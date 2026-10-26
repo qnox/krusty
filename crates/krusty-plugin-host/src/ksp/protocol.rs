@@ -15,7 +15,7 @@ use crate::protocol::{malformed, put_list, put_str, read_frame, utf8, write_fram
 
 use super::{GeneratedKind, KspGenerated, KspLoad, KspOutcome};
 
-pub(crate) const PROTOCOL: u32 = 10;
+pub(crate) const PROTOCOL: u32 = 11;
 
 const HELLO: u8 = 0;
 const LOAD: u8 = 1;
@@ -472,6 +472,7 @@ fn put_type(payload: &mut Vec<u8>, ty: &KspType) {
         }
     }
     payload.push(u8::from(ty.nullable));
+    payload.push(u8::from(ty.unannotated));
     put_list(payload, &ty.arguments, |payload, argument| match argument {
         KspTypeArgument::Star => payload.push(0),
         KspTypeArgument::Invariant(ty) => {
@@ -560,6 +561,7 @@ mod tests {
             },
             nullable: false,
             arguments: Vec::new(),
+            unannotated: false,
         }
     }
 
@@ -623,12 +625,14 @@ mod tests {
                             declaration: KspTypeDeclaration::Class("k.Any".into()),
                             nullable: true,
                             arguments: Vec::new(),
+                            unannotated: true,
                         }],
                     }]),
                     super_types: Some(vec![KspType {
                         declaration: KspTypeDeclaration::Class("k.C".into()),
                         nullable: false,
                         arguments: vec![KspTypeArgument::Star, KspTypeArgument::In(parameter_t())],
+                        unannotated: false,
                     }]),
                     declarations: vec![KspDeclaration::Function(constructor)],
                     declarations_complete: true,
@@ -663,15 +667,16 @@ mod tests {
         expected.extend([1, 0, 0, 0, 1, 0, 0, 0, 7, 0, 0, 0, 1, b'T', 1, 0]);
         expected.extend([0, 0, 0, 1, 0, 0, 0, 0, 5]);
         expected.extend(b"k.Any");
-        expected.extend([1, 0, 0, 0, 0]);
+        // Nullable, with no annotations, and no arguments.
+        expected.extend([1, 1, 0, 0, 0, 0]);
         // `k.C<*, in T>`.
         expected.extend([1, 0, 0, 0, 1, 0, 0, 0, 0, 3]);
         expected.extend(b"k.C");
-        expected.extend([0, 0, 0, 0, 2, 0, 3]);
+        expected.extend([0, 0, 0, 0, 0, 2, 0, 3]);
         let t = {
             let mut t = vec![1, 0, 0, 0, 7, 0, 0, 0, 3];
             t.extend(b"p.A");
-            t.extend([0, 0, 0, 1, b'T', 0, 0, 0, 0, 0]);
+            t.extend([0, 0, 0, 1, b'T', 0, 0, 0, 0, 0, 0]);
             t
         };
         expected.extend(&t);

@@ -161,7 +161,7 @@ pub use progression::{IrProgressionSource, IrRuntimeFunction};
 pub use properties::{
     IrAccessorLines, IrCheckedProperty, IrInlinePropertySplice, IrInlineTypeSubstitution,
     IrMemberKind, IrModuleProperty, IrProperty, IrPropertyModality, IrPropertyModifiers,
-    MemberExtProp,
+    MemberExtProp, PrivatePropertyAccessorCall,
 };
 pub use property_layouts::IrLocalPropertyLayout;
 pub use references::{
@@ -1596,6 +1596,10 @@ pub struct IrFile {
     /// index is stable within its declaring class; backend consumers must not recover this edge by
     /// matching the property's spelling against a static field name.
     jvm_companion_property_statics: crate::fx_hash::HashMap<(TypeName, u32), u32>,
+    /// Exact delegated companion property declaration → the outer-class static holding its
+    /// `x$delegate`. Kept apart from `jvm_companion_property_statics`: the delegate is storage the
+    /// property's accessors read, not the property itself.
+    jvm_companion_delegate_statics: crate::fx_hash::HashMap<(TypeName, u32), u32>,
     /// User annotations applied to FUNCTIONS (top-level and members share the `functions` arena),
     /// by function id, retaining the resolved semantic retention. A side table rather than a field on [`IrFunction`], for the
     /// same reason [`IrClass::field_annotations`] is one: the overwhelming majority of functions
@@ -2363,6 +2367,10 @@ pub struct IrFile {
     /// when it mangles that accessor. Other calls that share a JVM spelling stay bound to
     /// their own declarations.
     pub synthesized_accessor_calls: crate::fx_hash::HashMap<ExprId, SynthesizedAccessorCall>,
+    /// A call realized as a private member property's static accessor, with the facts the
+    /// value-class pass realizes its physical name and descriptor from.
+    pub private_property_accessor_calls:
+        crate::fx_hash::HashMap<ExprId, PrivatePropertyAccessorCall>,
     /// Stable property-operation identity → checker-selected accessor identity and physical return.
     /// This is a semantic selection, distinct from any backend rewrite of its platform spelling.
     pub property_selected_accessors: crate::fx_hash::HashMap<u32, (String, Ty)>,

@@ -839,6 +839,8 @@ mod elvis_newline_continuation_e2e;
 mod elvis_nullability_join_e2e;
 #[path = "elvis_over_safe_call_e2e.rs"]
 mod elvis_over_safe_call_e2e;
+#[path = "elvis_own_line_e2e.rs"]
+mod elvis_own_line_e2e;
 #[path = "elvis_return_smartcast_e2e.rs"]
 mod elvis_return_smartcast_e2e;
 #[path = "elvis_signature_inference_e2e.rs"]
@@ -1298,6 +1300,8 @@ mod is_nullable_primitive_e2e;
 mod is_primitive_smartcast_e2e;
 #[path = "java_abstract_override_e2e.rs"]
 mod java_abstract_override_e2e;
+#[path = "java_annotation_element_property_e2e.rs"]
+mod java_annotation_element_property_e2e;
 #[path = "java_array_covariance_e2e.rs"]
 mod java_array_covariance_e2e;
 #[path = "java_bridge_members_e2e.rs"]
@@ -1737,8 +1741,8 @@ mod type_parameter_nullability_annotations_e2e;
 mod type_resolution;
 #[path = "unit_expression_body_return_line_e2e.rs"]
 mod unit_expression_body_return_line_e2e;
-#[path = "unsigned_operations_e2e.rs"]
-mod unsigned_operations_e2e;
+#[path = "e2e/unsigned_values.rs"]
+mod unsigned_values;
 #[path = "unsupported_kotlinc_arguments_e2e.rs"]
 mod unsupported_kotlinc_arguments_e2e;
 #[path = "upper_bound_violations_e2e.rs"]
@@ -2218,6 +2222,8 @@ mod private_constructor_accessors_e2e;
 mod private_inline_property_ref_e2e;
 #[path = "read_only_iterator_stubs_e2e.rs"]
 mod read_only_iterator_stubs_e2e;
+#[path = "read_only_stub_generic_override_e2e.rs"]
+mod read_only_stub_generic_override_e2e;
 #[path = "read_only_stub_inheritability_e2e.rs"]
 mod read_only_stub_inheritability_e2e;
 #[path = "read_only_stub_override_bridges_e2e.rs"]
@@ -2381,6 +2387,7 @@ mod private_inline_access_e2e;
 mod private_inline_property_access_e2e;
 #[path = "private_member_extension_accessor_e2e.rs"]
 mod private_member_extension_accessor_e2e;
+mod private_property_inline_access_e2e;
 #[path = "private_set_e2e.rs"]
 mod private_set_e2e;
 #[path = "probe_argument_call_e2e.rs"]

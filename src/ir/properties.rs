@@ -17,6 +17,20 @@ pub struct IrInlineTypeSubstitution {
     pub value: Ty,
 }
 
+/// A JVM call to the static accessor through which another class reaches a private member
+/// property: `access$get<X>$p` / `access$set<X>$p` over its field, or `access$<accessor>` over an
+/// accessor the source declares. The owner instance is the call's dispatch receiver; the source
+/// arguments, and their declared parameters in `call_declared_params`, follow it. The value-class
+/// pass realizes the physical descriptor from that receiver slot plus those parameters.
+#[derive(Clone, Debug)]
+pub struct PrivatePropertyAccessorCall {
+    /// The declared accessor whose JVM name the bridge's name embeds, when that name is the one
+    /// kotlinc mangles for a value-class signature (no `@JvmName` writes it).
+    pub mangled_accessor: Option<String>,
+    /// The accessor's semantic result: the property type for a read, `Unit` for a write.
+    pub result: Ty,
+}
+
 impl IrFile {
     /// A property's source-level accessor parameters and identities, together with its getter.
     ///
