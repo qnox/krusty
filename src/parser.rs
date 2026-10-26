@@ -1747,18 +1747,6 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Whether the expression tree at `e` reads the property backing field — a bare `field`
-    /// identifier. Used to detect that a custom getter (`get() = field + …`) has a backing field.
-    fn expr_reads_field(&self, e: ExprId) -> bool {
-        if let Expr::Name(n) = self.file.expr(e) {
-            if n == "field" {
-                return true;
-            }
-        }
-        self.file
-            .any_child_expr(e, &mut |c| self.expr_reads_field(c), &mut |_| false)
-    }
-
     /// Consume an accessor's `()`. Returns `Some(())` on success. `require` controls whether a
     /// missing `(` is an error (getter) — setters route through `parse_setter_param` instead.
     fn eat_accessor_parens(&mut self, require: bool) -> Option<()> {

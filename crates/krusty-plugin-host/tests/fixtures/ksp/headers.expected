@@ -1,5 +1,6 @@
 # What KSP2 2.3.12 (KSPJvmMain) logs with Headers.kt over headers/: each classifier's modifiers,
-# type parameters, supertypes and star-projected type.
+# type parameters, supertypes and star-projected type, then for each star-projected classifier and
+# its nullable form the types among them it is assignable from.
 w: [ksp] INTERFACE headers.Named modifiers= typeParameters=[] supertypes=kotlin.Any star=headers.Named starText=Named starArguments=[]
 w: [ksp] CLASS headers.Base modifiers=ABSTRACT typeParameters=[T qualified=headers.Base.T variance=INVARIANT reified=false bounds=kotlin.Any; I qualified=headers.Base.I variance=CONTRAVARIANT reified=false bounds=kotlin.Any?] supertypes=headers.Named, java.io.Serializable star=headers.Base<*, *> starText=Base<*, *> starArguments=[STAR type=null origin=SYNTHETIC parent=null text=STAR null, STAR type=null origin=SYNTHETIC parent=null text=STAR null]
 w: [ksp] CLASS headers.Middle modifiers=OPEN typeParameters=[E qualified=headers.Middle.E variance=COVARIANT reified=false bounds=kotlin.CharSequence?] supertypes=headers.Base<kotlin.collections.List<headers.Middle.E [type parameter of headers.Middle]>, kotlin.String>, kotlin.Comparable<headers.Middle<*>> star=headers.Middle<*> starText=Middle<*> starArguments=[STAR type=null origin=SYNTHETIC parent=null text=STAR null]
@@ -16,3 +17,47 @@ w: [ksp] CLASS headers.Holder.Inner modifiers=INNER typeParameters=[B qualified=
 w: [ksp] CLASS headers.Holder.Bare modifiers=INNER typeParameters=[] supertypes=kotlin.Any star=headers.Holder.Bare<*> starText=Bare<*> starArguments=[STAR type=null origin=SYNTHETIC parent=null text=STAR null]
 w: [ksp] CLASS headers.Holder.Nested modifiers= typeParameters=[C qualified=headers.Holder.Nested.C variance=INVARIANT reified=false bounds=kotlin.Any?] supertypes=kotlin.Any star=headers.Holder.Nested<*> starText=Nested<*> starArguments=[STAR type=null origin=SYNTHETIC parent=null text=STAR null]
 w: [ksp] written headers.Middle<*> equals star=true star equals written=true same hash=true
+w: [ksp] assignable headers.Named <- headers.Named, headers.Base<*, *>, headers.Middle<*>, headers.Shape<*>, headers.Hidden, headers.Outer.In<*>, kotlin.Nothing
+w: [ksp] assignable headers.Named? <- headers.Named, headers.Named?, headers.Base<*, *>, headers.Base<*, *>?, headers.Middle<*>, headers.Middle<*>?, headers.Shape<*>, headers.Shape<*>?, headers.Hidden, headers.Hidden?, headers.Outer.In<*>, headers.Outer.In<*>?, kotlin.Nothing, kotlin.Nothing?
+w: [ksp] assignable headers.Base<*, *> <- headers.Base<*, *>, headers.Middle<*>, kotlin.Nothing
+w: [ksp] assignable headers.Base<*, *>? <- headers.Base<*, *>, headers.Base<*, *>?, headers.Middle<*>, headers.Middle<*>?, kotlin.Nothing, kotlin.Nothing?
+w: [ksp] assignable headers.Middle<*> <- headers.Middle<*>, kotlin.Nothing
+w: [ksp] assignable headers.Middle<*>? <- headers.Middle<*>, headers.Middle<*>?, kotlin.Nothing, kotlin.Nothing?
+w: [ksp] assignable headers.Shape<*> <- headers.Shape<*>, headers.Hidden, kotlin.Nothing
+w: [ksp] assignable headers.Shape<*>? <- headers.Shape<*>, headers.Shape<*>?, headers.Hidden, headers.Hidden?, kotlin.Nothing, kotlin.Nothing?
+w: [ksp] assignable headers.Hidden <- headers.Hidden, kotlin.Nothing
+w: [ksp] assignable headers.Hidden? <- headers.Hidden, headers.Hidden?, kotlin.Nothing, kotlin.Nothing?
+w: [ksp] assignable headers.Marker <- headers.Marker, kotlin.Nothing
+w: [ksp] assignable headers.Marker? <- headers.Marker, headers.Marker?, kotlin.Nothing, kotlin.Nothing?
+w: [ksp] assignable headers.Color <- headers.Color, kotlin.Nothing
+w: [ksp] assignable headers.Color? <- headers.Color, headers.Color?, kotlin.Nothing, kotlin.Nothing?
+w: [ksp] assignable headers.Outer <- headers.Outer, kotlin.Nothing
+w: [ksp] assignable headers.Outer? <- headers.Outer, headers.Outer?, kotlin.Nothing, kotlin.Nothing?
+w: [ksp] assignable headers.Action <- headers.Action, kotlin.Nothing
+w: [ksp] assignable headers.Action? <- headers.Action, headers.Action?, kotlin.Nothing, kotlin.Nothing?
+w: [ksp] assignable headers.Holder<*> <- headers.Holder<*>, kotlin.Nothing
+w: [ksp] assignable headers.Holder<*>? <- headers.Holder<*>, headers.Holder<*>?, kotlin.Nothing, kotlin.Nothing?
+w: [ksp] assignable headers.Outer.In<*> <- headers.Outer.In<*>, kotlin.Nothing
+w: [ksp] assignable headers.Outer.In<*>? <- headers.Outer.In<*>, headers.Outer.In<*>?, kotlin.Nothing, kotlin.Nothing?
+w: [ksp] assignable headers.Outer.Single <- headers.Outer.Single, kotlin.Nothing
+w: [ksp] assignable headers.Outer.Single? <- headers.Outer.Single, headers.Outer.Single?, kotlin.Nothing, kotlin.Nothing?
+w: [ksp] assignable kotlin.Any <- headers.Named, headers.Base<*, *>, headers.Middle<*>, headers.Shape<*>, headers.Hidden, headers.Marker, headers.Color, headers.Outer, headers.Action, headers.Holder<*>, headers.Outer.In<*>, headers.Outer.Single, kotlin.Any, kotlin.Nothing, kotlin.Comparable<*>, java.io.Serializable, kotlin.Enum<*>, kotlin.Function0<*>, kotlin.Function<*>, kotlin.Annotation, kotlin.CharSequence, kotlin.String
+w: [ksp] assignable kotlin.Any? <- headers.Named, headers.Named?, headers.Base<*, *>, headers.Base<*, *>?, headers.Middle<*>, headers.Middle<*>?, headers.Shape<*>, headers.Shape<*>?, headers.Hidden, headers.Hidden?, headers.Marker, headers.Marker?, headers.Color, headers.Color?, headers.Outer, headers.Outer?, headers.Action, headers.Action?, headers.Holder<*>, headers.Holder<*>?, headers.Outer.In<*>, headers.Outer.In<*>?, headers.Outer.Single, headers.Outer.Single?, kotlin.Any, kotlin.Any?, kotlin.Nothing, kotlin.Nothing?, kotlin.Comparable<*>, kotlin.Comparable<*>?, java.io.Serializable, java.io.Serializable?, kotlin.Enum<*>, kotlin.Enum<*>?, kotlin.Function0<*>, kotlin.Function0<*>?, kotlin.Function<*>, kotlin.Function<*>?, kotlin.Annotation, kotlin.Annotation?, kotlin.CharSequence, kotlin.CharSequence?, kotlin.String, kotlin.String?
+w: [ksp] assignable kotlin.Nothing <- kotlin.Nothing
+w: [ksp] assignable kotlin.Nothing? <- kotlin.Nothing, kotlin.Nothing?
+w: [ksp] assignable kotlin.Comparable<*> <- headers.Middle<*>, headers.Color, headers.Outer.In<*>, kotlin.Nothing, kotlin.Comparable<*>, kotlin.Enum<*>, kotlin.String
+w: [ksp] assignable kotlin.Comparable<*>? <- headers.Middle<*>, headers.Middle<*>?, headers.Color, headers.Color?, headers.Outer.In<*>, headers.Outer.In<*>?, kotlin.Nothing, kotlin.Nothing?, kotlin.Comparable<*>, kotlin.Comparable<*>?, kotlin.Enum<*>, kotlin.Enum<*>?, kotlin.String, kotlin.String?
+w: [ksp] assignable java.io.Serializable <- headers.Base<*, *>, headers.Middle<*>, headers.Color, kotlin.Nothing, java.io.Serializable, kotlin.Enum<*>, kotlin.String
+w: [ksp] assignable java.io.Serializable? <- headers.Base<*, *>, headers.Base<*, *>?, headers.Middle<*>, headers.Middle<*>?, headers.Color, headers.Color?, kotlin.Nothing, kotlin.Nothing?, java.io.Serializable, java.io.Serializable?, kotlin.Enum<*>, kotlin.Enum<*>?, kotlin.String, kotlin.String?
+w: [ksp] assignable kotlin.Enum<*> <- headers.Color, kotlin.Nothing, kotlin.Enum<*>
+w: [ksp] assignable kotlin.Enum<*>? <- headers.Color, headers.Color?, kotlin.Nothing, kotlin.Nothing?, kotlin.Enum<*>, kotlin.Enum<*>?
+w: [ksp] assignable kotlin.Function0<*> <- headers.Action, kotlin.Nothing, kotlin.Function0<*>
+w: [ksp] assignable kotlin.Function0<*>? <- headers.Action, headers.Action?, kotlin.Nothing, kotlin.Nothing?, kotlin.Function0<*>, kotlin.Function0<*>?
+w: [ksp] assignable kotlin.Function<*> <- headers.Action, kotlin.Nothing, kotlin.Function0<*>, kotlin.Function<*>
+w: [ksp] assignable kotlin.Function<*>? <- headers.Action, headers.Action?, kotlin.Nothing, kotlin.Nothing?, kotlin.Function0<*>, kotlin.Function0<*>?, kotlin.Function<*>, kotlin.Function<*>?
+w: [ksp] assignable kotlin.Annotation <- headers.Marker, kotlin.Nothing, kotlin.Annotation
+w: [ksp] assignable kotlin.Annotation? <- headers.Marker, headers.Marker?, kotlin.Nothing, kotlin.Nothing?, kotlin.Annotation, kotlin.Annotation?
+w: [ksp] assignable kotlin.CharSequence <- kotlin.Nothing, kotlin.CharSequence, kotlin.String
+w: [ksp] assignable kotlin.CharSequence? <- kotlin.Nothing, kotlin.Nothing?, kotlin.CharSequence, kotlin.CharSequence?, kotlin.String, kotlin.String?
+w: [ksp] assignable kotlin.String <- kotlin.Nothing, kotlin.String
+w: [ksp] assignable kotlin.String? <- kotlin.Nothing, kotlin.Nothing?, kotlin.String, kotlin.String?

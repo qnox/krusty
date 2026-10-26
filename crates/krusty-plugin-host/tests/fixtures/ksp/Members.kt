@@ -78,6 +78,7 @@ class MembersProcessor(private val env: SymbolProcessorEnvironment) : SymbolProc
             is KSPropertyDeclaration -> {
                 out.append("property ").append(declaration.simpleName.asString())
                     .append(" mutable=").append(declaration.isMutable)
+                    .append(" backingField=").append(declaration.hasBackingField)
                     .append(" modifiers=").append(modifiers(declaration))
                     .append(": ").append(type(declaration.type))
                 declaration.extensionReceiver?.let { out.append(" receiver=").append(type(it)) }

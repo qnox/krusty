@@ -459,7 +459,8 @@ impl BodyLowering<'_, '_, '_> {
                     site,
                     realization
                         .compiler_intrinsic
-                        .or(realization.member_realization.compiler_intrinsic()),
+                        .or(realization.member_realization.compiler_intrinsic())
+                        .or_else(|| self.unsigned_array_carrier_access(realization)),
                     dispatch_receiver,
                     args,
                     *extension_receiver_parameter,

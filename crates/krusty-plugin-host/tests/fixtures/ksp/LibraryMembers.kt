@@ -94,6 +94,8 @@ class LibraryMembersProcessor(private val env: SymbolProcessorEnvironment) : Sym
         return when (declaration) {
             is KSPropertyDeclaration ->
                 "val ${declaration.simpleName.asString()}: ${type(declaration.type)} mutable=${declaration.isMutable} " +
+                    // krusty does not answer a Kotlin library property's backing field yet.
+                    (if (origin == Origin.KOTLIN_LIB) "" else "backingField=${declaration.hasBackingField} ") +
                     "owner=$owner origin=$origin modifiers=$modifiers getter=${accessor(declaration.getter)} " +
                     "setter=${accessor(declaration.setter)}"
             is KSFunctionDeclaration ->

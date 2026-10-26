@@ -8,6 +8,14 @@ prefix identities before later consumers run. Metadata class-ID encoding still n
 snapshot ownership lookup; publication alone does not supply authoritative negative nesting facts
 for every cached or cross-module identity.
 
+## JVM member-class rows
+
+The JVM attribute writer now consumes retained non-local ownership and exact declaration segments
+for member rows, including names with literal dollars. The cross-file module resolver preserves
+the current declaration's precedence over classpath rows. Local and anonymous implementation rows
+retain their existing provenance. This changes no Kotlin metadata class-ID encoding; aliases and
+builtin ownership evidence belong to the remaining metadata handoff.
+
 ## Declaration-name evidence
 
 Kotlin metadata class IDs delimit the package with `/` and lexical classifier ownership with `.`;
