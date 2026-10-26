@@ -10121,6 +10121,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `tests/elvis_branch_order_e2e.rs`
   (`a_multi_line_call_on_the_null_path_writes_no_entry_for_the_line_in_effect`).
 
+- **An elvis keeps its own line beside its operands' lines.** kotlinc states an elvis's own line
+  where the elvis begins and again where its value is stored. When the left value's first
+  instruction marks another line at that offset (`val y = foo(\n a) ?: 0` loads `a` on the next
+  line), or the store marks the declaration's line there, both entries stay: `line 4: 0, line 5: 0`.
+  Common lowering records the elvis block as an expression whose start line is kept, and the JVM
+  line table keeps that entry. A chain `a ?: b ?: c` begins only once, at `a`: kotlinc folds it
+  into one chain, so the elvis krusty nests on the first one's right side states no start line of
+  its own. Test: `tests/elvis_own_line_e2e.rs`.
+
 - **A not-null assertion keeps its own line beside its operand's line.** kotlinc states a `!!`'s
   own line before its operand. When the operand's first instruction marks another line at that
   offset (`val y = foo(\n a)!!` loads `a` on the next line), both entries stay:
