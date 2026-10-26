@@ -5654,8 +5654,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   backend (`IrFile::compiled_inline_call`) only when the callee is a non-suspend function in this
   module (public, or declared in the caller's own file), top-level or a member of a class, object
   or companion, with no suspend function-typed parameter or receiver, no
-  `crossinline` parameter, and a template without local classes
-  or a subject `when` that switches on an enum's keys (`IrFile::enum_switch_when`),
+  `crossinline` parameter, and a template without
+  a subject `when` that switches on an enum's keys (`IrFile::enum_switch_when`),
   called with every argument from any body: a named function, an inline function (whose compiled
   body then holds the nested callee's code, as kotlinc's does), a lambda's method, a local function,
   a property initializer, an `init` block, a constructor or an accessor, as kotlinc inlines wherever
@@ -5908,7 +5908,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   transformation's `reifiedTypeParametersUsages`), so its load keeps the marker and a call site
   specializes it again. A copy is public ABI when the code it is written in is: a non-private
   inline function, a lambda class that function's ABI publishes, or, for a nested copy, its root
-  call's scope (`RegeneratedClassContext` keeps the root `callSiteInfo`). Tests:
+  call's scope (`RegeneratedClassContext` keeps the root `callSiteInfo`), whatever the original's
+  flag: an object a private inline function creates is outside the public ABI, and its copies are
+  regenerated all the same (`writeTransformedMetadata` replaces the flag, it does not require it).
+  A callee body that creates an object of an anonymous class is therefore inlined from its
+  compiled body like any other (`tests/inline_same_module_local_classes_e2e.rs`: an object reused
+  by two call sites, an object a body keeps in a local, and a private reified function's object
+  regenerated per call site, against kotlinc's bytes and as a run). Tests:
   `tests/inline_same_module_lambda_bodies_e2e.rs` (same-file and cross-file lambdas reused and
   regenerated, a reified lambda marked at its load, a reified default lambda, a reified `when`
   join, a lambda whose function type names a reified parameter, a reified lambda nested in a

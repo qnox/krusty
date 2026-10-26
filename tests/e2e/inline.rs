@@ -108,6 +108,8 @@ mod inline_sam_wrapper_copy_e2e;
 mod inline_same_module_bytes_e2e;
 #[path = "../inline_same_module_lambda_bodies_e2e.rs"]
 mod inline_same_module_lambda_bodies_e2e;
+#[path = "../inline_same_module_local_classes_e2e.rs"]
+mod inline_same_module_local_classes_e2e;
 #[path = "../inline_same_module_members_e2e.rs"]
 mod inline_same_module_members_e2e;
 #[path = "../inline_same_module_non_local_jumps_e2e.rs"]

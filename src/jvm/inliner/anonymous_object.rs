@@ -813,9 +813,21 @@ fn check_captured_field_accesses(
     old: &str,
     declared: &[DeclaredCapture<'_>],
 ) -> Result<(), RegenerationError> {
-    let Some(code) = &method.code else {
-        return Ok(());
-    };
+    match &method.code {
+        Some(code) if !reads_captured_fields_from_this(code, old, declared) => Err(
+            RegenerationError::Unsupported("a captured field accessed other than from this"),
+        ),
+        _ => Ok(()),
+    }
+}
+
+/// Whether every access to a captured field in `code` reads one `old` declares, from `this`: the
+/// copy declares the same field, so the read stays as kotlinc's field remapper leaves it.
+pub(super) fn reads_captured_fields_from_this(
+    code: &MethodNode,
+    old: &str,
+    declared: &[DeclaredCapture<'_>],
+) -> bool {
     let mut previous: Option<&Insn> = None;
     for entry in &code.nodes {
         let Node::Insn(insn) = entry else {
@@ -837,15 +849,13 @@ fn check_captured_field_accesses(
                         .any(|field| field.name == name && field.desc == desc)
                     && matches!(previous, Some(Insn::Var { op: ALOAD, slot: 0 }));
                 if !direct {
-                    return Err(RegenerationError::Unsupported(
-                        "a captured field accessed other than from this",
-                    ));
+                    return false;
                 }
             }
         }
         previous = Some(insn);
     }
-    Ok(())
+    true
 }
 
 /// A body of the original as the copy carries it: every regenerated class renamed and every line
@@ -994,11 +1004,6 @@ fn write_metadata(
         .value("xi")
         .and_then(ElementValue::as_int)
         .unwrap_or(0);
-    if extra & METADATA_PUBLIC_ABI_FLAG == 0 {
-        return Err(RegenerationError::Unsupported(
-            "an object outside the public ABI",
-        ));
-    }
     let strings = |name| {
         metadata
             .value(name)

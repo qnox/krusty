@@ -5589,9 +5589,16 @@ regress.
     caller's: 1 more box file is byte-identical on 2.4.21
     (`coroutines/featureIntersection/suspendInlineSuspendFinally`), none regresses, and all 7,184
     applicable files run.
+    ✓ Callee bodies with local or anonymous classes (`LocalClassInBody`): such a body is inlined
+    from its compiled body, its objects reused or regenerated as kotlinc's same-module
+    `shouldRegenerate` decides, and an object outside the public ABI (a private inline function's)
+    is regenerated too: 4 more box files are byte-identical on 2.4.21
+    (`reified/kt39256_privateInlineWithAnonymousObject`, `reified/catchParameter/nestedReifiedCatch`,
+    `inline/localDeclarationsClash`, `topLevelPrivate/privateInInlineNested`), none regresses, and
+    all 7,184 applicable files run.
     ☐ `$default` calls, non-public callees of another file, suspend callees (and the calls a
     suspend inline function holds), `crossinline` parameters, calls in default arguments, and
-    callee bodies with local classes or enum switches.
+    callee bodies with enum switches.
 - ☐ 7. Delete `InlineBodyPlan` and its resolver/FIR threading once the coroutine state machine runs
   on inlined bytecode (the plans exist only to reach IR before `lower_suspend`).
 

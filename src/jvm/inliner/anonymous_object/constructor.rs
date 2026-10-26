@@ -11,7 +11,7 @@ use crate::fx_hash::HashMap;
 
 use crate::jvm::method_node::{Insn, MethodNode, Node};
 
-use super::{is_captured_field_name, RegenerationError};
+use super::RegenerationError;
 
 const ALOAD: u8 = 0x19;
 const PUTFIELD: u8 = 0xb5;
@@ -115,12 +115,9 @@ pub(super) fn extract(
     for at in remove.into_iter().rev() {
         body.nodes.remove(at);
     }
-    // Any other access to a captured field is remapped by kotlinc's field remapper, which this
-    // stage does not port.
-    let accesses_captured = body.instructions().any(|insn| {
-        matches!(insn, Insn::Field { op: GETFIELD | PUTFIELD, name, .. } if is_captured_field_name(name))
-    });
-    if accesses_captured {
+    // What is left may read a captured field from `this`, after the stores: the copy declares the
+    // same field and stores it first. Any other access is refused.
+    if !super::reads_captured_fields_from_this(&body, owner, declared) {
         return Err(unsupported(
             "a constructor that accesses a captured field other than by storing its parameter",
         ));
@@ -195,6 +192,14 @@ impl Constructor {
                     "a lambda its constructor does not keep in a field",
                 ))?;
             fields.push(self.fields.remove(at).name);
+        }
+        let reads_lambda = self.body.instructions().any(|insn| {
+            matches!(insn, Insn::Field { op: GETFIELD, name, .. } if fields.contains(name))
+        });
+        if reads_lambda {
+            return Err(unsupported(
+                "a constructor that reads a lambda other than to keep it",
+            ));
         }
         for field in &mut self.fields {
             field.slot = place(field.slot).ok_or(unsupported("a malformed captured store"))?;
@@ -423,6 +428,54 @@ mod tests {
                 var(ALOAD, 0),
                 var(ALOAD, 1),
                 put("lib/Other", "$prefix"),
+            ]),
+            Err(RegenerationError::Unsupported(
+                "a constructor that accesses a captured field other than by storing its parameter"
+            ))
+        );
+    }
+
+    /// An initializer that reads the captured value back from `this` keeps the read: the copy
+    /// declares the same field and stores it before the copied body runs.
+    #[test]
+    fn a_captured_field_read_from_this_stays_in_the_body() {
+        let read = [
+            var(ALOAD, 0),
+            Node::Insn(Insn::Field {
+                op: GETFIELD,
+                owner: OWNER.to_string(),
+                name: "$prefix".to_string(),
+                desc: STRING.to_string(),
+            }),
+            Node::Insn(Insn::Op(0x57)),
+        ];
+        let mut stores = vec![var(ALOAD, 0), var(ALOAD, 1), put(OWNER, "$prefix")];
+        stores.extend(read.clone());
+        let plan = extract(
+            &constructor(stores),
+            OWNER,
+            &prefix(),
+            "(Ljava/lang/String;)V",
+        )
+        .expect("extracts");
+        assert_eq!(plan.body.nodes, constructor(read.to_vec()).nodes);
+    }
+
+    #[test]
+    fn a_captured_field_read_from_another_object_declines() {
+        assert_eq!(
+            extracted(vec![
+                var(ALOAD, 0),
+                var(ALOAD, 1),
+                put(OWNER, "$prefix"),
+                var(ALOAD, 1),
+                Node::Insn(Insn::Field {
+                    op: GETFIELD,
+                    owner: OWNER.to_string(),
+                    name: "$prefix".to_string(),
+                    desc: STRING.to_string(),
+                }),
+                Node::Insn(Insn::Op(0x57)),
             ]),
             Err(RegenerationError::Unsupported(
                 "a constructor that accesses a captured field other than by storing its parameter"
