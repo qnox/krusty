@@ -13,6 +13,16 @@ pub enum ClassifierDeclarationName {
     Nested { owner: TypeName, name: Box<str> },
 }
 
+impl ClassifierDeclarationName {
+    /// The classifier's own declared segment, exactly as written: a `$` in a backticked name is
+    /// part of it, never a nesting separator.
+    pub fn name(&self) -> &str {
+        match self {
+            Self::TopLevel { name, .. } | Self::Nested { name, .. } => name,
+        }
+    }
+}
+
 /// Return-value statuses of the four overrides every serialization-plugin generated serializer
 /// declares. Pass 1 selects the overridden declarations from their complete semantic shapes; the
 /// closed result crosses common lowering without retaining a provider or reopening member lookup.

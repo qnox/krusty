@@ -253,10 +253,18 @@ impl FileLowering<'_> {
             .expect("value_field validated exactly one recorded property coordinate")
             .name
             .clone();
-        // The class's own simple name, whatever it is nested in: `C.IC1` prints `IC1(s=…)`.
+        // The class's own declared name, whatever it is nested in: `C.IC1` prints `IC1(s=…)`, and
+        // a backticked `Cash$Tag` keeps its `$`.
         let simple_name = self.ir.classes[class as usize]
-            .fq_name_id()
-            .nested_segment_ref();
+            .declaration_name
+            .as_ref()
+            .map(|declaration| declaration.name().to_owned())
+            .ok_or_else(|| {
+                declined!(
+                    "value class `{}` without a retained declaration name",
+                    self.ir.classes[class as usize].fq_name()
+                )
+            })?;
         let name = format!("{}.{member:?}", self.ir.classes[class as usize].fq_name());
         let clif = self.carrier(ty).clif().expect("a value is never `Unit`");
         let descriptor = self.classes[class as usize].descriptor;
