@@ -1089,7 +1089,7 @@ fn superclass_chain(
 /// class from the class up to that superclass shares the class's package. A private member is
 /// never inherited, and a package-private one only along a path that stays in its package; only
 /// an inherited member can implement a stub's member.
-fn inherited_along(visibility: Visibility, same_package_path: bool) -> bool {
+pub(super) fn inherited_along(visibility: Visibility, same_package_path: bool) -> bool {
     match visibility {
         Visibility::Private => false,
         Visibility::PackagePrivate => same_package_path,
