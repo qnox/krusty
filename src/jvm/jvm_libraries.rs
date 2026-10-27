@@ -4857,7 +4857,9 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
         // may find the JVM realization (`java/lang/String`, `java/util/List`), but its source identity
         // is the one `.kotlin_builtins` record that declares the Kotlin API. Keeping the physical name
         // here loses members such as inherited `CharSequence.length` and creates a second class model.
-        super::jvm_class_map::jvm_to_kotlin_builtin_metadata_name(internal).unwrap_or(internal)
+        // Only a group Java source maps to Kotlin has that identity: `java.lang.Void` is the realization
+        // `Nothing` erases to, yet a Java or Kotlin reference to it names the ordinary Java class.
+        super::jvm_class_map::to_kotlin_type_name(internal)
     }
 
     fn is_default_library_owner(&self, internal: TypeName) -> bool {
@@ -6156,6 +6158,10 @@ mod tests {
         assert_eq!(
             libs.canonical_source_type_name(type_name("java/lang/String")),
             type_name("kotlin/String")
+        );
+        assert_eq!(
+            libs.canonical_source_type_name(type_name("java/lang/Void")),
+            type_name("java/lang/Void")
         );
     }
 
