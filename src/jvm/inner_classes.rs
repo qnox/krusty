@@ -127,10 +127,11 @@ impl InnerClasses {
                 });
                 continue;
             }
-            // A callable reference class is anonymous too, and synthetic; it is public only where
-            // spliced inline code constructs it from elsewhere.
+            // A callable reference class is anonymous too, and synthetic; it is public in an inline
+            // function's scope, whose callers construct it from elsewhere.
             if class.func_ref.is_some() || class.prop_ref.is_some() {
-                let public = if ir.public_synthetics.contains(&identity) {
+                let public = if crate::jvm::ir_emit::enclosure::in_inline_function_scope(ir, class)
+                {
                     0x0001
                 } else {
                     0

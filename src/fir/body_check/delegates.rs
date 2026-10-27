@@ -870,6 +870,7 @@ fn selected_delegate_call(
                     declared_result: None,
                     overridden_results: Box::new([]),
                     semantic_role: None,
+                    intrinsic_const: false,
                     overridden_declarations: Box::new([]),
                     suspend: false,
                     inline: crate::libraries::InlineKind::None,
@@ -979,6 +980,7 @@ fn selected_delegate_call(
                         .collect::<Result<Vec<_>, _>>()?
                         .into_boxed_slice(),
                     semantic_role: callable.semantic_role,
+                    intrinsic_const: super::calls::is_intrinsic_const(&callable.annotations),
                     overridden_declarations: callable.overridden_declarations.clone(),
                     suspend: callable.suspend,
                     inline: callable.inline,
@@ -1085,6 +1087,7 @@ fn selected_delegate_call(
                         declared_result: declared_ret.map(resolved).transpose()?,
                         overridden_results: Box::new([]),
                         semantic_role: None,
+                        intrinsic_const: false,
                         overridden_declarations: Box::new([]),
                         suspend: *suspend,
                         inline: *inline,

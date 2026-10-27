@@ -32,6 +32,15 @@ declaration-owned name operation. Preserve exact segments, owner edges, visibili
 non-local exclusions without interning undeclared prefixes. This producer correction is separate
 from the remaining metadata class-ID encoder and dependency/alias-name fact handoff.
 
+## Wasm runtime-exception declarations
+
+Normalize admitted platform exception storage roles at the KLIB provider boundary, freeze them
+beside classifier facts, and realize their metadata-owned parent chains in the Wasm GC registry.
+The registry authenticates every ancestor on every request, including cached leaves, before
+mutating module state. The shared Throwable hierarchy case starts from exact JVM/reference and
+Native results and exercises both Wasm hosts. Reference-array storage and checked array reads
+remain the next separate slice of #2531.
+
 ## JVM companion field ABI
 
 Centralize the physical companion field segment from the selected holder/companion identities.
@@ -5581,8 +5590,9 @@ regress.
     and FixStack saves the stack around it, and the lambda's lines are mapped into the copy's SMAP from
     the caller's. The call site passes the captured values instead of the lambda; code compiled only
     for the object is rolled back from the caller's constant pool (`ClassWriter::checkpoint`). The
-    route is probed with the lambdas' shapes before any code is emitted, so a shape not ported yet
-    keeps the bridge, as does a lambda that reaches a private member of the caller (a backing
+    route is decided from the callee's facts before any code is emitted, never by inlining the body
+    on trial: an object whose suspend method lacks the `$$forInline` copy keeps the bridge
+    (`SpliceReason::SuspendMethodWithoutForInlineCopy`), as does a lambda that reaches a private member of the caller (a backing
     field, a private function, `invokespecial`, a materialized lambda) until kotlinc's synthetic
     accessors are ported. ✅ Lambdas taking or returning a value class (`Continuation.resumeWith`'s
     `Result`): the inline body takes the parameter unboxed (`value_classes::inline_body_slots`) and
@@ -6210,3 +6220,8 @@ after an inline value resets the caller line. Ordinary method local-table orderi
 Full-class/runtime controls cover consecutive initializers, object and companion storage with an
 `init` block, and ordinary callable bodies. The batched bytecode oracle now isolates fixture packages
 and fails compilation errors (#2639).
+
+Nominal function values use the shared subtype relation to reach the canonical function classifier
+of the expected signature. Applied hierarchy traversal retains declared variance, nullability,
+arity and suspend kind. Owning semantic tests cover reflective and inherited function declarations
+and unrelated-callable rejection; the JVM round trip covers nominal and reflection interface slots.

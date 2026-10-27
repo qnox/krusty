@@ -246,7 +246,7 @@ impl CallableRegistry {
                         "a dependency call without frozen callable facts".to_string()
                     })?;
                     if callable
-                        .compiler_intrinsic
+                        .compiler_operation()
                         .is_some_and(super::lower::is_direct_operation)
                         && !callable
                             .dependency_callable

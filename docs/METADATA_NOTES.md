@@ -41,6 +41,15 @@ prefix identities before later consumers run. Metadata class-ID encoding still n
 snapshot ownership lookup; publication alone does not supply authoritative negative nesting facts
 for every cached or cross-module identity.
 
+## Platform exception storage authority
+
+Only the explicitly selected platform stdlib may publish an admitted runtime-exception storage
+role. Class shape, generic/outer-instance state and metadata supertypes constrain that role;
+subclasses with additional declared instance state are not admitted. The frozen classifier record
+retains the role and exact parent identity. Wasm's physical registry consumes those records rather
+than selected constructor inventory or classifier spelling, and validates the complete chain even
+when its leaf already has a GC type. Ordinary source and JVM classifier records retain no role.
+
 ## Companion fields and class metadata
 
 Physical companion storage uses the whole segment within the recorded holder, never the last
@@ -1275,3 +1284,10 @@ their local-variable ranges at nested lexical boundaries, and each store restore
 after an inlined value. Class-initializer table curation preserves intentional marks at distinct
 offsets, including returns to the same source line. The JVM uses these debug points to preserve
 inline markers and closing anchors; Kotlin metadata and constructor descriptors are unchanged.
+
+## Nominal function subtype evidence
+
+Provider-normalized function classifiers supply their declared generic supertypes to the common
+subtype relation. A typed function signature supplies its canonical classifier application, and
+the hierarchy walk checks the nominal value against that application. Reflective function types
+retain their nominal identity; no new metadata payload or physical JVM descriptor is introduced.

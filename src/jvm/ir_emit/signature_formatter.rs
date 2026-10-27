@@ -130,6 +130,23 @@ impl<'a> JvmSignatureFormatter<'a> {
         Some(signature)
     }
 
+    /// [`Self::method_positions`] with every declaration-site variance of the parameters written,
+    /// redundant or not: kotlinc's `METHODS_WITH_DECLARATION_SITE_WILDCARDS` realizations, such as
+    /// `addAll(Collection<? extends String>)`.
+    pub(super) fn method_positions_with_declaration_site_wildcards(
+        &self,
+        params: &[Ty],
+        ret: &Ty,
+    ) -> Option<String> {
+        let mut signature = String::from("(");
+        for parameter in params {
+            signature.push_str(&self.method_ty(parameter, Wildcards::Generic)?);
+        }
+        signature.push(')');
+        signature.push_str(&self.method_ty(ret, Wildcards::Suppressed)?);
+        Some(signature)
+    }
+
     /// A parameter position. `Unit` is a value there, the `kotlin.Unit` object, not `void`.
     pub(super) fn parameter_ty(&self, parameter: &Ty) -> Option<String> {
         if *parameter == Ty::Unit {

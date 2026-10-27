@@ -748,6 +748,7 @@ mod tests {
                     );
                 }
                 Some(std::sync::Arc::new(LibraryType {
+                    runtime_exception: None,
                     declaration_name: None,
                     is_kotlin: true,
                     is_data: false,

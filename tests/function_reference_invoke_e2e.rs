@@ -960,3 +960,29 @@ fn high_arity_reference_carriers_declare_kotlincs_typed_invoke() {
         ],
     });
 }
+
+/// PLATFORM: JVM nominal function/reflection interface slots retain their callable invocation.
+#[test]
+fn nominal_function_slots_remain_invocable_through_their_declared_function_type() {
+    common::expect_box_same_as_kotlinc(
+        r#"fun step(value: Int): Int = value + 1
+fun fromNominal(value: kotlin.Function1<Int, Int>): (Int) -> Int = value
+fun fromReflective(value: kotlin.reflect.KFunction1<Int, Int>): (Int) -> Int = value
+fun <P, R> fromGeneric(value: kotlin.Function1<P, R>): (P) -> R = value
+open class DeclaredCallable : (Int) -> Int {
+    override fun invoke(value: Int): Int = value + 1
+}
+class InheritedCallable : DeclaredCallable()
+fun box(): String {
+    val nominal: kotlin.Function1<Int, Int> = ::step
+    val reflective: kotlin.reflect.KFunction1<Int, Int> = ::step
+    if (fromNominal(nominal)(41) != 42) return "nominal"
+    if (fromReflective(reflective)(41) != 42) return "reflective"
+    if (fromGeneric(nominal)(41) != 42) return "generic"
+    if (fromNominal(InheritedCallable())(41) != 42) return "inherited"
+    return "OK"
+}
+"#,
+        "NominalFunctionSubtyping",
+    );
+}

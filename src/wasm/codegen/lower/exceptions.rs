@@ -3,7 +3,7 @@
 use crate::backend::BackendCompilerIntrinsic as CompilerIntrinsic;
 use crate::fir::ExternalCallableId;
 use crate::ir::IrCatch;
-use crate::types::{type_name, TypeName};
+use crate::types::TypeName;
 
 use super::*;
 
@@ -21,7 +21,7 @@ impl Body<'_> {
         }
         let operation = external
             .and_then(|target| self.callables.callable(target))
-            .and_then(|fact| fact.member_realization.compiler_intrinsic());
+            .and_then(|fact| fact.compiler_operation());
         let Some(CompilerIntrinsic::ThrowableConstructor { message }) = operation else {
             return self.construction(internal, args, params);
         };
@@ -45,7 +45,7 @@ impl Body<'_> {
 
     pub(super) fn is_throwable_message(&self, target: ExternalCallableId) -> bool {
         self.callables.callable(target).is_some_and(|fact| {
-            fact.compiler_intrinsic == Some(CompilerIntrinsic::ThrowableMessage)
+            fact.compiler_operation() == Some(CompilerIntrinsic::ThrowableMessage)
         })
     }
 
@@ -98,7 +98,14 @@ impl Body<'_> {
         let [catch] = catches else {
             return Err("a `try` without exactly one Throwable catch".into());
         };
-        if catch.ty != Ty::obj_name(type_name("kotlin/Throwable")) {
+        let catch_layout = catch
+            .ty
+            .obj_internal()
+            .and_then(|identity| self.classifiers.classifier(identity))
+            .and_then(|fact| fact.runtime_exception);
+        if catch.ty.is_nullable()
+            || !matches!(catch_layout, Some(layout) if layout.kind == crate::libraries::RuntimeExceptionKind::Throwable)
+        {
             return Err(format!("a catch of `{}`", describe(catch.ty)));
         }
         let result_block = carrier(result)?.map_or(BlockType::Empty, BlockType::Value);

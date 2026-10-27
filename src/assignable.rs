@@ -351,6 +351,14 @@ fn assignable_inner(cx: &TyCtx, oracle: &dyn TypeOracle, sub: Ty, sup: Ty) -> bo
     }
 
     match (sub.kind(), sup.kind()) {
+        // A nominal function value reaches the declared FunctionN/SuspendFunctionN application
+        // of the requested signature through the same applied hierarchy and variance relation.
+        (TyKind::Obj(_, _), TyKind::Fun(_)) => obj_assignable(
+            cx,
+            oracle,
+            sub,
+            crate::libraries::function_classifiers::supertype_classifier(sup),
+        ),
         (TyKind::Fun(a), TyKind::Fun(b)) => {
             a.params.len() == b.params.len()
                 // A `suspend` function is never a regular one: nothing converts that way.
@@ -529,6 +537,16 @@ fn capture_projection_parameters(
 fn same_type_argument_with(oracle: &dyn TypeOracle, left: Ty, right: Ty) -> bool {
     match (left.kind(), right.kind()) {
         (TyKind::TyParam(a, _), TyKind::TyParam(b, _)) => a == b,
+        // `T & Any` has two spellings: the provenance wrapper a nullable binding leaves and the
+        // compact parameter whose occurrence bound excludes null. They are one argument.
+        (TyKind::DefinitelyNotNull(a), TyKind::DefinitelyNotNull(b)) => {
+            same_flexible_type_with(oracle, a, b)
+        }
+        (TyKind::DefinitelyNotNull(wrapped), TyKind::TyParam(name, bound))
+        | (TyKind::TyParam(name, bound), TyKind::DefinitelyNotNull(wrapped)) => {
+            !bound.upper_bound_admits_null()
+                && matches!(wrapped.kind(), TyKind::TyParam(inner, _) if inner == name)
+        }
         (TyKind::Obj(a, aa), TyKind::Obj(b, ba)) => {
             a == b
                 && aa.len() == ba.len()
@@ -1141,5 +1159,39 @@ mod tests {
     fn value_class_is_not_assignable_to_its_storage_type() {
         assert!(!ok(s("app/Aid"), Ty::String));
         assert!(!ok(s("app/Aid"), s("kotlin/String")));
+    }
+
+    /// `T & Any` left by substituting a nullable binding and the compact `T` whose occurrence bound
+    /// excludes null are one type argument. A different parameter, or the same parameter while its
+    /// bound still admits null, is not.
+    #[test]
+    fn substituted_definitely_non_null_matches_only_its_non_null_bounded_parameter() {
+        let nullable_any = Ty::nullable(s("kotlin/Any"));
+        let wrapped = Ty::ty_param("T", nullable_any).contributed_through_nullable_formal();
+        let compact = Ty::ty_param("T", nullable_any).definitely_non_null();
+        assert!(matches!(wrapped.kind(), TyKind::DefinitelyNotNull(_)));
+        assert!(matches!(compact.kind(), TyKind::TyParam(..)));
+        assert!(same_flexible_type(wrapped, compact));
+        assert!(same_flexible_type(compact, wrapped));
+        assert!(same_flexible_type(wrapped, wrapped));
+
+        let other_wrapped = Ty::ty_param("U", nullable_any).contributed_through_nullable_formal();
+        assert!(!same_flexible_type(wrapped, other_wrapped));
+        assert!(!same_flexible_type(
+            wrapped,
+            Ty::ty_param("U", s("kotlin/Any"))
+        ));
+        assert!(!same_flexible_type(
+            Ty::ty_param("U", s("kotlin/Any")),
+            wrapped
+        ));
+        assert!(!same_flexible_type(
+            wrapped,
+            Ty::ty_param("T", nullable_any)
+        ));
+        assert!(!same_flexible_type(
+            Ty::ty_param("T", nullable_any),
+            wrapped
+        ));
     }
 }

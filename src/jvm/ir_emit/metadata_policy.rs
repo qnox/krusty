@@ -117,6 +117,25 @@ pub(super) fn finish_local_synthetic_class(
     env.run.finish_class(cw)
 }
 
+/// Finish a callable reference's class: a `k=3` synthetic-class record whose visibility and
+/// public-ABI flag follow the scope it is written in, as a lambda's class does
+/// ([`lambda_class_xi`]).
+pub(super) fn finish_reference_class(
+    mut cw: crate::jvm::classfile::ClassWriter,
+    env: &super::EmitEnv,
+    ir: &crate::ir::IrFile,
+    class: &crate::ir::IrClass,
+) -> Vec<u8> {
+    cw.set_kotlin_metadata(
+        3,
+        env.metadata_stamp,
+        lambda_class_xi(ir, class.enclosure),
+        &[],
+        &[],
+    );
+    env.run.finish_class(cw)
+}
+
 /// Finish a synthetic class kotlinc generates for a whole file or class, such as the
 /// `$EntriesIntrinsicMappings` holder: the `k=3` synthetic-class record with PUBLIC visibility.
 pub(super) fn finish_public_synthetic_class(

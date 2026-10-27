@@ -10,6 +10,11 @@ use crate::jvm::classfile::CodeBuilder;
 
 use super::Emitter;
 
+mod intrinsic_calls;
+pub(super) use intrinsic_calls::{
+    inversion_mask_line, safe_call_read_line, states_line_before_operands,
+};
+
 fn first_block_expression(ir: &IrFile, block: ExprId) -> ExprId {
     let mut expression = block;
     loop {
@@ -20,6 +25,26 @@ fn first_block_expression(ir: &IrFile, block: ExprId) -> ExprId {
             return expression;
         };
         expression = first;
+    }
+}
+
+/// Whether `value` is `expression` itself, or only an implicit coercion or the bottom-typed
+/// completion of it, which writes no code ahead of it and marks no line of its own there.
+pub(super) fn evaluates_to(ir: &IrFile, value: ExprId, expression: ExprId) -> bool {
+    let mut value = value;
+    loop {
+        if value == expression {
+            return true;
+        }
+        match ir.expr(value) {
+            IrExpr::TypeOp {
+                op: crate::ir::IrTypeOp::ImplicitCoercion,
+                arg,
+                ..
+            } => value = *arg,
+            IrExpr::BottomValue { producer, .. } => value = *producer,
+            _ => return false,
+        }
     }
 }
 
@@ -136,6 +161,23 @@ impl Emitter<'_> {
         }
     }
 
+    /// Restate an intrinsic call's line right before its own instruction, after its operands, as
+    /// kotlinc's intrinsic function does once it has generated them (`arraylength` of `.size`,
+    /// `ineg` of `unaryMinus()`, the conversion of `toLong()`). Only an expression that states
+    /// its line before its operands is such an intrinsic call.
+    pub(super) fn mark_intrinsic_instruction(
+        &mut self,
+        expression: ExprId,
+        code: &mut CodeBuilder,
+    ) {
+        if !states_line_before_operands(self.ir, expression) {
+            return;
+        }
+        if let Some(&line) = self.ir.expr_source_lines.get(&expression) {
+            self.mark_expression_line(expression, line, code);
+        }
+    }
+
     /// Mark one expression line, mapping a same-module inline copy through the class's SMAP. Common
     /// IR supplies the semantic declaration owner, the callee's source file, and the call line;
     /// this boundary chooses JVM source paths and output line numbers.
@@ -145,14 +187,28 @@ impl Emitter<'_> {
         {
             return;
         }
-        if self.ir.kept_start_lines.contains(&expression) {
+        if self.keeps_start_line(expression) {
             self.mark_kept_start_line(expression, code);
             return;
         }
-        let Some(&line) = self.ir.expr_source_lines.get(&expression) else {
+        let Some(line) = self
+            .ir
+            .expr_source_lines
+            .get(&expression)
+            .copied()
+            .or_else(|| safe_call_read_line(self.ir, expression))
+        else {
             return;
         };
         self.mark_expression_line(expression, line, code);
+    }
+
+    /// Whether `expression`'s line keeps its entry where an operand marks another line at the same
+    /// offset: an intrinsic or safe call that states its line before its operands, or a node
+    /// common IR marks so.
+    pub(super) fn keeps_start_line(&self, expression: ExprId) -> bool {
+        self.ir.kept_start_lines.contains(&expression)
+            || states_line_before_operands(self.ir, expression)
     }
 
     /// Mark `expression`'s line where kotlinc marks an intrinsic call before its operands (the
