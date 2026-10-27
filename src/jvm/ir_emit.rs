@@ -802,7 +802,7 @@ fn attach_synth_nullability(
     // hoisted companion static is annotated like any other backing field.
     if let Some(companion) = &c.companion_class {
         cw.set_field_nullability(
-            companion.nested_segment_ref(),
+            crate::jvm::companion_storage::field_name(c.fq_name, *companion),
             &format!("L{};", companion.render()),
             "Lorg/jetbrains/annotations/NotNull;",
         );
@@ -2364,7 +2364,7 @@ fn emit_class(
         let desc = format!("L{};", companion.render());
         let field = (
             companion_field_access(ir, c, companion),
-            companion.nested_segment_ref(),
+            crate::jvm::companion_storage::field_name(c.fq_name, companion),
             desc.as_str(),
         );
         cw.add_field_late_leading(field, None, Some("Lorg/jetbrains/annotations/NotNull;"));
@@ -3507,7 +3507,7 @@ fn emit_enum_class(
         let desc = format!("L{};", companion.render());
         let field = (
             companion_field_access(ir, c, companion),
-            companion.nested_segment_ref(),
+            crate::jvm::companion_storage::field_name(c.fq_name, companion),
             desc.as_str(),
         );
         cw.add_field_late_leading(field, None, Some("Lorg/jetbrains/annotations/NotNull;"));

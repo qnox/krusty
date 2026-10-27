@@ -1470,7 +1470,18 @@ impl BodyLowering<'_> {
         if !matches!(expression.kind, FirExprKind::Lambda { .. }) {
             self.record_callable_reference_provenance(expression_id, first_generated);
         }
-        let debug = self.body.expression_debug_lines(expression_id);
+        let mut debug = self.body.expression_debug_lines(expression_id);
+        // kotlinc replaces an array-factory call (`intArrayOf(a, b)`) by its vararg, whose offsets
+        // start at the first element, so the call's own line never opens. An empty factory call
+        // keeps its own position.
+        if let FirExprKind::ArrayLiteral { elements, .. } = &expression.kind {
+            let first = elements
+                .first()
+                .map(|first| self.body.expression_debug_lines(first.value).source);
+            if let Some(line) = first.filter(|&line| line != 0) {
+                debug.source = line;
+            }
+        }
         if debug.positionless {
             self.ir.mark_positionless(lowered);
         }

@@ -906,6 +906,12 @@ fn source_alias_expansion(
     };
     SourceAliasSeed::Ready(crate::libraries::AliasExpansion {
         identity: crate::types::type_name_child(package, alias),
+        declaration_name: Some(std::sync::Arc::new(
+            crate::types::ClassifierDeclarationName::TopLevel {
+                package,
+                name: alias.into(),
+            },
+        )),
         target: target_classifier,
         formals: formals.to_vec(),
         expansion,

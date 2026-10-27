@@ -1,7 +1,8 @@
-//! Null checks over an erased call result.
+//! Null checks over an erased call or property-read result.
 //!
 //! A generic call returns its JVM erasure (`Object` for `Cell<String>.read()`), and checked IR
-//! narrows that slot to the substituted type with a coercion directly over the call. kotlinc checks
+//! narrows that slot to the substituted type with a coercion directly over the call. A generic
+//! property read leaves its accessor's erasure the same way. kotlinc checks
 //! the value in the slot the call produced and only then casts the checked value, so a `!!` or a
 //! platform-type assertion over such a coercion moves beneath it: `checkNotNull` reads the `Object`,
 //! and the `checkcast` follows.
@@ -33,10 +34,12 @@ pub(super) fn check_before_result_coercion(ir: &mut IrFile) {
             else {
                 return None;
             };
-            let call = crate::jvm::call_result_boundaries::terminal_call(&ir.exprs, arg)?;
-            let slot = ir_ty_to_jvm(&crate::jvm::call_result_boundaries::checked_result_slot(
-                ir, call,
-            )?);
+            let slot = ir_ty_to_jvm(&match crate::jvm::call_result_boundaries::terminal_call(
+                &ir.exprs, arg,
+            ) {
+                Some(call) => crate::jvm::call_result_boundaries::checked_result_slot(ir, call)?,
+                None => generic_property_read_slot(ir, coercion, arg)?,
+            });
             let target = ir_ty_to_jvm(&type_operand);
             (slot.is_reference() && target.is_reference() && slot != target)
                 .then_some((assertion, root, coercion))
@@ -68,6 +71,23 @@ pub(super) fn check_before_result_coercion(ir: &mut IrFile) {
         }
     }
     retain_checked_result_at_non_null_coercion(ir);
+}
+
+/// The slot a property read leaves before its declaration-result coercion, when that slot is a
+/// type parameter's erasure: `Simple<T : Base>.nul: T?` read as `Both?` leaves `Base`, exactly as a
+/// generic call does. Any other read keeps its own representation boundary.
+fn generic_property_read_slot(
+    ir: &IrFile,
+    coercion: ExprId,
+    read: ExprId,
+) -> Option<crate::types::Ty> {
+    if !ir.declaration_result_coercions.contains(&coercion) {
+        return None;
+    }
+    let IrExpr::PropertyRead { ty, .. } = ir.exprs.get(read as usize)? else {
+        return None;
+    };
+    matches!(ty.non_null().kind(), crate::types::TyKind::TyParam(..)).then_some(*ty)
 }
 
 /// Common lowering gives `!!` a separate coercion from its nullable input to its non-null
