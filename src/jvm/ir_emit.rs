@@ -1581,8 +1581,7 @@ fn emit_pass(
         // filling the masked slots from the defaults), so an omitted-argument caller — same-file or
         // cross-module — resolves against the same ABI kotlinc emits. A default the synthetic frame
         // cannot re-emit is skipped (`toplevel_default_stub_safe`).
-        if crate::ir::toplevel_default_stub_safe(ir, i as u32) {
-            let defaults = ir.param_defaults(i as u32).unwrap();
+        if let Some(defaults) = crate::jvm::default_wrappers::top_level_function(ir, i as u32) {
             // A top-level function's `$default` marker is a plain `Object` (kotlinc's function ABI).
             emit_facade_default_stub(
                 DefaultStubSource {
@@ -2115,11 +2114,8 @@ fn emit_scheduled_member(
     // (the JVM realization of default arguments). A STATIC method (a value class's `constructor-impl`)
     // has no `self`, so it uses the facade-style stub keyed on the class as owner; an instance member
     // uses the self-carrying variant.
-    let Some(fid) = crate::jvm::suspend_impls::default_stub_after(ir, fid) else {
-        return;
-    };
-    let f = &ir.functions[fid as usize];
-    if let Some(defaults) = ir.declared_param_defaults(fid) {
+    if let Some((fid, defaults)) = crate::jvm::default_wrappers::member_function(ir, fid) {
+        let f = &ir.functions[fid as usize];
         if f.is_static {
             let marker = static_default_stub_marker(ir, fid);
             emit_facade_default_stub(
@@ -2741,7 +2737,7 @@ fn emit_class(
         // A default on any primary-ctor parameter → kotlinc's synthetic
         // `<init>(params…, int mask, DefaultConstructorMarker)` overload (fills the masked slots from the
         // defaults, then `invokespecial` the real `<init>`).
-        if let Some(defaults) = ir.class_ctor_defaults(&fq_name) {
+        if let Some(defaults) = crate::jvm::default_wrappers::primary_constructor(ir, c) {
             // (The stub emits its own LineNumberTable — class line, per-fill parameter lines, the
             // ctor's closing-`)` line at `return` — collapsed for single-line declarations.)
             let prefix_count = c.constructor_prefix_count as usize;
@@ -3238,66 +3234,54 @@ fn emit_interface_class(
         // to the abstract method via `invokeinterface`. kotlinc emits it ON THE INTERFACE (call sites use
         // it) AND, under a mode that keeps the compatibility holder, a copy on the
         // `<Iface>$DefaultImpls` class (`public final`).
-        let deferred_suspend_declaration = ir
-            .jvm_suspend_impl_bodies
-            .values()
-            .any(|(_, declaration)| *declaration == fid);
-        let default_fid = ir
-            .jvm_suspend_impl_bodies
-            .get(&fid)
-            .map(|(_, declaration)| *declaration)
-            .unwrap_or(fid);
-        if !deferred_suspend_declaration {
-            if let Some(defaults) = ir.declared_param_defaults(default_fid) {
-                // `disable` puts NOTHING executable on the interface, the `$default` stub included: call
-                // sites go to the holder's copy instead.
-                if bodies_on_interface {
+        if let Some((default_fid, defaults)) =
+            crate::jvm::default_wrappers::member_function(ir, fid)
+        {
+            // `disable` puts NOTHING executable on the interface, the `$default` stub included: call
+            // sites go to the holder's copy instead.
+            if bodies_on_interface {
+                emit_default_stub(
+                    DefaultStubSource {
+                        ir,
+                        fid: default_fid,
+                        defaults,
+                    },
+                    Some(StaticOwner::Class(c.fq_name)),
+                    &fq_name,
+                    facade,
+                    &mut cw,
+                    env,
+                    true,
+                );
+            }
+            // `-jvm-default=no-compatibility` emits NO `$DefaultImpls` at all. Emitting one anyway
+            // would publish a holder class the build says does not exist — a downstream compilation
+            // resolving against it links to a class kotlinc would never have produced.
+            if emits_default_impls {
+                let di = default_impls.get_or_insert_with(|| {
+                    let mut w =
+                        new_writer(&format!("{fq_name}$DefaultImpls"), "java/lang/Object", opts);
+                    w.set_access(0x0011 | 0x0020); // PUBLIC | FINAL | SUPER
+                    w
+                });
+                if enable_compat {
+                    // The interface owns the real default application; the holder's copy is a
+                    // thin synthetic forward to it (kotlinc's `enable` shape).
+                    default_impls::emit_default_stub_forward(ir, default_fid, &fq_name, di);
+                } else {
                     emit_default_stub(
                         DefaultStubSource {
                             ir,
                             fid: default_fid,
                             defaults,
                         },
-                        Some(StaticOwner::Class(c.fq_name)),
+                        None,
                         &fq_name,
                         facade,
-                        &mut cw,
+                        di,
                         env,
                         true,
                     );
-                }
-                // `-jvm-default=no-compatibility` emits NO `$DefaultImpls` at all. Emitting one anyway
-                // would publish a holder class the build says does not exist — a downstream compilation
-                // resolving against it links to a class kotlinc would never have produced.
-                if emits_default_impls {
-                    let di = default_impls.get_or_insert_with(|| {
-                        let mut w = new_writer(
-                            &format!("{fq_name}$DefaultImpls"),
-                            "java/lang/Object",
-                            opts,
-                        );
-                        w.set_access(0x0011 | 0x0020); // PUBLIC | FINAL | SUPER
-                        w
-                    });
-                    if enable_compat {
-                        // The interface owns the real default application; the holder's copy is a
-                        // thin synthetic forward to it (kotlinc's `enable` shape).
-                        default_impls::emit_default_stub_forward(ir, default_fid, &fq_name, di);
-                    } else {
-                        emit_default_stub(
-                            DefaultStubSource {
-                                ir,
-                                fid: default_fid,
-                                defaults,
-                            },
-                            None,
-                            &fq_name,
-                            facade,
-                            di,
-                            env,
-                            true,
-                        );
-                    }
                 }
             }
         }
@@ -3680,10 +3664,7 @@ fn emit_enum_class(
             cw.set_method_lines("<init>", &ctor_desc, &entries);
         }
     }
-    if let Some(defaults) = ir
-        .class_ctor_defaults(&fq)
-        .filter(|defaults| defaults.iter().any(Option::is_some))
-    {
+    if let Some(defaults) = crate::jvm::default_wrappers::primary_constructor(ir, c) {
         constructor_defaults::emit_ctor_default_stub_with_prefix(
             ir,
             constructor_defaults::ConstructorDefaultStub {
@@ -3793,7 +3774,9 @@ fn emit_enum_class(
                 // silently had no stub at all — a call omitting the argument had nothing to dispatch to.
                 // Same call as the class path, so the super-call guard rides along: an enum IS
                 // inheritable (an entry body subclasses it), which is why kotlinc guards the stub.
-                if let Some(defaults) = ir.declared_param_defaults(fid) {
+                if let Some((fid, defaults)) =
+                    crate::jvm::default_wrappers::member_function(ir, fid)
+                {
                     emit_default_stub(
                         DefaultStubSource { ir, fid, defaults },
                         Some(StaticOwner::Class(c.fq_name)),

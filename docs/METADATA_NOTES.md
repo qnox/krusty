@@ -1,5 +1,23 @@
 # `@kotlin.Metadata` — reverse-engineering notes (Phase 4b)
 
+## Native bound-receiver physical storage
+
+The common callable-reference record owns the bound-receiver capture coordinate. Native emission
+uses that coordinate to choose semantic object storage, even when a primitive or value class has
+an unboxed invocation carrier. Stored types and offsets jointly own the GC map and thunk loads.
+This representation choice changes no declaration identity, metadata or source-level type, and
+does not reconstruct receiver roles from a capture's spelling or machine carrier.
+
+## Identity-keyed declaration-name projection
+
+Providers project name evidence directly from their selected classifier and alias records. Typed
+ordinary/alias keys retain both declarations when their flattened identity is the same. The
+outer option distinguishes an absent declaration from a selected declaration whose name is unknown.
+Federation stops at the first present record; source-unit caches retain all three states. Frozen
+backend module facts keep source class and alias names independently of alias targets, and forward
+only absent identities to the dependency inventory. Literal-dollar ownership stays snapshot-owned.
+The metadata encoder callback and class-ID sinks remain a separate consumer change.
+
 ## KLIB reference wrappers and provider declarations
 
 The serialized reflection target and the wrapper's actual call must name the same public
@@ -43,6 +61,15 @@ segments rather than splitting lookup names on dots and dollars. This avoids cre
 prefix identities before later consumers run. Metadata class-ID encoding still needs its separate
 snapshot ownership lookup; publication alone does not supply authoritative negative nesting facts
 for every cached or cross-module identity.
+
+## Platform exception storage authority
+
+Only the explicitly selected platform stdlib may publish an admitted runtime-exception storage
+role. Class shape, generic/outer-instance state and metadata supertypes constrain that role;
+subclasses with additional declared instance state are not admitted. The frozen classifier record
+retains the role and exact parent identity. Wasm's physical registry consumes those records rather
+than selected constructor inventory or classifier spelling, and validates the complete chain even
+when its leaf already has a GC type. Ordinary source and JVM classifier records retain no role.
 
 ## Companion fields and class metadata
 

@@ -13,6 +13,7 @@
 //! collected together and selected later by [`crate::symbol_resolver::SymbolResolver`].
 
 pub use crate::libraries::ClassifierAccess;
+pub use crate::libraries::ClassifierDeclarationKey;
 use crate::libraries::{FunctionSet, LibraryType, PropertySet, ResolvedSymbols};
 use crate::types::{Ty, TypeName};
 
@@ -53,6 +54,20 @@ impl SymbolNamespace {
 /// A provider of declarations — a module's AST or a compiled library. The arg-independent metadata
 /// surface that federates across sources; arg-dependent selection/binding lives above (the resolver).
 pub trait SymbolSource {
+    /// The selected declaration record's own name, addressed by an already-bound declaration key.
+    /// `None` means this source has no such declaration; `Some(None)` means its selected record
+    /// has unknown name evidence and must shadow later sources. This projects the same normalized
+    /// classifier/alias records as `symbols`, without decomposing the identity or selecting an
+    /// alias's expansion target. Ordinary and alias keys stay distinct even when their flattened
+    /// identities coincide. This is not a source-name binding operation. Every source publishing
+    /// classifier declarations implements this projection; the default is only for empty sources.
+    fn classifier_declaration_name(
+        &self,
+        _declaration: crate::libraries::ClassifierDeclarationKey,
+    ) -> Option<Option<crate::types::ClassifierDeclarationName>> {
+        None
+    }
+
     /// Core projection of the classifier half of [`Self::symbols`]. Providers must not override this;
     /// the implementation lives here solely while call sites migrate to reading the record directly.
     fn classifier(&self, internal: TypeName) -> Option<std::sync::Arc<LibraryType>> {
@@ -223,6 +238,9 @@ pub trait SymbolSource {
     }
 }
 
+#[cfg(test)]
+mod declaration_names_tests;
+
 /// An ordered federation of sources — itself a [`SymbolSource`], so it nests. Earlier children win:
 /// Callables concatenate in order (each overload keeps its own origin); the classifier comes from the
 /// first/earliest contributor on a name clash. Holds children by REFERENCE so a resolver can federate the
@@ -245,6 +263,15 @@ impl<'a> CompositeSource<'a> {
 }
 
 impl SymbolSource for CompositeSource<'_> {
+    fn classifier_declaration_name(
+        &self,
+        declaration: crate::libraries::ClassifierDeclarationKey,
+    ) -> Option<Option<crate::types::ClassifierDeclarationName>> {
+        self.children
+            .iter()
+            .find_map(|child| child.classifier_declaration_name(declaration))
+    }
+
     /// A package exists if ANY source declares it — packages are a union across the module and the
     /// classpath, not a shadowing lookup: the same package name legitimately holds declarations from
     /// both, and a qualifier walk must be able to continue through either.
@@ -432,6 +459,12 @@ impl SymbolSource for CompositeSource<'_> {
 /// cannot outlive or conceal mutation of any contributing provider.
 #[derive(Default)]
 pub(crate) struct SymbolQueryCache {
+    declaration_names: std::cell::RefCell<
+        crate::fx_hash::HashMap<
+            ClassifierDeclarationKey,
+            Option<Option<crate::types::ClassifierDeclarationName>>,
+        >,
+    >,
     /// Keyed by NAME, and every miss and hit hashes that string. The default hasher is SipHash,
     /// which is a cryptographic-strength choice this cache does not need: the keys are internal
     /// declaration spellings, never attacker-supplied, and the map lives and dies inside one source
@@ -461,6 +494,21 @@ impl<'a> CachedCompositeSource<'a> {
 }
 
 impl SymbolSource for CachedCompositeSource<'_> {
+    fn classifier_declaration_name(
+        &self,
+        declaration: crate::libraries::ClassifierDeclarationKey,
+    ) -> Option<Option<crate::types::ClassifierDeclarationName>> {
+        if let Some(name) = self.cache.declaration_names.borrow().get(&declaration) {
+            return name.clone();
+        }
+        let name = self.source.classifier_declaration_name(declaration);
+        self.cache
+            .declaration_names
+            .borrow_mut()
+            .insert(declaration, name.clone());
+        name
+    }
+
     fn package_exists(&self, parent: TypeName, name: &str) -> bool {
         self.source.package_exists(parent, name)
     }
@@ -700,6 +748,7 @@ mod tests {
                     );
                 }
                 Some(std::sync::Arc::new(LibraryType {
+                    runtime_exception: None,
                     declaration_name: None,
                     is_kotlin: true,
                     is_data: false,

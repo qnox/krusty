@@ -59,12 +59,13 @@ use crate::jvm::names::{method_descriptor, property_getter_name, type_descriptor
 use crate::jvm::operation_relocation::clone_below_representation_wrapper;
 use crate::jvm::physical_type::ir_ty_to_jvm;
 use crate::libraries::InlineKind;
-use crate::types::{existing_type_name, type_name, SemanticCallRole, Ty, TyKind, TypeName};
+use crate::types::{type_name, SemanticCallRole, Ty, TyKind, TypeName};
 use body_scopes::{append_inline_body_scopes, collect_reachable, collect_reachable_scoped};
 use boxing_rewrites::{box_wrap, box_wrap_nullable, to_string_wrap};
 use call_results::CallTypes;
 pub(crate) use class_annotations::class_file_annotations;
 pub(crate) use declaration_inventory::record_referenced as record_referenced_value_classes;
+use descriptor_parameters::erase_descriptor;
 pub(crate) use inherited_default_calls::InheritedDefaultStatics;
 use lambda_slots::{boxed_lambda_own_params_from, lambda_sam_params, lambda_slot_is_boxed};
 pub(crate) use member_names::suspend_lambda_invoke_name;
@@ -730,6 +731,13 @@ pub(crate) fn lower_value_classes(
     let mut lowered_value_members = HashSet::default();
     // Functions whose physical name the mangling below changed, by stable identity.
     let mut renamed_functions = HashSet::default();
+    // kotlinc names a property accessor's extension receiver after the property, not after the
+    // accessor's mangled name.
+    let property_accessors: HashSet<u32> = ir
+        .local_property_layouts
+        .values()
+        .flat_map(crate::ir::IrLocalPropertyLayout::accessor_functions)
+        .collect();
     for (fid, f) in ir.functions.iter_mut().enumerate() {
         let is_box_impl = f.name == "box-impl";
         // A USER value-class member function's body runs on the BOXED object; its value-class-typed
@@ -803,6 +811,13 @@ pub(crate) fn lower_value_classes(
                 if let Some(owner) = f.dispatch_receiver {
                     let key = (owner, source_name.clone(), orig_params[fid].len());
                     mangle_map.insert(key, mangled.clone());
+                }
+                if let Some(suffix) = mangled
+                    .strip_prefix(&source_name)
+                    .filter(|_| !vc_member && !property_accessors.contains(&(fid as u32)))
+                {
+                    ir.value_class_mangle_suffixes
+                        .insert(fid as u32, suffix.to_owned());
                 }
                 f.name = mangled;
                 renamed_functions.insert(fid as u32);
@@ -4645,41 +4660,6 @@ fn sam_declares_vc_return(
     ir.lambda_sam_signature
         .get(&impl_fn)
         .is_some_and(|(_, ret)| ret.non_null().obj_internal() == Some(x))
-}
-
-/// Erase the value-class types in a JVM method descriptor: each `L<fq>;` whose `<fq>` is a value class
-/// becomes its underlying descriptor (`(LIv;)Ljava/lang/String;` → `(I)Ljava/lang/String;`).
-fn erase_descriptor(descriptor: &str, under: &Under) -> String {
-    let bytes = descriptor.as_bytes();
-    let mut out = String::with_capacity(descriptor.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'L' {
-            let start = i + 1;
-            let mut j = start;
-            while j < bytes.len() && bytes[j] != b';' {
-                j += 1;
-            }
-            let fq = &descriptor[start..j];
-            // A value class in a JVM reference-array component is necessarily BOXED. Erase a
-            // declaration slot `LValue;` to its carrier, but never rewrite the component of
-            // `[LValue;`: doing so silently changes `Array<UInt>` into `IntArray` and likewise turns
-            // `Array<Data>` into the array-valued carrier of `Data`.
-            let underlying = (bytes.get(i.wrapping_sub(1)) != Some(&b'['))
-                .then(|| existing_type_name(fq).and_then(|name| under.get(&name)))
-                .flatten();
-            if let Some(u) = underlying {
-                out.push_str(&desc(&erase(u, under)));
-            } else {
-                out.push_str(&descriptor[i..=j]);
-            }
-            i = j + 1;
-        } else {
-            out.push(bytes[i] as char);
-            i += 1;
-        }
-    }
-    out
 }
 
 fn desc(t: &Ty) -> String {
