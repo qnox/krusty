@@ -13,6 +13,16 @@ pub enum ClassifierDeclarationName {
     Nested { owner: TypeName, name: Box<str> },
 }
 
+impl ClassifierDeclarationName {
+    /// Publish this declaration's identity from its retained container and exact segment.
+    pub(crate) fn identity(&self) -> TypeName {
+        match self {
+            Self::TopLevel { package, name } => super::type_name_child(*package, name),
+            Self::Nested { owner, name } => super::type_name_nested_child(*owner, name),
+        }
+    }
+}
+
 /// Return-value statuses of the four overrides every serialization-plugin generated serializer
 /// declares. Pass 1 selects the overridden declarations from their complete semantic shapes; the
 /// closed result crosses common lowering without retaining a provider or reopening member lookup.

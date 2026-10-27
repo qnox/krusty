@@ -236,7 +236,7 @@ pub(super) fn constructor_initialization_callees(
     Ok(Some(
         plan.header
             .arena
-            .emitted_callable_symbols_from(roots, super::emitted_closure_function)
+            .emitted_callable_symbols_from(roots, super::EMITTED_CALL_FORMS)
             .into_iter()
             .filter_map(|symbol| match &symbol.signature {
                 KlibIrSignature::Public(signature) => {

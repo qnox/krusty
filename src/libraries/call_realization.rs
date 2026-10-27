@@ -117,6 +117,8 @@ pub struct KlibBodyCallable<'a> {
     type_parameters: &'a [Ty],
     reified_type_parameter_ordinals: &'a [u32],
     compiler_intrinsic: Option<CompilerIntrinsic>,
+    /// The range operator an exact builtin `rangeTo`/`rangeUntil` member constructs.
+    range_construction: Option<crate::fir::FirRangeOperation>,
     declaration_modifiers: Option<super::KlibBodyDeclarationModifiers>,
     class_contract: Option<&'a super::KlibBodyClassContract>,
     /// Exact singleton dispatch receiver selected for this call edge. Common KLIB body lowering
@@ -149,6 +151,7 @@ pub(crate) struct KlibBodyCallableShape<'a> {
     pub(crate) type_parameters: &'a [Ty],
     pub(crate) reified_type_parameter_ordinals: &'a [u32],
     pub(crate) compiler_intrinsic: Option<CompilerIntrinsic>,
+    pub(crate) range_construction: Option<crate::fir::FirRangeOperation>,
     pub(crate) declaration_modifiers: Option<super::KlibBodyDeclarationModifiers>,
     pub(crate) class_contract: Option<&'a super::KlibBodyClassContract>,
 }
@@ -176,6 +179,7 @@ impl<'a> KlibBodyCallable<'a> {
             type_parameters,
             reified_type_parameter_ordinals,
             compiler_intrinsic,
+            range_construction,
             declaration_modifiers,
             class_contract,
         } = shape;
@@ -194,6 +198,7 @@ impl<'a> KlibBodyCallable<'a> {
             type_parameters,
             reified_type_parameter_ordinals,
             compiler_intrinsic,
+            range_construction,
             declaration_modifiers,
             class_contract,
             singleton_dispatch: singleton.map(SingletonDispatch::ty),
@@ -271,6 +276,10 @@ impl<'a> KlibBodyCallable<'a> {
         self.compiler_intrinsic
     }
 
+    pub(crate) fn range_construction(self) -> Option<crate::fir::FirRangeOperation> {
+        self.range_construction
+    }
+
     pub(crate) fn singleton_dispatch(self) -> Option<Ty> {
         self.singleton_dispatch
     }
@@ -305,6 +314,7 @@ impl<'a> KlibBodyCallable<'a> {
             && self.type_parameters == other.type_parameters
             && self.reified_type_parameter_ordinals == other.reified_type_parameter_ordinals
             && self.compiler_intrinsic == other.compiler_intrinsic
+            && self.range_construction == other.range_construction
             && self.declaration_modifiers == other.declaration_modifiers
             && self.class_contract == other.class_contract
             && self.companion_receiver == other.companion_receiver
@@ -390,6 +400,7 @@ impl ExternalCallableRealization {
                     .callable
                     .compiler_intrinsic
                     .or(self.callable.member_realization.compiler_intrinsic()),
+                range_construction: self.callable.member_realization.range_construction(),
                 declaration_modifiers: self.klib_body_declaration_modifiers,
                 class_contract: self.klib_body_class_contract.as_ref(),
             },

@@ -1028,6 +1028,32 @@ impl BodyFirChecker<'_> {
         Ok(checked)
     }
 
+    /// An operator convention's explicit `receiver` (`map[k] = v`, `list += x`, `map + pair`) is the
+    /// argument of the selected extension's receiver parameter. A Java value the checker committed
+    /// to that non-null parameter is guarded like a written extension call's receiver.
+    pub(super) fn guard_operator_extension_receiver(
+        &mut self,
+        receiver: ExprId,
+        call: &mut FirCall,
+    ) -> Result<(), BodyCheckFailure> {
+        let Some(checked) = call.extension_receiver.as_mut() else {
+            return Ok(());
+        };
+        if checked.conversion.is_some() || !self.info.platform_narrowings.contains_key(&receiver) {
+            return Ok(());
+        }
+        let span = self
+            .file
+            .expr_span(receiver)
+            .ok_or_else(|| self.failure(None, BodyCheckFailureKind::MissingSourceSpan))?;
+        let received = self.info.semantic_ty(receiver).platform_lower_bound();
+        let target = self.resolved_type(span, received)?;
+        let cause = self.expression_origin(receiver)?;
+        checked.conversion =
+            Some(self.platform_producer_conversion(receiver, checked.value, cause, target));
+        Ok(())
+    }
+
     /// An extension call's explicit `receiver`, converted as the argument of the receiver
     /// parameter it is. Besides a smart cast of its own value, a Java value the checker committed
     /// to a receiver type that rejects `null` is guarded (`System.getProperty(key).ext()` checks

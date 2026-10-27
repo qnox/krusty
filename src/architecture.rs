@@ -336,11 +336,14 @@ mod tests {
                 let mut allowed = allowed.to_vec();
                 allowed.push("java_source");
                 assert_allowed_crate_modules_in_file(&path, &allowed);
-            } else if path.ends_with("src/jvm/array_casts.rs") {
-                // Array-cast realization reuses the core subtype relation over checked types and
-                // the frozen classifier inventory. Its oracle cannot resolve declarations or
-                // infer bindings; keep this dependency local rather than duplicating subtyping
-                // or admitting semantic selection throughout the JVM backend.
+            } else if path.ends_with("src/jvm/array_casts.rs")
+                || path.ends_with("src/jvm/read_only_collection_stubs.rs")
+            {
+                // Array-cast realization and read-only stub result compatibility reuse the core
+                // subtype relation over checked types and the frozen classifier inventory. Their
+                // oracles cannot resolve declarations or infer bindings; keep this dependency
+                // local rather than duplicating subtyping or admitting semantic selection
+                // throughout the JVM backend.
                 let mut allowed = allowed.to_vec();
                 allowed.push("assignable");
                 assert_allowed_crate_modules_in_file(&path, &allowed);

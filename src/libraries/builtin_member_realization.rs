@@ -24,6 +24,19 @@ impl MemberRealization {
             Self::Dispatch | Self::Direct { .. } | Self::RangeConstruction { .. } => None,
         }
     }
+
+    /// The source range operator this exact provider realization constructs, if any.
+    pub const fn range_construction(self) -> Option<crate::fir::FirRangeOperation> {
+        match self {
+            Self::RangeConstruction { open_end: false } => {
+                Some(crate::fir::FirRangeOperation::Through)
+            }
+            Self::RangeConstruction { open_end: true } => {
+                Some(crate::fir::FirRangeOperation::OpenEnd)
+            }
+            Self::Dispatch | Self::Direct { .. } | Self::Intrinsic(_) => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

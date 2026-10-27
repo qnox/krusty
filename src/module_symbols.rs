@@ -53,7 +53,7 @@ impl<'a> ModuleSymbols<'a> {
         identity: TypeName,
     ) -> Option<crate::libraries::AliasExpansion> {
         let target = *self.syms.source_alias_fqns.get(&identity)?;
-        let (formals, expansion) = self.syms.source_alias_expansions.get(&identity)?;
+        let template = self.syms.source_alias_expansions.get(&identity)?;
         let expansion_spelling = self
             .syms
             .alias_expansion_spellings
@@ -62,9 +62,10 @@ impl<'a> ModuleSymbols<'a> {
             .unwrap_or_default();
         Some(crate::libraries::AliasExpansion {
             identity,
+            declaration_name: template.declaration_name.clone().map(std::sync::Arc::new),
             target,
-            formals: formals.clone(),
-            expansion: *expansion,
+            formals: template.formals.clone(),
+            expansion: template.expansion,
             expansion_spelling,
         })
     }
