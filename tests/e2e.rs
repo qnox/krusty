@@ -430,8 +430,6 @@ mod classpath_nullable_param_toplevel_e2e;
 mod classpath_nullable_value_class_e2e;
 #[path = "classpath_number_conversion_e2e.rs"]
 mod classpath_number_conversion_e2e;
-#[path = "classpath_object_member_extension_import_e2e.rs"]
-mod classpath_object_member_extension_import_e2e;
 #[path = "classpath_object_member_import_e2e.rs"]
 mod classpath_object_member_import_e2e;
 #[path = "classpath_object_nested_e2e.rs"]
@@ -1118,8 +1116,6 @@ mod generic_inferred_primitive_return_e2e;
 mod generic_inferred_return_e2e;
 #[path = "generic_local_extension_ref_e2e.rs"]
 mod generic_local_extension_ref_e2e;
-#[path = "generic_member_extension_lambda_result_e2e.rs"]
-mod generic_member_extension_lambda_result_e2e;
 #[path = "generic_receiver_extension_lambda_shape_e2e.rs"]
 mod generic_receiver_extension_lambda_shape_e2e;
 #[path = "generic_result_assertion_e2e.rs"]
@@ -1547,26 +1543,8 @@ mod member_array_ctor_inference_e2e;
 mod member_ctrl_inference_e2e;
 #[path = "member_default_implicit_receiver_e2e.rs"]
 mod member_default_implicit_receiver_e2e;
-#[path = "member_extension_default_args_e2e.rs"]
-mod member_extension_default_args_e2e;
-#[path = "member_extension_function_e2e.rs"]
-mod member_extension_function_e2e;
-#[path = "member_extension_in_lambda_e2e.rs"]
-mod member_extension_in_lambda_e2e;
-#[path = "member_extension_lambda_arity_e2e.rs"]
-mod member_extension_lambda_arity_e2e;
-#[path = "member_extension_lambda_inference_e2e.rs"]
-mod member_extension_lambda_inference_e2e;
-#[path = "member_extension_nested_hof_e2e.rs"]
-mod member_extension_nested_hof_e2e;
-#[path = "member_extension_property_e2e.rs"]
-mod member_extension_property_e2e;
-#[path = "member_extension_property_override_e2e.rs"]
-mod member_extension_property_override_e2e;
-#[path = "member_extension_recursive_bound_e2e.rs"]
-mod member_extension_recursive_bound_e2e;
-#[path = "member_extension_reified_e2e.rs"]
-mod member_extension_reified_e2e;
+#[path = "e2e/member_extensions.rs"]
+mod member_extensions;
 #[path = "member_generic_nullable_result_e2e.rs"]
 mod member_generic_nullable_result_e2e;
 #[path = "member_infix_inference_e2e.rs"]
@@ -1687,8 +1665,6 @@ mod primary_constructor_newline_e2e;
 mod primitive_explicit_equals_e2e;
 #[path = "primitive_hash_code_e2e.rs"]
 mod primitive_hash_code_e2e;
-#[path = "projected_member_extension_invoke_e2e.rs"]
-mod projected_member_extension_invoke_e2e;
 #[path = "public_inline_property_access_e2e.rs"]
 mod public_inline_property_access_e2e;
 #[path = "receiver_type_line_break_e2e.rs"]
@@ -2371,8 +2347,6 @@ mod private_classifier_access_e2e;
 mod private_constructor_access_e2e;
 mod private_inline_access_e2e;
 mod private_inline_property_access_e2e;
-#[path = "private_member_extension_accessor_e2e.rs"]
-mod private_member_extension_accessor_e2e;
 mod private_property_inline_access_e2e;
 #[path = "private_set_e2e.rs"]
 mod private_set_e2e;
