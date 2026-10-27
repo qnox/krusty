@@ -87,7 +87,6 @@ fn generate_diagnostic_names() -> Result<(), String> {
         if !path.to_string_lossy().ends_with(".diagnostics.tsv") {
             continue;
         }
-        println!("cargo:rerun-if-changed={}", path.display());
         let table = std::fs::read_to_string(&path)
             .map_err(|error| format!("read {}: {error}", path.display()))?;
         for row in table.lines().filter(|line| !line.starts_with('#')) {
