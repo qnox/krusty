@@ -112,7 +112,7 @@ fn generate_diagnostic_names() -> Result<(), String> {
             "pub const {name}: DiagnosticName = DiagnosticName({index});\n"
         ));
     }
-    generated.push_str(&format!("const SPELLINGS: [&str; {}] = [\n", names.len()));
+    generated.push_str(&format!("static SPELLINGS: [&str; {}] = [\n", names.len()));
     for name in &names {
         generated.push_str(&format!("    \"{name}\",\n"));
     }
