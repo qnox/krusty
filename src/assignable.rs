@@ -1130,4 +1130,38 @@ mod tests {
         assert!(!ok(s("app/Aid"), Ty::String));
         assert!(!ok(s("app/Aid"), s("kotlin/String")));
     }
+
+    /// `T & Any` left by substituting a nullable binding and the compact `T` whose occurrence bound
+    /// excludes null are one type argument. A different parameter, or the same parameter while its
+    /// bound still admits null, is not.
+    #[test]
+    fn substituted_definitely_non_null_matches_only_its_non_null_bounded_parameter() {
+        let nullable_any = Ty::nullable(s("kotlin/Any"));
+        let wrapped = Ty::ty_param("T", nullable_any).contributed_through_nullable_formal();
+        let compact = Ty::ty_param("T", nullable_any).definitely_non_null();
+        assert!(matches!(wrapped.kind(), TyKind::DefinitelyNotNull(_)));
+        assert!(matches!(compact.kind(), TyKind::TyParam(..)));
+        assert!(same_flexible_type(wrapped, compact));
+        assert!(same_flexible_type(compact, wrapped));
+        assert!(same_flexible_type(wrapped, wrapped));
+
+        let other_wrapped = Ty::ty_param("U", nullable_any).contributed_through_nullable_formal();
+        assert!(!same_flexible_type(wrapped, other_wrapped));
+        assert!(!same_flexible_type(
+            wrapped,
+            Ty::ty_param("U", s("kotlin/Any"))
+        ));
+        assert!(!same_flexible_type(
+            Ty::ty_param("U", s("kotlin/Any")),
+            wrapped
+        ));
+        assert!(!same_flexible_type(
+            wrapped,
+            Ty::ty_param("T", nullable_any)
+        ));
+        assert!(!same_flexible_type(
+            Ty::ty_param("T", nullable_any),
+            wrapped
+        ));
+    }
 }
