@@ -3263,6 +3263,23 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `src/symbol_resolver/callable_shapes.rs` (plain, nullable, and platform function classifiers
   versus a nominal callable object); `tests/platform_function_type_argument_e2e.rs` (platform and
   nullable acceptance against kotlinc, and the complete non-null rejection diagnostic).
+- **A `@NotNull` Java collection keeps its mutability flexible.** A nullability qualifier fixes
+  nullability alone: `@NotNull List<String>` is `(Mutable)List<String!>`, the interval
+  `MutableList<String!>..List<String!>` with both faces non-null, not `MutableList<String!>`. A
+  read-only `List` therefore reaches such a Java parameter or SAM parameter, a Kotlin override may
+  declare the parameter or result as either `List` or `MutableList`, and a result is usable as both.
+  A type substituted into a generic Java result stays inside the interval (`Api.same(ro)` is
+  `(Mutable)List<String!>`). A declaration inferred from one publishes it as kotlinc does: a
+  non-null flexible metadata type whose upper bound is the read-only classifier, and the
+  read-only-faced generic signature. Diagnostics render it `(Mutable)List<String!>`. Nullability
+  composes with the interval rather than replacing it: joined with `null`
+  (`if (flag) Api.give() else null`) or substituted into a nullable generic result (`T?`), it is
+  `(Mutable)List<String!>?`, both faces nullable, and metadata publishes that nullable interval.
+  Removing the nullability again (`joined(flag)!!`, or inference through a nullable formal
+  `fun <T> present(x: T?): T`) gives back `(Mutable)List<String!>`.
+  Tests: `tests/java_not_null_collection_mutability_e2e.rs` (bytecode and metadata identical to
+  kotlinc, runtime, and the complete diagnostics against kotlinc); `src/types.rs`
+  (`nullability_composes_with_a_mutability_interval`).
 - **A Java `TYPE_USE` nullability qualifier fixes the member type it annotates.** A
   `@NonNull`/`@Nullable` type-use annotation on the outermost type of a Java method return, formal
   parameter, or field states the same fact as a declaration `@NotNull`/`@Nullable`: the type is `T`

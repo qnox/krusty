@@ -265,6 +265,16 @@ fn assignable_inner(cx: &TyCtx, oracle: &dyn TypeOracle, sub: Ty, sup: Ty) -> bo
         return assignable_inner(cx, oracle, inner, sup)
             || assignable_inner(cx, oracle, Ty::nullable(inner), sup);
     }
+    // A non-null Java collection `(Mutable)X` is the interval `MutableX..X`: as a target it accepts
+    // what its read-only upper face accepts, and as a source its mutable lower face fits wherever
+    // either face does.
+    if let TyKind::MutabilityFlexible(inner) = sup.kind() {
+        let upper = oracle.platform_flexible_upper_bound(inner);
+        return assignable_inner(cx, oracle, sub, upper);
+    }
+    if let TyKind::MutabilityFlexible(inner) = sub.kind() {
+        return assignable_inner(cx, oracle, inner, sup);
+    }
 
     // Nullability. `null` fits any nullable target; `T` fits `T?`; `T?` does not fit non-null `T`.
     if sub == Ty::Null {
@@ -497,6 +507,7 @@ fn capture_projection_parameters(
         TyKind::DefinitelyNotNull(template)
         | TyKind::Nullable(template)
         | TyKind::PlatformNullable(template)
+        | TyKind::MutabilityFlexible(template)
         | TyKind::InProjection(template)
         | TyKind::OutProjection(template)
         | TyKind::StarProjection(template)
@@ -588,6 +599,11 @@ fn same_flexible_type_with(oracle: &dyn TypeOracle, left: Ty, right: Ty) -> bool
         }
         (TyKind::PlatformNullable(inner), _) => flexible_bound_matches(oracle, inner, right),
         (_, TyKind::PlatformNullable(inner)) => flexible_bound_matches(oracle, inner, left),
+        (TyKind::MutabilityFlexible(left), TyKind::MutabilityFlexible(right)) => {
+            same_type_argument_with(oracle, left, right)
+        }
+        (TyKind::MutabilityFlexible(inner), _) => mutability_bound_matches(oracle, inner, right),
+        (_, TyKind::MutabilityFlexible(inner)) => mutability_bound_matches(oracle, inner, left),
         _ => same_type_argument_with(oracle, left, right),
     }
 }
@@ -601,6 +617,12 @@ fn flexible_bound_matches(oracle: &dyn TypeOracle, inner: Ty, other: Ty) -> bool
         || (upper != inner
             && (same_type_argument_with(oracle, other, upper)
                 || same_type_argument_with(oracle, other, Ty::nullable(upper))))
+}
+
+/// `other` matches the non-null collection `(Mutable)X` at its mutable or its read-only face.
+fn mutability_bound_matches(oracle: &dyn TypeOracle, inner: Ty, other: Ty) -> bool {
+    same_type_argument_with(oracle, other, inner)
+        || same_type_argument_with(oracle, other, oracle.platform_flexible_upper_bound(inner))
 }
 
 /// Resolve a generic argument only for invariant identity comparison. A free type parameter becomes

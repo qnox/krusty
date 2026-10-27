@@ -321,6 +321,7 @@ pub use super_calls::ResolvedSuperCall;
 mod superclass_validation;
 mod type_join;
 mod type_parameter_owners;
+use type_parameter_owners::ty_param_names_into;
 mod uninferred_call_results;
 mod upper_bound_violations;
 mod value_class_parameters;
@@ -13015,6 +13016,7 @@ impl<'a> Checker<'a> {
                 }
                 TyKind::Nullable(inner)
                 | TyKind::PlatformNullable(inner)
+                | TyKind::MutabilityFlexible(inner)
                 | TyKind::InProjection(inner)
                 | TyKind::OutProjection(inner)
                 | TyKind::StarProjection(inner) => {
@@ -30533,10 +30535,10 @@ pub(crate) fn semantic_common_supertype_inner(
         return semantic_common_supertype_inner(source, oracle, a, bound, visiting);
     }
     if a == Ty::Null && b.is_reference() {
-        return Some(Ty::nullable(b.non_null()));
+        return Some(Ty::nullable(b));
     }
     if b == Ty::Null && a.is_reference() {
-        return Some(Ty::nullable(a.non_null()));
+        return Some(Ty::nullable(a));
     }
     if (a == Ty::Unit && b == Ty::Null) || (b == Ty::Unit && a == Ty::Null) {
         return Some(Ty::nullable(Ty::Unit));
@@ -34392,33 +34394,6 @@ struct MemberMappingFailure {
     candidate: crate::libraries::FunctionInfo,
 }
 
-fn ty_param_names_into(ty: Ty, out: &mut Vec<&'static str>) {
-    match ty.kind() {
-        TyKind::TyParam(name, _) => out.push(name.as_str()),
-        TyKind::Nullable(inner)
-        | TyKind::PlatformNullable(inner)
-        | TyKind::InProjection(inner)
-        | TyKind::OutProjection(inner) => ty_param_names_into(inner, out),
-        // A source star has a computed upper bound for frontend reads, but that
-        // bound is not an explicit use of its type parameters in the source
-        // declaration. In particular, `C<*>` must not publish `C`'s own
-        // recursive parameter as a parameter of the enclosing declaration.
-        TyKind::StarProjection(_) => {}
-        TyKind::Obj(_, args) => {
-            for &argument in args {
-                ty_param_names_into(argument, out);
-            }
-        }
-        TyKind::Fun(signature) => {
-            for &parameter in &signature.params {
-                ty_param_names_into(parameter, out);
-            }
-            ty_param_names_into(signature.ret, out);
-        }
-        _ => {}
-    }
-}
-
 /// The order a construction's arguments are typed in: every CONTEXTUAL (lambda) argument after the
 /// arguments that can bind the type parameters ITS OWN parameters mention.
 ///
@@ -34545,6 +34520,7 @@ fn merge_source_constructor_shape_bindings(
         }
         TyKind::Nullable(inner)
         | TyKind::PlatformNullable(inner)
+        | TyKind::MutabilityFlexible(inner)
         | TyKind::OutProjection(inner) => {
             merge_source_constructor_shape_bindings(
                 inner,
@@ -34691,7 +34667,7 @@ impl crate::assignable::TypeOracle for Checker<'_> {
 /// accidentally become `String?`.
 fn common_result_nullability(a: Ty, b: Ty, base: Ty) -> Ty {
     if matches!(a.kind(), TyKind::Nullable(_)) || matches!(b.kind(), TyKind::Nullable(_)) {
-        Ty::nullable(base.non_null())
+        Ty::nullable(base)
     } else if a.is_platform_nullable() || b.is_platform_nullable() {
         Ty::platform_nullable(base.non_null())
     } else {
@@ -50812,7 +50788,9 @@ impl<'a> Checker<'a> {
                 TyKind::TyParam(name, _) => {
                     bindings.entry(name.to_string()).or_insert(expected);
                 }
-                TyKind::Nullable(inner) | TyKind::PlatformNullable(inner) => {
+                TyKind::Nullable(inner)
+                | TyKind::PlatformNullable(inner)
+                | TyKind::MutabilityFlexible(inner) => {
                     collect_exact_expected_bindings(inner, expected.non_null(), bindings);
                 }
                 TyKind::Obj(owner, arguments) => {
@@ -56372,6 +56350,7 @@ impl<'a> Checker<'a> {
                     TyKind::Nothing | TyKind::Null => true,
                     TyKind::Nullable(inner)
                     | TyKind::PlatformNullable(inner)
+                    | TyKind::MutabilityFlexible(inner)
                     | TyKind::InProjection(inner)
                     | TyKind::OutProjection(inner)
                     | TyKind::StarProjection(inner) => contains_bottom_evidence(inner),

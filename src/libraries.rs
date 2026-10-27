@@ -1578,6 +1578,9 @@ impl FunctionInfo {
                 (TyKind::PlatformNullable(inner), TyKind::PlatformNullable(selected_inner)) => {
                     Ty::platform_nullable(merge_method_arguments(inner, selected_inner, formals))
                 }
+                (TyKind::MutabilityFlexible(inner), TyKind::MutabilityFlexible(selected_inner)) => {
+                    Ty::mutability_flexible(merge_method_arguments(inner, selected_inner, formals))
+                }
                 (TyKind::InProjection(inner), TyKind::InProjection(selected_inner)) => {
                     Ty::in_projection(merge_method_arguments(inner, selected_inner, formals))
                 }

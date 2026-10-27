@@ -244,7 +244,10 @@ pub fn ir_ty_to_jvm(t: &Ty) -> Ty {
     // A nullable PRIMITIVE is a JVM reference — its boxed wrapper (`Int?` → `java/lang/Integer`, a
     // 1-slot reference), NOT the unboxed scalar. Map it before peeling `?`, so descriptors, slots and
     // stackmap frames all see the reference. A nullable REFERENCE keeps its descriptor (peel below).
-    if let TyKind::Nullable(inner) | TyKind::PlatformNullable(inner) = t.kind() {
+    if let TyKind::Nullable(inner)
+    | TyKind::PlatformNullable(inner)
+    | TyKind::MutabilityFlexible(inner) = t.kind()
+    {
         if inner == Ty::Nothing {
             // In a VALUE position this is the null-only bottom type, which also arises when generic
             // inference combines only `null` arguments. Keep its erased top representation here;
