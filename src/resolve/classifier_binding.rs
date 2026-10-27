@@ -807,6 +807,7 @@ mod tests {
             target,
             Some(crate::libraries::AliasExpansion {
                 identity: alias,
+                declaration_name: None,
                 target: other,
                 formals: vec!["T".to_string()],
                 expansion: Ty::obj_name(other),

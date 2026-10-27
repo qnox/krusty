@@ -176,6 +176,10 @@ pub(crate) fn run_backend_passes(
         jvm_plugin_type_descriptor,
         classifiers,
     );
+    crate::jvm::local_class_names::realize_copied_lambda_class_names(ir, |source| {
+        crate::jvm::module_calls::facade_for(source, facades)
+            .expect("a local classifier's declaring source has a file stem")
+    });
     // The JVM publishes members kotlinc's plugins generate only in IR (serialization's
     // `write$Self`); they join each class's record before any lowering rewrites one.
     crate::metadata::class_declarations::add_target_generated_functions(ir);
@@ -209,6 +213,9 @@ fn run_backend_passes_after_plugins(
     lambda_modes: crate::jvm::ir_emit::LambdaModes,
     facts: &mut BackendPassFacts,
 ) -> Result<(), SkipReason> {
+    // Every later pass reads a type parameter's JVM carrier off its occurrences. Select it once,
+    // from the declarations' complete bounds, before any of them runs.
+    crate::jvm::type_parameter_carriers::realize(ir);
     let module_value_classes = classifiers.module().source_value_classes();
     let module_readable_value_classes = classifiers.module().metadata_readable_value_classes();
     // Plugins produce backend-neutral checked IR. Realize any semantic super dispatch they add at

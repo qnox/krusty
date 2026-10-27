@@ -816,14 +816,15 @@ pub(crate) enum Expansion {
 
 /// A Java raw occurrence, as kotlinc's JVM serializer writes a raw type: the flexible interval
 /// from each formal's erasure (`Box<CharSequence!>`) up to the all-star application of the
-/// provider's upper face (`Box<*>?`), both faces marked with `JvmProtoBuf.is_raw` (field 101).
+/// provider's upper face `upper_bound` (`Box<*>?`), both faces marked with `JvmProtoBuf.is_raw`
+/// (field 101).
 /// `faces` is the nullability of the lower and upper face: an unannotated occurrence's upper face
 /// only, both for `@Nullable`, neither for `@NotNull`.
 fn encode_raw_type(
     strings: &mut StringTable<'_>,
     (owner, arguments): (TypeName, &[Ty]),
     (lower_nullable, upper_nullable): (bool, bool),
-    spelled: &Spelled,
+    upper_bound: Option<Ty>,
     type_parameters: &TypeParameters,
     expansion: Expansion,
 ) -> Result<Pb, TypeEncodeError> {
@@ -840,10 +841,7 @@ fn encode_raw_type(
         None,
         expansion,
     )?;
-    let upper_owner = spelled
-        .flexible_upper_bound
-        .and_then(Ty::obj_internal)
-        .unwrap_or(owner);
+    let upper_owner = upper_bound.and_then(Ty::obj_internal).unwrap_or(owner);
     let stars = vec![Ty::star_projection(Ty::nullable(Ty::obj("kotlin/Any"))); arguments.len()];
     let mut upper = encode_type_with_parameter(
         strings,
@@ -900,17 +898,28 @@ fn encode_type_with_parameter(
             return Ok(reference);
         }
     }
-    let (nullable, flexible, base) = match ty.kind() {
-        TyKind::Nullable(inner) => (true, false, inner),
-        TyKind::PlatformNullable(inner) => (false, true, inner),
-        _ => (false, spelled.flexible_upper_bound.is_some(), ty),
+    // Only a platform interval's upper face admits null on its own; a Java collection's `(Mutable)`
+    // interval is flexible in its mutability alone, with both faces as nullable as the occurrence.
+    let (nullable, flexible, mutability_only, base) = match ty.kind() {
+        TyKind::Nullable(inner) => match inner.kind() {
+            TyKind::MutabilityFlexible(inner) => (true, true, true, inner),
+            _ => (true, false, false, inner),
+        },
+        TyKind::PlatformNullable(inner) => (false, true, false, inner),
+        TyKind::MutabilityFlexible(inner) => (false, true, true, inner),
+        _ => (false, spelled.flexible_upper_bound.is_some(), false, ty),
     };
     if let (TyKind::Obj(owner, arguments), true) = (base.kind(), base.is_raw_application()) {
+        let upper_bound = if mutability_only {
+            spelled.mutability_upper_bound
+        } else {
+            spelled.flexible_upper_bound
+        };
         return encode_raw_type(
             strings,
             (owner, &arguments),
-            (nullable, nullable || flexible),
-            spelled,
+            (nullable, nullable || (flexible && !mutability_only)),
+            upper_bound,
             type_parameters,
             expansion,
         );
@@ -923,18 +932,24 @@ fn encode_type_with_parameter(
         // while encoding each face so it describes this node once rather than recursing.
         let mut face = spelled.clone();
         face.flexible_upper_bound = None;
+        face.mutability_upper_bound = None;
+        let faces = |face: Ty| if nullable { Ty::nullable(face) } else { face };
         let mut message = encode_type_with_parameter(
             strings,
-            base,
+            faces(base),
             &face,
             type_parameters,
             forced_parameter,
             expansion,
         )?;
-        let upper = spelled.flexible_upper_bound.unwrap_or(base);
+        let upper = if mutability_only {
+            faces(spelled.mutability_upper_bound.unwrap_or(base))
+        } else {
+            Ty::nullable(spelled.flexible_upper_bound.unwrap_or(base))
+        };
         let upper = encode_type_with_parameter(
             strings,
-            Ty::nullable(upper),
+            upper,
             &face,
             type_parameters,
             forced_parameter,
@@ -1131,6 +1146,7 @@ fn encode_type_with_parameter(
         | TyKind::Error
         | TyKind::Nullable(_)
         | TyKind::PlatformNullable(_)
+        | TyKind::MutabilityFlexible(_)
         | TyKind::InProjection(_)
         | TyKind::OutProjection(_)
         | TyKind::StarProjection(_)

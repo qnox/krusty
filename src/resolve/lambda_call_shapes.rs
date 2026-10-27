@@ -562,6 +562,9 @@ impl Checker<'_> {
                             TyKind::PlatformNullable(_) => {
                                 Some(Ty::platform_nullable as fn(Ty) -> Ty)
                             }
+                            TyKind::MutabilityFlexible(_) => {
+                                Some(Ty::mutability_flexible as fn(Ty) -> Ty)
+                            }
                             _ => None,
                         };
                         let TyKind::Fun(function) = parameter.non_null().kind() else {

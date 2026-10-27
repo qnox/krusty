@@ -1432,7 +1432,13 @@ pub fn decode_metadata_within(
         package_properties: realizations
             .stamp_properties(decode_properties(&ctx, 4, &[], &[])?)
             .into(),
-        type_aliases: decode_type_aliases(&ctx, package.as_deref(), this_class, k == Some(1))?,
+        type_aliases: decode_type_aliases(
+            &ctx,
+            package.as_deref(),
+            this_class,
+            k == Some(1),
+            st_body,
+        )?,
         constructors: constructors.into(),
         is_inner: class_flags.is_some_and(enclosing_type_parameters::is_inner),
         type_parameter_scope: scope,

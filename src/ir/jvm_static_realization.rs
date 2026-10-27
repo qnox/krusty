@@ -52,6 +52,27 @@ impl IrFile {
             .copied()
     }
 
+    pub(crate) fn mark_jvm_companion_delegate_static(
+        &mut self,
+        companion: TypeName,
+        property: u32,
+        index: u32,
+    ) {
+        self.jvm_companion_delegate_statics
+            .insert((companion, property), index);
+    }
+
+    /// The outer-class static holding a delegated companion property's `x$delegate`.
+    pub(crate) fn jvm_companion_delegate_static(
+        &self,
+        companion: TypeName,
+        property: u32,
+    ) -> Option<u32> {
+        self.jvm_companion_delegate_statics
+            .get(&(companion, property))
+            .copied()
+    }
+
     /// The exact companion property declaration whose storage `index` realizes on the JVM.
     /// Consumers that need declaration-owned facts use this recorded edge instead of recovering
     /// an owner or property from the physical static's spelling.

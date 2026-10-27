@@ -250,6 +250,19 @@ pub(super) fn hoisted_static_declaration_for<'a>(
         .map(|storage| (static_id, storage))
 }
 
+/// The HOISTED outer-class static holding the `x$delegate` of delegated companion property
+/// `property` of `c`, if any.
+pub(super) fn hoisted_delegate_static_for(
+    ir: &IrFile,
+    c: &crate::ir::IrClass,
+    property: usize,
+) -> Option<u32> {
+    if !c.is_companion {
+        return None;
+    }
+    ir.jvm_companion_delegate_static(c.fq_name_id(), property as u32)
+}
+
 /// Whether this companion property's hoisted static is the `@JvmField` realization — a public owner
 /// field with NO companion accessors, so accessor-shaped emission must skip it entirely.
 pub(super) fn jvm_field_static_for(ir: &IrFile, c: &crate::ir::IrClass, property: usize) -> bool {
@@ -960,9 +973,11 @@ impl<'a> Emitter<'a> {
                 .expect("a companion initializer belongs to a class that declares one");
             let companion_name = companion.render();
             let descriptor = format!("L{companion_name};");
-            let field = self
-                .cw
-                .fieldref(fq_name, companion.nested_segment_ref(), &descriptor);
+            let field = self.cw.fieldref(
+                fq_name,
+                crate::jvm::companion_storage::field_name(c.fq_name, companion),
+                &descriptor,
+            );
             clinit.getstatic(field, 1);
             let receiver_ty = Ty::obj_name(companion);
             let existing = self.slots.get(&0).map(|(slot, _)| *slot);
@@ -1230,7 +1245,12 @@ impl Emitter<'_> {
                     .unwrap_or_else(|| self.ir.functions[setter as usize].name.clone());
                 Some((
                     companion_name,
-                    companion.fq_name.nested_segment_ref().to_string(),
+                    crate::jvm::companion_storage::field_name(
+                        s.owner
+                            .expect("a hoisted companion static has an outer owner"),
+                        companion.fq_name,
+                    )
+                    .to_string(),
                     setter_name,
                 ))
             })

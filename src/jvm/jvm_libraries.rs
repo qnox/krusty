@@ -24,6 +24,8 @@ mod contract_dsl_tests;
 mod dependency_access_policy;
 mod dependency_deprecation;
 use dependency_deprecation::{ClassifierShape, PropertyDeclaration, PropertyDeprecations};
+#[cfg(test)]
+mod builtin_declaration_name_tests;
 mod dependency_registration;
 mod generic_signatures;
 mod inline_body_plan;
@@ -1843,6 +1845,10 @@ impl JvmLibraries {
             let is_mapped_builtin =
                 super::jvm_class_map::maps_to_distinct_jvm_internal(internal_name);
             let builtin_class_signature = self.cp.builtin_class_signature_name(internal_name);
+            let builtin_declaration_name = builtin_class_signature
+                .as_ref()
+                .filter(|signature| signature.declaration == internal_name)
+                .map(|signature| signature.declaration_name.clone());
             let metadata_class_signature = ci.meta.class_visibility.map(|_| {
                 (
                     ci.meta.class_type_parameters.type_params.clone(),
@@ -2405,9 +2411,11 @@ impl JvmLibraries {
             let own_type_parameter_count = application_header.own_count;
             let type_parameters = application_header.parameters;
             Some(LibraryType {
-                declaration_name: (ci.this_class == internal_name)
-                    .then(|| classifier_facts::classifier_declaration_name(&ci))
-                    .flatten(),
+                declaration_name: if ci.this_class == internal_name {
+                    classifier_facts::classifier_declaration_name(&ci)
+                } else {
+                    builtin_declaration_name
+                },
                 is_kotlin: has_kotlin_metadata,
                 is_data: ci.meta.is_data,
                 access: if let Some(visibility) = ci.meta.class_visibility {
@@ -3289,16 +3297,9 @@ impl JvmLibraries {
                 function_renames,
             ));
         }
-        const ACC_STATIC: u16 = 0x0008;
-        const ACC_PUBLIC: u16 = 0x0001;
-        let declares_instance_field = self.cp.find_name(cn).is_some_and(|class| {
-            class.fields.iter().any(|field| {
-                field.name == name
-                    && field.access & ACC_STATIC == 0
-                    && field.access & ACC_PUBLIC != 0
-            })
-        });
-        if !declares_instance_field {
+        let class = self.cp.find_name(cn);
+        let declares_field = |class: &_| synthetic_properties::declares_field(class, name);
+        if !class.as_deref().is_some_and(declares_field) {
             // The getters come from this classifier's own method inventory: each one declares
             // `name` by its spelling, and its arity and return type are checked below.
             for getter_name in accessors.getters(name) {
@@ -3382,6 +3383,10 @@ impl JvmLibraries {
                 }
             }
         }
+        if let Some(class) = class.as_deref() {
+            use classpath_annotation_classes::java_annotation_element_properties as elements;
+            overloads.extend(elements(class, cn, recv, name, &mut functions));
+        }
         if let Some(mapping) = mapped_property {
             // A mapped builtin property and its JVM getter are one property declaration, not a
             // second source function. Keep the exact realization above, but do not publish the
@@ -3459,7 +3464,8 @@ impl JvmLibraries {
                         .collect::<Vec<_>>();
                     let member_names =
                         self.member_scope_names(internal_name, &classifier, &mapped_members);
-                    let accessors = if classifier.is_kotlin {
+                    // A Java `@interface` element is a property already, never an accessor.
+                    let accessors = if classifier.is_kotlin || classifier.is_annotation() {
                         AccessorInventory::default()
                     } else {
                         AccessorInventory::from_methods(
@@ -3527,8 +3533,8 @@ impl JvmLibraries {
     /// source dependencies publish the semantic source arity. Providers must agree before the
     /// resolver selects the declaration; core must not accept two physical spellings afterward.
     fn semantic_type_alias_target(&self, identity: TypeName) -> Option<TypeName> {
-        let (target, _, expansion, _) = self.cp.type_alias_expansion(identity)?;
-        Self::normalized_type_alias_target(target, expansion)
+        let alias = self.cp.type_alias_expansion(identity)?;
+        Self::normalized_type_alias_target(alias.target, alias.expansion)
     }
 
     fn normalized_type_alias_target(target: TypeName, expansion: Ty) -> Option<TypeName> {
@@ -4837,21 +4843,20 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
     }
 
     fn type_alias_expansion(&self, internal: TypeName) -> Option<crate::libraries::AliasExpansion> {
-        self.cp.type_alias_expansion(internal).and_then(
-            |(target, formals, expansion, expansion_spelling)| {
-                let target = Self::normalized_type_alias_target(target, expansion)?;
-                Some(crate::libraries::AliasExpansion {
-                    identity: internal,
-                    target: self.canonical_source_type_name(target),
-                    formals,
-                    expansion_spelling,
-                    // Metadata may name a mapped JVM collection as the expanded classifier. Normalize
-                    // the complete template at the provider boundary so core resolution only sees
-                    // source identities, including inside projections, function types, and nullability.
-                    expansion: canonicalize_jvm_collections(expansion),
-                })
-            },
-        )
+        self.cp.type_alias_expansion(internal).and_then(|alias| {
+            let target = Self::normalized_type_alias_target(alias.target, alias.expansion)?;
+            Some(crate::libraries::AliasExpansion {
+                identity: internal,
+                declaration_name: alias.declaration_name,
+                target: self.canonical_source_type_name(target),
+                formals: alias.formals,
+                expansion_spelling: alias.expansion_spelling,
+                // Metadata may name a mapped JVM collection as the expanded classifier. Normalize
+                // the complete template at the provider boundary so core resolution only sees
+                // source identities, including inside projections, function types, and nullability.
+                expansion: canonicalize_jvm_collections(alias.expansion),
+            })
+        })
     }
 
     fn canonical_source_type_name(&self, internal: TypeName) -> TypeName {
@@ -4859,7 +4864,9 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
         // may find the JVM realization (`java/lang/String`, `java/util/List`), but its source identity
         // is the one `.kotlin_builtins` record that declares the Kotlin API. Keeping the physical name
         // here loses members such as inherited `CharSequence.length` and creates a second class model.
-        super::jvm_class_map::jvm_to_kotlin_builtin_metadata_name(internal).unwrap_or(internal)
+        // Only a group Java source maps to Kotlin has that identity: `java.lang.Void` is the realization
+        // `Nothing` erases to, yet a Java or Kotlin reference to it names the ordinary Java class.
+        super::jvm_class_map::to_kotlin_type_name(internal)
     }
 
     fn is_default_library_owner(&self, internal: TypeName) -> bool {
@@ -6158,6 +6165,10 @@ mod tests {
         assert_eq!(
             libs.canonical_source_type_name(type_name("java/lang/String")),
             type_name("kotlin/String")
+        );
+        assert_eq!(
+            libs.canonical_source_type_name(type_name("java/lang/Void")),
+            type_name("java/lang/Void")
         );
     }
 

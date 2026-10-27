@@ -13,6 +13,7 @@ mod control_forms;
 mod demo_package;
 mod inline_templates;
 mod primitive_calls;
+mod range_membership_producers;
 mod returnable_blocks;
 mod target_calls;
 mod varargs;
@@ -539,6 +540,28 @@ fn render_node(ir: &IrFile, expression: ExprId) -> String {
             completion,
         } => format!("{completion:?}({})", render(ir, *producer)),
         IrExpr::UnitInstance => "Unit".to_owned(),
+        IrExpr::Checked(checked) => match checked.as_ref() {
+            crate::ir::IrCheckedOperation::RangeContains {
+                operation,
+                value,
+                start,
+                end,
+                negated,
+                counter,
+                unsigned_compare,
+            } => format!(
+                "{}{operation:?}<{}{}>({} in {}, {})",
+                if *negated { "!" } else { "" },
+                type_name_of(*counter),
+                unsigned_compare
+                    .as_ref()
+                    .map_or(String::new(), |compare| format!(", {compare:?}")),
+                render(ir, *value),
+                render(ir, *start),
+                render(ir, *end)
+            ),
+            other => panic!("a lowered body holds no {other:?}"),
+        },
         other => panic!("a lowered body holds no {other:?}"),
     };
     match ir.logical_types.get(&expression) {

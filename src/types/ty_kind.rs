@@ -40,6 +40,12 @@ pub enum TyKind {
     /// A Java platform type `T!`: flexible between `T` and `T?`. Unlike [`Nullable`](TyKind::Nullable),
     /// direct member access is permitted; assignability accepts it at either nullability bound.
     PlatformNullable(Ty),
+    /// A non-null Java collection type `(Mutable)List<T>`: flexible between the carried mutable
+    /// face (`MutableList<T>`) and its read-only face (`List<T>`). A Java `@NotNull` qualifier
+    /// fixes the nullability of `List<T>` but not its mutability. A nullable or platform occurrence
+    /// is [`PlatformNullable`](TyKind::PlatformNullable) of the mutable face, which already carries
+    /// that flexibility.
+    MutabilityFlexible(Ty),
     /// Use-site type projections. These occur only as generic arguments (`Box<in T>`, `Box<out T>`,
     /// and `Box<*>`) and remain semantic until assignability/inference consumes their variance. A
     /// star retains its readable upper bound, but stays distinct from an explicitly written `out`

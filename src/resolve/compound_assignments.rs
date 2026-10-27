@@ -89,6 +89,7 @@ impl Checker<'_> {
         ) {
             return false;
         }
+        self.narrow_operator_receiver(receiver, &call);
         self.stmt_lowers.insert(
             statement,
             StmtLowering::PlusAssign(CompoundAssignmentTarget {

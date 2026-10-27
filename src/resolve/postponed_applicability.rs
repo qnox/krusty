@@ -47,6 +47,9 @@ fn constructor_shape(declared: Ty, formals: &[String]) -> Ty {
     match declared.kind() {
         TyKind::Nullable(inner) => Ty::nullable(constructor_shape(inner, formals)),
         TyKind::PlatformNullable(inner) => Ty::platform_nullable(constructor_shape(inner, formals)),
+        TyKind::MutabilityFlexible(inner) => {
+            Ty::mutability_flexible(constructor_shape(inner, formals))
+        }
         TyKind::Obj(name, arguments) => {
             let arguments = arguments
                 .iter()

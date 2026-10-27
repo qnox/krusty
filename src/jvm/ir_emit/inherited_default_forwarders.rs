@@ -384,6 +384,7 @@ fn mentions_other_type_parameter(ty: Ty, known: &[String]) -> bool {
         TyKind::DefinitelyNotNull(inner)
         | TyKind::Nullable(inner)
         | TyKind::PlatformNullable(inner)
+        | TyKind::MutabilityFlexible(inner)
         | TyKind::InProjection(inner)
         | TyKind::OutProjection(inner)
         | TyKind::StarProjection(inner) => mentions_other_type_parameter(inner, known),

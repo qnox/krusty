@@ -321,6 +321,7 @@ pub use super_calls::ResolvedSuperCall;
 mod superclass_validation;
 mod type_join;
 mod type_parameter_owners;
+use type_parameter_owners::ty_param_names_into;
 mod uninferred_call_results;
 mod upper_bound_violations;
 mod value_class_parameters;
@@ -557,34 +558,6 @@ fn resolved_compact_jvm_name(
                 .map(|value| value.to_string())
         })
         .unwrap_or_else(|| fallback.to_string())
-}
-
-fn classifier_bound_is_interface(
-    source_headers: &HashMap<TypeName, SourceClassHeader>,
-    source: &dyn SymbolSource,
-    bound: Ty,
-) -> bool {
-    bound
-        .non_null()
-        .kotlin_class_internal()
-        .is_some_and(|classifier| {
-            source_headers
-                .get(&classifier)
-                .is_some_and(|header| header.flags.has(ClassFlags::INTERFACE))
-                || source
-                    .classifier(classifier)
-                    .is_some_and(|shape| shape.is_interface())
-        })
-}
-
-fn order_primary_class_bounds(
-    signature: &mut GenericSig,
-    source_headers: &HashMap<TypeName, SourceClassHeader>,
-    source: &dyn SymbolSource,
-) {
-    type_parameter_bounds::order_primary_class_bounds(signature, |bound| {
-        classifier_bound_is_interface(source_headers, source, bound)
-    });
 }
 
 impl Checker<'_> {
@@ -2676,7 +2649,7 @@ pub struct SymbolTable {
     /// CLASSIFIER, which is all name resolution needs; `@Metadata` must describe the expansion so a
     /// consumer can place a use site's arguments. Every valid source alias has one; an unresolved
     /// declaration is a frontend error and compilation stops before emission.
-    pub source_alias_expansions: HashMap<TypeName, (Vec<String>, Ty)>,
+    pub source_alias_expansions: HashMap<TypeName, crate::libraries::TypeAliasTemplate>,
     /// Source SPELLINGS of declared types, keyed by stable Pass-1 identity — see
     /// [`crate::spelling`]. `@Metadata` records a `typealias` named in a declared type as
     /// `Type.abbreviated_type`, and `Ty` is fully expanded by the time the builders see it, so the
@@ -13043,6 +13016,7 @@ impl<'a> Checker<'a> {
                 }
                 TyKind::Nullable(inner)
                 | TyKind::PlatformNullable(inner)
+                | TyKind::MutabilityFlexible(inner)
                 | TyKind::InProjection(inner)
                 | TyKind::OutProjection(inner)
                 | TyKind::StarProjection(inner) => {
@@ -22859,11 +22833,11 @@ mod tests {
         assert_eq!(extension.receiver, Ty::String);
         assert_eq!(extension.ty, Ty::Char);
         assert_eq!(
-            symbols.source_alias_expansions[&type_name("Count")].1,
+            symbols.source_alias_expansions[&type_name("Count")].expansion,
             Ty::Long
         );
         assert_eq!(
-            symbols.source_alias_expansions[&type_name("Box/Alias")].1,
+            symbols.source_alias_expansions[&type_name("Box/Alias")].expansion,
             Ty::String
         );
         let class = symbols
@@ -30561,10 +30535,10 @@ pub(crate) fn semantic_common_supertype_inner(
         return semantic_common_supertype_inner(source, oracle, a, bound, visiting);
     }
     if a == Ty::Null && b.is_reference() {
-        return Some(Ty::nullable(b.non_null()));
+        return Some(Ty::nullable(b));
     }
     if b == Ty::Null && a.is_reference() {
-        return Some(Ty::nullable(a.non_null()));
+        return Some(Ty::nullable(a));
     }
     if (a == Ty::Unit && b == Ty::Null) || (b == Ty::Unit && a == Ty::Null) {
         return Some(Ty::nullable(Ty::Unit));
@@ -34420,33 +34394,6 @@ struct MemberMappingFailure {
     candidate: crate::libraries::FunctionInfo,
 }
 
-fn ty_param_names_into(ty: Ty, out: &mut Vec<&'static str>) {
-    match ty.kind() {
-        TyKind::TyParam(name, _) => out.push(name.as_str()),
-        TyKind::Nullable(inner)
-        | TyKind::PlatformNullable(inner)
-        | TyKind::InProjection(inner)
-        | TyKind::OutProjection(inner) => ty_param_names_into(inner, out),
-        // A source star has a computed upper bound for frontend reads, but that
-        // bound is not an explicit use of its type parameters in the source
-        // declaration. In particular, `C<*>` must not publish `C`'s own
-        // recursive parameter as a parameter of the enclosing declaration.
-        TyKind::StarProjection(_) => {}
-        TyKind::Obj(_, args) => {
-            for &argument in args {
-                ty_param_names_into(argument, out);
-            }
-        }
-        TyKind::Fun(signature) => {
-            for &parameter in &signature.params {
-                ty_param_names_into(parameter, out);
-            }
-            ty_param_names_into(signature.ret, out);
-        }
-        _ => {}
-    }
-}
-
 /// The order a construction's arguments are typed in: every CONTEXTUAL (lambda) argument after the
 /// arguments that can bind the type parameters ITS OWN parameters mention.
 ///
@@ -34573,6 +34520,7 @@ fn merge_source_constructor_shape_bindings(
         }
         TyKind::Nullable(inner)
         | TyKind::PlatformNullable(inner)
+        | TyKind::MutabilityFlexible(inner)
         | TyKind::OutProjection(inner) => {
             merge_source_constructor_shape_bindings(
                 inner,
@@ -34719,7 +34667,7 @@ impl crate::assignable::TypeOracle for Checker<'_> {
 /// accidentally become `String?`.
 fn common_result_nullability(a: Ty, b: Ty, base: Ty) -> Ty {
     if matches!(a.kind(), TyKind::Nullable(_)) || matches!(b.kind(), TyKind::Nullable(_)) {
-        Ty::nullable(base.non_null())
+        Ty::nullable(base)
     } else if a.is_platform_nullable() || b.is_platform_nullable() {
         Ty::platform_nullable(base.non_null())
     } else {
@@ -50840,7 +50788,9 @@ impl<'a> Checker<'a> {
                 TyKind::TyParam(name, _) => {
                     bindings.entry(name.to_string()).or_insert(expected);
                 }
-                TyKind::Nullable(inner) | TyKind::PlatformNullable(inner) => {
+                TyKind::Nullable(inner)
+                | TyKind::PlatformNullable(inner)
+                | TyKind::MutabilityFlexible(inner) => {
                     collect_exact_expected_bindings(inner, expected.non_null(), bindings);
                 }
                 TyKind::Obj(owner, arguments) => {
@@ -56400,6 +56350,7 @@ impl<'a> Checker<'a> {
                     TyKind::Nothing | TyKind::Null => true,
                     TyKind::Nullable(inner)
                     | TyKind::PlatformNullable(inner)
+                    | TyKind::MutabilityFlexible(inner)
                     | TyKind::InProjection(inner)
                     | TyKind::OutProjection(inner)
                     | TyKind::StarProjection(inner) => contains_bottom_evidence(inner),

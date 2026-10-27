@@ -23,6 +23,7 @@ mod compiler_blocks;
 mod conditionals;
 mod constructions;
 mod loops;
+mod range_membership;
 mod string_templates;
 mod try_catch;
 mod type_operators;
@@ -65,6 +66,13 @@ pub(super) struct LinkedCallee {
     pub(super) class_type_parameters: Vec<String>,
 }
 
+/// The declared shape of a member a range literal's membership calls.
+pub(super) struct RangeMembershipHeader {
+    pub(super) receiver: Option<Ty>,
+    pub(super) params: Vec<Ty>,
+    pub(super) ret: Ty,
+}
+
 /// Joins the calls a body makes of public dependency declarations to the functions they invoke.
 pub(super) trait CallLinker {
     /// The same authenticated primitive call shape that dependency planning treats as a leaf.
@@ -80,6 +88,18 @@ pub(super) trait CallLinker {
     /// Such calls must remain callable edges; only a compiler builtin without either obligation
     /// may be folded into a common-IR operation.
     fn requires_declaration(&self, callee: &KlibPublicIdSignature) -> Lowered<bool>;
+
+    /// The serialized header of the member `callee` an `in` over a range literal calls, read
+    /// only to prove it is the range's own membership operator: its dispatch receiver, value
+    /// parameters and result. `None` keeps the membership an ordinary checked call, as template
+    /// linkers do; a linker whose dependency preparation omits the membership's declaration
+    /// edge declines a header it cannot read instead.
+    fn range_membership_header(
+        &self,
+        _callee: &KlibPublicIdSignature,
+    ) -> Lowered<Option<RangeMembershipHeader>> {
+        Ok(None)
+    }
 
     /// The function a call of the public declaration `callee` invokes.
     fn link(&mut self, ir: &mut IrFile, callee: &KlibPublicIdSignature) -> Lowered<LinkedCallee>;
@@ -247,7 +267,15 @@ impl<'a> BodyLowering<'a> {
                 if super_qualifier.is_some() {
                     return unsupported("a `super` call");
                 }
-                (self.call(access, ty)?, ty)
+                let lowered =
+                    match super::range_membership::range_literal_membership(arena, expression) {
+                        Some(membership) => self.range_literal_membership(membership, ty, false)?,
+                        None => None,
+                    };
+                match lowered {
+                    Some(lowered) => (lowered, ty),
+                    None => (self.call(access, ty)?, ty),
+                }
             }
             KlibIrExprKind::Return { target, value } => {
                 let ty = self.ty(expression, "`return`")?;

@@ -9,24 +9,40 @@ use krusty_plugin_ir::{
 
 use super::annotations::Placement;
 use super::platform_names::{FunctionNaming, NamingSite};
-use super::type_model::{class_type, TypeParameterScope};
+use super::type_model::{as_written, class_type, TypeParameterScope};
 use super::{Owner, Source, Subject};
 use crate::ast::{
-    AstEnumEntry, ClassDecl, Decl, DeclId, FunBody, FunDecl, Param, PropDecl, PropParam,
-    SecondaryCtor,
+    AstEnumEntry, ClassDecl, Decl, DeclId, File, FunBody, FunDecl, Param, PropDecl, PropParam,
+    SecondaryCtor, TypeRef,
 };
-use crate::frontend::{FrontendClassSig, FrontendDeclarationId};
+use crate::frontend::{
+    FrontendClassSig, FrontendDeclarationId, FrontendDeclaredSpellings as DeclaredSpellings,
+    FrontendSpelled as Spelled, OverriddenMember,
+};
 use crate::types::{wk, ResolvedAnnotation, Ty, Visibility};
+
+/// A classifier's declarations in KSP's order.
+pub(super) struct ClassDeclarations {
+    pub(super) declarations: Vec<KspDeclaration>,
+    /// The resolved declaration of each of [`Self::declarations`] that is a member function or
+    /// property the source writes, `None` for the others.
+    pub(super) resolved: Vec<Option<FrontendDeclarationId>>,
+    /// Whether [`Self::declarations`] are every declaration KSP lists.
+    pub(super) complete: bool,
+}
 
 /// What a classifier's declarations are built from.
 pub(super) struct ClassHeader<'a> {
     pub(super) id: DeclId,
+    pub(super) file: &'a File,
     pub(super) class: &'a ClassDecl,
     pub(super) signature: &'a FrontendClassSig,
     pub(super) kind: KspClassKind,
     pub(super) qualified_name: &'a str,
     pub(super) type_parameters: &'a Option<Vec<KspTypeParameter>>,
     pub(super) scope: &'a TypeParameterScope,
+    /// The resolved spellings of the primary constructor's parameter types.
+    pub(super) primary_spellings: Option<&'a DeclaredSpellings>,
 }
 
 impl ClassHeader<'_> {
@@ -42,17 +58,24 @@ impl ClassHeader<'_> {
     }
 
     /// The classifier applied to a star for each of its type parameters, which is what KSP
-    /// reports a constructor returns.
+    /// reports a constructor returns, with no annotations.
     fn star_projected(&self) -> KspType {
         let mut ty = class_type(self.qualified_name);
         ty.arguments = vec![KspTypeArgument::Star; self.class.type_parameters.type_params().len()];
+        ty.unannotated = true;
         ty
     }
 
     /// The type of the property primary-constructor parameter `index` declares: the resolved
     /// slot, which for a `vararg` parameter is its array, `Array<out T>` for a reference element.
     fn constructor_property_type(&self, index: usize) -> Option<KspType> {
-        self.scope.ty(self.constructor_property(index)?)
+        let ty = self.scope.ty(self.constructor_property(index)?)?;
+        // A `vararg` property's array is not what its parameter spells.
+        let property = self.class.props.get(index)?;
+        match property.is_vararg {
+            true => Some(ty),
+            false => as_written(self.file, &property.ty, self.primary_spelled(index), ty),
+        }
     }
 
     /// [`Self::constructor_property_type`] as the resolved type.
@@ -72,7 +95,19 @@ impl ClassHeader<'_> {
 
     /// The resolved type of the primary constructor's parameter at `index`.
     fn constructor_parameter_type(&self, index: usize) -> Option<KspType> {
-        self.scope.ty(self.constructor_parameter(index)?)
+        let ty = self.scope.ty(self.constructor_parameter(index)?)?;
+        as_written(
+            self.file,
+            &self.class.props.get(index)?.ty,
+            self.primary_spelled(index),
+            ty,
+        )
+    }
+
+    /// The resolved spelling of the primary constructor's parameter at `index`.
+    fn primary_spelled(&self, index: usize) -> Option<&Spelled> {
+        self.primary_spellings
+            .map(|spellings| spellings.param(index))
     }
 
     /// [`Self::constructor_parameter_type`] as the resolved type.
@@ -88,23 +123,30 @@ impl ClassHeader<'_> {
 }
 
 impl Source<'_> {
-    /// The classifier's declarations in KSP's order, and whether they are all it lists.
+    /// The classifier's declarations in KSP's order, the resolved declaration of each member
+    /// function and property among them, and whether they are all it lists.
     pub(super) fn class_declarations(
         &self,
         header: &ClassHeader<'_>,
-    ) -> Result<(Vec<KspDeclaration>, bool), String> {
+    ) -> Result<ClassDeclarations, String> {
         let class = header.class;
+        let class_declaration = header.signature.stable_declaration;
         // A nested type alias and a member of a companion block are not described yet.
         let complete = class.type_aliases.is_empty() && class.companion_block_members.is_empty();
         let mut declarations = Vec::new();
+        let mut resolved = Vec::new();
         for (index, parameter) in class.props.iter().enumerate() {
             if parameter.is_property {
                 declarations.push(KspDeclaration::Property(Box::new(
                     self.constructor_property(index, parameter, header)?,
                 )));
+                resolved.push(class_declaration.and_then(|class| {
+                    self.analysis
+                        .member_property_declaration(class, index as u32, true)
+                }));
             }
         }
-        let mut members: Vec<(u32, KspDeclaration)> = Vec::new();
+        let mut members: Vec<(u32, KspDeclaration, Option<FrontendDeclarationId>)> = Vec::new();
         for (method, function) in class.methods.iter().enumerate() {
             let owner = Owner::Class {
                 header,
@@ -113,9 +155,12 @@ impl Source<'_> {
             members.push((
                 function.span.lo,
                 KspDeclaration::Function(self.function(function, &owner, header.scope)?),
+                class_declaration
+                    .and_then(|class| self.resolved.methods.get(&(class, method as u32)))
+                    .and_then(|signature| signature.stable_declaration),
             ));
         }
-        for property in &class.body_props {
+        for (position, property) in class.body_props.iter().enumerate() {
             let owner = Owner::Class {
                 header,
                 method: None,
@@ -127,10 +172,17 @@ impl Source<'_> {
                     &owner,
                     header.scope,
                 )?)),
+                class_declaration.and_then(|class| {
+                    self.analysis
+                        .member_property_declaration(class, position as u32, false)
+                }),
             ));
         }
-        members.sort_by_key(|(start, _)| *start);
-        declarations.extend(members.into_iter().map(|(_, declaration)| declaration));
+        members.sort_by_key(|(start, _, _)| *start);
+        for (_, declaration, member) in members {
+            declarations.push(declaration);
+            resolved.push(member);
+        }
         if class.is_data && header.kind == KspClassKind::Class {
             declarations.extend(self.data_members(header));
         }
@@ -154,7 +206,12 @@ impl Source<'_> {
         if header.kind == KspClassKind::EnumClass {
             declarations.extend(self.enum_members(header));
         }
-        Ok((declarations, complete))
+        resolved.resize(declarations.len(), None);
+        Ok(ClassDeclarations {
+            declarations,
+            resolved,
+            complete,
+        })
     }
 
     /// Adds the classifiers nested in `header`'s class that are `inner` or not, in source order.
@@ -230,8 +287,20 @@ impl Source<'_> {
             })
             .flatten()
             .or_else(|| function.type_params.is_empty().then(Vec::new));
+        let spellings = signature
+            .and_then(|signature| signature.stable_declaration)
+            .and_then(|declaration| self.analysis.declared_type_spellings(declaration));
         let return_type = signature
-            .and_then(|signature| scope.ty(generic.map_or(signature.ret, |generic| generic.ret)));
+            .and_then(|signature| scope.ty(generic.map_or(signature.ret, |generic| generic.ret)))
+            .and_then(|ty| match &function.ret {
+                Some(spelling) => as_written(
+                    self.file,
+                    spelling,
+                    spellings.map(|spellings| &spellings.ret),
+                    ty,
+                ),
+                None => Some(ty),
+            });
         // The resolved parameter types, parallel to the written parameters.
         let parameter_types = signature
             .map(|signature| generic.map_or(&signature.params, |generic| &generic.params))
@@ -275,7 +344,13 @@ impl Source<'_> {
             .skip(function.context_count)
         {
             let resolved = parameter_types.map(|types| types[index]);
-            let mut described = parameter_description(parameter, resolved, &scope);
+            let mut described = parameter_description(
+                self.file,
+                parameter,
+                resolved,
+                spellings.map(|spellings| spellings.param(index)),
+                &scope,
+            );
             // A member function's parameter also has the default a function it overrides
             // declares.
             if is_member && described.has_default == Some(false) {
@@ -321,7 +396,13 @@ impl Source<'_> {
             )?,
             modifiers: self.written_modifiers(function.declaration_span.lo),
             type_parameters,
-            extension_receiver: receiver_slot(receiver, &scope),
+            extension_receiver: receiver_slot(
+                self.file,
+                function.receiver.as_ref(),
+                receiver,
+                spellings.map(|spellings| &spellings.receiver),
+                &scope,
+            ),
             parameters,
             return_type,
             jvm_signature,
@@ -450,9 +531,12 @@ impl Source<'_> {
         }
         let (owner, _) = self.analysis.member_function_slot(declaration)?;
         let mut inherited = Some(false);
-        for overridden in self.analysis.overridden_functions(owner, declaration) {
-            match overridden.and_then(|overridden| self.member_parameter_default(overridden, index))
-            {
+        for overridden in self.analysis.overridden_members(owner, declaration) {
+            let declared = match overridden {
+                OverriddenMember::Declared(declared) => Some(declared),
+                OverriddenMember::Library { .. } => None,
+            };
+            match declared.and_then(|declared| self.member_parameter_default(declared, index)) {
                 Some(true) => return Some(true),
                 Some(false) => {}
                 None => inherited = None,
@@ -498,7 +582,6 @@ impl Source<'_> {
                     .map(|resolved| resolved.ty),
             ),
         };
-        let ty = resolved.and_then(|ty| scope.ty(ty));
         let declaration = match owner {
             Owner::TopLevel { id, .. } => self
                 .file
@@ -520,9 +603,29 @@ impl Source<'_> {
                         .member_property_declaration(class, position as u32, false)
                 }),
         };
+        let spellings =
+            declaration.and_then(|declaration| self.analysis.declared_type_spellings(declaration));
+        let ty = resolved
+            .and_then(|ty| scope.ty(ty))
+            .and_then(|ty| match &property.ty {
+                Some(spelling) => as_written(
+                    self.file,
+                    spelling,
+                    spellings.map(|spellings| &spellings.ret),
+                    ty,
+                ),
+                None => Some(ty),
+            });
         let modifiers = self.written_modifiers(property.declaration_span.lo);
-        let (getter, setter) =
-            self.written_accessors(subject, property, declaration, modifiers.as_deref())?;
+        let in_interface =
+            matches!(owner, Owner::Class { header, .. } if header.kind == KspClassKind::Interface);
+        let (getter, setter) = self.written_accessors(
+            subject,
+            property,
+            declaration,
+            modifiers.as_deref(),
+            in_interface,
+        )?;
         let mut described = KspProperty {
             name: property.name.clone(),
             is_mutable: property.is_var,
@@ -537,13 +640,19 @@ impl Source<'_> {
             modifiers,
             // A generic property's type parameters are not described yet.
             type_parameters: property.type_params.is_empty().then(Vec::new),
-            extension_receiver: receiver_slot(receiver, scope),
+            extension_receiver: receiver_slot(
+                self.file,
+                property.receiver.as_ref(),
+                receiver,
+                spellings.map(|spellings| &spellings.receiver),
+                scope,
+            ),
             ty,
             getter: Some(getter),
             setter,
             has_backing_field: super::backing_field::source_property_has_backing_field(
                 property,
-                matches!(owner, Owner::Class { header, .. } if header.kind == KspClassKind::Interface),
+                in_interface,
             ),
             jvm_signature: None,
         };
@@ -738,10 +847,18 @@ impl Source<'_> {
             self.analysis
                 .constructor_declaration(class, index as u32 + 1)
         });
+        let spellings =
+            declaration.and_then(|declaration| self.analysis.declared_type_spellings(declaration));
         let mut parameters = Vec::with_capacity(constructor_decl.params.len());
         for (position, parameter) in constructor_decl.params.iter().enumerate() {
             let resolved = resolved.map(|types| types[position]);
-            let mut described = parameter_description(parameter, resolved, header.scope);
+            let mut described = parameter_description(
+                self.file,
+                parameter,
+                resolved,
+                spellings.map(|spellings| spellings.param(position)),
+                header.scope,
+            );
             described.annotations = self.published_annotations(
                 subject,
                 &parameter.annotations,
@@ -811,6 +928,9 @@ impl Source<'_> {
             jvm_signature: self
                 .platform
                 .and_then(|platform| platform.type_signature(header.class_ty())),
+            // KSP2 lists an entry's members as an anonymous class's, which is not described yet.
+            all_properties: None,
+            all_functions: None,
         })
     }
 
@@ -876,6 +996,7 @@ impl Source<'_> {
                     },
                     nullable: false,
                     arguments: Vec::new(),
+                    unannotated: false,
                 })
             })
             .collect();
@@ -905,6 +1026,81 @@ impl Source<'_> {
         );
         self.add_synthetic_jvm_names(&mut copy, &copy_types, Some(header.class_ty()));
         members.push(KspDeclaration::Function(copy));
+        members
+    }
+
+    /// The `equals`, `hashCode` and `toString` the compiler generates for a data class, each one
+    /// the resolved class has: a superclass's final one is inherited instead. KSP2 lists them
+    /// among the inherited members rather than the declarations.
+    pub(super) fn data_object_members(&self, header: &ClassHeader<'_>) -> Vec<KspFunction> {
+        if !header.class.is_data || header.kind != KspClassKind::Class {
+            return Vec::new();
+        }
+        let generated = |name: &str| {
+            header
+                .signature
+                .methods
+                .get(name)
+                .into_iter()
+                .flatten()
+                .any(|method| {
+                    method
+                        .stable_declaration
+                        .is_some_and(|declaration| self.analysis.is_compiler_generated(declaration))
+                })
+        };
+        let open = |operator: bool| {
+            let mut modifiers = vec![KspModifier::Open];
+            if operator {
+                modifiers.extend([KspModifier::Operator, KspModifier::Override]);
+            }
+            modifiers.push(KspModifier::Public);
+            modifiers
+        };
+        let mut members = Vec::new();
+        if generated("equals") {
+            let mut any = class_type("kotlin.Any");
+            any.nullable = true;
+            let mut equals = synthetic_function(
+                "equals".to_string(),
+                KspFunctionKind::Member,
+                open(true),
+                vec![KspParameter {
+                    name: "other".to_string(),
+                    ty: Some(any),
+                    is_val: false,
+                    is_var: false,
+                    is_vararg: false,
+                    is_noinline: false,
+                    is_crossinline: false,
+                    has_default: Some(false),
+                    annotations: Vec::new(),
+                }],
+                Some(class_type("kotlin.Boolean")),
+            );
+            self.add_synthetic_jvm_names(
+                &mut equals,
+                &[Some(Ty::nullable(Ty::obj_name(wk::any())))],
+                Some(Ty::Boolean),
+            );
+            members.push(equals);
+        }
+        for (name, result, ty) in [
+            ("hashCode", "kotlin.Int", Ty::Int),
+            ("toString", "kotlin.String", Ty::String),
+        ] {
+            if generated(name) {
+                let mut function = synthetic_function(
+                    name.to_string(),
+                    KspFunctionKind::Member,
+                    open(false),
+                    Vec::new(),
+                    Some(class_type(result)),
+                );
+                self.add_synthetic_jvm_names(&mut function, &[], Some(ty));
+                members.push(function);
+            }
+        }
         members
     }
 
@@ -985,15 +1181,18 @@ impl Source<'_> {
 
 /// A written parameter described with its `resolved` type.
 fn parameter_description(
+    file: &File,
     parameter: &Param,
     resolved: Option<Ty>,
+    spelled: Option<&Spelled>,
     scope: &TypeParameterScope,
 ) -> KspParameter {
     KspParameter {
         name: parameter.name.clone(),
         ty: resolved
             .and_then(|ty| declared_parameter_type(ty, parameter.is_vararg))
-            .and_then(|ty| scope.ty(ty)),
+            .and_then(|ty| scope.ty(ty))
+            .and_then(|ty| as_written(file, &parameter.ty, spelled, ty)),
         is_val: false,
         is_var: false,
         is_vararg: parameter.is_vararg,
@@ -1013,12 +1212,23 @@ fn declared_parameter_type(resolved: Ty, is_vararg: bool) -> Option<Ty> {
     }
 }
 
-/// The extension receiver slot of a declaration that writes `receiver`, resolved or not.
-fn receiver_slot(receiver: Option<Option<Ty>>, scope: &TypeParameterScope) -> KspTypeSlot {
+/// The extension receiver slot of a declaration that writes `receiver`, resolved or not, as
+/// `spelling` writes it.
+fn receiver_slot(
+    file: &File,
+    spelling: Option<&TypeRef>,
+    receiver: Option<Option<Ty>>,
+    spelled: Option<&Spelled>,
+    scope: &TypeParameterScope,
+) -> KspTypeSlot {
     match receiver {
         None => KspTypeSlot::Absent,
         Some(resolved) => resolved
             .and_then(|ty| scope.ty(ty))
+            .and_then(|ty| match spelling {
+                Some(spelling) => as_written(file, spelling, spelled, ty),
+                None => Some(ty),
+            })
             .map_or(KspTypeSlot::Undescribed, KspTypeSlot::Present),
     }
 }

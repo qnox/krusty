@@ -50,7 +50,40 @@ pub(crate) struct IrLocalClassNameProvenance {
     pub parents: Box<[EnclosingDeclaration]>,
 }
 
-fn remapped_name(mut value: TypeName, names: &HashMap<TypeName, TypeName>) -> TypeName {
+/// The identities a backend-boundary rewrite replaces throughout common IR: semantic classifier
+/// identities become target physical ones, and a type-parameter occurrence takes the carrier bound
+/// its target selected from the declaration. Both maps are exact and declaration-produced.
+pub(super) struct IdentityRemap<'a> {
+    classifiers: &'a HashMap<TypeName, TypeName>,
+    /// Semantic type-parameter identity -> the bound its occurrences carry.
+    carriers: &'a HashMap<String, Ty>,
+}
+
+impl<'a> IdentityRemap<'a> {
+    pub(super) fn classifiers(classifiers: &'a HashMap<TypeName, TypeName>) -> Self {
+        static NO_CARRIERS: std::sync::OnceLock<HashMap<String, Ty>> = std::sync::OnceLock::new();
+        Self {
+            classifiers,
+            carriers: NO_CARRIERS.get_or_init(HashMap::default),
+        }
+    }
+
+    fn carriers(carriers: &'a HashMap<String, Ty>) -> Self {
+        static NO_CLASSIFIERS: std::sync::OnceLock<HashMap<TypeName, TypeName>> =
+            std::sync::OnceLock::new();
+        Self {
+            classifiers: NO_CLASSIFIERS.get_or_init(HashMap::default),
+            carriers,
+        }
+    }
+
+    fn is_identity(&self) -> bool {
+        self.classifiers.is_empty() && self.carriers.is_empty()
+    }
+}
+
+fn remapped_name(mut value: TypeName, names: &IdentityRemap<'_>) -> TypeName {
+    let names = names.classifiers;
     for _ in 0..names.len() {
         let Some(next) = names.get(&value).copied() else {
             return value;
@@ -67,15 +100,12 @@ fn remapped_name(mut value: TypeName, names: &HashMap<TypeName, TypeName>) -> Ty
     value
 }
 
-fn name(name: &mut TypeName, names: &HashMap<TypeName, TypeName>) {
+fn name(name: &mut TypeName, names: &IdentityRemap<'_>) {
     *name = remapped_name(*name, names);
 }
 
 /// A captured enclosing instance names its class by identity, which follows the class's rename.
-fn captured_receiver(
-    receiver: &mut super::IrCapturedReceiver,
-    names: &HashMap<TypeName, TypeName>,
-) {
+fn captured_receiver(receiver: &mut super::IrCapturedReceiver, names: &IdentityRemap<'_>) {
     match receiver {
         super::IrCapturedReceiver::Enclosing { classifier } => name(classifier, names),
         super::IrCapturedReceiver::Context { types, .. } => tys(types, names),
@@ -83,7 +113,7 @@ fn captured_receiver(
     }
 }
 
-fn ty(value: Ty, names: &HashMap<TypeName, TypeName>) -> Ty {
+fn ty(value: Ty, names: &IdentityRemap<'_>) -> Ty {
     match value.kind() {
         TyKind::Obj(classifier, arguments) => Ty::obj_args_name(
             remapped_name(classifier, names),
@@ -105,11 +135,19 @@ fn ty(value: Ty, names: &HashMap<TypeName, TypeName>) -> Ty {
         ),
         TyKind::Nullable(inner) => Ty::nullable(ty(inner, names)),
         TyKind::PlatformNullable(inner) => Ty::platform_nullable(ty(inner, names)),
+        TyKind::MutabilityFlexible(inner) => Ty::mutability_flexible(ty(inner, names)),
         TyKind::InProjection(inner) => Ty::in_projection(ty(inner, names)),
         TyKind::OutProjection(inner) => Ty::out_projection(ty(inner, names)),
         TyKind::StarProjection(inner) => Ty::star_projection(ty(inner, names)),
         TyKind::RawProjection(inner) => Ty::raw_projection(ty(inner, names)),
-        TyKind::TyParam(parameter, bound) => Ty::ty_param(parameter.as_str(), ty(bound, names)),
+        TyKind::TyParam(parameter, bound) => match names.carriers.get(parameter.as_str()) {
+            // The occurrence keeps its own nullability on the selected carrier.
+            Some(&carrier) if bound.non_null() != bound => {
+                Ty::ty_param(parameter.as_str(), Ty::nullable(carrier))
+            }
+            Some(&carrier) => Ty::ty_param(parameter.as_str(), carrier),
+            None => Ty::ty_param(parameter.as_str(), ty(bound, names)),
+        },
         TyKind::DefinitelyNotNull(inner) => Ty::from(TyKind::DefinitelyNotNull(ty(inner, names))),
         TyKind::Intersection(parts) => Ty::intersection(
             &parts
@@ -121,20 +159,20 @@ fn ty(value: Ty, names: &HashMap<TypeName, TypeName>) -> Ty {
     }
 }
 
-fn tys(values: &mut [Ty], names: &HashMap<TypeName, TypeName>) {
+fn tys(values: &mut [Ty], names: &IdentityRemap<'_>) {
     values
         .iter_mut()
         .for_each(|value| *value = ty(*value, names));
 }
 
-fn resolved_ty(value: &mut crate::fir::ResolvedTy, names: &HashMap<TypeName, TypeName>) {
+fn resolved_ty(value: &mut crate::fir::ResolvedTy, names: &IdentityRemap<'_>) {
     *value = crate::fir::ResolvedTy::new(ty(value.get(), names))
         .expect("renaming a resolved classifier preserves a publishable type");
 }
 
 fn reference_adaptation(
     adaptation: &mut crate::fir::FirReferenceAdaptation,
-    names: &HashMap<TypeName, TypeName>,
+    names: &IdentityRemap<'_>,
 ) {
     adaptation
         .parameter_types
@@ -143,15 +181,12 @@ fn reference_adaptation(
     resolved_ty(&mut adaptation.result_type, names);
 }
 
-fn runtime_function(function: &mut super::IrRuntimeFunction, names: &HashMap<TypeName, TypeName>) {
+fn runtime_function(function: &mut super::IrRuntimeFunction, names: &IdentityRemap<'_>) {
     tys(&mut function.parameters, names);
     function.result = ty(function.result, names);
 }
 
-fn progression_source(
-    source: &mut super::IrProgressionSource,
-    names: &HashMap<TypeName, TypeName>,
-) {
+fn progression_source(source: &mut super::IrProgressionSource, names: &IdentityRemap<'_>) {
     match source {
         super::IrProgressionSource::Step {
             nested,
@@ -172,7 +207,7 @@ fn progression_source(
     }
 }
 
-fn checked_arguments(values: &mut [IrCheckedArgument], names: &HashMap<TypeName, TypeName>) {
+fn checked_arguments(values: &mut [IrCheckedArgument], names: &IdentityRemap<'_>) {
     for argument in values {
         if let IrCheckedArgument::Vararg { array_type, .. } = argument {
             *array_type = ty(*array_type, names);
@@ -182,7 +217,7 @@ fn checked_arguments(values: &mut [IrCheckedArgument], names: &HashMap<TypeName,
 
 fn inline_accessor_splice(
     splice: &mut Option<Box<crate::fir::FirInlineAccessorSplice>>,
-    names: &HashMap<TypeName, TypeName>,
+    names: &IdentityRemap<'_>,
 ) {
     if let Some(splice) = splice {
         for substitution in &mut splice.substitutions {
@@ -191,10 +226,7 @@ fn inline_accessor_splice(
     }
 }
 
-fn property_target(
-    target: &mut crate::fir::FirPropertyTarget,
-    names: &HashMap<TypeName, TypeName>,
-) {
+fn property_target(target: &mut crate::fir::FirPropertyTarget, names: &IdentityRemap<'_>) {
     match target {
         crate::fir::FirPropertyTarget::Module { inline_splice, .. } => {
             inline_accessor_splice(inline_splice, names);
@@ -222,7 +254,7 @@ fn property_target(
 
 fn property_reference_target(
     target: &mut crate::fir::FirPropertyReferenceTarget,
-    names: &HashMap<TypeName, TypeName>,
+    names: &IdentityRemap<'_>,
 ) {
     match target {
         crate::fir::FirPropertyReferenceTarget::Module(_) => {}
@@ -275,7 +307,7 @@ fn property_reference_target(
     }
 }
 
-fn checked_operation(operation: &mut IrCheckedOperation, names: &HashMap<TypeName, TypeName>) {
+fn checked_operation(operation: &mut IrCheckedOperation, names: &IdentityRemap<'_>) {
     let substitutions = match operation {
         IrCheckedOperation::Call {
             arguments,
@@ -395,7 +427,7 @@ fn checked_operation(operation: &mut IrCheckedOperation, names: &HashMap<TypeNam
     }
 }
 
-fn callee(callee: &mut Callee, names: &HashMap<TypeName, TypeName>) {
+fn callee(callee: &mut Callee, names: &IdentityRemap<'_>) {
     match callee {
         Callee::ClassStatic { owner, .. }
         | Callee::ClassStaticWithDefaults { owner, .. }
@@ -499,7 +531,7 @@ fn callee(callee: &mut Callee, names: &HashMap<TypeName, TypeName>) {
     }
 }
 
-fn remap_expression(expression: &mut IrExpr, names: &HashMap<TypeName, TypeName>) {
+fn remap_expression(expression: &mut IrExpr, names: &IdentityRemap<'_>) {
     match expression {
         IrExpr::Checked(operation) => checked_operation(operation, names),
         IrExpr::CallableReference(reference) => {
@@ -695,7 +727,7 @@ fn remap_expression_class_ids(expression: &mut IrExpr, classes: &HashMap<ClassId
     }
 }
 
-fn annotation_value(value: &mut super::AnnoValue, names: &HashMap<TypeName, TypeName>) {
+fn annotation_value(value: &mut super::AnnoValue, names: &IdentityRemap<'_>) {
     match value {
         super::AnnoValue::Enum(classifier, _) => name(classifier, names),
         super::AnnoValue::Class(classifier) => *classifier = ty(*classifier, names),
@@ -707,26 +739,20 @@ fn annotation_value(value: &mut super::AnnoValue, names: &HashMap<TypeName, Type
     }
 }
 
-fn annotation_application(
-    annotation: &mut super::AppliedAnnotation,
-    names: &HashMap<TypeName, TypeName>,
-) {
+fn annotation_application(annotation: &mut super::AppliedAnnotation, names: &IdentityRemap<'_>) {
     name(&mut annotation.internal, names);
     for (_, value) in &mut annotation.values {
         annotation_value(value, names);
     }
 }
 
-fn annotations(
-    annotations: &mut super::DeclarationAnnotations,
-    names: &HashMap<TypeName, TypeName>,
-) {
+fn annotations(annotations: &mut super::DeclarationAnnotations, names: &IdentityRemap<'_>) {
     for retained in annotations.iter_mut() {
         annotation_application(&mut retained.annotation, names);
     }
 }
 
-fn type_parameters(parameters: &mut [super::IrTypeParameter], names: &HashMap<TypeName, TypeName>) {
+fn type_parameters(parameters: &mut [super::IrTypeParameter], names: &IdentityRemap<'_>) {
     for parameter in parameters {
         for (bound, _) in &mut parameter.bounds {
             *bound = ty(*bound, names);
@@ -736,21 +762,21 @@ fn type_parameters(parameters: &mut [super::IrTypeParameter], names: &HashMap<Ty
 
 fn package_type_parameters(
     parameters: &mut [super::IrPackageTypeParameter],
-    names: &HashMap<TypeName, TypeName>,
+    names: &IdentityRemap<'_>,
 ) {
     for parameter in parameters {
         tys(&mut parameter.bounds, names);
     }
 }
 
-fn generic_signature(signature: &mut super::IrGenericSig, names: &HashMap<TypeName, TypeName>) {
+fn generic_signature(signature: &mut super::IrGenericSig, names: &IdentityRemap<'_>) {
     type_parameters(&mut signature.type_params, names);
     tys(&mut signature.params, names);
     signature.ret = signature.ret.map(|value| ty(value, names));
     tys(&mut signature.supers, names);
 }
 
-fn spelled(spelling: &mut crate::spelling::Spelled, names: &HashMap<TypeName, TypeName>) {
+fn spelled(spelling: &mut crate::spelling::Spelled, names: &IdentityRemap<'_>) {
     // An alias is never a local class, and an actualized expect's abbreviation keeps naming the
     // expect class the target realizes, so only the classifiers below an abbreviation move.
     for (value, spelling) in &mut spelling.alias_args {
@@ -765,7 +791,7 @@ fn spelled(spelling: &mut crate::spelling::Spelled, names: &HashMap<TypeName, Ty
 
 fn declared_spellings(
     spellings: &mut crate::spelling::DeclaredSpellings,
-    names: &HashMap<TypeName, TypeName>,
+    names: &IdentityRemap<'_>,
 ) {
     spelled(&mut spellings.ret, names);
     spellings
@@ -785,15 +811,12 @@ fn declared_spellings(
         .for_each(|value| spelled(value, names));
 }
 
-fn type_alias(alias: &mut super::IrTypeAlias, names: &HashMap<TypeName, TypeName>) {
+fn type_alias(alias: &mut super::IrTypeAlias, names: &IdentityRemap<'_>) {
     alias.expansion = ty(alias.expansion, names);
     spelled(&mut alias.expansion_spelling, names);
 }
 
-fn local_property_layout(
-    layout: &mut super::IrLocalPropertyLayout,
-    names: &HashMap<TypeName, TypeName>,
-) {
+fn local_property_layout(layout: &mut super::IrLocalPropertyLayout, names: &IdentityRemap<'_>) {
     match layout {
         super::IrLocalPropertyLayout::TopLevelStorage { qualifier, .. } => {
             qualifier.iter_mut().for_each(|value| name(value, names));
@@ -833,7 +856,7 @@ fn local_property_layout(
 
 fn value_class_suspend_result(
     result: &mut super::IrValueClassSuspendResult,
-    names: &HashMap<TypeName, TypeName>,
+    names: &IdentityRemap<'_>,
 ) {
     match result {
         super::IrValueClassSuspendResult::Boxed {
@@ -853,7 +876,7 @@ fn value_class_suspend_result(
     }
 }
 
-fn remap_keyed<V>(map: &mut HashMap<TypeName, V>, names: &HashMap<TypeName, TypeName>) {
+fn remap_keyed<V>(map: &mut HashMap<TypeName, V>, names: &IdentityRemap<'_>) {
     *map = std::mem::take(map)
         .into_iter()
         .map(|(key, value)| (remapped_name(key, names), value))
@@ -862,7 +885,7 @@ fn remap_keyed<V>(map: &mut HashMap<TypeName, V>, names: &HashMap<TypeName, Type
 
 fn remap_first_key<K: Eq + std::hash::Hash, V>(
     map: &mut HashMap<(TypeName, K), V>,
-    names: &HashMap<TypeName, TypeName>,
+    names: &IdentityRemap<'_>,
 ) {
     *map = std::mem::take(map)
         .into_iter()
@@ -872,7 +895,7 @@ fn remap_first_key<K: Eq + std::hash::Hash, V>(
 
 fn local_class_name_provenance(
     provenance: &mut IrLocalClassNameProvenance,
-    names: &HashMap<TypeName, TypeName>,
+    names: &IdentityRemap<'_>,
 ) {
     name(&mut provenance.source.package, names);
     if let Some(IrLocalClassOwner::External(owner)) = &mut provenance.lexical_owner {
@@ -880,10 +903,7 @@ fn local_class_name_provenance(
     }
 }
 
-fn module_member_access(
-    access: &mut super::IrModuleMemberAccess,
-    names: &HashMap<TypeName, TypeName>,
-) {
+fn module_member_access(access: &mut super::IrModuleMemberAccess, names: &IdentityRemap<'_>) {
     match access {
         super::IrModuleMemberAccess::Callable {
             selected_parameters,
@@ -898,14 +918,14 @@ fn module_member_access(
 
 fn declaration_argument_boundaries(
     boundaries: &mut [super::IrDeclarationArgumentBoundary],
-    names: &HashMap<TypeName, TypeName>,
+    names: &IdentityRemap<'_>,
 ) {
     boundaries
         .iter_mut()
         .for_each(|boundary| boundary.declaration = ty(boundary.declaration, names));
 }
 
-fn remap_class(class: &mut super::IrClass, names: &HashMap<TypeName, TypeName>) {
+fn remap_class(class: &mut super::IrClass, names: &IdentityRemap<'_>) {
     name(&mut class.fq_name, names);
     for (_, bound) in &mut class.type_param_bounds {
         *bound = ty(*bound, names);
@@ -1081,7 +1101,7 @@ fn remap_class(class: &mut super::IrClass, names: &HashMap<TypeName, TypeName>) 
 }
 
 /// The exact classifier remap, applied to a class's declaration record.
-struct RecordRenaming<'a>(&'a HashMap<TypeName, TypeName>);
+struct RecordRenaming<'a>(&'a IdentityRemap<'a>);
 
 impl crate::metadata::class_declarations::ClassifierRenaming for RecordRenaming<'_> {
     fn name(&self, value: TypeName) -> TypeName {
@@ -1113,12 +1133,23 @@ impl super::IrFile {
     /// Replace semantic classifier identities with target physical identities at a backend boundary.
     /// The map is exact and declaration-produced; this operation performs no spelling lookup.
     pub(crate) fn remap_classifier_identities(&mut self, names: &HashMap<TypeName, TypeName>) {
-        if names.is_empty() {
+        self.remap_identities(&IdentityRemap::classifiers(names));
+    }
+
+    /// Give every occurrence of each type parameter in `carriers` the bound a target selected for
+    /// its physical representation. The occurrence keeps its semantic identity, so generic
+    /// signatures and metadata still name the parameter.
+    pub(crate) fn rebind_type_parameter_carriers(&mut self, carriers: &HashMap<String, Ty>) {
+        self.remap_identities(&IdentityRemap::carriers(carriers));
+    }
+
+    fn remap_identities(&mut self, names: &IdentityRemap<'_>) {
+        if names.is_identity() {
             return;
         }
 
         annotations(&mut self.file_annotations, names);
-        self.remap_inline_copy_owners(names);
+        self.remap_inline_copy_owners(names.classifiers);
         for provenance in self.local_class_name_provenance.values_mut() {
             local_class_name_provenance(provenance, names);
         }
@@ -1341,8 +1372,10 @@ impl super::IrFile {
             generic_signature(signature, names);
         }
         self.companion_blocks
-            .remap_classifier_identities(names, |value| ty(value, names));
-        self.remap_type_reflection_classifier_identities(names, |value| ty(value, names));
+            .remap_classifier_identities(names.classifiers, |value| ty(value, names));
+        self.remap_type_reflection_classifier_identities(names.classifiers, |value| {
+            ty(value, names)
+        });
         for splice in self.inline_property_access.splices.values_mut() {
             for substitution in &mut splice.substitutions {
                 substitution.value = ty(substitution.value, names);
@@ -1556,12 +1589,13 @@ impl super::IrFile {
         remap_first_key(&mut self.generated_functions, names);
         remap_first_key(&mut self.generated_secondary_constructors, names);
         remap_first_key(&mut self.jvm_companion_property_statics, names);
+        remap_first_key(&mut self.jvm_companion_delegate_statics, names);
         remap_first_key(&mut self.property_annotation_markers, names);
         remap_first_key(&mut self.external_secondary_super_constructors, names);
         remap_first_key(&mut self.prop_declared_spellings, names);
         remap_first_key(&mut self.prop_decl_lines, names);
         self.value_class_constructor_facts
-            .remap_classifier_identities(names, |value| ty(value, names));
+            .remap_classifier_identities(names.classifiers, |value| ty(value, names));
 
         self.synthetic_classes = std::mem::take(&mut self.synthetic_classes)
             .into_iter()
@@ -1587,11 +1621,7 @@ impl super::IrFile {
     }
 }
 
-fn remap_expression_facts(
-    ir: &mut super::IrFile,
-    expression: ExprId,
-    names: &HashMap<TypeName, TypeName>,
-) {
+fn remap_expression_facts(ir: &mut super::IrFile, expression: ExprId, names: &IdentityRemap<'_>) {
     if let Some(value) = ir.logical_types.get_mut(&expression) {
         *value = ty(*value, names);
     }
@@ -1794,9 +1824,15 @@ mod tests {
         let terminal = crate::types::type_name("sample/Terminal");
         let names = HashMap::from_iter([(declaration, intermediate), (intermediate, terminal)]);
 
-        assert_eq!(remapped_name(declaration, &names), terminal);
         assert_eq!(
-            ty(Ty::obj_name(declaration), &names),
+            remapped_name(declaration, &IdentityRemap::classifiers(&names)),
+            terminal
+        );
+        assert_eq!(
+            ty(
+                Ty::obj_name(declaration),
+                &IdentityRemap::classifiers(&names)
+            ),
             Ty::obj_name(terminal)
         );
     }
@@ -1826,7 +1862,7 @@ mod tests {
             })),
             reflection_owner: Some(source),
         }));
-        remap_expression(&mut callable, &names);
+        remap_expression(&mut callable, &IdentityRemap::classifiers(&names));
         let IrExpr::CallableReference(callable) = callable else {
             unreachable!()
         };
@@ -1864,7 +1900,7 @@ mod tests {
             })),
             inline_body: None,
         };
-        remap_expression(&mut lambda, &names);
+        remap_expression(&mut lambda, &IdentityRemap::classifiers(&names));
         let IrExpr::Lambda { sam: Some(sam), .. } = lambda else {
             unreachable!()
         };
@@ -1894,7 +1930,7 @@ mod tests {
             label: String::new(),
             with_index: None,
         };
-        checked_operation(&mut range, &names);
+        checked_operation(&mut range, &IdentityRemap::classifiers(&names));
         let IrCheckedOperation::RangeLoop {
             counter,
             source: IrProgressionSource::Step { last_element, .. },
@@ -1947,7 +1983,7 @@ mod tests {
                 role: IrValueClassTypeRole::Box,
             },
         );
-        remap_expression_facts(&mut ir, expression, &names);
+        remap_expression_facts(&mut ir, expression, &IdentityRemap::classifiers(&names));
 
         assert_eq!(ir.deferred_local_types[&expression], target_ty);
         let IrModuleMemberAccess::Callable {

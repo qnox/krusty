@@ -621,11 +621,6 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                         });
                     if let Some(signature) = &mut generic_sig {
                         signature.receiver = source_receiver;
-                        order_primary_class_bounds(
-                            signature,
-                            &table.source_class_headers,
-                            &*libraries,
-                        );
                     }
                     let projected_return_hazard = if compact_headers.is_some() {
                         has_projected_generic_return_hazard_from_header(&callable_header)
@@ -4297,6 +4292,10 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
         for (alias, formals, target) in &file_type_aliases[file_index] {
             let alias = SourceAlias {
                 identity: crate::types::type_name_child(package, alias),
+                declaration_name: crate::types::ClassifierDeclarationName::TopLevel {
+                    package,
+                    name: alias.as_str().into(),
+                },
                 nested_in: None,
                 formals,
                 target,
@@ -4385,6 +4384,10 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                     .fold(package, crate::types::type_name_child);
                 let source_alias = SourceAlias {
                     identity: crate::types::type_name_child(owner, &alias.name),
+                    declaration_name: crate::types::ClassifierDeclarationName::Nested {
+                        owner: alias_owner,
+                        name: alias.name.as_str().into(),
+                    },
                     nested_in: Some((alias_owner, &alias.name)),
                     formals: &alias.type_params,
                     target: &alias.target,

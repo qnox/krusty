@@ -517,6 +517,51 @@ impl CallLinker for Linker<'_, '_> {
         )
     }
 
+    fn range_membership_header(
+        &self,
+        callee: &KlibPublicIdSignature,
+    ) -> Result<Option<super::body_lowering::RangeMembershipHeader>, KlibBodyDeclineReason> {
+        let signature = KlibDeclarationSignature::Public(callee.clone());
+        let identity = match self
+            .sources
+            .bodies
+            .callee_origin(&self.active_module, &signature)
+        {
+            KlibCalleeOrigin::Exact(identity) => identity,
+            // Dependency preparation omitted this declaration's edge, so a membership this unit
+            // does not fold has no declaration to call: the body declines.
+            KlibCalleeOrigin::Missing => {
+                return Err(KlibBodyDeclineReason::UnsupportedCallee(Box::new(
+                    callee.clone(),
+                )))
+            }
+            KlibCalleeOrigin::Ambiguous => {
+                return Err(KlibBodyDeclineReason::AmbiguousCalleeOrigin(Box::new(
+                    callee.clone(),
+                )))
+            }
+        };
+        let Some((arena, declaration)) = self.sources.bodies.function(&identity) else {
+            return Err(KlibBodyDeclineReason::UnsupportedCallee(Box::new(
+                callee.clone(),
+            )));
+        };
+        let header = raw_function_header(None, HeaderPurpose::External, arena, declaration)?;
+        let (params, ret, context_count, extension_receiver, receiver) = header.linked_signature();
+        // The stdlib declares mixed-element `contains` extensions (`LongRange.contains(Int)`), a
+        // valid declaration this fold does not model rather than inconsistent evidence.
+        if context_count != 0 || extension_receiver {
+            return Err(KlibBodyDeclineReason::UnsupportedOperation(
+                "a membership through a `contains` that is not a member of the range",
+            ));
+        }
+        Ok(Some(super::body_lowering::RangeMembershipHeader {
+            receiver,
+            params: params.to_vec(),
+            ret,
+        }))
+    }
+
     fn is_subtype(&self, sub: Ty, sup: Ty) -> bool {
         // A support unit has no semantic model of the classes its body names.
         sub == sup
