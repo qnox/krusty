@@ -604,6 +604,12 @@ fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId) {
     if ir.kept_start_lines.contains(&source) {
         ir.kept_start_lines.insert(target);
     }
+    copy_map!(builtin_calls);
+    if ir.safe_calls.contains(&source) {
+        ir.safe_calls.insert(target);
+    }
+    copy_map!(safe_call_reads);
+    copy_map!(elvis_temporaries);
     if ir.inline_cleanup_results.contains(&source) {
         ir.inline_cleanup_results.insert(target);
     }

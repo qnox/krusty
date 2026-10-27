@@ -108,6 +108,16 @@ impl<'a> SymbolResolver<'a> {
 }
 
 impl SymbolSource for ResolverSource<'_> {
+    fn classifier_declaration_name(
+        &self,
+        declaration: crate::libraries::ClassifierDeclarationKey,
+    ) -> Option<Option<crate::types::ClassifierDeclarationName>> {
+        match self {
+            Self::Direct(source) => source.classifier_declaration_name(declaration),
+            Self::Memoized(source) => source.classifier_declaration_name(declaration),
+        }
+    }
+
     fn actualized_expect(&self, internal: TypeName) -> Option<TypeName> {
         match self {
             Self::Direct(source) => source.actualized_expect(internal),

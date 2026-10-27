@@ -4778,6 +4778,7 @@ fn multiline_member_call_keeps_the_selected_call_source_and_end_lines() {
     assert_eq!(
         body.expression_debug_lines(call),
         FirExpressionDebugLines {
+            start: 5,
             source: 5,
             end: 8,
             positionless: false

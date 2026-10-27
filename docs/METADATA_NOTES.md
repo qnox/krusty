@@ -9,6 +9,25 @@ identity-only ordinary proof. Value/reference conversions retain typed common IR
 than changing metadata or runtime layouts. Tests: `klib_lowering::type_evidence::tests` and
 `klib_lowering::tests::body_forms`.
 
+## Native source callable-reference identity
+
+The checked source-module callable ID and source-module identity own the Native reflection marker's
+linkage. Weak definitions in dedicated COMDAT sections give all emitted files the same address,
+which the existing reference equality and hash runtime reads. The invocation adapter and carrier
+remain separate from declaration identity. KLIB references need their retained module-qualified
+signature before receiving the same program scope; a raw provider-local callable number is
+insufficient across independently analyzed modules.
+
+## Identity-keyed declaration-name projection
+
+Providers project name evidence directly from their selected classifier and alias records. Typed
+ordinary/alias keys retain both declarations when their flattened identity is the same. The
+outer option distinguishes an absent declaration from a selected declaration whose name is unknown.
+Federation stops at the first present record; source-unit caches retain all three states. Frozen
+backend module facts keep source class and alias names independently of alias targets, and forward
+only absent identities to the dependency inventory. Literal-dollar ownership stays snapshot-owned.
+The metadata encoder callback and class-ID sinks remain a separate consumer change.
+
 ## Alias declaration-name evidence
 
 Package and Class type-alias tables supply the alias's exact simple name and declaring container.

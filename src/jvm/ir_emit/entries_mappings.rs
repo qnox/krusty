@@ -29,24 +29,19 @@ impl EntriesMappingTables {
         self.owners.clear();
     }
 
-    /// The field index `owner` reads `enum_class`'s entries from, assigned on first claim. A probe
-    /// (`commit` false) learns the index the claim would get without making it.
-    fn claim(&mut self, owner: &str, enum_class: &str, commit: bool) -> usize {
+    /// The field index `owner` reads `enum_class`'s entries from, assigned on first claim.
+    fn claim(&mut self, owner: &str, enum_class: &str) -> usize {
         let Some(at) = self.owners.iter().position(|(name, _)| name == owner) else {
-            if commit {
-                self.owners
-                    .push((owner.to_string(), vec![enum_class.to_string()]));
-            }
+            self.owners
+                .push((owner.to_string(), vec![enum_class.to_string()]));
             return 0;
         };
         let enums = &mut self.owners[at].1;
         if let Some(index) = enums.iter().position(|claimed| claimed == enum_class) {
             return index;
         }
-        if commit {
-            enums.push(enum_class.to_string());
-        }
-        enums.len() - usize::from(commit)
+        enums.push(enum_class.to_string());
+        enums.len() - 1
     }
 
     /// The `InnerClasses` row an owning class declares for its mappings, once it has any.
@@ -145,13 +140,11 @@ fn write_class(
 /// How one inline call of the class `owner` reads an enum's entries: through the static accessor
 /// the enum's declaration publishes ([`EnumEntriesAccessor`](crate::backend::EnumEntriesAccessor),
 /// which every provider normalizes the same way), otherwise through `owner`'s mapping class. The
-/// declaration is found by the argument's semantic identity, never by its JVM spelling. The first
-/// inlining pass over a call only probes, claiming nothing.
+/// declaration is found by the argument's semantic identity, never by its JVM spelling.
 pub(super) struct CallEnumEntries<'e> {
     pub(super) classifiers: &'e dyn crate::backend::BackendClassifierSource,
     pub(super) run: &'e EmitRun,
     pub(super) owner: &'e str,
-    pub(super) commit: bool,
 }
 
 impl EnumEntriesReads for CallEnumEntries<'_> {
@@ -171,7 +164,7 @@ impl EnumEntriesReads for CallEnumEntries<'_> {
             .run
             .entries_mappings
             .borrow_mut()
-            .claim(self.owner, internal, self.commit);
+            .claim(self.owner, internal);
         Some(EnumEntriesRead::Mapping {
             class: mappings_class(self.owner),
             field: entries_field(index),
@@ -187,18 +180,6 @@ fn accessor_call(accessor: &crate::backend::EnumEntriesAccessor) -> EnumEntriesR
         owner: crate::jvm::names::owned_classfile_internal_name(accessor.owner),
         name: accessor.name.to_string(),
         descriptor: accessor.descriptor.to_string(),
-    }
-}
-
-impl<'a> Emitter<'a> {
-    /// How an inline call emitted into this class reads enum entries; `commit` false only probes.
-    pub(super) fn call_enum_entries(&self, commit: bool) -> CallEnumEntries<'_> {
-        CallEnumEntries {
-            classifiers: self.classifiers,
-            run: self.run,
-            owner: &self.owner,
-            commit,
-        }
     }
 }
 

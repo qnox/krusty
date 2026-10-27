@@ -1580,7 +1580,8 @@ pub fn facade_package_metadata_from_ir(
                         Some(storage) => storage.default_getter_jvm_name(),
                         None => crate::jvm::names::property_getter_name(&declaration.name),
                     }),
-                    format!("({descriptor_parameters}){value_descriptor}"),
+                    value_class_accessor_descriptor(ir, getter_function)
+                        .unwrap_or_else(|| format!("({descriptor_parameters}){value_descriptor}")),
                 )
             });
             let setter = has_setter.then(|| {
@@ -1591,7 +1592,8 @@ pub fn facade_package_metadata_from_ir(
                         Some(storage) => storage.default_setter_jvm_name(),
                         None => crate::jvm::names::property_setter_name(&declaration.name),
                     }),
-                    format!("({parameters})V"),
+                    value_class_accessor_descriptor(ir, setter_function)
+                        .unwrap_or_else(|| format!("({parameters})V")),
                 )
             });
             // A delegate evaluated in place has no storage; its `get<X>$delegate` stands in.
@@ -1662,6 +1664,21 @@ pub fn facade_package_metadata_from_ir(
         metadata_stamp,
         annotations_in_metadata,
     )
+}
+
+/// The physical descriptor of an accessor the value-class pass rewrote: a receiver or value typed
+/// by a value class is its erased carrier there (`getXx-IQRRRT4(I)I` over `val Z.xx`), as the
+/// method itself declares it.
+fn value_class_accessor_descriptor(
+    ir: &crate::ir::IrFile,
+    accessor: Option<u32>,
+) -> Option<String> {
+    let accessor = accessor.filter(|accessor| ir.vc_declared_sigs.contains_key(accessor))?;
+    let function = &ir.functions[accessor as usize];
+    Some(crate::jvm::names::method_descriptor(
+        &function.params,
+        function.ret,
+    ))
 }
 
 /// The physical name and descriptor of the static field holding a delegated package property's

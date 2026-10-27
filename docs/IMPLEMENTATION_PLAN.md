@@ -8,6 +8,22 @@ typed common coercions when a conversion changes nullability or scalar/reference
 Keep the already-landed generic-argument arity guard unchanged. Validate the owning proof and body
 tests and the portable dependency-array-view fixture without backend mutes or new outcome entries.
 
+## Native source callable-reference markers
+
+Give source-module references a program-scoped marker keyed by the existing module-qualified
+callable symbol. Reuse the static reflection-object COMDAT emitter so separate object files link
+to one marker address. Keep identity scope explicit in the cache; local declarations and current
+dependency identities retain their existing file scope. A separate KLIB follow-up must derive
+program identity from authenticated module-qualified declarations, since opaque provider IDs are
+rebound between modules.
+
+## Bound declaration-name inventory
+
+Expose selected declaration-name evidence by typed resolved key across source, JVM, KLIB and their
+federated views. Preserve absent, selected-unknown and selected-known records in caches and frozen
+backend facts, including aliases without target shapes. This supplies the metadata consumer seam;
+the full class-ID encoder and callable-reference adapter regressions remain separate follow-ups.
+
 ## Alias declaration-name producers
 
 Retain an alias's own optional container and exact segment through stable source headers, the
@@ -5589,8 +5605,9 @@ regress.
     and FixStack saves the stack around it, and the lambda's lines are mapped into the copy's SMAP from
     the caller's. The call site passes the captured values instead of the lambda; code compiled only
     for the object is rolled back from the caller's constant pool (`ClassWriter::checkpoint`). The
-    route is probed with the lambdas' shapes before any code is emitted, so a shape not ported yet
-    keeps the bridge, as does a lambda that reaches a private member of the caller (a backing
+    route is decided from the callee's facts before any code is emitted, never by inlining the body
+    on trial: an object whose suspend method lacks the `$$forInline` copy keeps the bridge
+    (`SpliceReason::SuspendMethodWithoutForInlineCopy`), as does a lambda that reaches a private member of the caller (a backing
     field, a private function, `invokespecial`, a materialized lambda) until kotlinc's synthetic
     accessors are ported. ✅ Lambdas taking or returning a value class (`Continuation.resumeWith`'s
     `Result`): the inline body takes the parameter unboxed (`value_classes::inline_body_slots`) and
