@@ -1,6 +1,5 @@
 //! JVM class-file reading, writing, and bytecode emission (all JVM-specific code).
 
-mod abstract_method_nullability;
 mod annotation_constructions;
 mod annotation_kclass;
 mod anonymous_context_labels;
