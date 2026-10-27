@@ -16,6 +16,7 @@ use crate::types::Visibility;
 
 mod annotation_class_literals;
 mod annotation_strings;
+mod declaration;
 mod executable_owners;
 mod flags;
 mod nested_classifiers;
@@ -27,6 +28,7 @@ mod written_type_projection;
 
 use annotation_class_literals::annotation_class_literals;
 use annotation_strings::HeaderAnnotationStringArena;
+pub use declaration::{HeaderDeclaration, HeaderDeclarationKind, HeaderResultType};
 use executable_owners::local_executable_owner;
 pub use flags::{HeaderParameterFlags, HeaderTypeFlags, HeaderTypeParameterFlags};
 use nested_classifiers::{
@@ -170,92 +172,6 @@ pub enum HeaderInterfaceDelegateSource {
 pub struct HeaderInterfaceDelegation {
     pub supertype: u32,
     pub source: HeaderInterfaceDelegateSource,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum HeaderResultType {
-    Explicit(HeaderTypeId),
-    /// Block-body functions with no written return type are semantically `Unit` and need no graph.
-    ImplicitUnit,
-    /// Expression-body functions and expression-derived properties are attached to `SignatureGraph`.
-    Inferred,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum HeaderDeclarationKind {
-    Callable {
-        receiver: Option<HeaderTypeId>,
-        parameters: HeaderParameterRange,
-        result: HeaderResultType,
-        type_parameters: HeaderTypeParameterRange,
-        bounds: HeaderTypeBoundRange,
-        context_count: u32,
-        /// Start of the declaration signature, used only to derive stable semantic identities for
-        /// callable type parameters after the parser-owned declaration has been released.
-        signature_start: u32,
-        /// End of the declaration signature. Together with `signature_start`, this preserves the
-        /// exact diagnostic origin without retaining the declaration or body AST.
-        signature_end: u32,
-    },
-    Property {
-        receiver: Option<HeaderTypeId>,
-        context_parameters: HeaderParameterRange,
-        /// Exact source name of a written setter parameter. An absent/default setter has no source
-        /// parameter declaration and is projected separately by each target.
-        setter_parameter_name: Option<LookupNameId>,
-        declared_type: Option<HeaderTypeId>,
-        getter_type: Option<HeaderTypeId>,
-        backing_field_type: Option<HeaderTypeId>,
-        type_parameters: HeaderTypeParameterRange,
-        bounds: HeaderTypeBoundRange,
-        mutable: bool,
-    },
-    Classifier {
-        /// Exact source declaration segment retained before parser hoisting gives a nested
-        /// classifier its qualified lookup/emission path. Recursive header scope consumes this
-        /// spelling directly; it must not recover a segment from `DeclarationStub::lookup_name`.
-        source_name: LookupNameId,
-        type_parameters: HeaderTypeParameterRange,
-        /// Enclosing declaration parameters used by a parser-hoisted local/anonymous classifier.
-        /// These bind existing semantic declarations; they are not formals owned by this classifier.
-        lexical_type_parameter_captures: HeaderTypeParameterRange,
-        bounds: HeaderTypeBoundRange,
-        /// Declared interface/function supertypes in source order.
-        supertypes: HeaderTypeRange,
-        /// The one superclass constructor target, kept distinct from interfaces so later semantic
-        /// graph construction never recovers class-vs-interface ownership from source spelling.
-        base: Option<HeaderTypeId>,
-        /// The callee name of the superclass constructor call (`Base` in `: pkg.Base(args)`).
-        /// The call names its classifier apart from `base`, and kotlinc checks its access there.
-        base_callee: Option<crate::diag::Span>,
-        /// Class context parameters in source order. They are shared by every constructor and are
-        /// implicit receivers of instance bodies.
-        context_parameters: HeaderParameterRange,
-        primary_parameters: HeaderParameterRange,
-        delegations: HeaderInterfaceDelegationRange,
-    },
-    Constructor {
-        context_parameters: HeaderParameterRange,
-        parameters: HeaderParameterRange,
-    },
-    TypeAlias {
-        type_parameters: HeaderTypeParameterRange,
-        target: HeaderTypeId,
-    },
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct HeaderDeclaration {
-    pub declaration: DeclarationId,
-    /// Declaration annotations as compact classifier-reference types. Resolution consumes this
-    /// temporary range during Pass 1 and publishes stable classifier identities.
-    pub annotations: HeaderTypeRange,
-    /// Class-literal arguments written on those annotations, keyed by annotation ordinal — the
-    /// declaration-level twin of [`HeaderParameter::annotation_class_literals`]. A class-level
-    /// `@Serializable(with = X::class)` is a semantic fact another file of the same module must be
-    /// able to read, and it cannot be recovered once the source AST is released.
-    pub annotation_class_literals: HeaderParameterAnnotationClassLiteralRange,
-    pub kind: HeaderDeclarationKind,
 }
 
 /// Temporary packed syntax required to resolve explicit declaration signatures after the source
@@ -2013,6 +1929,7 @@ pub fn extract_file_header_syntax(
         let bounds = bounds(headers, names, &function.type_param_bounds);
         headers.insert_declaration(HeaderDeclaration {
             declaration,
+            name_span: Some(function.name_span),
             annotations,
             annotation_class_literals: HeaderParameterAnnotationClassLiteralRange::default(),
             kind: HeaderDeclarationKind::Callable {
@@ -2085,6 +2002,7 @@ pub fn extract_file_header_syntax(
         let bounds = bounds(headers, names, &property.type_param_bounds);
         headers.insert_declaration(HeaderDeclaration {
             declaration,
+            name_span: Some(property.name_span),
             annotations,
             annotation_class_literals: HeaderParameterAnnotationClassLiteralRange::default(),
             kind: HeaderDeclarationKind::Property {
@@ -2129,6 +2047,7 @@ pub fn extract_file_header_syntax(
         let target = headers.add_type(&alias.target, names);
         headers.insert_declaration(HeaderDeclaration {
             declaration,
+            name_span: Some(alias.name_span),
             annotations: HeaderTypeRange::default(),
             annotation_class_literals: HeaderParameterAnnotationClassLiteralRange::default(),
             kind: HeaderDeclarationKind::TypeAlias {
@@ -2239,6 +2158,7 @@ pub fn extract_file_header_syntax(
         );
         headers.insert_declaration(HeaderDeclaration {
             declaration,
+            name_span: Some(class.name_span),
             annotations,
             annotation_class_literals,
             kind: HeaderDeclarationKind::Classifier {
@@ -2276,6 +2196,7 @@ pub fn extract_file_header_syntax(
             );
             headers.insert_declaration(HeaderDeclaration {
                 declaration: constructor,
+                name_span: None,
                 annotations,
                 annotation_class_literals: HeaderParameterAnnotationClassLiteralRange::default(),
                 kind: HeaderDeclarationKind::Constructor {
@@ -2319,6 +2240,7 @@ pub fn extract_file_header_syntax(
             let annotations = annotation_types(headers, names, &parameter.annotations);
             headers.insert_declaration(HeaderDeclaration {
                 declaration: property_id,
+                name_span: Some(parameter.span),
                 annotations,
                 annotation_class_literals: HeaderParameterAnnotationClassLiteralRange::default(),
                 kind: HeaderDeclarationKind::Property {
@@ -2353,6 +2275,7 @@ pub fn extract_file_header_syntax(
             let annotations = annotation_types(headers, names, &constructor.annotations);
             headers.insert_declaration(HeaderDeclaration {
                 declaration: constructor_id,
+                name_span: None,
                 annotations,
                 annotation_class_literals: HeaderParameterAnnotationClassLiteralRange::default(),
                 kind: HeaderDeclarationKind::Constructor {

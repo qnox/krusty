@@ -39,6 +39,10 @@ final class SourceClass implements KSClassDeclaration {
     List<KSTypeParameter> typeParameters;
     List<KSTypeReference> superTypes;
     String jvmSignature;
+    // The properties and functions the classifier has with the inherited ones, each null when
+    // krusty cannot order them; the query is then refused.
+    Members allProperties;
+    Members allFunctions;
 
     SourceClass(
             SourceFile file,
@@ -94,12 +98,20 @@ final class SourceClass implements KSClassDeclaration {
 
     @Override
     public Sequence<KSFunctionDeclaration> getAllFunctions() {
-        throw Nodes.notImplemented("KSClassDeclaration.getAllFunctions");
+        if (allFunctions == null) {
+            throw Nodes.notImplemented(
+                    "KSClassDeclaration.getAllFunctions of a classifier whose members it cannot order");
+        }
+        return Nodes.sequence(allFunctions.as(KSFunctionDeclaration.class));
     }
 
     @Override
     public Sequence<KSPropertyDeclaration> getAllProperties() {
-        throw Nodes.notImplemented("KSClassDeclaration.getAllProperties");
+        if (allProperties == null) {
+            throw Nodes.notImplemented(
+                    "KSClassDeclaration.getAllProperties of a classifier whose members it cannot order");
+        }
+        return Nodes.sequence(allProperties.as(KSPropertyDeclaration.class));
     }
 
     @Override
@@ -109,7 +121,7 @@ final class SourceClass implements KSClassDeclaration {
 
     @Override
     public KSType asStarProjectedType() {
-        throw Nodes.notImplemented("KSClassDeclaration.asStarProjectedType");
+        return ClassType.starProjected(this);
     }
 
     @Override

@@ -101,19 +101,52 @@ impl Emitter<'_> {
         self.coerce_reference_on_stack(source, expected, code);
     }
 
-    /// Defer only the checked declaration-result conversion while that call still owns its
-    /// recorded reference slot. Inline expansion and suspension-result materialization own their
-    /// replacement values; ordinary smart casts are separate checked conversions.
+    /// A coercion that only reads a call's physical result as its semantic type: the checked
+    /// declaration-result narrowing, or the boundary a dependency call's realization placed over
+    /// the provider's erased result.
+    /// A null assertion over that result checks the same slot, so the boundary is the same.
+    pub(super) fn is_call_result_boundary(&self, coercion: u32, arg: u32) -> bool {
+        let checked = self.asserted_value(arg);
+        self.ir.declaration_result_coercions.contains(&coercion)
+            || (matches!(self.ir.expr(checked), IrExpr::Call { .. })
+                && self.ir.physical_types.contains_key(&checked))
+    }
+
+    /// The value beneath every null assertion over `expression`: the slot those checks read.
+    fn asserted_value(&self, mut expression: crate::ir::ExprId) -> crate::ir::ExprId {
+        while let IrExpr::NotNullAssert { operand, .. } = self.ir.expr(expression) {
+            expression = *operand;
+        }
+        expression
+    }
+
+    /// Defer only a call-result boundary (the checked declaration-result conversion, or a
+    /// dependency realization's) while that call still owns its recorded reference slot. Inline
+    /// expansion and suspension-result materialization own their replacement values; ordinary
+    /// smart casts are separate checked conversions. A property read owns the slot its value type
+    /// names, which is the accessor's result.
     fn retains_declaration_result_slot(
         &self,
         expression: crate::ir::ExprId,
         producer: crate::ir::ExprId,
         slot: Ty,
     ) -> bool {
-        if !self.ir.declaration_result_coercions.contains(&expression)
-            || self.ir.physical_types.get(&producer) != Some(&slot)
+        if !self.is_call_result_boundary(expression, producer)
             || self.transformed_result(producer).is_some()
         {
+            return false;
+        }
+        // A null assertion checks the same slot it reads, so a producer beneath one still owns it.
+        let checked = self.asserted_value(producer);
+        if matches!(self.ir.expr(checked), IrExpr::PropertyRead { .. }) {
+            return self.value_ty(producer) == ir_ty_to_jvm(&slot);
+        }
+        let recorded = self
+            .ir
+            .physical_types
+            .get(&producer)
+            .or_else(|| self.ir.physical_types.get(&checked));
+        if recorded.map(ir_ty_to_jvm) != Some(ir_ty_to_jvm(&slot)) {
             return false;
         }
         let Some(call) =
@@ -155,7 +188,7 @@ impl Emitter<'_> {
         }
         match self.erased_reference_result(expression) {
             Some(ErasedResult::Coerced { call, slot }) => {
-                self.emit_value(call, code);
+                self.emit_deferred_coercion(expression, call, code);
                 slot
             }
             Some(ErasedResult::Invocation) => {
@@ -169,6 +202,26 @@ impl Emitter<'_> {
             None => {
                 self.emit_value(expression, code);
                 self.value_ty(expression)
+            }
+        }
+    }
+
+    /// Emit a deferred coercion's producer in the coercion's place. The coercion still owns its
+    /// debug lines: the line it starts on, and the end line its evaluated result marks, exactly
+    /// as emitting the coercion itself would record them.
+    fn emit_deferred_coercion(
+        &mut self,
+        coercion: crate::ir::ExprId,
+        producer: crate::ir::ExprId,
+        code: &mut CodeBuilder,
+    ) {
+        super::debug_lines::begin_expression(self.ir, coercion, code);
+        self.mark_value_expression_start(coercion, code);
+        self.emit_value(producer, code);
+        if !code.is_dead() {
+            if let Some(line) = self.ir.evaluated_result_end_line(coercion) {
+                self.mark_expression_line(coercion, line, code);
+                code.nop();
             }
         }
     }
@@ -195,6 +248,24 @@ impl Emitter<'_> {
                 arg,
                 type_operand,
             } => {
+                // `!!` gives its non-null result a coercion of its own over the nullable one. Over
+                // a call-result boundary that keeps one JVM representation, that boundary's erased
+                // result is what reaches the consumer. A coercion that unboxes (`Int?` to `int`)
+                // or changes a value class's carrier is a representation the consumer needs.
+                if let IrExpr::TypeOp {
+                    op: crate::ir::IrTypeOp::ImplicitCoercion,
+                    arg: checked,
+                    type_operand: nullable,
+                } = self.ir.expr(*arg)
+                {
+                    if nullable.is_nullable()
+                        && nullable.non_null() == *type_operand
+                        && ir_ty_to_jvm(nullable) == ir_ty_to_jvm(type_operand)
+                        && self.is_call_result_boundary(*arg, *checked)
+                    {
+                        return self.erased_reference_result(*arg);
+                    }
+                }
                 // Keep the declaration-side erasure until the consumer chooses its physical type.
                 // This is not limited to `Object`: `T : Comparable<T>` arrives as `Comparable`.
                 // A String-only consumer casts that slot once to `String`; a consumer of the bound
@@ -210,16 +281,28 @@ impl Emitter<'_> {
                         callee: call_callee,
                         ..
                     } if matches!(&**call_callee, crate::ir::Callee::Static { inline, .. } if inline.can_inline()));
-                // Without a recorded result the producer's own value type is the slot. Only an
-                // erased top is the generic-result contract; a narrower slot is a smart cast
-                // (`p.type` proven `Ref.Cls`), which this coercion itself checks.
+                // Without a recorded result the producer's own value type is the slot. An erased
+                // top is the generic-result contract, and so is a declaration result coercion
+                // whose call still owns its recorded bound slot (`<T : Base>` returns `Base`, read
+                // as `Both`): kotlinc narrows either only for a consumer that needs the narrower
+                // type, so `===`, `== null`, and an `Any` or `Base` consumer take no `checkcast`.
+                // Any other narrower slot is a smart cast (`p.type` proven `Ref.Cls`), which this
+                // coercion itself checks. A slot the coercion rebuilds rather than narrows (an
+                // annotation's stored `Class` read as `KClass`) is a representation, not a bound.
                 let slot = self
                     .ir
                     .physical_types
                     .get(arg)
                     .copied()
                     .unwrap_or_else(|| self.value_ty(*arg));
-                if !jvm_is_erased_top(ir_ty_to_jvm(&slot)) && !inline_producer {
+                if !jvm_is_erased_top(ir_ty_to_jvm(&slot))
+                    && !inline_producer
+                    && (!self.retains_declaration_result_slot(expression, *arg, slot)
+                        || crate::jvm::annotation_kclass::is_kclass_storage_read(
+                            *type_operand,
+                            slot,
+                        ))
+                {
                     return None;
                 }
                 narrows(slot, *type_operand).then_some(ErasedResult::Coerced { call: *arg, slot })
@@ -230,6 +313,32 @@ impl Emitter<'_> {
                 .then_some(ErasedResult::Invocation)
             }
             _ => None,
+        }
+    }
+
+    /// The erased declaration result a dispatch receiver reads through implicit coercions alone
+    /// (`h.get().base()` on `Simple<Both>` upcasts the `Both` result to the declaring `Base`).
+    /// The call narrows that result to the class it names; the coercions between change nothing
+    /// the JVM sees.
+    pub(super) fn erased_dispatch_receiver(
+        &self,
+        mut receiver: crate::ir::ExprId,
+    ) -> Option<crate::ir::ExprId> {
+        loop {
+            if matches!(
+                self.erased_reference_result(receiver),
+                Some(ErasedResult::Coerced { .. })
+            ) {
+                return Some(receiver);
+            }
+            match self.ir.expr(receiver) {
+                IrExpr::TypeOp {
+                    op: crate::ir::IrTypeOp::ImplicitCoercion,
+                    arg,
+                    type_operand,
+                } if ir_ty_to_jvm(type_operand).is_reference() => receiver = *arg,
+                _ => return None,
+            }
         }
     }
 

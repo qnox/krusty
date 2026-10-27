@@ -12,7 +12,9 @@
 //! the rest rather than answer with a part of it.
 
 mod accessors;
+mod all_members;
 mod annotations;
+mod backing_field;
 mod declarations;
 mod library;
 mod platform_names;
@@ -53,6 +55,7 @@ pub fn ksp_round(
     let resolved = Resolved::new(analysis);
     let ids = TypeParameterIds::default();
     let platform = PlatformNames::new(analysis, module_name);
+    let ledger = all_members::Ledger::default();
     let mut files = Vec::with_capacity(paths.len());
     for (index, (file, path)) in analysis.files.iter().zip(paths).enumerate() {
         let source = Source {
@@ -64,9 +67,11 @@ pub fn ksp_round(
             resolved: &resolved,
             ids: &ids,
             platform: platform.as_ref(),
+            ledger: &ledger,
         };
         files.push(source.file()?);
     }
+    all_members::order(&mut files, ledger, analysis);
     Ok(KspRound { files })
 }
 
@@ -148,6 +153,8 @@ struct Source<'a> {
     ids: &'a TypeParameterIds,
     /// The names the platform's binary interface gives declarations, if it has one.
     platform: Option<&'a PlatformNames<'a>>,
+    /// What each classifier's member lists are built from, once every file is described.
+    ledger: &'a all_members::Ledger,
 }
 
 /// A declaration a refusal names: what it is, its name and its line.
@@ -287,14 +294,26 @@ impl Source<'_> {
         let type_parameters = type_parameters(class, signature, &scope);
         let header = declarations::ClassHeader {
             id,
+            file: self.file,
             class,
             signature,
             kind,
             qualified_name: &qualified_name,
             type_parameters: &type_parameters,
             scope: &scope,
+            primary_spellings: signature
+                .stable_declaration
+                .and_then(|class| self.analysis.constructor_declaration(class, 0))
+                .and_then(|constructor| self.analysis.declared_type_spellings(constructor)),
         };
-        let (declarations, declarations_complete) = self.class_declarations(&header)?;
+        let described = self.class_declarations(&header)?;
+        self.ledger.record(
+            qualified_name.clone(),
+            all_members::ClassLedger {
+                resolved: described.resolved,
+                generated: self.data_object_members(&header),
+            },
+        );
         Ok(KspClass {
             simple_name,
             qualified_name: qualified_name.clone(),
@@ -304,11 +323,14 @@ impl Source<'_> {
             modifiers: self.written_modifiers(class.name_span.lo),
             type_parameters,
             super_types: super_types(signature, &scope),
-            declarations,
-            declarations_complete,
+            declarations: described.declarations,
+            declarations_complete: described.complete,
             jvm_signature: self
                 .platform
                 .and_then(|platform| platform.type_signature(Ty::obj_name(signature.internal))),
+            // Filled in once every file is described, as they depend on the supertypes'.
+            all_properties: None,
+            all_functions: None,
         })
     }
 
@@ -582,9 +604,12 @@ mod tests {
             KspTypeSlot::Undescribed => " receiver=<undescribed>".to_string(),
         };
         format!(
-            "property {} mutable={} modifiers={}: {}{receiver}",
+            "property {} mutable={} backingField={} modifiers={}: {}{receiver}",
             property.name,
             property.is_mutable,
+            property
+                .has_backing_field
+                .map_or("<refused>".to_string(), |has| has.to_string()),
             modifiers(&property.modifiers),
             rendered(&property.ty)
         )
@@ -718,21 +743,21 @@ mod tests {
             dumped(&round),
             [
                 "fun topLevel kind=TOP_LEVEL abstract=false modifiers= typeParameters= receiver=null (items: kotlin.Array<out members.Item> vararg=false default=false, sink: kotlin.Array<in kotlin.String> vararg=false default=false, any: kotlin.Array<*> vararg=false default=false): kotlin.Unit",
-                "property topValue mutable=false modifiers=: kotlin.Array<kotlin.Array<kotlin.Int>>",
-                "property inferred mutable=false modifiers=: kotlin.Int",
+                "property topValue mutable=false backingField=true modifiers=: kotlin.Array<kotlin.Array<kotlin.Int>>",
+                "property inferred mutable=false backingField=true modifiers=: kotlin.Int",
                 "INTERFACE members.Named modifiers= typeParameters= supertypes=kotlin.Any",
-                "  property name mutable=false modifiers=: kotlin.String",
+                "  property name mutable=false backingField=false modifiers=: kotlin.String",
                 "  fun describe kind=MEMBER abstract=true modifiers= typeParameters= receiver=null (prefix: kotlin.String vararg=false default=true): kotlin.String",
                 "CLASS members.Base modifiers=ABSTRACT typeParameters=T:kotlin.Any supertypes=members.Named",
-                "  property seed mutable=false modifiers=PROTECTED: members.Base.T?",
-                "  property name mutable=false modifiers=ABSTRACT,OVERRIDE: kotlin.String",
+                "  property seed mutable=false backingField=true modifiers=PROTECTED: members.Base.T?",
+                "  property name mutable=false backingField=false modifiers=ABSTRACT,OVERRIDE: kotlin.String",
                 "  fun seedOr kind=MEMBER abstract=false modifiers=OPEN typeParameters= receiver=null (fallback: members.Base.T vararg=false default=false): members.Base.T",
                 "  fun <init> kind=MEMBER abstract=false modifiers=FINAL typeParameters=T receiver=null (seed: members.Base.T? vararg=false default=false): members.Base<*>",
                 "CLASS members.Item modifiers=DATA typeParameters= supertypes=members.Base<kotlin.String>",
-                "  property name mutable=false modifiers=OVERRIDE: kotlin.String",
-                "  property count mutable=true modifiers=: kotlin.Int",
-                "  property tags mutable=false modifiers=PRIVATE: kotlin.Array<kotlin.String>",
-                "  property weight mutable=true modifiers=INTERNAL: kotlin.Double?",
+                "  property name mutable=false backingField=true modifiers=OVERRIDE: kotlin.String",
+                "  property count mutable=true backingField=true modifiers=: kotlin.Int",
+                "  property tags mutable=false backingField=true modifiers=PRIVATE: kotlin.Array<kotlin.String>",
+                "  property weight mutable=true backingField=true modifiers=INTERNAL: kotlin.Double?",
                 "  fun describe kind=MEMBER abstract=false modifiers=OVERRIDE typeParameters= receiver=null (prefix: kotlin.String vararg=false default=true): kotlin.String",
                 "  fun mapTags kind=MEMBER abstract=false modifiers= typeParameters=R receiver=null (transform: kotlin.Function1<kotlin.String, members.Item.mapTags.R> vararg=false default=false): kotlin.Array<members.Item.mapTags.R>?",
                 "  fun load kind=MEMBER abstract=false modifiers=SUSPEND typeParameters= receiver=null (ids: kotlin.Long vararg=true default=false): members.Item?",
@@ -742,7 +767,7 @@ mod tests {
                 "  fun <init> kind=MEMBER abstract=false modifiers=FINAL typeParameters= receiver=null (name: kotlin.String vararg=false default=false, count: kotlin.Int vararg=false default=true): members.Item",
                 "  fun <init> kind=MEMBER abstract=false modifiers=FINAL typeParameters= receiver=null (name: kotlin.String vararg=false default=false, tags: kotlin.Array<kotlin.String> vararg=false default=false): members.Item",
                 "  OBJECT members.Item.Companion modifiers= typeParameters= supertypes=kotlin.Any",
-                "    property LIMIT mutable=false modifiers=CONST: kotlin.Int",
+                "    property LIMIT mutable=false backingField=true modifiers=CONST: kotlin.Int",
                 "    fun empty kind=MEMBER abstract=false modifiers= typeParameters= receiver=null (): members.Item",
                 "    fun <init> kind=MEMBER abstract=false modifiers=FINAL,PUBLIC typeParameters= receiver=null (): members.Item.Companion",
             ]
@@ -760,10 +785,10 @@ mod tests {
             dumped(&round),
             [
                 "CLASS members.Packed modifiers= typeParameters= supertypes=kotlin.Any",
-                "  property words mutable=false modifiers=VARARG: kotlin.Array<out kotlin.String>",
+                "  property words mutable=false backingField=true modifiers=VARARG: kotlin.Array<out kotlin.String>",
                 "  fun <init> kind=MEMBER abstract=false modifiers=FINAL typeParameters= receiver=null (words: kotlin.String vararg=true default=false): members.Packed",
                 "CLASS members.Numbers modifiers= typeParameters= supertypes=kotlin.Any",
-                "  property ids mutable=false modifiers=VARARG: kotlin.IntArray",
+                "  property ids mutable=false backingField=true modifiers=VARARG: kotlin.IntArray",
                 "  fun <init> kind=MEMBER abstract=false modifiers=FINAL typeParameters= receiver=null (ids: kotlin.Int vararg=true default=false): members.Numbers",
                 "CLASS members.NativeApi modifiers= typeParameters= supertypes=kotlin.Any",
                 "  fun ping kind=MEMBER abstract=false modifiers=EXTERNAL typeParameters= receiver=null (): kotlin.Int",

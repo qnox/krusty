@@ -21,6 +21,9 @@ final class SourceType implements KSType {
     // The library type alias the type was named by, or null.
     LibraryTypeAlias alias;
     private final boolean nullable;
+    // Whether the type has no annotations: source spells it with no type-use annotation, or it is
+    // the classifier type a constructor returns.
+    private final boolean unannotated;
     final List<KSTypeArgument> arguments;
 
     SourceType(
@@ -28,11 +31,13 @@ final class SourceType implements KSType {
             String name,
             int parameter,
             boolean nullable,
+            boolean unannotated,
             List<KSTypeArgument> arguments) {
         this.symbols = symbols;
         this.name = name;
         this.parameter = parameter;
         this.nullable = nullable;
+        this.unannotated = unannotated;
         this.arguments = arguments;
     }
 
@@ -56,7 +61,10 @@ final class SourceType implements KSType {
 
     @Override
     public Sequence<KSAnnotation> getAnnotations() {
-        throw Nodes.notImplemented("KSType.annotations");
+        if (!unannotated) {
+            throw Nodes.notImplemented("KSType.annotations");
+        }
+        return Nodes.empty();
     }
 
     @Override
@@ -79,19 +87,24 @@ final class SourceType implements KSType {
         throw Nodes.notImplemented("KSType.replace");
     }
 
+    // KSP2 projects the classifier the type names, keeping the type's nullability; a type parameter
+    // or a type alias is not answered yet.
     @Override
     public KSType starProjection() {
-        throw Nodes.notImplemented("KSType.starProjection");
+        if (parameter >= 0 || alias != null) {
+            throw Nodes.notImplemented("KSType.starProjection");
+        }
+        return ClassType.starProjected(symbols.resolvedClass(name)).withNullability(nullable);
     }
 
     @Override
     public KSType makeNullable() {
-        return nullable ? this : new SourceType(symbols, name, parameter, true, arguments);
+        return nullable ? this : new SourceType(symbols, name, parameter, true, unannotated, arguments);
     }
 
     @Override
     public KSType makeNotNullable() {
-        return nullable ? new SourceType(symbols, name, parameter, false, arguments) : this;
+        return nullable ? new SourceType(symbols, name, parameter, false, unannotated, arguments) : this;
     }
 
     @Override
@@ -118,6 +131,13 @@ final class SourceType implements KSType {
     // nullability.
     @Override
     public boolean equals(Object other) {
+        if (other instanceof ClassType) {
+            ClassType that = (ClassType) other;
+            return parameter < 0
+                    && name.equals(that.getDeclaration().getQualifiedName().asString())
+                    && nullable == that.isMarkedNullable()
+                    && argumentKeys(arguments).equals(argumentKeys(that.getArguments()));
+        }
         if (!(other instanceof SourceType)) {
             return false;
         }
@@ -125,10 +145,11 @@ final class SourceType implements KSType {
         return name.equals(that.name)
                 && parameter == that.parameter
                 && nullable == that.nullable
-                && argumentKeys().equals(that.argumentKeys());
+                && argumentKeys(arguments).equals(argumentKeys(that.arguments));
     }
 
-    private List<Object> argumentKeys() {
+    // Each argument's variance and resolved type, a star's with none.
+    static List<Object> argumentKeys(List<? extends KSTypeArgument> arguments) {
         List<Object> keys = new ArrayList<>();
         for (KSTypeArgument argument : arguments) {
             keys.add(argument.getVariance());
@@ -139,7 +160,13 @@ final class SourceType implements KSType {
 
     @Override
     public int hashCode() {
-        return name.hashCode() * 31 + parameter;
+        return parameter < 0 ? classifierHash(name, nullable) : name.hashCode() * 31 + parameter;
+    }
+
+    // The hash of a type naming the classifier `qualifiedName`, whichever kind of type names it. As
+    // in KSP2, a nullable type hashes apart from its non-null form.
+    static int classifierHash(String qualifiedName, boolean nullable) {
+        return qualifiedName.hashCode() * 31 + (nullable ? 1 : -1);
     }
 
     // KSP's rendering: simple names, arguments in angle brackets, and `?` when nullable.

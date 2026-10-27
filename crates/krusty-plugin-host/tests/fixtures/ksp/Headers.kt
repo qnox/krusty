@@ -9,7 +9,7 @@ class HeadersProvider : SymbolProcessorProvider {
 
 /**
  * Logs each classifier's header: its modifiers, type parameters and supertypes, once. It lists a
- * class's declarations only to reach the classifiers nested in `Outer`.
+ * class's declarations only to reach the classifiers nested in `Outer` and `Holder`.
  */
 class HeadersProcessor(private val env: SymbolProcessorEnvironment) : SymbolProcessor {
     private var done = false
@@ -22,11 +22,87 @@ class HeadersProcessor(private val env: SymbolProcessorEnvironment) : SymbolProc
                 if (declaration is KSClassDeclaration) log(declaration)
             }
         }
-        val outer = resolver.getClassDeclarationByName(resolver.getKSNameFromString("headers.Outer"))!!
-        for (nested in outer.declarations) {
-            if (nested is KSClassDeclaration) log(nested)
+        for (name in listOf("headers.Outer", "headers.Holder")) {
+            val outer = resolver.getClassDeclarationByName(resolver.getKSNameFromString(name))!!
+            for (nested in outer.declarations) {
+                if (nested is KSClassDeclaration) log(nested)
+            }
+        }
+        // `Middle<*>` as `Middle` writes it in its `Comparable` supertype, against its star projection.
+        val middle = resolver.getClassDeclarationByName(resolver.getKSNameFromString("headers.Middle"))!!
+        val comparable = middle.superTypes.map { it.resolve() }.first { it.declaration.simpleName.asString() == "Comparable" }
+        val written = comparable.arguments.single().type!!.resolve()
+        val star = middle.asStarProjectedType()
+        env.logger.warn(
+            "written ${type(written)} equals star=${written == star} star equals written=${star == written}" +
+                " same hash=${written.hashCode() == star.hashCode()}",
+        )
+        assignability(resolver, resolver.getClassDeclarationByName(resolver.getKSNameFromString("headers.Outer"))!!)
+        for (file in resolver.getAllFiles()) {
+            for (declaration in file.declarations) {
+                if (declaration is KSClassDeclaration) projections(declaration)
+            }
         }
         return emptyList()
+    }
+
+    /**
+     * Logs `starProjection()` of each type a classifier names in its supertypes and type parameter
+     * bounds, of the nullable form of each, and of the classifier's own star-projected type.
+     */
+    private fun projections(declaration: KSClassDeclaration) {
+        val types = declaration.superTypes.map { it.resolve() }.toList() +
+            declaration.typeParameters.flatMap { parameter -> parameter.bounds.map { it.resolve() }.toList() } +
+            declaration.asStarProjectedType()
+        for (named in types) {
+            for (type in listOf(named, named.makeNullable())) {
+                val projected = type.starProjection()
+                val target = projected.declaration
+                val star = (target as? KSClassDeclaration)?.asStarProjectedType()
+                    ?.let { if (projected.isMarkedNullable) it.makeNullable() else it }
+                env.logger.warn(
+                    "projection ${declaration.simpleName.asString()} ${type(type)} -> ${type(projected)}" +
+                        " text=$projected nullable=${projected.isMarkedNullable}" +
+                        " arguments=" + projected.arguments.joinToString(", ", "[", "]") {
+                            "${it.variance} type=${it.type} origin=${it.origin} parent=${it.parent} text=$it"
+                        } +
+                        " equals star=${star?.let { projected == it }}" +
+                        " same=${projected == type}",
+                )
+            }
+        }
+    }
+
+    private val libraryNames = listOf(
+        "kotlin.Any", "kotlin.Nothing", "kotlin.Comparable", "java.io.Serializable", "kotlin.Enum",
+        "kotlin.Function0", "kotlin.Function", "kotlin.Annotation", "kotlin.CharSequence", "kotlin.String",
+    )
+
+    /**
+     * Logs, for each classifier's star-projected type and its nullable form, which of those types
+     * it is assignable from.
+     */
+    private fun assignability(resolver: Resolver, outer: KSClassDeclaration) {
+        val classes = mutableListOf<KSClassDeclaration>()
+        for (file in resolver.getAllFiles()) {
+            for (declaration in file.declarations) {
+                if (declaration is KSClassDeclaration) classes.add(declaration)
+            }
+        }
+        for (nested in outer.declarations) {
+            if (nested is KSClassDeclaration) classes.add(nested)
+        }
+        for (name in libraryNames) {
+            classes.add(resolver.getClassDeclarationByName(resolver.getKSNameFromString(name))!!)
+        }
+        val types = classes.flatMap {
+            val star = it.asStarProjectedType()
+            listOf(star, star.makeNullable())
+        }
+        for (receiver in types) {
+            val assignable = types.filter { receiver.isAssignableFrom(it) }.map { type(it) }
+            env.logger.warn("assignable ${type(receiver)} <- ${assignable.joinToString(", ")}")
+        }
     }
 
     private fun type(reference: KSTypeReference): String = type(reference.resolve())
@@ -72,6 +148,11 @@ class HeadersProcessor(private val env: SymbolProcessorEnvironment) : SymbolProc
                 .append(" bounds=").append(parameter.bounds.map { type(it) }.joinToString(" & "))
         }
         out.append("] supertypes=").append(declaration.superTypes.map { type(it) }.joinToString(", "))
+        val star = declaration.asStarProjectedType()
+        out.append(" star=").append(type(star)).append(" starText=").append(star.toString())
+            .append(" starArguments=").append(star.arguments.joinToString(", ", "[", "]") {
+                "${it.variance} type=${it.type} origin=${it.origin} parent=${it.parent} text=$it"
+            })
         env.logger.warn(out.toString())
     }
 }

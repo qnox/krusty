@@ -20,6 +20,32 @@ and provider normalization retain that fact independently of target normalizatio
 still needs the separate identity-keyed declaration-name lookup; alias semantic keys are not
 descriptor payloads and an expansion target's owner never substitutes for the alias's own owner.
 
+## Source inventory publication
+
+Compact source headers publish classifier identities from explicit declaration ownership and exact
+segments rather than splitting lookup names on dots and dollars. This avoids creating undeclared
+prefix identities before later consumers run. Metadata class-ID encoding still needs its separate
+snapshot ownership lookup; publication alone does not supply authoritative negative nesting facts
+for every cached or cross-module identity.
+
+## JVM member-class rows
+
+The JVM attribute writer now consumes retained non-local ownership and exact declaration segments
+for member rows, including names with literal dollars. The cross-file module resolver preserves
+the current declaration's precedence over classpath rows. Local and anonymous implementation rows
+retain their existing provenance. This changes no Kotlin metadata class-ID encoding; aliases and
+builtin ownership evidence belong to the remaining metadata handoff.
+
+## Builtin declaration-name evidence
+
+Capture raw builtin Class names before name-tree normalization, so a literal dollar remains
+distinct from the metadata's classifier separator. The selected builtin signature carries its
+own declaration identity and name; a mapped physical class does not supply that semantic owner.
+Exact physical classifiers retain their own classfile/Kotlin metadata authority. Compiler-owned
+function, array, reflection and JVM Cloneable factories publish names from their existing
+declaration definitions. These facts are input to the later metadata name consumer; this producer
+change does not itself repair the retained complete-classfile literal-dollar regression.
+
 ## Declaration-name evidence
 
 Kotlin metadata class IDs delimit the package with `/` and lexical classifier ownership with `.`;
@@ -42,6 +68,14 @@ uses the same marked edge to distinguish declaration carriers from generic boxes
 nullable-to-nonnull coercion retains that declaration boundary. Source metadata types continue
 to describe the selected declaration independently of this JVM representation decision.
 
+## Source and optional-annotation projection
+
+The source index already owns each classifier's optional declaration name; its provider projection
+copies that fact without reinterpretation. A `.kotlin_module` optional-annotation class supplies a
+raw qualified class name even though no physical classfile exists. Retain its package/owner and
+exact segment before name-tree normalization, then publish that fact with the annotation shape.
+This preserves literal-dollar and nested names across separate metadata snapshots.
+
 ## Serialization constructor handoff
 
 The serialization constructor's `named_params` retain nullable reference elements and the nullable
@@ -63,6 +97,21 @@ Kotlin class metadata supplies own formals and bounds. A mapped builtin declarat
 semantic layout when applicable; Java class signatures supply the remaining declarations. Captured
 class formals come from non-static `InnerClasses` outer edges, with bound hydration before own-first
 capture/shadow renaming. Local or anonymous entries without an outer are not member capture edges.
+
+Inferred exposed anonymous results are approximated before their declaration signatures enter
+metadata. Their authenticated own/captured application supplies the declared parent and bounds;
+ordinary written stars retain their declaration meaning. Function parents keep the complete
+semantic function shape. Private factory and lambda implementation signatures remain exact rather
+than being rewritten to match the exposed declaration's denotable result.
+The retained body view removes solver-local callee parameters through the same lexical formal set;
+ordinary result denotability does not introduce a separate checking context.
+Parent templates are the same alias-expanded compact facts later published in classifier headers;
+metadata and anonymous exposure do not reconstruct arguments from transitional collector shapes.
+
+Complete anonymous-class metadata parity remains tracked by #2653 (own versus lexical-capture
+applications) and #2654 (package-local classifier facts and raw payloads). Their unchanged complete
+fixture oracles remain attached to those issues; ABI publication checks do not establish metadata
+payload parity.
 
 Layout reads use class headers and builtin declaration tables, not the enclosing `LibraryType` or
 its members. Physical mapped Java requests keep invariant formals independently of a Kotlin view's
@@ -302,10 +351,11 @@ Reverse-engineered from kotlinc for `class Point(val x: Int, var y: String)` (se
   (f100) interns its `d2` strings BEFORE the annotations, while the annotation field serializes first
   (ascending field number). An annotated `suspend fun f(a: Int)` therefore lands
   `…, "a", "(ILkotlin/coroutines/Continuation;)Ljava/lang/Object;", "Lp/Mark;"` in `d2`.
-- The PRIMARY constructor's flags word is the one case where `| HAS_ANNOTATIONS` is not enough.
-  `Constructor.flags` has proto default 6 (visibility PUBLIC) and is omitted at that value, so krusty
-  carries a public primary ctor as 0; the bit forces the field out, and the default has to be
-  materialized on the way (0 → 6 → 7). `class C @Mark constructor(val x: Int)` in kotlinc 2.4.10:
+- The PRIMARY constructor's flags word is written whenever it differs from the proto default 6
+  (visibility PUBLIC). krusty carries the real word (6 for a public primary ctor) and omits it only
+  at 6, so the bit takes a public ctor to an explicit 7, and an `internal constructor`, whose
+  visibility bits are 0, is written as an explicit 0 (1 with annotations), as kotlinc writes it.
+  `class C @Mark constructor(val x: Int)` in kotlinc 2.4.10:
   `08 07 | 12 06 …value parameter… | 1a 02 08 06 (Constructor.annotation, d2[6] = "Lp/Mark;") |
   a2 06 04 …constructorSignature…`, with `Lp/Mark;` interned between `"(I)V"` and `"getX"`. A
   secondary ctor never hits this — its 22 is already explicit, so 22 → 23 is a plain OR.

@@ -334,3 +334,68 @@ fun box(): String = delegated(7).toString()
     );
     assert_same_class("DelegateCapture", source, "DelegateCaptureKt$delegated$D");
 }
+
+/// An interface delegate expression (`: I by expr`) runs in the constructor: a capture only it
+/// reads comes from the parameter, and only `$$delegate_0` is stored.
+#[test]
+fn a_capture_read_only_by_an_interface_delegate_gets_no_field() {
+    let source = "\
+interface Value {
+    fun value(): Int
+}
+
+fun valueOf(a: Int): Value = object : Value {
+    override fun value() = a
+}
+
+fun delegating(a: Int): Int {
+    class D : Value by valueOf(a)
+    return D().value()
+}
+
+fun box(): String = delegating(8).toString()
+";
+    assert_eq!(
+        common::expect_box_run_with_stdlib(source, "InterfaceDelegateCapture"),
+        "8"
+    );
+    assert_same_class(
+        "InterfaceDelegateCapture",
+        source,
+        "InterfaceDelegateCaptureKt$delegating$D",
+    );
+}
+
+/// The delegate expressions run before the body's initializers, so their captures are the first
+/// constructor parameters: `E(b, a, c)`, with fields only for the method's `b` and `c`.
+#[test]
+fn interface_delegate_captures_come_before_initializer_captures() {
+    let source = "\
+interface Value {
+    fun value(): Int
+}
+
+fun valueOf(a: Int): Value = object : Value {
+    override fun value() = a
+}
+
+fun mixed(a: Int, b: Int, c: Int): Int {
+    class E : Value by valueOf(b) {
+        val x = a
+        fun y() = c + b
+    }
+    return E().value() + E().x + E().y()
+}
+
+fun box(): String = mixed(1, 2, 3).toString()
+";
+    assert_eq!(
+        common::expect_box_run_with_stdlib(source, "InterfaceDelegateOrder"),
+        "8"
+    );
+    assert_same_class(
+        "InterfaceDelegateOrder",
+        source,
+        "InterfaceDelegateOrderKt$mixed$E",
+    );
+}

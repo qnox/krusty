@@ -106,8 +106,14 @@ mod inline_return_bound_context_e2e;
 mod inline_sam_wrapper_copy_e2e;
 #[path = "../inline_same_module_bytes_e2e.rs"]
 mod inline_same_module_bytes_e2e;
+#[path = "../inline_same_module_internal_bodies_e2e.rs"]
+mod inline_same_module_internal_bodies_e2e;
+#[path = "../inline_same_module_lambda_bodies_e2e.rs"]
+mod inline_same_module_lambda_bodies_e2e;
 #[path = "../inline_same_module_members_e2e.rs"]
 mod inline_same_module_members_e2e;
+#[path = "../inline_same_module_non_local_jumps_e2e.rs"]
+mod inline_same_module_non_local_jumps_e2e;
 #[path = "../inline_scope_function_bytes_e2e.rs"]
 mod inline_scope_function_bytes_e2e;
 #[path = "../inline_splice_e2e.rs"]

@@ -89,7 +89,7 @@ final class HostResolver implements Resolver {
 
     @Override
     public KSBuiltIns getBuiltIns() {
-        throw Nodes.notImplemented("Resolver.builtIns");
+        return new BuiltIns(symbols);
     }
 
     @Override

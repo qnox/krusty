@@ -4,7 +4,8 @@
 //! delegation and defaults, the superclass constructor arguments, and the primary constructor's
 //! default expressions (evaluated in the synthetic `$default` `<init>`) are separate roots. Each
 //! runs over its constructor's parameters (slot 0 = `this`, parameters at 1..) plus the locals it
-//! declares. Their slot types are captured before expression erasure, since afterwards a local
+//! declares. A companion's initializer that the outer class's `<clinit>` runs is still that
+//! companion's constructor code, now over no parameters at all. Their slot types are captured before expression erasure, since afterwards a local
 //! `val tmp: Money` reads as its carrier and hides the box a generic slot needs.
 
 use super::collect_reachable;
@@ -43,6 +44,8 @@ pub(super) struct ConstructorSlots {
     secondary: Vec<Vec<SlotTypes>>,
     super_args: Vec<SlotTypes>,
     primary_defaults: Vec<Vec<(ExprId, SlotTypes)>>,
+    /// The companion initializer each class's `<clinit>` runs, with the locals it declares.
+    companion_initializer: Vec<Option<(ExprId, SlotTypes)>>,
 }
 
 impl ConstructorSlots {
@@ -89,6 +92,13 @@ impl ConstructorSlots {
                         .chain(&declaration.super_args)
                         .copied();
                     slot_map(exprs, roots, &primary[class])
+                })
+                .collect(),
+            companion_initializer: classes
+                .clone()
+                .map(|(_, declaration)| {
+                    ir.companion_clinit_body(declaration.fq_name)
+                        .map(|root| (root, slot_map(exprs, [root], &[])))
                 })
                 .collect(),
             primary_defaults: classes
@@ -163,6 +173,7 @@ impl ConstructorSlots {
             out.extend(roots.map(|root| (root, slots.clone())));
         }
         out.extend(self.primary_defaults[class].iter().cloned());
+        out.extend(self.companion_initializer[class].iter().cloned());
         let super_roots = declaration
             .super_arg_prelude
             .iter()

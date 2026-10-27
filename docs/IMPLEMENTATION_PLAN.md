@@ -15,6 +15,29 @@ metadata/classpath records. Keep existing alias identities, expansion templates,
 normalization and spelling sidecars intact. Metadata class-ID consumers and builtin declaration
 names remain separate prerequisites; this producer handoff does not repair their output by itself.
 
+## Source classifier inventory identities
+
+Replace lookup-spelling splitting in the foreign-source classifier inventory with the existing
+declaration-owned name operation. Preserve exact segments, owner edges, visibility, order and
+non-local exclusions without interning undeclared prefixes. This producer correction is separate
+from the remaining metadata class-ID encoder and dependency/alias-name fact handoff.
+
+## JVM declaration-owned member rows
+
+Consume classifier declaration-name facts in both per-file `InnerClasses` candidates and the
+cross-file module resolver. Keep top-level and unavailable module records from being replaced by
+a classpath record with the same physical identity. Preserve local/coroutine/reference provenance
+and exact table order. This slice leaves source identity publication and metadata class-ID encoding
+for subsequent changes; the complete literal-dollar classfile regression remains open there.
+
+## Builtin declaration-name producers
+
+Populate the existing declaration-name fact from admitted core/function/array factories and raw
+`.kotlin_builtins` declarations. Carry the selected builtin identity alongside its name through
+signature and classless/mapped shape publication; retain exact physical declaration authority.
+Reuse the current inventories and mappings. Metadata name lookup/encoding, source classifier
+projection and optional-annotation name retention remain separate follow-ups.
+
 ## Classifier declaration-name handoff
 
 Retain an optional declaration-owned package/owner and exact segment across source bootstrap,
@@ -38,6 +61,12 @@ Phased, each phase ends in a **green `cargo test`** and a runnable artifact. The
 front-to-back so the streaming/arena shape is real from the start, then widened.
 
 Legend: ✅ done · 🚧 in progress · ⬜ todo
+
+## Preserve classifier name evidence at projection boundaries
+
+Copy source header declaration names into finalized module provider shapes. Retain optional
+annotation names from decoded module metadata until annotation shape publication. These close two
+producer omissions; the metadata name inventory/query and class-ID consumers remain separate work.
 
 ## Anonymous construction argument scope
 
@@ -4949,6 +4978,14 @@ code is the one the code generator already names: provider-owned bodies through 
   not declared from their headers: a constructor call needs its class's layout and initializers,
   not only a callable header. Next: member calls with their dispatch form and the fake-override
   walk, callee parameter defaults, inlined function blocks, then constructors.
+- **Lowering: range-literal membership.** `v in a..b`/`v !in a..b` over a builtin scalar range
+  construction lowers as the source membership comparison (`klib_lowering/range_membership.rs`
+  owns the serialized form, read by both dependency preparation and body lowering), and a
+  standalone range construction is the checked construction of its provider role. Native's
+  `intToString`/`longToString` externals are realized by the runtime (`RadixToString`).
+  kotlin-test's assertions and `kotlin.text.trim` still decline inside their library bodies
+  (`Asserter` interface dispatch, accessor calls); the generic fix is compiling those member
+  bodies, not intercepting the calls. Next: final library member bodies as ordinary roots.
 - Tests: the unit tests in `metadata/klib_ir/tree_decoding.rs`, `metadata/id_signature/` and
   `klib_lowering/` (whose stdlib checks run when `KRUSTY_KOTLIN_NATIVE` is set). End-to-end coverage comes through
   the box harness rather than a separate KLIB suite: the Native lane gains the `// MODULE:`
@@ -5593,9 +5630,26 @@ regress.
     properties read through their getter in an inline body, and unread delegated-property operands
     passed as `null`: 19 more box files are byte-identical on 2.4.20 (3,832 to 3,851), none
     regresses.
-    ☐ `$default` calls, non-public callees of another file, suspend callers and callees,
-    `crossinline` parameters, literals with non-local jumps, calls in default arguments, and callee
-    bodies with lambdas, local classes or enum switches.
+    ✓ Callee bodies with lambdas (`LambdaInBody`): the classes a callee declares compiled with it
+    (another file's under that file's identity, read but not written), reused at a same-module
+    call unless the call specializes them, `needClassReification` at the instance load instead of
+    the class initializer, objects regenerated in inline functions under their own names, and
+    a reified `when` branch of the join's own class cast again; a copy regenerates the objects its
+    methods name, specializes a suspend lambda and every type argument, and drops its initializer's
+    marker: 6 more box files are byte-identical on 2.4.21 (4,025 to 4,031) and none regresses.
+    ✓ Non-public callees of another file (`NonPublicCallee`): the body reaches its file's private
+    functions through its class's accessors, and another file's internal member template takes
+    its module-mangled JVM name for the frame marker: 17 more box files are byte-identical on
+    2.4.21 (4,031 to 4,048) and none regresses.
+    ✓ Literals with non-local jumps (`NonLocalJumpInLambda`): a lambda that returns from its caller
+    or breaks or continues a loop around the call is inlined from the compiled body through the
+    MethodInliner port's marked returns, and a `tailrec` self-call returned from such a lambda
+    still loops (the sweep enters the lambda's template in the lambda's frame): 5 more box files
+    are byte-identical on 2.4.21 (the four `inlinedBreakContinue` shapes and
+    `secondaryConstructors/withNonLocalReturn`), none regresses, and all 7,184 applicable files
+    run.
+    ☐ `$default` calls, suspend callers and callees, `crossinline` parameters, calls in default
+    arguments, and callee bodies with local classes or enum switches.
 - ☐ 7. Delete `InlineBodyPlan` and its resolver/FIR threading once the coroutine state machine runs
   on inlined bytecode (the plans exist only to reach IR before `lower_suspend`).
 
@@ -6017,6 +6071,18 @@ direct source construction, inheritance, secondary/default/vararg/generic constr
 accessor/member dispatch remain required follow-ups. The first slice explicitly declines identity
 collisions before backend emission. It does not close #2621 or change any outcome baseline.
 
+## Anonymous declaration result publication
+
+Anonymous factory results retain exact checked applications until declaration publication. The
+publication owner authenticates anonymous declarations and complete own/captured arguments, applies
+declared bounds and parent/function shapes, and follows generic/function variance. Compact headers
+retain declaration-name spans for exact ambiguous-parent diagnostics. Private and local-member
+results remain exact; shared outcomes and operand ABI ownership are unchanged.
+Canonical compact parent templates, including alias arguments, are computed once before signature
+inference and shared with classifier publication; parent diagnostics retain their publication order.
+Complete anonymous metadata parity stays in #2653/#2654 with its full retained fixture oracles.
+Parameterized alias superclass constructor argument inference remains a separate repair in #2655.
+
 ## Enclosing formal field signatures
 
 JVM field and property-accessor signature formatting consumes retained enclosing-method formals
@@ -6043,6 +6109,13 @@ checked argument types nor callable selection are rewritten to obtain a JVM cast
 reference controls cover source dependent bounds and independently bounded dependency slots,
 with width, Object, exact-wrapper and runtime controls. The dependency inner-constructor frontend
 prerequisite landed in #2593; its declaration normalization remains separate from this representation fix (#2590).
+
+## Callable applicability ownership
+
+Syntax-aware callable applicability lives in `resolve/call_applicability`: source argument slots,
+candidate ranks and selected SAM adaptations share one operation across the existing call paths.
+The resolver facade delegates to that owner, preserving parameter mapping and scoring policy.
+Captured input constraints remain tracked separately in #2648 and #2649.
 
 ## Direct projected input diagnostics
 

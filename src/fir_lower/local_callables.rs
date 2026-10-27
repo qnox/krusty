@@ -322,11 +322,14 @@ impl BodyLowering<'_> {
                     array_type,
                     elements,
                     spreads,
-                } => Some(self.ir.add_expr(IrExpr::Vararg {
+                    source_line,
+                } => Some(super::checked_arguments::vararg_value(
+                    self.ir,
                     array_type,
                     elements,
                     spreads,
-                })),
+                    source_line,
+                )),
                 CheckedArgumentSlot::Default(_) | CheckedArgumentSlot::Missing => None,
             })
             .collect::<Vec<_>>();
@@ -719,6 +722,7 @@ impl BodyLowering<'_> {
                         parameter,
                         array_type,
                         elements,
+                        source_line: 0,
                     }
                 }
             });

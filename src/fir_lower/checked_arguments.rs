@@ -20,7 +20,29 @@ pub(super) enum CheckedArgumentSlot {
         array_type: Ty,
         elements: Vec<ExprId>,
         spreads: Vec<bool>,
+        /// Where the argument begins: the first fragment's first element. `0` when generated.
+        source_line: u32,
     },
+}
+
+/// The array value of a grouped vararg argument. It carries the line the argument begins on, as
+/// kotlinc's `IrVararg` does, so the backend can attribute the array it builds to that line.
+pub(super) fn vararg_value(
+    ir: &mut crate::ir::IrFile,
+    array_type: Ty,
+    elements: Vec<ExprId>,
+    spreads: Vec<bool>,
+    source_line: u32,
+) -> ExprId {
+    let value = ir.add_expr(crate::ir::IrExpr::Vararg {
+        array_type,
+        spreads,
+        elements,
+    });
+    if source_line != 0 {
+        ir.expr_source_lines.insert(value, source_line);
+    }
+    value
 }
 
 /// Lay checked arguments into semantic parameter slots while visiting values in source order.
@@ -65,6 +87,7 @@ pub(super) fn materialize_checked_arguments(
             IrCheckedArgument::Vararg {
                 array_type,
                 elements,
+                source_line,
                 ..
             } => {
                 if matches!(current, CheckedArgumentSlot::Missing) {
@@ -72,12 +95,14 @@ pub(super) fn materialize_checked_arguments(
                         array_type: *array_type,
                         elements: Vec::new(),
                         spreads: Vec::new(),
+                        source_line: *source_line,
                     };
                 }
                 let CheckedArgumentSlot::Vararg {
                     array_type: grouped_type,
                     elements: grouped_elements,
                     spreads,
+                    ..
                 } = current
                 else {
                     return None;
