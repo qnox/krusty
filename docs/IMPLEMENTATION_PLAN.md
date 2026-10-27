@@ -9,6 +9,20 @@ retaining exact fixed-type and callable-substitution validation. Exercise the ex
 export path with one portable multimodule fixture and JVM-first Native validation. Backing-field
 getter materialization remains a subsequent consumer of this signature boundary.
 
+## Wasm generic numeric call edges
+
+Realize declared type-parameter slots applied as Int or Long with separate full-width GC payloads
+and the ordinary object/table prefix. Adapt only authenticated dependency arguments and results;
+evaluate each operand under its existing conversion rules. Typed reference null assertions are a
+prerequisite. Boxed Any operations and additional scalar kinds remain separate follow-ups.
+
+## Wasm reference assertion exceptions
+
+Authenticate NullPointerException storage through the existing platform exception declaration
+normalizer and metadata parent chain. Failed reference assertions construct that exact class and
+throw through the shared Kotlin tag. Keep scalar-reference conversion outside this change; the
+generic numeric dependency ABI will consume this exception prerequisite separately.
+
 ## Bound declaration-name inventory
 
 Expose selected declaration-name evidence by typed resolved key across source, JVM, KLIB and their

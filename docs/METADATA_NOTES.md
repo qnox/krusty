@@ -10,6 +10,20 @@ inherited receiver. The common dependency-signature boundary consumes those type
 class-dependent slots while authenticating fixed types and callable type-argument records.
 This preserves one declared ABI for distinct Int, String, Long and nullable applications.
 
+## Numeric dependency slot representation
+
+Wasm keeps the emitted generic function's declared parameter/result types beside its exact export
+identity. The checked application selects Int or Long for a declared formal, authorizing the
+corresponding ABI adapter without reconstructing substitutions from receiver or operand types.
+Each box retains the AnyTable prefix, a nullable interface-table slot, and its full signed payload.
+
+## Null-pointer exception storage
+
+The platform NullPointerException declaration carries the existing runtime-exception storage role.
+Its metadata owns its superclass; a same-named foreign declaration or one with additional state
+receives no role. Wasm reference assertions use the authenticated hierarchy and base Throwable
+message/cause fields rather than manufacturing an untyped exception object.
+
 ## Identity-keyed declaration-name projection
 
 Providers project name evidence directly from their selected classifier and alias records. Typed

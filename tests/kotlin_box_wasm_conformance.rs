@@ -592,6 +592,39 @@ fn expect_wasm_decline(src: &str, stem: &str, reason: &str) {
     }
 }
 
+// PLATFORM-SPECIFIC: dependency ABI adapters must not change nested source-call conversions.
+#[test]
+fn wasm_numeric_dependency_adapters_do_not_enter_source_argument_calls() {
+    let src = r#"
+// MODULE: lib
+fun <T> dependencyKeep(value: T): T = value
+// MODULE: main(lib)
+fun sourceAny(value: Any): Any = value
+fun box(): String { dependencyKeep(sourceAny(42)); return "OK" }
+"#;
+    super::box_reference_classes::checked_box(src, "numericDependencyNestedSource")
+        .expect("the exact Kotlin compiler must run the nested source-call fixture");
+    let modules = krusty::conformance::split_modules(src).expect("valid module fixture");
+    let units = krusty::conformance::module_units(&modules);
+    for target in WasmTarget::ALL {
+        let lane = WasmLane { target };
+        if !focused_wasm_lane_available(&lane, "numericDependencyNestedSource") {
+            return;
+        }
+        assert_eq!(
+            lane.compile_modules_and_run(
+                &std::env::temp_dir(),
+                "numericDependencyNestedSource",
+                &units,
+                src,
+            ),
+            Outcome::Declined("a coercion to `kotlin.Any`".to_owned()),
+            "nested source argument on {}",
+            target.name(),
+        );
+    }
+}
+
 // PLATFORM-SPECIFIC: a reference assertion cannot implement nullable scalar unboxing.
 fn expect_reference_assertion_box(src: &str, stem: &str) {
     let jdk = super::common::jdk_modules();

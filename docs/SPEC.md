@@ -13,6 +13,25 @@ class substitutions from receiver types or argument values. The shared
 inherited final methods, zero-argument results, separate class/method formals, and inner classes
 with captured-only or own-and-captured declaration parameters.
 
+## Wasm numeric dependency ABI
+
+An authenticated generic dependency slot applied as non-null Int or Long crosses the exported
+reference ABI through a distinct full-width numeric box. The checked application owns the scalar
+type; the retained export owns the declared slot. Argument and result adapters stay at that call
+edge. Operand subexpressions and source casts retain their own conversion rules.
+`genericNumericExtremes.kt` checks signed limits and reordered named arguments;
+`genericDependencyNullBoundaries.kt` checks nullable generic arguments and catchable null failures.
+The existing `genericDependencyAbi.kt` covers source and serialized extension receiver positions
+and evaluation counts. Reference null failures use the separate typed assertion implementation.
+
+## Wasm reference not-null assertions
+
+A failed reference `!!` throws the platform declaration's `NullPointerException` through the
+Kotlin exception tag. Its message and cause are null. The assertion evaluates its input once and
+preserves the input's reference carrier on success, including String's distinct heap type.
+`referenceNotNullException.kt` checks nullable String and hidden nullable generic locals against
+the JVM reference and every backend. Nullable scalar unboxing remains separately unsupported.
+
 ## Bound declaration-name evidence
 
 A query for an already-bound classifier or alias key projects the selected declaration's own
