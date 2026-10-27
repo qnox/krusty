@@ -182,6 +182,9 @@ pub struct BackendModuleFacts {
     file_annotations: HashMap<crate::fir::SourceFileId, Box<[crate::types::ResolvedAnnotation]>>,
     /// The dispatch shape of every named class, for a target that numbers slots itself.
     classes: super::class_tables::module_classes::ModuleClasses,
+    /// The superclass and instance functions of every named source classifier, whichever file
+    /// declares it: exactly the classifiers of [`Self::classifiers`].
+    source_class_members: HashMap<TypeName, super::source_class_members::SourceClassMembers>,
     /// Each dependency classifier the module's own classes stand behind, with the file of every
     /// source class that can be an instance of it, body-local ones included.
     dependency_implementors: HashMap<TypeName, Box<[crate::fir::SourceFileId]>>,
@@ -223,6 +226,7 @@ impl BackendModuleFacts {
         let mut source_declarations = HashMap::default();
         let mut generated_classifiers = Vec::new();
         let mut source_supertypes = HashMap::default();
+        let mut source_class_members = HashMap::default();
         let mut actualized_expects = HashMap::default();
         let mut actualized_nested_expects = HashMap::default();
         for raw in 0..index.declaration_count() {
@@ -436,6 +440,16 @@ impl BackendModuleFacts {
                 inherited_defaults
                     .insert(classifier.classifier, defaults.to_vec().into_boxed_slice());
             }
+            source_class_members.insert(
+                classifier.classifier,
+                super::source_class_members::from_resolved_index(
+                    index,
+                    declaration,
+                    classifier
+                        .superclass
+                        .and_then(|superclass| superclass.get().non_null().obj_internal()),
+                ),
+            );
             classifiers.insert(classifier.classifier, Arc::new(fact));
         }
         Ok(Self {
@@ -454,6 +468,7 @@ impl BackendModuleFacts {
                 .map(|(source, applications)| (source, Box::from(applications)))
                 .collect(),
             classes: Default::default(),
+            source_class_members,
             dependency_implementors: dependency_implementors(&source_supertypes),
             actualized_expects,
             actualized_nested_expects,
@@ -493,6 +508,7 @@ impl BackendModuleFacts {
             source_declarations: HashMap::default(),
             file_annotations: HashMap::default(),
             classes: Default::default(),
+            source_class_members: HashMap::default(),
             dependency_implementors: HashMap::default(),
             actualized_expects: HashMap::default(),
             actualized_nested_expects: HashMap::default(),
@@ -541,6 +557,15 @@ impl BackendModuleFacts {
     /// The dispatch shape of every named class of the module, when the target asked for it.
     pub(crate) fn classes(&self) -> &super::class_tables::module_classes::ModuleClasses {
         &self.classes
+    }
+
+    /// What the named source classifier `classifier` declares for its subclasses, whichever file
+    /// of the module declares it; `None` for a body-local or dependency classifier.
+    pub fn source_class_members(
+        &self,
+        classifier: TypeName,
+    ) -> Option<&super::source_class_members::SourceClassMembers> {
+        self.source_class_members.get(&classifier)
     }
 
     pub fn source_value_classes(&self) -> &HashMap<TypeName, Ty> {
