@@ -231,6 +231,39 @@ fn an_objects_own_outer_instance_is_renamed_beside_a_lambdas_captured_one() {
     common::expect_box_same_as_kotlinc(OWN_OUTER_INSTANCE, "OwnOuterInstance");
 }
 
+// The same object, declaring both the renamed outer instance's name and its first numbered
+// candidate as fields of the outer instance's type. kotlinc numbers the rename by how many fields
+// share the base name and declares `this$0$inline_fun$1` twice with one descriptor, a class the JVM
+// refuses (`ClassFormatError: Duplicate field name`); the copy here skips every name the class
+// holds and takes `this$0$inline_fun$2`.
+const OWN_OUTER_INSTANCE_NAME_TAKEN: &str = r#"class A(val s: String) {
+    inline fun wrap(crossinline f: () -> String): () -> String = object : () -> String {
+        val `this$0$inline_fun`: A = A("I")
+        val `this$0$inline_fun$1`: A = A("J")
+        override fun invoke() = s + f() + `this$0$inline_fun`.s + `this$0$inline_fun$1`.s
+    }
+
+    fun go(): String = wrap { s + "K" }()
+}
+
+class B(val t: String) {
+    fun go(a: A): String = a.wrap { t }()
+}
+
+fun box(): String {
+    val same = A("O").go()
+    if (same != "OOKIJ") return "same type $same"
+    val other = B("K").go(A("O"))
+    if (other != "OKIJ") return "other type $other"
+    return "OK"
+}
+"#;
+
+#[test]
+fn a_renamed_outer_instance_skips_every_field_name_the_object_declares() {
+    common::expect_box_ok_with_stdlib(OWN_OUTER_INSTANCE_NAME_TAKEN, "OwnOuterInstanceNameTaken");
+}
+
 // `filter`'s compiled body hands `predicate` to the suspend literal it passes to `source`, which
 // this compiler materializes rather than inlining into the object it regenerates. Which lowering
 // the call takes is decided from that body before anything is inlined
