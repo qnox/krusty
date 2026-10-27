@@ -341,6 +341,14 @@ fn assignable_inner(cx: &TyCtx, oracle: &dyn TypeOracle, sub: Ty, sup: Ty) -> bo
     }
 
     match (sub.kind(), sup.kind()) {
+        // A nominal function value reaches the declared FunctionN/SuspendFunctionN application
+        // of the requested signature through the same applied hierarchy and variance relation.
+        (TyKind::Obj(_, _), TyKind::Fun(_)) => obj_assignable(
+            cx,
+            oracle,
+            sub,
+            crate::libraries::function_classifiers::supertype_classifier(sup),
+        ),
         (TyKind::Fun(a), TyKind::Fun(b)) => {
             a.params.len() == b.params.len()
                 // A `suspend` function is never a regular one: nothing converts that way.
