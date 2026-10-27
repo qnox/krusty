@@ -301,6 +301,15 @@ mod tests {
         entry: Entry,
         sources: &[&str],
     ) -> (Vec<Artifact>, Vec<String>) {
+        compile_program_with_provider(target, entry, sources, Box::new(EmptySymbolSource))
+    }
+
+    fn compile_program_with_provider(
+        target: WasmTarget,
+        entry: Entry,
+        sources: &[&str],
+        provider: Box<dyn crate::libraries::SemanticPlatform>,
+    ) -> (Vec<Artifact>, Vec<String>) {
         let stems = (0..sources.len())
             .map(|ordinal| match ordinal {
                 0 => "Main".to_string(),
@@ -317,7 +326,7 @@ mod tests {
             &inputs,
             crate::frontend::PlatformProvider::new(
                 crate::compiler::Backend::compilation_target(&WasmBackend::new(target)),
-                Box::new(EmptySymbolSource),
+                provider,
             ),
             &crate::features::LangFeatures::new(),
             &mut diags,
@@ -527,16 +536,29 @@ mod tests {
 
     #[test]
     fn nothing_member_property_getter_has_no_wasm_result() {
+        use crate::klib_libraries::{KlibLibraries, KlibLibraryInput, KlibStdlibSemantics};
+
         for target in WasmTarget::ALL {
-            let (outputs, diagnostics) = compile(
+            let path = crate::toolchain::kotlin_stdlib_klib(
+                crate::backend::Backend::compilation_target(&WasmBackend::new(target)),
+            )
+            .expect("the exact target stdlib must be provisioned");
+            let libraries = KlibLibraries::open(&[KlibLibraryInput::platform_stdlib(
+                path,
+                KlibStdlibSemantics::Wasm,
+            )])
+            .unwrap();
+            let (outputs, diagnostics) = compile_program_with_provider(
                 target,
-                "var flag = true\n\
+                Entry::Box,
+                &["var flag = true\n\
                  object Test { val magic: Nothing get() = null!! }\n\
                  fun box(): String {\n\
                  \x20   val answer: String\n\
                  \x20   if (flag) answer = \"OK\" else Test.magic\n\
                  \x20   return answer\n\
-                 }",
+                 }"],
+                Box::new(libraries),
             );
             assert_eq!(diagnostics, Vec::<String>::new());
             assert_eq!(outputs.len(), 2);
