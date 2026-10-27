@@ -200,6 +200,7 @@ impl Checker<'_> {
             unsafe_variance: false,
             parameter_name: None,
             flexible_upper_bound: None,
+            mutability_upper_bound: None,
             enhanced_nullability: false,
             actualized_expect: false,
         }

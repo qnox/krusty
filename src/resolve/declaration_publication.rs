@@ -292,6 +292,7 @@ impl FlexibleValue {
         match ty.kind() {
             TyKind::Nullable(inner)
             | TyKind::PlatformNullable(inner)
+            | TyKind::MutabilityFlexible(inner)
             | TyKind::DefinitelyNotNull(inner)
             | TyKind::InProjection(inner)
             | TyKind::OutProjection(inner)
@@ -340,7 +341,8 @@ impl FlexibleValue {
             TyKind::Nullable(inner) | TyKind::DefinitelyNotNull(inner) => {
                 Self::semantic(inner, upper_bound).without_head()
             }
-            TyKind::InProjection(inner)
+            TyKind::MutabilityFlexible(inner)
+            | TyKind::InProjection(inner)
             | TyKind::OutProjection(inner)
             | TyKind::StarProjection(inner) => Self::semantic(inner, upper_bound),
             TyKind::Obj(owner, arguments) => FlexibleValue {
@@ -399,6 +401,11 @@ impl FlexibleValue {
                 (declared, selected)
             }
             (TyKind::PlatformNullable(declared), _) => (declared, selected),
+            // Mutability flexibility is the declaration's head; its classifier pairs as is.
+            (TyKind::MutabilityFlexible(declared), TyKind::MutabilityFlexible(selected)) => {
+                (declared, selected)
+            }
+            (TyKind::MutabilityFlexible(declared), _) => (declared, selected),
             (TyKind::Nullable(declared), TyKind::Nullable(selected))
             | (TyKind::DefinitelyNotNull(declared), TyKind::DefinitelyNotNull(selected))
             | (TyKind::InProjection(declared), TyKind::InProjection(selected))
@@ -496,6 +503,7 @@ impl FlexibleValue {
                 self.substitute(inner, binding).without_head()
             }
             TyKind::PlatformNullable(inner)
+            | TyKind::MutabilityFlexible(inner)
             | TyKind::InProjection(inner)
             | TyKind::OutProjection(inner)
             | TyKind::StarProjection(inner) => self.substitute(inner, binding),

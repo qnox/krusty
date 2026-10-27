@@ -1952,6 +1952,7 @@ impl super::Emitter<'_> {
                 let array = vararg::NewArray {
                     ty: array_type,
                     reified_marker: marker.as_deref(),
+                    source: Some(e),
                 };
                 vararg::emit(self, array, elements, spreads, code);
             }

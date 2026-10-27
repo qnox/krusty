@@ -2230,11 +2230,14 @@ impl BodyLowering<'_> {
                     array_type,
                     elements,
                     spreads,
-                } => Some(Some(self.ir.add_expr(IrExpr::Vararg {
+                    source_line,
+                } => Some(Some(super::checked_arguments::vararg_value(
+                    self.ir,
                     array_type,
-                    spreads,
                     elements,
-                }))),
+                    spreads,
+                    source_line,
+                ))),
             })
             .collect::<Option<Vec<_>>>()?;
         Some(NormalizedCheckedArguments {

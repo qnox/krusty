@@ -639,6 +639,65 @@ fn a_type_naming_an_alias_is_refused() {
 
 #[test]
 #[ignore = "downloads symbol-processing-api 2.3.12 and a JDK"]
+fn getter_return_types_are_what_ksp2_reports() {
+    log_is_what_ksp2_reports(
+        "Accessors",
+        "accessors.AccessorsProvider",
+        &[fixtures().join("accessors/Accessors.kt")],
+        "ksp-outputs-accessors",
+        "accessors.expected",
+    );
+}
+
+/// A getter that writes its own return type (`get(): Long`) is refused: KSP2 serves that written
+/// reference, which the round does not describe yet.
+#[test]
+#[ignore = "downloads symbol-processing-api 2.3.12 and a JDK"]
+fn the_return_type_a_getter_writes_is_refused() {
+    let (runtime, env) = runtime();
+    let processor = processor_in(
+        &runtime,
+        "Accessors",
+        "accessors.AccessorsProvider",
+        "ksp-processor-accessors-refusals",
+    );
+    let out = scratch("ksp-outputs-accessors-refused");
+    let outputs = KspOutputs {
+        kotlin: out.join("kotlin"),
+        java: out.join("java"),
+        classes: out.join("classes"),
+        resources: out.join("resources"),
+    };
+    let error = run(
+        &runtime,
+        &env,
+        &processor,
+        &[fixtures().join("accessors-refused/TypedGetter.kt")],
+        &[],
+        &outputs,
+    )
+    .err()
+    .expect("the host refuses a getter's written return type");
+    assert_eq!(
+        error.to_string(),
+        "krusty's KSP host does not implement KSPropertyGetter.returnType yet, which a processor uses"
+    );
+}
+
+#[test]
+#[ignore = "downloads symbol-processing-api 2.3.12 and a JDK"]
+fn effective_java_modifiers_are_what_ksp2_reports() {
+    log_is_what_ksp2_reports(
+        "JavaModifiers",
+        "javamodifiers.JavaModifiersProvider",
+        &[fixtures().join("java-modifiers/JavaModifiers.kt")],
+        "ksp-outputs-java-modifiers",
+        "java-modifiers.expected",
+    );
+}
+
+#[test]
+#[ignore = "downloads symbol-processing-api 2.3.12 and a JDK"]
 fn class_literal_arguments_are_what_ksp2_reports() {
     log_with_dependencies_is_what_ksp2_reports(
         "Annotations",
