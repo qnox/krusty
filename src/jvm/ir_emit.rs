@@ -176,6 +176,8 @@ use primary_constructor_parameters::{
 };
 use try_emission::ProtectedRegion;
 mod class_metadata;
+#[cfg(test)]
+mod metadata_name_tests;
 use class_metadata::build_class_metadata;
 #[cfg(test)]
 use class_metadata::build_class_metadata_with_facts;
@@ -6929,17 +6931,6 @@ mod invariant_tests {
         }
     }
 
-    struct NoClassifiers;
-
-    impl BackendClassifierSource for NoClassifiers {
-        fn classifier(
-            &self,
-            _classifier: crate::types::TypeName,
-        ) -> Option<std::sync::Arc<crate::backend::BackendClassifierFact>> {
-            None
-        }
-    }
-
     pub(super) fn emit_for_test(
         ir: &IrFile,
         facade: &str,
@@ -7049,7 +7040,7 @@ mod invariant_tests {
                     suspended_result_returns: &suspended_result_returns,
                     intrinsic_probe_continuations,
                 },
-                signature_symbols: &NoClassifiers,
+                signature_symbols: &super::metadata_name_tests::DeclarationNames(ir),
                 dependency_callables: &dependency_callables,
                 property_realizations: &property_realizations,
                 property_reference_realizations: &property_reference_realizations,
@@ -7100,39 +7091,6 @@ mod invariant_tests {
             method,
             Some(("build".to_string(), "(Ljava/lang/String;)V".to_string()))
         );
-    }
-
-    #[test]
-    fn nested_metadata_uses_declaration_identity_not_generated_name_shape() {
-        let mut ir = IrFile::default();
-        let mut outer = crate::plugins::synthetic_class("demo/Outer");
-        outer.is_source_declared = true;
-        let outer_id = ir.add_class(outer);
-        ir.record_class_source_order(outer_id, 0);
-
-        // A digit is valid in a source identifier; the former generated-name heuristic dropped it.
-        let mut declared = crate::plugins::synthetic_class("demo/Outer$Node2");
-        declared.is_source_declared = true;
-        let declared_id = ir.add_class(declared);
-        ir.record_class_source_order(declared_id, 1);
-
-        // Conversely, looking nested is not sufficient: backend-generated implementation classes
-        // are not declarations in Kotlin metadata.
-        ir.add_class(crate::plugins::synthetic_class("demo/Outer$Impl3"));
-        crate::metadata::class_declarations::record_all(&mut ir);
-
-        let metadata = build_class_metadata_with_facts(
-            &ir,
-            &crate::jvm::override_results::OverrideResults::default(),
-            &ir.classes[outer_id as usize],
-            &EmitOptions::default(),
-            &LocalDelegatedProperties::default(),
-            &NoClassifiers,
-            &EmitRun::default(),
-        )
-        .expect("plain source class metadata");
-        assert!(metadata.d2.iter().any(|entry| entry == "Node2"));
-        assert!(!metadata.d2.iter().any(|entry| entry == "Impl3"));
     }
 
     #[test]

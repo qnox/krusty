@@ -1,5 +1,15 @@
 # krusty — implementation plan
 
+## Consume declaration names in metadata class headers
+
+Resolve selected declaration keys against the frozen name inventory and pass mandatory resolved
+class IDs into the common Class schema. JVM and KLIB headers share that writer; KLIB's class-name
+inventory reuses it. Select nested children and top-level KLIB roots from retained declaration
+ownership. Retain generated classifier names from the existing typed plugin facts.
+Keep explicit local provenance separate from unknown evidence. Other class-ID consumers in types,
+aliases, annotations and sealed-class inventories remain separate follow-ups; this step does not
+claim to replace their legacy encoding or callable-reference adapter naming.
+
 ## Bound declaration-name inventory
 
 Expose selected declaration-name evidence by typed resolved key across source, JVM, KLIB and their
