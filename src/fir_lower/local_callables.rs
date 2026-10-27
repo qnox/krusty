@@ -1169,6 +1169,30 @@ impl BodyLowering<'_> {
         }
     }
 
+    /// Whether `capture` holds a `crossinline` parameter: this body's own, a local class's capture
+    /// of one, or one an enclosing callable captured.
+    fn capture_source_is_crossinline(
+        &self,
+        capture: &crate::fir::FirCapture,
+    ) -> Result<bool, FirLoweringFailure> {
+        match (capture.enclosing_depth.checked_sub(1), capture.source) {
+            (None, crate::fir::FirCaptureSource::Value(value)) => {
+                Ok(self.body.is_crossinline_parameter(value))
+            }
+            (None, crate::fir::FirCaptureSource::ConstructorPrefix { owner, field }) => {
+                self.class_capture_is_crossinline(owner, field)
+            }
+            (Some(depth), source) => self
+                .capture_slots
+                .get(&(depth, source))
+                .map(|slot| slot.crossinline)
+                .ok_or(FirLoweringFailure::MissingCapture {
+                    enclosing_depth: depth,
+                    source,
+                }),
+        }
+    }
+
     fn lower_nested_function(
         &mut self,
         body: &FirBody,
@@ -1210,18 +1234,19 @@ impl BodyLowering<'_> {
                         "a lifted callable publishes one captured-value identity per capture"
                     ),
                 };
-                (
+                Ok((
                     (capture.enclosing_depth, capture.source),
                     CaptureSlot {
                         slot: body.value_capture_position(slot),
                         ty: capture.ty,
                         shared_cell: capture.shared_cell,
                         stable: self.capture_source_is_stable(capture),
+                        crossinline: self.capture_source_is_crossinline(capture)?,
                         declared,
                     },
-                )
+                ))
             })
-            .collect::<HashMap<_, _>>();
+            .collect::<Result<HashMap<_, _>, FirLoweringFailure>>()?;
         let inline_parameter_values = self.inline_parameter_values.nested(body);
         if !inline_parameter_values.is_empty() {
             self.callables_reading_inline_parameters.insert(function);

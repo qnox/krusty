@@ -5549,7 +5549,13 @@ regress.
     continuation), are regenerated under the copy's name generator with the lambda inlined
     (`anonymous_object::nested_objects`); a multifile facade's inline body is read from its part.
     ✅ krusty's own `$$forInline` copy of an object's suspend method that reads a `crossinline`
-    capture, with its public continuation (`suspend_inline_functions::for_inline_copy`).
+    capture, with its public continuation (`suspend_inline_functions::for_inline_copy`). The
+    capture's `crossinline` provenance is recorded by common lowering where the capture is
+    produced (`IrConstructorCapture::crossinline`), so a capture moved through a lambda or an
+    enclosing object keeps the copy. Still open: a caller inlining a function whose lambda
+    constructs such an object is refused by route planning (`the inliner rejected a call`), with a
+    kotlinc library too; and a lambda returning an anonymous object takes the object's type for
+    `invoke` instead of the expected function type's `Source<T>`.
 - ☐ 5. `$default` inline functions (mask expansion) and `finally` blocks around inlined returns.
   Mask expansion and singleton default lambdas (`DefaultLambda`, with reification) are ported;
   a default lambda constructed with captured values and `finally` rewriting remain.

@@ -385,6 +385,33 @@ impl BodyLowering<'_> {
                     self.ir.add_expr(IrExpr::GetValue(slot))
                 }
             };
+            let crossinline = match &capture.source {
+                FirLocalClassCaptureSource::Value(source) => {
+                    self.body.is_crossinline_parameter(*source)
+                }
+                FirLocalClassCaptureSource::Captured {
+                    enclosing_depth,
+                    source,
+                } => {
+                    let source = crate::fir::FirCaptureSource::Value(*source);
+                    self.capture_slots
+                        .get(&(*enclosing_depth, source))
+                        .ok_or(FirLoweringFailure::MissingCapture {
+                            enclosing_depth: *enclosing_depth,
+                            source,
+                        })?
+                        .crossinline
+                }
+                FirLocalClassCaptureSource::ClassStorage { owner, field, .. }
+                | FirLocalClassCaptureSource::ConstructorCapture { owner, field, .. }
+                | FirLocalClassCaptureSource::CapturedClassStorage { owner, field, .. } => {
+                    self.class_capture_is_crossinline(*owner, *field)?
+                }
+                FirLocalClassCaptureSource::DispatchReceiver
+                | FirLocalClassCaptureSource::EnclosingReceiver { .. }
+                | FirLocalClassCaptureSource::CapturedImplicitReceiver { .. }
+                | FirLocalClassCaptureSource::ImplicitReceiver { .. } => false,
+            };
             values.push((value, capture.ty.get()));
             if let Some(field) = field {
                 fields.push(
@@ -415,6 +442,7 @@ impl BodyLowering<'_> {
                 capture: Some(crate::ir::IrConstructorCapture {
                     source_name: capture.name.clone(),
                     receiver,
+                    crossinline,
                 }),
                 provenance: crate::ir::IrCtorParameterProvenance::Capture,
                 capture_identity: capture.capture_identity,

@@ -213,6 +213,10 @@ pub struct IrConstructorCapture {
     pub source_name: Box<str>,
     /// What the capture is when it holds a receiver rather than a value.
     pub receiver: Option<IrCapturedReceiver>,
+    /// The captured declaration is a `crossinline` parameter, captured here directly or through
+    /// any chain of enclosing callables and classes. Lowering records it where the capture is
+    /// produced; a target reads it instead of tracing the constructor operand back to a parameter.
+    pub crossinline: bool,
 }
 
 /// What a captured receiver was in source. kotlinc's LocalDeclarationsLowering names each kind's

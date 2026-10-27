@@ -7164,7 +7164,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   in (kotlinc's `isSuspendCapturingCrossinline`, suspend lambda or not) gets `name$$forInline`, the
   marked body with the method's access, opened by `InlineMarker.mark(4)`, the construction of the
   method's continuation on the receiver and `$completion`, `mark(5)` and a `pop`
-  (`jvm::suspend_inline_functions`). That continuation is public, constructor included, its
+  (`jvm::suspend_inline_functions`). Eligibility is a semantic fact, not a shape of the body:
+  common lowering records on each constructor capture whether the captured declaration is a
+  `crossinline` parameter (`IrConstructorCapture::crossinline`), where the capture is produced,
+  through any chain of enclosing lambdas, local functions and classes, so a capture an object
+  receives from a lambda's capture or from its enclosing object's field keeps it. A call-site copy
+  of the class binds the function's parameters to the call's arguments and clears it. That
+  continuation is public, constructor included, its
   `@Metadata.xi` carries the public visibility and, like any continuation whose function is in a
   public inline function's scope, `METADATA_PUBLIC_ABI_FLAG`; it is written even when the method's
   own suspension points are all tail calls, then without `@DebugMetadata`. The route is decided

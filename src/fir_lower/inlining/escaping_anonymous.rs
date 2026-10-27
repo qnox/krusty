@@ -388,6 +388,13 @@ fn specialized_class(
     copy.is_source_declared = false;
     copy.enclosure = expansion.site.caller.or(copy.enclosure);
     copy.methods = cloned_methods.clone();
+    // The copy is the class regenerated for this call: the inline function's parameters are bound
+    // to its arguments, so none of the copy's captures holds a `crossinline` parameter any more.
+    for argument in &mut copy.ctor_args {
+        if let Some(capture) = &mut argument.capture {
+            capture.crossinline = false;
+        }
+    }
     remap_property_accessors(&mut copy, &cloned).map_err(|()| malformed(class_name))?;
     let source_init = ir.classes[source as usize].init_body;
     let covered = source_init

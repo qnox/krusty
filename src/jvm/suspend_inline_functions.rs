@@ -18,7 +18,6 @@ use crate::fx_hash::HashSet;
 use crate::ir::{ClassId, ExprId, IrClass, IrExpr, IrFile};
 use crate::jvm::suspend::TransformedMachine;
 use crate::types::InlineExpansionMode;
-use crate::types::InlineParameterModifier;
 
 /// Whether `fid` is a `suspend inline` function only ever inlined: a reified one, whose body
 /// needs its call site's types, or a private one. Its method keeps the marked body and no
@@ -74,53 +73,24 @@ fn reads_crossinline_capture(ir: &IrFile, fid: u32) -> bool {
     let Some(class) = ir.class_id_by_name(owner) else {
         return false;
     };
-    let fields = crossinline_capture_fields(ir, &ir.classes[class as usize]);
+    let fields = crossinline_capture_fields(&ir.classes[class as usize]);
     !fields.is_empty() && reads_own_fields(ir, body, class, &fields)
 }
 
 /// The fields of `class` that store a `crossinline` parameter of the inline function it is written
-/// in (kotlinc's `FIELD_FOR_CROSSINLINE_CAPTURED_VALUE`): the capture arguments its constructions in
-/// that function's body pass that parameter's value.
-fn crossinline_capture_fields(ir: &IrFile, class: &IrClass) -> HashSet<u32> {
-    let mut fields = HashSet::default();
-    let Some((function, _)) =
-        crate::jvm::ir_emit::enclosure::enclosing_functions(ir, class.enclosure).next()
-    else {
-        return fields;
-    };
-    if !ir.inline_fns.contains(&function) {
-        return fields;
-    }
-    let declaration = &ir.functions[function as usize];
-    let (Some(body), Some(parameters)) = (declaration.body, ir.fn_params.get(&function)) else {
-        return fields;
-    };
-    let receiver = u32::from(!declaration.is_static);
-    let crossinline = |value: u32| {
-        value
-            .checked_sub(receiver)
-            .and_then(|parameter| parameters.inline_modifiers.get(parameter as usize))
-            == Some(&InlineParameterModifier::Crossinline)
-    };
-    let mut pending = vec![body];
-    while let Some(expression) = pending.pop() {
-        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
-        let IrExpr::New { internal, args, .. } = ir.expr(expression) else {
-            continue;
-        };
-        if *internal != class.fq_name_id() {
-            continue;
-        }
-        for (argument, &value) in class.ctor_args.iter().zip(args) {
-            let (Some(_), Some(field)) = (&argument.capture, argument.field_index) else {
-                continue;
-            };
-            if matches!(ir.expr(value), IrExpr::GetValue(read) if crossinline(*read)) {
-                fields.insert(field);
-            }
-        }
-    }
-    fields
+/// in (kotlinc's `FIELD_FOR_CROSSINLINE_CAPTURED_VALUE`), as lowering recorded on each capture.
+fn crossinline_capture_fields(class: &IrClass) -> HashSet<u32> {
+    class
+        .ctor_args
+        .iter()
+        .filter(|argument| {
+            argument
+                .capture
+                .as_ref()
+                .is_some_and(|capture| capture.crossinline)
+        })
+        .filter_map(|argument| argument.field_index)
+        .collect()
 }
 
 /// Whether `body`, a method of `class`, reads one of `fields` of its own receiver.
@@ -169,7 +139,7 @@ pub(crate) fn inlined_invokes(ir: &IrFile, fid: u32, machine: &TransformedMachin
         .map(|class| {
             (
                 class,
-                crossinline_capture_fields(ir, &ir.classes[class as usize]),
+                crossinline_capture_fields(&ir.classes[class as usize]),
             )
         });
     let spliced = |call: ExprId| {

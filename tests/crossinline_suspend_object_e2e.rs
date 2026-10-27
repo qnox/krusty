@@ -552,3 +552,92 @@ fn a_krusty_compiled_for_inline_copy_is_inlined_and_resumes() {
         .expect("the library is compiled");
     assert_eq!(output, "OK");
 }
+
+const MOVED_LIB: &str = r#"
+package lib
+
+interface Source<out T> {
+    suspend fun next(): T
+}
+
+inline fun <T> deferred(crossinline produce: suspend () -> T): () -> Source<T> = {
+    val source: Source<T> = object : Source<T> {
+        override suspend fun next(): T = produce()
+    }
+    source
+}
+
+inline fun <T> nested(crossinline produce: suspend () -> T): Source<Source<T>> =
+    object : Source<Source<T>> {
+        override suspend fun next(): Source<T> =
+            object : Source<T> {
+                override suspend fun next(): T = produce()
+            }
+    }
+"#;
+
+/// The control for the copy's eligibility: the object's constructor operand for the `crossinline`
+/// capture is not the parameter itself but a lambda's capture of it, or the enclosing object's
+/// field. The capture still holds the `crossinline` parameter, so krusty writes kotlinc's copy.
+/// The lambda returns the object through a typed local: a lambda returning the object directly
+/// takes the object's type for `invoke`, a separate divergence.
+#[test]
+fn a_crossinline_capture_moved_through_a_lambda_or_an_object_keeps_the_for_inline_copy() {
+    let classes = common::classes_against_kotlinc_module(&[("Lib.kt", MOVED_LIB)]);
+    let inventory = [
+        "lib/LibKt",
+        "lib/LibKt$deferred$1",
+        "lib/LibKt$deferred$1$source$1",
+        "lib/LibKt$deferred$1$source$1$next$1",
+        "lib/LibKt$nested$1",
+        "lib/LibKt$nested$1$next$1",
+        "lib/LibKt$nested$1$next$2",
+        "lib/LibKt$nested$1$next$2$next$1",
+        "lib/Source",
+    ];
+    assert_eq!(classes.reference.keys().collect::<Vec<_>>(), inventory);
+    assert_eq!(classes.krusty.keys().collect::<Vec<_>>(), inventory);
+    for class in [
+        "lib/LibKt$deferred$1$source$1",
+        "lib/LibKt$nested$1",
+        "lib/LibKt$nested$1$next$2",
+    ] {
+        let (reference, krusty) = classes
+            .method_declarations(class)
+            .expect("both compilers write the class");
+        assert_eq!(krusty, reference, "{class}");
+        let copies = reference
+            .iter()
+            .filter(|declaration| declaration.contains(" next$$forInline("))
+            .collect::<Vec<_>>();
+        assert_eq!(copies.len(), 1, "{class}: kotlinc writes one copy");
+        let (reference, krusty) = classes.method_listing(class, copies[0]);
+        assert_eq!(krusty, reference, "{class}");
+    }
+    let code = classes.code_differences();
+    assert!(code.is_empty(), "{}", code.join("\n\n"));
+}
+
+const MOVED_RUN_MAIN: &str = r#"
+import lib.*
+import kotlin.coroutines.*
+
+fun nestedPlusOne(n: Int) = nested { n + 1 }
+
+fun box(): String {
+    var result: Any? = null
+    suspend { nestedPlusOne(41).next().next() }
+        .startCoroutine(Continuation(EmptyCoroutineContext) { result = it.getOrThrow() })
+    if (result != 42) return "FAIL nested: $result"
+    return "OK"
+}
+"#;
+
+/// A caller inlines the copies krusty wrote for a capture moved through the enclosing object, and
+/// the regenerated objects run.
+#[test]
+fn a_krusty_compiled_copy_of_a_capture_moved_through_an_object_runs() {
+    let output = common::expect_box_run_against("moved_for_inline", MOVED_LIB, MOVED_RUN_MAIN)
+        .expect("the library is compiled");
+    assert_eq!(output, "OK");
+}
