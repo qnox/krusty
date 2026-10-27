@@ -1,5 +1,12 @@
 # `@kotlin.Metadata` — reverse-engineering notes (Phase 4b)
 
+## Declared field storage records
+
+KLIB class storage retains the authenticated producer/class declaration, superclass and field
+types/flags in declaration order. Raw serialized field symbols are kept separately for initializer
+membership checks. The materialized class and its field operations consume the same normalized
+storage coordinates rather than rebuilding storage from constructor parameters.
+
 ## Declared class receivers and checked member applications
 
 Source KLIB method exports retain the complete declared self application recorded during FIR

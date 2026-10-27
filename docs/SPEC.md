@@ -1,5 +1,13 @@
 # krusty — a memory-lean Kotlin→JVM compiler PoC
 
+## Declared dependency class storage
+
+A materialized KLIB constructor retains one declaration-owned record of its class identity,
+superclass and ordered fields, including declared types, finality and visibility. Field symbols
+remain parallel to that record for exact initializer reads and writes. Constructor parameters
+keep their own coordinates; they never imply leading stored fields. Interleaved field and anonymous
+initializers preserve their source order and diagnostic priority.
+
 ## Checked applications of dependency class members
 
 FIR owns class-parameter application, including inherited members. A dependency export retains
