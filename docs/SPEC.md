@@ -13737,10 +13737,24 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`java.util.ArrayList`). A descriptor-only signature is still omitted. A value class's static
   replacement of such an override (`addAll-impl`) overrides nothing, so it keeps the ordinary
   signature of a member, its moved receiver first (`(ILjava/util/Collection<+TT;>;)Z`,
-  `(ILjava/util/Collection<Ljava/lang/String;>;)Z`). The type-safe members' signatures
-  (`contains(T)` written `contains(Object)` in a generic class) follow later. Tests:
+  `(ILjava/util/Collection<Ljava/lang/String;>;)Z`). Tests:
   `tests/collection_override_signature_e2e.rs` (member bytes and a reflective box run against
   kotlinc), and the face suites above, which now compare the declared `containsAll`.
+- **A type-safe collection override that keeps its declaration's descriptor is signed with
+  `Object`.** An override of a type-safe declaration (`contains`, `indexOf`, `lastIndexOf`,
+  `MutableCollection.remove`, `Map.containsKey`/`containsValue`/`get`, `MutableMap.remove(key)`
+  and `remove(key, value)`) whose own JVM parameters equal the declaration's erased ones, as for
+  an unbounded or nullable type parameter, writes each checked parameter as `Object` in its
+  generic signature, as kotlinc does. So `contains(element: T)` and `indexOf(element: T?)` carry
+  no `Signature`, `get(key: K)` is `(Ljava/lang/Object;)TV;`, and the descriptor and body are
+  unchanged. An override with another descriptor (`T : CharSequence`, `List<T>`, a `String` key)
+  keeps its own generic signature, and its final special bridge does the type check, as before.
+  The checked parameters come from the overridden declaration's type-safe policy in
+  `mapped_builtin_declarations`, found through the override edges like the signature policies
+  above. kotlinc's special bridge for a narrower `MutableMap.remove(key, value)` checks both
+  parameters; krusty's barrier checks one, so that override still gets a plain bridge, which
+  follows later. Tests: `tests/collection_type_safe_members_e2e.rs` (member bytes and a
+  reflective box run against kotlinc).
 - **A nested value class over a reference carrier is read as its carrier.** In `ZN(val z: Z1?)`
   with `Z1(val x: En)`, `Z1?` is carried as `En?`, so `zn.z` and `zn.z!!` already are `Z1`'s
   carrier and `.x` of them is that carrier itself, with no cast. krusty took the unboxed property
