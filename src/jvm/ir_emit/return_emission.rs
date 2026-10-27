@@ -148,6 +148,8 @@ impl Emitter<'_> {
             return;
         };
         let ret = self.ret;
+        // `visitReturn` marks its line once the value is on the stack.
+        code.mark_value_boundary(value);
         if ret == crate::types::Ty::Unit {
             // A void function's `return <Unit expression>` evaluates that expression as a
             // statement: kotlinc leaves nothing of its value on the stack.
