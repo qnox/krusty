@@ -5612,9 +5612,15 @@ regress.
     functions through its class's accessors, and another file's internal member template takes
     its module-mangled JVM name for the frame marker: 17 more box files are byte-identical on
     2.4.21 (4,031 to 4,048) and none regresses.
-    ☐ `$default` calls, suspend callers and callees,
-    `crossinline` parameters, literals with non-local jumps, calls in default arguments, and callee
-    bodies with local classes or enum switches.
+    ✓ Literals with non-local jumps (`NonLocalJumpInLambda`): a lambda that returns from its caller
+    or breaks or continues a loop around the call is inlined from the compiled body through the
+    MethodInliner port's marked returns, and a `tailrec` self-call returned from such a lambda
+    still loops (the sweep enters the lambda's template in the lambda's frame): 5 more box files
+    are byte-identical on 2.4.21 (the four `inlinedBreakContinue` shapes and
+    `secondaryConstructors/withNonLocalReturn`), none regresses, and all 7,184 applicable files
+    run.
+    ☐ `$default` calls, suspend callers and callees, `crossinline` parameters, calls in default
+    arguments, and callee bodies with local classes or enum switches.
 - ☐ 7. Delete `InlineBodyPlan` and its resolver/FIR threading once the coroutine state machine runs
   on inlined bytecode (the plans exist only to reach IR before `lower_suspend`).
 
