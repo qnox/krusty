@@ -1111,9 +1111,21 @@ impl Checker<'_> {
             fs.overloads.len(),
             crate::symbol_resolver::ranked_extension_overloads_by_recv(&src, receiver, &fs).len(),
         );
-        for (_, binding_receiver, o) in
+        // The first candidate in tower order that shapes the lambdas is selected. Candidates of
+        // the same rank that would shape the same lambda inputs with a different result
+        // (`@OverloadResolutionByLambdaReturnType`: `flatMap` over `(T) -> Iterable<R>` and
+        // `(T) -> Sequence<R>`) are still competing, so the result is left to the lambda body.
+        let mut selected: Option<((u32, u32), crate::symbol_resolver::LambdaCallShape)> = None;
+        for (rank, binding_receiver, o) in
             crate::symbol_resolver::ranked_extension_overloads_by_recv(&src, receiver, &fs)
         {
+            let rank = (rank, o.scope_rank);
+            if selected
+                .as_ref()
+                .is_some_and(|(selected_rank, _)| *selected_rank != rank)
+            {
+                break;
+            }
             crate::trace_compiler!(
                 "lambda_shape",
                 "extension candidate={name} receiver={receiver:?} scope_rank={} receiver_rank={} binding_receiver={binding_receiver:?} params={:?} generic={:?} partial={arg_tys:?}",
@@ -1177,11 +1189,45 @@ impl Checker<'_> {
             ) {
                 crate::trace_compiler!(
                     "lambda_shape",
-                    "extension candidate={name} selected shape={shape:?}"
+                    "extension candidate={name} shape={shape:?}"
                 );
-                return Some(shape);
+                match &mut selected {
+                    Some((_, selected)) => release_competing_lambda_results(selected, &shape),
+                    None => selected = Some((rank, shape)),
+                }
             }
         }
-        None
+        selected.map(|(_, shape)| shape)
+    }
+}
+
+/// Leave a lambda's result open when a same-rank `competitor` shapes the same inputs for it with a
+/// different callable type: only the lambda's body can choose between the two candidates.
+fn release_competing_lambda_results(
+    selected: &mut crate::symbol_resolver::LambdaCallShape,
+    competitor: &crate::symbol_resolver::LambdaCallShape,
+) {
+    let (Some(fixed), Some(expected), Some(inputs)) = (
+        selected.fixed_expected_types.as_mut(),
+        selected.expected_types.as_ref(),
+        selected.param_types.as_ref(),
+    ) else {
+        return;
+    };
+    for (argument, fixed) in fixed.iter_mut().enumerate() {
+        let same_inputs = competitor
+            .param_types
+            .as_ref()
+            .and_then(|types| types.get(argument))
+            .is_some_and(|competing| inputs.get(argument) == Some(competing));
+        let competing = competitor
+            .expected_types
+            .as_ref()
+            .and_then(|types| types.get(argument))
+            .copied()
+            .flatten();
+        if same_inputs && competing != expected.get(argument).copied().flatten() {
+            *fixed = None;
+        }
     }
 }

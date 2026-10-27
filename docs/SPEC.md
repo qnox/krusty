@@ -8954,6 +8954,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   actual element (a no-argument overload — the same-named lambda `sumOf` has an extra parameter). Test:
   `collection_members_e2e::numeric_reduction_extensions_by_element_type`.
 
+- **A lambda body chooses among overloads that differ only in the lambda's result.** The
+  `@OverloadResolutionByLambdaReturnType` pairs `Sequence<T>.flatMap((T) -> Iterable<R>)` /
+  `((T) -> Sequence<R>)` and `Iterable<T>.flatMap` take the same lambda inputs. When two extension
+  candidates of the same tower rank shape a lambda's inputs identically but its callable type
+  differently, the lambda is checked without a fixed result (its inputs still come from the
+  receiver), and call resolution then selects the overload its body's type fits. krusty used to check
+  the body against the first candidate's `Iterable<R>`, rejecting `seq.flatMap { sequenceOf(it) }`
+  even under an expected `Sequence<String>` (`tests/lambda_return_overload_shape_e2e.rs`).
+
 - **Non-inline top-level generic HOF binds the lambda parameter type (`transform(Item(…)) { it.name }`).**
   A user `fun <T, R> transform(x: T, f: (T) -> R): R` binds `T` from the first value argument, so the
   lambda parameter `it` types as that concrete type and `R` is inferred from the lambda body (the call
