@@ -25,6 +25,7 @@ pub const DECLINE_PREFIX: &str = "krusty: the wasm backend does not support ";
 pub struct WasmBackend {
     target: WasmTarget,
     entry: Entry,
+    array_range_checks: bool,
 }
 
 impl WasmBackend {
@@ -32,12 +33,20 @@ impl WasmBackend {
         Self {
             target,
             entry: Entry::Main,
+            array_range_checks: super::array_access::default_range_checks(),
         }
     }
 
     /// Start the program in `entry` instead of `main`.
     pub fn with_entry(mut self, entry: Entry) -> Self {
         self.entry = entry;
+        self
+    }
+
+    /// Explicit `-Xwasm-enable-array-range-checks` semantics. This is a code-generation option;
+    /// it does not change frontend array types, overload selection or dependency identities.
+    pub fn with_array_range_checks(mut self, enabled: bool) -> Self {
+        self.array_range_checks = enabled;
         self
     }
 }
@@ -169,6 +178,7 @@ impl Backend for WasmBackend {
                 properties: &properties,
                 callables: &file.callables,
                 classifiers: &file.classifiers,
+                array_range_checks: self.array_range_checks,
                 dependency_exports: &file.dependency_exports,
                 module_name: file.module_name,
                 plan,
