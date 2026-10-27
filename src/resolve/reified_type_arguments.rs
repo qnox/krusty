@@ -316,7 +316,7 @@ impl Checker<'_> {
                         span,
                         false,
                         warning.as_deref(),
-                        crate::diag::CompilerWarningName::TypeParameterAsReifiedDeprecation,
+                        crate::diag::names::TYPE_PARAMETER_AS_REIFIED_DEPRECATION_WARNING,
                         &message,
                     );
                 } else if in_array {
@@ -353,7 +353,7 @@ impl Checker<'_> {
                         span,
                         false,
                         warning.as_deref(),
-                        crate::diag::CompilerWarningName::TypeIntersectionAsReifiedDeprecation,
+                        crate::diag::names::TYPE_INTERSECTION_AS_REIFIED_DEPRECATION_WARNING,
                         &message,
                     );
                 } else {
@@ -365,7 +365,7 @@ impl Checker<'_> {
                         span,
                         features.prohibit_intersection,
                         warning.as_deref(),
-                        crate::diag::CompilerWarningName::TypeIntersectionAsReified,
+                        crate::diag::names::TYPE_INTERSECTION_AS_REIFIED_WARNING,
                         &message,
                     );
                 }

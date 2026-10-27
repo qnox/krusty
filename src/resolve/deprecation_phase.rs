@@ -17,7 +17,7 @@ impl Checker<'_> {
         span: Span,
         forbidden: bool,
         deprecation_message: Option<&str>,
-        warning: crate::diag::CompilerWarningName,
+        warning: crate::diag::DiagnosticName,
         message: &str,
     ) {
         if forbidden {

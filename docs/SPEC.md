@@ -16761,9 +16761,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   leaves `REDUNDANT_CLI_ARG` in place
   (`suppress_version_warnings_drops_only_version_status_warnings` in
   `crates/krusty-cli/src/cli.rs`). The registry contains only
-  diagnostics the compiler can actually emit: source `DEPRECATION`, deprecated and experimental
-  language-version warnings, and `REDUNDANT_CLI_ARG`. A located compiler warning carries that
-  typed name separately from its duplicate-report identity; the CLI applies its named disposition
+  diagnostics the compiler can actually emit (`REPORTED_WARNINGS` in
+  `crates/krusty-cli/src/cli/warning_policy.rs`), and a name is accepted only where the selected
+  release's own diagnostic table (`src/diag/releases/<ver>.diagnostics.tsv`) declares it as a
+  warning: measured, kotlinc 2.4.0 rejects `TYPE_PARAMETER_AS_REIFIED_DEPRECATION_WARNING` as a
+  warning that does not exist and accepts `INAPPLICABLE_OPERATOR_MODIFIER_WARNING`. A located
+  compiler warning carries that kotlinc `DiagnosticName` separately from its duplicate-report
+  identity; the CLI applies its named disposition
   before deciding whether frontend diagnostics fail the compilation. Language-feature arguments
   are replayed from the selected
   language/API baseline; an argument that makes no semantic change emits `REDUNDANT_CLI_ARG` with
@@ -16855,7 +16859,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the feature's `sinceVersion` and YouTrack issue in `releases/<ver>.features.tsv`, and
   `@Suppress("<NAME>_WARNING")` silences it; with the feature on it is the error with the plain
   message. A release whose language-feature table predates the split keeps the plain error; the
-  warning name does not exist in that release's `-Xwarning-level` catalog. Modeled so far, compared
+  warning name does not exist in that release's diagnostic table, so `-Xwarning-level` rejects it. Modeled so far, compared
   with kotlinc 2.4.0/2.4.10 before the split and 2.4.20 with the feature off and on:
   - `ForbidValueClassRecursionViaTypeParameters`: a value class whose underlying type reaches it
     again through a type parameter's bound (`value class V<T : V<T>>(val x: T)`). The parameter

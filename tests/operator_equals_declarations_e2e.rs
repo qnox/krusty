@@ -187,7 +187,7 @@ fn anonymous_owner_policy_is_owned_by_the_selected_release() {
         assert_eq!(diagnostic.span, krusty::diag::Span::new(22, 30));
         assert_eq!(diagnostic.editor_span, None);
         assert_eq!(diagnostic.severity, krusty::diag::Severity::Error);
-        assert_eq!(diagnostic.warning_name, None);
+        assert_eq!(diagnostic.name, None);
         assert_eq!(diagnostic.kind, krusty::diag::DiagnosticKind::Compiler);
         assert_eq!(diagnostic.msg, NOT_OVERRIDING);
         assert_eq!(diagnostic.identity, None);
@@ -201,8 +201,8 @@ fn anonymous_owner_policy_is_owned_by_the_selected_release() {
     assert_eq!(diagnostic.editor_span, None);
     assert_eq!(diagnostic.severity, krusty::diag::Severity::Warning);
     assert_eq!(
-        diagnostic.warning_name,
-        Some(krusty::diag::CompilerWarningName::InapplicableOperatorModifier)
+        diagnostic.name,
+        Some(krusty::diag::names::INAPPLICABLE_OPERATOR_MODIFIER_WARNING)
     );
     assert_eq!(diagnostic.kind, krusty::diag::DiagnosticKind::Compiler);
     assert_eq!(
