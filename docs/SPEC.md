@@ -1,5 +1,13 @@
 # krusty — a memory-lean Kotlin→JVM compiler PoC
 
+## Type-alias declaration names
+
+A type alias retains its own declaring package or classifier and exact name segment, independently
+of its expanded target. Source header publication, module projections and dependency normalization
+carry that declaration fact without reconstructing it from the alias's lookup key. Two snapshots
+can give the same flattened identity distinct top-level and nested declaration facts. Missing name
+evidence remains unknown even when the expansion target is fully known.
+
 ## Source classifier identity publication
 
 The compact header inventory publishes non-local classifier identities through their declaration

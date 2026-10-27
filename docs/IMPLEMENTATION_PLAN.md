@@ -1,5 +1,13 @@
 # krusty — implementation plan
 
+## Alias declaration-name producers
+
+Retain an alias's own optional container and exact segment through stable source headers, the
+legacy source template record, bootstrap/body-local aliases, common KLIB normalization and JVM
+metadata/classpath records. Keep existing alias identities, expansion templates, target
+normalization and spelling sidecars intact. Metadata class-ID consumers and builtin declaration
+names remain separate prerequisites; this producer handoff does not repair their output by itself.
+
 ## Source classifier inventory identities
 
 Replace lookup-spelling splitting in the foreign-source classifier inventory with the existing
