@@ -5788,14 +5788,28 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   or companion, with no suspend function-typed parameter or receiver, no
   `crossinline` parameter, and a template without local classes
   or a subject `when` that switches on an enum's keys (`IrFile::enum_switch_when`),
-  called with every argument from any body outside a suspend state machine: a named function, an
-  inline function (whose compiled body then holds the nested callee's code, as kotlinc's does), a
-  lambda's method, a local function, a property initializer, an `init` block, a constructor or an
-  accessor, as kotlinc inlines wherever the call is written. A suspend function or suspend lambda, and a lambda written in one (whose body may be
-  spliced into its state machine), keep their calls expanded (`SuspendCaller`), as does a default
-  argument. With no literal lambda argument
-  that leaves its body by a non-local `return`, `break` or `continue`, and, in an inline function,
-  none that reads one of that function's inline parameters at any depth (`InlineParameterInLiteral`):
+  called with every argument from any body: a named function, an inline function (whose compiled
+  body then holds the nested callee's code, as kotlinc's does), a lambda's method, a local function,
+  a property initializer, an `init` block, a constructor or an accessor, as kotlinc inlines wherever
+  the call is written. A suspend function, a suspend lambda and a lambda written in one are such
+  bodies too: the method inliner places the call's literal lambdas in the caller's frame, and the
+  coroutine transformer builds the caller's machine over the inlined bytecode, as kotlinc's
+  `CoroutineTransformerMethodVisitor` runs after inlining. A suspension in a placed lambda is then
+  a state of the caller (`cps::inline_suspension::places_literal_lambdas` counts a compiled-body
+  call as a placing one), and a suspend lambda's reads of its own continuation inside a placed
+  lambda stay the current continuation the lambda's node captures, since that body numbers its
+  values from the lambda's frame (`intrinsic_probes::bind_own_continuation`). Tests:
+  `tests/inline_same_module_suspend_callers_e2e.rs` (an elvis-return callee, suspensions in a
+  placed lambda and `coroutineContext` read there, from suspend functions and suspend lambdas,
+  against kotlinc's bytes and as runs, and a run whose placed suspensions really suspend and
+  resume). A suspend inline function is not such a body yet: its template is expanded at its
+  call sites in IR (`SuspendCallee`), and the calls it holds are expanded with it, so a lambda it
+  hands an inline callee keeps its parameters' inline frame in the caller's `@DebugMetadata`
+  (`inline_route::tests::calls_in_a_suspend_inline_function_stay_expanded`,
+  `continuation_spill_order_e2e::a_lambda_declared_inside_an_inline_function_gains_its_frame`).
+  A default argument keeps its calls expanded, and so does a
+  call in an inline function with a literal that reads one of that function's inline parameters at
+  any depth (`InlineParameterInLiteral`):
   a caller that expands the function's template splices its own literal for that parameter, which
   reaches a literal only through an expanded body, never through one the backend inlines. Checking
   publishes the values it binds for the function's splice-mode parameters, so an anonymous context
@@ -5820,7 +5834,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   top-level one's does not. An inline function's own body reads a hoisted companion property
   through the companion's accessor rather than the outer class's static field, as kotlinc keeps
   an accessor call inside an inline function, and a body other classes inline reads a private
-  companion instance through the outer class's `access$get<Companion>$p`.
+  companion instance through the outer class's `access$get<Companion>$p`. A class that only a
+  `StackMapTable` frame names, as a local of a nested class copied from a compiled body is named
+  by the frames of a branch after it, gives the caller no `InnerClasses` row: ASM writes frames
+  straight into the pool, never through kotlinc's type mapper
+  (`inlined_code_inner_classes_e2e::a_class_only_a_stack_map_frame_names_gives_no_row`).
   A callee whose body inlines another same-module callee is compiled after it, as kotlinc compiles
   a callee's node when a call first needs it; the node carries its method's own source map (the
   lines it inlined are numbered past its file's own line count, not the caller's), so the caller

@@ -5650,8 +5650,15 @@ regress.
     are byte-identical on 2.4.21 (the four `inlinedBreakContinue` shapes and
     `secondaryConstructors/withNonLocalReturn`), none regresses, and all 7,184 applicable files
     run.
-    ☐ `$default` calls, suspend callers and callees, `crossinline` parameters, calls in default
-    arguments, and callee bodies with local classes or enum switches.
+    ✓ Suspend callers (`SuspendCaller`): a call in a suspend function, a suspend lambda or a
+    lambda written in one is inlined from the compiled body, and the coroutine transformer builds
+    the caller's machine over the inlined bytecode, taking a placed lambda's suspensions as the
+    caller's: 1 more box file is byte-identical on 2.4.21
+    (`coroutines/featureIntersection/suspendInlineSuspendFinally`), none regresses, and all 7,184
+    applicable files run.
+    ☐ `$default` calls, suspend callees (and the calls a suspend inline function holds),
+    `crossinline` parameters, calls in default arguments, and callee bodies with local classes or
+    enum switches.
 - ☐ 7. Delete `InlineBodyPlan` and its resolver/FIR threading once the coroutine state machine runs
   on inlined bytecode (the plans exist only to reach IR before `lower_suspend`).
 
