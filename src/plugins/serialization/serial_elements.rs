@@ -47,6 +47,9 @@ pub(super) struct SerialElements {
     /// deserialization constructor over them: over its own type parameters, not the class's
     /// arguments.
     external_parent_types: Vec<Ty>,
+    /// Provider-owned payloads indexed by `ElementSource::External`. A local descendant keeps
+    /// the complete arena with its inherited indices instead of cloning each payload again.
+    external: Vec<SerializableElement>,
     inherited: Vec<ElementSource>,
     fields: Vec<usize>,
 }
@@ -66,7 +69,7 @@ enum ElementSource {
     /// A property of a class in this file, by its backing field.
     Field { class: ClassId, field: usize },
     /// An element of a superclass compiled apart from this file.
-    External(SerializableElement),
+    External(usize),
 }
 
 /// One element of the wire shape, as the descriptor, `childSerializers` and `deserialize` see it.
@@ -165,6 +168,7 @@ impl SerialElements {
         let mut inherited_bindings = HashMap::default();
         let mut undescribed_parent = None;
         let mut external_parent_types = Vec::new();
+        let mut external = Vec::new();
         let mut inherited = Vec::new();
         let parent = if let Some(parent) = serializable_superclass(ctx, ir, class_id) {
             let parent_elements = SerialElements::of(ctx, ir, parent);
@@ -180,6 +184,7 @@ impl SerialElements {
             inherited_bindings.extend(own);
             undescribed_parent = parent_elements.undescribed_parent;
             inherited = parent_elements.sources_of(parent).collect();
+            external = parent_elements.external;
             Some(SerialParent::Local(parent))
         } else if ctx.external_serializable_parent(superclass).is_some() {
             parent_type_arguments = superclass_type_arguments(ir, class_id, superclass);
@@ -193,14 +198,15 @@ impl SerialElements {
                         .collect();
                     external_parent_types =
                         chain.elements.iter().map(|element| element.ty).collect();
-                    inherited = chain
+                    external = chain
                         .elements
                         .into_iter()
                         .map(|mut element| {
                             element.ty = ty_subst_keep_unbound(element.ty, &own);
-                            ElementSource::External(element)
+                            element
                         })
                         .collect();
+                    inherited = (0..external.len()).map(ElementSource::External).collect();
                 }
                 Ok(_) => undescribed_parent = Some(superclass),
                 Err(undescribed) => undescribed_parent = Some(undescribed),
@@ -220,6 +226,7 @@ impl SerialElements {
             parent_type_arguments,
             inherited_bindings,
             external_parent_types,
+            external,
             inherited,
             fields,
         }
@@ -265,7 +272,8 @@ impl SerialElements {
         for source in self.sources_of(class_id) {
             let (class, field) = match source {
                 ElementSource::Field { class, field } => (class, field),
-                ElementSource::External(element) => {
+                ElementSource::External(index) => {
+                    let element = &self.external[index];
                     // An element a local superclass inherited from a dependency is typed over
                     // that superclass's type parameters; the class sees its own arguments.
                     let ty = ty_subst_keep_unbound(element.ty, &self.inherited_bindings);
