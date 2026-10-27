@@ -3208,6 +3208,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   composes with the interval rather than replacing it: joined with `null`
   (`if (flag) Api.give() else null`) or substituted into a nullable generic result (`T?`), it is
   `(Mutable)List<String!>?`, both faces nullable, and metadata publishes that nullable interval.
+  Removing the nullability again (`joined(flag)!!`, or inference through a nullable formal
+  `fun <T> present(x: T?): T`) gives back `(Mutable)List<String!>`.
   Tests: `tests/java_not_null_collection_mutability_e2e.rs` (bytecode and metadata identical to
   kotlinc, runtime, and the complete diagnostics against kotlinc); `src/types.rs`
   (`nullability_composes_with_a_mutability_interval`).

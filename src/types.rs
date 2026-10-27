@@ -949,7 +949,7 @@ impl Ty {
             TyKind::TyParam(name, bound) => {
                 Ty::ty_param(name.as_str(), bound.definitely_non_null())
             }
-            _ => self.non_null(),
+            _ => self.non_null_keeping_mutability(),
         }
     }
 
@@ -960,7 +960,7 @@ impl Ty {
     /// to `Any`: that copy is indistinguishable from a parameter declared `T : Any`. A parameter
     /// already bounded by non-null `Any` is contributed unchanged.
     pub(crate) fn contributed_through_nullable_formal(self) -> Ty {
-        let actual = self.non_null();
+        let actual = self.non_null_keeping_mutability();
         match actual.kind() {
             TyKind::TyParam(_, bound) if bound.upper_bound_admits_null() => {
                 Ty::intern(TyKind::DefinitelyNotNull(actual))
@@ -2519,6 +2519,10 @@ mod tests {
         assert!(nullable.is_nullable());
         assert_eq!(nullable.non_null_keeping_mutability(), flexible);
         assert_eq!(nullable.non_null(), mutable);
+        assert_eq!(nullable.definitely_non_null(), flexible);
+        assert_eq!(flexible.definitely_non_null(), flexible);
+        assert_eq!(nullable.contributed_through_nullable_formal(), flexible);
+        assert_eq!(flexible.contributed_through_nullable_formal(), flexible);
         assert_eq!(Ty::nullable(nullable), nullable);
         assert_eq!(Ty::mutability_flexible(nullable), flexible);
         assert_eq!(

@@ -70,6 +70,10 @@ fun raw() = Api.raw()\n\
 fun joined(flag: Boolean) = if (flag) Api.give() else null\n\
 fun <T> orNull(x: T, flag: Boolean): T? = if (flag) x else null\n\
 fun genericJoined(flag: Boolean) = orNull(Api.give(), flag)\n\
+fun asserted(flag: Boolean) = joined(flag)!!\n\
+fun genericAsserted(flag: Boolean) = genericJoined(flag)!!\n\
+fun <T> present(x: T?): T = x!!\n\
+fun presentJoined() = present(joined(true))\n\
 fun box(): String {\n\
     val ro: List<String> = listOf(\"x\")\n\
     val m: MutableList<String> = mutableListOf(\"y\")\n\
