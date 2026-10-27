@@ -22562,3 +22562,13 @@ Concrete or conflicting receiver applications still fail. The same operation adm
 unbound outer receiver in a constructor reference. Tests: `builder_inference_receivers_e2e`,
 `postponed_bound_inference_e2e` and the exact wrong-receiver ledgers in
 `bound_inner_alias_inference_e2e`.
+
+## Nominal function values
+
+A nominal value conforms to a function type when its declared applied hierarchy reaches that
+signature's `FunctionN` or `SuspendFunctionN` classifier. The ordinary declaration-site variance
+relation checks its parameters and result, with nullability and arity preserved. This includes
+reflective function classifiers and classes inheriting a function interface; an unrelated SAM or
+a same-named classifier gains no such subtype relation. Tests: the normalized declaration cases in
+`symbol_resolver::hierarchy_projection` and the JVM nominal-slot round trip in
+`function_reference_invoke_e2e`.

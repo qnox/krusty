@@ -6212,3 +6212,8 @@ after an inline value resets the caller line. Ordinary method local-table orderi
 Full-class/runtime controls cover consecutive initializers, object and companion storage with an
 `init` block, and ordinary callable bodies. The batched bytecode oracle now isolates fixture packages
 and fails compilation errors (#2639).
+
+Nominal function values use the shared subtype relation to reach the canonical function classifier
+of the expected signature. Applied hierarchy traversal retains declared variance, nullability,
+arity and suspend kind. Owning semantic tests cover reflective and inherited function declarations
+and unrelated-callable rejection; the JVM round trip covers nominal and reflection interface slots.

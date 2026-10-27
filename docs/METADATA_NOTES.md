@@ -1269,3 +1269,10 @@ their local-variable ranges at nested lexical boundaries, and each store restore
 after an inlined value. Class-initializer table curation preserves intentional marks at distinct
 offsets, including returns to the same source line. The JVM uses these debug points to preserve
 inline markers and closing anchors; Kotlin metadata and constructor descriptors are unchanged.
+
+## Nominal function subtype evidence
+
+Provider-normalized function classifiers supply their declared generic supertypes to the common
+subtype relation. A typed function signature supplies its canonical classifier application, and
+the hierarchy walk checks the nominal value against that application. Reflective function types
+retain their nominal identity; no new metadata payload or physical JVM descriptor is introduced.
