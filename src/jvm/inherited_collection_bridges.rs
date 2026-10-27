@@ -662,13 +662,17 @@ fn member_bridges(
     let mut bridges = vec![InheritedCollectionBridge {
         name: specialized_name.clone(),
         parameters: specification.parameters.clone(),
-        // A Java method has no parameter names to keep; a Kotlin fake override keeps its
-        // declaration's.
-        parameter_names: match specification.slots {
-            SlotMapping::JavaReferences => (0..specification.parameters.len())
+        // A Java class method has no parameter names to keep. A Kotlin fake override, and the
+        // default of a mapped builtin interface (`getOrDefault(key, defaultValue)` under
+        // `java.util.AbstractMap`), keep the builtin declaration's.
+        parameter_names: if specification.slots == SlotMapping::JavaReferences
+            && !member.interface_default
+        {
+            (0..specification.parameters.len())
                 .map(crate::jvm::parameter_names::inherited_collection_specialized_local)
-                .collect(),
-            SlotMapping::Kotlin => specification.parameter_names.clone(),
+                .collect()
+        } else {
+            specification.parameter_names.clone()
         },
         result: specialized_result,
         body: if member.method.is_abstract() {

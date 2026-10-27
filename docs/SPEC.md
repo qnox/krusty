@@ -8066,9 +8066,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `Object removeAt(int)` bridge. An interface default the superclass chain inherits joins them
   after the chain's own members, grouped with a same-named one: `Map.getOrDefault` gives
   `Integer getOrDefault(String, int)`, the final synthetic `Object getOrDefault(Object, Object)`
-  and the final `Integer getOrDefault(Object, int)`, which boxes the default it answers. Tests:
-  `tests/kotlin_collection_superclass_bridges_e2e.rs` (class bytes and Java interface calls
-  against kotlinc).
+  and the final `Integer getOrDefault(Object, int)`, which boxes the default it answers. Such a
+  default is the mapped builtin's member, so its specialization keeps the builtin's parameter
+  names (`key`, `defaultValue`) even under a Java superclass, whose own members' locals are `p0`,
+  `p1`. Tests: `tests/kotlin_collection_superclass_bridges_e2e.rs` (class bytes and Java interface
+  calls against kotlinc; an `AbstractMutableList` subclass compares every method but not their
+  order, a `java.util.AbstractMap` one its declarations and the two default bridges).
 - **An override of a collection member keeps kotlinc's special bridge flags.** The type-checked bridge a class override of `contains`, `remove`, `indexOf`, `lastIndexOf`, `containsKey`, `containsValue` or `get` gets under the member's erased root signature is kotlinc's `BRIDGE_SPECIAL`: `ACC_PUBLIC|ACC_FINAL|ACC_BRIDGE`. A map lookup whose foreign key fails the type check (`get`, `MutableMap.remove`) returns `null` from that non-synthetic bridge. A source interface keeps its bridge non-final so another declaration can implement it. A subclass inherits an identical final bridge from a superclass in the same module or a dependency instead of declaring it, as kotlinc's bridge blacklist does; declaring it would override a final method. An inherited `getOrDefault(Object, Object)` bridge keeps the class-owned value variable in its generic signature (`(Object, V): V`) even though its JVM descriptor erases both occurrences to `Object`. Tests: `tests/special_collection_bridge_e2e.rs`.
 - **A bridge erases the overridden declaration's own signature, which the override edge carries.**
   The supertype side of an erasure bridge is the overridden declaration as declared, before the
@@ -13777,7 +13780,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `tests/read_only_set_face_stubs_e2e.rs`. Not yet like kotlinc: the order of the members an
   `AbstractMutableList` subclass inherits (kotlinc writes `remove(String)` and `contains` before
   `indexOf`), the place of `values()` under `java.util.AbstractMap`, and the shortcuts of members
-  a Java collection superclass leaves abstract.
+  a Java collection superclass leaves abstract, among them the `null` shortcut kotlinc's final
+  type-safe bridges take under `java.util.AbstractMap` (`containsKey(Object)`, `getOrDefault`).
 - **A collection class gets the JDK's `toArray` pair.** As kotlinc's `ToArrayLowering`, every
   non-interface class that implements `Collection` (any face, read-only or mutable, abstract or
   not, enum and anonymous classes included) gets `public <T> T[] toArray(T[])`, which checks its

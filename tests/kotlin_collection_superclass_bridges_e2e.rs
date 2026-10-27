@@ -83,3 +83,60 @@ fun box(): String {{
     );
     common::expect_box_same_as_kotlinc(&program, "kotlin_collection_superclass_bridges");
 }
+
+const RENAMED_AND_DEFAULT_MEMBERS: &str = "package inherited
+
+abstract class Rows : AbstractMutableList<String>()
+
+class JavaTotals : java.util.AbstractMap<String, Int>() {
+    override val entries: MutableSet<MutableMap.MutableEntry<String, Int>>
+        get() = java.util.HashMap<String, Int>().entries
+}
+";
+
+/// `AbstractMutableList`'s abstract `removeAt` gives `abstract String removeAt(int)`, the final
+/// `String remove(int)` and the ordinary `Object removeAt(int)` bridge; every method of `Rows` is
+/// kotlinc's, compared as a set because kotlinc orders the inherited members differently (SPEC:
+/// not yet like kotlinc). Under a Java base, `java.util.Map`'s `getOrDefault` and `remove(K, V)`
+/// defaults give kotlinc's methods, and their specializations keep the builtin's parameter names.
+/// Of `JavaTotals`, the declarations are compared as a set and those two bridges byte for byte:
+/// its final type-safe bridges still lack kotlinc's `null` shortcut, a gap the class had before.
+#[test]
+fn a_renamed_member_and_an_inherited_default_get_their_bridges_like_kotlinc() {
+    let classes = common::classes_against_kotlinc_module(&[(
+        "RenamedAndDefaultMembers.kt",
+        RENAMED_AND_DEFAULT_MEMBERS,
+    )]);
+    let (mut reference, mut krusty) = classes.method_blocks("inherited/Rows");
+    reference.sort();
+    krusty.sort();
+    assert_eq!(krusty, reference, "Rows: every method as kotlinc writes it");
+
+    let (reference, krusty) = classes.method_blocks("inherited/JavaTotals");
+    let declarations = |blocks: &[(String, String)]| {
+        let mut declarations: Vec<_> = blocks
+            .iter()
+            .map(|(declaration, _)| declaration.clone())
+            .collect();
+        declarations.sort();
+        declarations
+    };
+    assert_eq!(
+        declarations(&krusty),
+        declarations(&reference),
+        "JavaTotals: kotlinc's methods"
+    );
+    for member in [
+        "public java.lang.Integer getOrDefault(java.lang.String, java.lang.Integer);",
+        "public boolean remove(java.lang.String, java.lang.Integer);",
+    ] {
+        let block = |blocks: &[(String, String)]| {
+            blocks
+                .iter()
+                .find(|(declaration, _)| declaration == member)
+                .map(|(_, body)| body.clone())
+                .unwrap_or_else(|| panic!("JavaTotals declares no `{member}`"))
+        };
+        assert_eq!(block(&krusty), block(&reference), "JavaTotals `{member}`");
+    }
+}
