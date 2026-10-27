@@ -1,5 +1,14 @@
 # krusty — implementation plan
 
+## Native source callable-reference markers
+
+Give source-module references a program-scoped marker keyed by the existing module-qualified
+callable symbol. Reuse the static reflection-object COMDAT emitter so separate object files link
+to one marker address. Keep identity scope explicit in the cache; local declarations and current
+dependency identities retain their existing file scope. A separate KLIB follow-up must derive
+program identity from authenticated module-qualified declarations, since opaque provider IDs are
+rebound between modules.
+
 ## Bound declaration-name inventory
 
 Expose selected declaration-name evidence by typed resolved key across source, JVM, KLIB and their

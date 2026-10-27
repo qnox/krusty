@@ -1,5 +1,14 @@
 # `@kotlin.Metadata` — reverse-engineering notes (Phase 4b)
 
+## Native source callable-reference identity
+
+The checked source-module callable ID and source-module identity own the Native reflection marker's
+linkage. Weak definitions in dedicated COMDAT sections give all emitted files the same address,
+which the existing reference equality and hash runtime reads. The invocation adapter and carrier
+remain separate from declaration identity. KLIB references need their retained module-qualified
+signature before receiving the same program scope; a raw provider-local callable number is
+insufficient across independently analyzed modules.
+
 ## Identity-keyed declaration-name projection
 
 Providers project name evidence directly from their selected classifier and alias records. Typed
