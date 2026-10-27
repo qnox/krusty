@@ -46,8 +46,9 @@ These projects carry a patch for that bump:
   inner class, expect/actual pairs, data-class `copy` visibility, `INVISIBLE_REFERENCE`
   suppressions, a hand-written `$serializer` that crashes the serialization plugin). Tests
   compile at the default language version and without `ContextReceivers` (no test uses them; the
-  build enabled them through `enableLanguageFeature`, an error in Kotlin 2.4's Gradle DSL), and `mirai-core-utils` skips atomicfu's bytecode transform as its siblings already do.
-  The blocking-bridge and dynamic-delegation compiler plugins have no Kotlin 2 release and are left
+  build enabled them through `enableLanguageFeature`, an error in Kotlin 2.4's Gradle DSL), and
+  `mirai-core-utils` skips atomicfu's bytecode transform as its siblings already do. The
+  blocking-bridge and dynamic-delegation compiler plugins have no Kotlin 2 release and are left
   out, as are the Android target and the IntelliJ plugin module (`local.properties`). The version
   pin is `kotlinCompiler` in `buildSrc/src/main/kotlin/Versions.kt`.
 - `moshi`: kotlinc 2.4 warns that `-Xannotation-default-target=param-property` is redundant, and
