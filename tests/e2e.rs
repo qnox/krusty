@@ -2941,26 +2941,8 @@ mod var_extension_property_e2e;
 mod var_smartcast_after_assign_e2e;
 #[path = "var_smartcast_e2e.rs"]
 mod var_smartcast_e2e;
-#[path = "vararg_constructor_property_e2e.rs"]
-mod vararg_constructor_property_e2e;
-#[path = "vararg_e2e.rs"]
-mod vararg_e2e;
-#[path = "vararg_element_default_e2e.rs"]
-mod vararg_element_default_e2e;
-#[path = "vararg_element_specificity_e2e.rs"]
-mod vararg_element_specificity_e2e;
-#[path = "vararg_elements_before_named_e2e.rs"]
-mod vararg_elements_before_named_e2e;
-#[path = "vararg_extension_overload_e2e.rs"]
-mod vararg_extension_overload_e2e;
-#[path = "vararg_inline_argument_splice_e2e.rs"]
-mod vararg_inline_argument_splice_e2e;
-#[path = "vararg_lambda_element_shape_e2e.rs"]
-mod vararg_lambda_element_shape_e2e;
-#[path = "vararg_member_overload_clash_e2e.rs"]
-mod vararg_member_overload_clash_e2e;
-#[path = "vararg_spread_shapes_e2e.rs"]
-mod vararg_spread_shapes_e2e;
+#[path = "e2e/varargs.rs"]
+mod varargs;
 #[path = "vc_mangled_default_e2e.rs"]
 mod vc_mangled_default_e2e;
 #[path = "when_branch_if_no_else_e2e.rs"]
