@@ -18,6 +18,7 @@ use super::symbols::KlibIrSymbol;
 use super::KlibIrConstant;
 
 mod emitted_callables;
+pub(crate) use emitted_callables::EmittedCallForms;
 mod lexical_values;
 
 macro_rules! arena_id {
@@ -113,6 +114,7 @@ impl KlibIrArena {
 
     /// Calls and constructions reached by executing exactly this body. Parameter defaults and
     /// nested declaration bodies are separate execution roots, not edges of this graph.
+    #[cfg(test)]
     pub(crate) fn callable_symbols_in_body<'a>(
         &'a self,
         function: &'a KlibIrFunction,
@@ -1072,17 +1074,29 @@ mod tests {
         let selected = arena.function(root);
         assert_eq!(
             arena
-                .emitted_callable_symbols(selected, |_, expression| match expression.kind {
-                    KlibIrExprKind::FunctionExpression { function, .. } => Some(function),
-                    _ => None,
-                })
+                .emitted_callable_symbols(
+                    selected,
+                    EmittedCallForms {
+                        closure: |_, expression| match expression.kind {
+                            KlibIrExprKind::FunctionExpression { function, .. } => Some(function),
+                            _ => None,
+                        },
+                        folded_call: |_, _| false,
+                    }
+                )
                 .into_iter()
                 .cloned()
                 .collect::<Vec<_>>(),
             [helper, executed]
         );
         assert!(arena
-            .emitted_callable_symbols(selected, |_, _| None)
+            .emitted_callable_symbols(
+                selected,
+                EmittedCallForms {
+                    closure: |_, _| None,
+                    folded_call: |_, _| false,
+                }
+            )
             .is_empty());
         assert_eq!(arena.callable_symbols_in_body(selected).count(), 0);
         assert_eq!(arena.call_symbols_in_body(selected).count(), 0);

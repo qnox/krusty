@@ -558,6 +558,7 @@ impl Record {
                 type_parameters: &self.formals,
                 reified_type_parameter_ordinals: &self.reified,
                 compiler_intrinsic: None,
+                range_construction: None,
                 declaration_modifiers: None,
             },
             None,

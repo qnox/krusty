@@ -258,6 +258,7 @@ impl BackendCallableFact {
                 type_parameters: &self.klib_body_type_parameters,
                 reified_type_parameter_ordinals: &self.reified_type_parameter_ordinals,
                 compiler_intrinsic: self.compiler_operation(),
+                range_construction: self.member_realization.range_construction(),
                 declaration_modifiers: self.klib_body_declaration_modifiers,
                 class_contract: self.klib_body_class_contract.as_ref(),
             },
