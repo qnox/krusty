@@ -602,13 +602,7 @@ impl Emitter<'_> {
         call: &ClasspathInlineCall<'_, '_>,
         code: &mut CodeBuilder,
     ) -> Option<()> {
-        let ClasspathInlineCall {
-            call_expression,
-            target,
-            args,
-            reified,
-            ..
-        } = *call;
+        let ClasspathInlineCall { target, args, .. } = *call;
         if code.is_dead() {
             return Some(());
         }
@@ -662,31 +656,6 @@ impl Emitter<'_> {
             &lambdas,
         );
         let base = self.inline_splice_base(self.frame.size());
-        // The body's lines are mapped once the arguments are evaluated, like kotlinc's, so that
-        // the source map numbers them after any call inlined into an argument; this first pass only
-        // settles whether the port covers the body.
-        if let Err(error) = inliner::inline(
-            &callee,
-            &parameters,
-            &lambdas,
-            target.inline_only,
-            base,
-            reified,
-            inliner::InliningContext {
-                lines: &mut UnmappedLines,
-                classes: &self.bodies,
-                objects: &mut self.call_objects(
-                    call_expression,
-                    target.name,
-                    false,
-                    SourceMap::default(),
-                ),
-                enum_entries: &mut self.call_enum_entries(false),
-            },
-        ) {
-            crate::trace_compiler!("splice", "unified inliner declines: {error:?}");
-            return None;
-        }
         let inlined_call = InlinedCall {
             call: *call,
             physical: &physical,
@@ -697,8 +666,16 @@ impl Emitter<'_> {
             lines: SourceMap::default(),
             captures: &[],
         };
-        self.emit_inlined_call(&inlined_call, &callee, &parameters, inlined, base, code)
-            .expect("the body was inlined before its arguments were evaluated");
+        // The route was settled from the callee's facts before any argument was evaluated: a body
+        // the port then cannot inline is an error, never a direct call.
+        if let Err(error) =
+            self.emit_inlined_call(&inlined_call, &callee, &parameters, inlined, base, code)
+        {
+            self.run.set_emit_error(format!(
+                "the compiled inline body of `{}` cannot be inlined: {error:?}",
+                target.name
+            ));
+        }
         Some(())
     }
 
@@ -1038,7 +1015,7 @@ impl Emitter<'_> {
         let mut objects =
             lines
                 .emitter
-                .call_objects(call_expression, target.name, true, lambda_lines.clone());
+                .call_objects(call_expression, target.name, lambda_lines.clone());
         let (classifiers, run, owner) = (
             lines.emitter.classifiers,
             lines.emitter.run,
@@ -1048,7 +1025,6 @@ impl Emitter<'_> {
             classifiers,
             run,
             owner: &owner,
-            commit: true,
         };
         let inlined = inliner::inline(
             callee,
@@ -1739,21 +1715,6 @@ impl Emitter<'_> {
         self.cw
             .source_map_for_inlining(claimable)
             .and_then(|map| map.map_line(name, path, source, call_line))
-    }
-}
-
-/// Lines left as the body's own, for the pass that only checks the body can be inlined.
-struct UnmappedLines;
-
-impl inliner::SourceLines for UnmappedLines {
-    fn map(&mut self, line: u16) -> Option<u16> {
-        Some(line)
-    }
-    fn synthetic(&mut self) -> Option<u16> {
-        None
-    }
-    fn call_site(&self) -> Option<u16> {
-        None
     }
 }
 

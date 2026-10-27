@@ -16,6 +16,7 @@ mod body_local_ownership;
 mod body_trace;
 #[cfg(test)]
 mod bottom_value_tests;
+mod builtin_calls;
 #[cfg(test)]
 mod builtin_operation_tests;
 #[cfg(test)]

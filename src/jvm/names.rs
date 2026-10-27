@@ -495,6 +495,7 @@ fn descriptor_shape(ty: Ty) -> DescriptorShape {
         ),
         TyKind::TyParam(_, bound)
         | TyKind::PlatformNullable(bound)
+        | TyKind::MutabilityFlexible(bound)
         | TyKind::OutProjection(bound)
         | TyKind::StarProjection(bound)
         | TyKind::RawProjection(bound) => descriptor_shape(bound),
@@ -557,7 +558,9 @@ pub(crate) fn instanceof_internal_name(t: Ty) -> String {
                 _ => unreachable!("is_unsigned accepts only the four unsigned scalar types"),
             }
         }
-        TyKind::Nullable(inner) | TyKind::PlatformNullable(inner) => inner
+        TyKind::Nullable(inner)
+        | TyKind::PlatformNullable(inner)
+        | TyKind::MutabilityFlexible(inner) => inner
             .boxed_ref()
             .and_then(Ty::obj_internal)
             .map(|name| crate::jvm::names::classfile_internal_name_of(name).to_string())

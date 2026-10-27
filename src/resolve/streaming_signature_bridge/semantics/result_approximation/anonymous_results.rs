@@ -93,6 +93,7 @@ fn contains_anonymous(
             }
             TyKind::Nullable(inner)
             | TyKind::PlatformNullable(inner)
+            | TyKind::MutabilityFlexible(inner)
             | TyKind::InProjection(inner)
             | TyKind::OutProjection(inner)
             | TyKind::StarProjection(inner) => contains_anonymous(table, headers, inner),
@@ -295,6 +296,9 @@ impl Projection<'_> {
                 Ok(Ty::nullable(self.approximate(inner, position, bindings)?))
             }
             TyKind::PlatformNullable(inner) => Ok(Ty::platform_nullable(
+                self.approximate(inner, position, bindings)?,
+            )),
+            TyKind::MutabilityFlexible(inner) => Ok(Ty::mutability_flexible(
                 self.approximate(inner, position, bindings)?,
             )),
             TyKind::InProjection(inner) => Ok(Ty::in_projection(self.approximate(

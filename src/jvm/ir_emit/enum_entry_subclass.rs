@@ -197,7 +197,7 @@ pub(super) fn emit_enum_entry_subclass(
                 c.decl_line,
             );
         }
-        if let Some(defaults) = ir.declared_param_defaults(fid) {
+        if let Some((fid, defaults)) = crate::jvm::default_wrappers::member_function(ir, fid) {
             if function.is_static {
                 emit_facade_default_stub(
                     DefaultStubSource { ir, fid, defaults },
