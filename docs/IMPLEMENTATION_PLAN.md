@@ -1,5 +1,12 @@
 # krusty — implementation plan
 
+## Bound declaration-name inventory
+
+Expose selected declaration-name evidence by typed resolved key across source, JVM, KLIB and their
+federated views. Preserve absent, selected-unknown and selected-known records in caches and frozen
+backend facts, including aliases without target shapes. This supplies the metadata consumer seam;
+the full class-ID encoder and callable-reference adapter regressions remain separate follow-ups.
+
 ## Alias declaration-name producers
 
 Retain an alias's own optional container and exact segment through stable source headers, the
@@ -14,6 +21,15 @@ Replace lookup-spelling splitting in the foreign-source classifier inventory wit
 declaration-owned name operation. Preserve exact segments, owner edges, visibility, order and
 non-local exclusions without interning undeclared prefixes. This producer correction is separate
 from the remaining metadata class-ID encoder and dependency/alias-name fact handoff.
+
+## Wasm runtime-exception declarations
+
+Normalize admitted platform exception storage roles at the KLIB provider boundary, freeze them
+beside classifier facts, and realize their metadata-owned parent chains in the Wasm GC registry.
+The registry authenticates every ancestor on every request, including cached leaves, before
+mutating module state. The shared Throwable hierarchy case starts from exact JVM/reference and
+Native results and exercises both Wasm hosts. Reference-array storage and checked array reads
+remain the next separate slice of #2531.
 
 ## JVM companion field ABI
 

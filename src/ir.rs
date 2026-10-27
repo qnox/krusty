@@ -2130,6 +2130,11 @@ pub struct IrFile {
     /// `-impl`, a constructor's `constructor-impl`). Only that pass writes it; kotlinc names the
     /// callables it lifts out of such a function after this name.
     pub(crate) value_class_renamed_functions: crate::fx_hash::HashSet<FunId>,
+    /// The `-<hash>` suffix the value-class pass appended to a function that is not a value class's
+    /// own member. kotlinc's inline-class lowering renames that IR function to its source name plus
+    /// this suffix, whatever `@JvmName` later makes of the JVM method, and names an extension
+    /// receiver after that IR name.
+    pub(crate) value_class_mangle_suffixes: crate::fx_hash::HashMap<FunId, String>,
     /// Top-level source declaration id → its exact IR function id. Metadata emission uses this
     /// checked declaration handoff to find a value-class-rewritten physical realization; it must
     /// never reconstruct an overload by matching source names and arity.

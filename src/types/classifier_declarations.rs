@@ -14,6 +14,14 @@ pub enum ClassifierDeclarationName {
 }
 
 impl ClassifierDeclarationName {
+    /// The classifier's own declared segment, exactly as written: a `$` in a backticked name is
+    /// part of it, never a nesting separator.
+    pub fn name(&self) -> &str {
+        match self {
+            Self::TopLevel { name, .. } | Self::Nested { name, .. } => name,
+        }
+    }
+
     /// Publish this declaration's identity from its retained container and exact segment.
     pub(crate) fn identity(&self) -> TypeName {
         match self {

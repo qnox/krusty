@@ -579,8 +579,12 @@ impl<'a> JvmClassRealization<'a> {
         // A value-class-parametered primary ctor's physical handle is the PUBLIC synthetic marker
         // ctor (`(…;Lkotlin/jvm/internal/DefaultConstructorMarker;)V`) — the private erased
         // `<init>` is not callable cross-class. The marker ctor spells EVERY parameter, an inner
-        // class's leading outer instance included.
-        if !c.is_enum && ir.vc_ctor_declared_params(c.fq_name_id()).is_some() {
+        // class's leading outer instance included. A private primary is not hidden: kotlinc calls
+        // its erased `<init>` directly and names that one, the marker ctor being only its accessor.
+        if !c.is_enum
+            && ir.vc_ctor_declared_params(c.fq_name_id()).is_some()
+            && ir.ctor_visibilities.get(&c.fq_name_id()) != Some(&crate::types::Visibility::Private)
+        {
             return JvmConstructorSignature::init(format!(
                 "({}Lkotlin/jvm/internal/DefaultConstructorMarker;)V",
                 arguments.iter().map(|arg| desc(arg.ty)).collect::<String>()
