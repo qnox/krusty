@@ -1661,6 +1661,8 @@ mod public_inline_property_access_e2e;
 mod reference_carrier_cast_e2e;
 #[path = "reified_type_arguments_e2e.rs"]
 mod reified_type_arguments_e2e;
+#[path = "report_all_warnings_e2e.rs"]
+mod report_all_warnings_e2e;
 #[path = "result_generic_override_argument_e2e.rs"]
 mod result_generic_override_argument_e2e;
 #[path = "safe_call_null_line_e2e.rs"]
