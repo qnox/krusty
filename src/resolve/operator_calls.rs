@@ -165,6 +165,9 @@ impl<'a> Checker<'a> {
             operand,
             expected_result,
         )?;
+        if let Expr::Binary { lhs, .. } = self.file.expr(expression) {
+            self.narrow_operator_receiver(*lhs, &call);
+        }
         self.resolved_operator_calls.insert((expression, key), call);
         Some(ret)
     }

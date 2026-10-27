@@ -3381,6 +3381,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`resolve/value_classes.rs`). Test:
   `tests/platform_call_assertions_e2e.rs::a_java_value_received_by_a_value_class_is_checked_like_kotlinc`.
 
+  An OPERATOR CONVENTION's receiver is the argument of the selected extension's receiver
+  parameter: a Java value written as `map[k] = v` (`MutableMap.set`), `list += x` (`plusAssign`) or
+  `map + pair` (`Map.plus`) is committed to that non-null receiver and checked like a written
+  extension call's receiver (`map(...)`, or message-less over a local). A member convention's
+  dispatch receiver stays unchecked. Not yet matched: kotlinc stores every argument of such an
+  `@InlineOnly` call (constants and the boxed value included) once its receiver is checked, and
+  keeps a checked local in place. Test:
+  `tests/java_operator_receiver_null_check_e2e.rs` (each failure's message run against kotlinc).
+
   A RANGE LITERAL's end is the argument of `rangeTo`/`rangeUntil` and is checked like one; its start
   is the dispatch receiver and is not (`(0..list[0]).last` checks `get(...)`, `(list[0]..3).first`
   does not). A counted `for` loop over a range literal (`..`, `..<`, `until`, `downTo`) commits each
