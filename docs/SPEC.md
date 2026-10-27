@@ -7159,12 +7159,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   no lines. The copy's locals are renumbered as kotlinc's class builder sorts them, the machine's
   `$continuation`, `$result` and suspension marker first. The lambda is no function of its own: no
   `access$…$lambda$0` bridge is written for it, nor the continuation its lowering prepared, unless
-  a call keeps it as a value. A library object without the `$$forInline` copy (one krusty compiled,
-  which writes no such copy for an object's method yet) keeps the lambda as a value. That route is
-  decided once from the callee's facts before any code is emitted: the constructions the body
-  passes a suspend lambda are paired with their classes, and a method other than a `$$forInline`
-  copy that reads the lambda's field names the bridge (`SuspendMethodWithoutForInlineCopy`). The
-  body is not inlined on trial: once a call is routed to the inliner, or a lambda-free call to a
+  a call keeps it as a value. krusty writes the same copy for a library it compiles: a suspend method
+  of a class in an inline function that reads a field the class stores a `crossinline` parameter
+  in (kotlinc's `isSuspendCapturingCrossinline`, suspend lambda or not) gets `name$$forInline`, the
+  marked body with the method's access, opened by `InlineMarker.mark(4)`, the construction of the
+  method's continuation on the receiver and `$completion`, `mark(5)` and a `pop`
+  (`jvm::suspend_inline_functions`). That continuation is public, constructor included, its
+  `@Metadata.xi` carries the public visibility and, like any continuation whose function is in a
+  public inline function's scope, `METADATA_PUBLIC_ABI_FLAG`; it is written even when the method's
+  own suspension points are all tail calls, then without `@DebugMetadata`. The route is decided
+  once from the callee's facts before any code is emitted, and the body is not inlined on trial: once a call is routed to the inliner, or a lambda-free call to a
   compiled body is, a failure to inline or regenerate is an emission error, never a direct call.
   Tests: `tests/crossinline_suspend_object_e2e.rs`. An object the copied method constructs that reads the lambda through the copy's field (the
   `FlowCollector` that `Flow.map`'s object creates) is regenerated too, as kotlinc's

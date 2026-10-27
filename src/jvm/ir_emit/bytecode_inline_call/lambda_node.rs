@@ -449,60 +449,6 @@ impl Emitter<'_> {
         }
     }
 
-    /// The literal lambda `argument` as route planning sees it before compiling it: its parameters,
-    /// captured values and names, with a body that only returns; and the caller values it captures.
-    pub(super) fn lambda_shape(
-        &self,
-        argument: u32,
-    ) -> Result<(inliner::Lambda, Vec<(u32, Ty)>), &'static str> {
-        let (lambda, _) = self.literal_lambda(argument)?;
-        let parameter_types: Vec<String> = lambda
-            .parameter_types
-            .iter()
-            .map(|&ty| type_descriptor(ty))
-            .collect();
-        let descriptor = format!(
-            "({}{})V",
-            parameter_types.concat(),
-            lambda
-                .capture_types
-                .iter()
-                .map(|&ty| type_descriptor(ty))
-                .collect::<String>(),
-        );
-        let mut node = MethodNode::new(ACC_STATIC, "invoke", &descriptor);
-        node.max_locals = lambda
-            .parameter_types
-            .iter()
-            .chain(&lambda.capture_types)
-            .map(|&ty| slot_words(ty))
-            .sum();
-        let start = node.new_label();
-        node.nodes = vec![Node::Label(start), Node::Insn(Insn::Op(RETURN))];
-        let shape = inliner::Lambda {
-            node,
-            value_class_parameters: lambda
-                .parameter_coercions
-                .iter()
-                .map(InvokeCoercion::value_class)
-                .collect(),
-            parameter_types,
-            return_type: "V".to_string(),
-            value_class_return: None,
-            captured: 0..0,
-            capture_names: self.capture_names(lambda.impl_fn, lambda.captures.len()),
-            default_class: None,
-            suspend: lambda.suspend,
-        };
-        let captures = lambda
-            .captures
-            .iter()
-            .copied()
-            .zip(lambda.capture_types.iter().copied())
-            .collect();
-        Ok((shape, captures))
-    }
-
     /// Whether the literal lambda `argument`'s body reaches a declaration only its own class may: a
     /// private field (a property's backing field), a private function, an `invokespecial`, or a
     /// nested lambda (which may be materialized as a private method). Inlined into a regenerated

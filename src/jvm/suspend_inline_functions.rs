@@ -5,10 +5,20 @@
 //! that body in a private `name$$forInline` copy beside its own state machine. A function that is
 //! only ever inlined (kotlinc's `isEffectivelyInlineOnly`) has no state machine: its one method is
 //! that body.
+//!
+//! A suspend method of a class that captures a `crossinline` parameter of the inline function it is
+//! written in, and reads that capture, is inlined in the same way: a call site that inlines the
+//! function copies the class and inlines the lambda into the method (kotlinc's
+//! `isSuspendCapturingCrossinline`). kotlinc keeps that method's marked body in a
+//! `name$$forInline` copy too, which keeps the method's access and starts by constructing the
+//! method's continuation between `InlineMarker.mark(4)` and `mark(5)`, so the copy's machine can be
+//! built over it.
 
-use crate::ir::{ExprId, IrExpr, IrFile};
+use crate::fx_hash::HashSet;
+use crate::ir::{ClassId, ExprId, IrClass, IrExpr, IrFile};
 use crate::jvm::suspend::TransformedMachine;
 use crate::types::InlineExpansionMode;
+use crate::types::InlineParameterModifier;
 
 /// Whether `fid` is a `suspend inline` function only ever inlined: a reified one, whose body
 /// needs its call site's types, or a private one. Its method keeps the marked body and no
@@ -18,30 +28,159 @@ pub(crate) fn keeps_marked_body(ir: &IrFile, fid: u32) -> bool {
         && (crate::jvm::ir_emit::is_reifiable(ir, fid) || ir.method_visibility(fid).is_private())
 }
 
-/// Whether `fid` is a callable `suspend inline` function, written as its state machine with the
-/// marked body in a private `name$$forInline` copy.
-pub(crate) fn has_for_inline_copy(ir: &IrFile, fid: u32) -> bool {
-    is_suspend_inline(ir, fid) && !keeps_marked_body(ir, fid)
+/// Why a suspend function keeps its marked body in a `name$$forInline` copy beside its machine.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ForInlineCopy {
+    /// A callable `suspend inline` function: the copy is private.
+    InlineFunction,
+    /// A suspend method that reads a `crossinline` capture of its class: the copy keeps the
+    /// method's access and constructs the continuation first.
+    CrossinlineCapture,
+}
+
+/// Whether `fid` is written as its state machine with its marked body in a `name$$forInline` copy,
+/// and why.
+pub(crate) fn for_inline_copy(ir: &IrFile, fid: u32) -> Option<ForInlineCopy> {
+    if is_suspend_inline(ir, fid) {
+        return (!keeps_marked_body(ir, fid)).then_some(ForInlineCopy::InlineFunction);
+    }
+    reads_crossinline_capture(ir, fid).then_some(ForInlineCopy::CrossinlineCapture)
+}
+
+/// Whether continuation class `class` belongs to a method with a `$$forInline` copy that reads a
+/// `crossinline` capture. The copy constructs it, so a call site in another class that inlines the
+/// copy does too: kotlinc writes it public, and even when the method's own body needs no machine.
+pub(crate) fn constructed_by_method_copy(ir: &IrFile, class: ClassId) -> bool {
+    ir.jvm_continuation_functions
+        .get(&class)
+        .is_some_and(|&function| {
+            for_inline_copy(ir, function) == Some(ForInlineCopy::CrossinlineCapture)
+        })
+}
+
+/// Whether `fid` is a suspend method that reads one of its class's `crossinline` captures.
+fn reads_crossinline_capture(ir: &IrFile, fid: u32) -> bool {
+    if !ir.suspend_funs.contains(&fid) || ir.inline_fns.contains(&fid) {
+        return false;
+    }
+    let function = &ir.functions[fid as usize];
+    let (Some(body), Some(owner), false) = (
+        function.body,
+        function.dispatch_receiver,
+        function.is_static,
+    ) else {
+        return false;
+    };
+    let Some(class) = ir.class_id_by_name(owner) else {
+        return false;
+    };
+    let fields = crossinline_capture_fields(ir, &ir.classes[class as usize]);
+    !fields.is_empty() && reads_own_fields(ir, body, class, &fields)
+}
+
+/// The fields of `class` that store a `crossinline` parameter of the inline function it is written
+/// in (kotlinc's `FIELD_FOR_CROSSINLINE_CAPTURED_VALUE`): the capture arguments its constructions in
+/// that function's body pass that parameter's value.
+fn crossinline_capture_fields(ir: &IrFile, class: &IrClass) -> HashSet<u32> {
+    let mut fields = HashSet::default();
+    let Some((function, _)) =
+        crate::jvm::ir_emit::enclosure::enclosing_functions(ir, class.enclosure).next()
+    else {
+        return fields;
+    };
+    if !ir.inline_fns.contains(&function) {
+        return fields;
+    }
+    let declaration = &ir.functions[function as usize];
+    let (Some(body), Some(parameters)) = (declaration.body, ir.fn_params.get(&function)) else {
+        return fields;
+    };
+    let receiver = u32::from(!declaration.is_static);
+    let crossinline = |value: u32| {
+        value
+            .checked_sub(receiver)
+            .and_then(|parameter| parameters.inline_modifiers.get(parameter as usize))
+            == Some(&InlineParameterModifier::Crossinline)
+    };
+    let mut pending = vec![body];
+    while let Some(expression) = pending.pop() {
+        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+        let IrExpr::New { internal, args, .. } = ir.expr(expression) else {
+            continue;
+        };
+        if *internal != class.fq_name_id() {
+            continue;
+        }
+        for (argument, &value) in class.ctor_args.iter().zip(args) {
+            let (Some(_), Some(field)) = (&argument.capture, argument.field_index) else {
+                continue;
+            };
+            if matches!(ir.expr(value), IrExpr::GetValue(read) if crossinline(*read)) {
+                fields.insert(field);
+            }
+        }
+    }
+    fields
+}
+
+/// Whether `body`, a method of `class`, reads one of `fields` of its own receiver.
+fn reads_own_fields(ir: &IrFile, body: ExprId, class: u32, fields: &HashSet<u32>) -> bool {
+    let mut pending = vec![body];
+    while let Some(expression) = pending.pop() {
+        if own_field_read(ir, expression, class, fields) {
+            return true;
+        }
+        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+    }
+    false
+}
+
+/// Whether `expression` reads one of `fields` of the method's own receiver, value 0.
+fn own_field_read(ir: &IrFile, expression: ExprId, class: u32, fields: &HashSet<u32>) -> bool {
+    matches!(
+        ir.expr(expression),
+        IrExpr::GetField { receiver, class: owner, index }
+            if *owner == class
+                && fields.contains(index)
+                && matches!(ir.expr(*receiver), IrExpr::GetValue(0))
+    )
 }
 
 fn is_suspend_inline(ir: &IrFile, fid: u32) -> bool {
     ir.inline_fns.contains(&fid) && ir.suspend_funs.contains(&fid)
 }
 
-/// The suspension points of `machine` a body kept for inlining leaves unmarked: an inline
-/// function-typed parameter's invoke, which the inlining caller replaces with the lambda's body.
+/// The suspension points of `machine` a body kept for inlining leaves unmarked: the invoke the
+/// inlining caller replaces with the lambda's body, of an inline function-typed parameter or of a
+/// method's `crossinline` capture.
 pub(crate) fn inlined_invokes(ir: &IrFile, fid: u32, machine: &TransformedMachine) -> Vec<ExprId> {
     // A member's value 0 is its receiver; the modes cover the parameters after it. They cover the
     // declared parameters only, not the trailing `$completion` the CPS signature added.
-    let receiver = usize::from(!ir.functions[fid as usize].is_static);
+    let function = &ir.functions[fid as usize];
+    let receiver = usize::from(!function.is_static);
     let modes = ir
         .fn_params
         .get(&fid)
         .map_or(&[][..], |info| info.expansion_modes.as_slice());
+    let captures = function
+        .dispatch_receiver
+        .filter(|_| for_inline_copy(ir, fid) == Some(ForInlineCopy::CrossinlineCapture))
+        .and_then(|owner| ir.class_id_by_name(owner))
+        .map(|class| {
+            (
+                class,
+                crossinline_capture_fields(ir, &ir.classes[class as usize]),
+            )
+        });
     let spliced = |call: ExprId| {
         let IrExpr::InvokeFunction { func, .. } = ir.expr(call) else {
             return false;
         };
+        if let Some((class, fields)) = &captures {
+            if own_field_read(ir, *func, *class, fields) {
+                return true;
+            }
+        }
         let IrExpr::GetValue(value) = ir.expr(*func) else {
             return false;
         };

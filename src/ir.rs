@@ -1353,6 +1353,9 @@ pub struct IrFile {
     /// these identities; they must not recover either one from the generated `$suspendImpl`
     /// spelling.
     pub(crate) jvm_suspend_impl_bodies: crate::fx_hash::HashMap<FunId, (TypeName, FunId)>,
+    /// JVM continuation classes, keyed by class id, with the suspend function each one re-enters.
+    /// The class's access and ABI scope are that function's facts.
+    pub(crate) jvm_continuation_functions: crate::fx_hash::HashMap<ClassId, FunId>,
     /// Exact generated function metadata/debug contracts, keyed by semantic owning classifier.
     /// Producers publish once; backends consume function identities without name/descriptor scans.
     generated_member_publications: crate::fx_hash::HashMap<TypeName, IrGeneratedMemberPublication>,

@@ -8,8 +8,8 @@
 //! A method that constructs another object reading the lambda regenerates that object too, numbered
 //! under the copy (kotlinx `Flow.map`'s collector).
 //!
-//! The library is compiled by the reference compiler: krusty does not write the `$$forInline`
-//! copy of an object's suspend method yet, and a copy is regenerated only from one.
+//! A copy is regenerated only from the method's `$$forInline` copy, which kotlinc and krusty both
+//! write for a method that reads a `crossinline` capture.
 
 use super::common;
 
@@ -444,4 +444,111 @@ fn an_unused_suspend_lambda_suspends_in_no_frame_like_kotlinc() {
     );
     let differences = classes.differences();
     assert!(differences.is_empty(), "{}", differences.join("\n\n"));
+}
+
+const COPIED_LIB: &str = r#"
+package lib
+
+interface Source<out T> {
+    suspend fun next(): T
+}
+
+inline fun <T> source(crossinline produce: suspend () -> T): Source<T> =
+    object : Source<T> {
+        override suspend fun next(): T = produce()
+    }
+
+inline fun <T> plain(crossinline produce: () -> T): Source<T> =
+    object : Source<T> {
+        override suspend fun next(): T = produce()
+    }
+
+inline fun <T> second(crossinline produce: suspend () -> T): Source<T> =
+    object : Source<T> {
+        override suspend fun next(): T {
+            produce()
+            return produce()
+        }
+    }
+
+fun <T> eager(produce: suspend () -> T): Source<T> =
+    object : Source<T> {
+        override suspend fun next(): T = produce()
+    }
+"#;
+
+/// krusty writes kotlinc's `$$forInline` copy of an object's suspend method that reads a
+/// `crossinline` capture, suspend or not: the method's marked body, public like the method, opened
+/// by constructing its continuation between `InlineMarker.mark(4)` and `mark(5)`. That
+/// continuation is public, part of the public ABI, and written even when the method's own body is
+/// all tail calls. A method of an object outside an inline function has no copy.
+#[test]
+fn a_method_reading_a_crossinline_capture_writes_kotlincs_for_inline_copy() {
+    let classes = common::classes_against_kotlinc_module(&[("Lib.kt", COPIED_LIB)]);
+    let inventory = [
+        "lib/LibKt",
+        "lib/LibKt$eager$1",
+        "lib/LibKt$plain$1",
+        "lib/LibKt$plain$1$next$1",
+        "lib/LibKt$second$1",
+        "lib/LibKt$second$1$next$1",
+        "lib/LibKt$source$1",
+        "lib/LibKt$source$1$next$1",
+        "lib/Source",
+    ];
+    assert_eq!(classes.reference.keys().collect::<Vec<_>>(), inventory);
+    assert_eq!(classes.krusty.keys().collect::<Vec<_>>(), inventory);
+    let code = classes.code_differences();
+    assert!(code.is_empty(), "{}", code.join("\n\n"));
+    for continuation in [
+        "lib/LibKt$plain$1$next$1",
+        "lib/LibKt$second$1$next$1",
+        "lib/LibKt$source$1$next$1",
+    ] {
+        let (reference, krusty) = classes.class_listing(continuation);
+        assert_eq!(krusty, reference, "{continuation}");
+        assert!(
+            classes.reference[continuation] == classes.krusty[continuation],
+            "{continuation}: the listings agree, the bytes do not"
+        );
+    }
+}
+
+const COPIED_RUN_MAIN: &str = r#"
+import lib.*
+import kotlin.coroutines.*
+
+var pending: Continuation<Int>? = null
+
+class Later : Source<Int> {
+    override suspend fun next(): Int = suspendCoroutine { pending = it }
+}
+
+fun plainPlusOne(n: Int) = plain { n + 1 }
+
+fun secondPlusOne(s: Source<Int>) = second { s.next() + 1 }
+
+fun box(): String {
+    var result: Any? = null
+    suspend { plainPlusOne(41).next() }
+        .startCoroutine(Continuation(EmptyCoroutineContext) { result = it.getOrThrow() })
+    if (result != 42) return "FAIL plain: $result"
+    result = null
+    suspend { secondPlusOne(Later()).next() }
+        .startCoroutine(Continuation(EmptyCoroutineContext) { result = it.getOrThrow() })
+    pending!!.resume(1)
+    if (result != null) return "FAIL completed before the second resume: $result"
+    pending!!.resume(41)
+    if (result != 42) return "FAIL second: $result"
+    return "OK"
+}
+"#;
+
+/// A caller inlines the copies of a library krusty compiled, and the regenerated objects suspend
+/// and resume through their continuations.
+#[test]
+fn a_krusty_compiled_for_inline_copy_is_inlined_and_resumes() {
+    let output = common::expect_box_run_against("copied_for_inline", COPIED_LIB, COPIED_RUN_MAIN)
+        .expect("the library is compiled");
+    assert_eq!(output, "OK");
 }

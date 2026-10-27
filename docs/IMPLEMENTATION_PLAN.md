@@ -5534,9 +5534,8 @@ regress.
     the caller's. The call site passes the captured values instead of the lambda; code compiled only
     for the object is rolled back from the caller's constant pool (`ClassWriter::checkpoint`). The
     route is decided from the callee's facts before any code is emitted, never by inlining the body
-    on trial: an object whose suspend method lacks the `$$forInline` copy keeps the bridge
-    (`SpliceReason::SuspendMethodWithoutForInlineCopy`), as does a lambda that reaches a private member of the caller (a backing
-    field, a private function, `invokespecial`, a materialized lambda) until kotlinc's synthetic
+    on trial: a lambda that reaches a private member of the caller (a backing
+    field, a private function, `invokespecial`, a materialized lambda) keeps the bridge until kotlinc's synthetic
     accessors are ported. ✅ Lambdas taking or returning a value class (`Continuation.resumeWith`'s
     `Result`): the inline body takes the parameter unboxed (`value_classes::inline_body_slots`) and
     `invoke`'s `Object` is coerced over the Kotlin types (`checkcast` + `unbox-impl`, `box-impl`),
@@ -5549,8 +5548,8 @@ regress.
     lambda through the copy's field (kotlinx's `Flow.map`: its `FlowCollector` and that collector's
     continuation), are regenerated under the copy's name generator with the lambda inlined
     (`anonymous_object::nested_objects`); a multifile facade's inline body is read from its part.
-    ☐ krusty's own `$$forInline` copy of an object's suspend method in an inline function it
-    compiles.
+    ✅ krusty's own `$$forInline` copy of an object's suspend method that reads a `crossinline`
+    capture, with its public continuation (`suspend_inline_functions::for_inline_copy`).
 - ☐ 5. `$default` inline functions (mask expansion) and `finally` blocks around inlined returns.
   Mask expansion and singleton default lambdas (`DefaultLambda`, with reification) are ported;
   a default lambda constructed with captured values and `finally` rewriting remain.
