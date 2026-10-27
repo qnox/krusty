@@ -19327,12 +19327,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   operand of the receiver's own type), and `contains` is the constructed range's own membership
   operator over that element, lowering builds the checked range membership checked FIR builds for
   the source form: the value compared with both bounds, each operand evaluated once in source order,
-  and no range is constructed. Any other operator or `contains` stays an ordinary call, as kotlinc's
-  `RangeContainsLowering` leaves a range it does not recognize. Dependency preparation reads the same
-  structural form, so the folded `contains` and range operator are not emitted as declaration roots.
+  and no range is constructed. Dependency preparation reads the same structural form and omits the
+  `contains` declaration edge, so a dependency body never calls that unprepared `contains`: a
+  membership whose operator or `contains` is not proven declines the body. The one exception is a
+  `contains` that a checked source edge or retained export already needs, which stays that ordinary
+  call and is never folded, so its selection and ambiguity diagnostics are preserved. An inline
+  template, whose callees preparation does not fold, keeps every membership an ordinary call.
   A range construction outside a membership (`val r = a..b`) is the checked range construction of its
   provider role. Tests: `klib_lowering::tests::body_forms::stdlib_range_literal_membership_is_a_bounds_comparison`
   (`Char.isSurrogate`), `stdlib_range_literal_negation_lowers_past_the_membership` (`checkRadix`),
+  `stdlib_range_literal_membership_without_a_range_construction_declines`,
+  `stdlib_range_literal_membership_keeps_a_selected_contains`,
   `a_negation_of_another_source_form_declines`, box
   `tests/box_regressions/libraryRangeMembership.kt`.
 

@@ -528,7 +528,13 @@ impl CallLinker for Linker<'_, '_> {
             .callee_origin(&self.active_module, &signature)
         {
             KlibCalleeOrigin::Exact(identity) => identity,
-            KlibCalleeOrigin::Missing => return Ok(None),
+            // Dependency preparation omitted this declaration's edge, so a membership this unit
+            // does not fold has no declaration to call: the body declines.
+            KlibCalleeOrigin::Missing => {
+                return Err(KlibBodyDeclineReason::UnsupportedCallee(Box::new(
+                    callee.clone(),
+                )))
+            }
             KlibCalleeOrigin::Ambiguous => {
                 return Err(KlibBodyDeclineReason::AmbiguousCalleeOrigin(Box::new(
                     callee.clone(),
@@ -536,12 +542,16 @@ impl CallLinker for Linker<'_, '_> {
             }
         };
         let Some((arena, declaration)) = self.sources.bodies.function(&identity) else {
-            return Ok(None);
+            return Err(KlibBodyDeclineReason::UnsupportedCallee(Box::new(
+                callee.clone(),
+            )));
         };
         let header = raw_function_header(None, HeaderPurpose::External, arena, declaration)?;
         let (params, ret, context_count, extension_receiver, receiver) = header.linked_signature();
         if context_count != 0 || extension_receiver {
-            return Ok(None);
+            return Err(KlibBodyDeclineReason::SignatureMismatch(
+                "a range literal's `contains` is not a dispatch-receiver member".to_owned(),
+            ));
         }
         Ok(Some(super::body_lowering::RangeMembershipHeader {
             receiver,
