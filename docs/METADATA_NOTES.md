@@ -18,6 +18,16 @@ backend module facts keep source class and alias names independently of alias ta
 only absent identities to the dependency inventory. Literal-dollar ownership stays snapshot-owned.
 The metadata encoder callback and class-ID sinks remain a separate consumer change.
 
+## Bound declaration-reference wrapper roles
+
+The supported rich-reference wrapper already contains its bound receiver among its regular storage
+parameters. Shared admission proves its exact symbol forwards to the reflected extension receiver;
+the provider's normalized parameter identities authenticate that declaration coordinate. The reference
+header preserves all serialized symbol-to-slot mappings and records distinct generated bound-storage
+and invocation roles. Type-table indices do not define semantic type equality. Preparation and actual
+lowering use the same admission, and common IR retains the bound receiver separately from lexical
+captures. No Native runtime carrier or source-name reconstruction is introduced.
+
 ## KLIB reference wrappers and provider declarations
 
 The serialized reflection target and the wrapper's actual call must name the same public

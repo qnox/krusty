@@ -575,13 +575,9 @@ impl CallLinker for Linker<'_, '_> {
         callee: &KlibPublicIdSignature,
     ) -> Result<LinkedCallableReference, KlibBodyDeclineReason> {
         let identity = self.callee_identity(callee)?;
-        let (declaration, kind) = self.sources.callees.reference_declaration(&identity)?;
+        let (declaration, callable) = self.sources.callees.reference_declaration(&identity)?;
         let call = self.link(ir, callee)?;
-        Ok(LinkedCallableReference {
-            declaration,
-            kind,
-            call,
-        })
+        Ok(LinkedCallableReference::new(declaration, callable, call))
     }
 
     fn link_constructor(

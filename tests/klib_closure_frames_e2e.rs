@@ -9,6 +9,29 @@ const LIBRARY: &str = include_str!("fixtures/klib_closure_frames/Library.kt");
 
 const CONSUMER: &str = include_str!("fixtures/klib_closure_frames/Consumer.kt");
 
+#[test]
+fn serialized_bound_extension_references_preserve_receivers_and_once_only_operands() {
+    let library = include_str!("fixtures/klib_closure_frames/BoundExtensionReferences.kt");
+    let consumer = include_str!("fixtures/klib_closure_frames/BoundExtensionReferenceConsumer.kt");
+    let dependency = common::kotlinc_lib_out(&[("Library.kt", library)])
+        .expect("reference compiler required for bound-reference oracle");
+    let packaged_consumer = format!("package fixture\n{consumer}");
+    assert_eq!(
+        common::kotlinc_box_files_result_with_classpath(
+            &[("Consumer.kt", &packaged_consumer)],
+            "fixture.ConsumerKt",
+            &[dependency],
+        ),
+        "OK"
+    );
+    assert_official_dependency_closures(
+        library,
+        consumer,
+        "SerializedBoundExtensionReference",
+        DependencyConsumer::Native,
+    );
+}
+
 const CONSTRUCTOR_CONSUMER: &str = r#"
 fun box(): String {
     val f = makeWithConstructor(40)

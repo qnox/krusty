@@ -70,7 +70,28 @@ pub(super) struct LinkedCallee {
 pub(super) struct LinkedCallableReference {
     pub(super) declaration: crate::fir::ExternalCallableId,
     pub(super) kind: crate::libraries::ExternalCallableKind,
+    pub(super) extension_receiver_parameter: Option<usize>,
     pub(super) call: LinkedCallee,
+}
+
+impl LinkedCallableReference {
+    pub(super) fn new(
+        declaration: crate::fir::ExternalCallableId,
+        callable: crate::libraries::KlibBodyCallable<'_>,
+        call: LinkedCallee,
+    ) -> Self {
+        Self {
+            declaration,
+            kind: callable.kind(),
+            extension_receiver_parameter: callable.parameter_identities().iter().position(|role| {
+                matches!(
+                    role,
+                    crate::fir::ResolvedParameterIdentity::ExtensionReceiver
+                )
+            }),
+            call,
+        }
+    }
 }
 
 /// The declared shape of a member a range literal's membership calls.
@@ -332,7 +353,7 @@ impl<'a> BodyLowering<'a> {
                 ..
             } => {
                 if let Some(reference) =
-                    super::callable_references::unbound_reference(self.arena, expression)
+                    super::callable_references::declaration_reference(self.arena, expression)
                 {
                     let ty = self.ty(expression, "callable reference")?;
                     let lowered = self.callable_reference(reference, ty)?;

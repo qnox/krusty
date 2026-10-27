@@ -21,6 +21,17 @@ known name does. An alias retains its own identity and name even when its expand
 no shape in that provider. Metadata naming does not reopen source-name binding or borrow a target's
 name. Body-local aliases remain owned by the active checker rather than the frozen module inventory.
 
+## Serialized bound extension references
+
+An unadapted, non-generic, non-suspend reference to a top-level extension may bind one receiver.
+Preparation and lowering authenticate the same reflected target, forwarding wrapper, bound-input
+symbol and remaining invocation inputs. The receiver occupies the producer's existing storage slot,
+separate from invocation parameters and lexical captures, and evaluates once when the reference is
+created. Declaration identity and bound receiver both participate in reference equality and hashing.
+Generated storage has no invented source name. Member, generic, adapted and suspend forms retain
+their existing capability checks. Tests: `klib_lowering::tests::callable_references::bound_extensions`
+and `serialized_bound_extension_references_preserve_receivers_and_once_only_operands`.
+
 ## Serialized top-level callable references
 
 An unbound, non-generic, non-suspend top-level reference in a KLIB body retains its exact provider

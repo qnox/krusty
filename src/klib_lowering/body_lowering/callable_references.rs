@@ -7,7 +7,7 @@ use crate::types::TyKind;
 impl BodyLowering<'_> {
     pub(super) fn callable_reference(
         &mut self,
-        reference: super::super::callable_references::UnboundReference<'_>,
+        reference: super::super::callable_references::DeclarationReference<'_>,
         nominal: Ty,
     ) -> Lowered<ExprId> {
         let TyKind::Obj(_, arguments) = nominal.kind() else {
@@ -25,16 +25,18 @@ impl BodyLowering<'_> {
             arguments[reference.arity],
         );
         let function = self.arena.function(reference.invoke);
-        let header = super::super::function_lowering::closure_header(
-            self.arena,
-            function,
-            self.header,
-            &[],
-        )?;
+        let bound_count = usize::from(reference.receiver.is_some());
+        let header =
+            super::super::function_lowering::reference_header(self.arena, &reference, self.header)?;
         let linked = self.linker.link_reference(self.ir, reference.target)?;
         let declared = &linked.call;
-        if linked.kind != crate::libraries::ExternalCallableKind::TopLevel
-            || header.params() != &arguments[..reference.arity]
+        let kind_matches = matches!(
+            (reference.receiver.is_some(), linked.kind),
+            (false, crate::libraries::ExternalCallableKind::TopLevel)
+                | (true, crate::libraries::ExternalCallableKind::Extension)
+        );
+        if !kind_matches
+            || header.params()[bound_count..] != arguments[..reference.arity]
             || header.result() != arguments[reference.arity]
             || declared.params != header.params()
             || declared.ret != header.result()
@@ -43,24 +45,35 @@ impl BodyLowering<'_> {
             || declared.singleton_dispatch.is_some()
             || !declared.type_parameters.is_empty()
             || !declared.class_type_parameters.is_empty()
-            || matches!(
-                declared.callee,
-                Callee::External {
-                    extension_receiver_parameter: Some(_),
-                    ..
-                }
-            )
+            || linked.extension_receiver_parameter != reference.receiver.as_ref().map(|_| 0)
         {
             return unsupported("an adapted, generic or receiver-bearing declaration reference");
         }
         let declaration = linked.declaration;
-        let declaration_parameters = declared.params.clone().into_boxed_slice();
+        let declaration_parameters = declared.params[bound_count..].to_vec().into_boxed_slice();
         let declaration_result = declared.ret;
+        let receiver_type = reference.receiver.as_ref().map(|_| header.params()[0]);
+        let bound_receiver = if let Some(receiver) = &reference.receiver {
+            let actual = self.ty(
+                self.arena.expr(receiver.operand),
+                "bound reference receiver",
+            )?;
+            let value = self.expression(receiver.operand)?;
+            let value = self
+                .upcast(value, actual, header.params()[0])
+                .ok_or(KlibBodyDeclineReason::ImplicitConversion)?;
+            Some(self.typed(value, header.params()[0]))
+        } else {
+            None
+        };
         let adapter = super::super::function_lowering::declare_function(self.ir, &header);
-        self.ir.lambda_own_params_from.insert(adapter, 0);
+        self.ir
+            .lambda_own_params_from
+            .insert(adapter, bound_count as u32);
         self.ir
             .set_method_visibility(adapter, crate::types::Visibility::Private);
-        // Admission proved this exact Return(Call(target, own parameters in order)) wrapper.
+        // Admission proved this exact forwarding call, including the declared bound-receiver
+        // slot and every remaining invocation input in order.
         // Use ordinary checked-call lowering directly, retaining the declaration edge even for
         // a target whose implementation is a compiler-provided operation.
         let KlibIrExprKind::Return { value, .. } = &self.arena.expr(reference.returned).kind else {
@@ -103,11 +116,11 @@ impl BodyLowering<'_> {
             .add_expr(IrExpr::CallableReference(Box::new(IrCallableReference {
                 target: IrCallableReferenceTarget::External {
                     declaration,
-                    receiver: None,
+                    receiver: receiver_type,
                 },
                 adapter,
                 captures: Vec::new(),
-                bound_receiver: None,
+                bound_receiver,
                 function_type,
                 declaration_parameters,
                 declaration_result,

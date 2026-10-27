@@ -67,7 +67,7 @@ impl<'a> KlibCalleeFacts<'a> {
     ) -> Result<
         (
             crate::fir::ExternalCallableId,
-            crate::libraries::ExternalCallableKind,
+            crate::libraries::KlibBodyCallable<'a>,
         ),
         super::decline::KlibBodyDeclineReason,
     > {
@@ -76,7 +76,7 @@ impl<'a> KlibCalleeFacts<'a> {
                 .reference_targets
                 .get(identity)
                 .copied()
-                .map(|target| (target, callables[0].kind()))
+                .map(|target| (target, callables[0]))
                 .ok_or(super::decline::KlibBodyDeclineReason::UnsupportedOperation(
                     "a callable reference without an exact provider declaration",
                 )),
