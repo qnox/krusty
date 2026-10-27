@@ -518,6 +518,16 @@ fn capture_projection_parameters(
 fn same_type_argument_with(oracle: &dyn TypeOracle, left: Ty, right: Ty) -> bool {
     match (left.kind(), right.kind()) {
         (TyKind::TyParam(a, _), TyKind::TyParam(b, _)) => a == b,
+        // `T & Any` has two spellings: the provenance wrapper a nullable binding leaves and the
+        // compact parameter whose occurrence bound excludes null. They are one argument.
+        (TyKind::DefinitelyNotNull(a), TyKind::DefinitelyNotNull(b)) => {
+            same_flexible_type_with(oracle, a, b)
+        }
+        (TyKind::DefinitelyNotNull(wrapped), TyKind::TyParam(name, bound))
+        | (TyKind::TyParam(name, bound), TyKind::DefinitelyNotNull(wrapped)) => {
+            !bound.upper_bound_admits_null()
+                && matches!(wrapped.kind(), TyKind::TyParam(inner, _) if inner == name)
+        }
         (TyKind::Obj(a, aa), TyKind::Obj(b, ba)) => {
             a == b
                 && aa.len() == ba.len()

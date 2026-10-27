@@ -11127,6 +11127,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   checks, and common-type validation; a `Nothing` branch remains bottom and cannot widen the
   bounded variable. A definitely-non-null `T & Any` meets the intersection of all of `T`'s bounds
   made non-null, so `where T : A?, T : B?` makes `T & Any` an argument for both `A` and `B`.
+  Substituting `T := U?` into `T & Any` gives `U & Any`, whichever way it is spelled: the
+  provenance wrapper the substitution leaves and the compact parameter whose occurrence bound
+  excludes null are one type argument, so `Adapter<T?>.unsafeNonNull()` returning `Adapter<T & Any>`
+  meets an expected `Adapter<T & Any>` (moshi's `JsonAdapter.nonNull()`). Verified against kotlinc
+  2.4.21. (`tests/definitely_non_null_type_e2e.rs`.)
   The variable carries one bound, and which one varies: a signature moves a class bound first for
   JVM erasure (`X : Comparable<Int>, X : Int` erases to `int`), so oracles report every declared
   bound and assignability intersects them with the carried one. That reordering also re-carries the
