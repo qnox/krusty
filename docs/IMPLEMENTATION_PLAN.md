@@ -1,5 +1,20 @@
 # krusty — implementation plan
 
+## Source classifier inventory identities
+
+Replace lookup-spelling splitting in the foreign-source classifier inventory with the existing
+declaration-owned name operation. Preserve exact segments, owner edges, visibility, order and
+non-local exclusions without interning undeclared prefixes. This producer correction is separate
+from the remaining metadata class-ID encoder and dependency/alias-name fact handoff.
+
+## JVM declaration-owned member rows
+
+Consume classifier declaration-name facts in both per-file `InnerClasses` candidates and the
+cross-file module resolver. Keep top-level and unavailable module records from being replaced by
+a classpath record with the same physical identity. Preserve local/coroutine/reference provenance
+and exact table order. This slice leaves source identity publication and metadata class-ID encoding
+for subsequent changes; the complete literal-dollar classfile regression remains open there.
+
 ## Classifier declaration-name handoff
 
 Retain an optional declaration-owned package/owner and exact segment across source bootstrap,
@@ -4934,6 +4949,14 @@ code is the one the code generator already names: provider-owned bodies through 
   not declared from their headers: a constructor call needs its class's layout and initializers,
   not only a callable header. Next: member calls with their dispatch form and the fake-override
   walk, callee parameter defaults, inlined function blocks, then constructors.
+- **Lowering: range-literal membership.** `v in a..b`/`v !in a..b` over a builtin scalar range
+  construction lowers as the source membership comparison (`klib_lowering/range_membership.rs`
+  owns the serialized form, read by both dependency preparation and body lowering), and a
+  standalone range construction is the checked construction of its provider role. Native's
+  `intToString`/`longToString` externals are realized by the runtime (`RadixToString`).
+  kotlin-test's assertions and `kotlin.text.trim` still decline inside their library bodies
+  (`Asserter` interface dispatch, accessor calls); the generic fix is compiling those member
+  bodies, not intercepting the calls. Next: final library member bodies as ordinary roots.
 - Tests: the unit tests in `metadata/klib_ir/tree_decoding.rs`, `metadata/id_signature/` and
   `klib_lowering/` (whose stdlib checks run when `KRUSTY_KOTLIN_NATIVE` is set). End-to-end coverage comes through
   the box harness rather than a separate KLIB suite: the Native lane gains the `// MODULE:`

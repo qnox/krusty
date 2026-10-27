@@ -22,6 +22,8 @@ pub(crate) use local_class_names::{settle_generated_class_names, SettledGenerate
 mod local_function_names;
 mod no_expect_for_actual;
 mod published_declarations;
+mod published_overrides;
+pub use published_overrides::OverriddenMember;
 mod retained_syntax;
 #[cfg(test)]
 pub(crate) use crate::resolve::collect_signatures;
@@ -39,6 +41,9 @@ pub use crate::resolve::{
 /// Types carried by the public source-set analysis signatures, re-exported here so process
 /// adapters do not have to reach through the frontend boundary into source classification.
 pub use crate::source::{SourceInput, SourceKind};
+pub use crate::spelling::{
+    DeclaredSpellings as FrontendDeclaredSpellings, Spelled as FrontendSpelled,
+};
 
 /// Analysis result for a jointly compiled source set.
 ///
@@ -86,30 +91,6 @@ impl SourceSetAnalysis {
                     .flags
                     .has(crate::fir::DeclarationFlags::COMPILER_GENERATED)
             })
-    }
-
-    /// The functions the member function `declaration` of the classifier `owner` directly
-    /// overrides: each one this module declares, or `None` for one a library declares.
-    pub fn overridden_functions(
-        &self,
-        owner: FrontendDeclarationId,
-        declaration: FrontendDeclarationId,
-    ) -> Vec<Option<FrontendDeclarationId>> {
-        use crate::fir::ResolvedFunctionOverrideTarget as Target;
-        let Some(streamed) = &self.streamed else {
-            return Vec::new();
-        };
-        let index = streamed.module.index();
-        let declared = |target: Target| match target {
-            Target::Module(callable) => index.callable(callable).map(|header| header.declaration),
-            Target::External(_) => None,
-        };
-        index
-            .function_overrides(owner)
-            .iter()
-            .filter(|edge| declared(edge.implementation) == Some(declaration))
-            .map(|edge| declared(edge.overridden))
-            .collect()
     }
 }
 

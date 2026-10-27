@@ -413,6 +413,7 @@ fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId) {
     copy_map!(dispatch_classes);
     copy_map!(call_declared_ret);
     copy_map!(synthesized_accessor_calls);
+    copy_map!(private_property_accessor_calls);
     copy_map!(call_declared_params);
     copy_map!(module_member_accesses);
     copy_map!(jvm_protected_dependency_calls);

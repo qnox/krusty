@@ -410,8 +410,9 @@ pub(super) fn default_stub_access(ir: &IrFile, fid: u32) -> u16 {
     visibility | 0x1008
 }
 
-/// The declaration's signature line, where a default stub's own instructions stand.
-fn signature_line(ir: &IrFile, fid: u32) -> Option<u32> {
+/// The declaration's signature line, where a default stub's own instructions stand. An accessor
+/// records only its declaration line, which is its header's.
+pub(super) fn signature_line(ir: &IrFile, fid: u32) -> Option<u32> {
     ir.fn_sig_lines
         .get(&fid)
         .or_else(|| ir.fn_decl_lines.get(&fid))
@@ -444,6 +445,7 @@ pub(super) fn emit_default_param_overwrites(
             code.iand();
             let skip = code.new_label();
             code.ifeq(skip);
+            mark_default_fill(emitter, *expression, code);
             emitter.emit_value(*expression, code);
             let produced = ir_ty_to_jvm(&emitter.value_ty(*expression));
             emit_primitive_box_if_needed(emitter.cw, produced, ty, code);
@@ -455,6 +457,18 @@ pub(super) fn emit_default_param_overwrites(
             code.bind(skip);
         }
     }
+}
+
+/// kotlinc stores a masked default into its parameter as a statement at the default expression's
+/// position, so the fill opens on that expression's first line before the value's own code marks
+/// any line. The value's first operand may mark another line at that same offset (a call whose
+/// argument starts on the next line); kotlinc's table keeps both entries.
+pub(super) fn mark_default_fill(
+    emitter: &mut Emitter<'_>,
+    default: ExprId,
+    code: &mut CodeBuilder,
+) {
+    emitter.mark_kept_start_line(default, code);
 }
 
 pub(in crate::jvm) fn body_has_reified_markers(ir: &IrFile, expression: crate::ir::ExprId) -> bool {
