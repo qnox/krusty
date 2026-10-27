@@ -23,8 +23,8 @@ fn first_block_expression(ir: &IrFile, block: ExprId) -> ExprId {
     }
 }
 
-/// Whether `value` is `expression` itself, or only an implicit coercion of it, which writes no
-/// code ahead of it and marks no line of its own there.
+/// Whether `value` is `expression` itself, or only an implicit coercion or the bottom-typed
+/// completion of it, which writes no code ahead of it and marks no line of its own there.
 pub(super) fn evaluates_to(ir: &IrFile, value: ExprId, expression: ExprId) -> bool {
     let mut value = value;
     loop {
@@ -37,6 +37,7 @@ pub(super) fn evaluates_to(ir: &IrFile, value: ExprId, expression: ExprId) -> bo
                 arg,
                 ..
             } => value = *arg,
+            IrExpr::BottomValue { producer, .. } => value = *producer,
             _ => return false,
         }
     }

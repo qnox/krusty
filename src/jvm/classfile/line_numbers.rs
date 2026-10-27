@@ -389,8 +389,9 @@ impl CodeBuilder {
     }
 
     /// The current offset begins a statement whose value, named by the opaque token `value`, comes
-    /// next and that kotlinc marks only once that value is on the stack: a declaration
-    /// (`visitVariable`) or a `return` (`visitReturn`). The entries at this offset, the
+    /// next and that kotlinc marks only once that value is on the stack, or not at all apart from
+    /// it: a declaration (`visitVariable`), a `return` (`visitReturn`), or a block statement
+    /// (`visitStatementContainer`). The entries at this offset, the
     /// statement's own and those its value marks eagerly where it starts, are not kotlinc's yet.
     pub(crate) fn mark_value_boundary(&mut self, value: u32) {
         let Ok(pc) = u16::try_from(self.bytes.len()) else {
