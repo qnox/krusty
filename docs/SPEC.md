@@ -13639,9 +13639,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   String)` implements `remove(Object)`, which becomes kotlinc's `ACC_PUBLIC|ACC_FINAL|ACC_BRIDGE`
   special bridge returning `false` unless the argument is `instanceof String` (or `null`, for a
   `String?`), and an inherited `Base<T>.remove(e: T)` under `Base<String>` already has the erased
-  descriptor, so nothing is written for it. The JDK members (`removeIf`), the `Collection<?>`
-  signature of a declared `containsAll` override and an abstract class's fake-override bridges
-  follow in later slices; `toArray` is below. Tests:
+  descriptor, so nothing is written for it. The JDK members (`removeIf`) and an abstract class's
+  fake-override bridges follow in later slices; `toArray` and a declared `containsAll`'s signature
+  are below. Tests:
   `tests/read_only_collection_face_stubs_e2e.rs` (member bytes and box runs against kotlinc).
 - **A read-only `List` gets `MutableList`'s members as stubs.** A class that implements
   `kotlin.collections.List` without `MutableList` gets throwing stubs for the members
@@ -13666,8 +13666,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   through applied supertypes: a builtin's generic supertypes from `.kotlin_builtins` and a source
   classifier's checked applied hierarchy, so `listIterator(): MutableListIterator<String>` and
   `listIterator(): Walk` with `Walk : ListIterator<String>` implement `listIterator`. The JDK
-  defaults (`replaceAll`, `sort`, the `SequencedCollection` members), a declared
-  `containsAll`'s signature and an abstract class's fake-override bridges follow later. Tests:
+  defaults (`replaceAll`, `sort`, the `SequencedCollection` members) and an abstract class's
+  fake-override bridges follow later. Tests:
   `tests/read_only_list_face_stubs_e2e.rs` (member bytes and box runs against kotlinc),
   `tests/metadata_return_types.rs::list_impls_realize_remove_at_as_remove_int`.
 - **A read-only `Set` gets `MutableSet`'s members as stubs.** A class that implements
@@ -13676,8 +13676,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the class leaves it abstract. Each takes the policies of the `MutableCollection` declaration it
   overrides (`remove(Object)`, `addAll(Collection<? extends E>)`, `removeAll`/`retainAll` as
   `Collection<?>`). Unlike the `Collection` face, kotlinc writes no JDK `removeIf` stub for it.
-  A declared `containsAll`'s signature and an abstract class's fake-override bridges follow
-  later. Tests: `tests/read_only_set_face_stubs_e2e.rs` (member bytes and box runs
+  An abstract class's fake-override bridges follow later. Tests:
+  `tests/read_only_set_face_stubs_e2e.rs` (member bytes and box runs
   against kotlinc).
 - **A read-only `Map` and `Map.Entry` get their mutable members as stubs.** A class that
   implements `kotlin.collections.Map` without `MutableMap` gets throwing stubs for `put`,
@@ -13720,11 +13720,27 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   dependency's from the classpath. A superclass declared in another file is therefore never taken
   for a dependency, so its collection ancestry and its `toArray` declarations still count. Tests:
   `tests/collection_to_array_e2e.rs` (member bytes, member order and a box run against kotlinc;
-  a split-module superclass/subclass control comparing every class's complete listing and the
-  run; same-package, other-package and package-crossing Java superclass controls, also compared
-  class by class; those listings read kotlinc's deferred `Collection<?>`/`Collection<? extends E>`
-  signature of a declared override as krusty's), and the face suites above, which now compare
-  the pair.
+  a split-module superclass/subclass control comparing every class byte for byte and the run;
+  same-package, other-package and package-crossing Java superclass controls, also compared byte
+  for byte), and the face suites above, which now compare the pair.
+- **An override of a collection declaration with a signature policy takes that policy's
+  signature.** kotlinc writes the realization of a few mapped collection members other than as
+  declared, and every override inherits it. An override of `Collection.containsAll` or
+  `MutableCollection.removeAll`/`retainAll` star-projects its collection parameter
+  (`containsAll(Collection<?>)`, whatever the class's element type), and an override of
+  `MutableCollection.addAll`, either `MutableList.addAll` or `MutableMap.putAll` writes every
+  declaration-site variance of its parameters (`addAll(Collection<? extends String>)`,
+  `putAll(Map<? extends String, ? extends Integer>)`). These are the same policies the read-only
+  stubs use. The policy belongs to the overridden declaration, found from the class's exact
+  override edges through the builtin supertypes of the declaration's owner, so it applies through
+  a mutable or read-only face, in a generic class, and over a Java collection superclass
+  (`java.util.ArrayList`). A descriptor-only signature is still omitted. A value class's static
+  replacement of such an override (`addAll-impl`) overrides nothing, so it keeps the ordinary
+  signature of a member, its moved receiver first (`(ILjava/util/Collection<+TT;>;)Z`,
+  `(ILjava/util/Collection<Ljava/lang/String;>;)Z`). The type-safe members' signatures
+  (`contains(T)` written `contains(Object)` in a generic class) follow later. Tests:
+  `tests/collection_override_signature_e2e.rs` (member bytes and a reflective box run against
+  kotlinc), and the face suites above, which now compare the declared `containsAll`.
 - **A nested value class over a reference carrier is read as its carrier.** In `ZN(val z: Z1?)`
   with `Z1(val x: En)`, `Z1?` is carried as `En?`, so `zn.z` and `zn.z!!` already are `Z1`'s
   carrier and `.x` of them is that carrier itself, with no cast. krusty took the unboxed property

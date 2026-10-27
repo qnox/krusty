@@ -555,7 +555,7 @@ fn physical_stub_result(result: Ty, boxed: bool) -> Ty {
 
 /// The policy of the declaration a member of the builtin `owner` is, or overrides: `owner`'s own
 /// row first, then each builtin supertype's, nearest first.
-fn overridden_declaration_policy<T>(
+pub(super) fn overridden_declaration_policy<T>(
     classpath: &Classpath,
     owner: TypeName,
     policy: impl Fn(TypeName) -> Option<T>,
@@ -576,7 +576,7 @@ fn overridden_declaration_policy<T>(
 
 /// A collection parameter with each of its arguments star-projected, `Collection<*>` for
 /// `Collection<E>`.
-fn star_projected(parameter: Ty) -> Ty {
+pub(super) fn star_projected(parameter: Ty) -> Ty {
     let inner = parameter.non_null();
     let Some(classifier) = inner.kotlin_class_internal() else {
         return parameter;

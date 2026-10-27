@@ -151,7 +151,7 @@ fn an_enum_collection_gets_its_to_array_pair_before_its_initializer_like_kotlinc
 }
 
 /// A concrete `MutableCollection` body: the read-only faces' throwing stubs, their bridges and
-/// an abstract class's fake-override bridges stay out of the complete-class controls below.
+/// an abstract class's fake-override bridges stay out of the byte-for-byte controls below.
 const MUTABLE_MEMBERS: &str = "    override val size = 0
     override fun isEmpty() = true
     override fun contains(element: String) = false
@@ -204,7 +204,7 @@ fn a_superclass_in_another_source_file_decides_to_array_like_kotlinc() {
         ("Superclasses.kt", superclasses.as_str()),
     ];
     let classes = common::classes_against_kotlinc_module(&sources);
-    assert_complete_classes_like_kotlinc(&classes);
+    assert_eq!(classes.differences(), Vec::<String>::new());
     assert_declared_to_array(&classes, "arrays/Bag", &[GENERIC, NON_GENERIC]);
     assert_declared_to_array(&classes, "arrays/Sub", &[]);
     assert_declared_to_array(
@@ -241,43 +241,6 @@ fun box(): String {
         common::compile_and_run_files_with_stdlib(&runtime).expect("krusty compiles and runs"),
         reference
     );
-}
-
-/// Both compilers write the same classes, and each one's complete `javap -v -p` listing (header,
-/// every member with its code, debug tables and attributes, and the class attributes) is the
-/// same. The one deferred difference is the generic signature of a declared override of a
-/// `Collection`-parameter member: kotlinc signs it by the overridden declaration's
-/// `Collection<?>`/`Collection<? extends E>`, which a later slice realizes, so kotlinc's spelling
-/// of exactly those parameters is read as krusty's.
-fn assert_complete_classes_like_kotlinc(classes: &common::ClassSets) {
-    let names =
-        |set: &std::collections::BTreeMap<String, Vec<u8>>| set.keys().cloned().collect::<Vec<_>>();
-    assert_eq!(names(&classes.krusty), names(&classes.reference));
-    let deferred = [
-        (
-            "java.util.Collection<?>",
-            "java.util.Collection<java.lang.String>",
-        ),
-        (
-            "java.util.Collection<? extends java.lang.String>",
-            "java.util.Collection<java.lang.String>",
-        ),
-        (
-            "Ljava/util/Collection<*>;",
-            "Ljava/util/Collection<Ljava/lang/String;>;",
-        ),
-        (
-            "Ljava/util/Collection<+Ljava/lang/String;>;",
-            "Ljava/util/Collection<Ljava/lang/String;>;",
-        ),
-    ];
-    for class in classes.reference.keys() {
-        let (mut reference, krusty) = classes.class_listing(class);
-        for (kotlinc, realized) in deferred {
-            reference = reference.replace(kotlinc, realized);
-        }
-        assert_eq!(krusty, reference, "{class}");
-    }
 }
 
 /// The `toArray` declarations `class` has in each compiler's output, in class-file order.
@@ -326,7 +289,7 @@ fn assert_java_superclass_like_kotlinc(package: &str, superclass: &str, expected
         "package {package}\n\nclass Bag : {superclass}(), MutableCollection<String> {{\n{MUTABLE_MEMBERS}}}\n"
     );
     let classes = common::classes_against_kotlinc_module_cp(&[("Bag.kt", &source)], &[java]);
-    assert_complete_classes_like_kotlinc(&classes);
+    assert_eq!(classes.differences(), Vec::<String>::new());
     assert_declared_to_array(&classes, &format!("{package}/Bag"), expected);
 }
 

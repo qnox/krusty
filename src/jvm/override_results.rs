@@ -36,6 +36,10 @@ pub(crate) struct OverrideResults {
     boxed_members: HashSet<(TypeName, u32)>,
     /// Realized `super` calls of a boxed getter, with the scalar type each reads out of it.
     super_getter_calls: HashMap<ExprId, Ty>,
+    /// The overrides whose generic signature follows an overridden collection declaration's
+    /// policy (`containsAll(Collection<?>)`).
+    pub(super) collection_signatures:
+        crate::jvm::collection_override_signatures::CollectionOverrideSignatures,
 }
 
 /// Whether a declaration result of `ty` maps to an unboxed JVM scalar of its own. An unsigned type

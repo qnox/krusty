@@ -301,6 +301,8 @@ fn run_backend_passes_after_plugins(
         callables,
         &facts.property_realizations,
     )?;
+    facts.override_results.collection_signatures =
+        crate::jvm::collection_override_signatures::select(ir, classpath);
     crate::jvm::bridges::derive_bridges(
         ir,
         classpath,
