@@ -31,3 +31,21 @@ fun box(): String {
 fn extension_property_root_outranks_a_same_named_package() {
     common::expect_box_same_as_kotlinc(EXTENSION_PROPERTY_ROOTS, "QualifierRootExtensionProperty");
 }
+
+/// The value root commits the whole spelling: a missing member after an extension-property root is
+/// reported on that property's type, never retried through the same-named package `java`.
+#[test]
+fn a_missing_member_after_an_extension_property_root_is_reported_on_its_value() {
+    let sources = [(
+        "Main.kt",
+        "val String.java: Int get() = length\n\nfun String.missing(): Int = java.noSuchMember\n",
+    )];
+    let expected = vec![
+        "Main.kt:3:34: unresolved reference 'noSuchMember' on receiver of type 'Int'.".to_string(),
+    ];
+    assert_eq!(common::reference_error_ledger(&sources, &[]), expected);
+    assert_eq!(
+        common::krusty_error_ledger_with_args(&sources, &[]),
+        expected
+    );
+}
