@@ -4,6 +4,7 @@
 //! supplies the parameter, receiver and expected function types its lambdas would be checked
 //! against. Selecting the callable is left to call resolution once the lambdas are checked.
 
+use super::member_extension_selection::MemberExtensionLambdaShape;
 use super::*;
 use crate::types::TyKind;
 
@@ -1075,12 +1076,12 @@ impl Checker<'_> {
     }
 
     pub(super) fn extension_lambda_shape(
-        &self,
+        &mut self,
         scope: &CheckerScope<'_>,
         receiver: Ty,
         name: &str,
         call: UntypedLambdaCall<'_>,
-    ) -> Option<crate::symbol_resolver::LambdaCallShape> {
+    ) -> MemberExtensionLambdaShape {
         let UntypedLambdaCall {
             args,
             partial: arg_tys,
@@ -1111,19 +1112,18 @@ impl Checker<'_> {
             fs.overloads.len(),
             crate::symbol_resolver::ranked_extension_overloads_by_recv(&src, receiver, &fs).len(),
         );
-        // The first candidate in tower order that shapes the lambdas is selected. Candidates of
-        // the same rank that would shape the same lambda inputs with a different result
-        // (`@OverloadResolutionByLambdaReturnType`: `flatMap` over `(T) -> Iterable<R>` and
-        // `(T) -> Sequence<R>`) are still competing, so the result is left to the lambda body.
-        let mut selected: Option<((u32, u32), crate::symbol_resolver::LambdaCallShape)> = None;
+        // Only the candidates of the nearest tower rank that shape the lambdas compete, exactly as
+        // final overload selection evaluates one rank at a time; a farther rank never refines them.
+        let mut plans: Vec<(
+            crate::symbol_resolver::OverloadTowerRank,
+            crate::symbol_resolver::LambdaCallShape,
+            &crate::libraries::FunctionInfo,
+        )> = Vec::new();
         for (rank, binding_receiver, o) in
             crate::symbol_resolver::ranked_extension_overloads_by_recv(&src, receiver, &fs)
         {
-            let rank = (rank, o.scope_rank);
-            if selected
-                .as_ref()
-                .is_some_and(|(selected_rank, _)| *selected_rank != rank)
-            {
+            let rank = crate::symbol_resolver::extension_tower_rank(rank, o);
+            if plans.first().is_some_and(|(nearest, ..)| *nearest != rank) {
                 break;
             }
             crate::trace_compiler!(
@@ -1138,13 +1138,15 @@ impl Checker<'_> {
             // This handles reordered names, omitted defaults, and syntactic trailing lambdas
             // together; an origin-specific label-only map used to drift from real call
             // recording whenever more than one of those features appeared in the same call.
-            let shape = self.contextual_call_shape(
+            let Some(shape) = self.contextual_call_shape(
                 scope,
                 &o.semantic_params(),
                 &o.call_sig,
                 o.context_count,
                 arg_names,
-            )?;
+            ) else {
+                return MemberExtensionLambdaShape::Absent;
+            };
             let Some(argument_map) = call_argument_parameter_indices(
                 arg_tys.len(),
                 shape.params.len(),
@@ -1191,43 +1193,172 @@ impl Checker<'_> {
                     "lambda_shape",
                     "extension candidate={name} shape={shape:?}"
                 );
-                match &mut selected {
-                    Some((_, selected)) => release_competing_lambda_results(selected, &shape),
-                    None => selected = Some((rank, shape)),
-                }
+                plans.push((rank, shape, o));
             }
         }
-        selected.map(|(_, shape)| shape)
+        match self.select_extension_lambda_shape(&src, args, plans) {
+            ExtensionShapeChoice::Decided(shape) => shape,
+            ExtensionShapeChoice::Refine { lambda, tied } => {
+                self.refined_extension_lambda_shape(scope, name, (lambda, args[lambda]), tied)
+            }
+        }
+    }
+
+    /// The shape of a tie that the lambda's result refines. The lambda is probed against the first
+    /// tied candidate's fixed expectation, and the first candidate whose result accepts the
+    /// probed results shapes the lambda with its own fixed expectation. Without fixed
+    /// expectations, or when none accepts the results, the lambda is checked with an open result
+    /// and call resolution refines the tie.
+    fn refined_extension_lambda_shape(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        name: &str,
+        (position, lambda): (usize, ExprId),
+        mut tied: Vec<crate::symbol_resolver::LambdaCallShape>,
+    ) -> MemberExtensionLambdaShape {
+        let expectations = tied
+            .iter()
+            .map(|shape| {
+                let fixed = shape
+                    .fixed_expected_types
+                    .as_ref()?
+                    .get(position)
+                    .copied()??;
+                match fixed.non_null().kind() {
+                    TyKind::Fun(signature) => Some(signature),
+                    _ => None,
+                }
+            })
+            .collect::<Option<Vec<_>>>();
+        let inputs = tied[0]
+            .param_types
+            .as_ref()
+            .and_then(|inputs| inputs.get(position))
+            .cloned()
+            .unwrap_or_default();
+        let chosen = expectations.and_then(|expectations| {
+            self.refine_tie_by_lambda_results(scope, (lambda, &inputs), &expectations, Some(name))
+        });
+        crate::trace_compiler!("lambda_shape", "extension refined tie chosen={chosen:?}");
+        let Some(chosen) = chosen else {
+            let mut shape = tied.swap_remove(0);
+            if let Some(fixed) = shape
+                .fixed_expected_types
+                .as_mut()
+                .and_then(|fixed| fixed.get_mut(position))
+            {
+                *fixed = None;
+            }
+            return MemberExtensionLambdaShape::Selected(shape);
+        };
+        MemberExtensionLambdaShape::Selected(tied.swap_remove(chosen))
+    }
+
+    /// Choose the lambda shape among the nearest-rank extension `plans`, as Kotlin's
+    /// most-specific selection would before any lambda body is analyzed. A unique most specific
+    /// candidate fixes its lambda's result. A tie is refined by the lambda's result only when the
+    /// specification allows it (`@OverloadResolutionByLambdaReturnType` on a tied candidate, exactly
+    /// one lambda argument, and tied function types with the same inputs); the lambda's body then
+    /// chooses among the tied shapes. Any other tie is an ambiguity that claims the call without
+    /// shaping its lambdas.
+    fn select_extension_lambda_shape(
+        &self,
+        source: &dyn crate::symbol_source::SymbolSource,
+        args: &[ExprId],
+        plans: Vec<(
+            crate::symbol_resolver::OverloadTowerRank,
+            crate::symbol_resolver::LambdaCallShape,
+            &crate::libraries::FunctionInfo,
+        )>,
+    ) -> ExtensionShapeChoice {
+        let tied = match crate::symbol_resolver::most_specific_with_ties(
+            plans
+                .into_iter()
+                .map(|(_, shape, overload)| (shape.argument_parameters.clone(), (shape, overload))),
+            |_, left, right| crate::symbol_resolver::resolution_subtype(source, left, right),
+        ) {
+            crate::symbol_resolver::CandidateSelectionWithTies::None => {
+                return ExtensionShapeChoice::Decided(MemberExtensionLambdaShape::Absent);
+            }
+            crate::symbol_resolver::CandidateSelectionWithTies::Selected((shape, _)) => {
+                crate::trace_compiler!("lambda_shape", "extension most-specific shape={shape:?}");
+                return ExtensionShapeChoice::Decided(MemberExtensionLambdaShape::Selected(shape));
+            }
+            crate::symbol_resolver::CandidateSelectionWithTies::Ambiguous(tied) => tied,
+        };
+        crate::trace_compiler!(
+            "lambda_shape",
+            "extension most-specific tie={:?}",
+            tied.iter()
+                .map(|(shape, _)| &shape.argument_parameters)
+                .collect::<Vec<_>>()
+        );
+        let Some(((first, _), others)) = tied.split_first() else {
+            return ExtensionShapeChoice::Decided(MemberExtensionLambdaShape::Absent);
+        };
+        if others.iter().all(|(shape, _)| shape == first) {
+            return ExtensionShapeChoice::Decided(MemberExtensionLambdaShape::Selected(
+                first.clone(),
+            ));
+        }
+        let refinable = tied.iter().any(|(_, overload)| {
+            overload
+                .callable
+                .annotations
+                .contains(&crate::types::type_name(
+                    "kotlin/OverloadResolutionByLambdaReturnType",
+                ))
+        });
+        let mut lambdas = args
+            .iter()
+            .enumerate()
+            .filter(|(_, &argument)| matches!(self.file.expr(argument), Expr::Lambda { .. }))
+            .map(|(position, _)| position);
+        let (Some(lambda), None) = (lambdas.next(), lambdas.next()) else {
+            return ExtensionShapeChoice::Decided(MemberExtensionLambdaShape::Ambiguous);
+        };
+        let inputs = |shape: &crate::symbol_resolver::LambdaCallShape| {
+            let parameter = shape
+                .expected_types
+                .as_ref()?
+                .get(lambda)
+                .copied()
+                .flatten()?;
+            match parameter.non_null().kind() {
+                TyKind::Fun(signature) => Some((
+                    signature.params.clone(),
+                    signature.context_count,
+                    signature.has_receiver,
+                    signature.suspend,
+                )),
+                _ => None,
+            }
+        };
+        let same_inputs = inputs(first).is_some_and(|first_inputs| {
+            others
+                .iter()
+                .all(|(shape, _)| inputs(shape).as_ref() == Some(&first_inputs))
+        });
+        crate::trace_compiler!(
+            "lambda_shape",
+            "extension tie refinable={refinable} same_inputs={same_inputs}"
+        );
+        if !refinable || !same_inputs {
+            return ExtensionShapeChoice::Decided(MemberExtensionLambdaShape::Ambiguous);
+        }
+        ExtensionShapeChoice::Refine {
+            lambda,
+            tied: tied.into_iter().map(|(shape, _)| shape).collect(),
+        }
     }
 }
 
-/// Leave a lambda's result open when a same-rank `competitor` shapes the same inputs for it with a
-/// different callable type: only the lambda's body can choose between the two candidates.
-fn release_competing_lambda_results(
-    selected: &mut crate::symbol_resolver::LambdaCallShape,
-    competitor: &crate::symbol_resolver::LambdaCallShape,
-) {
-    let (Some(fixed), Some(expected), Some(inputs)) = (
-        selected.fixed_expected_types.as_mut(),
-        selected.expected_types.as_ref(),
-        selected.param_types.as_ref(),
-    ) else {
-        return;
-    };
-    for (argument, fixed) in fixed.iter_mut().enumerate() {
-        let same_inputs = competitor
-            .param_types
-            .as_ref()
-            .and_then(|types| types.get(argument))
-            .is_some_and(|competing| inputs.get(argument) == Some(competing));
-        let competing = competitor
-            .expected_types
-            .as_ref()
-            .and_then(|types| types.get(argument))
-            .copied()
-            .flatten();
-        if same_inputs && competing != expected.get(argument).copied().flatten() {
-            *fixed = None;
-        }
-    }
+/// What the nearest-rank extension shapes decide before any lambda body is analyzed.
+enum ExtensionShapeChoice {
+    Decided(MemberExtensionLambdaShape),
+    /// A tie that the result of the lambda argument at `lambda` refines.
+    Refine {
+        lambda: usize,
+        tied: Vec<crate::symbol_resolver::LambdaCallShape>,
+    },
 }

@@ -1220,6 +1220,7 @@ impl ProductionSignatureSemantics<'_> {
                             !call_sig.vararg,
                         ),
                         sam_signatures: Vec::new(),
+                        lambda_result_fits: true,
                     })
                 },
             },

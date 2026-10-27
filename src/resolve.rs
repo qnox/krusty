@@ -35648,11 +35648,7 @@ impl<'a> Checker<'a> {
                 ))
             }
             ExtensionRefSelection::Ambiguous(candidates) => {
-                let mut message = "overload resolution ambiguity between candidates:".to_string();
-                for candidate in candidates {
-                    message.push('\n');
-                    message.push_str(&Self::callable_candidate_display(name, &candidate));
-                }
+                let message = Self::ambiguous_candidates_message(name, &candidates);
                 self.diags
                     .error(self.member_name_span(expression, name), message);
                 Some(Ty::Error)
@@ -36956,6 +36952,7 @@ impl<'a> Checker<'a> {
             };
         let mut applicable = Vec::new();
         let mut sam_converted = crate::fx_hash::HashSet::default();
+        let mut lambda_misfits = crate::fx_hash::HashSet::default();
         for (index, mut candidate) in overloads.iter().cloned().enumerate() {
             if self.file.infix_calls.contains(&call.0) && !candidate.flags.infix {
                 continue;
@@ -38157,6 +38154,9 @@ impl<'a> Checker<'a> {
                 intersection_bindings,
                 candidate_index: Some(index),
             };
+            if !score.lambda_result_fits {
+                lambda_misfits.insert(index);
+            }
             applicable.push((
                 score.rank,
                 generic,
@@ -38199,20 +38199,8 @@ impl<'a> Checker<'a> {
         // members above ordinary extensions, and skip a rung whose only candidates lack context.
         // Later rules share one rung. Argument score there is type fit and omitted defaults;
         // a vararg loses only after element specificity, as a tie-break among equal shapes.
-        let hides_members = crate::types::type_name("kotlin/internal/HidesMembers");
-        let tower_rank = |candidate: &SelectedCallable| {
-            if candidate.is_extension() && candidate.callable.annotations.contains(&hides_members) {
-                (0_u8, (0_u8, 0_u32), candidate.receiver_rank)
-            } else if candidate.kind == crate::libraries::FnKind::Member {
-                (1_u8, (0_u8, 0_u32), candidate.receiver_rank)
-            } else {
-                (
-                    2_u8,
-                    candidate.scope_rung.selection_key(candidate.scope_rank),
-                    candidate.receiver_rank,
-                )
-            }
-        };
+        let tower_rank =
+            |candidate: &SelectedCallable| crate::symbol_resolver::callable_tower_rank(candidate);
         let nearest_available_rung = applicable
             .iter()
             .filter(|(_, _, _, missing_context, ..)| !missing_context)
@@ -38242,6 +38230,9 @@ impl<'a> Checker<'a> {
                     .contains(&low_priority_annotation)
             });
         }
+        call_applicability::retain_eager_lambda_fits(self.file, &mut applicable, |candidate| {
+            !lambda_misfits.contains(&candidate.2)
+        });
         let has_context = applicable
             .iter()
             .any(|(_, _, _, missing_context, _, _, _, _)| !missing_context);
@@ -38350,6 +38341,9 @@ impl<'a> Checker<'a> {
                 (receiver, parameters, *generic, member_owner)
             },
         );
+        call_applicability::refine_tie_by_lambda_result(self.file, args, &mut maximal, |tie| {
+            (&tie.5.info, &tie.6, !lambda_misfits.contains(&tie.2))
+        });
         // Distinct SAM target types do not make an overload family inherently ambiguous. The
         // ordinary most-specific relation below must still compare them: if one SAM interface
         // inherits the other, its overload wins (`MyRunnable : Runnable`; `foo(MyRunnable)` beats
@@ -52691,15 +52685,19 @@ impl<'a> Checker<'a> {
             &member_extension,
             member_extension_selection::MemberExtensionLambdaShape::Absent
         );
-        let extension = match member_extension {
-            member_extension_selection::MemberExtensionLambdaShape::Selected(shape) => Some(shape),
-            member_extension_selection::MemberExtensionLambdaShape::Absent
-            | member_extension_selection::MemberExtensionLambdaShape::Ambiguous => None,
-        };
-        let extension = extension.or_else(|| {
-            (consider_extension && !member_extension_claimed)
-                .then(|| self.extension_lambda_shape(scope, receiver, name, untyped))
-                .flatten()
+        // An ambiguous extension rung claims the call just as an ambiguous member-extension rung
+        // does: no later source may shape its lambdas.
+        let mut extension_claimed = member_extension_claimed;
+        let extension = member_extension.selected().or_else(|| {
+            if !consider_extension || extension_claimed {
+                return None;
+            }
+            let shape = self.extension_lambda_shape(scope, receiver, name, untyped);
+            extension_claimed = matches!(
+                shape,
+                member_extension_selection::MemberExtensionLambdaShape::Ambiguous
+            );
+            shape.selected()
         });
         // A call selected by the lambda's RETURN type (`recv.sumOf { … }`) has no JVM method under
         // its source name, so every signature-driven source above misses it. It is the last source
@@ -52707,7 +52705,7 @@ impl<'a> Checker<'a> {
         // decision: the selector's `it` comes from the receiver's element type, at the lambda's own
         // argument position.
         let extension = extension.or_else(|| {
-            if !consider_extension || member_extension_claimed {
+            if !consider_extension || extension_claimed {
                 return None;
             }
             let params = self.lambda_return_overload_param_types(receiver, name)?;
@@ -59351,11 +59349,11 @@ impl<'a> Checker<'a> {
                     self.report_selected_callable_missing_context(scope, e, &selected);
                     return Some(Ty::Error);
                 }
-                CallableCandidateSelection::Ambiguous(_) => {
-                    self.diags.error(
-                        self.call_callee_name_span(e),
-                        "overload resolution ambiguity".to_string(),
-                    );
+                CallableCandidateSelection::Ambiguous(candidates) => {
+                    let message = Self::ambiguous_candidates_message(name, &candidates);
+                    self.diags.error(self.call_callee_name_span(e), message);
+                    // No candidate shapes the lambdas of an ambiguous call.
+                    self.report_unshaped_lambda_diagnostics(scope, args);
                     return Some(Ty::Error);
                 }
             },

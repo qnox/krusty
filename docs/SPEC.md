@@ -8954,14 +8954,26 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   actual element (a no-argument overload — the same-named lambda `sumOf` has an extra parameter). Test:
   `collection_members_e2e::numeric_reduction_extensions_by_element_type`.
 
-- **A lambda body chooses among overloads that differ only in the lambda's result.** The
-  `@OverloadResolutionByLambdaReturnType` pairs `Sequence<T>.flatMap((T) -> Iterable<R>)` /
-  `((T) -> Sequence<R>)` and `Iterable<T>.flatMap` take the same lambda inputs. When two extension
-  candidates of the same tower rank shape a lambda's inputs identically but its callable type
-  differently, the lambda is checked without a fixed result (its inputs still come from the
-  receiver), and call resolution then selects the overload its body's type fits. krusty used to check
-  the body against the first candidate's `Iterable<R>`, rejecting `seq.flatMap { sequenceOf(it) }`
-  even under an expected `Sequence<String>` (`tests/lambda_return_overload_shape_e2e.rs`).
+- **A lambda's result refines overload selection only as the specification allows.** Kotlin
+  decides applicability and the most specific candidate before analyzing a lambda body: a lambda
+  literal's result, typed parameters or not, never makes a candidate inapplicable. Only the
+  nearest callable-tower rank competes (`HidesMembers`, members, then extensions by semantic scope
+  rung, its rank inside the rung, and receiver distance; numeric ranks of different rungs are
+  never compared alone). A unique most specific candidate keeps its own function type for the
+  lambda, so `(Int) -> String` beats `(Int) -> CharSequence` and `{ StringBuilder(it) }` is a return
+  type mismatch. A tie is refined by the checked lambda result only when a tied candidate is
+  `@OverloadResolutionByLambdaReturnType`, the call has exactly one lambda literal, and the tied
+  function types have the same inputs (`Sequence<T>.flatMap` over `(T) -> Iterable<R>` /
+  `(T) -> Sequence<R>`); the refined set then prefers unannotated candidates. As in kotlinc, the
+  lambda is analyzed once against the first tied candidate's expectation, so a labelled
+  `return@flatMap emptyList()` still infers from the call's expected result, and the first tied
+  candidate whose result accepts what the body produced shapes the lambda. Under
+  `+EagerLambdaAnalysis` the lambda's result instead drops every applicable candidate it does not
+  fit before most-specific selection (`tests/eager_lambda_analysis_e2e.rs`). Any other tie is
+  `overload resolution ambiguity between candidates:` with the tied declarations, and its
+  lambdas stay unshaped (`unresolved reference 'it'.`, `cannot infer type for value parameter`),
+  in both body checking and declaration-signature inference. Tests:
+  `tests/lambda_return_overload_shape_e2e.rs`.
 
 - **Non-inline top-level generic HOF binds the lambda parameter type (`transform(Item(…)) { it.name }`).**
   A user `fun <T, R> transform(x: T, f: (T) -> R): R` binds `T` from the first value argument, so the
