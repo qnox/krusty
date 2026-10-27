@@ -5,10 +5,12 @@ use super::*;
 use crate::types::TyKind;
 
 mod constructor_positions;
+mod declaration_types;
 mod type_arguments;
 mod value_class_positions;
 
 pub(super) use constructor_positions::ConstructorParameter;
+pub(super) use declaration_types::JvmPropertySignatures;
 
 /// Whether declaration-site variance becomes a JVM wildcard at the position being formatted.
 ///
@@ -80,6 +82,14 @@ pub(super) struct JvmSignatureFormatter<'a> {
     ir: &'a IrFile,
     symbols: &'a dyn BackendClassifierSource,
     run: &'a EmitRun,
+}
+
+/// One classifier's own parameters within the common own-first, then captured argument layout.
+/// Rendering visits these segments in reverse order, retaining each segment's argument order.
+struct ClassifierSignatureSegment {
+    classifier: TypeName,
+    variances: Vec<TypeVariance>,
+    arguments: std::ops::Range<usize>,
 }
 
 impl<'a> JvmSignatureFormatter<'a> {
@@ -155,9 +165,10 @@ impl<'a> JvmSignatureFormatter<'a> {
     fn classifier_signature_chain(
         &self,
         owner: TypeName,
-    ) -> Option<Vec<(TypeName, Vec<TypeVariance>)>> {
+    ) -> Option<Vec<ClassifierSignatureSegment>> {
         let mut chain = Vec::new();
         let mut current = owner;
+        let mut argument_start = 0;
         loop {
             let (variances, outer) = if let Some(classifier) = self.current_class(current) {
                 let variances = if classifier.type_params.is_empty() {
@@ -212,11 +223,16 @@ impl<'a> JvmSignatureFormatter<'a> {
                     classifier.outer_instance,
                 )
             };
-            chain.push((current, variances));
+            let argument_end = argument_start + variances.len();
+            chain.push(ClassifierSignatureSegment {
+                classifier: current,
+                variances,
+                arguments: argument_start..argument_end,
+            });
+            argument_start = argument_end;
             let Some(outer) = outer else { break };
             current = outer;
         }
-        chain.reverse();
         Some(chain)
     }
 
@@ -264,11 +280,11 @@ impl<'a> JvmSignatureFormatter<'a> {
 
     fn declaration_variance(&self, owner: TypeName, index: usize) -> Option<TypeVariance> {
         let chain = self.classifier_signature_chain(owner)?;
-        let total: usize = chain.iter().map(|(_, variances)| variances.len()).sum();
+        let total: usize = chain.iter().map(|segment| segment.variances.len()).sum();
         let Some(variance) = chain
             .iter()
-            .flat_map(|(_, variances)| variances.iter().copied())
-            .nth(index)
+            .find(|segment| segment.arguments.contains(&index))
+            .map(|segment| segment.variances[index - segment.arguments.start])
         else {
             self.run.set_emit_error(format!(
                 "internal: JVM signature supplies type argument {} to classifier '{}' with {} type parameters across its inner-class chain",
@@ -346,7 +362,7 @@ impl<'a> JvmSignatureFormatter<'a> {
         };
         let arguments = ty.type_args();
         let chain = self.classifier_signature_chain(owner)?;
-        let declared_arguments = chain.iter().map(|(_, variances)| variances.len()).sum();
+        let declared_arguments = chain.iter().map(|segment| segment.variances.len()).sum();
         let arguments = self.classifier_usage_arguments(owner, arguments, declared_arguments)?;
         let is_closed = self.classifier_is_closed(owner)?;
         if !is_closed {
@@ -587,8 +603,13 @@ impl<'a> JvmSignatureFormatter<'a> {
             }
             // A primitive specialized array is class-shaped in the semantic model but is a JVM
             // array in descriptors and generic signatures alike. It has no type arguments to
-            // drive the general classifier path below.
-            TyKind::Obj(owner, _) if crate::types::prim_array_element(owner).is_some() => {
+            // drive the general classifier path below. A value class over an array (`UIntArray`)
+            // is a class: an element or type argument holds its box, so it takes the classifier
+            // path below like any other value class (`Array<UIntArray>` is `[Lkotlin/UIntArray;`).
+            TyKind::Obj(owner, _)
+                if crate::types::prim_array_element(owner).is_some()
+                    && !self.ir.is_value_class_name(owner) =>
+            {
                 Some(ir_type_desc(ty))
             }
             // `kotlin.Array<E>` has no JVM class: its realization is the ARRAY type `[E`, and that is
@@ -647,30 +668,28 @@ impl<'a> JvmSignatureFormatter<'a> {
             TyKind::Obj(owner, arguments) => {
                 let chain = self.classifier_signature_chain(owner)?;
                 let declared_arguments: usize =
-                    chain.iter().map(|(_, variances)| variances.len()).sum();
+                    chain.iter().map(|segment| segment.variances.len()).sum();
                 let arguments = self.classifier_usage_arguments(
                     owner,
                     arguments.as_slice(),
                     declared_arguments,
                 )?;
-                let (outer, _) = chain.first()?;
-                let jvm = crate::jvm::names::classfile_internal_name_of(*outer);
+                let outer = chain.last()?.classifier;
+                let jvm = crate::jvm::names::classfile_internal_name_of(outer);
                 let mut signature = format!("L{jvm}");
-                let mut argument_index = 0;
-                for (segment_index, (classifier, variances)) in chain.iter().enumerate() {
+                for (segment_index, segment) in chain.iter().rev().enumerate() {
                     if segment_index != 0 {
                         signature.push('.');
-                        signature.push_str(classifier.nested_segment_ref());
+                        signature.push_str(segment.classifier.nested_segment_ref());
                     }
-                    if !variances.is_empty() {
+                    if !segment.variances.is_empty() {
                         signature.push('<');
-                        for &variance in variances {
-                            signature.push_str(&self.type_argument(
-                                variance,
-                                arguments[argument_index],
-                                wildcards,
-                            )?);
-                            argument_index += 1;
+                        for (&variance, &argument) in segment
+                            .variances
+                            .iter()
+                            .zip(&arguments[segment.arguments.clone()])
+                        {
+                            signature.push_str(&self.type_argument(variance, argument, wildcards)?);
                         }
                         signature.push('>');
                     }

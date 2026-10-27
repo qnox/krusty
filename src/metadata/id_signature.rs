@@ -52,6 +52,27 @@ pub struct KlibPublicIdSignature {
 }
 
 impl KlibPublicIdSignature {
+    /// Append this signature's identity bytes in an injective encoding: the package and
+    /// declaration segments, each list and string length-prefixed, then the member id and mask.
+    /// A backend that joins declarations across modules compares these bytes, never a spelling.
+    pub(crate) fn write_identity(&self, bytes: &mut Vec<u8>) {
+        for segments in [self.package().segments(), self.declaration().segments()] {
+            bytes.extend_from_slice(&(segments.len() as u32).to_le_bytes());
+            for segment in segments {
+                bytes.extend_from_slice(&(segment.len() as u32).to_le_bytes());
+                bytes.extend_from_slice(segment.as_bytes());
+            }
+        }
+        match self.member_id() {
+            Some(id) => {
+                bytes.push(1);
+                bytes.extend_from_slice(&id.to_le_bytes());
+            }
+            None => bytes.push(0),
+        }
+        bytes.extend_from_slice(&self.mask().to_le_bytes());
+    }
+
     pub fn package(&self) -> &KlibNamePath {
         &self.package
     }

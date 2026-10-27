@@ -1,6 +1,7 @@
 //! Declaration-owned class evidence for authenticating serialized member headers.
 
 use crate::metadata::id_signature::KlibPublicIdSignature;
+use crate::metadata::semantic::KotlinModality;
 use crate::types::{Ty, TypeName, TypeVariance};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -17,4 +18,11 @@ pub(crate) struct KlibBodyClassContract {
     pub(crate) signature: KlibPublicIdSignature,
     pub(crate) classifier: TypeName,
     pub(crate) parameters: KlibBodyClassParameters,
+    pub(crate) kind: super::TypeKind,
+    pub(crate) modality: KotlinModality,
+    pub(crate) is_value: bool,
+    pub(crate) is_inner: bool,
+    pub(crate) is_expect: bool,
+    /// Exact primary declaration, including a private primary that is not a public candidate.
+    pub(crate) primary_constructor: Option<KlibPublicIdSignature>,
 }

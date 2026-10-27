@@ -58,6 +58,7 @@ mod enum_switch_whens;
 pub(crate) use enum_switch_whens::EnumSwitchWhen;
 mod emitted_body_roots;
 mod enums;
+mod expect_actualization;
 mod expression_provenance;
 pub(crate) use emitted_body_roots::emitted_body_roots;
 mod field_flags;
@@ -96,6 +97,7 @@ mod source_debug;
 pub(crate) use source_debug::SourceDebug;
 mod static_properties;
 mod type_check_role;
+mod type_parameter_declarations;
 pub(crate) mod type_reflection;
 mod value_class_constructors;
 mod value_class_facts;
@@ -159,7 +161,7 @@ pub use progression::{IrProgressionSource, IrRuntimeFunction};
 pub use properties::{
     IrAccessorLines, IrCheckedProperty, IrInlinePropertySplice, IrInlineTypeSubstitution,
     IrMemberKind, IrModuleProperty, IrProperty, IrPropertyModality, IrPropertyModifiers,
-    MemberExtProp,
+    MemberExtProp, PrivatePropertyAccessorCall,
 };
 pub use property_layouts::IrLocalPropertyLayout;
 pub use references::{
@@ -853,6 +855,8 @@ pub enum IrEnclosure {
 /// constructor's `val`/`var` parameters (in order); the constructor stores each.
 #[derive(Clone, Debug)]
 pub struct IrClass {
+    /// Non-local lexical declaration name retained independently from the class's physical name.
+    pub declaration_name: Option<crate::types::ClassifierDeclarationName>,
     pub fq_name: TypeName,
     /// `true` when this classifier comes from a source declaration. Synthesized implementation
     /// classes must not be published as declared nested classifiers in language metadata, even when
@@ -1304,6 +1308,17 @@ pub struct IrExternalFrameLine {
     pub call_line: u32,
 }
 
+/// Where an inline callee's body places one of the lambdas a call passes it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InlineLambdaPlacement {
+    /// The body never uses it: no frame runs the lambda's body.
+    Unused,
+    /// The body invokes it, so the lambda's body runs in the caller's frame.
+    Invoked,
+    /// The body hands it to an object it constructs, whose method runs the lambda's body.
+    Retained,
+}
+
 /// One lowered source file (`IrFile`) — its arenas. Index-based, bulk-freeable.
 #[derive(Default)]
 pub struct IrFile {
@@ -1478,6 +1493,12 @@ pub struct IrFile {
     /// Class initialization blocks in source order. Member-property initializers remain attached to
     /// their declarations so a backend can merge both without consulting syntax.
     pub checked_class_initializers: Vec<IrCheckedClassInitializer>,
+    /// For a class without a primary constructor, the values its initializers' locals are numbered
+    /// above once they are composed into its secondary constructors: `this` is value 0, the
+    /// constructor prefix and every constructor's parameters lie at or below this bound. A property
+    /// initializer re-evaluated elsewhere (a generated member applying the default) reads its locals
+    /// from here.
+    pub secondary_initializer_value_bases: crate::fx_hash::HashMap<ClassId, u32>,
     pub checked_enum_entry_bodies:
         crate::fx_hash::HashMap<crate::fir::DeclarationId, IrCheckedEnumEntryBody>,
     /// Lifted function parameter that carries a mutable capture's shared holder, keyed by
@@ -1575,6 +1596,10 @@ pub struct IrFile {
     /// index is stable within its declaring class; backend consumers must not recover this edge by
     /// matching the property's spelling against a static field name.
     jvm_companion_property_statics: crate::fx_hash::HashMap<(TypeName, u32), u32>,
+    /// Exact delegated companion property declaration → the outer-class static holding its
+    /// `x$delegate`. Kept apart from `jvm_companion_property_statics`: the delegate is storage the
+    /// property's accessors read, not the property itself.
+    jvm_companion_delegate_statics: crate::fx_hash::HashMap<(TypeName, u32), u32>,
     /// User annotations applied to FUNCTIONS (top-level and members share the `functions` arena),
     /// by function id, retaining the resolved semantic retention. A side table rather than a field on [`IrFunction`], for the
     /// same reason [`IrClass::field_annotations`] is one: the overwhelming majority of functions
@@ -1862,6 +1887,10 @@ pub struct IrFile {
     /// Anonymous initializer (`init { … }`) bodies. kotlinc gives such a block's opening and
     /// closing lines entries of their own, even where no instruction of the block sits on them.
     pub initializer_blocks: crate::fx_hash::HashSet<ExprId>,
+    /// Expressions whose own line keeps its entry when an operand marks another line at the same
+    /// offset, as kotlinc's line table does. A serializable property's default copied into a
+    /// generated method starts with a property read the plugin attributes to the class's line.
+    pub kept_start_lines: crate::fx_hash::HashSet<ExprId>,
     /// Compiler-generated `Variable` declarations whose semantic role is holding a call operand:
     /// an inline expansion's parameter (argument, receiver, or capture), or an argument preserved
     /// for evaluation order. This is provenance, not a storage decision; a backend decides how
@@ -2088,6 +2117,10 @@ pub struct IrFile {
     /// return, before CPS erasure to `Object`), recorded from the checked FIR call target: the
     /// cross-unit complement of `suspend_funs`, for a callee in ANOTHER file or a dependency.
     pub suspend_calls: crate::fx_hash::HashMap<u32, Ty>,
+    /// Each suspend literal an emitted inline call binds to an inline parameter → where its body
+    /// runs: in the caller's frame, in an object the callee constructs, or nowhere. Decided before
+    /// coroutine lowering, from the callee's compiled body where the callee is spliced from one.
+    pub suspend_lambda_placements: crate::fx_hash::HashMap<ExprId, InlineLambdaPlacement>,
     /// A cross-unit suspend call → the declared results of the declarations its callee overrides,
     /// nearest first, when it overrides any: how its result crosses the continuation is the target's.
     pub suspend_call_overridden_results: crate::fx_hash::HashMap<ExprId, Box<[Ty]>>,
@@ -2288,8 +2321,8 @@ pub struct IrFile {
     /// classifying as a value class. Only NON-NULL declared returns are recorded: a nullable value
     /// class really is boxed.
     pub call_declared_ret: crate::fx_hash::HashMap<u32, Ty>,
-    /// The `ImplicitCoercion`s FIR lowering places between a call's declared result and its
-    /// call-site substitution (`fun <T> f(): T` read as `Int`). Which coercion a node is comes from
+    /// The `ImplicitCoercion`s FIR lowering places between a call's or property read's declared
+    /// result and its use-site substitution (`fun <T> f(): T` read as `Int`). Which coercion a node is comes from
     /// where it was lowered, not from its shape: an adaptation or widening over the same call is
     /// another coercion. A target decides whether the conversion crosses a physical result slot.
     pub declaration_result_coercions: crate::fx_hash::HashSet<ExprId>,
@@ -2334,6 +2367,10 @@ pub struct IrFile {
     /// when it mangles that accessor. Other calls that share a JVM spelling stay bound to
     /// their own declarations.
     pub synthesized_accessor_calls: crate::fx_hash::HashMap<ExprId, SynthesizedAccessorCall>,
+    /// A call realized as a private member property's static accessor, with the facts the
+    /// value-class pass realizes its physical name and descriptor from.
+    pub private_property_accessor_calls:
+        crate::fx_hash::HashMap<ExprId, PrivatePropertyAccessorCall>,
     /// Stable property-operation identity → checker-selected accessor identity and physical return.
     /// This is a semantic selection, distinct from any backend rewrite of its platform spelling.
     pub property_selected_accessors: crate::fx_hash::HashMap<u32, (String, Ty)>,

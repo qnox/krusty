@@ -76,7 +76,11 @@ impl<'a> ModuleSymbols<'a> {
     ) -> Option<crate::libraries::AliasExpansion> {
         let identity = match namespace {
             SymbolNamespace::Package(package) => {
-                crate::types::existing_type_name_child(package, name)?
+                crate::types::existing_type_name_child(package, name).filter(|&identity| {
+                    self.syms
+                        .source_fragments
+                        .sees_alias(self.source_file, identity)
+                })?
             }
             // A nested alias is a declaration of its owner's classifier namespace, keyed by the
             // owner's identity: a local or hoisted owner's runtime name is not the alias's path.
@@ -417,7 +421,16 @@ impl<'a> ModuleSymbols<'a> {
                 .iter()
                 .map(|(_, has_default)| *has_default)
                 .collect(),
-            types: c.ctor_params.clone(),
+            // Source argument mapping consumes the same symbolic template as constructor
+            // selection. The erased parameters remain the physical callable's ABI shape.
+            types: if c.type_params.is_empty() {
+                c.ctor_params.clone()
+            } else {
+                c.ctor_param_shapes
+                    .iter()
+                    .map(|(parameter, _)| *parameter)
+                    .collect()
+            },
             recv_fun: c
                 .ctor_params
                 .iter()
@@ -429,6 +442,7 @@ impl<'a> ModuleSymbols<'a> {
         .into_iter()
         .collect();
         let mut shape = LibraryType {
+            declaration_name: c.declaration_name.clone(),
             // A current-module classifier is by definition a Kotlin declaration.
             is_kotlin: true,
             is_data: c.is_data(),
@@ -1273,6 +1287,34 @@ fn source_property(
 }
 
 impl SymbolSource for ModuleSymbols<'_> {
+    fn actualized_expect(&self, internal: TypeName) -> Option<TypeName> {
+        self.syms
+            .source_fragments
+            .actualizes_expect(self.source_file, internal)
+            .then(|| self.type_alias_binding(internal))
+            .flatten()
+            .map(|alias| alias.target)
+    }
+
+    fn sees_function(&self, function: &FunctionInfo) -> bool {
+        self.syms.source_fragments.sees(
+            self.source_file,
+            function
+                .source_key
+                .map(|(file, _)| file)
+                .or(function.source_file),
+            function.stable_declaration,
+        )
+    }
+
+    fn sees_property(&self, property: &PropertyInfo) -> bool {
+        self.syms.source_fragments.sees(
+            self.source_file,
+            property.source_key.map(|(file, _)| file),
+            property.stable_declaration,
+        )
+    }
+
     fn type_variable_bounds(&self, name: &str) -> Vec<Ty> {
         self.type_parameter_bounds(name)
     }
@@ -1624,6 +1666,22 @@ impl SymbolSource for ModuleSymbols<'_> {
                 });
             }
         }
+        // A refined common fragment sees only its own declarations and those of the fragments it
+        // refines: the platform declarations that refine it are no candidates there.
+        let classifier_hidden = classifier.as_ref().is_some_and(|classifier| {
+            !self.syms.source_fragments.sees(
+                self.source_file,
+                classifier.source_file,
+                classifier.stable_declaration,
+            )
+        });
+        let (classifier_name, classifier_declaration, classifier) = if classifier_hidden {
+            (None, None, None)
+        } else {
+            (classifier_name, classifier_declaration, classifier)
+        };
+        overloads.retain(|function| self.sees_function(function));
+        properties.retain(|property| self.sees_property(property));
         let callables = match (overloads.is_empty(), properties.is_empty()) {
             (false, false) => Callables::Both {
                 functions: FunctionSet { overloads },
@@ -1722,6 +1780,7 @@ mod tests {
 
     fn class(internal: &str) -> FrontendClassSig {
         FrontendClassSig {
+            declaration_name: None,
             internal: internal.into(),
             stable_declaration: None,
             source_file: 0,
@@ -2694,6 +2753,39 @@ mod tests {
         assert_eq!(fs.len(), 1);
         assert_eq!(fs[0].callable.params, vec![declared]);
         assert_eq!(fs[0].callable.source_receiver, Some(declared));
+    }
+
+    #[test]
+    fn annotation_application_retains_the_constructor_parameter_template() {
+        let mut symbols = FrontendSymbols::default();
+        let mut annotation = class("demo/Envelope");
+        annotation.flags = annotation.flags.with_annotation(true);
+        let bound = Ty::nullable(Ty::obj("kotlin/Any"));
+        annotation.type_parameters = crate::types::TypeParameters::new(
+            vec!["T".to_string()],
+            vec![bound],
+            vec![crate::types::TypeVariance::Invariant],
+        );
+        let parameter = Ty::obj_args("demo/Leaf", &[Ty::ty_param("T", bound)]);
+        annotation.ctor_params = vec![Ty::obj_args("demo/Leaf", &[Ty::obj("kotlin/Any")])];
+        annotation.ctor_param_shapes = vec![(parameter, false)];
+        annotation.ctor_param_names = vec![("leaf".to_string(), false)];
+        symbols.insert_class(annotation);
+
+        let provider = ModuleSymbols::new(&symbols);
+        let declaration = provider.classifier(type_name("demo/Envelope")).unwrap();
+        let application = declaration.annotation_application().unwrap();
+        assert_eq!(application.parameters.types, vec![parameter]);
+        assert_eq!(application.parameters.names, vec!["leaf"]);
+        assert_eq!(application.parameters.defaults, vec![false]);
+        assert_eq!(
+            application.parameters.types,
+            declaration.constructors[0]
+                .generic_sig
+                .as_ref()
+                .unwrap()
+                .params,
+        );
     }
 
     #[test]

@@ -31,8 +31,9 @@ pub(super) struct ConstructorDefaultStub<'a> {
     pub(super) logical_prefix_count: usize,
     pub(super) real_params: &'a [Ty],
     pub(super) defaults: &'a [Option<u32>],
-    /// Source provenance for the stub's `LineNumberTable`. `None` is the primary constructor's.
-    pub(super) secondary_lines: Option<(u32, &'a [Option<u32>], u32)>,
+    /// A secondary constructor's entry and closing lines for the stub's `LineNumberTable`. `None`
+    /// is the primary constructor's.
+    pub(super) secondary_lines: Option<(u32, u32)>,
     /// Whether this exact declaration is hidden behind its marker accessor.
     pub(super) target_uses_marker_accessor: bool,
     /// Whether the declaration is `@Deprecated`; kotlinc repeats the classic attribute on the stub.
@@ -134,16 +135,23 @@ pub(super) fn emit_ctor_default_stub_with_prefix(
         .enter(FrameKey::Parameter((trailing + mask_count) as u16), marker);
     let _ = e.lease_temporary(marker_slot, marker);
 
-    // kotlinc's `$default` ctor LineNumberTable: the CLASS declaration line at entry, each masked
-    // fill's value at its PARAMETER's declaration line, the delegation back at the class line, and
-    // the `return` at the primary ctor's closing-`)` line — consecutive same-line entries collapse.
+    // kotlinc's `$default` ctor LineNumberTable: the stub enters on the constructor's line (the
+    // CLASS declaration's for a primary, the `constructor` keyword's for a secondary), and so does
+    // each mask test and the delegation. A masked fill is generated like any other code: the
+    // default expression marks its own lines, nested calls included. The `return` maps to the
+    // declaration's closing line.
     let class_decl = ir
         .classes
         .iter()
         .find(|candidate| candidate.fq_name() == owner);
-    let class_line = secondary_lines
-        .map(|(entry, _, _)| entry)
+    let entry_line = secondary_lines
+        .map(|(entry, _)| entry)
         .unwrap_or_else(|| class_decl.map_or(0, |candidate| candidate.decl_line));
+    let mark_entry = |code: &mut CodeBuilder| {
+        if entry_line != 0 {
+            code.mark_line(entry_line);
+        }
+    };
     // kotlinc visits the stub's name and descriptor before its body, so the descriptor's constant
     // precedes the default values and the delegation the body interns.
     let mut stub_params = physical_params.clone();
@@ -155,40 +163,24 @@ pub(super) fn emit_ctor_default_stub_with_prefix(
     let desc = method_descriptor(&stub_params, Ty::Unit);
     e.cw.reserve_method_name("<init>");
     e.cw.reserve_descriptor(&desc);
-    let mut lines: Vec<(u16, u32)> = vec![(0, class_line)];
     let mut code = CodeBuilder::new(e.frame.size());
     for (i, def) in defaults.iter().enumerate().take(n) {
         if let Some(def_expr) = def {
             let (pslot, pty) = param_slots[i];
+            mark_entry(&mut code);
             code.iload(mask_slots[i / 32]);
             code.push_int(default_mask_bit(i), e.cw);
             code.iand();
             let skip = code.new_label();
             code.ifeq(skip);
-            let parameter_line = match secondary_lines {
-                Some((_, parameter_lines, _)) => parameter_lines.get(i).copied().flatten(),
-                None => class_decl
-                    .and_then(|candidate| {
-                        candidate.fields.get(i).and_then(|field| {
-                            ir.prop_decl_lines
-                                .get(&(candidate.fq_name_id(), field.name.clone()))
-                        })
-                    })
-                    .copied(),
-            };
-            if let Some(param_line) = parameter_line {
-                lines.push((code.bytes.len() as u16, param_line));
-            }
+            super::method_defaults::mark_default_fill(&mut e, *def_expr, &mut code);
             e.emit_value(*def_expr, &mut code);
             store(pty, pslot, &mut code);
             code.bind(skip);
-            // The mask/branch machinery for the next slot maps back to the class declaration. The
-            // final fill lands at the delegation pc, where the same line is added below and collapsed.
-            lines.push((code.bytes.len() as u16, class_line));
         }
     }
     // `invokespecial <owner>.<init>(realparams)V` — delegate to the real primary constructor.
-    lines.push((code.bytes.len() as u16, class_line));
+    mark_entry(&mut code);
     code.aload(0);
     for &(prefix_slot, prefix_ty) in &prefix_slots {
         load(prefix_ty, prefix_slot, &mut code);
@@ -214,13 +206,13 @@ pub(super) fn emit_ctor_default_stub_with_prefix(
     // primary's stub, and the secondary's own last line for a secondary's — kotlinc's rule, and the
     // two are different declarations' lines, so neither may stand in for the other.
     let close_line = match secondary_lines {
-        Some((_, _, close)) => (close != 0).then_some(close),
+        Some((_, close)) => (close != 0).then_some(close),
         None => class_decl
             .and_then(|candidate| ir.ctor_close_lines.get(&candidate.fq_name_id()))
             .copied(),
     };
-    if let Some(close) = close_line {
-        lines.push((code.bytes.len() as u16, close));
+    if let Some(close) = close_line.filter(|_| entry_line != 0) {
+        code.mark_line(close);
     }
     code.ret_void();
     code.ensure_locals(e.frame.max());
@@ -236,8 +228,14 @@ pub(super) fn emit_ctor_default_stub_with_prefix(
         access
     };
     e.cw.add_method(access, "<init>", &desc, &code);
-    if class_line != 0 {
-        lines.dedup_by_key(|(_, line)| *line);
+    // `add_method` curates every `<init>`'s line table from its class's declarations; this stub's is
+    // the one its emission marked.
+    if entry_line != 0 {
+        let lines = code
+            .line_marks()
+            .iter()
+            .map(|&(pc, line)| (pc, u32::from(line)))
+            .collect::<Vec<_>>();
         e.cw.set_method_lines("<init>", &desc, &lines);
     }
     if deprecated {

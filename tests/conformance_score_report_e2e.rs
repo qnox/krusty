@@ -556,15 +556,17 @@ fn preview_lanes_and_release_carry_all_target_reports_distinctly() {
         "name: pct-${{ needs.build-tool-bins.outputs.max }}\n",
         "name: jvm-byte-equality-${{ needs.build-tool-bins.outputs.max }}\n",
         "name: native-pct-${{ needs.build-tool-bins.outputs.max }}\n",
-        "id: c\n",
-        "run: bash scripts/conformance-badge.sh fields conformance pct.txt \"$MAX_VERSION\" >> \"$GITHUB_OUTPUT\"\n",
-        "id: b\n",
-        "run: bash scripts/conformance-badge.sh fields jvm-byte-equality jvm-byte-equality.txt \"$MAX_VERSION\" >> \"$GITHUB_OUTPUT\"\n",
-        "id: n\n",
-        "run: bash scripts/conformance-badge.sh fields native-conformance native-pct.txt \"$MAX_VERSION\" >> \"$GITHUB_OUTPUT\"\n",
-        "filename: krusty-conformance.json\n          label: ${{ steps.c.outputs.label }}\n          message: ${{ steps.c.outputs.message }}\n          color: ${{ steps.c.outputs.color }}\n",
-        "filename: krusty-jvm-byte-equality.json\n          label: ${{ steps.b.outputs.label }}\n          message: ${{ steps.b.outputs.message }}\n          color: ${{ steps.b.outputs.color }}\n",
-        "filename: krusty-native-conformance.json\n          label: ${{ steps.n.outputs.label }}\n          message: ${{ steps.n.outputs.message }}\n          color: ${{ steps.n.outputs.color }}\n",
+        "GH_TOKEN: ${{ secrets.GIST_TOKEN }}\n",
+        "MAX_VERSION: ${{ needs.build-tool-bins.outputs.max }}\n",
+        "conformance=$(bash scripts/conformance-badge.sh json conformance pct.txt \"$MAX_VERSION\")\n",
+        "bytes=$(bash scripts/conformance-badge.sh json jvm-byte-equality jvm-byte-equality.txt \"$MAX_VERSION\")\n",
+        "native=$(bash scripts/conformance-badge.sh json native-conformance native-pct.txt \"$MAX_VERSION\")\n",
+        "kotlin=$(jq -cn --arg v \"$MAX_VERSION\" '{schemaVersion: 1, label: \"Kotlin\", message: $v, color: \"blue\"}')\n",
+        "\"krusty-conformance.json\": {content: $c},\n",
+        "\"krusty-jvm-byte-equality.json\": {content: $b},\n",
+        "\"krusty-native-conformance.json\": {content: $n},\n",
+        "\"krusty-kotlin.json\": {content: $k}}}' |\n",
+        "gh api --method PATCH \"gists/$GIST_ID\" --input - >/dev/null\n",
     ] {
         assert!(
             release.contains(needle),
@@ -572,14 +574,14 @@ fn preview_lanes_and_release_carry_all_target_reports_distinctly() {
         );
     }
     assert_eq!(
-        workflow.matches("Schneegans/dynamic-badges-action").count(),
-        release.matches("Schneegans/dynamic-badges-action").count(),
+        workflow.matches("gists/$GIST_ID").count(),
+        release.matches("gists/$GIST_ID").count(),
         "no job other than the master release publishes a badge"
     );
     assert_eq!(
-        release.matches("Schneegans/dynamic-badges-action").count(),
-        4,
-        "the release publishes the Kotlin version, JVM conformance/bytes, and Native conformance badges"
+        release.matches("gists/$GIST_ID").count(),
+        1,
+        "one gist update publishes the Kotlin version, JVM conformance/bytes, and Native conformance badges"
     );
 }
 

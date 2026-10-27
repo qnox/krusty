@@ -120,6 +120,108 @@ fn typed_function_input_supplies_tightest_contravariant_binding() {
 }
 
 #[test]
+fn dependent_applied_bounds_wait_for_complete_call_bindings() {
+    let any = Ty::nullable(Ty::obj("kotlin/Any"));
+    let a = Ty::ty_param("callee:A", any);
+    let bound = Ty::obj_args("test/Marker", &[a]);
+    let b = Ty::ty_param("callee:B", bound);
+    let signature = GenericSig {
+        formals: vec!["callee:A".into(), "callee:B".into()],
+        formal_bounds: vec![vec![any], vec![bound]],
+        receiver: None,
+        params: vec![b],
+        ret: Ty::obj_args("test/Pair", &[a, b]),
+        return_policy: crate::libraries::GenericReturnPolicy::Exact,
+    };
+    let actual = Ty::obj_args("test/Marker", &[Ty::Int]);
+    let source = crate::libraries::EmptySymbolSource;
+    let inferred = infer_generic_call_constraints_from_symbols(
+        &source,
+        &signature,
+        [(0, actual, false)],
+        None,
+    );
+    assert_eq!(inferred.bound_violation, None);
+    assert_eq!(inferred.bindings.get("callee:B"), Some(&actual));
+    assert_eq!(inferred.bindings.get("callee:A"), None);
+    let mut completed = inferred.bindings;
+    completed.insert("callee:A".into(), Ty::Int);
+    assert_eq!(
+        generic_binding_bound_violation(&signature, &completed, |actual, bound| {
+            resolution_subtype(&source, actual, bound)
+        }),
+        None,
+    );
+    completed.insert("callee:A".into(), Ty::String);
+    assert_eq!(
+        generic_binding_bound_violation(&signature, &completed, |actual, bound| {
+            resolution_subtype(&source, actual, bound)
+        }),
+        Some((Ty::obj_args("test/Marker", &[Ty::String]), actual)),
+    );
+}
+
+#[test]
+fn a_caller_owned_variable_does_not_defer_a_definite_bound_violation() {
+    let outer = Ty::ty_param("caller:A", Ty::Int);
+    let bound = Ty::obj_args("test/Marker", &[outer]);
+    let formal = Ty::ty_param("callee:B", bound);
+    let signature = GenericSig {
+        formals: vec!["callee:B".into()],
+        formal_bounds: vec![vec![bound]],
+        receiver: None,
+        params: vec![formal],
+        ret: formal,
+        return_policy: crate::libraries::GenericReturnPolicy::Exact,
+    };
+    let actual = Ty::obj_args("test/Marker", &[Ty::String]);
+    let inferred = infer_generic_call_constraints_from_symbols(
+        &crate::libraries::EmptySymbolSource,
+        &signature,
+        [(0, actual, false)],
+        None,
+    );
+    assert_eq!(
+        inferred.bound_violation,
+        Some(GenericBoundViolation {
+            argument: 0,
+            expected: bound,
+            actual,
+        })
+    );
+}
+
+#[test]
+fn an_open_dependent_bound_does_not_hide_a_concrete_bound_violation() {
+    let any = Ty::nullable(Ty::obj("kotlin/Any"));
+    let a = Ty::ty_param("callee:A", any);
+    let dependent = Ty::obj_args("test/Marker", &[a]);
+    let b = Ty::ty_param("callee:B", Ty::Int);
+    let signature = GenericSig {
+        formals: vec!["callee:A".into(), "callee:B".into()],
+        formal_bounds: vec![vec![any], vec![dependent, Ty::Int]],
+        receiver: None,
+        params: vec![b],
+        ret: b,
+        return_policy: crate::libraries::GenericReturnPolicy::Exact,
+    };
+    let inferred = infer_generic_call_constraints_from_symbols(
+        &crate::libraries::EmptySymbolSource,
+        &signature,
+        [(0, Ty::String, false)],
+        None,
+    );
+    assert_eq!(
+        inferred.bound_violation,
+        Some(GenericBoundViolation {
+            argument: 0,
+            expected: Ty::Int,
+            actual: Ty::String,
+        })
+    );
+}
+
+#[test]
 fn bound_violation_retains_the_prior_valid_argument_solution() {
     let formal = Ty::ty_param("T", Ty::Int);
     let signature = GenericSig {

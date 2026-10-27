@@ -1030,6 +1030,11 @@ impl<'a> CommonIrBodySink<'a> {
                 let subclass = index
                     .enum_entry_has_body(entry)
                     .then(|| header.classifier.nested_child(&name));
+                let subclass_declaration =
+                    subclass.map(|_| crate::types::ClassifierDeclarationName::Nested {
+                        owner: header.classifier,
+                        name: name.clone().into(),
+                    });
                 let source_order = index
                     .source_order(entry)
                     .ok_or(FirFileLoweringFailure::MissingSourceOrder(entry))?;
@@ -1052,6 +1057,7 @@ impl<'a> CommonIrBodySink<'a> {
                     });
                 if let Some(subclass) = subclass {
                     let mut entry_class = crate::ir::IrClass::synthetic(subclass);
+                    entry_class.declaration_name = subclass_declaration;
                     entry_class.superclass = header.classifier;
                     // The selected enum-entry constructor is executable FIR and may be a secondary
                     // constructor with a different parameter list. Finalization installs that
@@ -1491,6 +1497,9 @@ impl<'a> CommonIrBodySink<'a> {
         body: FirBody,
     ) -> Result<(), FirFileLoweringFailure> {
         let declaration = DeclarationId::from_raw(owner.raw());
+        if super::within_actualized_expect(index, declaration) {
+            return Ok(());
+        }
         let anchor = index.declaration_anchor(declaration).ok_or(
             FirFileLoweringFailure::UnsupportedCallableOwner(declaration),
         )?;

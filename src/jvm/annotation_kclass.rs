@@ -96,6 +96,13 @@ fn is_java_class_array(ty: Ty) -> bool {
     ty.is_reference_array() && ty.array_elem().is_some_and(is_java_class)
 }
 
+/// Whether reading `physical` as `logical` crosses annotation `KClass` storage, which
+/// [`adapt_read_kclass`] rebuilds rather than casts.
+pub(crate) fn is_kclass_storage_read(logical: Ty, physical: Ty) -> bool {
+    (is_annotation_kclass(logical) && is_java_class(physical))
+        || (is_annotation_kclass_array(logical) && is_java_class_array(physical))
+}
+
 /// An annotation getter left `physical` on the stack. When that value is the stored
 /// `java.lang.Class` of a `KClass` member, rebuild the `KClass` and return the type now on the
 /// stack. Any other pair is left untouched: a property whose Kotlin type is already `Class`, or

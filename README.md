@@ -91,8 +91,12 @@ plugins {
 }
 ```
 
-Kotlin/JVM, the Android Gradle plugin (AGP 9's built-in Kotlin, or `kotlin("android")`), or both
-must be applied before krusty; an Android project's Kotlin compiles are replaced per variant. `kotlin("plugin.serialization")` works in any order:
+Kotlin/JVM, Kotlin Multiplatform, the Android Gradle plugin (AGP 9's built-in Kotlin, or
+`kotlin("android")`), or a combination must be applied before krusty; an Android project's Kotlin
+compiles are replaced per variant. In a multiplatform project krusty compiles the JVM targets'
+compilations; each source set of a compilation reaches the compiler as a fragment refining the
+source sets it depends on, as kotlinc receives them. Other targets (Android included) keep their own
+compilers. `kotlin("plugin.serialization")` works in any order:
 krusty receives the Kotlin Gradle plugin's compiler-plugin classpath and options exactly as kotlinc
 would. The compiler identifies plugin jars and directories from their registrar service entries;
 a compile that requests a Kotlin compiler plugin krusty does not implement (assignment, Compose,
@@ -105,13 +109,42 @@ validated Gradle versions are 7.6.3, 8.14.3, 9.5.0, and 9.7.0. Projects applying
 `kotlin-dsl` (such as `buildSrc`) and Kotlin compile tasks outside any source set stay with kotlinc;
 the plugin logs each task it leaves. The plugin runs the compiler of its own release: on first use
 it downloads the archive for the host from that GitHub release into the Gradle user home and checks
-it against the release's `krusty-<version>-SHA256SUMS`. `-Pkrusty.releases=<url>` reads releases
-from a mirror with the same layout instead. To run another compiler binary, use either form:
+it against the release's `krusty-<version>-SHA256SUMS`. It trusts that file only through its
+signature, `krusty-<version>-SHA256SUMS.asc`, made by a subkey that the maintainer's OpenPGP key
+(fingerprint `D1A7 76AB F83D BE95 D365 C2A1 B871 3034 DFAE AA99`, bundled in the plugin) binds for
+signing, as published in `krusty-<version>-signing-key.asc`; a missing or invalid signature fails
+the build. Every release file also carries GitHub build provenance
+(`gh attestation verify <file> -R qnox/krusty`). `-Pkrusty.releases=<url>` reads releases from a
+mirror with the same layout instead. To run another compiler binary, use either form:
 
 ```sh
 ./gradlew -Pkrusty.binary=/absolute/path/to/krusty krustyCompile
 KRUSTY_BIN=/absolute/path/to/krusty ./gradlew krustyCompile
 ```
+
+### Is krusty for my build?
+
+`krustyVerify` answers that without changing what the build ships. It compiles every Kotlin/JVM
+compilation with kotlinc, as the build would without krusty, and compiles each one with krusty
+beside it:
+
+```sh
+./gradlew krustyVerify
+```
+
+The report in `build/reports/krusty-verify/` says which compilations krusty compiles, which it
+leaves to kotlinc and why (an unsupported compiler plugin is reported as unsupported, not as a
+failure), krusty's errors, how many classes are byte-identical to kotlinc's and how the others
+differ (instructions, line numbers, Kotlin metadata, ...), and kotlinc's and krusty's compile time
+and krusty's peak memory. kotlinc compiles every source again for the comparison, so its time is a
+full compile's too.
+
+Please submit the report: its button opens a prefilled GitHub issue, or paste
+`krusty-verify-issue.md`. It holds totals, difference kinds and unsupported requests with paths
+masked, and no compilation, class or member name. krusty's errors are masked by rule (their wording
+up to the first colon, with quoted text and identifier-like words replaced), which cannot promise
+to catch every name, so review the issue before you submit it. `-Pkrusty.verify.shareNames=true`
+names compilations and keeps errors whole, for an issue you are free to share in full.
 
 ## Features
 
@@ -138,7 +171,7 @@ shows the newest. On the command line, anything not listed here fails the build 
 | Kotlin Toolchain (`project.yaml`/`module.yaml`) | `krusty-toolchain`, built from source in `crates/krusty-toolchain`, as a drop-in for JetBrains' `kotlin` command: `show modules`, `show settings`, `show dependencies` and `task :<module>:compileJvm`. JVM modules only; a module with Java sources, a compiler setting it does not pass yet or an artifact to download is refused by name. See [docs/KOTLIN_TOOLCHAIN.md](docs/KOTLIN_TOOLCHAIN.md). |
 | Kotlin Build Tools API | `krusty-build-tools-<version>-kotlin-<kotlin>.jar` in each release, one per supported Kotlin version, stands in for `kotlin-build-tools-impl` in a build tool that loads the API from a classpath (JetBrains' Kotlin Toolchain among them). JVM toolchain and in-process execution only. See [tools/krusty-build-tools](tools/krusty-build-tools/README.md). |
 | Bazel | `krusty_jvm_library` rule from the `krusty` Bazel module each release publishes (`krusty-bazel-<version>.tar.gz`), which brings the release's compiler as a toolchain per host, and a `--persistent_worker` speaking intellij-community's `jvm-inc-builder` vocabulary. The worker accepts no compiler plugins. See [tools/krusty-bazel/README.md](tools/krusty-bazel/README.md) and [tools/krusty-bazel/intellij.md](tools/krusty-bazel/intellij.md). |
-| Maven | Not supported. |
+| Maven | Verification only: the `krusty-maven-plugin` `verify` goal, shipped as `krusty-maven-plugin-<version>.zip` in each release, compiles each kotlin-maven-plugin compilation with krusty beside kotlinc's output and reports how krusty fares; kotlinc still builds what Maven ships. See [tools/krusty-maven](tools/krusty-maven/README.md). |
 
 ### Compiler plugins
 
@@ -168,6 +201,13 @@ plugins listed above.
 - Kotlin/Native
 - Kotlin/Wasm
 - Compose
+
+## Contributing
+
+krusty accepts issues, not code: turning a precise issue into our own implementation is faster than
+reviewing an outside change. Ask your coding agent to draft one with a minimal reproduction and
+kotlinc's vs. krusty's result, or submit a `krustyVerify` report. See
+[`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ## Sponsor
 

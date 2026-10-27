@@ -23,26 +23,60 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         ret: Ty,
         arguments: &[Value],
     ) -> Result<Option<Value>, Unsupported> {
+        self.dispatch_through(
+            receiver,
+            model::Dispatch::Class(slot),
+            params,
+            ret,
+            arguments,
+        )
+    }
+
+    /// A call through one of the receiver's tables: its vtable by class slot —
+    /// `receiver.type.vtable[slot](receiver, args…)` — or, for a module interface member, the
+    /// member's stub, which the final link writes from every implementation in the program (see
+    /// `native::interface_calls`).
+    pub(super) fn dispatch_through(
+        &mut self,
+        receiver: Value,
+        through: model::Dispatch,
+        params: &[Ty],
+        ret: Ty,
+        arguments: &[Value],
+    ) -> Result<Option<Value>, Unsupported> {
         self.null_check(receiver)?;
+        let mut all_params = vec![any()];
+        all_params.extend_from_slice(params);
+        let mut all_arguments = vec![receiver];
+        all_arguments.extend_from_slice(arguments);
+        let slot = match through {
+            model::Dispatch::Class(slot) => slot,
+            model::Dispatch::Interface(number) => {
+                let stub = super::super::super::interface_calls::stub_symbol(
+                    self.file.module_name,
+                    number,
+                );
+                let stub = self.file.import(&stub, &all_params, ret)?;
+                let func_ref = self.func_ref(stub);
+                let call = self.emit_call(func_ref, &all_arguments)?;
+                return Ok(self.builder.inst_results(call).first().copied());
+            }
+        };
         let flags = trusted();
         let ty = self
             .builder
             .ins()
             .load(types::I64, flags, receiver, TYPE_OFFSET);
-        let vtable = self
+        let table = self
             .builder
             .ins()
             .load(types::I64, flags, ty, ktype::VTABLE as i32);
         let function = self
             .builder
             .ins()
-            .load(types::I64, flags, vtable, (slot * 8) as i32);
-        let mut all_params = vec![any()];
-        all_params.extend_from_slice(params);
+            .load(types::I64, flags, table, (slot * 8) as i32);
         let signature = self.file.signature_of(&all_params, ret)?;
         let signature = self.builder.import_signature(signature);
-        let mut all_arguments = vec![receiver];
-        all_arguments.extend_from_slice(arguments);
         let call = self
             .builder
             .ins()
@@ -57,7 +91,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
 
     /// A call dispatched on the receiver's own type, named by the STATIC type it is made through:
     /// `Callee::Virtual`. The class or interface that declares the member fixes the slot number —
-    /// `place_interface_slots` gives an interface member one number that means the same thing in
+    /// `module_interfaces` gives an interface member one number that means the same thing in
     /// every implementation — so the slot is looked up on the DECLARING classifier and the vtable
     /// it indexes is the receiver's. That is what makes `class C(a: I) : I by a` work: the
     /// forwarder synthesized on `C` knows only `I`.
@@ -149,7 +183,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             .and_then(|receiver| ir.class_id_by_name(receiver))
             .ok_or_else(unknown)?;
         let key = model::function_key(ir, declaring, fid);
-        let Some(slot) = self.file.model.slot(class, &key) else {
+        let Some(slot) = self.file.dispatch_of(class, &key) else {
             return Err(declined!("a virtual call with no dispatch slot (`{name}`)"));
         };
         // The ABI is the DECLARATION's, not the call site's: every override fills this slot with a
@@ -164,7 +198,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         if self.terminated {
             return Ok(None);
         }
-        self.dispatch(object, slot, &carried, ret, &arguments)
+        self.dispatch_through(object, slot, &carried, ret, &arguments)
     }
 
     /// `super.p` and `super.p = v` — the named class's own realization of a PROPERTY.

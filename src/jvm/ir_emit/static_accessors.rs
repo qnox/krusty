@@ -511,6 +511,13 @@ pub(super) fn plan(
         if declared_member_accessor_is_bridged(ir, &private_member_bridges, accessor) {
             continue;
         }
+        // A function with no method of its own has nothing to forward to: the continuation of a
+        // suspend lambda every inline call places re-enters a method that is never written.
+        if let StaticAccessor::Function(function) = accessor {
+            if super::standalone_method_is_elided(ir, function, env) {
+                continue;
+            }
+        }
         if seen.insert((owner, accessor)) {
             plan.by_owner.entry(owner).or_default().push(accessor);
         }

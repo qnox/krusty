@@ -47,10 +47,14 @@ impl Emitter<'_> {
         }
         let class = self.ir.classes.get(class_id as usize)?;
         let argument = class.ctor_args.get(index as usize - 1)?;
-        // A capture read in constructor code reads its parameter, as kotlinc does, even when
-        // later code also needs the field.
+        // A capture, or a script's implicit receiver, read in constructor code reads its
+        // parameter, as kotlinc does, even when later code also needs the field.
         if !argument.is_field
-            || argument.provenance == crate::ir::IrCtorParameterProvenance::Capture
+            || matches!(
+                argument.provenance,
+                crate::ir::IrCtorParameterProvenance::Capture
+                    | crate::ir::IrCtorParameterProvenance::ScriptReceiver { .. }
+            )
         {
             return None;
         }
@@ -146,15 +150,11 @@ impl Emitter<'_> {
         // A property initializer whose value was inlined forgot the line in effect
         // (`markLineNumberAfterInlineIfNeeded`), so its `putfield` writes that line again: an
         // entry of the inlined call's, which the constructor's curated table keeps.
-        if code.line_forgotten() && self.ir.property_initializer_stores.contains(&statement) {
-            if let Some(&line) = self
-                .ir
-                .expr_lines
-                .get(&statement)
-                .filter(|&&line| line != 0)
-            {
-                code.inlined_line(line.min(u32::from(u16::MAX)) as u16);
-            }
+        if self.ir.property_initializer_stores.contains(&statement) {
+            super::debug_lines::restore_initializer_store_line(
+                self.ir.expr_lines.get(&statement).copied(),
+                code,
+            );
         }
         if self.ir.expr_source_lines.contains_key(&value)
             || super::debug_lines::enters_nested_copied_lambda_frame(self.ir, statement, value)
@@ -202,6 +202,12 @@ impl Emitter<'_> {
         }
         self.coerce_reference_on_stack(self.value_ty(value), field_ty, code);
         let field_ref = self.cw.fieldref(owner, name, &type_descriptor(field_ty));
+        if self.ir.property_initializer_stores.contains(&statement) {
+            super::debug_lines::restore_initializer_store_line(
+                self.ir.expr_lines.get(&statement).copied(),
+                code,
+            );
+        }
         code.putstatic(field_ref, slot_words(field_ty) as i32);
     }
 

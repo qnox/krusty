@@ -451,50 +451,6 @@ impl ResolvedModuleIndex {
             .any(|classifier| classifier.purpose == purpose)
     }
 
-    pub fn serialization_generated_member_statuses(
-        &self,
-    ) -> Option<crate::types::SerializationGeneratedMemberStatuses> {
-        self.serialization_generated_member_statuses
-    }
-
-    pub(crate) fn publish_serialization_generated_member_statuses(
-        &mut self,
-        statuses: crate::types::SerializationGeneratedMemberStatuses,
-    ) {
-        assert!(
-            self.serialization_generated_member_statuses
-                .replace(statuses)
-                .is_none(),
-            "serialization generated-member statuses may be published only once"
-        );
-    }
-
-    pub fn serialization_companion_accessor(
-        &self,
-        declaration: DeclarationId,
-    ) -> Option<(&str, TypeName, usize)> {
-        self.serialization_companion_accessors
-            .get(&declaration)
-            .map(|(field, companion, arity)| (field.as_ref(), *companion, *arity))
-    }
-
-    /// The custom serializer class's primary constructor selected for `declaration`'s
-    /// `@Serializable(with = …)`, with the accessor operand ordinal for each of its parameters.
-    pub fn serialization_custom_serializer_constructor(
-        &self,
-        declaration: DeclarationId,
-    ) -> Option<(DeclarationId, &[u32])> {
-        self.serialization_custom_serializer_constructors
-            .get(&declaration)
-            .map(|(constructor, operands)| (*constructor, operands.as_ref()))
-    }
-
-    pub fn serialization_type_use_serializer_constructors(
-        &self,
-    ) -> impl Iterator<Item = (&(TypeName, u32), &ResolvedTypeUseSerializerConstruction)> {
-        self.serialization_type_use_serializer_constructors.iter()
-    }
-
     pub fn publish_declaration_annotations(
         &mut self,
         declaration: DeclarationId,
@@ -618,54 +574,5 @@ impl ResolvedModuleIndex {
                 .is_none(),
             "a stable declaration may publish generated classifiers only once"
         );
-    }
-
-    pub fn publish_serialization_companion_accessor(
-        &mut self,
-        declaration: DeclarationId,
-        field: Box<str>,
-        companion: TypeName,
-        type_parameters: usize,
-    ) {
-        assert!(
-            self.serialization_companion_accessors
-                .insert(declaration, (field, companion, type_parameters))
-                .is_none(),
-            "a source classifier may publish only one serialization companion accessor"
-        );
-    }
-
-    pub fn publish_serialization_custom_serializer_constructor(
-        &mut self,
-        declaration: DeclarationId,
-        constructor: DeclarationId,
-        operands: Box<[u32]>,
-    ) {
-        assert!(
-            self.serialization_custom_serializer_constructors
-                .insert(declaration, (constructor, operands))
-                .is_none(),
-            "a source classifier may publish only one custom serializer constructor"
-        );
-    }
-
-    pub fn publish_serialization_type_use_serializer_constructor(
-        &mut self,
-        type_argument_count: u32,
-        construction: ResolvedTypeUseSerializerConstruction,
-    ) {
-        let key = (construction.serializer, type_argument_count);
-        if let Some(existing) = self
-            .serialization_type_use_serializer_constructors
-            .get(&key)
-        {
-            assert_eq!(
-                existing, &construction,
-                "equal checked serializer occurrences must select one constructor declaration"
-            );
-            return;
-        }
-        self.serialization_type_use_serializer_constructors
-            .insert(key, construction);
     }
 }

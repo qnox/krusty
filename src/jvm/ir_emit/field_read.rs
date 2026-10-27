@@ -59,17 +59,48 @@ impl Emitter<'_> {
         // A `lateinit var` read throws while the field is still null. The bridge above performs a
         // raw field read, so the use site keeps the same guard as a direct read.
         if is_lateinit {
-            code.dup();
-            let initialized = code.new_label();
-            code.ifnonnull(initialized);
-            code.push_string(&source_name, self.cw);
-            let throw = self.cw.methodref(
-                "kotlin/jvm/internal/Intrinsics",
-                "throwUninitializedPropertyAccessException",
-                "(Ljava/lang/String;)V",
-            );
-            code.invokestatic(throw, 1, 0);
-            self.bind(initialized, code);
+            self.emit_lateinit_use_guard(&source_name, code);
         }
+    }
+
+    /// The guard kotlinc puts on a `lateinit` read that loads the field (or a raw field bridge)
+    /// rather than calling the getter: the value is on the stack, and a null one is replaced by the
+    /// throw, whose `Nothing` result is the `aconst_null` the join expects.
+    /// A private `lateinit` module property read through its owner's `access$get<X>$p` yields the
+    /// raw field, so the use site throws while it is unset, as it does after its own class's read.
+    pub(super) fn guard_private_lateinit_read(&mut self, expression: u32, code: &mut CodeBuilder) {
+        let Some(crate::ir::IrModuleMemberAccess::Property {
+            target,
+            write: false,
+            ..
+        }) = self.ir.module_member_accesses.get(&expression)
+        else {
+            return;
+        };
+        let Some(property) = self.ir.referenced_module_properties.get(target) else {
+            return;
+        };
+        if property.visibility.is_private()
+            && property.flags.has(crate::fir::DeclarationFlags::LATEINIT)
+        {
+            let name = property.name.clone();
+            self.emit_lateinit_use_guard(&name, code);
+        }
+    }
+
+    pub(super) fn emit_lateinit_use_guard(&mut self, name: &str, code: &mut CodeBuilder) {
+        code.dup();
+        let initialized = code.new_label();
+        code.ifnonnull(initialized);
+        code.pop();
+        code.push_string(name, self.cw);
+        let throw = self.cw.methodref(
+            "kotlin/jvm/internal/Intrinsics",
+            "throwUninitializedPropertyAccessException",
+            "(Ljava/lang/String;)V",
+        );
+        code.invokestatic(throw, 1, 0);
+        code.aconst_null();
+        self.bind(initialized, code);
     }
 }

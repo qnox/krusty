@@ -11,6 +11,7 @@ use super::members::{
     any_slot, function_key, implements_an_interface, local_property_target, overridden_functions,
     overridden_properties, overridden_property_slot, property_accessor_key, property_type,
 };
+use super::module_interfaces::ModuleInterfaces;
 use super::{any_vtable, ClassTable, Representation, Slot, SlotKey, Unsupported, FUNCTION_SLOT};
 
 /// Build the table of class `id`, whose superclass in this file (already tabled) is `parent`.
@@ -20,6 +21,7 @@ pub(super) fn class_table(
     id: ClassId,
     superclass: Option<ClassId>,
     parent: Option<&ClassTable>,
+    numbered: &ModuleInterfaces,
 ) -> Result<ClassTable, Unsupported> {
     let class = &ir.classes[id as usize];
     // Bridges against an INTERFACE's member numbers, which are placed program-wide rather than in
@@ -109,7 +111,7 @@ pub(super) fn class_table(
         .iter()
         .filter_map(|&function| property_accessor_key(ir, id, function).map(|key| (function, key)))
         .collect();
-    let overridden_functions = overridden_functions(ir, class)?;
+    let overridden_functions = overridden_functions(ir, class, numbered)?;
     let overridden_properties = overridden_properties(ir, id, class)?;
 
     for &fid in &class.methods {

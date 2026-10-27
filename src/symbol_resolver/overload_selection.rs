@@ -6,6 +6,9 @@
 use super::*;
 use crate::types::TyKind;
 
+type OverloadTowerRank = (u8, (u8, u32), u32);
+type ReceiverRankedOverload<'a> = (OverloadTowerRank, Ty, &'a FunctionInfo);
+
 pub(crate) enum CandidateSelectionWithTies<T> {
     None,
     Selected(T),
@@ -600,9 +603,9 @@ pub(super) fn select_overload_tracking_with_functions(
     const MEMBER_PRIORITY: u8 = 1;
     const EXTENSION_PRIORITY: u8 = 2;
 
-    let mut by_rank: std::collections::BTreeMap<(u8, u32, u32), Vec<(&FunctionInfo, Vec<Ty>)>> =
+    let mut by_rank: std::collections::BTreeMap<OverloadTowerRank, Vec<(&FunctionInfo, Vec<Ty>)>> =
         std::collections::BTreeMap::new();
-    let mut ranked: Vec<(u8, u32, u32, Ty, &FunctionInfo)> = Vec::new();
+    let mut ranked: Vec<ReceiverRankedOverload<'_>> = Vec::new();
     if matches!(
         mode,
         SelectionMode::Kind(FnKind::Extension) | SelectionMode::Receiver
@@ -620,25 +623,27 @@ pub(super) fn select_overload_tracking_with_functions(
             .into_iter()
             .map(|(rank, receiver, overload)| {
                 (
-                    if overload
-                        .callable
-                        .annotations
-                        .contains(&crate::types::type_name("kotlin/internal/HidesMembers"))
-                    {
-                        HIDES_MEMBERS_PRIORITY
-                    } else {
-                        EXTENSION_PRIORITY
-                    },
-                    if overload
-                        .callable
-                        .annotations
-                        .contains(&crate::types::type_name("kotlin/internal/HidesMembers"))
-                    {
-                        0
-                    } else {
-                        overload.scope_rank
-                    },
-                    rank,
+                    (
+                        if overload
+                            .callable
+                            .annotations
+                            .contains(&crate::types::type_name("kotlin/internal/HidesMembers"))
+                        {
+                            HIDES_MEMBERS_PRIORITY
+                        } else {
+                            EXTENSION_PRIORITY
+                        },
+                        if overload
+                            .callable
+                            .annotations
+                            .contains(&crate::types::type_name("kotlin/internal/HidesMembers"))
+                        {
+                            (0, 0)
+                        } else {
+                            overload.scope_rung.selection_key(overload.scope_rank)
+                        },
+                        rank,
+                    ),
                     receiver,
                     overload,
                 )
@@ -655,13 +660,11 @@ pub(super) fn select_overload_tracking_with_functions(
                 .iter()
                 .copied()
                 .filter(|o| o.kind == FnKind::Member)
-                .map(|o| (MEMBER_PRIORITY, 0, o.receiver_rank, recv, o)),
+                .map(|o| ((MEMBER_PRIORITY, (0, 0), o.receiver_rank), recv, o)),
         );
     }
-    ranked.sort_by_key(|(priority, scope_rank, receiver_rank, _, _)| {
-        (*priority, *scope_rank, *receiver_rank)
-    });
-    for (priority, scope_rank, receiver_rank, binding_receiver, o) in ranked {
+    ranked.sort_by_key(|(rank, _, _)| *rank);
+    for (tower_rank, binding_receiver, o) in ranked {
         let lp = if indexed != IndexedConvention::Ordinary && o.call_sig.vararg_index.is_some() {
             let Some((params, _, _)) = indexed_call_shape(
                 lib,
@@ -697,13 +700,10 @@ pub(super) fn select_overload_tracking_with_functions(
         );
         crate::trace_compiler!(
             "resolve",
-            "  cand {name} scope_rank={scope_rank} receiver_rank={receiver_rank} logical_params={lp:?} owner={}",
+            "  cand {name} tower_rank={tower_rank:?} logical_params={lp:?} owner={}",
             o.callable.owner.render()
         );
-        by_rank
-            .entry((priority, scope_rank, receiver_rank))
-            .or_default()
-            .push((o, lp));
+        by_rank.entry(tower_rank).or_default().push((o, lp));
     }
     if indexed != IndexedConvention::Ordinary {
         for cands in by_rank.values() {

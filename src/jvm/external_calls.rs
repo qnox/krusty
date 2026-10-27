@@ -925,6 +925,7 @@ pub(super) fn realize(
                 | crate::libraries::CompilerIntrinsic::ProgressionStep
                 | crate::libraries::CompilerIntrinsic::ProgressionReversed
                 | crate::libraries::CompilerIntrinsic::WithIndex
+                | crate::libraries::CompilerIntrinsic::Indices(_)
                 | crate::libraries::CompilerIntrinsic::UnsignedCompare { .. }
                 | crate::libraries::CompilerIntrinsic::PrimitiveIteratorNext
                 | crate::libraries::CompilerIntrinsic::NumericConversion
@@ -1030,14 +1031,21 @@ pub(super) fn realize(
                             descriptor,
                             inline: crate::libraries::InlineKind::None,
                         };
-                    } else if let Some(array) =
-                        crate::jvm::names::array_class_descriptor(callable.physical_owner)
-                    {
+                    } else if let Some(array) = crate::jvm::names::array_class_descriptor(
+                        callable.physical_owner,
+                    )
+                    .filter(|_| {
+                        !crate::jvm::member_dispatch::is_value_class(
+                            &dispatch_classifiers,
+                            callable.physical_owner,
+                        )
+                    }) {
                         // An array classifier has no JVM class to dispatch on. Its remaining
                         // dispatched member (`iterator()`) is implemented by the unique static
                         // helper its metadata declares for the array's JVM class. The provider
                         // attaches typed intrinsic realizations to `get`/`set`/`size`, so another
                         // selected array dispatch without this helper is invalid backend input.
+                        // A value class over an array (an unsigned array) is a class of its own.
                         let helper = array_member_helper(
                             classpath,
                             &physical_name,

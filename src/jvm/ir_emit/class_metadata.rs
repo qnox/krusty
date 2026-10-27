@@ -4,7 +4,7 @@
 use super::*;
 use crate::metadata::class_builder::{
     FnMeta, JvmClassSignatures, JvmConstructorSignature, JvmFieldSignature, JvmFunctionSignature,
-    JvmPropertySignature,
+    JvmPropertySignature, PropMeta,
 };
 use crate::metadata::class_declarations::{
     ClassDeclarationRecord, ClassTailOptions, FunctionOrigin, PropertyOrigin,
@@ -267,7 +267,7 @@ impl<'a> JvmClassRealization<'a> {
                 .prop_origins
                 .iter()
                 .zip(&record.props)
-                .map(|(&origin, _)| self.property(origin))
+                .map(|(&origin, record)| self.property(origin, record))
                 .collect(),
             functions: record
                 .method_origins
@@ -339,7 +339,7 @@ impl<'a> JvmClassRealization<'a> {
             &f.params,
             self.override_results.physical_result(self.ir, fid),
         );
-        let desc = super::super::metadata_method_signatures::requires_function_signature(
+        let desc = (super::super::metadata_method_signatures::requires_function_signature(
             record.receiver,
             record
                 .params
@@ -355,7 +355,7 @@ impl<'a> JvmClassRealization<'a> {
             record.ret,
             &physical,
             &self.local_classifiers,
-        )
+        ) || record.spellings.names_actualized_expect())
         .then_some(physical);
         JvmFunctionSignature {
             name: (record.name != f.name).then(|| f.name.clone()),
@@ -363,10 +363,10 @@ impl<'a> JvmClassRealization<'a> {
         }
     }
 
-    fn property(&self, origin: PropertyOrigin) -> JvmPropertySignature {
+    fn property(&self, origin: PropertyOrigin, record: &PropMeta) -> JvmPropertySignature {
         let (ir, c) = (self.ir, self.c);
         match origin {
-            PropertyOrigin::Declared(index) => self.declared_property(index),
+            PropertyOrigin::Declared(index) => self.declared_property(index, record),
             // A class `const val` is its static field, read inline through its `ConstantValue`.
             PropertyOrigin::Constant(static_id) => JvmPropertySignature {
                 field: Some(JvmFieldSignature::default()),
@@ -391,7 +391,7 @@ impl<'a> JvmClassRealization<'a> {
         }
     }
 
-    fn declared_property(&self, property_index: usize) -> JvmPropertySignature {
+    fn declared_property(&self, property_index: usize, record: &PropMeta) -> JvmPropertySignature {
         let (ir, c) = (self.ir, self.c);
         let property = &c.properties[property_index];
         let desc = |t: Ty| crate::jvm::names::type_descriptor(t);
@@ -404,6 +404,8 @@ impl<'a> JvmClassRealization<'a> {
             .delegate_field
             .and_then(|i| c.fields.get(i as usize));
         let hoisted = static_fields::hoisted_static_declaration_for(ir, c, property_index);
+        // A delegated companion property's `x$delegate`, hoisted onto the outer class.
+        let hoisted_delegate = static_fields::hoisted_delegate_static_for(ir, c, property_index);
         let (default_getter, default_setter) = accessor_jvm_names(c, &property.name);
         // A getter's descriptor is its physical one: a scalar getter result over a reference-returning
         // overridden property returns the wrapper (see `jvm::override_results`).
@@ -468,7 +470,10 @@ impl<'a> JvmClassRealization<'a> {
         // hoisted onto its outer class is stored there.
         let has_field = !c.is_annotation
             && !c.is_interface
-            && (backing.is_some() || delegate.is_some() || hoisted.is_some());
+            && (backing.is_some()
+                || delegate.is_some()
+                || hoisted.is_some()
+                || hoisted_delegate.is_some());
         let field = has_field.then(|| JvmFieldSignature {
             // The PHYSICAL field name when the JVM realization mangles it — an instance property
             // beside a same-named hoisted companion static (`result` → `result$1`).
@@ -478,15 +483,25 @@ impl<'a> JvmClassRealization<'a> {
                 .or(property.delegate_field.filter(|_| delegate.is_some()))
                 .map(|index| instance_field_jvm_name(ir, self.run, c, index as usize))
                 .or_else(|| {
-                    hoisted.map(|(static_id, _)| ir.static_field_jvm_name(static_id).to_string())
+                    hoisted
+                        .map(|(static_id, _)| static_id)
+                        .or(hoisted_delegate)
+                        .map(|static_id| ir.static_field_jvm_name(static_id).to_string())
                 })
                 .filter(|physical| *physical != property.name),
             desc: backing
                 .map(|field| jvm_value_ty(&field.ty))
                 .or(delegate.map(|field| jvm_value_ty(&field.ty)))
                 .or_else(|| hoisted.map(|(_, storage)| jvm_value_ty(&storage.ty)))
+                .or_else(|| {
+                    hoisted_delegate
+                        .map(|static_id| jvm_value_ty(&ir.statics[static_id as usize].ty))
+                })
                 .map(desc)
-                .filter(|physical| self.requires_field_signature(property.ty, physical)),
+                .filter(|physical| {
+                    record.spellings.ret.actualized_expect
+                        || self.requires_field_signature(property.ty, physical)
+                }),
         });
         JvmPropertySignature {
             getter,

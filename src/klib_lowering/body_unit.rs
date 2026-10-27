@@ -32,6 +32,8 @@ use crate::metadata::klib_ir::tree::{KlibIrArena, KlibIrBody, KlibIrFunction, Kl
 use crate::metadata::klib_ir::KlibIrSymbol;
 use crate::types::{Ty, TypeName};
 
+mod class_construction;
+
 /// An exact dependency edge linked outside this support unit. Body exports, target instruction
 /// leaves and constructor calls have distinct realization contracts.
 #[derive(Clone, Copy)]
@@ -108,6 +110,7 @@ impl EmittedDependencyCallable {
 pub struct DependencyBodyUnit {
     ir: IrFile,
     functions: HashMap<KlibDependencyCallable, FunId>,
+    classes: HashMap<KlibDependencyCallable, crate::ir::ClassId>,
     authenticated_singleton_dispatches: HashMap<KlibDependencyCallable, Ty>,
     authenticated_singleton_classifiers: HashMap<KlibDependencyCallable, TypeName>,
     builtins: IrBuiltinOperators,
@@ -118,6 +121,7 @@ impl Default for DependencyBodyUnit {
         Self {
             ir: IrFile::default(),
             functions: HashMap::default(),
+            classes: HashMap::default(),
             authenticated_singleton_dispatches: HashMap::default(),
             authenticated_singleton_classifiers: HashMap::default(),
             builtins: IrBuiltinOperators::new(),
@@ -143,6 +147,10 @@ struct PendingBody<'a> {
     statements: &'a [KlibIrStatement],
     header: FunctionHeader,
     function: FunId,
+    initialization: Option<(
+        crate::ir::ClassId,
+        super::class_initialization::ClassInitialization<'a, 'a>,
+    )>,
 }
 
 impl DependencyBodyUnit {
@@ -386,6 +394,17 @@ impl DependencyBodyUnit {
             .map(|(identity, &function)| (identity, function))
     }
 
+    /// Ordinary classes owned by this closed unit, keyed by their authenticated constructor.
+    pub(crate) fn materialized_classes(
+        &self,
+    ) -> impl Iterator<Item = (TypeName, &KlibDependencyCallable)> {
+        let mut classes = self.classes.iter().collect::<Vec<_>>();
+        classes.sort_unstable_by_key(|(_, class)| **class);
+        classes
+            .into_iter()
+            .map(|(identity, class)| (self.ir.classes[*class as usize].fq_name, identity))
+    }
+
     fn lower_reachable<'a>(
         &mut self,
         callable: KlibBodyCallable<'a>,
@@ -394,6 +413,7 @@ impl DependencyBodyUnit {
         let mut pending = VecDeque::new();
         let mut linker = Linker {
             functions: &mut self.functions,
+            classes: &mut self.classes,
             authenticated_singleton_dispatches: &mut self.authenticated_singleton_dispatches,
             authenticated_singleton_classifiers: &mut self.authenticated_singleton_classifiers,
             pending: &mut pending,
@@ -421,15 +441,18 @@ impl DependencyBodyUnit {
                 symbol: body.symbol,
                 function: body.function,
             };
-            let lowered = BodyLowering::new(
+            let lowering = BodyLowering::new(
                 body.arena,
                 function,
                 &body.header,
                 &self.builtins,
                 &mut self.ir,
                 &mut linker,
-            )
-            .body(body.statements)
+            );
+            let lowered = match &body.initialization {
+                Some((class, plan)) => lowering.initialize_class(*class, plan),
+                None => lowering.body(body.statements),
+            }
             .map_err(|reason| match reason {
                 KlibBodyDeclineReason::CalleeDeclined(decline) => *decline,
                 reason => KlibBodyDecline::new(body.identity.declaration, reason),
@@ -444,6 +467,7 @@ impl DependencyBodyUnit {
 /// reached for the first time and queueing its body.
 struct Linker<'u, 's> {
     functions: &'u mut HashMap<KlibDependencyCallable, FunId>,
+    classes: &'u mut HashMap<KlibDependencyCallable, crate::ir::ClassId>,
     authenticated_singleton_dispatches: &'u mut HashMap<KlibDependencyCallable, Ty>,
     authenticated_singleton_classifiers: &'u mut HashMap<KlibDependencyCallable, TypeName>,
     pending: &'u mut VecDeque<PendingBody<'s>>,
@@ -500,6 +524,7 @@ impl CallLinker for Linker<'_, '_> {
 
     fn link_constructor(
         &mut self,
+        ir: &mut IrFile,
         callee: &KlibPublicIdSignature,
     ) -> Result<LinkedConstructor, KlibBodyDeclineReason> {
         let identity = self.callee_identity(callee)?;
@@ -536,6 +561,15 @@ impl CallLinker for Linker<'_, '_> {
                 )
             })?
             .target();
+        let selected = match self.sources.callees.get(&identity) {
+            Some(KlibCalleeFact::Selected(callables)) => callables[0],
+            _ => {
+                return Err(KlibBodyDeclineReason::SignatureMismatch(
+                    "an authenticated constructor lost its provider declaration".to_owned(),
+                ))
+            }
+        };
+        self.materialize_class(ir, &identity, selected)?;
         Ok(LinkedConstructor {
             target,
             declaration,
@@ -863,6 +897,7 @@ impl<'s> Linker<'_, 's> {
             statements,
             header,
             function: declared,
+            initialization: None,
         });
         Ok(declared)
     }
@@ -950,6 +985,8 @@ impl UnitCheckpoint {
     fn restore(self, unit: &mut DependencyBodyUnit) {
         let first = self.0.restore(&mut unit.ir);
         unit.functions.retain(|_, function| *function < first);
+        unit.classes
+            .retain(|_, class| (*class as usize) < unit.ir.classes.len());
         let functions = &unit.functions;
         unit.authenticated_singleton_dispatches
             .retain(|identity, _| functions.contains_key(identity));

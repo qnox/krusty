@@ -237,15 +237,7 @@ impl BodyLowering<'_> {
                         .map(|signature| signature.result.get()),
                     crate::fir::FirPropertyTarget::External { result, .. } => Some(result.get()),
                 };
-                if declared.is_some_and(|declared| declared != expression.ty.get()) {
-                    self.ir.add_expr(IrExpr::TypeOp {
-                        op: IrTypeOp::ImplicitCoercion,
-                        arg: lowered,
-                        type_operand: expression.ty.get(),
-                    })
-                } else {
-                    lowered
-                }
+                self.declaration_result(lowered, declared, expression.ty.get())
             }
             FirExprKind::PropertyWrite {
                 target,
@@ -540,7 +532,7 @@ impl BodyLowering<'_> {
                             operand,
                             check: crate::ir::NullCheck::Source,
                         });
-                        if operand_ty != target.get() {
+                        let asserted = if operand_ty != target.get() {
                             self.ir
                                 .logical_types
                                 .insert(asserted, operand_ty.non_null());
@@ -551,7 +543,11 @@ impl BodyLowering<'_> {
                             })
                         } else {
                             asserted
-                        }
+                        };
+                        // kotlinc states a `!!`'s own line before its operand, and keeps it when
+                        // the operand's first instruction marks another line there.
+                        self.ir.kept_start_lines.insert(asserted);
+                        asserted
                     }
                     FirTypeOperation::SafeCast => {
                         self.safe_cast_expression(operand_id, target.get())?
@@ -918,6 +914,11 @@ impl BodyLowering<'_> {
                 *negated,
                 origin,
             ))?,
+            FirExprKind::IndicesContainment {
+                value,
+                indices,
+                comparison,
+            } => self.indices_contains_expression(*value, indices, comparison.get())?,
             FirExprKind::StringTemplate(_) => {
                 unreachable!("a string template folds to a constant or is a concatenation")
             }
@@ -1075,7 +1076,16 @@ impl BodyLowering<'_> {
                     lhs: condition_lhs,
                     rhs: null,
                 });
+                let chained = matches!(
+                    self.body.expr(*rhs).map(|rhs| &rhs.kind),
+                    Some(FirExprKind::Elvis { .. })
+                );
                 let rhs = self.expression(*rhs)?;
+                if chained {
+                    // `a ?: b ?: c` is one chain that begins with `a`, as kotlinc folds it: the
+                    // later elvis does not state a start line of its own.
+                    self.ir.kept_start_lines.remove(&rhs);
+                }
                 let rhs = self.coerce_result(rhs, expression.ty.get());
                 let lhs = self.ir.add_expr(IrExpr::GetValue(temporary));
                 let lhs = self.coerce_result(lhs, expression.ty.get());
@@ -1083,6 +1093,8 @@ impl BodyLowering<'_> {
                     branches: vec![(Some(condition), rhs), (None, lhs)],
                 });
                 self.ir.logical_types.insert(result, expression.ty.get());
+                let line = self.body.expression_debug_lines(expression_id).source;
+                self.ir.whens.elvises.insert(result, line);
                 // An elvis over a safe call is one more guard of that call's chain: its left
                 // value's null check joins the chain's, and every `null` reaches the right side.
                 let over_safe_call = matches!(
@@ -1093,10 +1105,14 @@ impl BodyLowering<'_> {
                     self.ir.null_guards.insert(result);
                     self.ir.elvis_safe_call_guards.insert(result);
                 }
-                self.ir.add_expr(IrExpr::Block {
+                let elvis = self.ir.add_expr(IrExpr::Block {
                     stmts: vec![variable],
                     value: Some(result),
-                })
+                });
+                // kotlinc states the elvis's own line where it begins and again where its value is
+                // stored, and keeps it when the left value or the store marks another line there.
+                self.ir.kept_start_lines.insert(elvis);
+                elvis
             }
             FirExprKind::Throw(value) => {
                 let operand = self.expression(*value)?;
@@ -1403,9 +1419,14 @@ impl BodyLowering<'_> {
                 target,
                 extension_receiver,
                 arguments,
+                parameter_types,
             } => {
-                let (call, declared) =
-                    self.checked_local_call(target.clone(), *extension_receiver, arguments)?;
+                let (call, declared) = self.checked_local_call(
+                    target.clone(),
+                    *extension_receiver,
+                    arguments,
+                    parameter_types,
+                )?;
                 self.declaration_result(call, Some(declared), expression.ty.get())
             }
             FirExprKind::Lambda {

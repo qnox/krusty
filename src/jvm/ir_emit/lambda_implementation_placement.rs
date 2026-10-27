@@ -179,6 +179,15 @@ pub(crate) fn reparent_lambda_impls(ir: &mut IrFile) {
     }
 }
 
+/// Whether this common-IR function has no standalone JVM declaration.
+///
+/// Both sets are explicit lowering/discovery decisions. In particular, `body == None` is not enough:
+/// it also represents real abstract declarations, while an inline-splice implementation loses its
+/// body only after the body has been consumed into its call site.
+pub(super) fn standalone_method_is_elided(ir: &IrFile, fid: u32, env: &super::EmitEnv) -> bool {
+    ir.inline_only_fns.contains(&fid) || env.run.dead_lambdas.borrow().contains(&fid)
+}
+
 #[cfg(test)]
 mod tests {
     use super::reparent_lambda_impls;

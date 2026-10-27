@@ -50,7 +50,7 @@ impl JvmLibraries {
             .iter()
             .any(|method| is_java_annotation_element(method) && !method.annotations.is_empty());
         let element_annotations = match annotated_element {
-            true => self.cp.method_annotations(classifier)?,
+            true => self.cp.class_method_annotations(classifier)?,
             false => Vec::new(),
         };
         java_annotation_members(classifier, &class, constants, &element_annotations)

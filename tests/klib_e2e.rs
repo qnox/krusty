@@ -29,6 +29,8 @@ mod common {
 
 #[path = "klib_class_surface_e2e.rs"]
 mod klib_class_surface_e2e;
+#[path = "klib_closure_frames_e2e.rs"]
+mod klib_closure_frames_e2e;
 #[path = "klib_container_e2e.rs"]
 mod klib_container_e2e;
 #[path = "klib_semantic_e2e.rs"]

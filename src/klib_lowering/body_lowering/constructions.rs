@@ -60,7 +60,7 @@ impl BodyLowering<'_> {
         if constructor_type_arguments != 0 {
             return unsupported("a call of a generic constructor");
         }
-        let linked = self.linker.link_constructor(callee)?;
+        let linked = self.linker.link_constructor(self.ir, callee)?;
         let type_arguments = access
             .type_arguments
             .iter()
