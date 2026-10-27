@@ -11,7 +11,7 @@ use crate::fx_hash::{HashMap, HashSet};
 
 use crate::libraries::SemanticPlatform;
 use crate::symbol_source::SymbolSource;
-use crate::types::Ty;
+use crate::types::{Ty, TyKind};
 
 /// The synthetic property the Java accessor `method` declares, from its spelling alone: `getUrl` →
 /// `url`, `getURLPath` → `urlPath`, `getIsOpen` → `isOpen`, `isOpen` → `isOpen`. A lowercase letter
@@ -74,17 +74,42 @@ impl super::JvmLibraries {
     /// Java synthetic-property pairing is declaration-shape matching, not call overload selection.
     /// The setter takes one value parameter whose type equals the getter's, and a platform type
     /// `T!` equals both `T` and `T?`: a `@NotNull` setter parameter still pairs with an unannotated
-    /// getter. Both sides compare in the provider's value form, which erases type arguments. The
-    /// method's return type is not part of the shape: a fluent or otherwise non-void Java setter
-    /// is still a `var`, and the assignment discards the result.
+    /// getter. The method's return type is not part of the shape: a fluent or otherwise non-void
+    /// Java setter is still a `var`, and the assignment discards the result.
     pub(super) fn pairs_java_setter(&self, getter: Ty, parameters: &[Ty]) -> bool {
         let [parameter] = *parameters else {
             return false;
         };
-        if !getter.is_platform_nullable() && !parameter.is_platform_nullable() {
-            return self.library_value_form(getter) == self.library_value_form(parameter);
+        self.flexibly_equal(getter, parameter)
+    }
+
+    /// Type equality where a platform occurrence `T!` equals `T` and `T?`, at every nesting level.
+    /// Classifiers compare in the provider's value form; their arguments compare recursively.
+    fn flexibly_equal(&self, left: Ty, right: Ty) -> bool {
+        let (left, right) = if left.is_platform_nullable() || right.is_platform_nullable() {
+            (left.non_null(), right.non_null())
+        } else {
+            (left, right)
+        };
+        match (left.kind(), right.kind()) {
+            (TyKind::InProjection(left), TyKind::InProjection(right))
+            | (TyKind::OutProjection(left), TyKind::OutProjection(right)) => {
+                return self.flexibly_equal(left, right);
+            }
+            (TyKind::StarProjection(_), TyKind::StarProjection(_)) => return true,
+            (TyKind::InProjection(_) | TyKind::OutProjection(_) | TyKind::StarProjection(_), _)
+            | (_, TyKind::InProjection(_) | TyKind::OutProjection(_) | TyKind::StarProjection(_)) => {
+                return false
+            }
+            _ => {}
         }
-        self.library_value_form(getter.non_null()) == self.library_value_form(parameter.non_null())
+        let (left_arguments, right_arguments) = (left.type_args(), right.type_args());
+        self.library_value_form(left) == self.library_value_form(right)
+            && left_arguments.len() == right_arguments.len()
+            && left_arguments
+                .iter()
+                .zip(right_arguments)
+                .all(|(left, right)| self.flexibly_equal(*left, *right))
     }
 }
 

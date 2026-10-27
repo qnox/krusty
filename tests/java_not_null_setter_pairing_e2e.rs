@@ -1,7 +1,8 @@
 //! A Java `setX` pairs with `getX` into a Kotlin `var` when its parameter type equals the getter's,
 //! and a platform type `T!` equals both `T` and `T?`. A setter whose parameter is annotated
 //! `@NotNull` (an override narrowing an inherited setter, or a class that annotates only one
-//! accessor) is still the property's setter; a `@NotNull` getter with a `@Nullable` setter is not.
+//! accessor) is still the property's setter; a `@NotNull` getter with a `@Nullable` setter is not,
+//! nor is a setter whose parameter differs from the getter only in a type argument.
 
 use std::path::PathBuf;
 
@@ -47,6 +48,10 @@ const ONE_SIDED: &str = "package js;\n\
         public void setLabel(@NotNull String label) { this.label = label; }\n\
         public @NotNull String getTitle() { return label; }\n\
         public void setTitle(@Nullable String title) { label = title; }\n\
+        public java.util.List<String> getItems() { return null; }\n\
+        public void setItems(java.util.List<Integer> items) {}\n\
+        public @NotNull java.util.List<String> getTags() { return new java.util.ArrayList<>(); }\n\
+        public void setTags(@NotNull java.util.List<Integer> tags) {}\n\
     }\n";
 
 fn classpath() -> Vec<PathBuf> {
@@ -111,14 +116,20 @@ fn errors(output: &str) -> Vec<String> {
 #[test]
 fn a_nullable_setter_of_a_not_null_getter_is_not_its_setter_like_kotlinc() {
     let source = "import js.OneSided\n\
-        fun f(o: OneSided) { o.title = \"t\" }\n";
+        fun f(o: OneSided) { o.title = \"t\" }\n\
+        fun g(o: OneSided) { o.items = listOf(\"x\") }\n\
+        fun h(o: OneSided) { o.tags = listOf(\"x\") }\n";
     let result = common::compiler_diagnostics(&[("Invalid.kt", source)], &classpath());
     assert_ne!(result.reference_code, 0, "kotlinc accepted the fixture");
     assert_ne!(result.krusty_code, 0, "krusty accepted the fixture");
     let reference = errors(&result.reference_stderr);
     assert_eq!(
         reference,
-        ["Invalid.kt:2:24: error: 'val' cannot be reassigned."]
+        [
+            "Invalid.kt:2:24: error: 'val' cannot be reassigned.",
+            "Invalid.kt:3:24: error: 'val' cannot be reassigned.",
+            "Invalid.kt:4:24: error: 'val' cannot be reassigned.",
+        ]
     );
     let mut krusty = errors(&result.krusty_stderr);
     krusty.extend(errors(&result.krusty_stdout));

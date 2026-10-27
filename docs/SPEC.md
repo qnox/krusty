@@ -9866,7 +9866,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   and `T?`: a `@NotNull` setter parameter (an override narrowing an inherited `setX`, or a class
   that annotates one accessor only) still pairs with an unannotated getter, while a `@Nullable`
   setter of a `@NotNull` getter does not, and assigning that property is a `val` reassignment
-  (`tests/java_not_null_setter_pairing_e2e.rs`).
+  (`tests/java_not_null_setter_pairing_e2e.rs`). The equality holds at every nesting level, so a
+  `setItems(List<Integer>)` is not the setter of `List<String> getItems()`, annotated or not.
 
 - **Member types of a Java interface or annotation are implicitly public (JLS §9.5).** The Java
   signature stubs emit `interface Registry { final class Handler {…} }` with `ACC_PUBLIC` on
