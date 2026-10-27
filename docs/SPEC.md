@@ -10107,6 +10107,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
       temporary is declared where the elvis starts and marks that line at its store.
   - **Not handled.** `Int.hashCode()` marks again after its invoke, and `Char.code` (an inline
     getter) leaves a `nop`.
+  - **Ownership.** Common IR records only facts: each expression's source start line, the builtin
+    call a node realizes with its checked operand and result types, safe-call blocks and the role
+    and line of each read of their temporary, and the line where an elvis's temporary is declared.
+    The JVM debug-line boundary (`src/jvm/ir_emit/debug_lines/intrinsic_calls.rs`) decides from
+    them which calls are intrinsics that state their line first, and where each entry goes.
 
   Test: `tests/multiline_receiver_access_line_e2e.rs`.
 - **An elvis over a safe call keeps its own null check.** fir2ir builds `a?.f() ?: b` as an elvis

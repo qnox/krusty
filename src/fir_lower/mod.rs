@@ -16,6 +16,7 @@ mod body_local_ownership;
 mod body_trace;
 #[cfg(test)]
 mod bottom_value_tests;
+mod builtin_calls;
 #[cfg(test)]
 mod builtin_operation_tests;
 #[cfg(test)]
@@ -54,7 +55,6 @@ mod inline_catch_tests;
 mod inline_returns;
 mod inlining;
 mod interface_delegation;
-mod intrinsic_call_lines;
 mod local_callables;
 mod local_delegates;
 #[cfg(test)]

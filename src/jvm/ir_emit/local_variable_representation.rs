@@ -352,11 +352,13 @@ impl Emitter<'_> {
                 code.mark_line(line);
             }
             None => {
+                // An elvis's temporary marks the line the elvis starts on where it stores the left
+                // value, after a multi-line left side has marked its own.
                 if let Some(&line) = self
                     .ir
                     .expr_lines
                     .get(&declaration)
-                    .or_else(|| self.ir.temporary_store_lines.get(&declaration))
+                    .or_else(|| self.ir.elvis_temporaries.get(&declaration))
                 {
                     self.mark_expression_line(declaration, line, code);
                 }

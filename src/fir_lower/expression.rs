@@ -80,9 +80,9 @@ impl BodyLowering<'_> {
             .is_none()
             .then(|| super::string_concatenation::flattened_concatenation(self.body, expression_id))
             .flatten();
-        let intrinsic_call = folded.is_none()
-            && concatenation.is_none()
-            && super::intrinsic_call_lines::states_line_before_operands(self.body, expression);
+        let builtin_call = (folded.is_none() && concatenation.is_none())
+            .then(|| super::builtin_calls::builtin_call(self.body, expression))
+            .flatten();
         let lowered = match &expression.kind {
             _ if concatenation.is_some() => {
                 let parts = concatenation.expect("guarded by the arm");
@@ -654,14 +654,6 @@ impl BodyLowering<'_> {
                                 IrConst::Int(-1)
                             },
                         ));
-                        // kotlinc's `inv` intrinsic restates its line after the receiver, where
-                        // it pushes the mask.
-                        if intrinsic_call {
-                            let line = self.body.expression_debug_lines(expression_id).source;
-                            if line != 0 {
-                                self.ir.expr_source_lines.insert(all_bits, line);
-                            }
-                        }
                         self.ir.add_arithmetic(
                             IrBinOp::BitXor,
                             operand,
@@ -1076,14 +1068,6 @@ impl BodyLowering<'_> {
             }
             FirExprKind::Elvis { lhs, rhs } => {
                 let lhs_value = self.expression(*lhs)?;
-                // kotlinc folds a safe call into the elvis over it, so the safe call no longer
-                // states its line before its receiver.
-                if matches!(
-                    self.body.expr(*lhs).map(|lhs| &lhs.kind),
-                    Some(FirExprKind::SafeCall { .. })
-                ) {
-                    self.ir.kept_start_lines.remove(&lhs_value);
-                }
                 let temporary = self.allocate_temporary();
                 let variable = self.ir.add_expr(IrExpr::Variable {
                     index: temporary,
@@ -1096,11 +1080,10 @@ impl BodyLowering<'_> {
                     init: Some(lhs_value),
                     named: false,
                 });
-                // kotlinc declares the temporary where the elvis starts and marks that line where
-                // it stores the left value, after a multi-line left side has marked its own.
+                // fir2ir declares the temporary where the elvis starts.
                 let start = self.body.expression_debug_lines(expression_id).start;
                 if start != 0 {
-                    self.ir.temporary_store_lines.insert(variable, start);
+                    self.ir.elvis_temporaries.insert(variable, start);
                 }
                 let condition_lhs = self.ir.add_expr(IrExpr::GetValue(temporary));
                 let null = self.ir.add_expr(IrExpr::Const(IrConst::Null));
@@ -1496,9 +1479,9 @@ impl BodyLowering<'_> {
         }
         if debug.source != 0 {
             self.ir.expr_source_lines.insert(lowered, debug.source);
-            // An intrinsic call states its own line before its operands, which keep theirs.
-            if intrinsic_call {
-                self.ir.kept_start_lines.insert(lowered);
+            // The builtin call this node realizes, when lowering made a node of its own for it.
+            if let Some(call) = builtin_call.filter(|_| lowered as usize >= first_generated) {
+                self.ir.builtin_calls.insert(lowered, call);
             }
             // A call whose operands were stored first keeps the call's line on the call itself, which
             // kotlinc marks once those operands are evaluated.
@@ -2094,14 +2077,17 @@ impl BodyLowering<'_> {
         // explicit conversion so nullable primitive receivers are unboxed before their selected
         // operation; a raw nullable-slot read would put a wrapper into a primitive local.
         let selector_read = self.ir.add_expr(IrExpr::GetValue(temporary));
-        // kotlinc reads the temporary as the selector's receiver at the receiver's own position,
+        // fir2ir reads the temporary as the selector's receiver at the receiver's own position,
         // and tests it for `null` at the safe call's (its `?.` selector's).
         let safe_call_line = self.body.expression_debug_lines(safe_call).source;
         let receiver_line = self.body.expression_debug_lines(receiver.value).start;
         if receiver_line != 0 {
-            self.ir
-                .expr_source_lines
-                .insert(selector_read, receiver_line);
+            self.ir.safe_call_reads.insert(
+                selector_read,
+                crate::ir::IrSafeCallRead::Receiver {
+                    start_line: receiver_line,
+                },
+            );
         }
         let selector_read = self.ir.add_expr(IrExpr::TypeOp {
             op: IrTypeOp::ImplicitCoercion,
@@ -2114,10 +2100,11 @@ impl BodyLowering<'_> {
         self.constants.bind_temporary(receiver.value);
         let null = self.ir.add_expr(IrExpr::Const(IrConst::Null));
         let condition_read = self.ir.add_expr(IrExpr::GetValue(temporary));
+        let null_check = crate::ir::IrSafeCallRead::NullCheck {
+            line: safe_call_line,
+        };
         if safe_call_line != 0 {
-            self.ir
-                .expr_source_lines
-                .insert(condition_read, safe_call_line);
+            self.ir.safe_call_reads.insert(condition_read, null_check);
         }
         let condition = self.ir.add_expr(IrExpr::PrimitiveBinOp {
             op: IrBinOp::Eq,
@@ -2125,7 +2112,7 @@ impl BodyLowering<'_> {
             rhs: null,
         });
         if safe_call_line != 0 {
-            self.ir.expr_source_lines.insert(condition, safe_call_line);
+            self.ir.safe_call_reads.insert(condition, null_check);
         }
         let selector = self.expression(selector)?;
         let selector = self.coerce_result(selector, result_type);
@@ -2153,9 +2140,7 @@ impl BodyLowering<'_> {
             stmts: vec![variable],
             value: Some(guarded),
         });
-        // The temporary's declaration states the safe call's line before the receiver, which keeps
-        // its own line at that offset.
-        self.ir.kept_start_lines.insert(block);
+        self.ir.safe_calls.insert(block);
         Ok(block)
     }
 

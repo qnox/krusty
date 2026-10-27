@@ -1216,7 +1216,7 @@ impl Emitter<'_> {
             self.mark_statement_line(statement, code);
             // A statement that states its own line before its operands (a safe call, an
             // intrinsic call) keeps that entry where an operand marks another line.
-            if self.ir.kept_start_lines.contains(&statement) {
+            if self.keeps_start_line(statement) {
                 self.mark_kept_start_line(statement, code);
             }
             if normalize_at_lambda_frame
