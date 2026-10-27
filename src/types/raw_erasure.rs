@@ -117,6 +117,9 @@ pub(crate) fn raw_member_type(
         TyKind::PlatformNullable(inner) => {
             Ty::platform_nullable(raw_member_type(inner, formals_of))
         }
+        TyKind::MutabilityFlexible(inner) => {
+            Ty::mutability_flexible(raw_member_type(inner, formals_of))
+        }
         _ => ty,
     }
 }

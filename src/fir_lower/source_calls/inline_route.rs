@@ -7,8 +7,7 @@
 
 use super::super::BodyLowering;
 use crate::fir::{
-    CallableId, DeclarationFlags, DeclarationId, FirBody, FirCapture, FirCaptureSource,
-    LocalValueId,
+    CallableId, DeclarationFlags, FirBody, FirCapture, FirCaptureSource, LocalValueId,
 };
 use crate::fx_hash::HashSet;
 use crate::ir::{ExprId, FunId, IrExpr, SameModuleInlining};
@@ -37,10 +36,9 @@ pub(in super::super) enum ExpansionReason {
     /// function's inline parameters. A caller that expands the function's template splices its
     /// own literal for that parameter, which reaches the literal only through an expanded body.
     InlineParameterInLiteral,
-    /// The call is in a suspend function or a suspend lambda, or in a lambda written in one,
-    /// whose state machine is built around expanded bodies.
-    SuspendCaller,
-    /// The callee is a suspend function.
+    /// The callee is a suspend function, or the call is written in a suspend inline function.
+    /// Such a function's template is expanded in IR at its call sites, and the calls it holds are
+    /// expanded with it.
     SuspendCallee,
     /// The call omits an argument that has a default.
     DefaultArguments,
@@ -91,8 +89,19 @@ impl BodyLowering<'_> {
         if self.ir.same_module_inlining() != SameModuleInlining::CompiledBodies {
             return Some(ExpansionReason::BackendExpandsInIr);
         }
-        if let Some(reason) = self.caller_exclusion() {
-            return Some(reason);
+        if self.in_default_argument {
+            return Some(ExpansionReason::DefaultArgument);
+        }
+        let suspend = |declaration| {
+            self.index
+                .declaration_header(declaration)
+                .is_some_and(|header| header.flags.has(DeclarationFlags::SUSPEND))
+        };
+        if self
+            .inline_declaration
+            .is_some_and(|inline| suspend(inline.declaration))
+        {
+            return Some(ExpansionReason::SuspendCallee);
         }
         if has_defaults {
             return Some(ExpansionReason::DefaultArguments);
@@ -151,20 +160,6 @@ impl BodyLowering<'_> {
             return Some(ExpansionReason::NoTemplate);
         };
         self.template_exclusion(body)
-    }
-
-    /// What about the body being lowered keeps its same-module inline calls expanded in IR.
-    fn caller_exclusion(&self) -> Option<ExpansionReason> {
-        if self.in_default_argument {
-            return Some(ExpansionReason::DefaultArgument);
-        }
-        let caller = DeclarationId::from_raw(self.body.owner().raw());
-        let suspend = self.suspend_context
-            || self
-                .index
-                .declaration_header(caller)
-                .is_some_and(|header| header.flags.has(DeclarationFlags::SUSPEND));
-        suspend.then_some(ExpansionReason::SuspendCaller)
     }
 
     /// What in the callee's IR template keeps a call to it expanded in IR.

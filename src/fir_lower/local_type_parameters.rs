@@ -142,6 +142,7 @@ impl Closure<'_> {
             TyKind::DefinitelyNotNull(inner)
             | TyKind::Nullable(inner)
             | TyKind::PlatformNullable(inner)
+            | TyKind::MutabilityFlexible(inner)
             | TyKind::InProjection(inner)
             | TyKind::OutProjection(inner)
             | TyKind::RawProjection(inner) => self.see(inner),
