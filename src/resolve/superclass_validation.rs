@@ -6,24 +6,41 @@ use crate::ast::{ClassDecl, DeclId};
 use crate::types::TypeName;
 
 impl Checker<'_> {
+    /// The class's own identity, its selected superclass, and whether that superclass is emitted
+    /// in another unit than this file.
+    fn selected_superclass(
+        &self,
+        class: &ClassDecl,
+        current_owner: Option<TypeName>,
+    ) -> Option<(TypeName, TypeName, bool)> {
+        let owner = current_owner?;
+        class.base_class.as_ref()?;
+        let superclass = self
+            .applied_declared_supertype(owner)?
+            .kotlin_class_internal()?;
+        Some((
+            owner,
+            superclass,
+            self.resolved_type_name(superclass)
+                .is_none_or(|shape| shape.source_file != Some(self.file_index)),
+        ))
+    }
+
+    /// Validate the class's selected superclass. The abstract members it leaves unimplemented are
+    /// checked here too, unless `abstract_members_later`: a body-local class's methods are
+    /// normalized only on its own walk, and a method whose result its body infers implements its
+    /// obligation only once that body is checked, so its walk calls
+    /// [`Self::check_class_abstract_members`] after the methods instead.
     pub(super) fn validate_class_superclass(
         &mut self,
         declaration: DeclId,
         class: &ClassDecl,
         current_owner: Option<TypeName>,
+        abstract_members_later: bool,
     ) {
-        let Some((owner, superclass, separate_emission)) = current_owner.and_then(|owner| {
-            class.base_class.as_ref()?;
-            let superclass = self
-                .applied_declared_supertype(owner)?
-                .kotlin_class_internal()?;
-            Some((
-                owner,
-                superclass,
-                self.resolved_type_name(superclass)
-                    .is_none_or(|shape| shape.source_file != Some(self.file_index)),
-            ))
-        }) else {
+        let Some((_, superclass, separate_emission)) =
+            self.selected_superclass(class, current_owner)
+        else {
             return;
         };
 
@@ -66,7 +83,27 @@ impl Checker<'_> {
         if let Some((span, message)) = diagnostic {
             self.diags.error(span, message);
         }
+        if !abstract_members_later {
+            self.check_class_abstract_members(class, current_owner);
+        }
+    }
 
+    /// Report the abstract members of the selected superclass's hierarchy that the concrete class
+    /// does not implement.
+    pub(super) fn check_class_abstract_members(
+        &mut self,
+        class: &ClassDecl,
+        current_owner: Option<TypeName>,
+    ) {
+        let Some((owner, superclass, separate_emission)) =
+            self.selected_superclass(class, current_owner)
+        else {
+            return;
+        };
+        let inheritance = self
+            .resolver()
+            .classifier(superclass)
+            .map(|shape| shape.inheritance);
         let checks_abstract_members = !class.is_enum()
             && separate_emission
             && inheritance.is_some_and(|shape| shape.is_abstract)
