@@ -1,5 +1,14 @@
 # `@kotlin.Metadata` — reverse-engineering notes (Phase 4b)
 
+## Platform exception storage authority
+
+Only the explicitly selected platform stdlib may publish an admitted runtime-exception storage
+role. Class shape, generic/outer-instance state and metadata supertypes constrain that role;
+subclasses with additional declared instance state are not admitted. The frozen classifier record
+retains the role and exact parent identity. Wasm's physical registry consumes those records rather
+than selected constructor inventory or classifier spelling, and validates the complete chain even
+when its leaf already has a GC type. Ordinary source and JVM classifier records retain no role.
+
 ## JVM member-class rows
 
 The JVM attribute writer now consumes retained non-local ownership and exact declaration segments

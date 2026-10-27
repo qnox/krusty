@@ -175,6 +175,7 @@ fn annotation_type(declaration: &semantic::KotlinClass) -> LibraryType {
         });
     }
     LibraryType {
+        runtime_exception: None,
         declaration_name: None,
         access: declaration.visibility.into(),
         is_kotlin: true,

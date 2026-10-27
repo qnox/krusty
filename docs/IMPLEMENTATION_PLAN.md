@@ -1,5 +1,14 @@
 # krusty — implementation plan
 
+## Wasm runtime-exception declarations
+
+Normalize admitted platform exception storage roles at the KLIB provider boundary, freeze them
+beside classifier facts, and realize their metadata-owned parent chains in the Wasm GC registry.
+The registry authenticates every ancestor on every request, including cached leaves, before
+mutating module state. The shared Throwable hierarchy case starts from exact JVM/reference and
+Native results and exercises both Wasm hosts. Reference-array storage and checked array reads
+remain the next separate slice of #2531.
+
 ## JVM declaration-owned member rows
 
 Consume classifier declaration-name facts in both per-file `InnerClasses` candidates and the

@@ -2405,6 +2405,7 @@ impl JvmLibraries {
             let own_type_parameter_count = application_header.own_count;
             let type_parameters = application_header.parameters;
             Some(LibraryType {
+                runtime_exception: None,
                 declaration_name: (ci.this_class == internal_name)
                     .then(|| classifier_facts::classifier_declaration_name(&ci))
                     .flatten(),

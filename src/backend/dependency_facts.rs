@@ -102,6 +102,11 @@ pub struct BackendCallableFact {
 }
 
 impl BackendCallableFact {
+    /// The selected operation shared by declaration and member realization views.
+    pub fn compiler_operation(&self) -> Option<crate::libraries::CompilerIntrinsic> {
+        self.compiler_intrinsic
+            .or(self.member_realization.compiler_intrinsic())
+    }
     pub fn physical_name(&self) -> &str {
         self.physical_name.as_deref().unwrap_or(&self.name)
     }
@@ -252,9 +257,7 @@ impl BackendCallableFact {
                 generic_signature: self.generic_sig.as_deref(),
                 type_parameters: &self.klib_body_type_parameters,
                 reified_type_parameter_ordinals: &self.reified_type_parameter_ordinals,
-                compiler_intrinsic: self
-                    .compiler_intrinsic
-                    .or(self.member_realization.compiler_intrinsic()),
+                compiler_intrinsic: self.compiler_operation(),
                 declaration_modifiers: self.klib_body_declaration_modifiers,
                 class_contract: self.klib_body_class_contract.as_ref(),
             },

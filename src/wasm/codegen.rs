@@ -106,6 +106,13 @@ impl Backend for WasmBackend {
         true
     }
 
+    fn realizes_dependency_intrinsic(
+        &self,
+        operation: crate::backend::BackendCompilerIntrinsic,
+    ) -> bool {
+        lower::is_direct_operation(operation)
+    }
+
     fn lower_ir_file(
         &self,
         mut file: CheckedIrFile<'_>,
@@ -161,6 +168,7 @@ impl Backend for WasmBackend {
                 ir: &file.ir,
                 properties: &properties,
                 callables: &file.callables,
+                classifiers: &file.classifiers,
                 dependency_exports: &file.dependency_exports,
                 module_name: file.module_name,
                 plan,
