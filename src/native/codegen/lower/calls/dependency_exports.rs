@@ -38,10 +38,8 @@ impl BodyLowering<'_, '_, '_> {
         args: &[u32],
     ) -> Result<Option<Value>, Unsupported> {
         let Callee::External {
-            target,
             params,
             ret,
-            substitutions,
             extension_receiver_parameter,
             ..
         } = callee
@@ -53,9 +51,8 @@ impl BodyLowering<'_, '_, '_> {
                 "a dependency call whose operands disagree with its checked parameters".into(),
             );
         }
-        let instantiated =
-            crate::backend::instantiate_dependency_signature(realization, *target, substitutions)
-                .map_err(Unsupported::from)?;
+        let instantiated = crate::backend::instantiate_dependency_signature(realization, callee)
+            .map_err(Unsupported::from)?;
         if realization
             .generic_sig
             .as_ref()

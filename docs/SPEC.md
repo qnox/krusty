@@ -1,5 +1,18 @@
 # krusty — a memory-lean Kotlin→JVM compiler PoC
 
+## Checked applications of dependency class members
+
+FIR owns class-parameter application, including inherited members. A dependency export retains
+its declared receiver application and carriers, such as `[Crate<T>, T] -> T`. The shared signature
+boundary consumes the complete checked call types for slots depending on authenticated class
+formals. Fixed slots and results still require exact agreement after callable type arguments are
+applied. Callable ordinals retain their own target, completeness and reification checks. Targets
+convert between the declared export carriers and checked application types without reconstructing
+class substitutions from receiver types or argument values. The shared
+`multimoduleGenericClassMembers.kt` fixture covers primitive/reference/nullable applications,
+inherited final methods, zero-argument results, separate class/method formals, and inner classes
+with captured-only or own-and-captured declaration parameters.
+
 ## Bound declaration-name evidence
 
 A query for an already-bound classifier or alias key projects the selected declaration's own
