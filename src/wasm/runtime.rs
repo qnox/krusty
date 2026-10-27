@@ -18,6 +18,7 @@
 
 use crate::fx_hash::HashMap;
 
+use super::boxed_numbers::BoxedNumbers;
 use super::encode::{
     BlockType, Code, CompositeType, FieldType, Function, HeapType, Module, StorageType, ValType,
 };
@@ -49,6 +50,7 @@ pub(super) struct Runtime {
     pub(super) i64_div: u32,
     /// The object model's root types and `kotlin.Any`'s members.
     pub(super) objects: ObjectRoot,
+    pub(super) numbers: BoxedNumbers,
     pub(super) exceptions: ExceptionTransport,
     /// Offsets of string constants already in the data segment.
     constants: HashMap<Vec<u16>, u32>,
@@ -89,13 +91,16 @@ impl Runtime {
         let mut objects = ObjectRoot::declare(module, ValType::nullable(string));
         let exceptions =
             ExceptionTransport::declare(module, &mut objects, ValType::nullable(string));
+        let string_of_i32 = module.declare();
+        let string_of_i64 = module.declare();
+        let numbers = BoxedNumbers::declare(module, &objects, [string_of_i32, string_of_i64]);
         let mut runtime = Self {
             chars,
             string,
             string_equals: module.declare(),
             string_concat: module.declare(),
-            string_of_i32: module.declare(),
-            string_of_i64: module.declare(),
+            string_of_i32,
+            string_of_i64,
             string_of_char: module.declare(),
             string_of_boolean: module.declare(),
             string_or_null: module.declare(),
@@ -103,6 +108,7 @@ impl Runtime {
             i32_div: module.declare(),
             i64_div: module.declare(),
             objects,
+            numbers,
             exceptions,
             constants: HashMap::default(),
         };

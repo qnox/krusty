@@ -22,6 +22,7 @@ mod default_arguments;
 mod dependency_exports;
 mod exceptions;
 mod intrinsic_operations;
+mod numeric_references;
 mod objects;
 mod scalar_instructions;
 mod shared_cells;

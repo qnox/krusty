@@ -150,9 +150,15 @@ impl Body<'_> {
                 "a dependency export whose declared operand count disagrees with its call".into(),
             );
         }
+        numeric_references::authenticate_numeric_formals(
+            &callable.params,
+            &instantiated.parameters,
+            callable.ret,
+            instantiated.result,
+        )?;
         match call {
             DependencyExportCall::TopLevel | DependencyExportCall::SerializedExtension => {
-                self.dependency_arguments(arguments, abi)?;
+                self.dependency_arguments(arguments, abi, params)?;
             }
             DependencyExportCall::SerializedClassifierAssociated { receiver } => {
                 if !matches!(carrier(receiver)?, Some(ValType::Ref { .. })) {
@@ -161,7 +167,7 @@ impl Body<'_> {
                             .into(),
                     );
                 }
-                self.dependency_arguments(arguments, abi)?;
+                self.dependency_arguments(arguments, abi, params)?;
             }
             DependencyExportCall::SingletonMember => {
                 let effect = singleton.ok_or_else(|| {
@@ -170,29 +176,33 @@ impl Body<'_> {
                 if effect.evaluate_source() {
                     self.statement(dispatch_receiver.expect("validated singleton receiver"))?;
                 }
-                self.dependency_arguments(arguments, abi)?;
+                self.dependency_arguments(arguments, abi, params)?;
             }
             DependencyExportCall::Member | DependencyExportCall::MemberExtension => {
                 self.value(
                     dispatch_receiver.expect("validated member receiver"),
                     abi[0],
                 )?;
-                self.dependency_arguments(arguments, &abi[1..])?;
+                self.dependency_arguments(arguments, &abi[1..], params)?;
             }
             DependencyExportCall::SourceExtension {
-                receiver_position, ..
+                receiver,
+                receiver_position,
             } => {
                 self.dependency_arguments(
                     &arguments[..receiver_position],
                     &abi[..receiver_position],
+                    &params[..receiver_position],
                 )?;
-                self.value(
+                self.dependency_value(
                     dispatch_receiver.expect("validated extension receiver"),
                     abi[receiver_position],
+                    receiver,
                 )?;
                 self.dependency_arguments(
                     &arguments[receiver_position..],
                     &abi[receiver_position + 1..],
+                    &params[receiver_position..],
                 )?;
             }
             DependencyExportCall::SourceSingletonExtension {
@@ -211,6 +221,7 @@ impl Body<'_> {
                 self.dependency_arguments(
                     &arguments[..receiver_position],
                     &abi[..receiver_position],
+                    &params[..receiver_position],
                 )?;
                 if matches!(call, DependencyExportCall::SourceSingletonExtension { .. })
                     && unread.is_none_or(|effect| effect.evaluate_source())
@@ -223,21 +234,27 @@ impl Body<'_> {
                 self.dependency_arguments(
                     &arguments[receiver_position..],
                     &abi[receiver_position + 1..],
+                    &params[receiver_position..],
                 )?;
             }
         }
         self.code.call(function);
-        self.coerce_emitted_value(signature.result(), *ret)
+        self.dependency_result(signature.result(), *ret)
     }
 
-    fn dependency_arguments(&mut self, arguments: &[u32], abi: &[Ty]) -> Result<(), Unsupported> {
-        if arguments.len() != abi.len() {
+    fn dependency_arguments(
+        &mut self,
+        arguments: &[u32],
+        abi: &[Ty],
+        applied: &[Ty],
+    ) -> Result<(), Unsupported> {
+        if arguments.len() != abi.len() || abi.len() != applied.len() {
             return Err(
                 "a dependency export whose declared operand count disagrees with its call".into(),
             );
         }
-        for (&argument, &parameter) in arguments.iter().zip(abi) {
-            self.value(argument, parameter)?;
+        for ((&argument, &parameter), &applied) in arguments.iter().zip(abi).zip(applied) {
+            self.dependency_value(argument, parameter, applied)?;
         }
         Ok(())
     }
