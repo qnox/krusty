@@ -23,6 +23,7 @@ pub mod classreader;
 mod collection_barriers;
 mod common_metadata;
 pub mod companion;
+mod companion_storage;
 pub mod compilation_inputs;
 mod concatenated_to_string;
 mod constructor_debug;
@@ -110,6 +111,7 @@ mod suspend_inline_functions;
 mod top_level_properties;
 mod type_intrinsics;
 mod type_of;
+mod type_parameter_carriers;
 mod value_class_declarations;
 pub mod value_classes;
 

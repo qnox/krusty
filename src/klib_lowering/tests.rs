@@ -5,6 +5,8 @@ use std::path::PathBuf;
 
 mod body_forms;
 mod callee_headers;
+mod closure_frames;
+mod closure_producers;
 mod constructor_calls;
 mod constructor_contracts;
 mod control_forms;
@@ -537,6 +539,28 @@ fn render_node(ir: &IrFile, expression: ExprId) -> String {
             completion,
         } => format!("{completion:?}({})", render(ir, *producer)),
         IrExpr::UnitInstance => "Unit".to_owned(),
+        IrExpr::Checked(checked) => match checked.as_ref() {
+            crate::ir::IrCheckedOperation::RangeContains {
+                operation,
+                value,
+                start,
+                end,
+                negated,
+                counter,
+                unsigned_compare,
+            } => format!(
+                "{}{operation:?}<{}{}>({} in {}, {})",
+                if *negated { "!" } else { "" },
+                type_name_of(*counter),
+                unsigned_compare
+                    .as_ref()
+                    .map_or(String::new(), |compare| format!(", {compare:?}")),
+                render(ir, *value),
+                render(ir, *start),
+                render(ir, *end)
+            ),
+            other => panic!("a lowered body holds no {other:?}"),
+        },
         other => panic!("a lowered body holds no {other:?}"),
     };
     match ir.logical_types.get(&expression) {

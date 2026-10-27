@@ -75,7 +75,7 @@ pub(super) fn realize(ir: &mut IrFile, underlying: &Under) {
             if ir.inline_regions.contains(&expression) {
                 return None;
             }
-            let call = crate::jvm::call_result_boundaries::terminal_call(&ir.exprs, expression)?;
+            let call = crate::jvm::call_result_boundaries::declaration_result_call(ir, expression)?;
             let declared = *ir.call_declared_ret.get(&call)?;
             let erased = ir.physical_types.get(&expression).copied().or_else(|| {
                 crate::jvm::call_result_boundaries::erased_result_slot(ir, call, declared)

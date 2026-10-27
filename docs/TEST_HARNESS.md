@@ -16,6 +16,19 @@ case: cleaning it hides the ownership defect.
 building the compiler. It is also part of `just lint`: missing or unrelated manifest baselines must
 fail without emitting a release version, while valid baseline and root counts remain exact.
 
+## Compiler invocation records
+
+Gradle proxies and Kotlin Toolchain fixtures share the std-only, development-only
+`krusty-test-support` invocation recorder. Each writer exclusively claims an empty owner file in a
+numeric slot, writes its argument payload privately, then publishes the completed record. Claims
+precede compiler execution, preserving dependency order without serializing independent compiles.
+
+Read snapshots only after the build drains its children. Missing, malformed and incomplete slots
+are errors. Gradle compile and support-check lanes are created lazily, so an absent lane still
+proves no invocation occurred. Clearing a completed Gradle lane validates it before removal and
+leaves it absent; the toolchain's cumulative snapshot and consume/recreate operations retain their
+existing contracts.
+
 ## Agent Quick Reference
 
 - Use `./run-tests.sh` for the full suite; it provisions kotlinc and the Kotlin codegen/box corpus.
@@ -419,9 +432,15 @@ and Java drivers use persistent `BoxRunner` and `JavaRunner` JVMs; `javac` runs 
 source to compile that helper, then in-process. The conformance box runner is a separate persistent
 JVM per test thread, also compiled once.
 
-`javap` is not a process on that path. Disassembly goes through `JavaRunner`'s in-process tool, and
-only to explain a failure. The oracle for a class is byte-for-byte equality with kotlinc's class
-file. A well-formedness check reads the class file and disassembles when that read fails. A
+The `bytecode_parity_e2e` batch compares normalized disassembly for its named fixtures. Each
+fixture receives its own package on both compiler inputs, so independent declarations such as
+`box()` can share one pooled reference compilation and one in-process krusty compilation. The
+batch caches comparisons and compilation errors for the test process. An unavailable
+reference compiler, a rejected batch, or a missing output class fails the comparison.
+
+Disassembly goes through `JavaRunner`'s in-process `javap` tool. Class-equality helpers compare
+byte-for-byte with kotlinc's class file and use disassembly to explain a failure. A well-formedness
+check reads the class file and disassembles when that read fails. A
 method-code comparison passes when the class files are identical and disassembles them only when
 they are not. The survey's reference acceptance oracle starts a kotlinc process per case; it is not
 part of `just ci`.

@@ -2,6 +2,27 @@
 
 use super::{ReturnValueStatus, Ty, TypeName, Visibility};
 
+/// The declaring container and exact source segment of a non-local classifier.
+///
+/// A top-level declaration explicitly has no classifier owner, even when its name contains `$`.
+/// This is independent of the enclosing instance an `inner` class captures. Providers retain this
+/// declaration fact in their own snapshot; an absent record means unavailable ownership evidence.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ClassifierDeclarationName {
+    TopLevel { package: TypeName, name: Box<str> },
+    Nested { owner: TypeName, name: Box<str> },
+}
+
+impl ClassifierDeclarationName {
+    /// Publish this declaration's identity from its retained container and exact segment.
+    pub(crate) fn identity(&self) -> TypeName {
+        match self {
+            Self::TopLevel { package, name } => super::type_name_child(*package, name),
+            Self::Nested { owner, name } => super::type_name_nested_child(*owner, name),
+        }
+    }
+}
+
 /// Return-value statuses of the four overrides every serialization-plugin generated serializer
 /// declares. Pass 1 selects the overridden declarations from their complete semantic shapes; the
 /// closed result crosses common lowering without retaining a provider or reopening member lookup.
@@ -70,6 +91,9 @@ pub enum GeneratedClassifierKind {
 /// read, or the class lists no program order) publishes no record rather than a partial one.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SerializableClassElements {
+    /// The class's own type parameters, by the identities its element types and superclass name
+    /// them with. A generic class publishes them only where its provider knows those identities.
+    pub type_parameters: Box<[Box<str>]>,
     /// The class's own elements, in program order.
     pub elements: Box<[SerializableElement]>,
     /// The superclass as the class declares it, type arguments included; `None` for `Any`.
@@ -85,6 +109,12 @@ pub struct SerializableElement {
     /// The input may omit the element: its property is not a primary-constructor parameter
     /// without a default value.
     pub optional: bool,
+    /// The element's name on the wire when the property's `@SerialName` gives one.
+    pub serial_name: Option<crate::kt_string::KtString>,
+    /// The serializer the property's `@Serializable(with = …)` names.
+    pub serializer: Option<TypeName>,
+    /// The property is `@Contextual`.
+    pub contextual: bool,
 }
 
 /// Declaration facts of a classifier, as its declaring compilation fixed them.

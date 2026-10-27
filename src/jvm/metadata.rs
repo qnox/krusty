@@ -1184,6 +1184,9 @@ pub struct KotlinMeta {
     /// `Class.fq_name` (field 3), the class's Kotlin qualified name with every boundary dotted
     /// (`lib.Outer.Nested`). Present only for class metadata.
     pub class_qualified_name: Option<String>,
+    /// Non-local declaration ownership and exact segment from `Class.fq_name`. Local class IDs
+    /// and absent class payloads provide no such evidence.
+    pub class_declaration_name: Option<crate::types::ClassifierDeclarationName>,
     /// `Class.companionObjectName` (field 4).
     pub companion_name: Option<String>,
     /// `Class.nestedClassName` (field 7): the simple names of the classifiers the class declares
@@ -1228,6 +1231,7 @@ impl Default for KotlinMeta {
             is_inner: false,
             type_parameter_scope: Vec::new(),
             class_qualified_name: None,
+            class_declaration_name: None,
             companion_name: None,
             nested_class_names: Box::default(),
             sealed_subclasses: Vec::new(),
@@ -1428,12 +1432,23 @@ pub fn decode_metadata_within(
         package_properties: realizations
             .stamp_properties(decode_properties(&ctx, 4, &[], &[])?)
             .into(),
-        type_aliases: decode_type_aliases(&ctx, package.as_deref(), this_class, k == Some(1))?,
+        type_aliases: decode_type_aliases(
+            &ctx,
+            package.as_deref(),
+            this_class,
+            k == Some(1),
+            st_body,
+        )?,
         constructors: constructors.into(),
         is_inner: class_flags.is_some_and(enclosing_type_parameters::is_inner),
         type_parameter_scope: scope,
         class_qualified_name: if k == Some(1) {
             class_identity::class_qualified_name(&ctx)
+        } else {
+            None
+        },
+        class_declaration_name: if k == Some(1) {
+            class_identity::class_declaration_name(&ctx, st_body)?
         } else {
             None
         },

@@ -299,7 +299,9 @@ impl ReferencedDependencies {
                 stepped: Some(stepped),
                 ..
             } => self.progression(stepped),
-            IrProgressionSource::Literal { .. } | IrProgressionSource::Value { .. } => {}
+            IrProgressionSource::Literal { .. }
+            | IrProgressionSource::Value { .. }
+            | IrProgressionSource::Indices { .. } => {}
         }
     }
 

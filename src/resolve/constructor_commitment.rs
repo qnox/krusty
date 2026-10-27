@@ -36,10 +36,7 @@ impl ConstructorDeclarationShape {
                 .iter()
                 .map(|bounds| bounds.first().copied().unwrap_or(any))
                 .collect(),
-            parameters: member.generic_sig.as_ref().map_or_else(
-                || member.params.clone(),
-                |signature| signature.params.clone(),
-            ),
+            parameters: member.constructor_declaration_params().to_vec(),
         }
     }
 }

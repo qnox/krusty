@@ -3,6 +3,18 @@
 
 use super::*;
 
+/// Receiver-specialized declaration evidence for an inner constructor's bound diagnostics.
+pub(super) struct BoundConstructorDiagnostic {
+    pub(super) outer: Ty,
+    pub(super) signature: crate::libraries::GenericSig,
+}
+
+impl BoundConstructorDiagnostic {
+    pub(super) fn new(outer: Ty, signature: crate::libraries::GenericSig) -> Box<Self> {
+        Box::new(Self { outer, signature })
+    }
+}
+
 pub(super) struct LibraryConstructorMappingFailure {
     failure: CallArgMappingFailure,
     params: Vec<Ty>,
@@ -29,6 +41,7 @@ pub(super) enum LibraryConstructorFailure {
         explicit: Vec<Ty>,
         /// kotlinc's rendering of the first constructor rejected by the bound.
         constructor: String,
+        bound_constructor: Option<Box<BoundConstructorDiagnostic>>,
     },
 }
 
@@ -142,15 +155,27 @@ impl Checker<'_> {
                 classifier,
                 explicit,
                 constructor,
+                bound_constructor,
             } => {
-                if !self.report_explicit_constructor_type_argument_bounds(
-                    call,
-                    classifier,
-                    !args.is_empty(),
-                    &explicit,
-                    &constructor,
-                ) {
+                let reported_bound = bound_constructor.is_some_and(|bound| {
+                    let display = format!("{}.{}", bound.outer.source_name(), constructor);
+                    self.report_bound_inner_constructor_type_arguments(
+                        call, &explicit, &bound, &display,
+                    )
+                });
+                if !reported_bound
+                    && !self.report_explicit_constructor_type_argument_bounds(
+                        call,
+                        classifier,
+                        !args.is_empty(),
+                        &explicit,
+                        &constructor,
+                    )
+                {
                     self.expect_assignable(expected, actual, self.span(call), "type argument");
+                }
+                for &argument in args {
+                    self.report_unbound_call_result_type_parameter(scope, argument);
                 }
             }
         }

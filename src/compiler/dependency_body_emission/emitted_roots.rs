@@ -48,18 +48,22 @@ pub(super) fn declarations(
             .callees
             .target_intrinsic(&identity, bodies, capabilities.target_realizes_intrinsic)
             .map_err(|reason| format!("an invalid target declaration: {reason:?}"))?;
-        let realization = match platform.external_callable_by_dependency(&identity) {
-            Some((_, realization)) => realization,
-            None if raw_header_capability && known_target.is_none() => {
-                pending.extend(bodies.direct_body_callables(&identity));
-                continue;
-            }
-            None => {
-                return Err(format!(
+        let realization =
+            match platform.external_callable_by_dependency(&identity) {
+                Some((_, realization)) => realization,
+                None if raw_header_capability && known_target.is_none() => {
+                    pending.extend(bodies.emitted_body_callables(
+                        &identity,
+                        crate::klib_lowering::EMITTED_CALL_FORMS,
+                    ));
+                    continue;
+                }
+                None => {
+                    return Err(format!(
                     "a KLIB dependency has no required exact provider declaration: {identity:?}"
                 ))
-            }
-        };
+                }
+            };
         if realization.dependency_callable.as_ref() != Some(&identity) {
             return Err("an ordinary KLIB body provider changed its exact identity".to_owned());
         }
@@ -70,6 +74,14 @@ pub(super) fn declarations(
         let constructor = facts
             .authenticates_constructor(&identity, bodies)
             .map_err(|reason| format!("an invalid constructor declaration: {reason:?}"))?;
+        if constructor {
+            if let Some(callees) = facts
+                .constructor_initialization_callees(&identity, bodies)
+                .map_err(|reason| format!("an invalid class initialization: {reason:?}"))?
+            {
+                pending.extend(callees);
+            }
+        }
         let primitive = facts
             .common_primitive(&identity, bodies)
             .map_err(|reason| format!("an invalid common primitive declaration: {reason:?}"))?;
@@ -94,7 +106,9 @@ pub(super) fn declarations(
             return Err(format!("a transitive KLIB body has no supported ordinary declaration contract: {identity:?}"));
         }
         if emits_body {
-            pending.extend(bodies.direct_body_callables(&identity));
+            pending.extend(
+                bodies.emitted_body_callables(&identity, crate::klib_lowering::EMITTED_CALL_FORMS),
+            );
         }
         declarations.push(realization);
     }

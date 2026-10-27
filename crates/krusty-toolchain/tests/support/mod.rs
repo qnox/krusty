@@ -12,6 +12,7 @@ pub mod oracle;
 pub mod rendering;
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Sections that hold krusty-toolchain's deliberate difference rather than a file.
 const KRUSTY: &str = "krusty";
@@ -128,11 +129,19 @@ pub struct TempDir(pub PathBuf);
 impl TempDir {
     /// A fresh, empty directory named after `name` and this process.
     pub fn new(name: &str) -> Self {
-        let path =
-            std::env::temp_dir().join(format!("krusty-toolchain-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&path);
-        std::fs::create_dir_all(&path).unwrap();
-        Self(path.canonicalize().unwrap())
+        static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
+        loop {
+            let sequence = NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "krusty-toolchain-{name}-{}-{sequence}",
+                std::process::id()
+            ));
+            match std::fs::create_dir(&path) {
+                Ok(()) => return Self(path.canonicalize().unwrap()),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => panic!("create temporary directory {}: {error}", path.display()),
+            }
+        }
     }
 }
 

@@ -30,12 +30,21 @@ pub(crate) trait ClassRoles {
     fn contains_reified_marker(&self, _internal: &str) -> bool {
         false
     }
+
+    /// The class file of `internal`, which a copy regenerates in turn.
+    fn class_file(&self, _internal: &str) -> Option<Vec<u8>> {
+        None
+    }
 }
 
 /// The compiled classes the call site reads bodies from declare the classes those bodies name.
 impl ClassRoles for &(dyn MethodBodies + '_) {
     fn regenerated_class(&self, internal: &str) -> Option<RegeneratedClass> {
         MethodBodies::regenerated_class(*self, internal)
+    }
+
+    fn class_file(&self, internal: &str) -> Option<Vec<u8>> {
+        MethodBodies::class_file(*self, internal)
     }
 
     fn contains_reified_marker(&self, internal: &str) -> bool {

@@ -7,12 +7,15 @@ mod builtin_property_realization;
 mod builtins_customizer;
 mod callable_availability;
 mod catalog_presence;
+mod class_application_headers;
 mod classifier_facts;
 mod classpath_annotation_classes;
 mod collection_canonicalization;
 mod declaration_headers;
 mod declared_members;
-use classpath_annotation_classes::*;
+use classpath_annotation_classes::{
+    annotation_element_defaults, classpath_annotation_targets, java_annotation_parameter_list,
+};
 use collection_canonicalization::{
     canonicalize_jvm_collections, overlay_metadata_collection_names,
 };
@@ -21,6 +24,8 @@ mod contract_dsl_tests;
 mod dependency_access_policy;
 mod dependency_deprecation;
 use dependency_deprecation::{ClassifierShape, PropertyDeclaration, PropertyDeprecations};
+#[cfg(test)]
+mod builtin_declaration_name_tests;
 mod dependency_registration;
 mod generic_signatures;
 mod inline_body_plan;
@@ -35,7 +40,10 @@ mod platform_abi;
 mod provider_normalization;
 #[cfg(test)]
 mod provider_normalization_tests;
+mod raw_types;
 use provider_normalization::normalize_tail;
+mod signature_parser;
+use signature_parser::parse_formals;
 mod return_types;
 use return_types::{java_collection_return_lower_bound, metadata_declared_nonnull_return};
 mod static_properties;
@@ -48,11 +56,10 @@ use super::mapped_builtin_declarations::MappedBuiltinMember;
 use crate::language_version::LanguageVersion;
 use builtin_classifier_shapes::{mapped_builtin_property, mapped_builtin_signature};
 use builtins_customizer::JvmBuiltInsCustomizer;
-pub(in crate::jvm) use generic_signatures::parse_class_gsig;
 use generic_signatures::{
-    concrete_generic_ret, hydrate_formal_bounds, mark_receiver_fun_params, parse_field_gsig,
-    suspend_return_from_gsig,
+    concrete_generic_ret, mark_receiver_fun_params, parse_field_gsig, suspend_return_from_gsig,
 };
+pub(in crate::jvm) use generic_signatures::{parse_class_gsig, parse_method_gsig};
 use inline_capability::{metadata_inline, property_accessor_inline, property_getter_inline};
 use java_nullability::{
     java_field_type, java_result_enhancement, java_type_argument_nullability, java_type_nullability,
@@ -164,6 +171,7 @@ impl JvmLibraries {
     /// declaration and its type-parameter metadata.
     fn semanticize_jvm_type(&self, ty: Ty) -> Ty {
         match ty.kind() {
+            TyKind::Obj(_, args) if args.is_empty() => self.java_raw_occurrences(ty),
             TyKind::Obj(internal, args) => {
                 let args = args
                     .iter()
@@ -1244,12 +1252,9 @@ impl JvmLibraries {
             let mut enum_entries_accessor = None;
             let has_kotlin_metadata = ci.meta.is_present();
             let uses_java_type_semantics = !has_kotlin_metadata;
+            let application_header = self.class_application_header(internal_name).ok()?;
             let class_bounds = self.member_class_formal_bounds(&ci);
-            let constructor_outer = ci.inner_class_self().and_then(|entry| {
-                (entry.access & ACC_STATIC == 0)
-                    .then(|| entry.outer.as_deref().map(type_name))
-                    .flatten()
-            });
+            let constructor_outer = application_header.outer_instance;
             // Identify the generated accessor while decoding JVM declarations, where metadata and
             // class flags are authoritative. The backend-neutral checker then consumes an explicit
             // capability instead of inferring declaration origin from a same-named static method.
@@ -1356,17 +1361,23 @@ impl JvmLibraries {
                         }),
                 );
                 if uses_java_type_semantics {
+                    // A descriptor names a generic classifier bare whether or not the source
+                    // applied it; only a method without a generic `Signature` wrote it raw.
+                    let raw = |ty: Ty| match m.signature {
+                        Some(_) => ty,
+                        None => self.java_raw_occurrences(ty),
+                    };
                     for (index, parameter) in params.iter_mut().enumerate() {
-                        *parameter = java_type_nullability(
+                        *parameter = raw(java_type_nullability(
                             java_collection_return_lower_bound(*parameter),
                             m.parameter_nullability.get(index).copied().flatten(),
-                        );
+                        ));
                     }
                     params.drain(..constructor_enclosing_prefix);
-                    ret = java_type_nullability(
+                    ret = raw(java_type_nullability(
                         java_collection_return_lower_bound(ret),
                         m.return_nullability,
-                    );
+                    ));
                 }
                 // Kotlin metadata defines the SOURCE declarations. The class file only realizes
                 // those declarations physically. An unmatched method in a Kotlin class is compiler
@@ -1834,6 +1845,10 @@ impl JvmLibraries {
             let is_mapped_builtin =
                 super::jvm_class_map::maps_to_distinct_jvm_internal(internal_name);
             let builtin_class_signature = self.cp.builtin_class_signature_name(internal_name);
+            let builtin_declaration_name = builtin_class_signature
+                .as_ref()
+                .filter(|signature| signature.declaration == internal_name)
+                .map(|signature| signature.declaration_name.clone());
             let metadata_class_signature = ci.meta.class_visibility.map(|_| {
                 (
                     ci.meta.class_type_parameters.type_params.clone(),
@@ -2393,16 +2408,14 @@ impl JvmLibraries {
                 &mut constructors,
                 constructor_outer,
             );
-            let (own_type_parameter_count, type_parameters) = self.member_class_type_parameters(
-                constructor_outer,
-                internal_name,
-                crate::types::TypeParameters::new(
-                    type_params,
-                    type_param_bounds,
-                    type_param_variances,
-                ),
-            );
+            let own_type_parameter_count = application_header.own_count;
+            let type_parameters = application_header.parameters;
             Some(LibraryType {
+                declaration_name: if ci.this_class == internal_name {
+                    classifier_facts::classifier_declaration_name(&ci)
+                } else {
+                    builtin_declaration_name
+                },
                 is_kotlin: has_kotlin_metadata,
                 is_data: ci.meta.is_data,
                 access: if let Some(visibility) = ci.meta.class_visibility {
@@ -2478,167 +2491,6 @@ impl JvmLibraries {
     }
 }
 
-/// Parse one JVM generic-signature type off the front of `s` into a signature [`Ty`], returning
-/// `(node, rest)`. A type variable becomes a [`Ty::TyParam`] (`kotlin/Any` bound).
-fn parse_gsig(s: &str) -> Option<(Ty, &str)> {
-    let parsed = parse_gsig_inner(s, false)?;
-    Some((parsed.ty, parsed.rest))
-}
-
-struct ParsedGsig<'a> {
-    ty: Ty,
-    erasure: Option<String>,
-    has_free: bool,
-    field_inexact: bool,
-    rest: &'a str,
-}
-
-fn parse_gsig_inner(s: &str, for_field: bool) -> Option<ParsedGsig<'_>> {
-    let b = s.as_bytes();
-    match *b.first()? {
-        b'T' => {
-            let end = s.find(';')?;
-            (end > 1).then(|| ParsedGsig {
-                ty: Ty::ty_param(&s[1..end], Ty::obj("kotlin/Any")),
-                erasure: for_field.then(|| "Ljava/lang/Object;".to_string()),
-                has_free: true,
-                field_inexact: false,
-                rest: &s[end + 1..],
-            })
-        }
-        b'[' => {
-            if s[1..].trim_start_matches('[').starts_with('V') {
-                return None;
-            }
-            let parsed = parse_gsig_inner(&s[1..], for_field)?;
-            Some(ParsedGsig {
-                ty: Ty::array(parsed.ty),
-                erasure: parsed.erasure.map(|erased| format!("[{erased}")),
-                has_free: parsed.has_free,
-                field_inexact: parsed.field_inexact,
-                rest: parsed.rest,
-            })
-        }
-        b'L' => {
-            let mut rest = &s[1..];
-            let end = rest.find(['<', '.', ';'])?;
-            let first_component = &rest[..end];
-            if !valid_gsig_class_component(first_component, true) {
-                return None;
-            }
-            rest = &rest[end..];
-
-            let (mut args, mut has_free, mut field_inexact, tail) =
-                parse_gsig_type_args(rest, for_field)?;
-            rest = tail;
-            let mut binary_name = None;
-            while let Some(suffix) = rest.strip_prefix('.') {
-                let end = suffix.find(['<', '.', ';'])?;
-                let component = &suffix[..end];
-                if !valid_gsig_class_component(component, false) {
-                    return None;
-                }
-                field_inexact |= !args.is_empty();
-                let binary_name = binary_name.get_or_insert_with(|| first_component.to_string());
-                binary_name.push('$');
-                binary_name.push_str(component);
-                rest = &suffix[end..];
-                let (suffix_args, suffix_has_free, suffix_inexact, tail) =
-                    parse_gsig_type_args(rest, for_field)?;
-                has_free |= suffix_has_free;
-                field_inexact |= suffix_inexact;
-                args = suffix_args;
-                rest = tail;
-            }
-            let after = rest.strip_prefix(';')?;
-            let binary_name = binary_name.as_deref().unwrap_or(first_component);
-            let internal = to_kotlin_internal(binary_name);
-            let node = if args.is_empty() {
-                kotlin_name_to_ty(internal)
-            } else {
-                Ty::obj_args(internal, &args)
-            };
-            Some(ParsedGsig {
-                ty: node,
-                erasure: for_field.then(|| format!("L{binary_name};")),
-                has_free,
-                field_inexact,
-                rest: after,
-            })
-        }
-        c => {
-            let t = match c {
-                b'I' | b'B' | b'S' => declared_desc_to_ty(&s[..1]),
-                b'J' => Ty::Long,
-                b'F' => Ty::Float,
-                b'D' => Ty::Double,
-                b'Z' => Ty::Boolean,
-                b'C' => Ty::Char,
-                b'V' => Ty::Unit,
-                _ => return None,
-            };
-            Some(ParsedGsig {
-                ty: t,
-                erasure: for_field.then(|| (c as char).to_string()),
-                has_free: false,
-                field_inexact: false,
-                rest: &s[1..],
-            })
-        }
-    }
-}
-
-fn valid_gsig_class_component(component: &str, allow_package: bool) -> bool {
-    if component.is_empty() || component.contains(['[', '>', ':']) {
-        return false;
-    }
-    if allow_package {
-        !component.starts_with('/') && !component.ends_with('/') && !component.contains("//")
-    } else {
-        !component.contains('/')
-    }
-}
-
-fn parse_gsig_type_args(s: &str, for_field: bool) -> Option<(Vec<Ty>, bool, bool, &str)> {
-    let Some(mut rest) = s.strip_prefix('<') else {
-        return Some((Vec::new(), false, false, s));
-    };
-    if rest.starts_with('>') {
-        return None;
-    }
-    let mut args = Vec::new();
-    let mut has_free = false;
-    let mut field_inexact = false;
-    while !rest.starts_with('>') {
-        if let Some(tail) = rest.strip_prefix('*') {
-            args.push(Ty::star_projection(Ty::nullable(Ty::obj("kotlin/Any"))));
-            field_inexact = true;
-            rest = tail;
-            continue;
-        }
-        let (arg, variance) = if let Some(arg) = rest.strip_prefix('+') {
-            (arg, Some(crate::types::TypeVariance::Out))
-        } else if let Some(arg) = rest.strip_prefix('-') {
-            (arg, Some(crate::types::TypeVariance::In))
-        } else {
-            (rest, None)
-        };
-        if !matches!(arg.as_bytes().first(), Some(b'L' | b'T' | b'[')) {
-            return None;
-        }
-        let parsed = parse_gsig_inner(arg, for_field)?;
-        has_free |= parsed.has_free;
-        field_inexact |= variance.is_some() || parsed.field_inexact;
-        args.push(match variance {
-            Some(crate::types::TypeVariance::Out) => Ty::out_projection(parsed.ty),
-            Some(crate::types::TypeVariance::In) => Ty::in_projection(parsed.ty),
-            Some(crate::types::TypeVariance::Invariant) | None => parsed.ty,
-        });
-        rest = parsed.rest;
-    }
-    Some((args, has_free, field_inexact, rest.strip_prefix('>')?))
-}
-
 fn gsig_unbox_wrapper(g: Ty) -> Ty {
     let TyKind::Obj(internal, args) = g.kind() else {
         return g;
@@ -2654,97 +2506,9 @@ fn gsig_unbox_wrapper(g: Ty) -> Ty {
         })
 }
 
-/// Parse a leading `<Name:Bound...>` formal-type-parameter block, returning the formal names and the
-/// remaining signature. No block means empty names and unchanged input.
-/// The generic type-parameter NAMES of a method `Signature` (`<T:…;U:…>(…)…` → `["T", "U"]`), for
-/// mapping a call's explicit type arguments onto reified type parameters at an inline splice.
+/// Names declared by a JVM signature, independent of a provider's application builder.
 pub(crate) fn signature_formals(sig: &str) -> Vec<String> {
     parse_formals(sig).0
-}
-
-fn parse_formals(s: &str) -> (Vec<String>, Vec<Vec<Ty>>, &str) {
-    let Some(rest) = s.strip_prefix('<') else {
-        return (Vec::new(), Vec::new(), s);
-    };
-    let original = s;
-    let mut rest = rest;
-    let mut formals = Vec::new();
-    let mut formal_bounds = Vec::new();
-    while !rest.starts_with('>') {
-        let Some(colon) = rest.find(':') else {
-            return (Vec::new(), Vec::new(), original);
-        };
-        if colon == 0 {
-            return (Vec::new(), Vec::new(), original);
-        }
-        formals.push(rest[..colon].to_string());
-        rest = &rest[colon + 1..];
-        let mut bounds = Vec::new();
-        // A missing class bound is followed by one or more interface bounds.
-        if !rest.starts_with(':') {
-            let Some((bound, tail)) = parse_gsig(rest) else {
-                return (Vec::new(), Vec::new(), original);
-            };
-            bounds.push(java_type_nullability(bound, None));
-            rest = tail;
-        }
-        while let Some(tail) = rest.strip_prefix(':') {
-            let Some((bound, after)) = parse_gsig(tail) else {
-                return (Vec::new(), Vec::new(), original);
-            };
-            bounds.push(java_type_nullability(bound, None));
-            rest = after;
-        }
-        formal_bounds.push(bounds);
-    }
-    (formals, formal_bounds, &rest[1..])
-}
-
-/// Parse a JVM method generic signature `<formals>(params)ret` declared outside any generic class.
-pub(in crate::jvm) fn parse_method_gsig(sig: &str) -> Option<GenericSig> {
-    parse_member_method_gsig(sig, &crate::fx_hash::HashMap::default())
-}
-
-/// Parse a JVM method generic signature `<formals>(params)ret` whose free type variables may be the
-/// declaring class's formals, bounded as `class_bounds` records ([`JvmLibraries::member_class_formal_bounds`]). A method
-/// formal of the same name shadows the class formal.
-pub(in crate::jvm) fn parse_member_method_gsig(
-    sig: &str,
-    class_bounds: &crate::fx_hash::HashMap<String, Ty>,
-) -> Option<GenericSig> {
-    let (formals, mut formal_bounds, s) = parse_formals(sig);
-    let inline_bounds = hydrate_formal_bounds(&formals, &mut formal_bounds, class_bounds);
-    let inner = s.strip_prefix('(')?;
-    let close = inner.find(')')?;
-    let mut params_s = &inner[..close];
-    let mut params = Vec::new();
-    while !params_s.is_empty() {
-        let (p, rest) = parse_gsig(params_s)?;
-        params.push(crate::types::ty_with_param_bounds(p, &inline_bounds));
-        params_s = rest;
-    }
-    let (ret, _) = parse_gsig(&inner[close + 1..])?;
-    let ret = crate::types::ty_with_param_bounds(ret, &inline_bounds);
-    // A raw signature has no source nullability annotation. When its OUTER return is one of the
-    // method's own formals, specializing that formal to a source primitive must retain the declared
-    // reference contract. Record that semantic behavior on the signature itself; downstream member,
-    // static, and top-level resolution then share one policy without learning why the provider chose it.
-    let return_policy = ret
-        .ty_param_name()
-        .filter(|name| formals.iter().any(|formal| formal == name))
-        .map_or(GenericReturnPolicy::Exact, |_| {
-            GenericReturnPolicy::FlexibleReference
-        });
-    // The JVM `Signature` attribute is the fallback for NON-metadata callables (Java methods): an instance
-    // method has no receiver parameter and a static none either, so the receiver is not modeled here.
-    Some(GenericSig {
-        formals,
-        formal_bounds,
-        receiver: None,
-        params,
-        ret,
-        return_policy,
-    })
 }
 
 fn has_free_ty_params(ty: Ty) -> bool {
@@ -3408,7 +3172,11 @@ impl JvmLibraries {
                 let field_ty = if ci.meta.is_present() {
                     field_ty
                 } else {
-                    java_field_type(field_ty, field.access, field.nullability)
+                    self.java_raw_occurrences(java_field_type(
+                        field_ty,
+                        field.access,
+                        field.nullability,
+                    ))
                 };
                 let visibility = if field.access & 0x0001 != 0 {
                     Visibility::Public
@@ -3529,16 +3297,9 @@ impl JvmLibraries {
                 function_renames,
             ));
         }
-        const ACC_STATIC: u16 = 0x0008;
-        const ACC_PUBLIC: u16 = 0x0001;
-        let declares_instance_field = self.cp.find_name(cn).is_some_and(|class| {
-            class.fields.iter().any(|field| {
-                field.name == name
-                    && field.access & ACC_STATIC == 0
-                    && field.access & ACC_PUBLIC != 0
-            })
-        });
-        if !declares_instance_field {
+        let class = self.cp.find_name(cn);
+        let declares_field = |class: &_| synthetic_properties::declares_field(class, name);
+        if !class.as_deref().is_some_and(declares_field) {
             // The getters come from this classifier's own method inventory: each one declares
             // `name` by its spelling, and its arity and return type are checked below.
             for getter_name in accessors.getters(name) {
@@ -3622,6 +3383,10 @@ impl JvmLibraries {
                 }
             }
         }
+        if let Some(class) = class.as_deref() {
+            use classpath_annotation_classes::java_annotation_element_properties as elements;
+            overloads.extend(elements(class, cn, recv, name, &mut functions));
+        }
         if let Some(mapping) = mapped_property {
             // A mapped builtin property and its JVM getter are one property declaration, not a
             // second source function. Keep the exact realization above, but do not publish the
@@ -3699,7 +3464,8 @@ impl JvmLibraries {
                         .collect::<Vec<_>>();
                     let member_names =
                         self.member_scope_names(internal_name, &classifier, &mapped_members);
-                    let accessors = if classifier.is_kotlin {
+                    // A Java `@interface` element is a property already, never an accessor.
+                    let accessors = if classifier.is_kotlin || classifier.is_annotation() {
                         AccessorInventory::default()
                     } else {
                         AccessorInventory::from_methods(
@@ -3767,8 +3533,8 @@ impl JvmLibraries {
     /// source dependencies publish the semantic source arity. Providers must agree before the
     /// resolver selects the declaration; core must not accept two physical spellings afterward.
     fn semantic_type_alias_target(&self, identity: TypeName) -> Option<TypeName> {
-        let (target, _, expansion, _) = self.cp.type_alias_expansion(identity)?;
-        Self::normalized_type_alias_target(target, expansion)
+        let alias = self.cp.type_alias_expansion(identity)?;
+        Self::normalized_type_alias_target(alias.target, alias.expansion)
     }
 
     fn normalized_type_alias_target(target: TypeName, expansion: Ty) -> Option<TypeName> {
@@ -5077,21 +4843,20 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
     }
 
     fn type_alias_expansion(&self, internal: TypeName) -> Option<crate::libraries::AliasExpansion> {
-        self.cp.type_alias_expansion(internal).and_then(
-            |(target, formals, expansion, expansion_spelling)| {
-                let target = Self::normalized_type_alias_target(target, expansion)?;
-                Some(crate::libraries::AliasExpansion {
-                    identity: internal,
-                    target: self.canonical_source_type_name(target),
-                    formals,
-                    expansion_spelling,
-                    // Metadata may name a mapped JVM collection as the expanded classifier. Normalize
-                    // the complete template at the provider boundary so core resolution only sees
-                    // source identities, including inside projections, function types, and nullability.
-                    expansion: canonicalize_jvm_collections(expansion),
-                })
-            },
-        )
+        self.cp.type_alias_expansion(internal).and_then(|alias| {
+            let target = Self::normalized_type_alias_target(alias.target, alias.expansion)?;
+            Some(crate::libraries::AliasExpansion {
+                identity: internal,
+                declaration_name: alias.declaration_name,
+                target: self.canonical_source_type_name(target),
+                formals: alias.formals,
+                expansion_spelling: alias.expansion_spelling,
+                // Metadata may name a mapped JVM collection as the expanded classifier. Normalize
+                // the complete template at the provider boundary so core resolution only sees
+                // source identities, including inside projections, function types, and nullability.
+                expansion: canonicalize_jvm_collections(alias.expansion),
+            })
+        })
     }
 
     fn canonical_source_type_name(&self, internal: TypeName) -> TypeName {

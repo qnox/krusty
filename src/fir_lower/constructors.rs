@@ -632,7 +632,13 @@ pub(super) fn finalize_constructors(
                     declaration,
                 ));
             }
-            class.superclass = owner;
+            // A class extending an alias-actualized `expect` class delegates to the alias target's
+            // constructor yet still declares the `expect` class; the backend boundary actualizes it.
+            if class.superclass != owner
+                && !super::actualizes_expect(index, class.superclass, owner)
+            {
+                class.superclass = owner;
+            }
             class.super_arg_prelude = delegate_prelude;
             class.super_args = arguments;
             class.super_ctor_params = parameters;
@@ -1108,11 +1114,14 @@ fn constructor_arguments(
                 array_type,
                 elements,
                 spreads,
-            } => Some(ir.add_expr(IrExpr::Vararg {
+                source_line,
+            } => Some(super::checked_arguments::vararg_value(
+                ir,
                 array_type,
                 elements,
                 spreads,
-            })),
+                source_line,
+            )),
             CheckedArgumentSlot::Default(ordinal) => {
                 defaults.push(ordinal);
                 let placeholder = ir.add_expr(IrExpr::Const(
@@ -1530,6 +1539,13 @@ pub(super) fn accept_constructor_body(
             class.ctor_args.extend(declared_arguments);
         } else {
             class.ctor_args = declared_arguments;
+        }
+        if script {
+            class
+                .ctor_args
+                .extend(crate::ir::IrClass::script_receiver_arguments(
+                    classifier_header,
+                ));
         }
         if defaults.iter().any(Option::is_some) {
             physical_defaults.resize(synthetic_prefix_count, None);

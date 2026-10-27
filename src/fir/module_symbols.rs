@@ -15,6 +15,9 @@ use crate::types::{stored_value_ty, Ty, TyKind, TypeName};
 
 use super::{DeclarationFlags, DeclarationId, DeclarationKind, ResolvedModuleIndex, SourceFileId};
 
+#[cfg(test)]
+mod declaration_name_tests;
+
 /// Pass-2 current-module provider. Its type deliberately cannot retain the Pass-1 symbol table.
 pub(crate) struct StreamedModuleSymbols<'a> {
     index: &'a ResolvedModuleIndex,
@@ -101,6 +104,7 @@ impl<'a> StreamedModuleSymbols<'a> {
         let header = self.index.type_alias_by_identity(identity)?;
         Some(crate::libraries::AliasExpansion {
             identity: header.identity,
+            declaration_name: header.declaration_name.clone().map(std::sync::Arc::new),
             target: header.target,
             formals: self
                 .index
@@ -121,7 +125,18 @@ impl<'a> StreamedModuleSymbols<'a> {
         let header = match namespace {
             SymbolNamespace::Package(package) => {
                 let identity = crate::types::existing_type_name_child(package, name)?;
-                self.index.type_alias_by_identity(identity)?
+                let header = self.index.type_alias_by_identity(identity)?;
+                let declared_in = self
+                    .index
+                    .declaration_anchor(header.declaration)
+                    .map(|anchor| anchor.source.raw());
+                if !self
+                    .index
+                    .source_sees(self.source_file, declared_in, Some(header.declaration))
+                {
+                    return None;
+                }
+                header
             }
             SymbolNamespace::Classifier(owner) => {
                 self.index.type_alias_in_classifier(owner, name)?
@@ -129,6 +144,7 @@ impl<'a> StreamedModuleSymbols<'a> {
         };
         Some(crate::libraries::AliasExpansion {
             identity: header.identity,
+            declaration_name: header.declaration_name.clone().map(std::sync::Arc::new),
             target: header.target,
             formals: self
                 .index
@@ -226,6 +242,34 @@ impl<'a> StreamedModuleSymbols<'a> {
         self.index.annotation_targets()
     }
 
+    /// Whether this provider's source sees one current-module declaration.
+    fn sees_declaration(&self, declaration: Option<DeclarationId>) -> bool {
+        declaration.is_none_or(|declaration| {
+            let declared_in = self
+                .index
+                .declaration_anchor(declaration)
+                .map(|anchor| anchor.source.raw());
+            self.index
+                .source_sees(self.source_file, declared_in, Some(declaration))
+        })
+    }
+
+    /// A refined common fragment constructs an `actual` class only through the constructors its
+    /// `expect` declares.
+    fn with_visible_constructors(
+        &self,
+        classifier: std::sync::Arc<crate::libraries::LibraryType>,
+    ) -> std::sync::Arc<crate::libraries::LibraryType> {
+        let seen =
+            |constructor: &LibraryMember| self.sees_declaration(constructor.stable_declaration);
+        if classifier.constructors.iter().all(seen) {
+            return classifier;
+        }
+        let mut visible = (*classifier).clone();
+        visible.constructors.retain(seen);
+        std::sync::Arc::new(visible)
+    }
+
     /// Project one current-module classifier from finalized declaration headers.
     ///
     /// Every result is rebuilt from stable headers and declaration identities.
@@ -248,6 +292,7 @@ impl<'a> StreamedModuleSymbols<'a> {
         let flags = declaration_header.flags;
         let mut projected = crate::libraries::LibraryType::declaration_header();
 
+        projected.declaration_name = classifier_header.declaration_name.clone();
         projected.is_kotlin = true;
         projected.access = declaration_header.visibility.into();
         projected.source_file = Some(anchor.source.raw());
@@ -1472,6 +1517,15 @@ impl<'a> StreamedModuleSymbols<'a> {
             let Some(anchor) = self.index.declaration_anchor(declaration) else {
                 continue;
             };
+            // A refined common fragment sees only its own declarations and those of the fragments
+            // it refines: the platform declarations that refine it are no candidates there.
+            if !self.index.source_sees(
+                self.source_file,
+                Some(anchor.source.raw()),
+                Some(declaration),
+            ) {
+                continue;
+            }
             let declaration_package = self
                 .index
                 .source_package(anchor.source)
@@ -1627,6 +1681,15 @@ impl<'a> StreamedModuleSymbols<'a> {
             let Some(anchor) = self.index.declaration_anchor(declaration) else {
                 continue;
             };
+            // A refined common fragment sees only its own declarations and those of the fragments
+            // it refines: the platform declarations that refine it are no candidates there.
+            if !self.index.source_sees(
+                self.source_file,
+                Some(anchor.source.raw()),
+                Some(declaration),
+            ) {
+                continue;
+            }
             let declaration_package = self
                 .index
                 .source_package(anchor.source)
@@ -1806,6 +1869,22 @@ impl<'a> StreamedModuleSymbols<'a> {
 }
 
 impl SymbolSource for StreamedModuleSymbols<'_> {
+    fn actualized_expect(&self, internal: TypeName) -> Option<TypeName> {
+        self.index
+            .actualizes_expect(self.source_file, internal)
+            .then(|| self.index.type_alias_by_identity(internal))
+            .flatten()
+            .map(|alias| alias.target)
+    }
+
+    fn sees_function(&self, function: &FunctionInfo) -> bool {
+        self.sees_declaration(function.stable_declaration)
+    }
+
+    fn sees_property(&self, property: &crate::libraries::PropertyInfo) -> bool {
+        self.sees_declaration(property.stable_declaration)
+    }
+
     fn type_variable_bounds(&self, name: &str) -> Vec<Ty> {
         self.type_parameter_bounds(name)
     }
@@ -1827,8 +1906,9 @@ impl SymbolSource for StreamedModuleSymbols<'_> {
             .as_ref()
             .map(|alias| alias.target)
             .or(ordinary_classifier);
-        let classifier =
-            stable_classifier_name.and_then(|internal| self.stable_classifier(internal));
+        let classifier = stable_classifier_name
+            .and_then(|internal| self.stable_classifier(internal))
+            .map(|classifier| self.with_visible_constructors(classifier));
         let mut functions = FunctionSet::default();
         let mut properties = PropertySet::default();
         functions
@@ -1843,6 +1923,25 @@ impl SymbolSource for StreamedModuleSymbols<'_> {
             functions.overloads.extend(associated_functions);
             properties.overloads.extend(associated_properties);
         }
+        // A classifier of a fragment that refines this one is no candidate in it either.
+        let classifier_hidden = classifier.as_ref().is_some_and(|classifier| {
+            !self.index.source_sees(
+                self.source_file,
+                classifier.source_file,
+                classifier.stable_declaration,
+            )
+        });
+        let (stable_classifier_name, type_alias, ordinary_classifier, classifier) =
+            if classifier_hidden {
+                (None, None, None, None)
+            } else {
+                (
+                    stable_classifier_name,
+                    type_alias,
+                    ordinary_classifier,
+                    classifier,
+                )
+            };
         // A HIDDEN-deprecated declaration stays in binary form but is never a Kotlin candidate.
         functions
             .overloads

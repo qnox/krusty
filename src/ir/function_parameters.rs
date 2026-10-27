@@ -48,6 +48,9 @@ pub enum IrCapturedDeclaration {
     Variable,
     /// A value parameter of an enclosing callable, or a constructor's capture-prefix value.
     Parameter,
+    /// A script's implicit receiver `ordinal`, which a script statement reads from its
+    /// constructor parameter.
+    ScriptReceiver { ordinal: u32 },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -74,6 +77,10 @@ pub enum IrGeneratedParameterRole {
     HolderReceiver,
     /// The enclosing instance an inner class's constructor takes first.
     OuterInstance,
+    /// A script's implicit receiver, numbered in its definition's order.
+    ScriptReceiver {
+        ordinal: u32,
+    },
     ValueClassCarrier,
     ValueClassEqualsOperand {
         ordinal: u8,
@@ -335,6 +342,29 @@ impl FnParamInfo {
 }
 
 impl IrFile {
+    /// Record that `inserted` captured values replace the `removed` parameters at `parameter` of
+    /// lambda implementation `function`. When those parameters lie inside its capture prefix (an
+    /// insertion at the prefix's end included), the boundary to the lambda's own parameters
+    /// ([`IrFile::lambda_own_params_from`]) moves by the difference; parameters after the prefix
+    /// leave it where it is. Several replacements apply from the highest `parameter` down.
+    pub(crate) fn resize_lambda_capture_prefix(
+        &mut self,
+        function: FunId,
+        parameter: usize,
+        removed: usize,
+        inserted: usize,
+    ) {
+        let Some(own_from) = self.lambda_own_params_from.get_mut(&function) else {
+            return;
+        };
+        let prefix = *own_from as usize;
+        if parameter + removed > prefix {
+            return;
+        }
+        *own_from =
+            u32::try_from(prefix - removed + inserted).expect("a lambda's capture prefix fits u32");
+    }
+
     /// The exact checked declaration that supplied inherited defaults for `fid`.
     pub(crate) fn inherited_param_default_provider(
         &self,

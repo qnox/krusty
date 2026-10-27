@@ -41,6 +41,16 @@ pub(super) struct TypeReflectionFacts {
     lambda_class_provenance: HashMap<u32, LambdaClassProvenance>,
 }
 
+impl TypeReflectionFacts {
+    /// The type-parameter declarations recorded for spliced foreign classifiers and for lambdas.
+    pub(super) fn type_parameter_declarations(&self) -> impl Iterator<Item = &IrTypeParameter> {
+        self.foreign_template_classifiers
+            .values()
+            .chain(self.lambda_type_parameters.values())
+            .flatten()
+    }
+}
+
 impl IrFile {
     pub(super) fn remap_type_reflection_classifier_identities(
         &mut self,
@@ -317,7 +327,8 @@ pub(crate) fn type_parameters_named_by(ty: Ty, names: &mut Vec<&'static str>) {
         | TyKind::Nullable(inner)
         | TyKind::PlatformNullable(inner)
         | TyKind::InProjection(inner)
-        | TyKind::OutProjection(inner) => type_parameters_named_by(inner, names),
+        | TyKind::OutProjection(inner)
+        | TyKind::RawProjection(inner) => type_parameters_named_by(inner, names),
         TyKind::Intersection(parts) => {
             for &part in parts {
                 type_parameters_named_by(part, names);

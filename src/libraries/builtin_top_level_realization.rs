@@ -889,9 +889,61 @@ pub(crate) fn normalized_function_semantic_role(
     })
 }
 
+/// `IndicesHandler`'s `matchIterable`: the read-only `indices: IntRange` extension of
+/// `kotlin.collections` on an array (`Array<out T>` or a primitive array) or on `Collection<*>`,
+/// and of `kotlin.text` on `CharSequence`.
+fn indices(facts: &BuiltinPropertyDeclaration<'_>) -> Option<CompilerIntrinsic> {
+    use crate::libraries::IndicesReceiver;
+    use crate::types::wk;
+    if facts.name != wk::INDICES
+        || facts.kind != PropKind::Extension
+        || facts.context_count != 0
+        || facts.mutable
+        || facts.ty.obj_internal() != Some(wk::int_range())
+    {
+        return None;
+    }
+    let receiver = facts.receiver?;
+    let receiver = (receiver == receiver.non_null()).then_some(receiver)?;
+    let generic = facts.type_parameter_count;
+    let kind = if facts.package == wk::kotlin_collections_package() {
+        let arguments: Vec<TyKind> = receiver
+            .type_args()
+            .iter()
+            .map(|argument| argument.kind())
+            .collect();
+        match arguments.as_slice() {
+            [TyKind::OutProjection(element)] if receiver.is_reference_array() => {
+                (generic == 1 && element.is_ty_param()).then_some(IndicesReceiver::Array)?
+            }
+            // kotlinc's `isPrimitiveArray()`, and `isUnsignedArray()` under the JVM backend's
+            // `optimizeLoopsOverUnsignedArrays`: an unsigned array's `size` is its value class's.
+            [] if receiver.is_array() && generic == 0 => IndicesReceiver::Array,
+            [TyKind::StarProjection(_)]
+                if receiver.obj_internal() == Some(wk::collection()) && generic == 0 =>
+            {
+                IndicesReceiver::Collection
+            }
+            _ => return None,
+        }
+    } else if facts.package == wk::kotlin_text_package()
+        && receiver.obj_internal() == Some(wk::char_sequence())
+        && receiver.type_args().is_empty()
+        && generic == 0
+    {
+        IndicesReceiver::CharSequence
+    } else {
+        return None;
+    };
+    Some(CompilerIntrinsic::Indices(kind))
+}
+
 pub(crate) fn property_realization(
     facts: BuiltinPropertyDeclaration<'_>,
 ) -> Option<CompilerIntrinsic> {
+    if let Some(indices) = indices(&facts) {
+        return Some(indices);
+    }
     if facts.context_count != 0 || facts.type_parameter_count != 0 || facts.mutable {
         return None;
     }
@@ -1741,6 +1793,105 @@ mod tests {
                 None,
                 "{why}"
             );
+        }
+    }
+
+    #[test]
+    fn indices_roles_require_the_complete_extension_property() {
+        use crate::libraries::IndicesReceiver;
+        let element = Ty::ty_param("T", Ty::nullable(Ty::obj("kotlin/Any")));
+        let star = Ty::star_projection(Ty::nullable(Ty::obj("kotlin/Any")));
+        let property =
+            |package: &str, receiver: Ty, type_parameter_count| BuiltinPropertyDeclaration {
+                package: type_name(package),
+                name: "indices",
+                kind: PropKind::Extension,
+                receiver: Some(receiver),
+                ty: Ty::obj("kotlin/ranges/IntRange"),
+                context_count: 0,
+                type_parameter_count,
+                mutable: false,
+            };
+        let int_array = Ty::obj("kotlin/IntArray");
+        let array = Ty::obj_args("kotlin/Array", &[Ty::out_projection(element)]);
+        let collection = Ty::obj_args("kotlin/collections/Collection", &[star]);
+        let char_sequence = Ty::obj("kotlin/CharSequence");
+        for (declaration, expected) in [
+            (
+                property("kotlin/collections", array, 1),
+                IndicesReceiver::Array,
+            ),
+            (
+                property("kotlin/collections", int_array, 0),
+                IndicesReceiver::Array,
+            ),
+            (
+                property("kotlin/collections", Ty::obj("kotlin/UIntArray"), 0),
+                IndicesReceiver::Array,
+            ),
+            (
+                property("kotlin/collections", collection, 0),
+                IndicesReceiver::Collection,
+            ),
+            (
+                property("kotlin/text", char_sequence, 0),
+                IndicesReceiver::CharSequence,
+            ),
+        ] {
+            assert_eq!(
+                property_realization(declaration),
+                Some(CompilerIntrinsic::Indices(expected))
+            );
+        }
+        let list = Ty::obj_args("kotlin/collections/List", &[star]);
+        let invariant_array = Ty::obj_args("kotlin/Array", &[element]);
+        for (declaration, why) in [
+            (property("fixture", int_array, 0), "another package"),
+            (
+                property("kotlin/text", collection, 0),
+                "a Collection in kotlin.text",
+            ),
+            (
+                property("kotlin/collections", char_sequence, 0),
+                "a CharSequence in kotlin.collections",
+            ),
+            (
+                property("kotlin/collections", Ty::nullable(int_array), 0),
+                "a nullable receiver",
+            ),
+            (property("kotlin/collections", list, 0), "a List receiver"),
+            (
+                property("kotlin/collections", invariant_array, 1),
+                "an invariant array receiver",
+            ),
+            (
+                property("kotlin/collections", array, 0),
+                "an array of no type parameter",
+            ),
+            (
+                BuiltinPropertyDeclaration {
+                    ty: Ty::obj("kotlin/ranges/LongRange"),
+                    ..property("kotlin/collections", int_array, 0)
+                },
+                "another range type",
+            ),
+            (
+                BuiltinPropertyDeclaration {
+                    mutable: true,
+                    ..property("kotlin/collections", int_array, 0)
+                },
+                "a mutable property",
+            ),
+            (
+                BuiltinPropertyDeclaration {
+                    name: "lastIndex",
+                    ty: Ty::Int,
+                    ..property("kotlin/collections", int_array, 0)
+                },
+                "another property",
+            ),
+        ] {
+            assert_eq!(property_realization(declaration), None, "{why}");
         }
     }
 

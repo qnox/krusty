@@ -33,15 +33,19 @@ use builtin_signatures::{
     builtin_bounds, builtin_declared_return, builtin_descriptor, builtin_erased, builtin_ty,
 };
 mod mapped_builtin_realizations;
+mod metadata_alignment;
 mod metadata_indexes;
 mod method_bodies;
 mod method_body_cache;
 mod module_optional_annotations;
+mod multifile_part_bodies;
 mod package_facades;
 mod property_access;
 mod property_identity;
 mod stub_overlay;
 pub(super) use stub_overlay::StubOverlayGuard;
+#[cfg(test)]
+mod alias_declaration_names_tests;
 #[cfg(test)]
 mod test_support;
 mod value_class_erasure;
@@ -55,6 +59,7 @@ pub use call_metadata::MetadataCallFacts;
 use self::ct_sym_index::cached_ct_sym_index;
 use self::external_identities::{ExternalCallableKey, ExternalPropertyKey};
 use self::jimage_catalog::{cached_jimage_index, JimageIndex};
+use self::metadata_alignment::{aligned_meta_callable, aligned_meta_index};
 use self::metadata_indexes::{
     build_entry_ext, build_entry_package_types, build_entry_types, complete_entry_package_types,
     ClassMetadataLoadError,
@@ -63,10 +68,7 @@ use self::method_body_cache::{
     global_entry_body_cache, global_entry_class_bodies_cache, BodyCache, ClassBodiesCache,
 };
 use self::property_access::*;
-use self::value_class_erasure::{
-    meta_descriptor_position, meta_param_exact, metadata_carrier_matches,
-    metadata_value_class_bound_carrier, metadata_value_class_underlying,
-};
+use self::value_class_erasure::metadata_value_class_underlying;
 
 use crate::fx_hash::{HashMap, HashSet};
 use std::cell::{Cell, RefCell};
@@ -896,10 +898,8 @@ pub struct TypeIndex {
     type_aliases: HashMap<TypeName, TypeName>,
     /// Alias name → its EXPANSION: the target applied to its own arguments, with the alias's own
     /// parameters left as `Ty::TyParam`. A use site substitutes its arguments into this template.
-    /// `(target, formals, expansion, right-hand-side argument spellings)` — the last carries the
-    /// dependency's own `typealias` spellings so a consumer's use site inherits them (see
-    /// [`crate::spelling`]).
-    alias_expansions: HashMap<TypeName, (TypeName, Vec<String>, Ty, crate::spelling::Spelled)>,
+    /// The record also retains the alias's own declaration name and right-hand-side spellings.
+    alias_expansions: HashMap<TypeName, crate::libraries::AliasExpansion>,
 }
 
 impl TypeIndex {
@@ -944,6 +944,9 @@ struct ClassMeta {
     fn_segments: Vec<std::sync::Arc<[super::metadata::MetaFn]>>,
     /// The facade's `@Metadata` property slices, segmented like `fn_segments`.
     prop_segments: Vec<std::sync::Arc<[super::metadata::MetaProp]>>,
+    /// The type parameters of the classifiers enclosing these functions, with their written
+    /// bounds: the bound evidence for a parameter a function names but does not declare.
+    enclosing_formals: Vec<super::metadata::ScopedTypeParameter>,
 }
 
 impl ClassMeta {
@@ -996,6 +999,16 @@ impl MetaFns {
     pub fn iter(&self) -> impl Iterator<Item = &super::metadata::MetaFn> {
         self.0.iter_fns()
     }
+
+    /// The functions a method named `jvm_name` of this class can realize, in declaration order.
+    pub fn named<'a>(
+        &'a self,
+        jvm_name: &'a str,
+    ) -> impl Iterator<Item = &'a super::metadata::MetaFn> + 'a {
+        self.0
+            .fns_named(jvm_name)
+            .map(|index| self.0.fn_at(index as usize))
+    }
 }
 
 /// The property analogue of [`MetaFns`].
@@ -1040,6 +1053,7 @@ struct BuiltinFunction {
 }
 
 struct BuiltinClass {
+    declaration_name: crate::types::ClassifierDeclarationName,
     supertypes: TypeNameList,
     /// Supertypes with type arguments, used when no JVM class generic signature is available.
     supertype_tys: Vec<Ty>,
@@ -1064,6 +1078,8 @@ struct BuiltinClass {
 /// The generic declaration facts decoded from one builtin classifier. They travel together so no
 /// provider consumer can observe formals without their parallel bounds.
 pub(super) struct BuiltinClassSignature {
+    pub(super) declaration: TypeName,
+    pub(super) declaration_name: crate::types::ClassifierDeclarationName,
     pub(super) formals: Vec<String>,
     pub(super) formal_bounds: Vec<Vec<Ty>>,
     pub(super) supertypes: Vec<Ty>,
@@ -1127,6 +1143,7 @@ impl BuiltinsFile {
             });
         }
         for (internal, class) in package.classes {
+            let declaration_name = crate::libraries::metadata_declaration_name(&internal);
             let companion_object = class
                 .companion_name
                 .as_ref()
@@ -1209,6 +1226,7 @@ impl BuiltinsFile {
             file.classes.insert(
                 canonical,
                 BuiltinClass {
+                    declaration_name,
                     supertypes,
                     supertype_tys,
                     formals,
@@ -1266,193 +1284,6 @@ impl BuiltinsFile {
                     .any(|s| self.is_subtype_name(s, sup))
             })
     }
-}
-
-/// Whether metadata callable `c` corresponds to a JVM method with these descriptor parameter types. An
-/// EXTENSION's receiver — a separate attribute, emitted as the leading JVM parameter — must match, then
-/// the value parameters align in order. Returns `(kept-param end, exact-match count)` — `end` is the count
-/// of SOURCE parameters (where the synthetic tail — a `suspend` Continuation, a `$default` mask — begins),
-/// and `exact` counts the value params matching by EQUAL erased descriptor (not through the loose
-/// type-variable rule), so the caller prefers the most-specific overload (`plusAssign(element: T)` binds
-/// the `Object` descriptor, `plusAssign(elements: Iterable)` the `Iterable` one).
-fn function_parameter_erasure_matches(
-    signature: &crate::types::FnSig,
-    descriptor: Ty,
-    classifier_arity: &dyn Fn(Ty) -> Option<usize>,
-) -> bool {
-    // A suspend function value implements Function(N+1): the additional JVM argument is its
-    // Continuation. A receiver is already the first semantic parameter, so it needs no separate
-    // adjustment (`suspend R.() -> T` has one semantic parameter and erases to Function2).
-    classifier_arity(descriptor) == Some(signature.params.len() + usize::from(signature.suspend))
-}
-
-/// Descriptor slot of the metadata parameter at `index`, where `parameters()` yields the context
-/// parameters first and the value parameters after them. Kotlin signs a context extension
-/// `(contexts…, receiver, values…)`, so only parameters PAST the context prefix are pushed along by
-/// the receiver.
-/// JVM carrier of a metadata type parameter whose class bound is a value class.
-///
-/// The signature parameter stays the type parameter, so it has no classifier of its own. A value-class
-/// class bound (`UInt` ahead of `Comparable<UInt>`) is what the descriptor erases to. Any other bound
-/// keeps the ordinary reference alignment.
-fn meta_callable_aligns(
-    f: &super::metadata::MetaFn,
-    desc_params: &[Ty],
-    value_underlying: &dyn Fn(TypeName) -> Option<Ty>,
-    classifier_arity: &dyn Fn(Ty) -> Option<usize>,
-    is_interface: &dyn Fn(TypeName) -> bool,
-) -> Option<(usize, usize)> {
-    let extension = f.is_extension();
-    let context_count = f.context_count();
-    // Context parameters LEAD the JVM descriptor, ahead of the extension receiver; metadata keeps
-    // them out of `value_parameter` (field 13 instead), so the aligned descriptor span is
-    // context + receiver + value params and the two groups are not contiguous.
-    let end = usize::from(extension) + context_count + f.value_params.len();
-    if end > desc_params.len() {
-        return None;
-    }
-    let aligned =
-        |index: usize| &desc_params[meta_descriptor_position(index, context_count, extension)];
-    let receiver_ok = !extension || {
-        let receiver = &desc_params[context_count];
-        match f.receiver_class {
-            Some(rc) => meta_param_compat(Some(rc), false, receiver, value_underlying),
-            None => receiver.is_reference(),
-        }
-    };
-    if !receiver_ok
-        || !f
-            .parameters()
-            .enumerate()
-            .map(|(index, m)| ((index, m), aligned(index)))
-            .all(|((index, m), d)| {
-                let signature_parameter = f
-                    .generic_sig
-                    .as_ref()
-                    .and_then(|signature| signature.params.get(index))
-                    .copied();
-                if let Some(TyKind::Fun(signature)) =
-                    signature_parameter.map(|ty| ty.non_null().kind())
-                {
-                    return function_parameter_erasure_matches(signature, *d, classifier_arity);
-                }
-                if let Some(carrier) = signature_parameter
-                    .zip(f.generic_sig.as_ref())
-                    .filter(|(parameter, _)| parameter.non_null().is_ty_param())
-                    .and_then(|(parameter, signature)| {
-                        metadata_value_class_bound_carrier(
-                            parameter,
-                            signature,
-                            is_interface,
-                            value_underlying,
-                        )
-                    })
-                {
-                    return metadata_carrier_matches(carrier, d, false, value_underlying);
-                }
-                let class = signature_parameter
-                    .and_then(|parameter| parameter.non_null().obj_internal())
-                    .or(m.ty);
-                meta_param_compat(class, m.nullable(), d, value_underlying)
-            })
-    {
-        return None;
-    }
-    let exact = f
-        .parameters()
-        .enumerate()
-        .map(|(index, m)| ((index, m), aligned(index)))
-        .filter(|((index, m), d)| {
-            let signature_parameter = f
-                .generic_sig
-                .as_ref()
-                .and_then(|signature| signature.params.get(*index))
-                .copied();
-            if let Some(TyKind::Fun(signature)) = signature_parameter.map(|ty| ty.non_null().kind())
-            {
-                return function_parameter_erasure_matches(signature, **d, classifier_arity);
-            }
-            if let Some(carrier) = signature_parameter
-                .zip(f.generic_sig.as_ref())
-                .filter(|(parameter, _)| parameter.non_null().is_ty_param())
-                .and_then(|(parameter, signature)| {
-                    metadata_value_class_bound_carrier(
-                        parameter,
-                        signature,
-                        is_interface,
-                        value_underlying,
-                    )
-                })
-            {
-                return metadata_carrier_matches(carrier, d, true, value_underlying);
-            }
-            let class = signature_parameter
-                .and_then(|parameter| parameter.non_null().obj_internal())
-                .or(m.ty);
-            meta_param_exact(class, m.nullable(), d, value_underlying)
-        })
-        .count();
-    Some((end, exact))
-}
-
-/// Pick the metadata function whose signature corresponds to the JVM method with `desc_params`, returning
-/// `(kept-param end, index into `meta.fns`)`. Disambiguates OVERLOADS sharing a JVM name
-/// (`any()` vs `any(predicate)`, `IntArray.any` vs `CharArray.any`) by receiver + value-parameter match,
-/// preferring the longest alignment.
-fn aligned_meta_index(
-    meta: &ClassMeta,
-    fn_name: &str,
-    desc_params: &[Ty],
-    desc_ret: &Ty,
-    value_underlying: &dyn Fn(TypeName) -> Option<Ty>,
-    classifier_arity: &dyn Fn(Ty) -> Option<usize>,
-    is_interface: &dyn Fn(TypeName) -> bool,
-) -> Option<(usize, usize)> {
-    meta.fns_named(fn_name)
-        .filter_map(|i| {
-            let f = meta.fn_at(i as usize);
-            let alignment = meta_callable_aligns(
-                f,
-                desc_params,
-                value_underlying,
-                classifier_arity,
-                is_interface,
-            );
-            crate::trace_compiler!(
-                "resolve",
-                "metadata alignment {fn_name} desc={desc_params:?} candidate_value_classes={:?} candidate_signature={:?} alignment={alignment:?}",
-                f.value_params.iter().map(|parameter| parameter.ty).collect::<Vec<_>>(),
-                f.generic_sig.as_ref().map(|signature| &signature.params),
-            );
-            let (end, exact) = alignment?;
-            let ret_match = f.ret_class.is_some_and(|rc| {
-                meta_param_compat(Some(rc), f.ret_nullable(), desc_ret, value_underlying)
-            });
-            Some((end, exact, ret_match, i))
-        })
-        .max_by_key(|(end, exact, ret_match, _)| (*end, *exact, *ret_match))
-        .map(|(end, _, _, i)| (end, i as usize))
-}
-
-fn aligned_meta_callable<'a>(
-    meta: &'a ClassMeta,
-    fn_name: &str,
-    desc_params: &[Ty],
-    desc_ret: &Ty,
-    value_underlying: &dyn Fn(TypeName) -> Option<Ty>,
-    classifier_arity: &dyn Fn(Ty) -> Option<usize>,
-    is_interface: &dyn Fn(TypeName) -> bool,
-) -> Option<(usize, &'a super::metadata::MetaFn)> {
-    aligned_meta_index(
-        meta,
-        fn_name,
-        desc_params,
-        desc_ret,
-        value_underlying,
-        classifier_arity,
-        is_interface,
-    )
-    .map(|(end, i)| (end, meta.fn_at(i)))
 }
 
 pub(super) fn metadata_return_info(class: Option<TypeName>, nullable: bool) -> ReturnInfo {
@@ -1661,7 +1492,7 @@ impl Classpath {
     pub(super) fn paired_stdlib_type_alias_expansion(
         &self,
         identity: TypeName,
-    ) -> Option<(TypeName, Vec<String>, Ty, crate::spelling::Spelled)> {
+    ) -> Option<crate::libraries::AliasExpansion> {
         let entry = self.paired_stdlib_entry()?;
         let aliases = self.entry_package_types(entry, identity.namespace());
         if self.class_load_error.borrow().is_some() {
@@ -2062,6 +1893,7 @@ impl Classpath {
         // copy here duplicated every part `MetaFn` (deep Strings included) — ~a third of peak heap.
         let mut fn_segments: Vec<std::sync::Arc<[super::metadata::MetaFn]>> = Vec::new();
         let mut prop_segments: Vec<std::sync::Arc<[super::metadata::MetaProp]>> = Vec::new();
+        let mut merged_parts = false;
         if let Some(ci) = &ci {
             if !ci.meta.package_functions.is_empty() {
                 fn_segments.push(ci.meta.package_functions.clone());
@@ -2077,6 +1909,7 @@ impl Classpath {
             if merge_fns || merge_props {
                 for part in &ci.meta.multifile_parts {
                     let Some(pci) = self.find(part) else { continue };
+                    merged_parts |= merge_fns;
                     if merge_fns && !pci.meta.package_functions.is_empty() {
                         fn_segments.push(pci.meta.package_functions.clone());
                     }
@@ -2088,11 +1921,13 @@ impl Classpath {
         }
         // Hash-sorted by-JVM-name lookup over the flat segment concatenation: no name copies, and
         // same-name overloads stay in declaration order (sort by `(hash, index)`), matching the old
-        // map's insertion-ordered index vecs.
+        // map's insertion-ordered index vecs. A part's private function has no facade method, so a
+        // facade's JVM name never selects it (another part may reuse its name and descriptor).
         let mut by_jvm_name: Vec<(u64, u32)> = fn_segments
             .iter()
             .flat_map(|s| s.iter())
             .enumerate()
+            .filter(|(_, f)| !(merged_parts && f.visibility == crate::types::Visibility::Private))
             .map(|(i, f)| (jvm_name_hash(&f.jvm_name), i as u32))
             .collect();
         by_jvm_name.sort_unstable();
@@ -2100,6 +1935,10 @@ impl Classpath {
             by_jvm_name,
             fn_segments,
             prop_segments,
+            enclosing_formals: ci
+                .as_ref()
+                .map(|ci| ci.meta.type_parameter_scope.clone())
+                .unwrap_or_default(),
         });
         if catalog_complete {
             self.meta_fns.borrow_mut().insert(internal_id, meta.clone());
@@ -2482,6 +2321,8 @@ impl Classpath {
                     "builtin formals and bounds must be decoded in parallel"
                 );
                 BuiltinClassSignature {
+                    declaration: kotlin,
+                    declaration_name: class.declaration_name.clone(),
                     formals: class.formals.clone(),
                     formal_bounds: class.formal_bounds.clone(),
                     supertypes: class.supertype_tys.clone(),
@@ -2528,8 +2369,8 @@ impl Classpath {
         if self.class_load_error.borrow().is_some() {
             return None;
         }
-        if let Some((target, _, _, _)) = self.nested_type_alias(internal) {
-            return Some(target);
+        if let Some(alias) = self.nested_type_alias(internal) {
+            return Some(alias.target);
         }
         let tree = self.package_tree();
         if !tree.catalog_complete() {
@@ -2581,7 +2422,7 @@ impl Classpath {
     pub fn type_alias_expansion(
         &self,
         internal: TypeName,
-    ) -> Option<(TypeName, Vec<String>, Ty, crate::spelling::Spelled)> {
+    ) -> Option<crate::libraries::AliasExpansion> {
         if let Some(alias) = self.nested_type_alias(internal) {
             return Some(alias);
         }
@@ -2608,22 +2449,21 @@ impl Classpath {
             .find(|identity| identity.segment_ref() == name)
     }
 
-    fn nested_type_alias(
-        &self,
-        identity: TypeName,
-    ) -> Option<(TypeName, Vec<String>, Ty, crate::spelling::Spelled)> {
+    fn nested_type_alias(&self, identity: TypeName) -> Option<crate::libraries::AliasExpansion> {
         let semantic_owner = identity.parent()?;
         let owner = self.source_classifier_name(semantic_owner)?;
         let class = self.find_name(owner)?;
         let alias = super::metadata::metadata_type_aliases(&class)
             .iter()
             .find(|alias| alias.name == identity)?;
-        Some((
-            type_name(&alias.target),
-            alias.formals.clone(),
-            alias.expansion,
-            alias.expansion_spelling.clone(),
-        ))
+        Some(crate::libraries::AliasExpansion {
+            identity,
+            declaration_name: alias.declaration_name.clone().map(std::sync::Arc::new),
+            target: type_name(&alias.target),
+            formals: alias.formals.clone(),
+            expansion: alias.expansion,
+            expansion_spelling: alias.expansion_spelling.clone(),
+        })
     }
 
     /// Convert a source classifier path (`pkg/Outer/Inner`) into its declared JVM classifier
@@ -3211,6 +3051,19 @@ impl Classpath {
         None
     }
 
+    /// The annotations, with their arguments, applied to method `name` `descriptor` of
+    /// `internal`, read from its class file ([`super::classreader::read_method_annotations`]).
+    pub fn method_annotations(
+        &self,
+        internal: TypeName,
+        name: &str,
+        descriptor: &str,
+    ) -> Option<Vec<crate::types::ResolvedAnnotation>> {
+        let internal = super::jvm_class_map::to_jvm_type_name(internal);
+        let bytes = self.class_bytes(crate::jvm::names::classfile_internal_name_of(internal))?;
+        super::classreader::read_method_annotations(&bytes, name, descriptor)
+    }
+
     /// Lazily read (and cache) one method's bytecode body — the inline expander's entry point. Each
     /// `(class, method, descriptor)` body is read and parsed at most once, even across many call sites.
     pub fn method_code(&self, internal: &str, name: &str, descriptor: &str) -> Option<MethodCode> {
@@ -3235,27 +3088,7 @@ impl Classpath {
             }
         }
         cache_stat!(bodies, false);
-        let mut code = self.own_method_code(internal, name, descriptor, catalog_complete);
-        if code.is_none() {
-            // A multifile facade (`StandardKt`) has no method bodies — they live in its part classes,
-            // which the facade *extends* (a superclass chain: `StandardKt` → `StandardKt__StandardKt`).
-            let jvm = super::jvm_class_map::to_jvm_type_name(internal);
-            let mut cur = self.find_name(jvm).and_then(|class| class.super_class);
-            while let Some(superclass) = cur {
-                if superclass == crate::types::wk::java_object() {
-                    break;
-                }
-                if let Some(body) =
-                    self.own_method_code(superclass, name, descriptor, catalog_complete)
-                {
-                    code = Some(body);
-                    break;
-                }
-                cur = self
-                    .find_name(superclass)
-                    .and_then(|class| class.super_class);
-            }
-        }
+        let code = self.method_code_through_parts(internal, name, descriptor, catalog_complete);
         if catalog_complete {
             self.bodies.borrow_mut().insert(key, code.clone());
         }
@@ -3571,7 +3404,6 @@ impl Classpath {
             }
             for facade in &roots {
                 let facade = facade.as_str();
-                let metas = self.meta_functions(facade);
                 for cand in self.facade_statics(type_name(facade)).iter() {
                     // `facade_statics` walks a multifile superclass chain. Several roots can
                     // therefore reach the SAME physical method (`StandardKt`, its declaring
@@ -3592,10 +3424,13 @@ impl Classpath {
                     // `@JvmName`-mangled extension (`sum` → `sumOfInt`) or value-class member resolves by
                     // the source name; the JVM name is emit-only, kept on the candidate. A static with no
                     // metadata (a Java method / synthetic) keeps its JVM name as the source key.
+                    // The declaring class's metadata names it: a facade's merged parts never offer
+                    // a part's private function for the facade's forwarder of the same JVM name.
+                    let metas = self.meta_functions_name(cand.owner);
                     let source = indexed_source_name(&cand.name, |jvm_name| {
                         metas
-                            .iter()
-                            .find(|metadata| metadata.jvm_name == jvm_name)
+                            .named(jvm_name)
+                            .next()
                             .map(|metadata| metadata.kotlin_name.clone())
                     });
                     // The receiver (first-parameter) descriptor marks `facade` as an extension owner for it
@@ -4425,9 +4260,11 @@ fn read_one_type<'a>(s: &mut &'a str) -> &'a str {
 
 #[cfg(test)]
 mod fq_tests {
+    use super::metadata_alignment::function_parameter_erasure_matches;
     use super::test_support::{
         test_temp_dir, write_test_archive_entries, write_test_jar_with_entry,
     };
+    use super::value_class_erasure::meta_param_exact;
     use super::*;
 
     mod classpath_snapshots;

@@ -432,17 +432,20 @@ impl KlibDeclarationBodies {
             .collect()
     }
 
-    /// Exact callable edges of the executed body, including construction but excluding unused
-    /// defaults and nested declarations. This inventory grants no intrinsic-root capability.
-    pub(crate) fn direct_body_callables(
+    /// Exact module-qualified edges of the bodies common lowering structurally emits, including
+    /// reached closure implementations. The supplied operation policy does not grant intrinsic
+    /// authority; original direct inventories remain the authority for that separate decision.
+    pub(crate) fn emitted_body_callables(
         &self,
         identity: &KlibDependencyCallable,
+        forms: crate::metadata::klib_ir::tree::EmittedCallForms,
     ) -> Vec<KlibDependencyCallable> {
         let Some((arena, function)) = self.function(identity) else {
             return Vec::new();
         };
         arena
-            .callable_symbols_in_body(function)
+            .emitted_callable_symbols(function, forms)
+            .into_iter()
             .filter_map(|symbol| declaration_signature(&symbol.signature))
             .filter_map(
                 |declaration| match self.callee_origin(&identity.module, &declaration) {

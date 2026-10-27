@@ -634,7 +634,7 @@ fn a_negation_of_another_source_form_declines() {
     });
     assert_eq!(
         not_in.declined("f", &[]),
-        "the KLIB body of `demo.f` (it uses a negation of another form than `!`, `!=` or `!==`)"
+        "the KLIB body of `demo.f` (it uses a `!in` of another form than a membership in a range literal)"
     );
     let bare = demo(&[("f", &[T::Boolean], T::Boolean)], |_, body| {
         let a = body.param(0);
@@ -1212,4 +1212,94 @@ fn every_lowered_value_has_a_checked_type() {
         .map(|expression| format!("{:?}", ir.expr(expression)))
         .collect::<Vec<_>>();
     assert_eq!(untyped, Vec::<String>::new());
+}
+
+/// The stdlib's `rangeTo` of the scalar class `owner` over its own type, as a dependency
+/// inventory declares it.
+fn declared_range_to(
+    libraries: &crate::klib_libraries::KlibLibraries,
+    owner: &str,
+    element: Ty,
+) -> crate::libraries::ExternalCallableRealization {
+    use crate::symbol_source::SymbolSource;
+    let class = libraries
+        .classifier(crate::types::type_name(owner))
+        .expect("stdlib class");
+    let target = class.declared_callables["rangeTo"]
+        .functions()
+        .iter()
+        .find(|function| function.callable.params == [element])
+        .and_then(|function| function.callable.external_identity)
+        .expect("provider identity");
+    libraries
+        .external_callable(target)
+        .expect("exact declaration")
+}
+
+/// `Char.isSurrogate()` is `this in MIN_SURROGATE..MAX_SURROGATE`: a membership in a
+/// range literal, which lowers to a comparison with the bounds, constructing no range.
+#[test]
+fn stdlib_range_literal_membership_is_a_bounds_comparison() {
+    let Some(root) = distribution_root() else {
+        return;
+    };
+    let libraries = stdlib(&root);
+    let range_to = declared_range_to(&libraries, "kotlin/Char", Ty::Char);
+    let fact = frozen_function(
+        &libraries,
+        "kotlin/text",
+        "isSurrogate",
+        Some(Ty::Char),
+        &[],
+    );
+    let facts = KlibCalleeFacts::with_declarations([], [range_to.klib_body_callable().unwrap()]);
+    let mut unit = DependencyBodyUnit::default();
+    let function = unit
+        .lower_function(
+            fact.klib_body_callable().expect("signed"),
+            libraries.declaration_bodies(),
+            &facts,
+        )
+        .unwrap_or_else(|decline| panic!("{decline}"));
+    validated(unit.ir());
+    // The source-side oracle here has no stdlib to resolve `Char..Char`, so the rendering is
+    // checked against the range membership checked FIR lowering records for that source.
+    assert_eq!(
+        lowered_body(&unit, function),
+        "scope {scope {return@Some(0) Through<kotlin/Char>(v0: kotlin/Char in Char(55296): \
+         kotlin/Char, Char(57343): kotlin/Char): Boolean: Nothing}: Nothing}"
+    );
+}
+
+/// `checkRadix` tests `radix !in MIN_RADIX..MAX_RADIX`: the negated membership lowers, and the
+/// body declines only at its exception's constructor.
+#[test]
+fn stdlib_range_literal_negation_lowers_past_the_membership() {
+    let Some(root) = distribution_root() else {
+        return;
+    };
+    let libraries = stdlib(&root);
+    let range_to = declared_range_to(&libraries, "kotlin/Int", Ty::Int);
+    let fact = frozen_function(&libraries, "kotlin/text", "checkRadix", None, &[Ty::Int]);
+    let callable = fact.klib_body_callable().expect("signed");
+    let mut unit = DependencyBodyUnit::default();
+    assert_eq!(
+        unit.lower_function(
+            callable,
+            libraries.declaration_bodies(),
+            &KlibCalleeFacts::default()
+        )
+        .expect_err("no range construction is declared")
+        .to_string(),
+        "the KLIB body of `kotlin.text.checkRadix` (it uses a `!in` of another form than a \
+         membership in a range literal)"
+    );
+    let facts = KlibCalleeFacts::with_declarations([], [range_to.klib_body_callable().unwrap()]);
+    assert_eq!(
+        unit.lower_function(callable, libraries.declaration_bodies(), &facts)
+            .expect_err("the exception constructor declines")
+            .to_string(),
+        "the KLIB body of `kotlin.text.checkRadix` (it calls `kotlin.IllegalArgumentException.<init>`)"
+    );
+    assert_unit_is_empty(&unit);
 }

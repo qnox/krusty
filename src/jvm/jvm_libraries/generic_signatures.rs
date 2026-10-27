@@ -5,6 +5,9 @@
 //! source publishes — the field's own type, a type parameter's erasure, a generic return, a suspend
 //! function's pre-CPS result, and a class's parameters with their bounds.
 
+use super::signature_parser::{
+    ordinary_application, parse_formals_with, parse_type_with, ClassApplication, ClassSegment,
+};
 use super::*;
 use crate::types::TyKind;
 use crate::types::TypeParameters;
@@ -18,10 +21,24 @@ pub(super) fn parse_field_gsig(
     erased_descriptor: &str,
     class_bounds: &crate::fx_hash::HashMap<String, Ty>,
 ) -> Option<(Ty, bool)> {
+    parse_field_gsig_with(
+        signature,
+        erased_descriptor,
+        class_bounds,
+        &ordinary_application,
+    )
+}
+
+pub(super) fn parse_field_gsig_with(
+    signature: &str,
+    erased_descriptor: &str,
+    class_bounds: &crate::fx_hash::HashMap<String, Ty>,
+    build: &impl Fn(&[ClassSegment]) -> Option<ClassApplication>,
+) -> Option<(Ty, bool)> {
     if !matches!(signature.as_bytes().first(), Some(b'L' | b'T' | b'[')) {
         return None;
     }
-    let mut parsed = parse_gsig_inner(signature, true)?;
+    let mut parsed = parse_type_with(signature, true, build)?;
     parsed.ty = crate::types::ty_with_param_bounds(parsed.ty, class_bounds);
     let erasure = field_type_parameter_erasure(signature, class_bounds)
         .or(parsed.erasure.as_deref().map(str::to_string));
@@ -152,6 +169,64 @@ pub(super) fn mark_receiver_fun_params(gsig: &mut GenericSig, recv_fun: &[bool],
     }
 }
 
+/// Parse a JVM method generic signature `<formals>(params)ret` declared outside any generic class.
+pub(in crate::jvm) fn parse_method_gsig(sig: &str) -> Option<GenericSig> {
+    parse_member_method_gsig(sig, &crate::fx_hash::HashMap::default())
+}
+
+/// Parse a JVM method generic signature `<formals>(params)ret` whose free type variables may be the
+/// declaring class's formals, bounded as `class_bounds` records ([`JvmLibraries::member_class_formal_bounds`]). A method
+/// formal of the same name shadows the class formal.
+pub(in crate::jvm) fn parse_member_method_gsig(
+    sig: &str,
+    class_bounds: &crate::fx_hash::HashMap<String, Ty>,
+) -> Option<GenericSig> {
+    parse_member_method_gsig_with(sig, class_bounds, &ordinary_application)
+}
+
+pub(super) fn parse_member_method_gsig_with(
+    sig: &str,
+    class_bounds: &crate::fx_hash::HashMap<String, Ty>,
+    build: &impl Fn(&[ClassSegment]) -> Option<ClassApplication>,
+) -> Option<GenericSig> {
+    let (formals, mut formal_bounds, s) = parse_formals_with(sig, build);
+    let inline_bounds = hydrate_formal_bounds(&formals, &mut formal_bounds, class_bounds);
+    let inner = s.strip_prefix('(')?;
+    let close = inner.find(')')?;
+    let mut params_s = &inner[..close];
+    let mut params = Vec::new();
+    while !params_s.is_empty() {
+        let parsed = parse_type_with(params_s, false, build)?;
+        params.push(crate::types::ty_with_param_bounds(
+            parsed.ty,
+            &inline_bounds,
+        ));
+        params_s = parsed.rest;
+    }
+    let parsed = parse_type_with(&inner[close + 1..], false, build)?;
+    let ret = crate::types::ty_with_param_bounds(parsed.ty, &inline_bounds);
+    // A raw signature has no source nullability annotation. When its OUTER return is one of the
+    // method's own formals, specializing that formal to a source primitive must retain the declared
+    // reference contract. Record that semantic behavior on the signature itself; downstream member,
+    // static, and top-level resolution then share one policy without learning why the provider chose it.
+    let return_policy = ret
+        .ty_param_name()
+        .filter(|name| formals.iter().any(|formal| formal == name))
+        .map_or(GenericReturnPolicy::Exact, |_| {
+            GenericReturnPolicy::FlexibleReference
+        });
+    // The JVM `Signature` attribute is the fallback for NON-metadata callables (Java methods): an instance
+    // method has no receiver parameter and a static none either, so the receiver is not modeled here.
+    Some(GenericSig {
+        formals,
+        formal_bounds,
+        receiver: None,
+        params,
+        ret,
+        return_policy,
+    })
+}
+
 /// Parse a class generic signature into its formal type-parameter names and its supertypes (the
 /// superclass followed by interfaces) as signature nodes, e.g. `java/util/List`'s
 /// `<E:Ljava/lang/Object;>Ljava/lang/Object;Ljava/util/Collection<TE;>;` → (`[E]`, `[Object,
@@ -160,7 +235,14 @@ pub(super) fn mark_receiver_fun_params(gsig: &mut GenericSig, recv_fun: &[bool],
 pub(in crate::jvm) type ParsedClassGenericSignature = (Vec<String>, Vec<Vec<Ty>>, Vec<Ty>);
 
 pub(in crate::jvm) fn parse_class_gsig(sig: &str) -> Option<ParsedClassGenericSignature> {
-    let (formals, mut formal_bounds, mut s) = parse_formals(sig);
+    parse_class_gsig_with(sig, &ordinary_application)
+}
+
+pub(super) fn parse_class_gsig_with(
+    sig: &str,
+    build: &impl Fn(&[ClassSegment]) -> Option<ClassApplication>,
+) -> Option<ParsedClassGenericSignature> {
+    let (formals, mut formal_bounds, mut s) = parse_formals_with(sig, build);
     hydrate_formal_bounds(
         &formals,
         &mut formal_bounds,
@@ -168,9 +250,9 @@ pub(in crate::jvm) fn parse_class_gsig(sig: &str) -> Option<ParsedClassGenericSi
     );
     let mut supers = Vec::new();
     while !s.is_empty() {
-        let (g, rest) = parse_gsig(s)?;
-        supers.push(g);
-        s = rest;
+        let parsed = parse_type_with(s, false, build)?;
+        supers.push(parsed.ty);
+        s = parsed.rest;
     }
     Some((formals, formal_bounds, supers))
 }
@@ -312,7 +394,7 @@ pub(super) fn constructor_inference_signature(
 /// slot under an identity of its own, and every captured bound names it by that identity:
 /// `Outer<T : Comparable<T>, U : T>.Inner<T>` keeps `Comparable<T>` and `U : T` on the captured
 /// `T`, not on `Inner`'s.
-fn capture_enclosing_type_parameters(
+pub(super) fn capture_enclosing_type_parameters(
     name: TypeName,
     own: &TypeParameters<Vec<Vec<Ty>>>,
     enclosing: &TypeParameters<Vec<Vec<Ty>>>,
@@ -383,26 +465,6 @@ impl JvmLibraries {
                 class_formal_bounds(outer.signature.as_deref(), &bounds)
             });
         class_formal_bounds(class.signature.as_deref(), &outer_bounds)
-    }
-
-    /// The type parameters class `name` publishes, and how many of them it declares itself. A
-    /// non-static member class (one with an `outer_instance`) captures its enclosing class's
-    /// formals after its own ([`capture_enclosing_type_parameters`]); a static nested class
-    /// captures none.
-    pub(super) fn member_class_type_parameters(
-        &self,
-        outer_instance: Option<TypeName>,
-        name: TypeName,
-        own: TypeParameters<Vec<Vec<Ty>>>,
-    ) -> (usize, TypeParameters<Vec<Vec<Ty>>>) {
-        let own_count = own.type_params().len();
-        match outer_instance.and_then(|outer| self.classifier_record(outer)) {
-            Some(enclosing) => (
-                own_count,
-                capture_enclosing_type_parameters(name, &own, &enclosing.type_parameters),
-            ),
-            None => (own_count, own),
-        }
     }
 
     /// Publish a Java method's `Signature` attribute: the declaring class's formal bounds
@@ -548,6 +610,49 @@ mod class_formal_bound_tests {
                 .ret,
             Ty::ty_param("T", Ty::platform_nullable(Ty::obj("kotlin/Any")))
         );
+    }
+
+    #[test]
+    fn captured_class_formals_use_headers_without_materializing_enclosing_members() {
+        use crate::jvm::classfile::{ClassWriter, InnerClassSpec, ACC_PUBLIC};
+
+        let outer = type_name("header/Outer");
+        let inner = outer.nested_child("Inner");
+        let mut outer_class = ClassWriter::new("header/Outer", "java/lang/Object");
+        outer_class.set_signature("<S:Ljava/lang/CharSequence;>Ljava/lang/Object;");
+        let mut inner_class = ClassWriter::new("header/Outer$Inner", "java/lang/Object");
+        let signature = "<T:TS;>Ljava/lang/Object;";
+        inner_class.set_signature(signature);
+        inner_class.add_inner_class(InnerClassSpec {
+            inner: "header/Outer$Inner".to_owned(),
+            outer: Some("header/Outer".to_owned()),
+            name: Some("Inner".to_owned()),
+            access: ACC_PUBLIC,
+        });
+        let classpath = std::rc::Rc::new(Classpath::new(Vec::new()));
+        classpath.set_stub_overlay(vec![
+            ("header/Outer".to_owned(), outer_class.finish()),
+            ("header/Outer$Inner".to_owned(), inner_class.finish()),
+        ]);
+        let libraries = JvmLibraries::new(classpath.clone()).expect("header fixture provider");
+        let header = libraries
+            .class_application_header(inner)
+            .expect("complete inner layout");
+        let own_count = header.own_count;
+        let complete = header.parameters;
+        assert!(
+            classpath
+                .cached_library_type_name(libraries.api_version, outer)
+                .is_none(),
+            "captured layout must not construct the enclosing classifier/member record"
+        );
+        assert_eq!(own_count, 1);
+        assert_eq!(complete.type_params(), &["T".to_owned(), "S".to_owned()]);
+        assert_eq!(
+            complete.type_param_bounds()[0],
+            [Ty::platform_nullable(Ty::ty_param("S", char_sequence()))]
+        );
+        assert_eq!(complete.type_param_bounds()[1], [char_sequence()]);
     }
 
     #[test]

@@ -2,6 +2,31 @@
 
 use super::*;
 
+pub(super) fn classifier_declaration_name(
+    class: &crate::jvm::classreader::ClassInfo,
+) -> Option<crate::types::ClassifierDeclarationName> {
+    use crate::types::ClassifierDeclarationName;
+    // Annotation presence remains authoritative even for synthetic/empty metadata whose decoded
+    // declaration inventory is empty. Do not turn missing Kotlin ownership into a Java guess.
+    if class
+        .annotations
+        .iter()
+        .any(|annotation| annotation.annotation == type_name("kotlin/Metadata"))
+    {
+        return class.meta.class_declaration_name.clone();
+    }
+    match class.inner_class_self() {
+        None => Some(ClassifierDeclarationName::TopLevel {
+            package: class.this_class.parent().unwrap_or(TypeName::ROOT),
+            name: class.this_class.segment_ref().into(),
+        }),
+        Some(entry) => Some(ClassifierDeclarationName::Nested {
+            owner: type_name(entry.outer.as_deref()?),
+            name: entry.name.as_deref()?.into(),
+        }),
+    }
+}
+
 /// Give every metadata-declared constructor the classifier parameters it can infer, independently
 /// of how the JVM realizes that declaration. Value classes use `constructor-impl` rather than a
 /// directly callable `<init>`, while ordinary and marker-backed constructors do have `<init>`
@@ -180,11 +205,26 @@ fn published_chain(libraries: &JvmLibraries, classifier: TypeName) -> Option<Pub
                 .is_some_and(|parent| generates_serializer(&parent.annotations));
             if !parent_generates {
                 Vec::new()
-            } else if superclass.type_args().is_empty() {
-                published_chain(libraries, parent)?.wire
             } else {
-                // A generic parent's elements need its type arguments, which no record carries.
-                return None;
+                // A generic parent's elements are typed over its own type parameters; the class
+                // inherits them typed by the arguments it gives the parent.
+                let formals = &SymbolSource::classifier(libraries, parent)?
+                    .type_parameters
+                    .type_params;
+                let arguments = superclass.type_args();
+                if formals.len() != arguments.len() {
+                    return None;
+                }
+                let bindings = formals
+                    .iter()
+                    .cloned()
+                    .zip(arguments.iter().copied())
+                    .collect::<crate::fx_hash::HashMap<_, _>>();
+                published_chain(libraries, parent)?
+                    .wire
+                    .into_iter()
+                    .map(|(name, ty)| (name, ty_subst_keep_unbound(ty, &bindings)))
+                    .collect()
             }
         }
         None => Vec::new(),
@@ -235,11 +275,15 @@ fn published_chain(libraries: &JvmLibraries, classifier: TypeName) -> Option<Pub
                 .iter()
                 .find(|property| property.name.as_str() == &**name)
                 .filter(|property| stored(property))?;
-            // Annotations on the element or inside its type (a serial name, a serializer of its
-            // own) change its wire shape, and this record carries none.
-            if property.annotation_method.is_some() || element.annotated_type {
+            // Annotations inside the element's type (a serializer of its own for a type argument)
+            // change its wire shape, and this record carries none.
+            if element.annotated_type {
                 return None;
             }
+            let annotations = match &property.annotation_method {
+                Some(method) => element_annotations(libraries, classifier, method)?,
+                None => ElementAnnotations::default(),
+            };
             let ty = shape
                 .declared_callables
                 .get(&**name)?
@@ -268,6 +312,9 @@ fn published_chain(libraries: &JvmLibraries, classifier: TypeName) -> Option<Pub
                 name: name.clone(),
                 ty,
                 optional,
+                serial_name: annotations.serial_name,
+                serializer: annotations.serializer,
+                contextual: annotations.contextual,
             })
         })
         .collect::<Option<Box<[_]>>>()?;
@@ -278,16 +325,92 @@ fn published_chain(libraries: &JvmLibraries, classifier: TypeName) -> Option<Pub
     );
     // The annotation says the class asked for a generated serializer; only the generated members
     // themselves say the plugin ran and what they take.
-    if !has_generated_parent_abi(&class.methods, classifier, &wire) {
+    let type_parameters = shape.type_parameters.type_params.len();
+    if !has_generated_parent_abi(&class.methods, classifier, type_parameters, &wire) {
         return None;
     }
     Some(PublishedChain {
         record: crate::types::SerializableClassElements {
+            type_parameters: shape
+                .type_parameters
+                .type_params
+                .iter()
+                .map(|parameter| Box::from(parameter.as_str()))
+                .collect(),
             elements,
             superclass,
         },
         wire,
     })
+}
+
+/// What a library element's property annotations say about its wire shape.
+#[derive(Default)]
+struct ElementAnnotations {
+    serial_name: Option<crate::kt_string::KtString>,
+    serializer: Option<TypeName>,
+    contextual: bool,
+}
+
+/// Read the annotations a library property keeps on its `$annotations` marker `method`, as
+/// kotlinc's plugin reads a superclass element's: `@SerialName`, a property-level
+/// `@Serializable(with = …)` and `@Contextual`. `None` when one changes the element in a way the
+/// record cannot state: `@Required`, `@Polymorphic`, or a `@SerialInfo` annotation the subclass's
+/// descriptor would have to carry.
+fn element_annotations(
+    libraries: &JvmLibraries,
+    classifier: TypeName,
+    method: &crate::jvm::metadata::MetaJvmMethodSig,
+) -> Option<ElementAnnotations> {
+    use crate::types::AnnotationValue;
+    let applications = libraries
+        .cp
+        .method_annotations(classifier, &method.name, &method.desc)?;
+    let mut annotations = ElementAnnotations::default();
+    for application in applications {
+        let argument = |name: &str| {
+            application
+                .arguments
+                .iter()
+                .find(|(argument, _)| argument == name)
+                .map(|(_, value)| value)
+        };
+        match application.annotation {
+            name if name == type_name("kotlinx/serialization/SerialName") => {
+                let Some(AnnotationValue::String(value)) = argument("value") else {
+                    return None;
+                };
+                annotations.serial_name = Some(value.clone());
+            }
+            name if name == type_name("kotlinx/serialization/Serializable") => {
+                let Some(AnnotationValue::Class(serializer)) = argument("with") else {
+                    return None;
+                };
+                annotations.serializer = Some(serializer.kotlin_class_internal()?);
+            }
+            name if name == type_name("kotlinx/serialization/Contextual") => {
+                annotations.contextual = true;
+            }
+            name if name == type_name("kotlinx/serialization/Required")
+                || name == type_name("kotlinx/serialization/Polymorphic") =>
+            {
+                return None
+            }
+            name => {
+                let serial_info = type_name("kotlinx/serialization/SerialInfo");
+                let marked = SymbolSource::classifier(libraries, name).is_some_and(|annotation| {
+                    annotation
+                        .annotations
+                        .iter()
+                        .any(|meta| meta.annotation == serial_info)
+                });
+                if marked {
+                    return None;
+                }
+            }
+        }
+    }
+    Some(annotations)
 }
 
 /// `@Serializable` without its own `with` serializer: the plugin generates the serializer.
@@ -300,19 +423,21 @@ fn generates_serializer(annotations: &[crate::types::ResolvedAnnotation]) -> boo
 }
 
 /// Whether `methods` hold exactly the members the serialization plugin generates on an
-/// inheritable class without type parameters whose wire is `wire`: a public static
-/// `write$Self(self, output, descriptor)` and a public deserialization constructor taking the
-/// `seen` masks, each element as the subclass's delegation passes it, and the marker.
+/// inheritable class with `type_parameters` type parameters whose wire is `wire`: a public static
+/// `write$Self(self, output, descriptor, typeSerial0, …)` and a public deserialization constructor
+/// taking the `seen` masks, each element as the subclass's delegation passes it, and the marker.
 fn has_generated_parent_abi(
     methods: &[crate::jvm::classreader::MethodSig],
     classifier: TypeName,
+    type_parameters: usize,
     wire: &[(Box<str>, Ty)],
 ) -> bool {
     const PUBLIC: u16 = 0x0001;
     const STATIC: u16 = 0x0008;
     let write_self = format!(
-        "(L{};Lkotlinx/serialization/encoding/CompositeEncoder;Lkotlinx/serialization/descriptors/SerialDescriptor;)V",
-        classifier.render()
+        "(L{};Lkotlinx/serialization/encoding/CompositeEncoder;Lkotlinx/serialization/descriptors/SerialDescriptor;{})V",
+        classifier.render(),
+        "Lkotlinx/serialization/KSerializer;".repeat(type_parameters)
     );
     let mut constructor = String::from("(");
     constructor.push_str(&"I".repeat(wire.len() / 32 + 1));
@@ -437,6 +562,154 @@ impl crate::types::ClassifierFactSource for JvmLibraries {
 mod tests {
     use super::*;
 
+    fn kotlin_declaration_name(
+        metadata_name: &str,
+        flags: u64,
+        table: &[u8],
+    ) -> Option<crate::types::ClassifierDeclarationName> {
+        use crate::jvm::classfile::{ClassWriter, InnerClassSpec, MetadataStamp};
+        let internal = metadata_name.replace('.', "$");
+        let mut writer = ClassWriter::new(&internal, "java/lang/Object");
+        // A contradictory physical self entry must not override the Kotlin declaration.
+        writer.add_inner_class(InnerClassSpec {
+            inner: internal.clone(),
+            outer: Some("ownership/PhysicalOwner".into()),
+            name: Some("PhysicalMember".into()),
+            access: 0x0019,
+        });
+        let mut message = crate::metadata::protobuf::Pb::new();
+        message.field_varint(1, flags);
+        message.field_varint(3, 0);
+        assert!(table.len() < 128);
+        let mut payload = vec![0, table.len() as u8];
+        payload.extend_from_slice(table);
+        payload.extend_from_slice(message.as_bytes());
+        let d1 = payload.into_iter().map(char::from).collect();
+        writer.set_kotlin_metadata(
+            1,
+            MetadataStamp {
+                version: [2, 4, 0],
+                pre_release: false,
+            },
+            0,
+            &[d1],
+            &[metadata_name.into()],
+        );
+        let class = crate::jvm::classreader::parse_class(&writer.finish()).unwrap();
+        classifier_declaration_name(&class)
+    }
+
+    #[test]
+    fn kotlin_classifier_declaration_names_use_metadata_class_ids() {
+        use crate::types::{type_name_child, ClassifierDeclarationName};
+        let package = type_name("ownership");
+        let owner = type_name_child(package, "Outer$Literal");
+        assert_eq!(
+            kotlin_declaration_name("ownership/Outer$Literal", 6, &[]),
+            Some(ClassifierDeclarationName::TopLevel {
+                package,
+                name: "Outer$Literal".into()
+            })
+        );
+        assert_eq!(
+            kotlin_declaration_name("ownership/Outer$Literal.Part$Name", 6, &[]),
+            Some(ClassifierDeclarationName::Nested {
+                owner,
+                name: "Part$Name".into()
+            })
+        );
+        assert_eq!(
+            kotlin_declaration_name("Default$Literal", 6, &[]),
+            Some(ClassifierDeclarationName::TopLevel {
+                package: TypeName::ROOT,
+                name: "Default$Literal".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn kotlin_classifier_declaration_names_exclude_local_class_ids() {
+        assert_eq!(kotlin_declaration_name("ownership/Local", 10, &[]), None);
+        // Public members of local classes retain local IDs independently of their visibility.
+        for table in [&[0x28, 0][..], &[0x2a, 1, 0][..]] {
+            assert_eq!(
+                kotlin_declaration_name("ownership/Facade$box$Local.Member", 6, table),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn kotlin_classifier_declaration_names_require_metadata_evidence() {
+        use crate::jvm::classfile::{ClassWriter, InnerClassSpec, MetadataStamp};
+        for kind in [1, 3] {
+            let mut writer = ClassWriter::new("ownership/Outer$Literal", "java/lang/Object");
+            writer.add_inner_class(InnerClassSpec {
+                inner: "ownership/Outer$Literal".into(),
+                outer: Some("ownership/Outer".into()),
+                name: Some("Literal".into()),
+                access: 0x0019,
+            });
+            writer.set_kotlin_metadata(
+                kind,
+                MetadataStamp {
+                    version: [2, 4, 0],
+                    pre_release: false,
+                },
+                0,
+                &[],
+                &[],
+            );
+            let class = crate::jvm::classreader::parse_class(&writer.finish()).unwrap();
+            assert_eq!(
+                classifier_declaration_name(&class),
+                None,
+                "metadata kind {kind}"
+            );
+        }
+    }
+
+    #[test]
+    fn classfile_declaration_names_use_structural_self_entries() {
+        use crate::types::{type_name_child, ClassifierDeclarationName};
+        let read = |internal: &str, row: Option<(Option<&str>, Option<&str>)>| {
+            let mut writer = crate::jvm::classfile::ClassWriter::new(internal, "java/lang/Object");
+            if let Some((outer, name)) = row {
+                writer.add_inner_class(crate::jvm::classfile::InnerClassSpec {
+                    inner: internal.into(),
+                    outer: outer.map(Into::into),
+                    name: name.map(Into::into),
+                    access: 0x0019,
+                });
+            }
+            let class = crate::jvm::classreader::parse_class(&writer.finish()).unwrap();
+            classifier_declaration_name(&class)
+        };
+        let package = type_name("ownership");
+        let owner = type_name_child(package, "Outer");
+        assert_eq!(
+            read("ownership/Outer$Literal", None),
+            Some(ClassifierDeclarationName::TopLevel {
+                package,
+                name: "Outer$Literal".into()
+            })
+        );
+        assert_eq!(
+            read(
+                "ownership/Outer$$serializer",
+                Some((Some("ownership/Outer"), Some("$serializer")))
+            ),
+            Some(ClassifierDeclarationName::Nested {
+                owner,
+                name: "$serializer".into()
+            })
+        );
+        assert_eq!(
+            read("ownership/Outer$1Local", Some((None, Some("Local")))),
+            None
+        );
+    }
+
     fn method(access: u16, name: &str, descriptor: &str) -> crate::jvm::classreader::MethodSig {
         crate::jvm::classreader::MethodSig {
             access,
@@ -480,16 +753,26 @@ mod tests {
         assert!(has_generated_parent_abi(
             &[write_self.clone(), constructor("ILjava/util/List;")],
             classifier,
+            0,
             &wire,
         ));
         assert!(!has_generated_parent_abi(
             &[write_self.clone(), constructor("ILjava/lang/String;")],
             classifier,
+            0,
             &wire,
         ));
         assert!(!has_generated_parent_abi(
             &[constructor("ILjava/util/List;")],
             classifier,
+            0,
+            &wire,
+        ));
+        // A generic class's `write$Self` takes one serializer per type parameter.
+        assert!(!has_generated_parent_abi(
+            &[write_self, constructor("ILjava/util/List;")],
+            classifier,
+            1,
             &wire,
         ));
     }
