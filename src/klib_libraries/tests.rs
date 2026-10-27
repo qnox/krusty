@@ -1,6 +1,7 @@
 use std::rc::Rc;
 
 mod accessor_modifiers;
+mod declaration_names;
 
 use super::*;
 use crate::fir::ResolvedParameterIdentity;

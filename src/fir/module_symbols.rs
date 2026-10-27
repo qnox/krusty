@@ -15,6 +15,8 @@ use crate::types::{stored_value_ty, Ty, TyKind, TypeName};
 
 use super::{DeclarationFlags, DeclarationId, DeclarationKind, ResolvedModuleIndex, SourceFileId};
 
+mod declaration_names;
+
 #[cfg(test)]
 mod declaration_name_tests;
 
@@ -1869,6 +1871,13 @@ impl<'a> StreamedModuleSymbols<'a> {
 }
 
 impl SymbolSource for StreamedModuleSymbols<'_> {
+    fn classifier_declaration_name(
+        &self,
+        declaration: crate::libraries::ClassifierDeclarationKey,
+    ) -> Option<Option<crate::types::ClassifierDeclarationName>> {
+        declaration_names::source_declaration_name(self, declaration)
+    }
+
     fn actualized_expect(&self, internal: TypeName) -> Option<TypeName> {
         self.index
             .actualizes_expect(self.source_file, internal)
