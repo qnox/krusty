@@ -16,6 +16,8 @@
 
 mod constructor;
 use constructor::DeclaredCapture;
+mod field_names;
+use field_names::FieldNames;
 mod lambda_inlining;
 use lambda_inlining::FieldLambda;
 mod nested_objects;
@@ -665,7 +667,8 @@ fn remap_declaration(
 /// (`extractParametersMappingAndPatchConstructor`). A captured value's field is named after it with
 /// `$inlined` added, numbered when that name is taken (`getNewFieldName`, `addUniqueField`): every
 /// field the original declares is taken first, as kotlinc's `visitField` records each one it
-/// copies before the constructor is patched. A captured outer instance keeps `this$0`, one field
+/// copies before the constructor is patched, and a numbered name the class already holds is
+/// skipped ([`FieldNames`]), where kotlinc would declare it twice. A captured outer instance keeps `this$0`, one field
 /// per type ([`merged_outer_instances`]).
 ///
 /// The object's own outer instance, when a lambda captures one too, is renamed `this$0$inline_fun`
@@ -681,19 +684,7 @@ fn plan_lambdas<'a>(
     if regeneration.lambdas.is_empty() {
         return Ok((Vec::new(), None));
     }
-    let mut taken: HashMap<String, usize> = HashMap::default();
-    for field in &regeneration.original.fields {
-        *taken.entry(field.name.clone()).or_default() += 1;
-    }
-    let mut unique = |base: String| {
-        let seen = taken.entry(base.clone()).or_default();
-        let name = match *seen {
-            0 => base,
-            count => format!("{base}${count}"),
-        };
-        *seen += 1;
-        name
-    };
+    let mut names = FieldNames::of(regeneration.original);
     let lambdas_capture_outer = regeneration.lambdas.iter().any(|passed| {
         passed
             .lambda
@@ -708,7 +699,7 @@ fn plan_lambdas<'a>(
             .iter_mut()
             .find(|field| field.name == CAPTURED_THIS)
         {
-            let renamed = unique(format!("{CAPTURED_THIS}{INLINE_FUN_THIS_0_SUFFIX}"));
+            let renamed = names.allocate(&format!("{CAPTURED_THIS}{INLINE_FUN_THIS_0_SUFFIX}"));
             constructor::rename_field(&mut plan.body, old, CAPTURED_THIS, &renamed);
             own.name.clone_from(&renamed);
             renamed_outer = Some(renamed);
@@ -736,7 +727,7 @@ fn plan_lambdas<'a>(
                 captured.push((name.to_string(), desc));
                 continue;
             }
-            captured.push((unique(format!("{name}$inlined")), desc));
+            captured.push((names.allocate(&format!("{name}$inlined")), desc));
         }
         lambdas.push(FieldLambda {
             field: String::new(),

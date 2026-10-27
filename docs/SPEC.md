@@ -5779,7 +5779,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`capturedOuterThisTypes`). An object whose own `this$0` a lambda also captures keeps its own
   instance as `this$0$inline_fun`, in its field, its constructor and every method that reads it
   (`INLINE_FUN_THIS_0_SUFFIX` in `extractParametersMappingAndPatchConstructor`): the two may be
-  different objects, of the same class or not. A bound callable reference passed for the
+  different objects, of the same class or not. That name and each captured value's `$inlined` field
+  are numbered past every name the class already holds, declared or allocated earlier in the same
+  regeneration (`anonymous_object::field_names`): kotlinc numbers by how many fields share the base
+  and declares a backticked `this$0$inline_fun$1` twice, which the JVM refuses; the copy takes
+  `this$0$inline_fun$2` (`a_renamed_outer_instance_skips_every_field_name_the_object_declares`). A
+  bound callable reference passed for the
   parameter keeps its receiver in the copy's `$receiver` field, and a literal that receives a lifted
   receiver names it as the lambda's class would. A literal that returns locally keeps its own
   locals in its method's outermost scope, recorded after the method's marker even though the
