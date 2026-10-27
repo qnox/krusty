@@ -115,6 +115,10 @@ final class SourceProperty implements KSPropertyDeclaration {
 
     @Override
     public KSPropertyDeclaration findOverridee() {
+        // A written property without `override` overrides nothing.
+        if (origin == Origin.KOTLIN && modifiers != null && !modifiers.contains(Modifier.OVERRIDE)) {
+            return null;
+        }
         throw Nodes.notImplemented("KSPropertyDeclaration.findOverridee");
     }
 
