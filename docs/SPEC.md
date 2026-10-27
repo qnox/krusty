@@ -1,5 +1,13 @@
 # krusty — a memory-lean Kotlin→JVM compiler PoC
 
+## Array clone result
+
+The JVM builtins customizer gives `Array<T>.clone()` the result `Array<T>` with each formal applied
+at its declared bound, which for `Array`'s `T` is `Any?`. Instantiating the member for a receiver
+therefore preserves the receiver's own element type: `Array<String?>.clone()` is `Array<String?>`,
+not `Array<String>`. The physical owner and result slot are unchanged. Covered by
+`tests/array_clone_e2e.rs` (nullable elements, a generic clone and copy independence).
+
 ## Source classifier identity publication
 
 The compact header inventory publishes non-local classifier identities through their declaration

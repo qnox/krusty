@@ -131,10 +131,21 @@ impl JvmBuiltInsCustomizer {
             Self::install_supertype(classifier, type_name(supertype));
         }
 
+        // `clone()` returns the receiver's own application, so each argument is the formal with its
+        // declared bound: `Array<T>` admits `T = String?`, and `Array<String?>.clone()` keeps it.
         let arguments = classifier
             .type_params
             .iter()
-            .map(|formal| Ty::ty_param(formal, Ty::obj("kotlin/Any")))
+            .enumerate()
+            .map(|(index, formal)| {
+                let bound = classifier
+                    .type_param_bounds()
+                    .get(index)
+                    .and_then(|bounds| bounds.first())
+                    .copied()
+                    .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
+                Ty::ty_param(formal, bound)
+            })
             .collect::<Vec<_>>();
         let ret = Ty::obj_args_name(internal, &arguments);
         let replacement = Self::clone_member(ret, Visibility::Public);
