@@ -1,5 +1,13 @@
 # `@kotlin.Metadata` — reverse-engineering notes (Phase 4b)
 
+## Native bound-receiver physical storage
+
+The common callable-reference record owns the bound-receiver capture coordinate. Native emission
+uses that coordinate to choose semantic object storage, even when a primitive or value class has
+an unboxed invocation carrier. Stored types and offsets jointly own the GC map and thunk loads.
+This representation choice changes no declaration identity, metadata or source-level type, and
+does not reconstruct receiver roles from a capture's spelling or machine carrier.
+
 ## Identity-keyed declaration-name projection
 
 Providers project name evidence directly from their selected classifier and alias records. Typed

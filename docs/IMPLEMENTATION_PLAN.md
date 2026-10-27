@@ -1,5 +1,12 @@
 # krusty — implementation plan
 
+## Native callable-reference capture storage
+
+Use one target-owned physical capture plan for closure layout, GC references, stores and ordinary
+or SAM thunk loads. Store the recorded equality receiver as Any? and use the existing conversion
+boundary to restore the body carrier. Preserve checked adapter parameters and ordinary captures;
+the storage repair is independent of serialized callable-reference admission and identity work.
+
 ## Bound declaration-name inventory
 
 Expose selected declaration-name evidence by typed resolved key across source, JVM, KLIB and their

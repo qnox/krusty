@@ -1,5 +1,17 @@
 # krusty — a memory-lean Kotlin→JVM compiler PoC
 
+## Native bound callable-reference receiver storage
+
+A bound callable reference retains its receiver as a semantic object for equality and hashing,
+including primitive and value-class receivers. Native closure layout records that exact receiver
+capture as reference storage and traces it accordingly. Invocation converts the stored object back
+to the adapter's declared carrier; ordinary captures keep their existing storage types and order.
+Receiver expressions are evaluated once before the closure is allocated.
+
+The Native storage ABI regression establishes each program's kotlinc result before checking scalar,
+scalar-backed and reference-backed value-class equality, hashes, typed invocation and mixed capture
+ordering. The runtime reference-equality protocol and KType layout are unchanged.
+
 ## Bound declaration-name evidence
 
 A query for an already-bound classifier or alias key projects the selected declaration's own
