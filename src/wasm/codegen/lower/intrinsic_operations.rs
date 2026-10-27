@@ -13,6 +13,12 @@ impl Body<'_> {
         args: &[u32],
     ) -> Result<(), Unsupported> {
         match operation {
+            IrIntrinsic::ArrayGet => {
+                let (Some(receiver), [index]) = (receiver, args) else {
+                    return Err("an array read with malformed operands".into());
+                };
+                self.reference_array_get(receiver, *index)
+            }
             IrIntrinsic::PrimitiveCompare { operand, .. } => {
                 let (lhs, rhs) = match (receiver, args) {
                     (None, [lhs, rhs]) => (*lhs, *rhs),
