@@ -14,6 +14,7 @@ mod entry;
 pub(crate) mod interface_identity;
 pub(crate) mod local_properties;
 mod module_facts;
+mod source_class_members;
 
 pub(crate) use dependency_call_shape::{DependencyCallShape, DependencyExportCall};
 #[cfg(test)]
@@ -43,6 +44,7 @@ pub use module_facts::{
     BackendClassifierFact, BackendClassifierSource, BackendFactError, BackendModuleFacts,
     CheckedBackendClassifiers, EnumEntriesAccessor, UndeterminedType,
 };
+pub use source_class_members::{SourceClassMembers, SourceFunctionSignature, SourceMemberFunction};
 
 use crate::compilation_target::CompilationTarget;
 use crate::diag::DiagSink;

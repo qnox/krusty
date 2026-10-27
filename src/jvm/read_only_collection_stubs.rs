@@ -11,11 +11,14 @@
 //! carries a stub.
 
 use crate::assignable::{is_subtype, TyCtx, TypeOracle};
-use crate::backend::BackendClassifierSource;
+use crate::backend::{
+    BackendClassifierSource, BackendModuleFacts, CheckedBackendClassifiers, SourceClassMembers,
+};
 use crate::fx_hash::{HashMap, HashSet};
 use crate::ir::{IrClass, IrFile};
 use crate::jvm::backend::SkipReason;
 use crate::jvm::classpath::Classpath;
+use crate::jvm::classreader::ClassInfo;
 use crate::jvm::inherited_collection_bridges::InheritedCollectionBridges;
 use crate::jvm::jvm_class_map::{
     jvm_collection_to_kotlin_mutable_type_name, mapped_collection, to_jvm_type_name,
@@ -117,7 +120,7 @@ impl ReadOnlyStub {
 pub(super) fn select(
     ir: &IrFile,
     classpath: &Classpath,
-    classifiers: &dyn BackendClassifierSource,
+    classifiers: &CheckedBackendClassifiers<'_>,
 ) -> Result<ReadOnlyCollectionStubs, SkipReason> {
     let mut result = ReadOnlyCollectionStubs::default();
     for class_index in 0..ir.classes.len() {
@@ -147,7 +150,7 @@ struct Face {
 fn class_stubs(
     ir: &IrFile,
     classpath: &Classpath,
-    classifiers: &dyn BackendClassifierSource,
+    classifiers: &CheckedBackendClassifiers<'_>,
     class: &IrClass,
 ) -> Result<Vec<ReadOnlyStub>, SkipReason> {
     let Some(hierarchy) = ir.classifier_hierarchies.get(&class.fq_name_id()) else {
@@ -181,7 +184,16 @@ fn class_stubs(
 
     // kotlinc's `computeStubsForSuperClasses`: a stub a superclass already realizes, built in this
     // class's substitution context, is not repeated.
-    let chain = superclass_chain(ir, classpath, classifiers, class, &candidates)?;
+    let chain = superclass_chain(
+        ChainSources {
+            ir,
+            module: classifiers.module(),
+            classpath,
+            classifiers,
+        },
+        class,
+        &candidates,
+    )?;
     let mut present: HashSet<(String, String)> = HashSet::default();
     for superclass in &chain {
         let faces = applicable_faces(classpath, &superclass.supertypes);
@@ -460,20 +472,95 @@ fn substituted(parameters: &[Ty], bindings: &HashMap<String, Ty>) -> Vec<Ty> {
         .collect()
 }
 
+/// Where the superclass chain reads each superclass's declaration from.
+#[derive(Clone, Copy)]
+struct ChainSources<'a> {
+    ir: &'a IrFile,
+    module: &'a BackendModuleFacts,
+    classpath: &'a Classpath,
+    classifiers: &'a dyn BackendClassifierSource,
+}
+
+/// The one source that owns a superclass's declaration.
+enum Declaring<'a> {
+    /// A named source class of the module, whichever file declares it.
+    Module(&'a SourceClassMembers),
+    /// A body-local class of the active file, which only that file can name.
+    File(&'a IrClass),
+    /// A dependency class, read from its class file.
+    Dependency(std::sync::Arc<ClassInfo>),
+}
+
+fn declaring<'a>(
+    sources: ChainSources<'a>,
+    superclass: TypeName,
+) -> Result<Declaring<'a>, SkipReason> {
+    if let Some(members) = sources.module.source_class_members(superclass) {
+        return Ok(Declaring::Module(members));
+    }
+    if let Some(class) = sources
+        .ir
+        .classes
+        .iter()
+        .find(|class| class.fq_name_id() == superclass)
+    {
+        return match class.enclosure {
+            Some(_) => Ok(Declaring::File(class)),
+            None => Err(SkipReason::ReadOnlyCollectionStubs(format!(
+                "missing module declaration record for source superclass {}",
+                superclass.render()
+            ))),
+        };
+    }
+    sources
+        .classpath
+        .find_name(superclass)
+        .map(Declaring::Dependency)
+        .ok_or_else(|| {
+            SkipReason::ReadOnlyCollectionStubs(format!(
+                "superclass {} has no module, file or classpath declaration",
+                superclass.render()
+            ))
+        })
+}
+
+/// What reading one superclass needs besides its declaration.
+struct SuperclassQuery<'a> {
+    owner: TypeName,
+    same_package_path: bool,
+    candidates: &'a [ReadOnlyStub],
+    /// The class's checked application of `owner`.
+    applied: Result<Ty, SkipReason>,
+}
+
+impl SuperclassQuery<'_> {
+    /// Only a candidate's name and arity can implement or declare its member.
+    fn relevant(&self, name: &str, count: usize) -> bool {
+        self.candidates
+            .iter()
+            .any(|stub| stub.name == name && stub.parameters.len() == count)
+    }
+
+    fn named(&self, name: &str) -> bool {
+        self.candidates.iter().any(|stub| stub.name == name)
+    }
+
+    fn applied(&self) -> Result<Ty, SkipReason> {
+        self.applied.clone()
+    }
+}
+
+/// kotlinc's superclass walk, each superclass read from the one source that owns it, so a
+/// superclass declared in another file of the module is never taken for an absent dependency.
 fn superclass_chain(
-    ir: &IrFile,
-    classpath: &Classpath,
-    classifiers: &dyn BackendClassifierSource,
+    sources: ChainSources<'_>,
     class: &IrClass,
     candidates: &[ReadOnlyStub],
 ) -> Result<Vec<Superclass>, SkipReason> {
-    let relevant = |name: &str, count: usize| {
-        candidates
-            .iter()
-            .any(|stub| stub.name == name && stub.parameters.len() == count)
-    };
     let applied = |owner: TypeName| {
-        ir.classifier_hierarchies
+        sources
+            .ir
+            .classifier_hierarchies
             .get(&class.fq_name_id())
             .and_then(|hierarchy| hierarchy.iter().find(|entry| entry.classifier == owner))
             .map(|entry| entry.applied)
@@ -485,174 +572,278 @@ fn superclass_chain(
             })
     };
     let mut chain = Vec::new();
-    let mut current = class.superclass;
+    let mut current = Some(class.superclass);
     let mut seen = HashSet::default();
     let package = class.fq_name_id().namespace();
     let mut same_package_path = true;
-    while current != wk::java_object() && current != wk::any() && seen.insert(current) {
-        same_package_path &= current.namespace() == package;
-        if let Some(source) = ir.classes.iter().find(|c| c.fq_name_id() == current) {
-            let mut superclass = Superclass {
-                supertypes: ir
-                    .classifier_hierarchies
-                    .get(&current)
-                    .map(|hierarchy| {
-                        hierarchy
-                            .iter()
-                            .filter(|entry| entry.depth > 0)
-                            .map(|entry| entry.classifier)
-                            .collect()
-                    })
-                    .unwrap_or_default(),
-                abstract_members: HashSet::default(),
-                implemented_members: HashMap::default(),
-            };
-            for &function_id in &source.methods {
-                let function = &ir.functions[function_id as usize];
-                if function.is_static
-                    || !inherited_along(ir.method_visibility(function_id), same_package_path)
-                {
-                    continue;
-                }
-                // Only a candidate's name and arity can implement or declare its member.
-                if !relevant(&function.name, function.params.len()) {
-                    continue;
-                }
-                // Common lowering records every class-parameter-dependent declaration here.
-                // Without that record the function types are unchanged declaration types;
-                // this is not recovery of a missing generic signature from erased parameters.
-                let semantic = ir.member_semantic_sigs.get(&function_id);
-                if function.body.is_some() {
-                    // In the class's substitution context, so `Base<T>.set(e: T)` under
-                    // `Base<String>` implements `set(String)`. The class calls it at its own
-                    // physical descriptor.
-                    let (parameters, result) = match semantic {
-                        Some((parameters, result)) => {
-                            let bindings =
-                                source_superclass_bindings(ir, current, source, applied(current)?)?;
-                            (
-                                substituted(parameters, &bindings),
-                                ty_subst(*result, &bindings),
-                            )
-                        }
-                        None => (function.params.clone(), function.ret),
-                    };
-                    superclass
-                        .implemented_members
-                        .entry((function.name.clone(), parameter_descriptor(&parameters)))
-                        .or_insert_with(|| Implementation {
-                            result,
-                            parameters: jvm_tys(&function.params),
-                            physical_result: jvm_declared_ty(&function.ret),
-                        });
-                } else if source.is_abstract {
-                    let bindings =
-                        source_superclass_bindings(ir, current, source, applied(current)?)?;
-                    let parameters = match semantic {
-                        Some((parameters, _)) => parameters,
-                        None => &function.params,
-                    };
-                    superclass.abstract_members.insert((
-                        function.name.clone(),
-                        parameter_descriptor(&substituted(parameters, &bindings)),
-                    ));
-                }
-            }
-            chain.push(superclass);
-            current = source.superclass;
+    while let Some(owner) = current
+        .filter(|&owner| owner != wk::java_object() && owner != wk::any())
+        .filter(|&owner| seen.insert(owner))
+    {
+        same_package_path &= owner.namespace() == package;
+        let query = SuperclassQuery {
+            owner,
+            same_package_path,
+            candidates,
+            applied: applied(owner),
+        };
+        let (superclass, next) = match declaring(sources, owner)? {
+            Declaring::Module(members) => (
+                module_superclass(sources.classifiers, members, &query)?,
+                members.superclass,
+            ),
+            Declaring::File(source) => (
+                file_superclass(sources.ir, source, &query)?,
+                Some(source.superclass),
+            ),
+            Declaring::Dependency(info) => (
+                dependency_superclass(sources.classifiers, &info, &query)?,
+                info.super_class,
+            ),
+        };
+        chain.push(superclass);
+        current = next;
+    }
+    Ok(chain)
+}
+
+/// A module superclass's members, from its retained declaration record: those declared abstract,
+/// and those it implements, keyed like a file superclass's in the class's substitution context.
+/// The physical parameters a bridge calls are the declaration types' JVM representation, as for
+/// a member of the active file.
+fn module_superclass(
+    classifiers: &dyn BackendClassifierSource,
+    members: &SourceClassMembers,
+    query: &SuperclassQuery<'_>,
+) -> Result<Superclass, SkipReason> {
+    let owner = query.owner;
+    let mut superclass = Superclass {
+        supertypes: classifier_closure(classifiers, owner),
+        abstract_members: HashSet::default(),
+        implemented_members: HashMap::default(),
+    };
+    for function in members.functions.iter() {
+        // A suspend declaration's continuation is a parameter of its own, so it neither declares
+        // nor implements a non-suspend member.
+        if function.is_suspend
+            || !query.named(&function.name)
+            || !inherited_along(function.visibility, query.same_package_path)
+        {
             continue;
         }
-        let Some(info) = classpath.find_name(current) else {
-            break;
-        };
-        let is_kotlin = info.meta.class_kind.is_some();
-        let is_abstract = info.access & ACC_ABSTRACT != 0;
-        let mut superclass = Superclass {
-            // kotlinc computes no stubs for a Java class.
-            supertypes: if is_kotlin {
-                classifier_closure(classifiers, current)
-            } else {
-                Vec::new()
-            },
-            abstract_members: HashSet::default(),
-            implemented_members: HashMap::default(),
-        };
-        for method in &info.methods {
-            if method.access & (ACC_STATIC | ACC_BRIDGE | ACC_SYNTHETIC) != 0
-                || method.name == "<init>"
-                || !inherited_along(method.visibility(), same_package_path)
-            {
-                continue;
-            }
-            if is_kotlin && is_abstract && method.access & ACC_ABSTRACT != 0 {
-                // Property accessors and unrelated abstract members cannot suppress these
-                // function stubs. Only a candidate's physical method name is lookup input here.
-                if !candidates.iter().any(|stub| stub.name == method.name) {
-                    continue;
-                }
-                let missing = || {
-                    SkipReason::ReadOnlyCollectionStubs(format!(
-                        "missing exact semantic abstract declaration {}.{}{}",
-                        current.render(),
-                        method.name,
-                        method.descriptor
-                    ))
-                };
-                let declaration = info
-                    .meta
-                    .class_functions
+        let signature = function.signature.as_ref().ok_or_else(|| {
+            SkipReason::ReadOnlyCollectionStubs(format!(
+                "missing checked signature of {}.{}",
+                owner.render(),
+                function.name
+            ))
+        })?;
+        let declared = signature.receiver_and_parameters();
+        if !query.relevant(&function.name, declared.len()) {
+            continue;
+        }
+        let formals = members.type_parameters.as_ref().ok_or_else(|| {
+            SkipReason::ReadOnlyCollectionStubs(format!(
+                "missing checked type parameters of superclass {}",
+                owner.render()
+            ))
+        })?;
+        let bindings = superclass_bindings(
+            owner,
+            formals.iter().map(|name| name.to_string()).collect(),
+            query.applied()?,
+        )?;
+        let key = (
+            function.name.to_string(),
+            parameter_descriptor(&substituted(&declared, &bindings)),
+        );
+        if function.is_abstract {
+            superclass.abstract_members.insert(key);
+        } else {
+            superclass
+                .implemented_members
+                .entry(key)
+                .or_insert_with(|| Implementation {
+                    result: ty_subst(signature.result, &bindings),
+                    parameters: jvm_tys(&declared),
+                    physical_result: jvm_declared_ty(&signature.result),
+                });
+        }
+    }
+    Ok(superclass)
+}
+
+/// A body-local superclass's members, from the active file's IR.
+fn file_superclass(
+    ir: &IrFile,
+    source: &IrClass,
+    query: &SuperclassQuery<'_>,
+) -> Result<Superclass, SkipReason> {
+    let current = query.owner;
+    let same_package_path = query.same_package_path;
+    let mut superclass = Superclass {
+        supertypes: ir
+            .classifier_hierarchies
+            .get(&current)
+            .map(|hierarchy| {
+                hierarchy
                     .iter()
-                    .find(|declaration| {
-                        declaration.jvm_name == method.name
-                            && declaration.jvm_desc == Some(method.descriptor.as_str())
-                    })
-                    .ok_or_else(missing)?;
-                let signature = declaration.generic_sig.as_ref().ok_or_else(missing)?;
-                let count = signature.params.len()
-                    + usize::from(signature.receiver.is_some())
-                    + usize::from(declaration.is_suspend());
-                if !relevant(&method.name, count) {
-                    continue;
+                    .filter(|entry| entry.depth > 0)
+                    .map(|entry| entry.classifier)
+                    .collect()
+            })
+            .unwrap_or_default(),
+        abstract_members: HashSet::default(),
+        implemented_members: HashMap::default(),
+    };
+    for &function_id in &source.methods {
+        let function = &ir.functions[function_id as usize];
+        if function.is_static
+            || !inherited_along(ir.method_visibility(function_id), same_package_path)
+        {
+            continue;
+        }
+        // Only a candidate's name and arity can implement or declare its member.
+        if !query.relevant(&function.name, function.params.len()) {
+            continue;
+        }
+        // Common lowering records every class-parameter-dependent declaration here.
+        // Without that record the function types are unchanged declaration types;
+        // this is not recovery of a missing generic signature from erased parameters.
+        let semantic = ir.member_semantic_sigs.get(&function_id);
+        if function.body.is_some() {
+            // In the class's substitution context, so `Base<T>.set(e: T)` under
+            // `Base<String>` implements `set(String)`. The class calls it at its own
+            // physical descriptor.
+            let (parameters, result) = match semantic {
+                Some((parameters, result)) => {
+                    let bindings =
+                        source_superclass_bindings(ir, current, source, query.applied()?)?;
+                    (
+                        substituted(parameters, &bindings),
+                        ty_subst(*result, &bindings),
+                    )
                 }
-                // Metadata publishes own formals here. A captured-layout mismatch must be
-                // reported explicitly, never truncated into a partial substitution.
-                let bindings = superclass_bindings(
-                    current,
-                    info.meta.class_type_parameters.type_params().clone(),
-                    applied(current)?,
-                )?;
-                superclass.abstract_members.insert((
-                    method.name.clone(),
-                    parameter_descriptor(
-                        &signature
-                            .receiver
-                            .iter()
-                            .chain(&signature.params)
-                            .map(|parameter| ty_subst(*parameter, &bindings))
-                            .collect::<Vec<_>>(),
-                    ),
-                ));
+                None => (function.params.clone(), function.ret),
+            };
+            superclass
+                .implemented_members
+                .entry((function.name.clone(), parameter_descriptor(&parameters)))
+                .or_insert_with(|| Implementation {
+                    result,
+                    parameters: jvm_tys(&function.params),
+                    physical_result: jvm_declared_ty(&function.ret),
+                });
+        } else if source.is_abstract {
+            let bindings = source_superclass_bindings(ir, current, source, query.applied()?)?;
+            let parameters = match semantic {
+                Some((parameters, _)) => parameters,
+                None => &function.params,
+            };
+            superclass.abstract_members.insert((
+                function.name.clone(),
+                parameter_descriptor(&substituted(parameters, &bindings)),
+            ));
+        }
+    }
+    Ok(superclass)
+}
+
+/// A dependency superclass's members, from its class file and Kotlin metadata.
+fn dependency_superclass(
+    classifiers: &dyn BackendClassifierSource,
+    info: &ClassInfo,
+    query: &SuperclassQuery<'_>,
+) -> Result<Superclass, SkipReason> {
+    let current = query.owner;
+    let same_package_path = query.same_package_path;
+    let is_kotlin = info.meta.class_kind.is_some();
+    let is_abstract = info.access & ACC_ABSTRACT != 0;
+    let mut superclass = Superclass {
+        // kotlinc computes no stubs for a Java class.
+        supertypes: if is_kotlin {
+            classifier_closure(classifiers, current)
+        } else {
+            Vec::new()
+        },
+        abstract_members: HashSet::default(),
+        implemented_members: HashMap::default(),
+    };
+    for method in &info.methods {
+        if method.access & (ACC_STATIC | ACC_BRIDGE | ACC_SYNTHETIC) != 0
+            || method.name == "<init>"
+            || !inherited_along(method.visibility(), same_package_path)
+        {
+            continue;
+        }
+        if is_kotlin && is_abstract && method.access & ACC_ABSTRACT != 0 {
+            // Property accessors and unrelated abstract members cannot suppress these
+            // function stubs. Only a candidate's physical method name is lookup input here.
+            if !query.named(&method.name) {
                 continue;
             }
-            // Concrete realizations (including generated stubs) and Java methods keep their
-            // existing physical-member accounting, separate from Kotlin abstract declarations.
-            let (Some(parameters), Some((physical, physical_result))) = (
-                method.descriptor.split_once(')').map(|(params, _)| params),
-                crate::jvm::physical_type::method_operand_tys(&method.descriptor),
-            ) else {
-                continue;
+            let missing = || {
+                SkipReason::ReadOnlyCollectionStubs(format!(
+                    "missing exact semantic abstract declaration {}.{}{}",
+                    current.render(),
+                    method.name,
+                    method.descriptor
+                ))
             };
-            let raw_key = format!("{parameters})V");
-            if method.access & ACC_ABSTRACT == 0 {
-                // A member a Kotlin class declares implements its member with its metadata
-                // signature, in the class's substitution context: `DBase<T>.set(e: T)` under
-                // `DBase<String>` implements `set(String)`, and a non-generic
-                // `set(e: String): Nothing` keeps its `Nothing` result, which its physical `Void`
-                // does not tell. A generated member has no declaration and only its descriptor.
-                // A suspend declaration's continuation is a real parameter its metadata signature
-                // omits, so it keeps its physical key and implements no non-suspend member.
-                let declaration = (is_kotlin
-                    && candidates.iter().any(|stub| stub.name == method.name))
+            let declaration = info
+                .meta
+                .class_functions
+                .iter()
+                .find(|declaration| {
+                    declaration.jvm_name == method.name
+                        && declaration.jvm_desc == Some(method.descriptor.as_str())
+                })
+                .ok_or_else(missing)?;
+            let signature = declaration.generic_sig.as_ref().ok_or_else(missing)?;
+            let count = signature.params.len()
+                + usize::from(signature.receiver.is_some())
+                + usize::from(declaration.is_suspend());
+            if !query.relevant(&method.name, count) {
+                continue;
+            }
+            // Metadata publishes own formals here. A captured-layout mismatch must be
+            // reported explicitly, never truncated into a partial substitution.
+            let bindings = superclass_bindings(
+                current,
+                info.meta.class_type_parameters.type_params().clone(),
+                query.applied()?,
+            )?;
+            superclass.abstract_members.insert((
+                method.name.clone(),
+                parameter_descriptor(
+                    &signature
+                        .receiver
+                        .iter()
+                        .chain(&signature.params)
+                        .map(|parameter| ty_subst(*parameter, &bindings))
+                        .collect::<Vec<_>>(),
+                ),
+            ));
+            continue;
+        }
+        // Concrete realizations (including generated stubs) and Java methods keep their
+        // existing physical-member accounting, separate from Kotlin abstract declarations.
+        let (Some(parameters), Some((physical, physical_result))) = (
+            method.descriptor.split_once(')').map(|(params, _)| params),
+            crate::jvm::physical_type::method_operand_tys(&method.descriptor),
+        ) else {
+            continue;
+        };
+        let raw_key = format!("{parameters})V");
+        if method.access & ACC_ABSTRACT == 0 {
+            // A member a Kotlin class declares implements its member with its metadata
+            // signature, in the class's substitution context: `DBase<T>.set(e: T)` under
+            // `DBase<String>` implements `set(String)`, and a non-generic
+            // `set(e: String): Nothing` keeps its `Nothing` result, which its physical `Void`
+            // does not tell. A generated member has no declaration and only its descriptor.
+            // A suspend declaration's continuation is a real parameter its metadata signature
+            // omits, so it keeps its physical key and implements no non-suspend member.
+            let declaration = (is_kotlin && query.named(&method.name))
                 .then(|| {
                     info.meta.class_functions.iter().find(|declaration| {
                         declaration.jvm_name == method.name
@@ -662,48 +853,42 @@ fn superclass_chain(
                 .flatten()
                 .filter(|declaration| !declaration.is_suspend())
                 .and_then(|declaration| declaration.generic_sig.as_ref());
-                let (key, result) = match declaration {
-                    Some(signature) => {
-                        let bindings = superclass_bindings(
-                            current,
-                            info.meta.class_type_parameters.type_params().clone(),
-                            applied(current)?,
-                        )?;
-                        let declared: Vec<Ty> = signature
-                            .receiver
-                            .iter()
-                            .chain(&signature.params)
-                            .copied()
-                            .collect();
-                        (
-                            parameter_descriptor(&substituted(&declared, &bindings)),
-                            ty_subst(signature.ret, &bindings),
-                        )
-                    }
-                    // A Java or generated method's result is its descriptor's.
-                    None => (raw_key, physical_result),
-                };
-                superclass
-                    .implemented_members
-                    .entry((method.name.clone(), key))
-                    .or_insert(Implementation {
-                        result,
-                        parameters: physical,
-                        physical_result,
-                    });
-            } else if is_abstract {
-                superclass
-                    .abstract_members
-                    .insert((method.name.clone(), raw_key));
-            }
+            let (key, result) = match declaration {
+                Some(signature) => {
+                    let bindings = superclass_bindings(
+                        current,
+                        info.meta.class_type_parameters.type_params().clone(),
+                        query.applied()?,
+                    )?;
+                    let declared: Vec<Ty> = signature
+                        .receiver
+                        .iter()
+                        .chain(&signature.params)
+                        .copied()
+                        .collect();
+                    (
+                        parameter_descriptor(&substituted(&declared, &bindings)),
+                        ty_subst(signature.ret, &bindings),
+                    )
+                }
+                // A Java or generated method's result is its descriptor's.
+                None => (raw_key, physical_result),
+            };
+            superclass
+                .implemented_members
+                .entry((method.name.clone(), key))
+                .or_insert(Implementation {
+                    result,
+                    parameters: physical,
+                    physical_result,
+                });
+        } else if is_abstract {
+            superclass
+                .abstract_members
+                .insert((method.name.clone(), raw_key));
         }
-        chain.push(superclass);
-        let Some(next) = info.super_class else {
-            break;
-        };
-        current = next;
     }
-    Ok(chain)
+    Ok(superclass)
 }
 
 /// Whether a member a superclass declares with `visibility` reaches the class, given whether every

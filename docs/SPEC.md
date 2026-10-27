@@ -13793,6 +13793,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `lib.JBase` with a package-private `void remove()` leave `Walk : Base(), Iterator<String>` (or
   `app.Walk : lib.JBase()`) its public throwing `remove()` stub, as kotlinc emits it. Tests:
   `tests/read_only_stub_inheritability_e2e.rs` (class bytes and box run against kotlinc).
+- **A read-only stub's superclass is read from the source that owns its declaration.** The
+  superclass walk reads a named source class of the module from the module's frozen declaration
+  records, whichever file declares it: its superclass, the semantic names of the type parameters
+  its application binds (own, then captured), and each instance function's visibility, abstract
+  and suspend modality, receiver, parameters and result. A body-local class is read from the
+  active file's IR, which alone can name it, and a dependency from its class file. A superclass
+  declared in another file of the module is therefore never taken for an absent dependency: its
+  realized stubs are not repeated (`Derived : Base()` with `open class Base : Iterator<String>` in
+  the other file gets no `remove()`), a member it declares abstract leaves the stub to its
+  subclass, and a member it implements is keyed in the class's substitution context
+  (`Editor<T>.set(e: T)` under `Editor<String>` implements `set(String)`) and called at its
+  declaration types' JVM representation. A superclass none of the three sources declares, or a
+  named source class without its record, is an explicit backend error, never an end of the walk.
+  Tests: `tests/read_only_stub_cross_file_superclass_e2e.rs` (every class byte for byte and a box
+  run against kotlinc).
 - **An implemented read-only stub member keeps its bridge.** When the class's own member, a
   superclass member or an interface default effectively overrides a mutable member of a read-only
   face, no throwing stub is written, but the mutable declaration's erased descriptor still gets a
