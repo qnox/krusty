@@ -151,3 +151,73 @@ fn a_synthesized_reference_or_annotation_class_is_marked_public_abi_like_kotlinc
     .expect("reference kotlinc is provisioned")
     .unwrap_or_else(|diff| panic!("{diff}"));
 }
+
+/// A top-level property's initializer is a declaration of its own, ordered against the functions
+/// around it by source position: `A` is first constructed by `first`'s initializer, before the
+/// inline function, so its implementation stays unmarked; `B` is first constructed in the inline
+/// function, before `second`'s initializer, so it is marked.
+const PROPERTY_ORDER_SOURCE: &str = r#"package app
+
+annotation class A(val i: Int)
+annotation class B(val i: Int)
+
+val first: Any = A(0)
+inline fun later(): Any = A(1)
+
+inline fun earlier(): Any = B(1)
+val second: Any = B(0)
+"#;
+
+#[test]
+fn a_property_initializer_takes_its_declaration_order_against_an_inline_function() {
+    let classpath = [common::stdlib_jar(), common::jdk_modules()];
+    common::metadata_headers_diff_against_kotlinc_cp(
+        "PropertyOrder",
+        PROPERTY_ORDER_SOURCE,
+        &[
+            "app/PropertyOrderKt$annotationImpl$app_A$0",
+            "app/PropertyOrderKt$annotationImpl$app_B$0",
+        ],
+        &classpath,
+    )
+    .expect("reference kotlinc is provisioned")
+    .unwrap_or_else(|diff| panic!("{diff}"));
+}
+
+/// The same for a class's property initializers and `init` blocks against its inline members.
+const CLASS_INITIALIZER_ORDER_SOURCE: &str = r#"package app
+
+annotation class A(val i: Int)
+annotation class B(val i: Int)
+annotation class C(val i: Int)
+annotation class D(val i: Int)
+
+class K {
+    val a: Any = A(0)
+    inline fun m(): Any = A(1)
+    inline fun n(): Any = B(1)
+    val b: Any = B(0)
+    init { C(0) }
+    inline fun o(): Any = C(1)
+    inline fun p(): Any = D(1)
+    init { D(0) }
+}
+"#;
+
+#[test]
+fn a_class_initializer_takes_its_declaration_order_against_an_inline_member() {
+    let classpath = [common::stdlib_jar(), common::jdk_modules()];
+    common::metadata_headers_diff_against_kotlinc_cp(
+        "ClassInitializerOrder",
+        CLASS_INITIALIZER_ORDER_SOURCE,
+        &[
+            "app/K$annotationImpl$app_A$0",
+            "app/K$annotationImpl$app_B$0",
+            "app/K$annotationImpl$app_C$0",
+            "app/K$annotationImpl$app_D$0",
+        ],
+        &classpath,
+    )
+    .expect("reference kotlinc is provisioned")
+    .unwrap_or_else(|diff| panic!("{diff}"));
+}

@@ -239,6 +239,9 @@ pub struct IrCheckedConstructorBody {
 pub struct IrCheckedClassInitializer {
     pub declaration: crate::fir::DeclarationId,
     pub initialization_order: u32,
+    /// The declaration's source position, the key properties (`IrStatic::source_order`,
+    /// `IrCheckedProperty::source_order`) and functions (`IrFile::fn_source_order`) order by.
+    pub source_order: u32,
     pub class: ClassId,
     pub body: ExprId,
 }

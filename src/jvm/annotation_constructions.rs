@@ -6,7 +6,7 @@
 
 use crate::fx_hash::{HashMap, HashSet};
 
-use crate::ir::{IrClass, IrCtorArg, IrEnclosure, IrExpr, IrField, IrFile};
+use crate::ir::{ExprId, IrClass, IrCtorArg, IrEnclosure, IrExpr, IrField, IrFile};
 use crate::types::{type_name, Ty, TypeName};
 
 pub(crate) fn lower_annotation_constructions(ir: &mut IrFile, facade: &str) {
@@ -127,23 +127,74 @@ pub(crate) fn lower_annotation_constructions(ir: &mut IrFile, facade: &str) {
 /// evaluated in the scope of an `inline` function other code can inline (one that is not private,
 /// nor a member of a private class), its lambdas and local classes included, the class is
 /// `isInPublicInlineScope`.
+///
+/// Declaration order is the frontend's source order of the declaration each construction is
+/// evaluated in: a function (a lambda or a local class's member by the declaration it is written
+/// in), a property's initializer, or an `init` block. Arena positions say nothing about it.
 fn public_abi_interfaces(
     ir: &IrFile,
     sites: &HashMap<u32, crate::ir::IrAnnotationConstruction>,
 ) -> HashSet<TypeName> {
-    let mut first_sites = HashMap::<TypeName, ((usize, u32), bool)>::default();
+    let mut first_sites = FirstSites::default();
     for (function, declaration) in ir.functions.iter().enumerate() {
         let Some(body) = declaration.body else {
             continue;
         };
         let function = u32::try_from(function).expect("too many functions for a function id");
-        let scope = crate::jvm::ir_emit::enclosure::enclosing_functions(
-            ir,
-            Some(IrEnclosure::Function(function)),
+        let scope = Scope::of(ir, Some(IrEnclosure::Function(function)), Some(function));
+        first_sites.visit(ir, sites, body, scope, &HashMap::default());
+    }
+    for property in &ir.statics {
+        if let Some(initializer) = property.init {
+            let scope = Scope {
+                order: property.source_order,
+                public: false,
+            };
+            first_sites.visit(ir, sites, initializer, scope, &HashMap::default());
+        }
+    }
+    // A class's initialization runs its property initializers and `init` blocks; each is its own
+    // declaration.
+    let initializers: HashMap<ExprId, u32> = ir
+        .checked_properties
+        .values()
+        .filter_map(|property| Some((property.initializer?, property.source_order)))
+        .chain(
+            ir.checked_class_initializers
+                .iter()
+                .map(|initializer| (initializer.body, initializer.source_order)),
         )
-        .collect::<Vec<_>>();
-        let root = scope.last().map_or(function, |&(root, _)| root) as usize;
-        let public = scope.iter().any(|&(enclosing, owner)| {
+        .collect();
+    for class in &ir.classes {
+        if let Some(body) = class.init_body {
+            let scope = Scope::of(ir, class.enclosure, None);
+            first_sites.visit(ir, sites, body, scope, &initializers);
+        }
+    }
+    first_sites
+        .0
+        .into_iter()
+        .filter(|(_, first)| first.public)
+        .map(|(interface, _)| interface)
+        .collect()
+}
+
+/// Where a construction is evaluated: the source order of its declaration, and whether that is
+/// in a public inline function's scope.
+#[derive(Clone, Copy)]
+struct Scope {
+    order: u32,
+    public: bool,
+}
+
+impl Scope {
+    /// The scope of code written in `enclosure`, ordered by the outermost function it is in, or,
+    /// outside every function, by `own` (a function's own id when `enclosure` is that function),
+    /// or last when there is neither.
+    fn of(ir: &IrFile, enclosure: Option<IrEnclosure>, own: Option<u32>) -> Self {
+        let functions =
+            crate::jvm::ir_emit::enclosure::enclosing_functions(ir, enclosure).collect::<Vec<_>>();
+        let public = functions.iter().any(|&(enclosing, owner)| {
             ir.inline_fns.contains(&enclosing)
                 && !ir.method_visibility(enclosing).is_private()
                 && owner.is_none_or(|owner| {
@@ -152,31 +203,57 @@ fn public_abi_interfaces(
                         .is_some_and(|visibility| visibility.is_private())
                 })
         });
-        let mut pending = vec![body];
-        while let Some(expression) = pending.pop() {
-            crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+        let order = functions
+            .last()
+            .map(|&(root, _)| root)
+            .or(own)
+            .and_then(|root| ir.fn_source_order.get(&root).copied());
+        Self {
+            order: order.unwrap_or(u32::MAX),
+            public,
+        }
+    }
+}
+
+/// Each annotation's first construction in declaration order.
+#[derive(Default)]
+struct FirstSites(HashMap<TypeName, Scope>);
+
+impl FirstSites {
+    /// Record the constructions under `root`, in `scope` unless they lie in one of `declarations`
+    /// (an initializer's own root, with its order).
+    fn visit(
+        &mut self,
+        ir: &IrFile,
+        sites: &HashMap<u32, crate::ir::IrAnnotationConstruction>,
+        root: ExprId,
+        scope: Scope,
+        declarations: &HashMap<ExprId, u32>,
+    ) {
+        let mut pending = vec![(root, scope)];
+        while let Some((expression, mut scope)) = pending.pop() {
+            if let Some(&order) = declarations.get(&expression) {
+                scope.order = order;
+            }
+            crate::ir::for_each_child(&ir.exprs, expression, &mut |child| {
+                pending.push((child, scope));
+            });
             let Some(site) = sites
                 .get(&expression)
                 .filter(|site| !site.scopes.is_empty())
             else {
                 continue;
             };
-            let order = (root, expression);
-            first_sites
+            self.0
                 .entry(site.interface)
                 .and_modify(|first| {
-                    if order < first.0 {
-                        *first = (order, public);
+                    if scope.order < first.order {
+                        *first = scope;
                     }
                 })
-                .or_insert((order, public));
+                .or_insert(scope);
         }
     }
-    first_sites
-        .into_iter()
-        .filter(|(_, (_, public))| *public)
-        .map(|(interface, _)| interface)
-        .collect()
 }
 
 fn annotation_implementation(
