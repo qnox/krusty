@@ -1,5 +1,31 @@
 # krusty — implementation plan
 
+## JVM dependency inline templates
+
+Native and Wasm compile against JVM dependency class files (`JvmLibraries`) as well as KLIBs. An
+inline function whose only body is JVM bytecode there, such as `UIntArray(size, init)`, has no
+`InlineBodyPlan` and cannot be expanded by `ExpandInIr`. The route is to read that bytecode body
+as a template in three independent steps:
+
+1. **Structured decoder** (`src/jvm/inline_template`, landed): `decode` turns a dependency
+   method's `MethodNode` into a `DecodedBody` of basic blocks over typed values. kotlinc's own
+   frame analysis (`FastMethodAnalyzer` + `OptimizationBasicInterpreter`) types every reached
+   frame; operand-stack words become `ValueId`s with stack-carried values passed as block
+   parameters, locals stay typed `(slot, category)` locals, calls and fields keep their exact
+   owner/name/descriptor, and lines and the exception table are kept per operation and as
+   handlers over blocks. It drops no instruction and interprets no call. Not yet consumed.
+2. **Normalization into common IR**: map a `DecodedBody` onto the common inline-body form keyed
+   only on exact JVM owner, name and descriptor: boxing/unboxing (`Integer.valueOf`,
+   `UInt.unbox-impl`, `UIntArray.constructor-impl`), function-type `invoke` of a lambda
+   parameter, parameter null checks (kept as checks a non-JVM target still performs), inline
+   markers and `$i$f`/`$i$a` locals. An unrecognised call stays an ordinary call of its exact
+   declaration or declines the template; reified bodies keep declining as today. No spelling or
+   simple-name matching, and no fallback lowering path.
+3. **`ExpandInIr` hookup**: publish the normalized template for a `JvmLibraries` inline
+   declaration the way KLIB providers publish theirs, so the Native/Wasm lanes expand it with the
+   existing machinery; Native `UIntArray(n) { … }` is the first regression, checked against the
+   JVM/kotlinc oracle first.
+
 ## Source classifier inventory identities
 
 Replace lookup-spelling splitting in the foreign-source classifier inventory with the existing

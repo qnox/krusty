@@ -50,6 +50,7 @@ mod inherited_default_realization;
 pub mod inline;
 pub mod inline_class;
 mod inline_parameters;
+pub mod inline_template;
 pub(crate) mod inliner;
 mod inner_classes;
 mod internal_names;
