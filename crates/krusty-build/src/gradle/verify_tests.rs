@@ -215,6 +215,21 @@ fn verify_task_reports_only_the_current_invocation() {
 #[ignore = "downloads Gradle and the Kotlin Gradle plugin"]
 fn verify_task_reports_an_unsupported_kotlin_gradle_plugin() {
     let fixture = IntegrationFixture::new("krusty-verify-kgp", write_unsupported_kgp_build);
+    assert_unsupported_kotlin_gradle_plugin_reported(&fixture, UNSUPPORTED_KGP);
+}
+
+/// A Kotlin Gradle plugin release older than the plugin API the krusty plugin is compiled against,
+/// whose classes differ in kind from it (`KotlinTopLevelExtension` is an abstract class there, not
+/// an interface): the krusty plugin reads only the release before leaving every compile to kotlinc,
+/// as for any unsupported release, instead of failing the build with a linkage error.
+#[test]
+#[ignore = "downloads Gradle and the Kotlin Gradle plugin"]
+fn verify_task_reports_a_kotlin_gradle_plugin_older_than_the_plugin_api() {
+    let fixture = IntegrationFixture::new("krusty-verify-old-kgp", write_old_kgp_build);
+    assert_unsupported_kotlin_gradle_plugin_reported(&fixture, OLD_KGP);
+}
+
+fn assert_unsupported_kotlin_gradle_plugin_reported(fixture: &IntegrationFixture, kgp: &str) {
     let root = &fixture.root;
     let output = fixture
         .build()
@@ -232,7 +247,7 @@ fn verify_task_reports_an_unsupported_kotlin_gradle_plugin() {
     .collect::<Vec<_>>();
     let (last, earlier) = supported.split_last().expect("a supported release");
     let reason = format!(
-        "unsupported Kotlin Gradle plugin {UNSUPPORTED_KGP}; expected {}, or {last}",
+        "unsupported Kotlin Gradle plugin {kgp}; expected {}, or {last}",
         earlier.join(", ")
     );
     let reports = output
@@ -260,6 +275,24 @@ fn verify_task_reports_an_unsupported_kotlin_gradle_plugin() {
         std::fs::read_to_string(root.join("build/reports/krusty-verify/krusty-verify-issue.md"))
             .expect("issue");
     assert!(issue.contains(&format!("| {reason} | 2 |\n")), "{issue}");
+    // krusty compiled neither: it only recorded each as unsupported, then wrote the report.
+    let runs = invocations(&read_invocation_log(&fixture.log).expect("invocation log"));
+    let commands = runs
+        .iter()
+        .map(|run| {
+            let unsupported = run.iter().any(|argument| argument == "--unsupported");
+            (run.first().map(String::as_str).unwrap_or(""), unsupported)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        commands,
+        [
+            ("verify-compile", true),
+            ("verify-compile", true),
+            ("verify-report", false)
+        ],
+        "{runs:?}"
+    );
 
     let _ = std::fs::remove_dir_all(root);
 }
@@ -444,8 +477,20 @@ repositories {
 /// A Kotlin Gradle plugin release that exists and that the kotlin-versions manifest does not list.
 const UNSUPPORTED_KGP: &str = "2.3.20";
 
+/// A Kotlin Gradle plugin release from before `KotlinTopLevelExtension` became an interface (2.1).
+const OLD_KGP: &str = "1.9.25";
+
 fn write_unsupported_kgp_build(root: &Path, plugin_version: &str, _kgp_version: &str) {
-    write_verify_build(root, plugin_version, UNSUPPORTED_KGP);
+    write_unrefused_verify_build(root, plugin_version, UNSUPPORTED_KGP);
+}
+
+fn write_old_kgp_build(root: &Path, plugin_version: &str, _kgp_version: &str) {
+    write_unrefused_verify_build(root, plugin_version, OLD_KGP);
+}
+
+/// [write_verify_build] for `kgp`, without the switch krusty refuses.
+fn write_unrefused_verify_build(root: &Path, plugin_version: &str, kgp: &str) {
+    write_verify_build(root, plugin_version, kgp);
     // The extra-warnings switch is beside the point here; the plugin release alone is refused.
     let build = root.join("build.gradle.kts");
     let script = std::fs::read_to_string(&build).expect("build script");
