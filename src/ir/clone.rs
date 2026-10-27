@@ -424,6 +424,7 @@ fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId) {
     }
     copy_map!(static_extension_receivers);
     copy_map!(call_inline_modifiers);
+    copy_map!(ordinary_intrinsic_calls);
     copy_map!(suspend_calls);
     copy_map!(suspend_lambda_placements);
     copy_map!(suspend_call_overridden_results);
@@ -483,6 +484,9 @@ fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId) {
     }
     if ir.transparent_loop_bodies.contains(&source) {
         ir.transparent_loop_bodies.insert(target);
+    }
+    if ir.inline_return_frame_bodies.contains(&source) {
+        ir.inline_return_frame_bodies.insert(target);
     }
     if ir.for_loop_next_loops.contains(&source) {
         ir.for_loop_next_loops.insert(target);

@@ -72,7 +72,8 @@ pub(super) fn inline_into(
     let constructors =
         object_regeneration::regenerate_objects(&mut node, &parameters, &placed, classes, objects)
             .map_err(inlining)?;
-    let invokes = functional_arguments::mark_places(&mut node, &parameters).map_err(inlining)?;
+    let invokes = functional_arguments::mark_places(&mut node, &parameters, &constructors)
+        .map_err(inlining)?;
     object_regeneration::complete_constructor_calls(&mut node, constructors).map_err(inlining)?;
     let context = lambda_expansion::Context {
         parameters: &parameters,

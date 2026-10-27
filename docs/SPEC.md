@@ -5785,8 +5785,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   route once (`fir_lower/source_calls/inline_route.rs`): a call stays a call recorded for the
   backend (`IrFile::compiled_inline_call`) only when the callee is a non-suspend function in this
   module (public, or declared in the caller's own file), top-level or a member of a class, object
-  or companion, with no suspend function-typed parameter or receiver, no
-  `crossinline` parameter, and a template without
+  or companion, with no suspend function-typed parameter or receiver, and a template without
   a subject `when` that switches on an enum's keys (`IrFile::enum_switch_when`),
   called with every argument from any body: a named function, an inline function (whose compiled
   body then holds the nested callee's code, as kotlinc's does), a lambda's method, a local function,
@@ -5876,6 +5875,59 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   reading a `noinline` parameter does not), with
   `tests/inline_deep_coverage_e2e.rs` (`inline_nonlocal_return_two_frames`) and
   `tests/nested_inline_lambda_e2e.rs` for a caller's literal forwarded through two inline frames.
+
+- **A same-module call with a `crossinline` literal is inlined from the compiled body.** kotlinc
+  compiles the literal's body for the object that keeps it, outside the literal's own class
+  (`IrInlineCodegen` generates a `crossinline` lambda as code of the regenerated object): a property
+  it writes goes through the setter (a top-level property's too, as in a non-private inline
+  function's own body, where kotlinc calls `getX`/`setX` rather than the facade's private field),
+  a private member through its class's synthetic `access$` accessor, as a nested class would reach
+  them (`StaticAccessorPlan::exports_lambda_body`, the
+  bodies `ir_emit::crossinline_literals` names, for a callee of this module or of the
+  classpath alike). `suspendCoroutine`'s block is `crossinline` only to forbid non-local returns:
+  kotlinc inlines it in place (`isCoroutineIntrinsic`), so it stays code of the caller's class
+  (`CompilerIntrinsic::SuspendCoroutine`, recognized from the declaration's shape). The literal's
+  captured outer instance is the
+  copy's `this$0`, one field for every captured instance of the same class
+  (`capturedOuterThisTypes`). An object whose own `this$0` a lambda also captures keeps its own
+  instance as `this$0$inline_fun`, in its field, its constructor and every method that reads it
+  (`INLINE_FUN_THIS_0_SUFFIX` in `extractParametersMappingAndPatchConstructor`): the two may be
+  different objects, of the same class or not. That name and each captured value's `$inlined` field
+  are numbered past every name the class already holds, declared or allocated earlier in the same
+  regeneration (`anonymous_object::field_names`): kotlinc numbers by how many fields share the base
+  and declares a backticked `this$0$inline_fun$1` twice, which the JVM refuses; the copy takes
+  `this$0$inline_fun$2` (`a_renamed_outer_instance_skips_every_field_name_the_object_declares`). A
+  bound callable reference passed for the
+  parameter keeps its receiver in the copy's `$receiver` field, and a literal that receives a lifted
+  receiver names it as the lambda's class would. A literal that returns locally keeps its own
+  locals in its method's outermost scope, recorded after the method's marker even though the
+  local-return frame nests them (`ir::inline_return_frame_bodies`). A property reference written as
+  the argument is a class-owned implementation; when the compiled body takes it as a value it is
+  materialized, and its implementation is kept for that use. A lambda an expansion writes directly
+  into an inline function's body is that function's code: a class enclosed by it, which a call
+  site regenerates with the lambda it captures. A nested literal the literal passes to an inline
+  call of its own is code of the literal's body, not a method of the caller, so it does not keep
+  the literal out of the object. A callable reference or lambda class declared in an inline
+  function's scope is public, with a public constructor and a public `InnerClasses` row, as
+  kotlinc's `inInlineFunctionScope` makes every local class there: a caller in another package
+  constructs it (`kt22304`). A compiled body that passes the call's lambda to any other operation
+  than its `invoke`, a removed store or null check, or the constructor of an object regenerated
+  around it keeps the lambda as a value. kotlinc's frontend rules that out for its own bodies, so
+  its `MethodInliner` never meets one; a body this compiler wrote still can, by capturing the
+  parameter in a suspend literal it materialized. The route is decided from that callee fact
+  before anything is inlined (`inliner::keeps_lambda_as_value`, `SpliceReason::LambdaKeptAsValue`,
+  the same analysis `markPlacesForInlineAndRemoveInlinable` runs), and the inliner refuses such a
+  body (`LambdaParameterAccess`) only as a broken invariant. Not yet matched:
+  the regenerated object still names the caller's source file and keeps the literal's field in its
+  metadata. Tests: `tests/inline_same_module_crossinline_e2e.rs` (setter and accessor writes, a
+  top-level property written from a `crossinline` literal and from an inline function as a run, a
+  bound reference, a local return with locals, against kotlinc's bytes for the classes around the
+  copies and as a run; a lambda class around the parameter, as a run;
+  `an_inline_functions_reference_class_is_public_to_a_caller_in_another_package`, against kotlinc's
+  result; `an_objects_own_outer_instance_is_renamed_beside_a_lambdas_captured_one` and
+  `a_body_keeping_a_crossinline_lambda_as_a_value_is_routed_before_inlining`, against kotlinc's
+  run), `jvm::inliner::tests::a_lambda_passed_to_another_call_is_not_inlined` and
+  `an_invoke_of_an_inline_lambda_becomes_the_lambdas_body` (the up-front fact).
 
 - **A lambda's non-local `return` runs every `finally` it leaves, as kotlinc copies them.** An
   inline function that holds the lambda in a `try`/`finally` (`synchronized`, `withLock`,

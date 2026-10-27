@@ -169,6 +169,22 @@ pub(super) fn reads_captured_fields_from_this(
     true
 }
 
+/// Rename every access in `code` to the field `from` of `owner` to `to`.
+pub(super) fn rename_field(code: &mut MethodNode, owner: &str, from: &str, to: &str) {
+    for entry in &mut code.nodes {
+        if let Node::Insn(Insn::Field {
+            owner: field_owner,
+            name,
+            ..
+        }) = entry
+        {
+            if field_owner == owner && name == from {
+                *name = to.to_string();
+            }
+        }
+    }
+}
+
 impl Constructor {
     /// kotlinc's constructor for a copy that inlines the lambdas passed as the arguments at
     /// `lambda_arguments` of `call_desc`: each lambda's field and parameter go, and the values the

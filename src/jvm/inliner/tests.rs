@@ -625,6 +625,10 @@ fn an_invoke_of_an_inline_lambda_becomes_the_lambdas_body() {
         }],
         capture_owners: vec![0],
     };
+    assert_eq!(
+        super::keeps_lambda_as_value(&apply_to_one(), &parameters, &NoClasses),
+        Ok(false)
+    );
     let inlined = inline(
         &apply_to_one(),
         &parameters,
@@ -696,6 +700,61 @@ fn an_invoke_of_an_inline_lambda_becomes_the_lambdas_body() {
         .collect();
     // The body's line, the lambda's, and the body's again after the lambda.
     assert_eq!(lines, vec![7, 2, 7]);
+}
+
+#[test]
+fn a_lambda_passed_to_another_call_is_not_inlined() {
+    // `inline fun f(block: (Int) -> Int) = keep(block)`: the lambda leaves as a value.
+    let mut callee = MethodNode::new(ACC_STATIC, "f", "(Lkotlin/jvm/functions/Function1;)V");
+    let start = callee.new_label();
+    callee.nodes = vec![
+        Node::Label(start),
+        var(0x19, 0),
+        method(
+            0xb8,
+            "Keeper",
+            "keep",
+            "(Lkotlin/jvm/functions/Function1;)V",
+        ),
+        op(0xb1),
+    ];
+    callee.max_locals = 1;
+    callee.max_stack = 1;
+    let parameters = Parameters {
+        parameters: vec![Parameter {
+            category: Category::Reference,
+            binding: Binding::Lambda(0),
+        }],
+        captured: vec![Parameter {
+            category: Category::Int,
+            binding: Binding::CallerLocal {
+                slot: 2,
+                category: Category::Int,
+                checkcast: None,
+            },
+        }],
+        capture_owners: vec![0],
+    };
+    // The route is decided from this fact before the body is inlined.
+    assert_eq!(
+        super::keeps_lambda_as_value(&callee, &parameters, &NoClasses),
+        Ok(true)
+    );
+    let inlined = inline(
+        &callee,
+        &parameters,
+        &[plus_captured()],
+        false,
+        5,
+        &Default::default(),
+        InliningContext {
+            lines: &mut OwnLines,
+            classes: &NoClasses,
+            objects: &mut NoObjects,
+            enum_entries: &mut crate::jvm::reified_arguments::NoEnumEntriesReads,
+        },
+    );
+    assert_eq!(inlined.err(), Some(InlineError::LambdaParameterAccess));
 }
 
 /// `inline fun f(block: (Int) -> Int): Int = 10 + block(1)`: the invoke finds `10` under it.

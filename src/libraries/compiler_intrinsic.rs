@@ -116,6 +116,11 @@ pub enum CompilerIntrinsic {
     CoroutineContext,
     CoroutineSuspended,
     SuspendCoroutineUninterceptedOrReturn,
+    /// `kotlin.coroutines.suspendCoroutine`, an ordinary inline call whose `crossinline` block
+    /// kotlinc's JVM backend treats as inlined in place (`isCoroutineIntrinsic` in
+    /// `IrInlineScopeResolver`): the parameter only forbids non-local returns, so the block's code
+    /// stays the calling class's own.
+    SuspendCoroutine,
     EnumValues,
     EnumValueOf,
     /// The zero-argument `kotlin.enums.enumEntries<T>()`. Its stdlib body only throws; the selected

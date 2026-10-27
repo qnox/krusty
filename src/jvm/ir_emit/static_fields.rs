@@ -1072,6 +1072,15 @@ impl Emitter<'_> {
             && (declaration.owner.is_some() || !self.ir.has_jvm_default_static_getter(index))
     }
 
+    /// Whether the facade's field of static `index` is accessed directly: from the facade, unless
+    /// the code is copied into other classes (an inline function's body or a `crossinline`
+    /// literal's), which reaches a property through its accessors as kotlinc does; a `@JvmField`
+    /// is a public field either way.
+    fn reads_facade_field_directly(&self, index: u32) -> bool {
+        self.static_owner == Some(StaticOwner::Facade)
+            && (!self.export_private_calls || self.ir.is_jvm_field_static(index))
+    }
+
     /// Read static `index` from wherever its storage lives, as seen from the class being emitted.
     pub(super) fn emit_get_static(&mut self, i: u32, expr: u32, code: &mut CodeBuilder) {
         let s = &self.ir.statics[i as usize];
@@ -1181,9 +1190,7 @@ impl Emitter<'_> {
         // cross-file property-access compilation. A public `lateinit` calls `getX()` even from the
         // facade, so the throw lives in the getter. `isInitialized` still `getstatic`s the public
         // field. A private `lateinit` inlines the guard on the raw read.
-        else if (self.static_owner == Some(StaticOwner::Facade)
-            || is_const
-            || (probe && !is_private))
+        else if (self.reads_facade_field_directly(i) || is_const || (probe && !is_private))
             && !calls_getter
         {
             let fref = self.cw.fieldref(
@@ -1338,7 +1345,7 @@ impl Emitter<'_> {
                 );
                 code.invokestatic(m, slot_words(jt) as i32, 0);
             }
-        } else if self.static_owner == Some(StaticOwner::Facade) || is_const {
+        } else if self.reads_facade_field_directly(index) || is_const {
             let fref = self.cw.fieldref(
                 &facade,
                 self.ir.static_field_jvm_name(index),

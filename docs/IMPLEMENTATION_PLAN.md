@@ -5667,8 +5667,19 @@ regress.
     it (`capturedOuterRegenerated`), a suspend method's continuation included, so a constructor
     that creates an object and a suspend method of a reified object compile again (the IR route
     had taken them): the corpus is unchanged (4,137 byte-identical, none lost, all 7,184 run).
-    ☐ `$default` calls, suspend callees (and the calls a suspend inline function holds),
-    `crossinline` parameters, calls in default arguments, and callee bodies with enum switches.
+    ✓ Callees with `crossinline` parameters (`CrossinlineParameter`): a `crossinline` literal's
+    body is compiled as code outside its class (setters, `access$` accessors, and a top-level
+    property's accessors, as an exported inline body's own code now reads them too), its captured
+    outer instance is one `this$0` per type, a bound reference's receiver is `$receiver`, a local
+    return keeps the literal's locals in its method's outer scope, a class-owned reference
+    implementation materialized as a value is kept, a lambda an expansion writes into an inline
+    function is a class that function encloses, an object's own `this$0` beside a lambda's is
+    `this$0$inline_fun`, a class in an inline function's scope is public, and a body that hands
+    the call's lambda to any other operation takes the splice, decided from the callee before
+    inlining (`LambdaKeptAsValue`): 12 more box files are byte-identical
+    on 2.4.21 (4,137 to 4,149), none regresses, and all 7,184 applicable files run.
+    ☐ `$default` calls, suspend callees (and the calls a suspend inline function holds), calls in
+    default arguments, and callee bodies with enum switches.
 - ☐ 7. Delete `InlineBodyPlan` and its resolver/FIR threading once the coroutine state machine runs
   on inlined bytecode (the plans exist only to reach IR before `lower_suspend`).
 

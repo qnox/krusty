@@ -6,6 +6,7 @@
 use super::lambda_route::SpliceReason;
 use super::*;
 use crate::jvm::classreader::{ExcEntry, MethodLocal};
+use crate::jvm::ir_emit::lambda_body_scope::{record_body_locals, LambdaBodyScope};
 use crate::jvm::method_node::{CodeAttribute, LabelId};
 use crate::types::TyKind;
 
@@ -490,7 +491,7 @@ impl Emitter<'_> {
             return_type: "V".to_string(),
             value_class_return: None,
             captured: 0..0,
-            capture_names: self.capture_names(lambda.impl_fn, lambda.captures.len()),
+            capture_names: self.capture_names(argument, lambda.impl_fn, lambda.captures.len()),
             default_class: None,
             suspend: lambda.suspend,
         };
@@ -503,11 +504,11 @@ impl Emitter<'_> {
         Ok((shape, captures))
     }
 
-    /// Whether the literal lambda `argument`'s body reaches a declaration only its own class may: a
-    /// private field (a property's backing field), a private function, an `invokespecial`, or a
-    /// nested lambda (which may be materialized as a private method). Inlined into a regenerated
-    /// object, kotlinc reaches those through synthetic accessors, which the port does not generate
-    /// yet.
+    /// Whether the literal lambda `argument`'s body reaches a declaration only its own class may,
+    /// other than through the accessors a `crossinline` literal's body calls: an `invokespecial`,
+    /// or a nested lambda (which may be materialized as a private method). Inlined into a
+    /// regenerated object, kotlinc reaches those through a synthetic accessor and a class of the
+    /// lambda's own, which the port does not generate yet.
     pub(super) fn lambda_reaches_private_members(
         &self,
         argument: u32,
@@ -515,31 +516,28 @@ impl Emitter<'_> {
         let (lambda, _) = self.literal_lambda(argument)?;
         let mut pending = vec![lambda.inline_body];
         let mut seen = HashSet::default();
+        // The literals an inline call written in the body inlines: their bodies are code of the
+        // body itself, never a method of their own.
+        let mut inlined = HashSet::default();
         while let Some(expression) = pending.pop() {
             if !seen.insert(expression) {
                 continue;
             }
             let private = match self.ir.expr(expression) {
-                // A property's backing field is private unless it is a constant or `@JvmField`,
-                // whatever the property's own visibility.
-                IrExpr::GetStatic(index) | IrExpr::SetStatic { index, .. } => {
-                    !self.ir.statics[*index as usize].is_const
-                        && !self.ir.is_jvm_field_static(*index)
-                }
-                IrExpr::GetField { class, index, .. }
-                | IrExpr::SetField { class, index, .. }
-                | IrExpr::LateinitInitialized { class, index, .. } => {
-                    self.ir.classes[*class as usize].fields[*index as usize].is_private()
-                }
-                IrExpr::Call { callee, .. } => {
+                IrExpr::Call { callee, args, .. } => {
+                    inlined.extend(
+                        self.inlined_literal_arguments(expression, args.iter().copied().map(Some)),
+                    );
                     matches!(&**callee, Callee::Special { .. })
-                        || callee.source_function().is_some_and(|function| {
-                            self.ir.method_visibility(function).is_private()
-                        })
                 }
-                // A nested lambda may be materialized as a method of the caller, which the object
-                // could not reach and route planning cannot tell from its shape.
-                IrExpr::Lambda { .. } => true,
+                IrExpr::MethodCall { args, .. } => {
+                    inlined
+                        .extend(self.inlined_literal_arguments(expression, args.iter().copied()));
+                    false
+                }
+                // Any other nested lambda may be materialized as a method of the caller, which the
+                // object could not reach and route planning cannot tell from its shape.
+                IrExpr::Lambda { .. } => !inlined.contains(&expression),
                 _ => false,
             };
             if private {
@@ -548,6 +546,24 @@ impl Emitter<'_> {
             crate::ir::for_each_child(&self.ir.exprs, expression, &mut |child| pending.push(child));
         }
         Ok(false)
+    }
+
+    /// The literal lambdas among `args`, the operands of the call `call`, that it passes to inline
+    /// parameters (`is_inline_parameter`).
+    fn inlined_literal_arguments(
+        &self,
+        call: ExprId,
+        args: impl Iterator<Item = Option<ExprId>>,
+    ) -> Vec<ExprId> {
+        args.enumerate()
+            .filter_map(|(parameter, argument)| {
+                let argument = argument?;
+                (matches!(self.ir.expr(argument), IrExpr::Lambda { .. })
+                    && crate::jvm::inline_parameters::is_inline_parameter(self.ir, call, parameter)
+                        == Some(true))
+                .then_some(argument)
+            })
+            .collect()
     }
 
     /// Whether every value the lambda `argument` captures can be bound: kotlinc binds a captured
@@ -663,7 +679,31 @@ impl Emitter<'_> {
         let caller_machine = placed_machine
             .map(|(machine, completion)| self.arm_placed_suspend_lambda(machine, completion));
         let caller_type_parameters = self.type_parameter_function.replace(impl_fn);
+        let caller_body_scope = std::mem::replace(
+            &mut self.lambda_body_scope,
+            LambdaBodyScope::of_template(self.ir, inline_body),
+        );
+        // A `crossinline` literal's body reaches its class's members as code outside the class.
+        let caller_exports = (
+            self.method_exports_private_access,
+            self.export_private_calls,
+        );
+        if self
+            .run
+            .static_accessor_plan
+            .borrow()
+            .exports_lambda_body(inline_body)
+        {
+            self.method_exports_private_access = true;
+            self.export_private_calls = true;
+        }
         let result = self.emit_fn_body_inline(inline_body, &parameter_slots, &mut scratch);
+        (
+            self.method_exports_private_access,
+            self.export_private_calls,
+        ) = caller_exports;
+        let body_scope_locals =
+            std::mem::replace(&mut self.lambda_body_scope, caller_body_scope).into_closed();
         self.type_parameter_function = caller_type_parameters;
         if let Some(caller_machine) = caller_machine {
             self.disarm_placed_suspend_lambda(caller_machine);
@@ -732,7 +772,8 @@ impl Emitter<'_> {
         };
         // kotlinc closes the outermost scope at the end of the lambda's method, after its return:
         // the marker it declared first, then the body's own locals in declaration order, then the
-        // parameters. A nested block's locals closed earlier, where the block ended.
+        // parameters. A nested block's locals closed earlier, where the block ended. A body that
+        // returns locally closed its own block where the returns join, holding its locals.
         if self.record_locals {
             let end = u16::try_from(scratch.bytes.len())
                 .map_err(|_| "an inline lambda's code is too long")?;
@@ -753,6 +794,7 @@ impl Emitter<'_> {
                 &marker,
                 "I",
             );
+            record_body_locals(body_scope_locals, end, &mut scratch);
             for local in body_locals {
                 let length = end.saturating_sub(local.start);
                 local.record(Some(length), &mut scratch);
@@ -828,7 +870,7 @@ impl Emitter<'_> {
                 value_class_return: self.invoke_coercion(result_semantic, result).value_class(),
                 captured: 0..0,
                 capture_names: {
-                    let mut names = self.capture_names(impl_fn, own_captures);
+                    let mut names = self.capture_names(argument, impl_fn, own_captures);
                     if continuation_read.is_some() {
                         names.push(Some("$completion".to_string()));
                     }
@@ -856,15 +898,36 @@ impl Emitter<'_> {
     }
 
     /// The names kotlinc's `capturedVars` give the lambda `impl_fn`'s first `count` parameters, its
-    /// captured values: `$x` for a captured local `x`. A captured receiver is not named yet.
-    fn capture_names(&self, impl_fn: u32, count: usize) -> Vec<Option<String>> {
+    /// captured values: `$x` for a captured local `x`, and a captured receiver as the lifted lambda
+    /// spells it (`this$0` for an outer instance).
+    /// The name each of the `count` values the literal `argument`, implemented by `impl_fn`,
+    /// captures is kept under in a regenerated object. A bound callable reference's receiver is its
+    /// last capture, which kotlinc captures as `$receiver`.
+    fn capture_names(&self, argument: u32, impl_fn: u32, count: usize) -> Vec<Option<String>> {
         let identities = self.ir.fn_params.get(&impl_fn).map(|info| &info.identities);
+        let bound_receiver = match self.ir.expr(argument) {
+            IrExpr::CallableReference(reference) if reference.bound_receiver.is_some() => {
+                count.checked_sub(1)
+            }
+            _ => None,
+        };
         (0..count)
             .map(|index| {
+                if Some(index) == bound_receiver {
+                    return Some("$receiver".to_string());
+                }
                 let identity = identities?.get(index)?;
                 match identity.role {
                     crate::ir::IrParameterRole::CapturedValue { .. } => {
                         Some(format!("${}", identity.source_name.as_ref()?))
+                    }
+                    crate::ir::IrParameterRole::CapturedReceiver { ordinal } => {
+                        crate::jvm::capture_names::lifted_receiver(
+                            self.ir,
+                            impl_fn,
+                            ordinal as usize,
+                        )
+                        .map(|(name, _)| name)
                     }
                     _ => None,
                 }

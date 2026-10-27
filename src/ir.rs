@@ -65,6 +65,7 @@ mod field_flags;
 mod fields;
 mod function_scope;
 mod inline_copies;
+mod inline_return_frame_bodies;
 mod suspension_points;
 pub use suspension_points::{IrIntrinsicSuspensionPoint, IrValueClassSuspendResult};
 mod intrinsic;
@@ -1629,6 +1630,9 @@ pub struct IrFile {
     /// nested in it writes [`IrExpr::SetFrameResult`], which every renumbering of either body
     /// leaves pointing at the same frame.
     pub inline_return_frames: crate::fx_hash::HashMap<ExprId, String>,
+    /// The bodies an inline-return frame wraps: each template body whose own returns became the
+    /// frame's exits. See [`IrFile::inline_return_frame_body`].
+    pub inline_return_frame_bodies: crate::fx_hash::HashSet<ExprId>,
     /// `try` expressions whose result is the value of a spliced inline lambda protected by the
     /// inline call's cleanup. This is semantic inline-frame provenance: a backend chooses how the
     /// result crosses `finally`; common IR does not prescribe a local slot, reload, or branch.
@@ -2173,11 +2177,6 @@ pub struct IrFile {
     /// `ValueParameter.vararg_element_type` (f4) or a consumer demands one literal array (`too many
     /// arguments`).
     pub fn_varargs: crate::fx_hash::HashMap<u32, IrVarargParameter>,
-    /// Synthesized classes (function-reference/suspend-conversion adapters) that must be PUBLIC:
-    /// they are referenced from a PUBLIC INLINE function's body, whose splice copies the reference
-    /// into arbitrary other packages/modules (kotlinc marks such synthetics public for the same
-    /// reason). Package-private would be an IllegalAccessError at every cross-package splice site.
-    pub public_synthetics: crate::fx_hash::HashSet<TypeName>,
     /// Declaring class to indices in `statics` for class properties whose JVM field is static.
     pub declared_class_statics: crate::fx_hash::HashMap<TypeName, Vec<u32>>,
     /// (class internal name, property name) → 1-based source line of a BODY property's declaration.
@@ -2361,6 +2360,10 @@ pub struct IrFile {
     /// modifier, published after the physical receiver operands are inserted.
     pub call_inline_modifiers:
         crate::fx_hash::HashMap<u32, Box<[crate::types::InlineParameterModifier]>>,
+    /// Realized call `ExprId` → the compiler role of the dependency declaration it calls, for a
+    /// role whose call stays an ordinary call (`CompilerIntrinsic::SuspendCoroutine`): the backend
+    /// reads the role, not the declaration's name.
+    pub ordinary_intrinsic_calls: crate::fx_hash::HashMap<u32, crate::libraries::CompilerIntrinsic>,
     /// Stable property-operation identity → the declaration's semantic value type before
     /// use-site generic substitution. Resolution knows this fact uniformly for every source owner;
     /// recording it here lets a backend derive the physical accessor boundary without asking whether

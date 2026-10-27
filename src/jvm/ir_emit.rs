@@ -59,6 +59,7 @@ use constructor_defaults::{constructor_default_masks, emit_constructor_default_a
 mod companion_field;
 mod copied_code;
 mod coroutine_machine;
+mod crossinline_literals;
 mod debug_lines;
 mod declaration_annotations;
 mod declaration_types;
@@ -113,6 +114,7 @@ use instance_field_names::instance_field_jvm_name;
 mod inherited_default_forwarders;
 mod interface_compatibility;
 mod intrinsic_probes;
+mod lambda_body_scope;
 mod lambda_class;
 pub(super) mod lambda_class_names;
 mod lambda_implementation_placement;
@@ -322,6 +324,10 @@ pub(crate) struct EmitRun {
     /// emit-run decision: it includes class-owned helpers whose every use was spliced, and is cleared
     /// before the next independent emission of the same IR.
     dead_lambdas: std::cell::RefCell<crate::fx_hash::HashSet<u32>>,
+    /// Must-inline lambda impls the discovery emit found a real closure for: their call fell back
+    /// to the function object, so the method is written despite its `inline_only` mark, whichever
+    /// class or facade owns it.
+    rescued_lambdas: std::cell::RefCell<crate::fx_hash::HashSet<u32>>,
     /// Subset of live closures actually realized with `invokedynamic`. A class-strategy closure still
     /// keeps its implementation method but does not impose the JVM-7 classfile requirement.
     used_indy_lambdas: std::cell::RefCell<crate::fx_hash::HashSet<u32>>,
@@ -1325,19 +1331,8 @@ fn emit_all_with_class_meta_impl(
     env.run.used_lambdas.borrow_mut().clear();
     env.run.used_indy_lambdas.borrow_mut().clear();
     env.run.dead_lambdas.borrow_mut().clear();
-    let empty = crate::fx_hash::HashSet::default();
-    let first = emit_pass(
-        ir,
-        facade,
-        env,
-        metadata,
-        opts,
-        class_meta,
-        &LambdaSelection {
-            dead: &empty,
-            rescued: &empty,
-        },
-    )?;
+    env.run.rescued_lambdas.borrow_mut().clear();
+    let first = emit_pass(ir, facade, env, metadata, opts, class_meta)?;
     let used = env.run.used_lambdas.borrow().clone();
     let used_indy = env.run.used_indy_lambdas.borrow().clone();
     // `invokedynamic` was added in class-file version 51 (Java 7). Do not return a version-50 class
@@ -1396,28 +1391,11 @@ fn emit_all_with_class_meta_impl(
         return Some(first);
     }
     env.run.dead_lambdas.borrow_mut().clone_from(&dead);
-    // Pass 2: re-emit without the dead facade impls, plus any rescued must-inline impls
-    // (deterministic — identical decisions, minus the dead methods, plus the rescued ones; the
-    // facade itself drops when the dead impls were its only members).
-    emit_pass(
-        ir,
-        facade,
-        env,
-        metadata,
-        opts,
-        class_meta,
-        &LambdaSelection {
-            dead: &dead,
-            rescued: &rescued,
-        },
-    )
-}
-
-/// Which facade-owned lambda impls a pass drops (`dead`) or keeps despite a pre-marked inline
-/// (`rescued`) — the only state that differs between emit pass 1 (both empty) and pass 2.
-struct LambdaSelection<'a> {
-    dead: &'a crate::fx_hash::HashSet<u32>,
-    rescued: &'a crate::fx_hash::HashSet<u32>,
+    env.run.rescued_lambdas.borrow_mut().clone_from(&rescued);
+    // Pass 2: re-emit without the dead impls, plus any rescued must-inline impls (deterministic —
+    // identical decisions, minus the dead methods, plus the rescued ones; the facade itself drops
+    // when the dead impls were its only members).
+    emit_pass(ir, facade, env, metadata, opts, class_meta)
 }
 
 fn emit_pass(
@@ -1427,7 +1405,6 @@ fn emit_pass(
     metadata: Option<&KotlinMetadata>,
     opts: &EmitOptions,
     class_meta: &dyn Fn(&str) -> Option<KotlinMetadata>,
-    lambdas: &LambdaSelection,
 ) -> Option<Vec<(String, Vec<u8>)>> {
     // `emit_all_with_class_meta_impl` may run a discovery pass and then discard all of its bytes in
     // favor of a second pass without dead lambda implementations. Plans are drained while each
@@ -1457,11 +1434,13 @@ fn emit_pass(
         .flat_map(|c| c.methods.iter().copied())
         .collect();
     let contexts = static_accessors::emission_contexts(ir, &class_member_fids);
+    let crossinline_bodies = crossinline_literals::crossinline_literal_bodies(ir);
     let member_access_bridges = access_bridges::cross_owner_member_calls(
         ir,
         facade,
         &contexts,
         opts.jvm_default != JvmDefaultMode::Disable,
+        &crossinline_bodies,
     );
     env.run
         .private_member_access_bridges
@@ -1477,6 +1456,7 @@ fn emit_pass(
         &contexts,
         &class_member_fids,
         &member_access_bridges.private_calls,
+        crossinline_bodies,
     );
     bytecode_inline_call::compile_inline_callees(ir, facade, env, opts, class_meta);
     let mut cw = new_writer(facade, "java/lang/Object", opts);
@@ -1492,8 +1472,7 @@ fn emit_pass(
         let emitted = !class_member_fids.contains(&i)
             && f.dispatch_receiver.is_none()
             && f.body.is_some()
-            && (!ir.inline_only_fns.contains(&i) || lambdas.rescued.contains(&i))
-            && !lambdas.dead.contains(&i);
+            && !standalone_method_is_elided(ir, i, env);
         emitted.then_some(i)
     });
     for member in member_schedule::facade_source_ordered_members(ir, facade_functions) {
@@ -1513,32 +1492,16 @@ fn emit_pass(
             }
         };
         let f = &ir.functions[i];
-        let rescued = lambdas.rescued.contains(&(i as u32));
-        if rescued {
-            // A rescued must-inline impl IS emitted despite its `inline_only` mark (see
-            // `emit_all_with_class_meta`) — bypass the early return.
-            emit_method_inner(
-                ir,
-                i as u32,
-                StaticOwner::Facade,
-                facade,
-                facade,
-                &mut cw,
-                false,
-                env,
-            );
-        } else {
-            emit_method(
-                ir,
-                i as u32,
-                StaticOwner::Facade,
-                facade,
-                facade,
-                &mut cw,
-                false,
-                env,
-            );
-        }
+        emit_method(
+            ir,
+            i as u32,
+            StaticOwner::Facade,
+            facade,
+            facade,
+            &mut cw,
+            false,
+            env,
+        );
         // A facade has no class declaration to close on.
         function_debug::attach_declared_function_debug(
             ir,
@@ -5177,6 +5140,8 @@ struct Emitter<'a> {
     /// krusty would otherwise need. Pushed/popped around the branchy RHS in `emit_binop`.
     /// Open source locals, in declaration order.
     open_locals: Vec<block_scope::OpenLocal>,
+    /// The outermost scope of the inline lambda whose method is being compiled.
+    lambda_body_scope: lambda_body_scope::LambdaBodyScope,
     /// Method-local identity source for inline frames. This never crosses the JVM boundary; it
     /// keeps debug-table ordering tied to producer provenance instead of generated local names.
     next_inline_frame_identity: u64,
@@ -5312,6 +5277,7 @@ impl<'a> Emitter<'a> {
             loop_stack: Vec::new(),
             non_local_jumps: Default::default(),
             open_locals: Vec::new(),
+            lambda_body_scope: Default::default(),
             next_inline_frame_identity: 0,
             inline_lambda_aliases: HashMap::default(),
             block_depth: 0,

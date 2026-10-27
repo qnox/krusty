@@ -144,6 +144,7 @@ pub(super) fn prepare_inline_template(
     }
 
     let label = format!("$fir_inline_return_{root}");
+    ir.inline_return_frame_bodies.insert(root);
     let result_slot = (value_needed && result != Ty::Unit).then(|| {
         let slot = *next_temporary;
         *next_temporary = (*next_temporary)

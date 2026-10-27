@@ -10,7 +10,7 @@ use crate::fx_hash::HashSet;
 use crate::ir::InlineLambdaPlacement;
 use crate::jvm::bytecode_passes::analysis::{
     analyze_with, AnalyzerError, AnalyzerOptions, At, BasicInterpreter, BasicValue, FrameView,
-    Interpreter, PlainFrames, Value,
+    Frames, Interpreter, PlainFrames, Value,
 };
 use crate::jvm::bytecode_passes::descriptors;
 use crate::jvm::bytecode_passes::opcodes::*;
@@ -47,12 +47,14 @@ impl Value for ArgumentValue {
     }
 }
 
+/// Every operation that took a lambda as an operand: the lambda, the instruction's index, and the
+/// operand's position.
+type Consumers = HashSet<(usize, usize, usize)>;
+
 struct FunctionalArgumentInterpreter<'a> {
     parameters: &'a Parameters,
     basic: BasicInterpreter,
-    /// Every operation that took a lambda as an operand: the lambda, the instruction's index, and
-    /// the operand's position.
-    consumers: HashSet<(usize, usize, usize)>,
+    consumers: Consumers,
 }
 
 impl FunctionalArgumentInterpreter<'_> {
@@ -198,18 +200,17 @@ fn top(frame: Option<FrameView<'_, ArgumentValue>>, depth: usize) -> Option<&Arg
 pub(super) fn mark_places(
     node: &mut MethodNode,
     parameters: &Parameters,
+    retained_by: &[super::object_regeneration::PendingConstructor],
 ) -> Result<Vec<Option<usize>>, InlineError> {
-    let mut interpreter = FunctionalArgumentInterpreter {
-        parameters,
-        basic: BasicInterpreter,
-        consumers: HashSet::default(),
-    };
-    let options = AnalyzerOptions {
-        prune_exception_edges: true,
-        ..AnalyzerOptions::default()
-    };
-    let frames = analyze_with(node, "fake", &mut interpreter, &mut PlainFrames, options)
-        .map_err(|error| InlineError::Analysis(error.message))?;
+    let (frames, consumers) = analyze(node, parameters)?;
+    // The route was chosen from [`keeps_lambda_as_value`] before inlining began.
+    if keeps_value(node, &consumers, |class| {
+        retained_by
+            .iter()
+            .any(|constructor| constructor.constructs(class))
+    }) {
+        return Err(InlineError::LambdaParameterAccess);
+    }
     let lambda_after = |at: usize| top(frames.get(at + 1), 0)?.lambda();
     let lambda_before = |at: usize, depth: usize| top(frames.get(at), depth)?.lambda();
 
@@ -264,6 +265,76 @@ pub(super) fn mark_places(
     });
     super::preparation::remove_empty_try_catch_blocks(node);
     Ok(invokes)
+}
+
+/// The frames of `node` with the call's lambdas bound in `parameters`
+/// (`FunctionalArgumentInterpreter`), and every operation that took a lambda as an operand: the
+/// lambda, the instruction's index, and the operand's position.
+fn analyze(
+    node: &MethodNode,
+    parameters: &Parameters,
+) -> Result<(Frames<ArgumentValue>, Consumers), InlineError> {
+    let mut interpreter = FunctionalArgumentInterpreter {
+        parameters,
+        basic: BasicInterpreter,
+        consumers: HashSet::default(),
+    };
+    // The reachability `markPlacesForInlineAndRemoveInlinable` sees, which deletes the rest.
+    let options = AnalyzerOptions {
+        prune_exception_edges: true,
+        ..AnalyzerOptions::default()
+    };
+    let frames = analyze_with(node, "fake", &mut interpreter, &mut PlainFrames, options)
+        .map_err(|error| InlineError::Analysis(error.message))?;
+    Ok((frames, interpreter.consumers))
+}
+
+/// Whether the compiled inline body `callee`, with the call's lambdas bound in `parameters`,
+/// passes one of them to an operation that keeps it as a value: anything but the receiver of a
+/// `FunctionN.invoke`, a field store or parameter null check the inliner removes, and the
+/// constructor of an anonymous object regenerated around it. kotlinc's frontend rules such a use
+/// out of its own bodies (a non-inlinable use of an inline parameter), so its `MethodInliner`
+/// never meets one; a body this compiler wrote can still capture the parameter in a lambda it
+/// materialized by `invokedynamic`. The call's route is decided from this fact before anything is
+/// inlined.
+pub(crate) fn keeps_lambda_as_value(
+    callee: &MethodNode,
+    parameters: &Parameters,
+    classes: &dyn ClassRoles,
+) -> Result<bool, InlineError> {
+    let (_, consumers) = analyze(callee, parameters)?;
+    Ok(keeps_value(callee, &consumers, |class| {
+        classes.is_regenerated(class)
+    }))
+}
+
+/// Whether one of `consumers`, the operations of `node` that take a lambda, keeps it as a value;
+/// `regenerated` tells the constructors of the objects regenerated around their lambdas.
+fn keeps_value(
+    node: &MethodNode,
+    consumers: &Consumers,
+    regenerated: impl Fn(&str) -> bool,
+) -> bool {
+    consumers.iter().any(|&(_, at, operand)| {
+        let Node::Insn(insn) = &node.nodes[at] else {
+            return false;
+        };
+        let removed = match insn {
+            Insn::Method { .. } if is_invoke_on_lambda(insn) => operand == 0,
+            Insn::Method {
+                op: INVOKESPECIAL,
+                owner,
+                name,
+                ..
+            } if name == "<init>" => regenerated(owner),
+            Insn::Method {
+                op: INVOKESTATIC, ..
+            } => at >= 2 && is_load_before_parameter_check(&node.nodes, at - 2),
+            Insn::Method { .. } | Insn::InvokeDynamic { .. } => false,
+            _ => true,
+        };
+        !removed
+    })
 }
 
 /// Where `node`, a compiled inline body with the call's lambdas bound in `parameters`, places each

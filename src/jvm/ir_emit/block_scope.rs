@@ -183,6 +183,7 @@ impl Emitter<'_> {
         let enclosing_statement_line = self.statement_line;
         let saved = self.open_slot_scope();
         self.block_depth += 1;
+        self.note_lambda_body_block(block);
         let mut dead = false;
         let mut reserved_inline_stack = None;
         let mut anchored_lambda_result = false;
@@ -1162,6 +1163,7 @@ impl Emitter<'_> {
     ) -> EmittedBlock {
         let enclosing_statement_line = self.statement_line;
         self.block_depth += 1;
+        self.note_lambda_body_block(block);
         let mut dead = false;
         let last_statement = stmts.len().checked_sub(1);
         let mut lambda_unit_after_effects = close_statement_lambda
@@ -1461,6 +1463,9 @@ impl Emitter<'_> {
         while i < self.open_locals.len() {
             if self.open_locals[i].depth >= depth {
                 let local = self.open_locals.remove(i);
+                let Some(local) = self.hold_lambda_body_local(depth, local, end) else {
+                    continue;
+                };
                 let length = local
                     .explicit_end
                     .unwrap_or(end)
