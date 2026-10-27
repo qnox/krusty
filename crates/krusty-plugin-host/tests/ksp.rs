@@ -698,6 +698,64 @@ fn effective_java_modifiers_are_what_ksp2_reports() {
 
 #[test]
 #[ignore = "downloads symbol-processing-api 2.3.12 and a JDK"]
+fn overridees_are_what_ksp2_reports() {
+    log_is_what_ksp2_reports(
+        "Overridees",
+        "overridees.OverrideesProvider",
+        &[fixtures().join("overridees/Overridees.kt")],
+        "ksp-outputs-overridees",
+        "overridees.expected",
+    );
+}
+
+#[test]
+#[ignore = "downloads symbol-processing-api 2.3.12 and a JDK"]
+fn the_overridee_of_an_override_is_refused() {
+    let (runtime, env) = runtime();
+    let processor = processor_in(
+        &runtime,
+        "Overridees",
+        "overridees.OverrideesProvider",
+        "ksp-processor-overridees-refusals",
+    );
+    for (fixture, query) in [
+        (
+            "OverridingFunction.kt",
+            "KSFunctionDeclaration.findOverridee",
+        ),
+        (
+            "OverridingProperty.kt",
+            "KSPropertyDeclaration.findOverridee",
+        ),
+        ("DataComponent.kt", "KSFunctionDeclaration.findOverridee"),
+    ] {
+        let out = scratch(&format!("ksp-outputs-overridees-refused-{fixture}"));
+        let outputs = KspOutputs {
+            kotlin: out.join("kotlin"),
+            java: out.join("java"),
+            classes: out.join("classes"),
+            resources: out.join("resources"),
+        };
+        let error = run(
+            &runtime,
+            &env,
+            &processor,
+            &[fixtures().join("overridees-refused").join(fixture)],
+            &[],
+            &outputs,
+        )
+        .err()
+        .unwrap_or_else(|| panic!("the host refuses an overridee in {fixture}"));
+        assert_eq!(
+            error.to_string(),
+            format!("krusty's KSP host does not implement {query} yet, which a processor uses"),
+            "{fixture}"
+        );
+    }
+}
+
+#[test]
+#[ignore = "downloads symbol-processing-api 2.3.12 and a JDK"]
 fn class_literal_arguments_are_what_ksp2_reports() {
     log_with_dependencies_is_what_ksp2_reports(
         "Annotations",

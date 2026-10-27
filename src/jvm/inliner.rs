@@ -66,7 +66,9 @@ pub(crate) use default_masks::{
 pub(crate) use functional_arguments::lambda_placements;
 pub(crate) use lambda_expansion::{Lambda, SourceLines};
 pub(crate) use name_generator::ClassNameGenerators;
-pub(crate) use object_regeneration::{AnonymousObjects, ObjectLambda, RegeneratedObject};
+pub(crate) use object_regeneration::{
+    suspend_lambda_without_for_inline_copy, AnonymousObjects, ObjectLambda, RegeneratedObject,
+};
 pub(crate) use parameters::{Binding, Parameter, Parameters};
 pub(crate) use preparation::reads_local;
 pub(in crate::jvm) use reified::has_reified_markers;

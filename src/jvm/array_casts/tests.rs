@@ -19,6 +19,7 @@ fn hierarchy(edges: &[(&str, &[&str])]) -> Facts {
         facts.0.insert(
             type_name(name),
             Arc::new(BackendClassifierFact {
+                runtime_exception: None,
                 declaration_name: None,
                 access: crate::libraries::ClassifierAccess::Public,
                 is_kotlin: true,

@@ -34,6 +34,22 @@ fn bootstrap_enclosing_names(
 }
 
 impl SymbolSource for BootstrapSymbolSource<'_> {
+    fn classifier_declaration_name(
+        &self,
+        declaration: crate::libraries::ClassifierDeclarationKey,
+    ) -> Option<Option<crate::types::ClassifierDeclarationName>> {
+        use crate::libraries::ClassifierDeclarationKey as Key;
+        let declares = match declaration {
+            Key::Ordinary(identity) => self.declarations.contains(&identity),
+            Key::TypeAlias(identity) => self.aliases.contains(&identity),
+        };
+        if declares {
+            Some(None)
+        } else {
+            self.libraries.classifier_declaration_name(declaration)
+        }
+    }
+
     fn platform_flexible_upper_bound(&self, lower: Ty) -> Ty {
         self.libraries.platform_flexible_upper_bound(lower)
     }

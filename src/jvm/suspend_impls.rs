@@ -72,6 +72,14 @@ fn move_declaration_facts(ir: &mut IrFile, implementation: u32, declaration: u32
     // is the metadata declaration, while the static body carrier still owns the implementation's
     // LocalVariableTable. Neither may derive it from the `$suspendImpl` physical name.
     copy_fact(&mut ir.fn_source_names, implementation, declaration);
+    // So does the value-class mangle the declaration's IR name carries: the trampoline names its
+    // extension receiver after it (`$this$work_u2dwnUzFvI`), and the body carrier keeps it for the
+    // same projection, which formats its receiver as kotlinc's `$receiver` instead.
+    copy_fact(
+        &mut ir.value_class_mangle_suffixes,
+        implementation,
+        declaration,
+    );
     move_fact(&mut ir.fn_context_counts, implementation, declaration);
     move_fact(&mut ir.fn_param_no_infer, implementation, declaration);
     move_fact(
@@ -151,6 +159,15 @@ pub(crate) fn default_stub_after(ir: &IrFile, fid: u32) -> Option<u32> {
         }
         None => Some(fid),
     }
+}
+
+/// Whether `fid` is the trampoline a split suspend member's declaration became: a suspend
+/// declaration whose CPS result is the callee's `Object`, though the suspend pass recorded only its
+/// body carrier.
+pub(crate) fn is_suspend_trampoline(ir: &IrFile, fid: u32) -> bool {
+    ir.jvm_suspend_impl_bodies
+        .values()
+        .any(|&(_, declaration)| declaration == fid)
 }
 
 /// The JVM name of the static a member's body moves to.

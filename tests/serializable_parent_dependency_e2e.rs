@@ -11,12 +11,12 @@
 //!
 //! A generic superclass's elements are typed by the arguments the subclass gives it.
 //!
-//! An element keeps the property annotations its `$annotations` marker carries: a serial name, a
-//! serializer of its own, `@Contextual`.
+//! An element keeps the property annotations its `$annotations` marker carries (a serial name, a
+//! serializer of its own, `@Contextual`) and the type-use annotations its metadata type records.
 //!
 //! A superclass whose classfile lacks the generated members (it was compiled without the plugin),
-//! or whose elements carry annotations the record does not describe (on a type argument,
-//! `@Required`, a `@SerialInfo` annotation), declines. kotlinc reads
+//! or whose elements carry annotations the record does not describe (`@Required`, a `@SerialInfo`
+//! annotation), declines. kotlinc reads
 //! a library class's own elements by name, so a parent that overrides an inherited element names
 //! it twice; kotlinc rejects its subclasses and krusty declines them.
 
@@ -167,16 +167,30 @@ const TYPE_USE_LIBRARY: &[(&str, &str)] = &[(
 )];
 
 const TYPE_USE_MAIN: &str = "import kotlinx.serialization.Serializable\n\
+                             import kotlinx.serialization.json.Json\n\
+                             import tagged.Item\n\
                              @Serializable\n\
-                             class Grouped(val n: Int) : tagged.Tagged(listOf(), mapOf())\n";
+                             class Grouped(val n: Int) : tagged.Tagged(listOf(Item(1)), mapOf(\"g\" to listOf(Item(2))))\n\
+                             fun box(): String {\n\
+                             \x20   val text = Json.encodeToString(Grouped.serializer(), Grouped(3))\n\
+                             \x20   if (text != \"{\\\"items\\\":[1],\\\"groups\\\":{\\\"g\\\":[2]},\\\"n\\\":3}\") return text\n\
+                             \x20   val back = Json.decodeFromString(Grouped.serializer(), text)\n\
+                             \x20   if (back.items.single().v != 1 || back.groups.getValue(\"g\").single().v != 2 || back.n != 3) return \"back\"\n\
+                             \x20   return \"OK\"\n\
+                             }\n";
 
 /// An element whose type names its own serializer, directly in a type argument or nested deeper,
-/// is serialized by that serializer, which the published record does not carry; the subclass
-/// declines rather than serialize the element with the type's ordinary serializer.
+/// is serialized by that serializer. kotlinc reads the type-use annotations from the property's
+/// type in the library's metadata, and the subclass's `childSerializers` builds the element's
+/// serializer around them.
 #[test]
-fn a_parent_element_with_a_type_use_serializer_declines() {
-    let (plugin, runtime) = plugin_and_runtime()
+fn a_parent_element_type_names_its_serializers() {
+    let (plugin, mut runtime) = plugin_and_runtime()
         .expect("the serialization plugin and runtime must be available to this regression");
+    runtime.push(
+        krusty::toolchain::serialization_json_jar()
+            .expect("kotlinx-serialization-json must be available to this regression"),
+    );
     let switches = vec![format!("-Xplugin={}", plugin.display())];
     let fixture = PluginFixture::new("serializable-parent-type-use");
     let reference_lib = fixture.kotlinc("lib", TYPE_USE_LIBRARY, &runtime, &switches);
@@ -185,18 +199,62 @@ fn a_parent_element_with_a_type_use_serializer_declines() {
     let sources = [("Main.kt", TYPE_USE_MAIN)];
     let mut reference_cp = runtime.clone();
     reference_cp.push(reference_lib);
-    fixture.kotlinc("main", &sources, &reference_cp, &switches);
     let mut krusty_cp = runtime.clone();
     krusty_cp.push(krusty_lib);
-    assert_eq!(
-        fixture.krusty_rejects("main", &sources, &krusty_cp, &switches),
-        "<fixture>/main/src/Main.kt:1:1: error: krusty: this construct is not yet supported by the IR backend\n\
-         krusty: 1 error(s)\n"
+    let reference = fixture.kotlinc("main", &sources, &reference_cp, &switches);
+    let krusty = fixture.krusty("main", &sources, &krusty_cp, &switches);
+    assert_same_classes_and_box(&reference, &krusty, &krusty_cp);
+    let on_reference_lib =
+        fixture.krusty("main-on-kotlinc-lib", &sources, &reference_cp, &switches);
+    assert_same_classes_and_box(&reference, &on_reference_lib, &reference_cp);
+}
+
+const TYPE_USE_CONTEXTUAL_LIBRARY: &[(&str, &str)] = &[(
+    "Listed.kt",
+    "package listed\n\
+     import kotlinx.serialization.Contextual\n\
+     import kotlinx.serialization.Serializable\n\
+     @Serializable\n\
+     class Item(val v: Int)\n\
+     @Serializable\n\
+     open class Listed(val items: List<@Contextual Item> = emptyList())\n",
+)];
+
+const TYPE_USE_POLYMORPHIC_LIBRARY: &[(&str, &str)] = &[(
+    "Listed.kt",
+    "package listed\n\
+     import kotlinx.serialization.Polymorphic\n\
+     import kotlinx.serialization.Serializable\n\
+     @Serializable\n\
+     open class Item(val v: Int)\n\
+     @Serializable\n\
+     open class Listed(val items: List<@Polymorphic Item> = emptyList())\n",
+)];
+
+const TYPE_USE_WRAPPER_MAIN: &str = "import kotlinx.serialization.Serializable\n\
+                                     @Serializable\n\
+                                     class Child(val c: Int) : listed.Listed()\n";
+
+/// A type-use `@Contextual` asks for a `ContextualSerializer` around the element's type. `Item` is
+/// serializable, so ignoring the annotation would compile with `Item`'s generated serializer
+/// instead; the subclass declines.
+#[test]
+fn a_parent_element_type_with_a_contextual_argument_declines() {
+    assert_parent_declines(
+        "serializable-parent-type-use-contextual",
+        TYPE_USE_CONTEXTUAL_LIBRARY,
+        TYPE_USE_WRAPPER_MAIN,
     );
-    assert_eq!(
-        fixture.krusty_rejects("main-on-kotlinc-lib", &sources, &reference_cp, &switches),
-        "<fixture>/main-on-kotlinc-lib/src/Main.kt:1:1: error: krusty: this construct is not yet supported by the IR backend\n\
-         krusty: 1 error(s)\n"
+}
+
+/// A type-use `@Polymorphic` asks for a `PolymorphicSerializer` around the element's type, where
+/// `Item`'s generated serializer would otherwise be chosen; the subclass declines.
+#[test]
+fn a_parent_element_type_with_a_polymorphic_argument_declines() {
+    assert_parent_declines(
+        "serializable-parent-type-use-polymorphic",
+        TYPE_USE_POLYMORPHIC_LIBRARY,
+        TYPE_USE_WRAPPER_MAIN,
     );
 }
 

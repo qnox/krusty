@@ -176,6 +176,7 @@ fn project_local_alias_spelling(
                         .parameter_name_at(source.span.lo)
                         .map(Into::into),
                     flexible_upper_bound: None,
+                    mutability_upper_bound: None,
                     enhanced_nullability: false,
                     actualized_expect: false,
                 };
