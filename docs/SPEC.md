@@ -1,5 +1,13 @@
 # krusty — a memory-lean Kotlin→JVM compiler PoC
 
+## Native function-reference identity across source files
+
+Two references to the same source-module callable compare equal and hash alike across emitted
+object files. Native emission keys their shared marker on the exact source module and checked
+callable identity, retaining the bound/unbound distinction. Different declarations remain unequal.
+The Native object-linkage regression in `tests/native_cross_file_e2e.rs` establishes the identical
+multi-file program's kotlinc and JVM results before requiring Native equality and hash agreement.
+
 ## Type-alias declaration names
 
 A type alias retains its own declaring package or classifier and exact name segment, independently
