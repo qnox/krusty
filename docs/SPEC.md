@@ -16551,6 +16551,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   rank after imports; an enclosing class's inherited classifiers rank with that enclosing rung,
   before imports. The signature bridge and the checker bind the header the same way. Verified
   against kotlinc 2.4.21. (`tests/nested_header_inherited_classifier_e2e.rs`.)
+- **Nested classifiers are inherited along the superclass chain only.** An interface's nested
+  classifier reaches neither an implementing class nor a sub-interface by its simple name, whether
+  the interface is Kotlin or Java: in `class One : Left` a top-level `Category` binds although
+  `Left` declares `Category`, two interfaces that each declare one leave the name unambiguous, and
+  `interface Sub : Outer { fun make(): Nested }` reports `unresolved reference 'Nested'`. A
+  superclass's nested classifiers stay inherited. Every scope walk (checker, signature bridge,
+  signature collection, accessibility) steps only through supertypes that are not interfaces.
+  Verified against kotlinc 2.4.21. (`tests/interface_nested_classifier_scope_e2e.rs`.)
 - **A classifier's own annotations resolve where the classifier is declared.** `@Dsl class Inner`
   inside `Builder` binds `Builder.Dsl`, a nested classifier of `Builder`'s companion, or one of any
   enclosing classifier; the annotated classifier's own nested declarations are not in scope for its

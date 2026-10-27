@@ -53,6 +53,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
         legacy_local_class_siblings,
         source_classifier_visibility,
         source_direct_supertypes,
+        source_interfaces,
     } = declared_classifier_inventory(
         files,
         compact_headers,
@@ -1143,29 +1144,20 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                                 }
                                 let mut inherited =
                                     crate::symbol_resolver::InheritedNestedClassifier::NotFound;
+                                let inheriting_supertypes = |owner| {
+                                    source_nested_classifier_supertypes(
+                                        &source_direct_supertypes,
+                                        &source_interfaces,
+                                        &*libraries,
+                                        owner,
+                                    )
+                                };
                                 for &lexical_inheritor in lexical_inheritors {
-                                    let roots = source_direct_supertypes
-                                        .get(&lexical_inheritor)
-                                        .cloned()
-                                        .unwrap_or_default();
                                     inherited =
                                         crate::symbol_resolver::inherited_nested_classifier_name(
                                             name,
-                                            roots,
-                                            |owner| {
-                                                source_direct_supertypes
-                                                    .get(&owner)
-                                                    .cloned()
-                                                    .unwrap_or_else(|| {
-                                                        crate::symbol_resolver::direct_supertypes(
-                                                            &*libraries,
-                                                            Ty::obj_name(owner),
-                                                        )
-                                                        .into_iter()
-                                                        .filter_map(Ty::obj_internal)
-                                                        .collect()
-                                                    })
-                                            },
+                                            inheriting_supertypes(lexical_inheritor),
+                                            inheriting_supertypes,
                                             |candidate| {
                                                 source_classifier_visibility
                                                     .get(&candidate)

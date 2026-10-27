@@ -1807,19 +1807,19 @@ impl ProductionSignatureSemantics<'_> {
             &module as &dyn crate::symbol_source::SymbolSource,
             &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
         ]);
-        let roots = crate::symbol_resolver::direct_supertypes(&source, Ty::obj_name(owner))
-            .into_iter()
-            .filter_map(Ty::obj_internal)
-            .collect::<Vec<_>>();
+        let inheriting_supertypes = |owner: crate::types::TypeName| {
+            crate::symbol_resolver::direct_supertypes(&source, Ty::obj_name(owner))
+                .into_iter()
+                .filter_map(Ty::obj_internal)
+                .filter(|&supertype| {
+                    crate::symbol_resolver::inherits_nested_classifiers_through(&source, supertype)
+                })
+                .collect::<Vec<_>>()
+        };
         match crate::symbol_resolver::inherited_nested_classifier_name(
             spelling,
-            roots,
-            |candidate| {
-                crate::symbol_resolver::direct_supertypes(&source, Ty::obj_name(candidate))
-                    .into_iter()
-                    .filter_map(Ty::obj_internal)
-                    .collect()
-            },
+            inheriting_supertypes(owner),
+            inheriting_supertypes,
             |candidate| {
                 crate::symbol_resolver::inherited_classifier_shape(&source, candidate, owner)
                     .is_some()
