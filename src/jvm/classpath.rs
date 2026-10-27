@@ -45,6 +45,8 @@ mod property_identity;
 mod stub_overlay;
 pub(super) use stub_overlay::StubOverlayGuard;
 #[cfg(test)]
+mod alias_declaration_names_tests;
+#[cfg(test)]
 mod test_support;
 mod value_class_erasure;
 
@@ -896,10 +898,8 @@ pub struct TypeIndex {
     type_aliases: HashMap<TypeName, TypeName>,
     /// Alias name → its EXPANSION: the target applied to its own arguments, with the alias's own
     /// parameters left as `Ty::TyParam`. A use site substitutes its arguments into this template.
-    /// `(target, formals, expansion, right-hand-side argument spellings)` — the last carries the
-    /// dependency's own `typealias` spellings so a consumer's use site inherits them (see
-    /// [`crate::spelling`]).
-    alias_expansions: HashMap<TypeName, (TypeName, Vec<String>, Ty, crate::spelling::Spelled)>,
+    /// The record also retains the alias's own declaration name and right-hand-side spellings.
+    alias_expansions: HashMap<TypeName, crate::libraries::AliasExpansion>,
 }
 
 impl TypeIndex {
@@ -1492,7 +1492,7 @@ impl Classpath {
     pub(super) fn paired_stdlib_type_alias_expansion(
         &self,
         identity: TypeName,
-    ) -> Option<(TypeName, Vec<String>, Ty, crate::spelling::Spelled)> {
+    ) -> Option<crate::libraries::AliasExpansion> {
         let entry = self.paired_stdlib_entry()?;
         let aliases = self.entry_package_types(entry, identity.namespace());
         if self.class_load_error.borrow().is_some() {
@@ -2369,8 +2369,8 @@ impl Classpath {
         if self.class_load_error.borrow().is_some() {
             return None;
         }
-        if let Some((target, _, _, _)) = self.nested_type_alias(internal) {
-            return Some(target);
+        if let Some(alias) = self.nested_type_alias(internal) {
+            return Some(alias.target);
         }
         let tree = self.package_tree();
         if !tree.catalog_complete() {
@@ -2422,7 +2422,7 @@ impl Classpath {
     pub fn type_alias_expansion(
         &self,
         internal: TypeName,
-    ) -> Option<(TypeName, Vec<String>, Ty, crate::spelling::Spelled)> {
+    ) -> Option<crate::libraries::AliasExpansion> {
         if let Some(alias) = self.nested_type_alias(internal) {
             return Some(alias);
         }
@@ -2449,22 +2449,21 @@ impl Classpath {
             .find(|identity| identity.segment_ref() == name)
     }
 
-    fn nested_type_alias(
-        &self,
-        identity: TypeName,
-    ) -> Option<(TypeName, Vec<String>, Ty, crate::spelling::Spelled)> {
+    fn nested_type_alias(&self, identity: TypeName) -> Option<crate::libraries::AliasExpansion> {
         let semantic_owner = identity.parent()?;
         let owner = self.source_classifier_name(semantic_owner)?;
         let class = self.find_name(owner)?;
         let alias = super::metadata::metadata_type_aliases(&class)
             .iter()
             .find(|alias| alias.name == identity)?;
-        Some((
-            type_name(&alias.target),
-            alias.formals.clone(),
-            alias.expansion,
-            alias.expansion_spelling.clone(),
-        ))
+        Some(crate::libraries::AliasExpansion {
+            identity,
+            declaration_name: alias.declaration_name.clone().map(std::sync::Arc::new),
+            target: type_name(&alias.target),
+            formals: alias.formals.clone(),
+            expansion: alias.expansion,
+            expansion_spelling: alias.expansion_spelling.clone(),
+        })
     }
 
     /// Convert a source classifier path (`pkg/Outer/Inner`) into its declared JVM classifier

@@ -1,5 +1,13 @@
 # krusty — a memory-lean Kotlin→JVM compiler PoC
 
+## Type-alias declaration names
+
+A type alias retains its own declaring package or classifier and exact name segment, independently
+of its expanded target. Source header publication, module projections and dependency normalization
+carry that declaration fact without reconstructing it from the alias's lookup key. Two snapshots
+can give the same flattened identity distinct top-level and nested declaration facts. Missing name
+evidence remains unknown even when the expansion target is fully known.
+
 ## Source classifier identity publication
 
 The compact header inventory publishes non-local classifier identities through their declaration
@@ -24,6 +32,17 @@ Synthesized reference null guards, including Elvis message reads, use the refere
 only when an operand is an explicit IR null constant. They never call user `equals(null)`;
 ordinary source structural equality retains its own operation. The shared fixture includes an
 object whose `equals(null)` returns true to distinguish those contracts.
+
+## JVM companion storage names
+
+A companion's instance field keeps its entire declared name within its recorded holder, including
+literal dollars. Field declarations, initialization, loads, JVM-static wrappers and collision checks
+use that same pair. In-file singleton loads use the explicit holder-to-companion relation; sibling
+files use their retained companion owner. Shared singleton realization authenticates that owner
+against its companion record. Unknown ownership stays unavailable; top-level and ordinary nested
+objects keep their own `INSTANCE` field. Dependency-published field names remain authoritative.
+Tests: `declared_companion_fields_e2e` compares complete holder-field inventories, complete caller
+classfiles and reference/runtime results across class/interface and single/sibling-file cases.
 
 ## JVM member-class table ownership
 

@@ -701,6 +701,8 @@ mod dataclass_hash_and_sam_e2e;
 mod decl_body_on_next_line_e2e;
 #[path = "declaration_matches_body_position_e2e.rs"]
 mod declaration_matches_body_position_e2e;
+#[path = "declared_companion_fields_e2e.rs"]
+mod declared_companion_fields_e2e;
 #[path = "deep_class_bail_reason_e2e.rs"]
 mod deep_class_bail_reason_e2e;
 #[path = "deep_expression_nesting_check.rs"]

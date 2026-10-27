@@ -1,5 +1,13 @@
 # krusty — implementation plan
 
+## Alias declaration-name producers
+
+Retain an alias's own optional container and exact segment through stable source headers, the
+legacy source template record, bootstrap/body-local aliases, common KLIB normalization and JVM
+metadata/classpath records. Keep existing alias identities, expansion templates, target
+normalization and spelling sidecars intact. Metadata class-ID consumers and builtin declaration
+names remain separate prerequisites; this producer handoff does not repair their output by itself.
+
 ## Source classifier inventory identities
 
 Replace lookup-spelling splitting in the foreign-source classifier inventory with the existing
@@ -15,6 +23,15 @@ The registry authenticates every ancestor on every request, including cached lea
 mutating module state. The shared Throwable hierarchy case starts from exact JVM/reference and
 Native results and exercises both Wasm hosts. Reference-array storage and checked array reads
 remain the next separate slice of #2531.
+
+## JVM companion field ABI
+
+Centralize the physical companion field segment from the selected holder/companion identities.
+Use it consistently in field emission, initialization, singleton loads, wrappers, hoisted property
+receivers and collision planning. Singleton realization reads retained declaration ownership and
+authenticates the holder's companion tuple; it never guesses a prefix owner. Preserve dependency-published names. Whole-owner metadata class
+IDs remain a separate consumer migration; this change establishes the independent field ABI with
+complete field/facade comparisons and reference/runtime controls.
 
 ## JVM declaration-owned member rows
 

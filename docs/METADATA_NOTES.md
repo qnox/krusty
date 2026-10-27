@@ -1,5 +1,15 @@
 # `@kotlin.Metadata` — reverse-engineering notes (Phase 4b)
 
+## Alias declaration-name evidence
+
+Package and Class type-alias tables supply the alias's exact simple name and declaring container.
+Package metadata honors its `pn` relocation; classifier ownership comes from the raw Class
+`fq_name` evidence, independently of the alias's existing lookup key and physical classfile owner.
+An unavailable classifier declaration name stays unknown. Classpath indexes, paired stdlib lookup
+and provider normalization retain that fact independently of target normalization. Metadata output
+still needs the separate identity-keyed declaration-name lookup; alias semantic keys are not
+descriptor payloads and an expansion target's owner never substitutes for the alias's own owner.
+
 ## Source inventory publication
 
 Compact source headers publish classifier identities from explicit declaration ownership and exact
@@ -16,6 +26,13 @@ subclasses with additional declared instance state are not admitted. The frozen 
 retains the role and exact parent identity. Wasm's physical registry consumes those records rather
 than selected constructor inventory or classifier spelling, and validates the complete chain even
 when its leaf already has a GC type. Ordinary source and JVM classifier records retain no role.
+
+## Companion fields and class metadata
+
+Physical companion storage uses the whole segment within the recorded holder, never the last
+dollar-delimited fragment. This field-ABI change preserves metadata production independently.
+The declaration-owned metadata header work retains the separate whole-owner classfile oracle;
+field inventories and complete caller classfiles validate this change without omitting any field.
 
 ## JVM member-class rows
 

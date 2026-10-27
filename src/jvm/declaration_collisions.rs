@@ -133,7 +133,7 @@ fn report_jvm_field_companion_alias_clashes(ir: &IrFile, diags: &mut DiagSink) -
         let Some(companion) = class.companion_class else {
             continue;
         };
-        let name = companion.nested_segment_ref();
+        let name = crate::jvm::companion_storage::field_name(class.fq_name, companion);
         let descriptor = format!("L{};", companion.render());
         for (index, _) in ir.statics.iter().enumerate().filter(|(_, storage)| {
             storage.owner == Some(class.fq_name)

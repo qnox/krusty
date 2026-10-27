@@ -64,6 +64,7 @@ mod tests {
             "A".to_owned(),
             crate::libraries::AliasExpansion {
                 identity: alias,
+                declaration_name: None,
                 target,
                 formals: vec!["T".to_owned()],
                 expansion: Ty::obj_args_name(target, &[Ty::obj("kotlin/String")]),
