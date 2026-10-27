@@ -13710,9 +13710,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   parameter, and `<T> toArray(Array<T>): Array<T>`. The shape is the declaration's: a
   `toArray(): Array<String>` suppresses `Object[] toArray()`, while `toArray(Array<String>)`
   suppresses nothing. kotlinc also makes a declared non-public `toArray` public (and realizes an
-  `internal` one under both names); that follows later. Tests:
-  `tests/collection_to_array_e2e.rs` (member bytes, member order and a box run against kotlinc),
-  and the face suites above, which now compare the pair.
+  `internal` one under both names); that follows later. Only an inherited member suppresses a
+  shape, by the same rule as a read-only stub's implementation: never a private one, and a
+  package-private Java `toArray` only along a superclass path that stays in the class's package,
+  so one in another package, or reached through a class of another package, suppresses nothing.
+  A supertype's members come from the one source that owns its declaration: a named source
+  classifier's from the module's frozen declaration records (its superclass and instance
+  functions), whichever file declares it; a body-local class's from the active file's IR; a
+  dependency's from the classpath. A superclass declared in another file is therefore never taken
+  for a dependency, so its collection ancestry and its `toArray` declarations still count. Tests:
+  `tests/collection_to_array_e2e.rs` (member bytes, member order and a box run against kotlinc;
+  a split-module superclass/subclass control comparing every class's complete listing and the
+  run; same-package, other-package and package-crossing Java superclass controls, also compared
+  class by class; those listings read kotlinc's deferred `Collection<?>`/`Collection<? extends E>`
+  signature of a declared override as krusty's), and the face suites above, which now compare
+  the pair.
 - **A nested value class over a reference carrier is read as its carrier.** In `ZN(val z: Z1?)`
   with `Z1(val x: En)`, `Z1?` is carried as `En?`, so `zn.z` and `zn.z!!` already are `Z1`'s
   carrier and `.x` of them is that carrier itself, with no cast. krusty took the unboxed property
