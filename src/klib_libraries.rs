@@ -22,6 +22,7 @@ mod inventory;
 mod lookup;
 pub(crate) mod parameter_defaults;
 mod platform;
+mod runtime_exception_layouts;
 mod serialized_references;
 mod target_intrinsics;
 #[cfg(test)]

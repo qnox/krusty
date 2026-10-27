@@ -16,6 +16,23 @@ classifier or owner. Publication retains visibility and declaration order, and e
 anonymous classifiers as before. Header-boundary regressions check the complete published inventory,
 absence of invented prefixes, and exact nesting for literal-dollar owner/member names.
 
+## Wasm runtime-exception type tests
+
+Selected platform-stdlib declarations publish authenticated storage roles for Throwable,
+Exception, RuntimeException and IndexOutOfBoundsException. Their metadata owns the parent chain;
+ordinary dependency or source declarations acquire no role from a matching name. Frozen backend
+facts retain this evidence independently of selected constructors.
+
+Wasm type tests use that declared GC hierarchy and the existing Throwable message/cause prefix.
+Missing, cyclic or changed hierarchy evidence declines before publishing a partial class chain.
+Throws and the existing single Throwable catch transport the same Kotlin reference. The shared
+`throwableHierarchy.kt` regression compares the JVM reference and all backends, including negative
+subclass tests, message reads and rethrow identity.
+Synthesized reference null guards, including Elvis message reads, use the reference-identity path
+only when an operand is an explicit IR null constant. They never call user `equals(null)`;
+ordinary source structural equality retains its own operation. The shared fixture includes an
+object whose `equals(null)` returns true to distinguish those contracts.
+
 ## JVM companion storage names
 
 A companion's instance field keeps its entire declared name within its recorded holder, including
