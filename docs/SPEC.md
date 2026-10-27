@@ -15971,9 +15971,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   language level under `-progressive` emits kotlinc's unnamed warning; it is deliberately
   unavailable to named `-Xwarning-level` policy and is removed by `-Xsuppress-version-warnings`.
   The Gradle plugin forwards `freeCompilerArgs` verbatim, so a free argument meets the same
-  dispositions as on the command line; it refuses only the arguments it derives from structured
-  task inputs (`-d`, `-classpath`, `-module-name`, …), which a free copy would contradict. It
-  walks the free arguments as the selected kotlinc release does, resolving short and deprecated
+  dispositions as on the command line. As KGP does, it passes the arguments built from the
+  structured compiler options first and the free arguments after them, so a free argument that
+  restates a structured option (`-module-name`, `-jvm-target`, `-progressive`, `-opt-in`,
+  `-jvm-default`, …) is resolved by the compiler's own parser, last value winning or repeated
+  values accumulating as kotlinc's does. It refuses only the arguments the plugin itself owns:
+  sources, destination, libraries (`-d`, `-classpath`, …), the JDK and stdlib policy, and
+  compiler plugins. It walks the free arguments as the selected kotlinc release does, resolving short and deprecated
   spellings (`-cp`, `-Xprogressive`, `-module`) through that release's compiler-owned vendored
   table, and
   refuses `--`, any `@argfile`, and a free source path, since each could reach a plugin-owned
