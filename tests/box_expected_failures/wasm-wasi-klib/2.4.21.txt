@@ -548,7 +548,6 @@ callableReference/funInterfaceConstructor/funInterfaceConstructorEquality.kt
 callableReference/funInterfaceConstructor/funInterfaceConstructorIsKFunction.kt
 callableReference/funInterfaceConstructor/funInterfaceConstructorOfImplicitKFunctionType.kt
 callableReference/function/abstractClassMember.kt
-callableReference/function/argumentTypes.kt
 callableReference/function/argumentTypesNoinline.kt
 callableReference/function/booleanNotIntrinsic.kt
 callableReference/function/classMemberFromClass.kt
@@ -701,7 +700,6 @@ callableReference/starProjectionCallableReference.kt
 callableReference/staticFunctionReferenceMultiUse.kt
 callableReference/twoRefsOneScope.kt
 casts/asForConstants.kt
-casts/asSafeFail.kt
 casts/asSafeForConstants.kt
 casts/asToNothing.kt
 casts/asUnit.kt
@@ -1165,7 +1163,6 @@ contracts/require.kt
 contracts/runLambdaForVal.kt
 contracts/valInWhen.kt
 controlStructures/breakContinueInExpressions/breakFromOuter.kt
-controlStructures/breakContinueInExpressions/breakInDoWhile.kt
 controlStructures/breakContinueInExpressions/breakInLoopConditions.kt
 controlStructures/breakContinueInExpressions/inlineWithStack.kt
 controlStructures/breakContinueInExpressions/inlinedBreakContinue/continueInTryBlock.kt
@@ -1180,8 +1177,6 @@ controlStructures/breakContinueInExpressions/inlinedBreakContinue/stdlibFunction
 controlStructures/breakContinueInExpressions/inlinedBreakContinue/withReturnValue.kt
 controlStructures/breakContinueInExpressions/inlinedBreakContinue/withReturnValueDoWhileContinue.kt
 controlStructures/breakContinueInExpressions/inlinedBreakContinue/withReturnValueNested.kt
-controlStructures/breakContinueInExpressions/kt16713.kt
-controlStructures/breakContinueInExpressions/kt16713_2.kt
 controlStructures/breakContinueInExpressions/kt17384.kt
 controlStructures/breakContinueInExpressions/kt45704_elvisInInlineFun.kt
 controlStructures/breakContinueInExpressions/popSizes.kt
@@ -1281,7 +1276,6 @@ controlStructures/kt15726.kt
 controlStructures/kt1688.kt
 controlStructures/kt1742.kt
 controlStructures/kt17590.kt
-controlStructures/kt17590_long.kt
 controlStructures/kt2147.kt
 controlStructures/kt2259.kt
 controlStructures/kt2291.kt
@@ -2236,13 +2230,10 @@ elvis/elvisToCommonType.kt
 elvis/genericElvisWithMoreSpecificLHS.kt
 elvis/genericElvisWithNullLHS.kt
 elvis/genericNull.kt
-elvis/kt24209.kt
 elvis/kt6694ExactAnnotationForElvis.kt
-elvis/nullNullOk.kt
 elvis/ofNonNullableResultType.kt
 elvis/primitive.kt
 elvis/withNothingConstraintAndExpectedType.kt
-elvis/withReturn.kt
 enum/abstractMethodInEnum.kt
 enum/abstractNestedClass.kt
 enum/asReturnExpression.kt
@@ -4063,7 +4054,6 @@ interfaceCallsNCasts/diamond.kt
 interfaceCallsNCasts/finalMethod.kt
 interfaceCallsNCasts/interface0.kt
 intrinsics/charToInt.kt
-intrinsics/ea35953.kt
 intrinsics/kt10131.kt
 intrinsics/kt10131a.kt
 intrinsics/kt12125_2.kt
@@ -4083,7 +4073,6 @@ invokedynamic/extensionFunInvoke.kt
 invokedynamic/lambdas/kt52875.kt
 ir/anonymousClassLeak.kt
 ir/anonymousObjectInForLoopIteratorAndBody.kt
-ir/anonymousObjectInsideElvis.kt
 ir/classInitializers.kt
 ir/closureConversion/closureConversion2.kt
 ir/closureConversion/innerClass1.kt
@@ -4176,8 +4165,6 @@ lazyCodegen/exceptionInFieldInitializer.kt
 lazyCodegen/ifElse.kt
 lazyCodegen/optimizations/negateObjectComp.kt
 lazyCodegen/optimizations/negateObjectComp2.kt
-lazyCodegen/safeAssign.kt
-lazyCodegen/safeAssignComplex.kt
 lazyCodegen/safeCallAndArray.kt
 lazyCodegen/tryCatchExpression.kt
 literals/listof1.kt
@@ -4459,7 +4446,6 @@ nothingValue/inNestedCall.kt
 nothingValue/nothingValueException.kt
 nothingValue/toStringOnNothing.kt
 nullCheckOptimization/kt22410.kt
-nullCheckOptimization/kt49136a.kt
 nullCheckOptimization/primitiveCheckWithSideEffect.kt
 nullCheckOptimization/trivialInstanceOf.kt
 object/constructor0.kt
@@ -4547,7 +4533,6 @@ objects/objectVsClassInitialization_kt5291.kt
 objects/privateExtensionFromInitializer_kt4543.kt
 objects/privateFunctionFromClosureInInitializer_kt5582.kt
 objects/receiverInConstructor.kt
-objects/safeAccess.kt
 objects/selfReferenceToCompanionObjectInAnonymousObjectInSuperConstructorCall.kt
 objects/selfReferenceToCompanionObjectInInlineLambdaInConstructorBody.kt
 objects/selfReferenceToCompanionObjectInInlineLambdaInSuperConstructorCall.kt
@@ -4643,7 +4628,6 @@ primitiveTypes/equalityWithObject/generated/primitiveEqObjectChar.kt
 primitiveTypes/equalityWithObject/generated/primitiveEqObjectInt.kt
 primitiveTypes/equalityWithObject/generated/primitiveEqObjectLong.kt
 primitiveTypes/equalityWithObject/generated/primitiveEqObjectShort.kt
-primitiveTypes/equalityWithObject/intEqualsNull.kt
 primitiveTypes/equalityWithObject/intEqualsNullableInt.kt
 primitiveTypes/equalityWithObject/intEqualsNullableIntWithSmartCasts.kt
 primitiveTypes/equalityWithObject/kt42281.kt
@@ -4753,8 +4737,6 @@ properties/generalAccess.kt
 properties/genericPropertyMultiModule.kt
 properties/genericWithSameName.kt
 properties/initOrderMultiModule.kt
-properties/initializerOfConstValWithConst.kt
-properties/initializerOfConstValWithConstExpr.kt
 properties/initializerOfValWithConstExpr.kt
 properties/initializerOfValWithNonConstExpr.kt
 properties/kt10729.kt
@@ -5682,8 +5664,6 @@ regressions/Kt2495Test.kt
 regressions/arrayLengthNPE.kt
 regressions/collectionSizeInInlineBody.kt
 regressions/collectionSizeOrDefault.kt
-regressions/commonSupertypeContravariant.kt
-regressions/commonSupertypeContravariant2.kt
 regressions/dataClassInInlineFunctionWithTypeParameters.kt
 regressions/dataClassInRegularFunctionWithTypeParameters.kt
 regressions/directInvokeDestructuring.kt
@@ -5750,7 +5730,6 @@ regressions/objectCaptureOuterConstructorProperty.kt
 regressions/objectInsideDelegation.kt
 regressions/recursiveDnnTypeInLambda.kt
 regressions/resolvedCallForGetOperator.kt
-regressions/supertypeDepth.kt
 reified/arraysReification/jaggedArray.kt
 reified/arraysReification/jaggedDeep.kt
 reified/callChain.kt
@@ -5819,7 +5798,6 @@ safeCall/safeCallEqPrimitive.kt
 safeCall/safeCallIOnUninitializedNonNullValue.kt
 safeCall/safeCallNotEqPrimitive.kt
 safeCall/safeCallOnLong.kt
-safeCall/safeCallWithElvisFolding.kt
 sam/approximation/approxToIntermediateType.kt
 sam/approximation/approxToSingleUpperBound.kt
 sam/approximation/impossibleToApproxToRepresentable.kt
@@ -5887,7 +5865,6 @@ smartCasts/kt19100.kt
 smartCasts/kt44804.kt
 smartCasts/kt44814.kt
 smartCasts/kt44932.kt
-smartCasts/kt44942.kt
 smartCasts/kt72391.kt
 smartCasts/lambdaArgumentWithoutType.kt
 smartCasts/negativesmartCastAugmentedAssignment.kt
@@ -6044,7 +6021,6 @@ traits/interfaceWithNonAbstractFunIndirect.kt
 traits/interfaceWithNonAbstractFunIndirectGeneric.kt
 traits/kt2399.kt
 traits/kt2541.kt
-traits/kt3500.kt
 traits/kt36973.kt
 traits/kt5393_property.kt
 traits/multiple.kt

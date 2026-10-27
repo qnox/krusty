@@ -2695,6 +2695,8 @@ mod captured_unsigned_lines_e2e;
 
 #[path = "char_code_inline_line_e2e.rs"]
 mod char_code_inline_line_e2e;
+#[path = "e2e/classifier_declarations.rs"]
+mod classifier_declarations;
 #[path = "erased_parameter_boxing_e2e.rs"]
 mod erased_parameter_boxing_e2e;
 #[path = "function_type_parameter_name_e2e.rs"]
@@ -2743,12 +2745,8 @@ mod type_parameter_invoke_e2e;
 mod type_parameter_nullability_e2e;
 #[path = "type_use_annotation_metadata_e2e.rs"]
 mod type_use_annotation_metadata_e2e;
-#[path = "typealias_abbreviated_type_e2e.rs"]
-mod typealias_abbreviated_type_e2e;
 #[path = "typealias_constructor_inference_e2e.rs"]
 mod typealias_constructor_inference_e2e;
-#[path = "typealias_emission_e2e.rs"]
-mod typealias_emission_e2e;
 #[path = "typealias_function_type_e2e.rs"]
 mod typealias_function_type_e2e;
 #[path = "typealias_generic_target_e2e.rs"]

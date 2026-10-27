@@ -22956,6 +22956,7 @@ fun after(): Int = 2
 
     fn import_test_classifier(alias_target: Option<TypeName>) -> crate::libraries::LibraryType {
         crate::libraries::LibraryType {
+            runtime_exception: None,
             declaration_name: None,
             is_kotlin: true,
             is_data: false,
@@ -25356,6 +25357,7 @@ fun box(): String {
                         )
                     };
                 return Some(std::sync::Arc::new(crate::libraries::LibraryType {
+                    runtime_exception: None,
                     declaration_name: None,
                     is_kotlin: true,
                     is_data: false,
@@ -25489,6 +25491,7 @@ fun box(): String {
                     })
                     .collect();
                 std::sync::Arc::new(crate::libraries::LibraryType {
+                    runtime_exception: None,
                     declaration_name: None,
                     is_kotlin: true,
                     is_data: false,

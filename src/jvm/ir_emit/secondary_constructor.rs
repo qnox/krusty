@@ -621,7 +621,7 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
                 cw.set_method_synthetic("<init>", &sc_desc);
             }
         }
-        if sc.defaults.iter().any(Option::is_some) {
+        if let Some(defaults) = crate::jvm::default_wrappers::secondary_constructor(sc) {
             // The stub's physical prefix is everything ahead of the declared parameters — the
             // owner's synthetic entries included, which is what makes an enum's stub
             // `(String, int, …declared, mask, marker)` as kotlinc writes it. Only the capture
@@ -648,7 +648,7 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
                         .collect::<Vec<_>>(),
                     logical_prefix_count: sc_prefix_tys.len(),
                     real_params: &sc_source_tys,
-                    defaults: &sc.defaults,
+                    defaults,
                     secondary_lines: Some((sc.lines.decl_line, sc.lines.decl_end_line)),
                     target_uses_marker_accessor: sc.vc_params
                         || super::constructor_accessors::hides_secondary(ir, c, secondary_ordinal),
