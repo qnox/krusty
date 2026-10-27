@@ -65,8 +65,9 @@ pub(super) enum SerialParent {
 enum ElementSource {
     /// A property of a class in this file, by its backing field.
     Field { class: ClassId, field: usize },
-    /// An element of a superclass compiled apart from this file.
-    External(SerializableElement),
+    /// An element of a superclass compiled apart from this file, boxed so a local field's
+    /// variant does not carry its size.
+    External(Box<SerializableElement>),
 }
 
 /// One element of the wire shape, as the descriptor, `childSerializers` and `deserialize` see it.
@@ -198,7 +199,7 @@ impl SerialElements {
                         .into_iter()
                         .map(|mut element| {
                             element.ty = ty_subst_keep_unbound(element.ty, &own);
-                            ElementSource::External(element)
+                            ElementSource::External(Box::new(element))
                         })
                         .collect();
                 }
