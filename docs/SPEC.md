@@ -10259,6 +10259,38 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`a?.b?.c`), a scalar receiver (`Int?`), a receiver wider than one word, and a selector that
   reads the receiver more than once keep the temporary. Tests: `tests/safe_call_dup_e2e.rs`,
   `tests/safe_call_inline_callable_reference_e2e.rs`.
+- **An access on a receiver that spans lines states its own line.**
+  - **Intrinsics state their line before their operands.** This covers `.size`, `[i]` on an
+    array or a string, primitive `compareTo`, a unary operator other than `+`, a binary operator
+    other than `&&`/`||`, and a numeric conversion, when no operand is unsigned. The receiver's
+    own first line, marked at the same offset, stays as a second entry.
+  - **Some intrinsics state it again at the instruction.** These are `arraylength`, `ineg`, the
+    widening and narrowing conversions, and `inv`'s `iconst_m1`. An unboxing is no conversion:
+    `b\n.v!!` states the `!!` line before its operand and nothing at `intValue`.
+  - **Calls mark only at their invoke.** A member call, a getter, `toString`, or `!!.length` marks
+    after the receiver's last line. Unsigned operators are inline functions, so they belong here
+    too.
+  - **A safe call.** fir2ir builds `recv?.sel` as `{ val tmp = recv; if (tmp == null) null else
+    tmp.sel }`.
+    - The safe call's line is stated before the receiver, as a statement or as an initializer, and
+      the null check is at that line.
+    - The selector reads the temporary at the line where the receiver starts. For a chain, that is
+      the line of its first receiver.
+    - kotlinc's optimizer folds the temporary into a `dup` only when no line entry falls between
+      them. So a multi-line receiver keeps its temporary.
+    - A folded chain (`a?.b?.c`) keeps each link's temporary live until the chain ends. The next
+      link's temporary takes the slot above it.
+    - An elvis folds the safe call it is over, which drops the safe call's start line. Its own
+      temporary is declared where the elvis starts and marks that line at its store.
+  - **Not handled.** `Int.hashCode()` marks again after its invoke, and `Char.code` (an inline
+    getter) leaves a `nop`.
+  - **Ownership.** Common IR records only facts: each expression's source start line, the builtin
+    call a node realizes with its checked operand and result types, safe-call blocks and the role
+    and line of each read of their temporary, and the line where an elvis's temporary is declared.
+    The JVM debug-line boundary (`src/jvm/ir_emit/debug_lines/intrinsic_calls.rs`) decides from
+    them which calls are intrinsics that state their line first, and where each entry goes.
+
+  Test: `tests/multiline_receiver_access_line_e2e.rs`.
 - **An elvis over a safe call keeps its own null check.** fir2ir builds `a?.f() ?: b` as an elvis
   `when` over a temporary holding the safe call's (nullable) value, so kotlinc emits the safe call's
   `ifnull` to the shared null path and then the elvis's own `dup; ifnonnull`, whatever `f()`'s
