@@ -16544,6 +16544,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   companion's own header does not see its nested classifiers, and a supertype's companion
   contributes none. Verified against kotlinc 2.4.20.
   (`tests/companion_nested_classifier_scope_e2e.rs`.)
+- **A nested class's header sees the classifiers its enclosing classes inherit.** The header of
+  `class Item(val token: Token)` declared in `ValueReader : Reader()` sits inside `ValueReader`'s
+  body, so `Token` binds `Reader.Token`, a nested classifier `ValueReader` inherits, ahead of a
+  top-level `Token` of the file or an import. The header owner's own inherited classifiers still
+  rank after imports; an enclosing class's inherited classifiers rank with that enclosing rung,
+  before imports. The signature bridge and the checker bind the header the same way. Verified
+  against kotlinc 2.4.21. (`tests/nested_header_inherited_classifier_e2e.rs`.)
 - **A classifier's own annotations resolve where the classifier is declared.** `@Dsl class Inner`
   inside `Builder` binds `Builder.Dsl`, a nested classifier of `Builder`'s companion, or one of any
   enclosing classifier; the annotated classifier's own nested declarations are not in scope for its
