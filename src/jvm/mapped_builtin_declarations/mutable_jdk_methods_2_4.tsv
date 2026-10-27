@@ -1,0 +1,21 @@
+# Kotlin's org.jetbrains.kotlin.builtins.jvm.JvmBuiltInsSignatures.MUTABLE_METHOD_SIGNATURES: the
+# JDK methods of a mapped collection interface that only its mutable Kotlin face carries.
+# Mirrors the Kotlin 2.4 `JvmBuiltInsSignatures` source.
+# This is checked-in policy data; it is not generated during the build.
+# physical JVM owner<TAB>physical method name<TAB>descriptor
+java/util/Collection	removeIf	(Ljava/util/function/Predicate;)Z
+java/util/List	replaceAll	(Ljava/util/function/UnaryOperator;)V
+java/util/List	sort	(Ljava/util/Comparator;)V
+java/util/List	addFirst	(Ljava/lang/Object;)V
+java/util/List	addLast	(Ljava/lang/Object;)V
+java/util/List	removeFirst	()Ljava/lang/Object;
+java/util/List	removeLast	()Ljava/lang/Object;
+java/util/Map	computeIfAbsent	(Ljava/lang/Object;Ljava/util/function/Function;)Ljava/lang/Object;
+java/util/Map	computeIfPresent	(Ljava/lang/Object;Ljava/util/function/BiFunction;)Ljava/lang/Object;
+java/util/Map	compute	(Ljava/lang/Object;Ljava/util/function/BiFunction;)Ljava/lang/Object;
+java/util/Map	merge	(Ljava/lang/Object;Ljava/lang/Object;Ljava/util/function/BiFunction;)Ljava/lang/Object;
+java/util/Map	putIfAbsent	(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;
+java/util/Map	remove	(Ljava/lang/Object;Ljava/lang/Object;)Z
+java/util/Map	replaceAll	(Ljava/util/function/BiFunction;)V
+java/util/Map	replace	(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;
+java/util/Map	replace	(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Z

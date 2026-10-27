@@ -9,9 +9,10 @@
 //! final special bridge testing `instanceof String`, and an inherited `Base<T>.remove(T)` under
 //! `Base<String>` implements it with the erased descriptor itself, so it needs nothing.
 //!
-//! The JDK default `removeIf` is a later realization; these comparisons leave it out by its exact
-//! spelling and compare every other member, the `toArray` pair and the declared `containsAll`
-//! override included, byte for byte.
+//! The JDK default `removeIf` that `java.util.Collection` declares is a stub as well
+//! (`removeIf(Predicate<? super String>)`). These comparisons compare every member, the `toArray`
+//! pair and the declared `containsAll` override included, byte for byte, except an abstract class's
+//! fake-override bridges, a later realization they leave out by their exact spelling.
 
 use super::common;
 
@@ -93,13 +94,6 @@ fun box(): String {{
 
 const ABSTRACT_BAG: &str = "abstract class Bag : Collection<String>\n";
 
-/// The members a later realization writes, as `javap -p` spells them in either compiler's class.
-const LATER_REALIZATIONS: &[&str] = &[
-    "public boolean removeIf(java.util.function.Predicate<? super java.lang.String>);",
-    "public boolean removeIf(java.util.function.Predicate<? super java.lang.Integer>);",
-    "public boolean removeIf(java.util.function.Predicate<? super T>);",
-];
-
 /// The fake-override bridges an abstract class's unimplemented `contains` and `size` get, a later
 /// realization as well.
 const ABSTRACT_FAKE_OVERRIDE_BRIDGES: &[&str] = &[
@@ -131,10 +125,7 @@ fn assert_members_match_kotlinc_beside(source: &str, members: &[&str], later: &[
     let realized_here = |declarations: Vec<String>| {
         declarations
             .into_iter()
-            .filter(|declaration| {
-                !LATER_REALIZATIONS.contains(&declaration.as_str())
-                    && !later.contains(&declaration.as_str())
-            })
+            .filter(|declaration| !later.contains(&declaration.as_str()))
             .collect::<Vec<_>>()
     };
     assert_eq!(realized_here(krusty), realized_here(reference));
@@ -158,6 +149,7 @@ const STUBS: &[&str] = &[
     "public boolean removeAll(java.util.Collection<?>);",
     "public boolean retainAll(java.util.Collection<?>);",
     "public void clear();",
+    "public boolean removeIf(java.util.function.Predicate<? super java.lang.String>);",
     "public final int size();",
     "public final boolean contains(java.lang.Object);",
     "public boolean add(java.lang.Object);",

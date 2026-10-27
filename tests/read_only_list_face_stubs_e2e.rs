@@ -9,10 +9,11 @@
 //! `remove(int)` bridge and the erased one. The override check sees applied supertypes, so a
 //! `MutableListIterator<String>` result implements `listIterator`.
 //!
-//! The JDK defaults (`replaceAll`, `sort`, the `SequencedCollection` members) are later
-//! realizations, and so are an abstract class's fake-override bridges; these comparisons leave them
-//! out by their exact spelling and compare every other member, the `toArray` pair and the declared
-//! `containsAll` override included, byte for byte.
+//! The JDK defaults `java.util.List` declares for the mutable face only (`replaceAll`, `sort`, the
+//! `SequencedCollection` members) are stubs too, with an erased bridge where the descriptor
+//! differs (`addFirst(Object)`). An abstract class's fake-override bridges are a later realization;
+//! these comparisons leave them out by their exact spelling and compare every other member, the
+//! `toArray` pair and the declared `containsAll` override included, byte for byte.
 
 use super::common;
 
@@ -91,32 +92,6 @@ abstract class Row : List<String> {
 
 const ABSTRACT_INT_ITERATOR: &str = "abstract class Row : ListIterator<Int>\n";
 
-/// The members a later realization writes, as `javap -p` spells them in either compiler's class.
-const LATER_REALIZATIONS: &[&str] = &[
-    "public void replaceAll(java.util.function.UnaryOperator<java.lang.String>);",
-    "public void replaceAll(java.util.function.UnaryOperator<java.lang.Integer>);",
-    "public void replaceAll(java.util.function.UnaryOperator<T>);",
-    "public void sort(java.util.Comparator<? super java.lang.String>);",
-    "public void sort(java.util.Comparator<? super java.lang.Integer>);",
-    "public void sort(java.util.Comparator<? super T>);",
-    "public void addFirst(java.lang.String);",
-    "public void addFirst(java.lang.Integer);",
-    "public void addFirst(T);",
-    "public void addFirst(java.lang.Object);",
-    "public void addLast(java.lang.String);",
-    "public void addLast(java.lang.Integer);",
-    "public void addLast(T);",
-    "public void addLast(java.lang.Object);",
-    "public java.lang.String removeFirst();",
-    "public java.lang.Integer removeFirst();",
-    "public T removeFirst();",
-    "public java.lang.Object removeFirst();",
-    "public java.lang.String removeLast();",
-    "public java.lang.Integer removeLast();",
-    "public T removeLast();",
-    "public java.lang.Object removeLast();",
-];
-
 /// The fake-override members an abstract class's unimplemented read-only members get.
 const ABSTRACT_FAKE_OVERRIDE_BRIDGES: &[&str] = &[
     "public abstract boolean contains(java.lang.String);",
@@ -140,10 +115,7 @@ fn assert_members_match_kotlinc(source: &str, members: &[&str], later: &[&str]) 
     let realized_here = |declarations: Vec<String>| {
         declarations
             .into_iter()
-            .filter(|declaration| {
-                !LATER_REALIZATIONS.contains(&declaration.as_str())
-                    && !later.contains(&declaration.as_str())
-            })
+            .filter(|declaration| !later.contains(&declaration.as_str()))
             .collect::<Vec<_>>()
     };
     assert_eq!(realized_here(krusty), realized_here(reference));
@@ -214,9 +186,15 @@ fn a_list_gets_kotlincs_mutable_list_stubs() {
             "public java.lang.String set(int, java.lang.String);",
             "public java.lang.String remove(int);",
             "public java.lang.Object remove(int);",
+            "public void replaceAll(java.util.function.UnaryOperator<java.lang.String>);",
+            "public void sort(java.util.Comparator<? super java.lang.String>);",
+            "public void addFirst(java.lang.String);",
+            "public java.lang.String removeLast();",
             "public boolean add(java.lang.Object);",
             "public void add(int, java.lang.Object);",
             "public java.lang.Object set(int, java.lang.Object);",
+            "public void addFirst(java.lang.Object);",
+            "public java.lang.Object removeLast();",
         ],
         &[],
     );
@@ -239,6 +217,10 @@ fn a_primitive_list_boxes_set_but_not_remove_at_like_kotlinc() {
             "public boolean add(java.lang.Object);",
             "public void add(int, java.lang.Object);",
             "public java.lang.Object set(int, java.lang.Object);",
+            "public void addLast(java.lang.Integer);",
+            "public java.lang.Integer removeFirst();",
+            "public void addLast(java.lang.Object);",
+            "public java.lang.Object removeFirst();",
         ],
         &[],
     );

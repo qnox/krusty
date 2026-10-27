@@ -22,15 +22,18 @@ use crate::jvm::jvm_class_map::{
     jvm_collection_to_kotlin_mutable_type_name, jvm_collection_to_kotlin_type_name,
     mapped_collection, to_jvm_type_name,
 };
+use crate::jvm::jvm_libraries::{declared_desc_to_ty, parse_method_gsig, signature_formals};
 use crate::jvm::mapped_builtin_declarations::{
     collection_bridge_policy_for_declaration, collection_signature_policy_for_declaration,
-    realization_for_declaration, CollectionBridgeFailure, CollectionSignaturePolicy,
-    MappedBuiltinMemberKind,
+    is_mutable_only_jdk_method, realization_for_declaration, CollectionBridgeFailure,
+    CollectionSignaturePolicy, MappedBuiltinMemberKind,
 };
 use crate::jvm::method_descriptors::{jvm_declared_ty, jvm_tys};
-use crate::jvm::names::method_descriptor;
+use crate::jvm::names::{method_descriptor, parse_method_descriptor};
 use crate::jvm::override_results::scalar_over_reference;
-use crate::types::{ty_subst, wk, CollectionKind, Ty, TypeName, Visibility};
+use crate::types::{
+    ty_subst, ty_subst_applied_arguments, wk, CollectionKind, Ty, TypeName, Visibility,
+};
 
 /// kotlinc's `preComputedStubs` order: a class's applicable faces contribute their stubs in this
 /// order.
@@ -45,8 +48,7 @@ const FACE_ORDER: [CollectionKind; 8] = [
     CollectionKind::ListIterator,
 ];
 
-/// The faces whose stubs are realized. The JDK members of the mutable collections (`removeIf`) and
-/// the `toArray` lowering are not yet realized for any face.
+/// The faces whose stubs are realized. `Iterable` has no mutable member of its own.
 const REALIZED_FACES: [CollectionKind; 7] = [
     CollectionKind::Collection,
     CollectionKind::Set,
@@ -541,7 +543,96 @@ fn face_stubs(classpath: &Classpath, face: Face, applied: Ty) -> Vec<ReadOnlyStu
         }
     }
     stubs.sort_by_key(|stub| names.iter().position(|name| *name == stub.name));
+    let jdk_stubs = mutable_jdk_stubs(classpath, face, arguments, &stubs);
+    stubs.extend(jdk_stubs);
     stubs
+}
+
+/// kotlinc's candidates from the mutable face's JDK interface: each method that interface declares
+/// which only the mutable face carries (`List.sort`, `Map.putIfAbsent`), in classfile order after
+/// the builtin members, unless a builtin member already stands for it (`MutableMap.remove(K, V)`).
+/// A Java signature's uses of the interface's type parameters are platform types, so they take the
+/// face's arguments as references (`putIfAbsent(K, V)` is `(Integer, Integer)` for `Map<Int, Int>`),
+/// and the stub's bridge is the JDK method's own descriptor when that differs.
+fn mutable_jdk_stubs(
+    classpath: &Classpath,
+    face: Face,
+    arguments: &[Ty],
+    builtin: &[ReadOnlyStub],
+) -> Vec<ReadOnlyStub> {
+    let jvm_owner = to_jvm_type_name(face.mutable);
+    let Some(interface) = classpath.find_name(jvm_owner) else {
+        return Vec::new();
+    };
+    let formals = interface
+        .signature
+        .as_deref()
+        .map(signature_formals)
+        .unwrap_or_default();
+    if formals.len() != arguments.len() {
+        return Vec::new();
+    }
+    let bindings: HashMap<String, Ty> = formals
+        .into_iter()
+        .zip(arguments.iter().map(|argument| Ty::nullable(*argument)))
+        .collect();
+    interface
+        .methods
+        .iter()
+        .filter(|method| {
+            method.access & ACC_STATIC == 0
+                && is_mutable_only_jdk_method(jvm_owner, &method.name, &method.descriptor)
+                && !builtin.iter().any(|stub| {
+                    stub.physical_name == method.name
+                        && (stub.descriptor() == method.descriptor
+                            || stub.bridge.as_ref().is_some_and(|(parameters, result)| {
+                                method_descriptor(parameters, *result) == method.descriptor
+                            }))
+                })
+        })
+        .filter_map(|method| {
+            let (erased_parameters, erased_result) = parse_method_descriptor(&method.descriptor)?;
+            let erased_parameters: Vec<Ty> = erased_parameters
+                .into_iter()
+                .map(|parameter| jvm_declared_ty(&declared_desc_to_ty(parameter)))
+                .collect();
+            let erased_result = jvm_declared_ty(&declared_desc_to_ty(erased_result));
+            let (parameters, result) = match method.signature.as_deref() {
+                Some(signature) => {
+                    let declared = parse_method_gsig(signature)?;
+                    (
+                        declared
+                            .params
+                            .iter()
+                            .map(|ty| ty_subst_applied_arguments(*ty, &bindings))
+                            .collect(),
+                        ty_subst_applied_arguments(declared.ret, &bindings),
+                    )
+                }
+                None => (erased_parameters.clone(), erased_result),
+            };
+            let stub_descriptor =
+                method_descriptor(&jvm_tys(&parameters), physical_stub_result(result, false));
+            let bridge = (method.descriptor != stub_descriptor)
+                .then_some((erased_parameters, erased_result));
+            Some(ReadOnlyStub {
+                name: method.name.clone(),
+                physical_name: method.name.clone(),
+                body: StubBody::Throwing,
+                parameter_names: (0..parameters.len())
+                    .map(crate::jvm::parameter_names::unnamed_java_parameter)
+                    .collect(),
+                override_parameters: parameters.clone(),
+                parameters,
+                result,
+                boxed_result: false,
+                declaration_site_wildcards: false,
+                bridge,
+                type_safe: false,
+                barrier: None,
+            })
+        })
+        .collect()
 }
 
 /// The JVM result of a stub whose semantic result is `result`.
@@ -702,7 +793,9 @@ fn superclass_bindings(
     if formals.len() != arguments.len() {
         return Err(SkipReason::ReadOnlyCollectionStubs(format!(
             "superclass {} declares {} type parameters but its checked application has {} arguments",
-            owner.render(), formals.len(), arguments.len()
+            owner.render(),
+            formals.len(),
+            arguments.len()
         )));
     }
     Ok(formals.into_iter().zip(arguments.iter().copied()).collect())
