@@ -16547,10 +16547,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 - **A nested class's header sees the classifiers its enclosing classes inherit.** The header of
   `class Item(val token: Token)` declared in `ValueReader : Reader()` sits inside `ValueReader`'s
   body, so `Token` binds `Reader.Token`, a nested classifier `ValueReader` inherits, ahead of a
-  top-level `Token` of the file or an import. The header owner's own inherited classifiers still
-  rank after imports; an enclosing class's inherited classifiers rank with that enclosing rung,
-  before imports. The signature bridge and the checker bind the header the same way. Verified
-  against kotlinc 2.4.21. (`tests/nested_header_inherited_classifier_e2e.rs`.)
+  top-level `Token` of the file or an import. A primary constructor's parameter types and default
+  values also see the classifiers their own class inherits, ranked like that class's body:
+  `class Holder(val t: Token = Token()) : Base()` binds `Base.Token` ahead of an explicit
+  `import other.Token`. The supertype list and type-parameter bounds see none of the class's own
+  inherited classifiers. The signature bridge and the checker bind the header the same way.
+  Verified against kotlinc 2.4.21. (`tests/nested_header_inherited_classifier_e2e.rs`.)
 - **Nested classifiers are inherited along the superclass chain only.** An interface's nested
   classifier reaches neither an implementing class nor a sub-interface by its simple name, whether
   the interface is Kotlin or Java: in `class One : Left` a top-level `Category` binds although
