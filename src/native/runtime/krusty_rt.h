@@ -1188,6 +1188,10 @@ KRef kt_ushort_to_string(kt_short value);
 KRef kt_uint_to_string(kt_int value);
 KRef kt_ulong_to_string(kt_long value);
 
+/* An `Int`/`Long` in a radix of 2..36, lowercase, as `Kotlin_Long_toStringRadix` renders it. */
+KRef kt_int_to_string_radix(kt_int value, kt_int radix);
+KRef kt_long_to_string_radix(kt_long value, kt_int radix);
+
 /* Integer division, remainder and shifts. Kotlin defines all three; C leaves the interesting cases
    undefined. Division by zero throws in Kotlin and is undefined in C; `Int.MIN_VALUE / -1` overflows
    and is undefined in C but wraps in Kotlin; and a shift count outside 0..31 is undefined in C while

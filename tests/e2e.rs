@@ -839,6 +839,8 @@ mod elvis_newline_continuation_e2e;
 mod elvis_nullability_join_e2e;
 #[path = "elvis_over_safe_call_e2e.rs"]
 mod elvis_over_safe_call_e2e;
+#[path = "elvis_own_line_e2e.rs"]
+mod elvis_own_line_e2e;
 #[path = "elvis_return_smartcast_e2e.rs"]
 mod elvis_return_smartcast_e2e;
 #[path = "elvis_signature_inference_e2e.rs"]
@@ -1298,6 +1300,8 @@ mod is_nullable_primitive_e2e;
 mod is_primitive_smartcast_e2e;
 #[path = "java_abstract_override_e2e.rs"]
 mod java_abstract_override_e2e;
+#[path = "java_annotation_element_property_e2e.rs"]
+mod java_annotation_element_property_e2e;
 #[path = "java_array_covariance_e2e.rs"]
 mod java_array_covariance_e2e;
 #[path = "java_bridge_members_e2e.rs"]
@@ -1314,8 +1318,6 @@ mod java_ctor_sam_conversion_e2e;
 mod java_flexible_collection_e2e;
 #[path = "java_flexible_variable_inference_e2e.rs"]
 mod java_flexible_variable_inference_e2e;
-#[path = "java_fluent_setter_e2e.rs"]
-mod java_fluent_setter_e2e;
 #[path = "java_instance_e2e.rs"]
 mod java_instance_e2e;
 #[path = "java_interface_mutable_collection_face_e2e.rs"]
@@ -1334,12 +1336,10 @@ mod local_class_construction_capture_e2e;
 #[path = "local_function_reference_inference_e2e.rs"]
 mod local_function_reference_inference_e2e;
 java_member_modules::declare!();
+mod java_nullability_modules;
+java_nullability_modules::declare!();
 #[path = "java_nested_static_e2e.rs"]
 mod java_nested_static_e2e;
-#[path = "java_not_null_null_argument_e2e.rs"]
-mod java_not_null_null_argument_e2e;
-#[path = "java_not_null_setter_pairing_e2e.rs"]
-mod java_not_null_setter_pairing_e2e;
 #[path = "java_parameters_attribute_e2e.rs"]
 mod java_parameters_attribute_e2e;
 #[path = "java_platform_type_publication_e2e.rs"]
@@ -2218,14 +2218,8 @@ mod platform_null_check_line_e2e;
 mod private_constructor_accessors_e2e;
 #[path = "private_inline_property_ref_e2e.rs"]
 mod private_inline_property_ref_e2e;
-#[path = "read_only_iterator_stubs_e2e.rs"]
-mod read_only_iterator_stubs_e2e;
-#[path = "read_only_stub_generic_override_e2e.rs"]
-mod read_only_stub_generic_override_e2e;
-#[path = "read_only_stub_inheritability_e2e.rs"]
-mod read_only_stub_inheritability_e2e;
-#[path = "read_only_stub_override_bridges_e2e.rs"]
-mod read_only_stub_override_bridges_e2e;
+#[path = "e2e/read_only_collection_stubs.rs"]
+mod read_only_collection_stubs;
 #[path = "redundant_checkcast_e2e.rs"]
 mod redundant_checkcast_e2e;
 #[path = "redundant_checkcasts_before_aastore_e2e.rs"]
@@ -2943,26 +2937,8 @@ mod var_extension_property_e2e;
 mod var_smartcast_after_assign_e2e;
 #[path = "var_smartcast_e2e.rs"]
 mod var_smartcast_e2e;
-#[path = "vararg_constructor_property_e2e.rs"]
-mod vararg_constructor_property_e2e;
-#[path = "vararg_e2e.rs"]
-mod vararg_e2e;
-#[path = "vararg_element_default_e2e.rs"]
-mod vararg_element_default_e2e;
-#[path = "vararg_element_specificity_e2e.rs"]
-mod vararg_element_specificity_e2e;
-#[path = "vararg_elements_before_named_e2e.rs"]
-mod vararg_elements_before_named_e2e;
-#[path = "vararg_extension_overload_e2e.rs"]
-mod vararg_extension_overload_e2e;
-#[path = "vararg_inline_argument_splice_e2e.rs"]
-mod vararg_inline_argument_splice_e2e;
-#[path = "vararg_lambda_element_shape_e2e.rs"]
-mod vararg_lambda_element_shape_e2e;
-#[path = "vararg_member_overload_clash_e2e.rs"]
-mod vararg_member_overload_clash_e2e;
-#[path = "vararg_spread_shapes_e2e.rs"]
-mod vararg_spread_shapes_e2e;
+#[path = "e2e/varargs.rs"]
+mod varargs;
 #[path = "vc_mangled_default_e2e.rs"]
 mod vc_mangled_default_e2e;
 #[path = "when_branch_if_no_else_e2e.rs"]

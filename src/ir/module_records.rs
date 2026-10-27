@@ -45,6 +45,10 @@ pub struct IrModuleCallable {
     /// Declaration type parameters and their complete bounds. A JVM realization erases a call to
     /// this declaration with the same primary class bound it uses for a same-file signature.
     pub type_parameters: Box<[IrCallableTypeParameter]>,
+    /// The declaring classifier's type parameters, those it captures from enclosing classifiers
+    /// included, with their complete bounds. A class formal in `parameters` or `result` erases
+    /// with these records exactly as it does in the declaring file.
+    pub owner_type_parameters: Box<[IrCallableTypeParameter]>,
     /// Stable source/generated identities parallel to `parameters`. Backends use these for debug
     /// and parameter metadata on synthesized adapters instead of inventing positional names.
     pub parameter_identities: Box<[IrParameterIdentity]>,
@@ -110,6 +114,9 @@ pub struct IrModuleConstructor {
     pub parameters: Box<[Ty]>,
     /// An inner class's enclosing classifier, whose instance a construction passes first.
     pub outer: Option<TypeName>,
+    /// The constructed classifier's type parameters, those it captures from enclosing classifiers
+    /// included, with their complete bounds. `parameters` erase with these records.
+    pub owner_type_parameters: Box<[IrCallableTypeParameter]>,
 }
 
 /// The module constructors a file names: what each construction selected, and the record of

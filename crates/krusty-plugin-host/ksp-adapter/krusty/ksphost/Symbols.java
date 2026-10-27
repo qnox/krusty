@@ -22,6 +22,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Supplier;
 
 // One round's symbol model, read from what krusty sends (`KspRound`): the module's source files and
 // their declarations, with the classpath for the library classifiers they name. A library
@@ -105,6 +106,12 @@ final class Symbols {
         sourceClasses.put(qualifiedName, declaration);
         readDeclarations(in, file, declaration, declaration.declarations);
         declaration.jvmSignature = readOptionalString(in);
+        if (Wire.readBoolean(in)) {
+            declaration.allProperties = readMembers(in, declaration.declarations);
+        }
+        if (Wire.readBoolean(in)) {
+            declaration.allFunctions = readMembers(in, declaration.declarations);
+        }
         return declaration;
     }
 
@@ -130,34 +137,51 @@ final class Symbols {
         declaration.declarationsComplete = Wire.readBoolean(in);
         symbols.readDeclarations(in, null, declaration, declaration.declarations);
         declaration.jvmSignature = readOptionalString(in);
+        if (Wire.readBoolean(in)) {
+            declaration.allProperties = symbols.readMembers(in, declaration.declarations);
+        }
+        if (Wire.readBoolean(in)) {
+            declaration.allFunctions = symbols.readMembers(in, declaration.declarations);
+        }
         declaration.packageName = new Name(Wire.readString(in));
         declaration.parent = readOptionalString(in);
         declaration.origin = in.readByte() == 0 ? Origin.KOTLIN_LIB : Origin.JAVA_LIB;
         declaration.annotationsComplete = Wire.readBoolean(in);
-        if (Wire.readBoolean(in)) {
-            declaration.allProperties = symbols.readMembers(in, declaration);
-        }
-        if (Wire.readBoolean(in)) {
-            declaration.allFunctions = symbols.readMembers(in, declaration);
-        }
         return declaration;
     }
 
-    // The members a library classifier lists (`put_members` in `src/ksp/protocol.rs`): its own
-    // declarations by index, and inherited ones with the classifier that declares them.
-    private List<KSDeclaration> readMembers(DataInputStream in, LibraryClass declaration)
+    // The members a classifier lists (`put_members` in `src/ksp/protocol.rs`): its own
+    // declarations by index, ones described with the list together with the classifier that
+    // declares them, and declarations of other source classifiers by index.
+    private Members readMembers(DataInputStream in, List<KSDeclaration> declarations)
             throws IOException {
         int count = in.readInt();
-        List<KSDeclaration> members = new ArrayList<>(count);
+        List<Supplier<KSDeclaration>> members = new ArrayList<>(count);
         for (int i = 0; i < count; i++) {
-            if (in.readByte() == 0) {
-                members.add(declaration.declarations.get(in.readInt()));
-            } else {
-                KSDeclaration owner = resolvedClass(Wire.readString(in));
-                members.add(readDeclaration(in, null, owner));
+            byte tag = in.readByte();
+            switch (tag) {
+                case 0: {
+                    KSDeclaration declared = declarations.get(in.readInt());
+                    members.add(() -> declared);
+                    break;
+                }
+                case 1: {
+                    KSDeclaration owner = resolvedClass(Wire.readString(in));
+                    KSDeclaration described = readDeclaration(in, null, owner);
+                    members.add(() -> described);
+                    break;
+                }
+                case 2: {
+                    String owner = Wire.readString(in);
+                    int index = in.readInt();
+                    members.add(() -> sourceClasses.get(owner).declarations.get(index));
+                    break;
+                }
+                default:
+                    throw new IOException("unknown member " + tag);
             }
         }
-        return members;
+        return new Members(members);
     }
 
     // A function (`put_function` in `src/ksp/protocol.rs`).
@@ -414,6 +438,7 @@ final class Symbols {
             name = Wire.readString(in);
         }
         boolean nullable = Wire.readBoolean(in);
+        boolean unannotated = Wire.readBoolean(in);
         int count = in.readInt();
         List<KSTypeArgument> arguments = new ArrayList<>(count);
         for (int i = 0; i < count; i++) {
@@ -424,7 +449,7 @@ final class Symbols {
             }
             arguments.add(argument);
         }
-        reference.type = new SourceType(this, name, parameter, nullable, arguments);
+        reference.type = new SourceType(this, name, parameter, nullable, unannotated, arguments);
         reference.type.alias = alias;
         return reference;
     }

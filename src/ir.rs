@@ -97,6 +97,7 @@ mod source_debug;
 pub(crate) use source_debug::SourceDebug;
 mod static_properties;
 mod type_check_role;
+mod type_parameter_declarations;
 pub(crate) mod type_reflection;
 mod value_class_constructors;
 mod value_class_facts;
@@ -188,6 +189,9 @@ pub enum IrCheckedArgument {
         parameter: u32,
         array_type: Ty,
         elements: Vec<(ExprId, bool)>,
+        /// The source line the argument begins on: its first element's (kotlinc's `IrVararg`
+        /// offsets). `0` for an argument the compiler generated, which has no position.
+        source_line: u32,
     },
 }
 
@@ -1595,6 +1599,10 @@ pub struct IrFile {
     /// index is stable within its declaring class; backend consumers must not recover this edge by
     /// matching the property's spelling against a static field name.
     jvm_companion_property_statics: crate::fx_hash::HashMap<(TypeName, u32), u32>,
+    /// Exact delegated companion property declaration → the outer-class static holding its
+    /// `x$delegate`. Kept apart from `jvm_companion_property_statics`: the delegate is storage the
+    /// property's accessors read, not the property itself.
+    jvm_companion_delegate_statics: crate::fx_hash::HashMap<(TypeName, u32), u32>,
     /// User annotations applied to FUNCTIONS (top-level and members share the `functions` arena),
     /// by function id, retaining the resolved semantic retention. A side table rather than a field on [`IrFunction`], for the
     /// same reason [`IrClass::field_annotations`] is one: the overwhelming majority of functions
@@ -2316,8 +2324,8 @@ pub struct IrFile {
     /// classifying as a value class. Only NON-NULL declared returns are recorded: a nullable value
     /// class really is boxed.
     pub call_declared_ret: crate::fx_hash::HashMap<u32, Ty>,
-    /// The `ImplicitCoercion`s FIR lowering places between a call's declared result and its
-    /// call-site substitution (`fun <T> f(): T` read as `Int`). Which coercion a node is comes from
+    /// The `ImplicitCoercion`s FIR lowering places between a call's or property read's declared
+    /// result and its use-site substitution (`fun <T> f(): T` read as `Int`). Which coercion a node is comes from
     /// where it was lowered, not from its shape: an adaptation or widening over the same call is
     /// another coercion. A target decides whether the conversion crosses a physical result slot.
     pub declaration_result_coercions: crate::fx_hash::HashSet<ExprId>,
