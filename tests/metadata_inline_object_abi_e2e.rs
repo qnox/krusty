@@ -264,3 +264,62 @@ fn a_secondary_constructor_takes_its_declaration_order_against_an_inline_member(
     .expect("reference kotlinc is provisioned")
     .unwrap_or_else(|diff| panic!("{diff}"));
 }
+
+/// A default argument is evaluated by its declaration's `$default` wrapper, so it takes that
+/// function's or constructor's order: `A` (primary constructor), `B` (secondary constructor), `D`
+/// (member) and `F` (top-level function) are first constructed by a default before the inline
+/// function, so their implementations stay unmarked; `C`, `E` and `G` are first constructed by an
+/// inline function before the declaration whose default constructs them, so they are marked. `H`
+/// is a public inline function's own default, ahead of a non-inline construction.
+const DEFAULT_ORDER_SOURCE: &str = r#"package app
+
+annotation class A(val i: Int)
+annotation class B(val i: Int)
+annotation class C(val i: Int)
+annotation class D(val i: Int)
+annotation class E(val i: Int)
+annotation class F(val i: Int)
+annotation class G(val i: Int)
+annotation class H(val i: Int)
+
+class K(val p: Any = A(0)) {
+    constructor(x: Any = B(0), y: Int) : this(x)
+    inline fun later(): Any = A(1)
+    inline fun before(): Any = C(1)
+    constructor(x: Any = C(0), y: Long) : this(x)
+    inline fun mid(): Any = B(1)
+    fun member(x: Any = D(0)): Any = x
+    inline fun d(): Any = D(1)
+    inline fun e(): Any = E(1)
+    fun memberAfter(x: Any = E(0)): Any = x
+}
+
+fun top(x: Any = F(0)): Any = x
+inline fun f(): Any = F(1)
+inline fun g(): Any = G(1)
+fun topAfter(x: Any = G(0)): Any = x
+inline fun h(x: Any = H(0)): Any = x
+fun notInline(): Any = H(1)
+"#;
+
+#[test]
+fn a_default_argument_takes_its_declaration_order_against_an_inline_function() {
+    let classpath = [common::stdlib_jar(), common::jdk_modules()];
+    common::metadata_headers_diff_against_kotlinc_cp(
+        "DefaultOrder",
+        DEFAULT_ORDER_SOURCE,
+        &[
+            "app/K$annotationImpl$app_A$0",
+            "app/K$annotationImpl$app_B$0",
+            "app/K$annotationImpl$app_C$0",
+            "app/K$annotationImpl$app_D$0",
+            "app/K$annotationImpl$app_E$0",
+            "app/DefaultOrderKt$annotationImpl$app_F$0",
+            "app/DefaultOrderKt$annotationImpl$app_G$0",
+            "app/DefaultOrderKt$annotationImpl$app_H$0",
+        ],
+        &classpath,
+    )
+    .expect("reference kotlinc is provisioned")
+    .unwrap_or_else(|diff| panic!("{diff}"));
+}

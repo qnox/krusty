@@ -135,7 +135,9 @@ pub(crate) fn lower_annotation_constructions(ir: &mut IrFile, facade: &str) {
 /// the inventory every target's emission walks, each ordered by the frontend's source order of the
 /// declaration it is evaluated in: a function (a lambda or a local class's member by the
 /// declaration it is written in), a property's initializer, an `init` block, or a constructor with
-/// its delegation. Arena positions say nothing about it.
+/// its delegation. Arena positions say nothing about it. The JVM's default-argument wrappers
+/// ([`crate::jvm::default_wrappers::evaluated_defaults`]) add the defaults they evaluate, each
+/// ordered by the function or constructor it belongs to; a default no wrapper fills is no code.
 fn public_abi_interfaces(
     ir: &IrFile,
     sites: &HashMap<u32, crate::ir::IrAnnotationConstruction>,
@@ -154,7 +156,9 @@ fn public_abi_interfaces(
         .collect();
     let mut roots = emitted_declaration_roots(ir)
         .into_iter()
-        .map(|root| (Scope::of_declaration(ir, root.declaration), root.root))
+        .map(|root| (root.declaration, root.root))
+        .chain(crate::jvm::default_wrappers::evaluated_defaults(ir))
+        .map(|(declaration, root)| (Scope::of_declaration(ir, declaration), root))
         .collect::<Vec<_>>();
     roots.sort_by_key(|(scope, _)| scope.order);
     let mut first_sites = FirstSites::default();
