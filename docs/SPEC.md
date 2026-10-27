@@ -13770,13 +13770,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `values`, `entries`, then `Map`'s `size`, `containsKey`, `containsValue`, `get`). They follow
   the class's own members' bridges and precede the read-only stubs' throwing bridges. A member
   the class or a superclass declares, abstract or not, or an inherited interface default stands
-  for itself; a Kotlin interface that redeclares the member abstract does not. A builtin a
+  for itself; a Kotlin interface that redeclares the member abstract does not. A source
+  superclass's member is read from the module's declaration record, whichever file declares it,
+  and stands for the builtin member when it is visible, has no receivers, and its parameters,
+  applied in the class (`contains(element: T)` of `GenericBase<T>` under `GenericBase<String>`),
+  erase like the builtin's; a property stands for a getter (`val size`). So `abstract class
+  Child : Base(), Collection<String>` with `Base`'s concrete `contains(String)` and `size` writes
+  only their final bridges in one file or split across two. A builtin a
   non-builtin superclass reaches is that superclass's to materialize, so its subclasses inherit
   the final bridges, and one that implements the member (`override val size`) declares none of
   its own. A Java superclass's abstract method keeps its specialization abstract
   (`AbstractList.size()` gives `abstract int getSize()` beside `final int size()`). Tests:
   `tests/abstract_builtin_overrides_e2e.rs` (classes byte for byte, and a box run through the JVM
-  names), `tests/read_only_collection_face_stubs_e2e.rs`, `tests/read_only_list_face_stubs_e2e.rs`,
+  names), `tests/abstract_builtin_source_superclass_e2e.rs` (same-file and split-file controls),
+  `tests/read_only_collection_face_stubs_e2e.rs`, `tests/read_only_list_face_stubs_e2e.rs`,
   `tests/read_only_set_face_stubs_e2e.rs`. Not yet like kotlinc: the order of the members an
   `AbstractMutableList` subclass inherits (kotlinc writes `remove(String)` and `contains` before
   `indexOf`), the place of `values()` under `java.util.AbstractMap`, and the shortcuts of members

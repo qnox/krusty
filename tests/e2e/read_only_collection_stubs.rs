@@ -7,6 +7,8 @@ use super::common;
 
 #[path = "../abstract_builtin_overrides_e2e.rs"]
 mod abstract_builtin_overrides_e2e;
+#[path = "../abstract_builtin_source_superclass_e2e.rs"]
+mod abstract_builtin_source_superclass_e2e;
 #[path = "../collection_override_signature_e2e.rs"]
 mod collection_override_signature_e2e;
 #[path = "../collection_to_array_e2e.rs"]
