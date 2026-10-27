@@ -24,6 +24,8 @@ mod contract_dsl_tests;
 mod dependency_access_policy;
 mod dependency_deprecation;
 use dependency_deprecation::{ClassifierShape, PropertyDeclaration, PropertyDeprecations};
+#[cfg(test)]
+mod builtin_declaration_name_tests;
 mod dependency_registration;
 mod generic_signatures;
 mod inline_body_plan;
@@ -1843,6 +1845,10 @@ impl JvmLibraries {
             let is_mapped_builtin =
                 super::jvm_class_map::maps_to_distinct_jvm_internal(internal_name);
             let builtin_class_signature = self.cp.builtin_class_signature_name(internal_name);
+            let builtin_declaration_name = builtin_class_signature
+                .as_ref()
+                .filter(|signature| signature.declaration == internal_name)
+                .map(|signature| signature.declaration_name.clone());
             let metadata_class_signature = ci.meta.class_visibility.map(|_| {
                 (
                     ci.meta.class_type_parameters.type_params.clone(),
@@ -2406,9 +2412,11 @@ impl JvmLibraries {
             let type_parameters = application_header.parameters;
             Some(LibraryType {
                 runtime_exception: None,
-                declaration_name: (ci.this_class == internal_name)
-                    .then(|| classifier_facts::classifier_declaration_name(&ci))
-                    .flatten(),
+                declaration_name: if ci.this_class == internal_name {
+                    classifier_facts::classifier_declaration_name(&ci)
+                } else {
+                    builtin_declaration_name
+                },
                 is_kotlin: has_kotlin_metadata,
                 is_data: ci.meta.is_data,
                 access: if let Some(visibility) = ci.meta.class_visibility {

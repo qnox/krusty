@@ -35,6 +35,15 @@ Anonymous classes, reference carriers and checked body-local naming keep their s
 Complete table comparisons cover top-level and nested literal-dollar names in both source orders.
 Metadata class-ID encoding and source-name publication remain separate follow-ups.
 
+## Builtin declaration names
+
+Language-owned classifier factories retain their admitted package and exact segment. Function
+families derive identity and declaration name from the same family/arity definition; array names
+come from the existing canonical array inventory. Decoded builtin metadata retains raw classifier
+ownership independently of a physical JVM realization. A selected Kotlin builtin name applies only
+to its declared semantic identity. An exact physical classifier keeps its own metadata authority,
+including unknown ownership when its Kotlin metadata supplies no name.
+
 ## Classifier declaration-name ownership
 
 A non-local classifier retains its exact declaration segment and either its package or its
@@ -81,6 +90,17 @@ declaring class between them does not hide the erased result, so the receiver is
 unnarrowed or narrowed only to `Base`. Tests:
 `tests/consumer_materialized_result_e2e.rs` (`bound_results`), for one file, a sibling file, and a
 kotlinc-built dependency.
+
+`!!` and string templates consume the same erased slot. `!!` checks the value the call or property
+read left, then the consumer narrows it if it needs to: for `Simple<T : Base>.nul: T?` read as
+`Both`, a `Both` consumer does `checkNotNull` and then `checkcast Both`, and a `Base` consumer or
+`===` takes no cast. A `!!` that unboxes (`m[k]!!` or `r.getOrNull()!!` read as `Int`) changes representation, so
+its unboxing stays after the check (`map_get_nullable_elvis_e2e`, `result_property_carrier_e2e`).
+A template part reaches `String.valueOf(Object)`, `StringBuilder.append(Object)`,
+or an `invokedynamic` argument in its erased slot, whose descriptor is `Base` or `Object`, not
+`Both`. Only `append(String)` narrows a `String`-typed part. Tests:
+`tests/consumer_materialized_result_e2e.rs` (`bound_result_order`), for one file and for a
+kotlinc-built dependency at JVM 1.8 and JVM 11.
 
 ## Serialization constructor contract checks
 
@@ -5137,6 +5157,22 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   OUT OF SCOPE (documented residuals): inline-function SMAP line mapping, `LocalVariableTable` for
   top-level fns (next slice), the loop-head extra StackMapTable `same` frame.
   `tests/lnt_parity_e2e.rs` (6 full-byte + 3 javap-level pins).
+- **A vararg argument's array instructions are on the vararg's line.** kotlinc's `IrVararg` starts
+  at its first element, and `VarargLowering` writes `tmp = new T[n]; tmp[i] = e_i; tmp` (or a
+  spread builder's `add`/`addSpread` calls and `toArray(new T[builder.size()])`) at those offsets.
+  When the elements span lines, that line returns before the array creation, before each element
+  store's `[array, index]` prefix (or builder reload), at each builder call after its element, and
+  before the final load. Each element marks its own line, a constant included, and the call's own
+  line returns at its invoke. An array-factory call (`intArrayOf(…)`, `arrayOf(…)`) is replaced by
+  its vararg, so it opens on its first element's line and the call's own line never opens; an
+  empty factory call keeps its own position. An array literal spread into a vararg
+  (`g(*arrayOf(a, b), c)`, or `xs = arrayOf(…)` for a named vararg) is not copied: its elements
+  join the enclosing array in place, under the enclosing vararg's line. Each joined element is
+  still adapted to its literal's own element type, as that literal's array would store it:
+  `g(*arrayOf<Int>(1), "x")` into `vararg xs: Any` boxes through `Integer.valueOf`, and an
+  `arrayOf<UInt>` element through `UInt.box-impl`, before the `Object[]` store. The spread
+  builder of a reference vararg is parked in a local like a primitive one's. Test:
+  `tests/vararg_argument_line_numbers_e2e.rs`.
 - **An enum entry's class body has the same lines as a class body.** Its methods and
   properties are members of the entry's own class, so the parser's line pass walks them as it walks
   a class's members: an empty `fun foo() {}` in `A { … }` maps its `return` to the declaration
@@ -13725,6 +13761,23 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   implements no such member: its continuation is a physical parameter, so a dependency's
   `suspend fun set(e: T)` leaves the class kotlinc's throwing `set(Object)` stub. Tests:
   `tests/read_only_stub_generic_override_e2e.rs` (class bytes and box runs against kotlinc).
+- **A read-only stub's member is implemented only by a member with a compatible result.** As in
+  kotlinc's override check, a member whose parameters match the mutable member's implements it only
+  when its result, in the class's substitution context, is a subtype of the mutable member's. The
+  check uses the published classifier hierarchy. So `fun set(e: String): Int`, declared by the
+  class or inherited from a Kotlin or Java superclass, and `Base<T>.set(e: T): T` under
+  `Base<String>` leave `Walk : ListIterator<String>` its throwing `set(String)` stub and
+  `set(Object)` bridge. `fun set(e: String): Nothing` does implement it, and its bridge calls the
+  member's `Void` descriptor and pops the result. A Kotlin dependency superclass's member, generic
+  or not, is compared by its metadata result, so a separately compiled `NBase.set(e: String):
+  Nothing` implements it too; its physical `Void` result only names the call. Whether an
+  implemented member needs that adapter depends on its complete physical descriptor, the result
+  included, against the mutable member's erased one. So `fun set(e: Any): Nothing` under
+  `ListIterator<Any>` and an inherited `Base<T>.set(e: T): Nothing` under `Base<String>` already
+  take `Object`, yet the class still gets `set(Object)V`, which calls `set(Object)Void` and pops.
+  The inherited adapter casts nothing, so `java.util.ListIterator.set(1)` reaches the member.
+  Tests: `tests/read_only_stub_override_return_e2e.rs` (class bytes and box runs against kotlinc,
+  with calls through `java.util.ListIterator.set`).
 - **A nested value class over a reference carrier is read as its carrier.** In `ZN(val z: Z1?)`
   with `Z1(val x: En)`, `Z1?` is carried as `En?`, so `zn.z` and `zn.z!!` already are `Z1`'s
   carrier and `.x` of them is that carrier itself, with no cast. krusty took the unboxed property
