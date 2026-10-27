@@ -1453,6 +1453,7 @@ impl super::Emitter<'_> {
             IrExpr::PrimitiveBinOp { op, lhs, rhs } => self.emit_binop(e, *op, *lhs, *rhs, code),
             IrExpr::PrimitiveNeg { operand, ty } => {
                 self.emit_value(*operand, code);
+                self.mark_intrinsic_instruction(e, code);
                 match ir_ty_to_jvm(ty) {
                     Ty::Long => code.lneg(),
                     Ty::Float => code.fneg(),
