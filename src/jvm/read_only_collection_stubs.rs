@@ -63,11 +63,13 @@ const ACC_SYNTHETIC: u16 = 0x1000;
 const ACC_ABSTRACT: u16 = 0x0400;
 
 /// The JVM-only collection members of every class: bridges for members inherited from a Java
-/// collection superclass, and throwing stubs for a read-only face's mutable members.
+/// collection superclass, throwing stubs for a read-only face's mutable members, and the JDK's
+/// `toArray` members.
 #[derive(Default)]
 pub(super) struct CollectionMemberPlans {
     pub(super) inherited_bridges: InheritedCollectionBridges,
     pub(super) read_only_stubs: ReadOnlyCollectionStubs,
+    pub(super) to_array: crate::jvm::collection_to_array::CollectionToArray,
 }
 
 #[derive(Default)]
@@ -989,7 +991,7 @@ fn superclass_chain(
 /// class from the class up to that superclass shares the class's package. A private member is
 /// never inherited, and a package-private one only along a path that stays in its package; only
 /// an inherited member can implement a stub's member.
-fn inherited_along(visibility: Visibility, same_package_path: bool) -> bool {
+pub(super) fn inherited_along(visibility: Visibility, same_package_path: bool) -> bool {
     match visibility {
         Visibility::Private => false,
         Visibility::PackagePrivate => same_package_path,

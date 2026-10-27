@@ -8028,10 +8028,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   diverge. Unlike the `size` entry beside it, this
   one is keyed on the KOTLIN declaration identity `kotlin/collections/MutableList` plus its full erased
   descriptor, not merely the erased `java/util/List` owner:
-  the renaming exists only on the mutable side, so a READ-ONLY `List` implementation that happens to
-  declare an unrelated `removeAt` must not acquire a `remove(int)` bridge. Tests: box corpus
-  `codegen/box/specialBuiltins/irrelevantRemoveAtOverride.kt`, and
-  `tests/metadata_return_types.rs::read_only_list_impl_gets_no_remove_bridge`.
+  the renaming exists only on the mutable side. A READ-ONLY `List` implementation's own `removeAt`
+  instead implements its face's `removeAt` stub, which kotlinc realizes as `remove(int)` (see the
+  read-only `List` face below), so it gets kotlinc's final `remove(int)` bridge there. Tests: box
+  corpus `codegen/box/specialBuiltins/irrelevantRemoveAtOverride.kt`, and
+  `tests/metadata_return_types.rs::list_impls_realize_remove_at_as_remove_int`.
 - **A renamed-builtin bridge belongs to the first Kotlin CLASS that overrides the mapped member.**
   kotlinc emits `size()` (for `Collection.size`), `intValue()` (for `Number.toInt`), `keySet()`,
   `remove(int)` and the rest of the renamed family `public final` in the first Kotlin class of the
@@ -13566,7 +13567,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   child's `set(String)` stub and erased bridge. A concrete generic intermediate's existing stub is
   still inherited rather than repeated. The stubs never enter Kotlin metadata. The collection faces
   (`Iterable`; `Collection`, `List`, `Set`, `Map` and `Map.Entry` are below), with `removeAt`, the lifted
-  `iterator` result types, the JDK members and `toArray`, follow in later slices. Tests:
+  `iterator` result types and the JDK members, follow in later slices. Tests:
   `tests/read_only_iterator_stubs_e2e.rs`. Corpus: `objects/useAnonymousObjectAsIterator.kt`,
   `builtinStubMethods/customReadOnlyIterator.kt`.
 - **Only an inherited superclass member implements a read-only stub's member.** The superclass
@@ -13638,9 +13639,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   String)` implements `remove(Object)`, which becomes kotlinc's `ACC_PUBLIC|ACC_FINAL|ACC_BRIDGE`
   special bridge returning `false` unless the argument is `instanceof String` (or `null`, for a
   `String?`), and an inherited `Base<T>.remove(e: T)` under `Base<String>` already has the erased
-  descriptor, so nothing is written for it. The JDK members (`removeIf`),
-  `toArray`, the `Collection<?>` signature of a declared `containsAll` override and an abstract
-  class's fake-override bridges follow in later slices. Tests:
+  descriptor, so nothing is written for it. The JDK members (`removeIf`), the `Collection<?>`
+  signature of a declared `containsAll` override and an abstract class's fake-override bridges
+  follow in later slices; `toArray` is below. Tests:
   `tests/read_only_collection_face_stubs_e2e.rs` (member bytes and box runs against kotlinc).
 - **A read-only `List` gets `MutableList`'s members as stubs.** A class that implements
   `kotlin.collections.List` without `MutableList` gets throwing stubs for the members
@@ -13665,7 +13666,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   through applied supertypes: a builtin's generic supertypes from `.kotlin_builtins` and a source
   classifier's checked applied hierarchy, so `listIterator(): MutableListIterator<String>` and
   `listIterator(): Walk` with `Walk : ListIterator<String>` implement `listIterator`. The JDK
-  defaults (`replaceAll`, `sort`, the `SequencedCollection` members), `toArray`, a declared
+  defaults (`replaceAll`, `sort`, the `SequencedCollection` members), a declared
   `containsAll`'s signature and an abstract class's fake-override bridges follow later. Tests:
   `tests/read_only_list_face_stubs_e2e.rs` (member bytes and box runs against kotlinc),
   `tests/metadata_return_types.rs::list_impls_realize_remove_at_as_remove_int`.
@@ -13675,8 +13676,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the class leaves it abstract. Each takes the policies of the `MutableCollection` declaration it
   overrides (`remove(Object)`, `addAll(Collection<? extends E>)`, `removeAll`/`retainAll` as
   `Collection<?>`). Unlike the `Collection` face, kotlinc writes no JDK `removeIf` stub for it.
-  `toArray`, a declared `containsAll`'s signature and an abstract class's fake-override bridges
-  follow later. Tests: `tests/read_only_set_face_stubs_e2e.rs` (member bytes and box runs
+  A declared `containsAll`'s signature and an abstract class's fake-override bridges follow
+  later. Tests: `tests/read_only_set_face_stubs_e2e.rs` (member bytes and box runs
   against kotlinc).
 - **A read-only `Map` and `Map.Entry` get their mutable members as stubs.** A class that
   implements `kotlin.collections.Map` without `MutableMap` gets throwing stubs for `put`,
@@ -13696,6 +13697,34 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   defaults (`replaceAll`, `putIfAbsent`, `replace`, `compute*`, `merge`) and an abstract class's
   fake-override bridges follow later. Tests:
   `tests/read_only_map_face_stubs_e2e.rs` (member bytes and box runs against kotlinc).
+- **A collection class gets the JDK's `toArray` pair.** As kotlinc's `ToArrayLowering`, every
+  non-interface class that implements `Collection` (any face, read-only or mutable, abstract or
+  not, enum and anonymous classes included) gets `public <T> T[] toArray(T[])`, which checks its
+  `array` parameter and calls `CollectionToArray.toArray(Collection, Object[])`, and `public
+  Object[] toArray()`, which calls `CollectionToArray.toArray(Collection)`. Neither has line
+  numbers. They are the class's last members before `<clinit>`, after its bridges and synthetic
+  accessors, the generic one first. A class with a collection anywhere in its superclass chain (a
+  source collection class, `kotlin.collections.AbstractList`, `java.util.AbstractList`) gets
+  neither. A member of either shape that the class declares or inherits from a supertype other
+  than the mapped collection interfaces suppresses that one: `toArray(): Array<…>` with no type
+  parameter, and `<T> toArray(Array<T>): Array<T>`. The shape is the declaration's: a
+  `toArray(): Array<String>` suppresses `Object[] toArray()`, while `toArray(Array<String>)`
+  suppresses nothing. kotlinc also makes a declared non-public `toArray` public (and realizes an
+  `internal` one under both names); that follows later. Only an inherited member suppresses a
+  shape, by the same rule as a read-only stub's implementation: never a private one, and a
+  package-private Java `toArray` only along a superclass path that stays in the class's package,
+  so one in another package, or reached through a class of another package, suppresses nothing.
+  A supertype's members come from the one source that owns its declaration: a named source
+  classifier's from the module's frozen declaration records (its superclass and instance
+  functions), whichever file declares it; a body-local class's from the active file's IR; a
+  dependency's from the classpath. A superclass declared in another file is therefore never taken
+  for a dependency, so its collection ancestry and its `toArray` declarations still count. Tests:
+  `tests/collection_to_array_e2e.rs` (member bytes, member order and a box run against kotlinc;
+  a split-module superclass/subclass control comparing every class's complete listing and the
+  run; same-package, other-package and package-crossing Java superclass controls, also compared
+  class by class; those listings read kotlinc's deferred `Collection<?>`/`Collection<? extends E>`
+  signature of a declared override as krusty's), and the face suites above, which now compare
+  the pair.
 - **A nested value class over a reference carrier is read as its carrier.** In `ZN(val z: Z1?)`
   with `Z1(val x: En)`, `Z1?` is carried as `En?`, so `zn.z` and `zn.z!!` already are `Z1`'s
   carrier and `.x` of them is that carrier itself, with no cast. krusty took the unboxed property
