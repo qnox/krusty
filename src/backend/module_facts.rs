@@ -43,6 +43,7 @@ pub trait BackendClassifierSource {
 /// parser-backed member identities cannot be represented here.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BackendClassifierFact {
+    pub runtime_exception: Option<crate::libraries::RuntimeExceptionLayout>,
     pub declaration_name: Option<crate::types::ClassifierDeclarationName>,
     pub access: crate::libraries::ClassifierAccess,
     pub is_kotlin: bool,
@@ -115,6 +116,7 @@ struct SourceDeclaration {
 impl BackendClassifierFact {
     fn from_library(classifier: TypeName, shape: &LibraryType) -> Self {
         Self {
+            runtime_exception: shape.runtime_exception,
             declaration_name: shape.declaration_name.clone(),
             access: shape.access,
             is_kotlin: shape.is_kotlin,
@@ -377,6 +379,7 @@ impl BackendModuleFacts {
             let companion = source_companion(index, declaration);
             let qualified_name = source_qualified_name(index, declaration);
             let fact = BackendClassifierFact {
+                runtime_exception: None,
                 declaration_name: classifier.declaration_name.clone(),
                 access: declaration_header.visibility.into(),
                 is_kotlin: true,
