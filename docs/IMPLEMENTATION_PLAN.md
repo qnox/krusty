@@ -15,6 +15,15 @@ declaration-owned name operation. Preserve exact segments, owner edges, visibili
 non-local exclusions without interning undeclared prefixes. This producer correction is separate
 from the remaining metadata class-ID encoder and dependency/alias-name fact handoff.
 
+## JVM companion field ABI
+
+Centralize the physical companion field segment from the selected holder/companion identities.
+Use it consistently in field emission, initialization, singleton loads, wrappers, hoisted property
+receivers and collision planning. Singleton realization reads retained declaration ownership and
+authenticates the holder's companion tuple; it never guesses a prefix owner. Preserve dependency-published names. Whole-owner metadata class
+IDs remain a separate consumer migration; this change establishes the independent field ABI with
+complete field/facade comparisons and reference/runtime controls.
+
 ## JVM declaration-owned member rows
 
 Consume classifier declaration-name facts in both per-file `InnerClasses` candidates and the

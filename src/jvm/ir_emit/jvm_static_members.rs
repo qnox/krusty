@@ -232,7 +232,7 @@ fn emit_companion_bridge(
     let companion_internal = companion.render();
     let field = cw.fieldref(
         &outer.render(),
-        companion.nested_segment_ref(),
+        crate::jvm::companion_storage::field_name(outer, companion),
         &format!("L{companion_internal};"),
     );
     code.getstatic(field, 1);
