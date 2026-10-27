@@ -182,6 +182,14 @@ impl Emitter<'_> {
                 let unsigned = self.is_unsigned_bitwise_result(expression);
                 if unsigned && !self.spills_operand_prefix(rhs) {
                     self.emit_unsigned_bitwise_operands(expression, lhs, rhs, code);
+                } else if let Some(line) =
+                    super::debug_lines::inversion_mask_line(self.ir, expression)
+                {
+                    // kotlinc's `inv` intrinsic restates its line where it pushes the mask.
+                    self.emit_value(lhs, code);
+                    self.mark_expression_line(expression, line, code);
+                    self.emit_value(rhs, code);
+                    self.mark_expression_start(expression, code);
                 } else {
                     self.emit_binary_operands_with_live_prefix(lhs, rhs, code);
                     self.mark_expression_start(expression, code);

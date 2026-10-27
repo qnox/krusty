@@ -85,9 +85,11 @@ pub(super) fn qualified_type_parameter(
 
 /// Render a platform type, including a provider-declared mutable/read-only classifier pair
 /// (`MutableList<E>..List<E>` -> `(Mutable)List<E!>!`). The provider supplies the upper identity;
-/// this diagnostic boundary only formats that already-normalized semantic relation.
+/// this diagnostic boundary only formats that already-normalized semantic relation. A non-null
+/// collection whose only flexibility is its mutability (`nullable` false) drops the `!`.
 pub(super) fn platform_type(
     inner: Ty,
+    nullable: bool,
     context: &[Ty],
     type_parameter: &dyn Fn(&str) -> String,
     classifier: &dyn Fn(TypeName) -> Option<String>,
@@ -97,6 +99,7 @@ pub(super) fn platform_type(
         ty.source_name_with_classifier_in(context, type_parameter, classifier, platform_upper_bound)
     };
     let upper = platform_upper_bound(inner);
+    let marker = if nullable { "!" } else { "" };
     if let (TyKind::Obj(lower_owner, arguments), true) = (inner.kind(), inner.is_raw_application())
     {
         // A raw occurrence is already flexible; its interval spells both bounds, and a mapped
@@ -106,17 +109,21 @@ pub(super) fn platform_type(
             &render(Ty::obj_name(lower_owner)),
             &render(Ty::obj_name(upper_owner)),
             &arguments,
-            RawNullability::PLATFORM,
+            if nullable {
+                RawNullability::PLATFORM
+            } else {
+                RawNullability::NOT_NULL
+            },
             render,
         );
     }
     let (TyKind::Obj(lower_owner, arguments), TyKind::Obj(upper_owner, _)) =
         (inner.kind(), upper.kind())
     else {
-        return format!("{}!", render(inner));
+        return format!("{}{marker}", render(inner));
     };
     if lower_owner == upper_owner {
-        return format!("{}!", render(inner));
+        return format!("{}{marker}", render(inner));
     }
 
     let face = upper_owner
@@ -127,7 +134,7 @@ pub(super) fn platform_type(
         .collect::<Vec<_>>()
         .join(".");
     if arguments.is_empty() {
-        return format!("{face}!");
+        return format!("{face}{marker}");
     }
     let arguments = arguments
         .iter()
@@ -145,7 +152,7 @@ pub(super) fn platform_type(
         })
         .collect::<Vec<_>>()
         .join(", ");
-    format!("{face}<{arguments}>!")
+    format!("{face}<{arguments}>{marker}")
 }
 
 /// Render an `@Nullable` Java raw occurrence: both faces of its interval are nullable.

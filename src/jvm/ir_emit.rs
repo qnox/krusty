@@ -2802,21 +2802,6 @@ fn emit_class(
     if script_main {
         script_main::emit(&fq_name, opts.param_assertions, &mut cw);
     }
-    // The exact serialization-plugin deserialization constructor emits after every declared member
-    // (`write$Self$main` included) and before `<clinit>`, which is kotlinc's member order for it.
-    if let Some(secondary_ordinal) = serialization_constructor {
-        let sc = &c.secondary_ctors[secondary_ordinal as usize];
-        SecondaryConstructorEmitter {
-            ir,
-            class: c,
-            owner: &fq_name,
-            facade,
-            env,
-            writer: &mut cw,
-            owner_prefix: &OwnerConstructorPrefix::none(),
-        }
-        .emit(secondary_ordinal as usize, sc);
-    }
     // EVERY parameter defaulted → kotlinc also emits the no-arg convenience `<init>()`
     // (`AuditFilters()` in Java/reflection), delegating to the `$default` overload with a full
     // mask — AFTER the declared methods (kotlinc's member order), at the primary's declared
@@ -4969,10 +4954,7 @@ fn method_parameterized_sig(
 ) -> Option<String> {
     // Runs for every emitted method — bail before building any string when no position can carry one.
     let is_parameterized = |t: &Ty| {
-        let inner = match t.kind() {
-            TyKind::Nullable(t) | TyKind::PlatformNullable(t) => t,
-            _ => *t,
-        };
+        let inner = t.non_null();
         matches!(inner.kind(), TyKind::Fun(_) | TyKind::Intersection(_))
             || matches!(inner.kind(), TyKind::Obj(_, arguments) if !arguments.is_empty())
     };
@@ -6428,7 +6410,7 @@ impl<'a> Emitter<'a> {
             TyKind::Obj(n, _) => {
                 VerifType::ObjectName(crate::jvm::names::classfile_internal_name_of(n).to_string())
             }
-            TyKind::Nullable(_) | TyKind::PlatformNullable(_) => {
+            TyKind::Nullable(_) | TyKind::PlatformNullable(_) | TyKind::MutabilityFlexible(_) => {
                 VerifType::ObjectName(crate::jvm::names::instanceof_internal_name(ty))
             }
             TyKind::Null => VerifType::Null,

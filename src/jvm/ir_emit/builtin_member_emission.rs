@@ -20,6 +20,7 @@ impl Emitter<'_> {
                     let object_array = self.cw.class_ref("[Ljava/lang/Object;");
                     code.checkcast(object_array);
                 }
+                self.mark_intrinsic_instruction(expression, code);
                 code.arraylength();
             }
             crate::ir::IrIntrinsic::StringGet | crate::ir::IrIntrinsic::StringLength => {

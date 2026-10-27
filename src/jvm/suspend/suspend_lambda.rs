@@ -129,7 +129,7 @@ pub(super) fn route(
         }
     }
     // The lambda is its own continuation: `coroutineContext` reads `this`'s context.
-    super::intrinsic_probes::bind_current_continuation(
+    super::intrinsic_probes::bind_own_continuation(
         ir,
         body,
         0,

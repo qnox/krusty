@@ -137,7 +137,9 @@ pub use constructors::{
     IrCustomSerializerConstructorTarget,
 };
 pub use enums::{EnumSwitchRegistration, IrCheckedEnumEntryBody, IrEnumEntry};
-pub use expression_provenance::{EnumValueOfDeclaration, IrShortCircuitKind};
+pub use expression_provenance::{
+    EnumValueOfDeclaration, IrBuiltinCall, IrBuiltinCallKind, IrSafeCallRead, IrShortCircuitKind,
+};
 pub use field_flags::IrfFlags;
 pub use fields::IrField;
 pub use function_scope::IrFunctionScope;
@@ -1894,6 +1896,16 @@ pub struct IrFile {
     /// offset, as kotlinc's line table does. A serializable property's default copied into a
     /// generated method starts with a property read the plugin attributes to the class's line.
     pub kept_start_lines: crate::fx_hash::HashSet<ExprId>,
+    /// Source operator, conversion, indexing and member calls realized as builtin operations, on
+    /// the node that realizes each.
+    pub builtin_calls: crate::fx_hash::HashMap<ExprId, IrBuiltinCall>,
+    /// Blocks that realize a source safe call `receiver?.selector`: a receiver temporary and a
+    /// null-guarded selector.
+    pub safe_calls: crate::fx_hash::HashSet<ExprId>,
+    /// Reads of a safe call's receiver temporary, by their role and source line.
+    pub safe_call_reads: crate::fx_hash::HashMap<ExprId, IrSafeCallRead>,
+    /// Temporaries that hold an elvis's left value, by the line the elvis starts on.
+    pub elvis_temporaries: crate::fx_hash::HashMap<ExprId, u32>,
     /// Compiler-generated `Variable` declarations whose semantic role is holding a call operand:
     /// an inline expansion's parameter (argument, receiver, or capture), or an argument preserved
     /// for evaluation order. This is provenance, not a storage decision; a backend decides how
@@ -2754,8 +2766,8 @@ pub use clone::clone_expression_dag;
 #[cfg(test)]
 pub(crate) use clone::make_expression_children_unique;
 pub(crate) use clone::{
-    clone_class_method, clone_function_implementation, clone_with_operands,
-    make_expression_children_unique_tracked,
+    clone_class_method, clone_expression_with_own_lambdas, clone_function_implementation,
+    clone_with_operands, make_expression_children_unique_tracked,
 };
 mod semantic_validation;
 pub use semantic_validation::{

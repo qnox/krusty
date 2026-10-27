@@ -1271,6 +1271,86 @@ fn stdlib_range_literal_membership_is_a_bounds_comparison() {
     );
 }
 
+/// Dependency preparation omits a range literal's `contains` edge, so a membership whose range
+/// operator is not an authenticated range construction declines the body rather than calling
+/// that unprepared `contains`.
+#[test]
+fn stdlib_range_literal_membership_without_a_range_construction_declines() {
+    let Some(root) = distribution_root() else {
+        return;
+    };
+    let libraries = stdlib(&root);
+    let fact = frozen_function(
+        &libraries,
+        "kotlin/text",
+        "isSurrogate",
+        Some(Ty::Char),
+        &[],
+    );
+    let mut unit = DependencyBodyUnit::default();
+    assert_eq!(
+        unit.lower_function(
+            fact.klib_body_callable().expect("signed"),
+            libraries.declaration_bodies(),
+            &KlibCalleeFacts::default(),
+        )
+        .expect_err("no range construction is declared")
+        .to_string(),
+        "the KLIB body of `kotlin.text.isSurrogate` (it uses a membership in another range than \
+         a builtin range construction)"
+    );
+    assert_unit_is_empty(&unit);
+}
+
+/// A `contains` a checked source edge selected stays that call: the fold never replaces a
+/// declaration another obligation needs. The support unit then declines at that member call,
+/// which it does not link.
+#[test]
+fn stdlib_range_literal_membership_keeps_a_selected_contains() {
+    use crate::symbol_source::SymbolSource;
+    let Some(root) = distribution_root() else {
+        return;
+    };
+    let libraries = stdlib(&root);
+    let range_to = declared_range_to(&libraries, "kotlin/Char", Ty::Char);
+    let range = libraries
+        .classifier(crate::types::type_name("kotlin/ranges/CharRange"))
+        .expect("stdlib class");
+    let contains = range.declared_callables["contains"]
+        .functions()
+        .iter()
+        .find(|function| function.callable.params == [Ty::Char])
+        .and_then(|function| function.callable.external_identity)
+        .and_then(|target| libraries.external_callable(target))
+        .expect("exact declaration");
+    let fact = frozen_function(
+        &libraries,
+        "kotlin/text",
+        "isSurrogate",
+        Some(Ty::Char),
+        &[],
+    );
+    let facts = KlibCalleeFacts::with_declarations(
+        [contains.klib_body_callable().unwrap()],
+        [range_to.klib_body_callable().unwrap()],
+    );
+    let mut unit = DependencyBodyUnit::default();
+    let lowered = unit.lower_function(
+        fact.klib_body_callable().expect("signed"),
+        libraries.declaration_bodies(),
+        &facts,
+    );
+    assert_eq!(
+        lowered
+            .map(|function| lowered_body(&unit, function))
+            .map_err(|decline| decline.to_string()),
+        Err(
+            "the KLIB body of `kotlin.text.isSurrogate` (it uses a call of a member function)"
+                .to_owned()
+        )
+    );
+}
+
 /// `checkRadix` tests `radix !in MIN_RADIX..MAX_RADIX`: the negated membership lowers, and the
 /// body declines only at its exception's constructor.
 #[test]
@@ -1291,8 +1371,8 @@ fn stdlib_range_literal_negation_lowers_past_the_membership() {
         )
         .expect_err("no range construction is declared")
         .to_string(),
-        "the KLIB body of `kotlin.text.checkRadix` (it uses a `!in` of another form than a \
-         membership in a range literal)"
+        "the KLIB body of `kotlin.text.checkRadix` (it uses a membership in another range than a \
+         builtin range construction)"
     );
     let facts = KlibCalleeFacts::with_declarations([], [range_to.klib_body_callable().unwrap()]);
     assert_eq!(

@@ -116,8 +116,13 @@ impl Emitter<'_> {
         // Enter before evaluating the initializer, as kotlinc does. A call-operand holder is the
         // exception: its value is materialized first and the slot is entered afterwards.
         let holds_operand = self.ir.call_operand_bindings.contains(&declaration);
+        // So is the receiver temporary of a folded safe-call chain (`a?.b?.c`): kotlinc's chain
+        // folding declares the inner receiver's temporary first and keeps it until the chain
+        // ends, so this one takes the slot above it.
+        let chained_receiver = self.is_chained_receiver(index);
         let entered = reused.or_else(|| {
-            (!holds_operand).then(|| self.enter_unassigned_value(index, slot_ty, false))
+            (!holds_operand && !chained_receiver)
+                .then(|| self.enter_unassigned_value(index, slot_ty, false))
         });
 
         if let Some(cell) = initializer.and_then(|value| self.stored_shared_cell(value)) {
@@ -138,6 +143,15 @@ impl Emitter<'_> {
                 slot_ty,
                 code,
             );
+            if chained_receiver && entered.is_none() {
+                // The previous links occupy their slots again, until this block leaves them.
+                let mut links = Vec::new();
+                self.chained_receiver_links(initializer, &mut links);
+                for (link, ty) in links {
+                    self.frame
+                        .enter(super::frame_map::FrameKey::Value(link), ty);
+                }
+            }
             let slot = entered
                 .unwrap_or_else(|| self.enter_unassigned_value(index, slot_ty, holds_operand));
             self.unassigned_values.remove(&index);
@@ -151,6 +165,41 @@ impl Emitter<'_> {
         self.slots.insert(index, (slot, slot_ty));
         // A `lateinit` declaration emits no store, but its lexical debug lifetime still starts here.
         self.open_declared_local(declaration, slot, slot_ty, code);
+    }
+
+    /// The receiver temporaries a folded safe call's `initializer` declares, the chain's previous
+    /// links, innermost first. kotlinc keeps them live until the chain ends although their blocks
+    /// have closed.
+    fn chained_receiver_links(&self, initializer: ExprId, links: &mut Vec<(u32, Ty)>) {
+        match self.ir.expr(initializer) {
+            IrExpr::TypeOp { arg, .. } => self.chained_receiver_links(*arg, links),
+            IrExpr::Block { stmts, .. } => {
+                let Some(&declaration) = stmts.first() else {
+                    return;
+                };
+                let IrExpr::Variable {
+                    index,
+                    ty,
+                    init: Some(init),
+                    ..
+                } = *self.ir.expr(declaration)
+                else {
+                    return;
+                };
+                if self.is_chained_receiver(index) {
+                    self.chained_receiver_links(init, links);
+                }
+                links.push((index, slot_type(self.ir, declaration, ty)));
+            }
+            _ => {}
+        }
+    }
+
+    /// Whether `index` is the receiver temporary of a later link of a folded safe-call chain.
+    fn is_chained_receiver(&self, index: u32) -> bool {
+        self.safe_call_exit_temporaries
+            .values()
+            .any(|temporaries| temporaries.contains(&index))
     }
 
     /// The holders of one inline lambda invocation's operands, which start `statements`; returns
@@ -303,7 +352,14 @@ impl Emitter<'_> {
                 code.mark_line(line);
             }
             None => {
-                if let Some(&line) = self.ir.expr_lines.get(&declaration) {
+                // An elvis's temporary marks the line the elvis starts on where it stores the left
+                // value, after a multi-line left side has marked its own.
+                if let Some(&line) = self
+                    .ir
+                    .expr_lines
+                    .get(&declaration)
+                    .or_else(|| self.ir.elvis_temporaries.get(&declaration))
+                {
                     self.mark_expression_line(declaration, line, code);
                 }
             }

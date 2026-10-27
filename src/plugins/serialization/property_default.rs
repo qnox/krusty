@@ -164,7 +164,7 @@ fn copy_in_frame(
         .take(parameter_count as usize)
         .map(|argument| argument.is_field.then_some(argument.field_index).flatten())
         .collect::<Vec<_>>();
-    let (copy, _) = crate::ir::clone_expression_dag(ir, initializer);
+    let copy = crate::ir::clone_expression_with_own_lambdas(ir, initializer);
 
     let mut reads = Vec::new();
     let mut receivers = Vec::new();
