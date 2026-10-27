@@ -20,7 +20,7 @@ pub use deprecation::{
     DeprecationLevel,
 };
 pub use overridden_declaration::OverriddenDeclaration;
-pub use semantic_call_role::SemanticCallRole;
+pub use semantic_call_role::{ConstNumericOperation, SemanticCallRole};
 pub use semantic_callable_owner::SemanticCallableOwner;
 mod annotation_targets;
 mod interning;
