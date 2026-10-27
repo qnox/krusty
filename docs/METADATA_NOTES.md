@@ -1,5 +1,14 @@
 # `@kotlin.Metadata` — reverse-engineering notes (Phase 4b)
 
+## KLIB reference wrappers and provider declarations
+
+The serialized reflection target and the wrapper's actual call must name the same public
+declaration. Its linked provider contract authenticates the whole declared signature; a matching
+name or body shape alone grants no external authority. Raw and prepared lowering retain the exact
+selected provider ID, while emitted-body planning preserves the full module-qualified declaration
+key. Header evidence never becomes a selected/export obligation by itself. This slice handles only
+unbound, non-generic, non-suspend top-level forwarding references; broader captures remain separate.
+
 ## Native reference identities and exported entry points
 
 A KLIB export's physical invocation alias is independent of its declaration marker. The Native

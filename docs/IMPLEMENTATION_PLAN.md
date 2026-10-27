@@ -1,5 +1,15 @@
 # krusty — implementation plan
 
+## Authenticated serialized reference admission
+
+Lower admitted top-level KLIB reference wrappers to the existing checked common callable-reference
+record. Freeze the exact provider handle alongside the complete declaration contract, reject
+ambiguous handles, and keep invocation adapters distinct from reflection/equality identity. Retain
+the raw/prepared/refusal-and-reuse tests and complete public runtime oracle. Transaction rollback
+removes adapter-result facts with their expression nodes. Preserve the modern emitted-call forms
+and range-fold exclusions; reference admission adds a shared closure-body entry, not a second walker.
+Core function subtyping and Native marker/export identity remain separate prerequisites.
+
 ## Native dependency reference identity handoff
 
 Retain the canonical declaration marker in the existing Native dependency export registry. Source

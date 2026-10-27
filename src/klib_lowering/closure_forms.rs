@@ -28,6 +28,9 @@ pub(crate) fn emitted_closure_function(
     arena: &KlibIrArena,
     expression: &KlibIrExpr,
 ) -> Option<KlibIrFunctionId> {
+    if let Some(reference) = super::callable_references::unbound_reference(arena, expression) {
+        return Some(reference.invoke);
+    }
     if !matches!(
         expression.kind,
         KlibIrExprKind::FunctionExpression { .. } | KlibIrExprKind::RichFunctionReference { .. }

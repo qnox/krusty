@@ -164,11 +164,13 @@ pub(super) fn emit_dependencies<B: Backend>(
                 return Vec::new();
             }
         };
-        let callees = KlibCalleeFacts::with_declarations(
+        let callees = KlibCalleeFacts::with_reference_declarations(
             selected.iter().copied(),
-            declarations
-                .iter()
-                .filter_map(|declaration| declaration.klib_body_callable()),
+            declarations.iter().filter_map(|(target, declaration)| {
+                declaration
+                    .klib_body_callable()
+                    .map(|callable| (*target, callable))
+            }),
         )
         .with_type_oracle(&type_oracle);
         let capabilities = DependencyLeafCapabilities {

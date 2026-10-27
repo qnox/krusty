@@ -1,5 +1,14 @@
 # krusty — a memory-lean Kotlin→JVM compiler PoC
 
+## Serialized top-level callable references
+
+An unbound, non-generic, non-suspend top-level reference in a KLIB body retains its exact provider
+declaration identity independently of its invocation adapter. Admission proves the entire serialized
+wrapper forwards its own parameters once and in order to the reflected declaration, with the same
+parameter/result ABI and no captures, adaptation, defaults or receiver binding. Other shapes decline.
+Preparation and ordinary lowering use the same admission. The public fixture establishes the Kotlin
+reference answer before requiring Native identity, invocation and evaluation-order agreement.
+
 ## Native callable-reference identity at module exports
 
 A reference created by a source module and a reference selected through that module's KLIB export
