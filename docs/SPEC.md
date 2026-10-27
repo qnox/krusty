@@ -1123,6 +1123,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `tests/inline_arguments_in_place_e2e.rs`, `tests/inline_repeat_local_e2e.rs`,
   `tests/inline_format_arguments_e2e.rs`, `tests/in_place_property_receiver_e2e.rs`,
   `tests/in_place_call_argument_e2e.rs`.
+- **An in-place call marks its line after its in-place arguments.** kotlinc's
+  `IrInlineCodegen` generates the arguments it reads in place before the call marks its line, and
+  `InplaceArgumentsMethodTransformer` then moves that code, its line labels included, to where the
+  body loads each parameter. The call's mark is deduplicated against the line those arguments
+  left in effect. A caller local the body reads directly (`genOrGetLocal`) generates nothing, so
+  in `fun f(x: UInt) = x + 1u` the literal marks the line first and the entry sits on it
+  (`line N: 1`), after the receiver load. Two local operands (`x * y`) mark nothing, and the
+  call's line stays where the body begins. A declaration (`visitVariable`) and a `return`
+  (`visitReturn`) mark their own line only once the value is on the stack. So emission withdraws
+  the call's entry, together with the eager entries such a statement and its directly returned or
+  declared value left at that offset, and puts the line back at the body's start only when the
+  in-place arguments left another line, or none, in effect (`CodeBuilder::defer_line_mark`,
+  `settle_deferred_line`). An assignment, a condition and an intrinsic such as `toString()` mark
+  their line before the operand, so their entry stays. Test:
+  `tests/unsigned_bitwise_lines_e2e.rs` (`unsigned_operator_lines_match_kotlinc`).
 - **An inlined lambda's body locals include the brace `nop` and follow its marker.** The lambda's
   inline template is the source block's statements, not a second block wrapped around that block,
   and a `Unit` coercion around the block is not another scope (`fir_lower/local_callables.rs`).
