@@ -1186,6 +1186,8 @@ mod indy_lambda_parity_e2e;
 mod inert_kotlinc_arguments_e2e;
 #[path = "inferred_alias_abbreviation_e2e.rs"]
 mod inferred_alias_abbreviation_e2e;
+#[path = "inferred_common_supertype_e2e.rs"]
+mod inferred_common_supertype_e2e;
 #[path = "inferred_computed_prop_e2e.rs"]
 mod inferred_computed_prop_e2e;
 #[path = "inferred_property_type_args_e2e.rs"]

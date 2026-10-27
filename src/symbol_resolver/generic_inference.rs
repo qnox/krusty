@@ -1359,31 +1359,42 @@ pub(crate) fn merge_inferred_ty_from_symbols(
         }
     }
 
+    // The join is the most specific classifier both hierarchies share. Depth is not specificity:
+    // `Any` is one edge above every class, while a shared interface may be several edges up
+    // (`A : Node` and `C : Nested`, `Nested : Node`, join at `Node`, not `Any`).
     let left = receiver_hierarchy(source, current.non_null());
     let right = receiver_hierarchy(source, actual.non_null());
-    let mut common = left
+    let mut common = Vec::new();
+    for (left_ty, _) in &left {
+        for (right_ty, _) in &right {
+            if left_ty.obj_internal().is_none() || left_ty.obj_internal() != right_ty.obj_internal()
+            {
+                continue;
+            }
+            let shared = if left_ty == right_ty {
+                *left_ty
+            } else {
+                common_supertype::common_super_type(source, *left_ty, *right_ty)
+            };
+            if !shared.is_erased_top() && !common.contains(&shared) {
+                common.push(shared);
+            }
+        }
+    }
+    let oracle = SourceOracle(source);
+    let context = crate::assignable::TyCtx::new();
+    let most_specific = common
         .iter()
-        .flat_map(|(left_ty, left_depth)| {
-            right.iter().filter_map(move |(right_ty, right_depth)| {
-                let left_name = left_ty.obj_internal()?;
-                let right_name = right_ty.obj_internal()?;
-                (left_name == right_name).then_some((
-                    left_depth + right_depth,
-                    if left_ty == right_ty {
-                        *left_ty
-                    } else {
-                        common_supertype::common_super_type(source, *left_ty, *right_ty)
-                    },
-                ))
+        .copied()
+        .filter(|candidate| {
+            !common.iter().any(|other| {
+                other != candidate
+                    && crate::assignable::is_assignable(&context, &oracle, *other, *candidate)
+                    && !crate::assignable::is_assignable(&context, &oracle, *candidate, *other)
             })
         })
         .collect::<Vec<_>>();
-    let Some(nearest) = common.iter().map(|(distance, _)| *distance).min() else {
-        return merged;
-    };
-    common.retain(|(distance, ty)| *distance == nearest && !ty.is_erased_top());
-    common.dedup_by(|left, right| left.1 == right.1);
-    let [(_, common)] = common.as_slice() else {
+    let [common] = most_specific.as_slice() else {
         return merged;
     };
     if current.is_nullable() || actual.is_nullable() {
