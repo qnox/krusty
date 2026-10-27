@@ -1,5 +1,14 @@
 # `@kotlin.Metadata` — reverse-engineering notes (Phase 4b)
 
+## Dependency conversion proof
+
+Ordinary body conversions and prepared-inline templates consume the same explicit semantic class
+model with the dependency declaration's complete formal bounds layered over it. Known empty bounds
+remain declaration evidence; they do not fall through to another provider. No class model means
+identity-only ordinary proof. Value/reference conversions retain typed common IR operations rather
+than changing metadata or runtime layouts. Tests: `klib_lowering::type_evidence::tests` and
+`klib_lowering::tests::body_forms`.
+
 ## Alias declaration-name evidence
 
 Package and Class type-alias tables supply the alias's exact simple name and declaring container.
