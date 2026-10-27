@@ -26,7 +26,7 @@ use crate::jvm::jvm_libraries::{declared_desc_to_ty, parse_method_gsig, signatur
 use crate::jvm::mapped_builtin_declarations::{
     collection_bridge_policy_for_declaration, collection_signature_policy_for_declaration,
     is_mutable_only_jdk_method, realization_for_declaration, CollectionBridgeFailure,
-    CollectionSignaturePolicy, MappedBuiltinMemberKind,
+    CollectionBridgePolicy, CollectionSignaturePolicy, MappedBuiltinMemberKind,
 };
 use crate::jvm::method_descriptors::{jvm_declared_ty, jvm_tys};
 use crate::jvm::names::{method_descriptor, parse_method_descriptor};
@@ -64,13 +64,14 @@ const ACC_BRIDGE: u16 = 0x0040;
 const ACC_SYNTHETIC: u16 = 0x1000;
 const ACC_ABSTRACT: u16 = 0x0400;
 
-/// The JVM-only collection members of every class: bridges for members inherited from a Java
-/// collection superclass, throwing stubs for a read-only face's mutable members, and the JDK's
-/// `toArray` members.
+/// The JVM-only members mapped builtins give every class: bridges for collection members inherited
+/// from a Java collection superclass, throwing stubs for a read-only face's mutable members, the
+/// abstract builtin members an abstract class materializes, and the JDK's `toArray` members.
 #[derive(Default)]
 pub(super) struct CollectionMemberPlans {
     pub(super) inherited_bridges: InheritedCollectionBridges,
     pub(super) read_only_stubs: ReadOnlyCollectionStubs,
+    pub(super) abstract_overrides: crate::jvm::abstract_builtin_overrides::AbstractBuiltinOverrides,
     pub(super) to_array: crate::jvm::collection_to_array::CollectionToArray,
 }
 
@@ -130,6 +131,21 @@ pub(super) struct ReadOnlyStub {
 pub(super) struct StubBarrier {
     pub(super) checked_parameters: &'static [u16],
     pub(super) outcome: BarrierOutcome,
+}
+
+/// The barrier of a type-safe declaration's special bridge. A default-value declaration
+/// (`getOrDefault`) answers its argument, which no stub or abstract member realizes.
+pub(super) fn stub_barrier(policy: CollectionBridgePolicy) -> Option<StubBarrier> {
+    let outcome = match policy.failure {
+        CollectionBridgeFailure::False => BarrierOutcome::False,
+        CollectionBridgeFailure::Null => BarrierOutcome::Null,
+        CollectionBridgeFailure::NotFound => BarrierOutcome::NotFound,
+        CollectionBridgeFailure::Argument(_) => return None,
+    };
+    Some(StubBarrier {
+        checked_parameters: policy.checked_parameters,
+        outcome,
+    })
 }
 
 /// What realizes a candidate member at the stub's own descriptor.
@@ -388,7 +404,8 @@ fn applicable_faces(classpath: &Classpath, supertypes: &[TypeName]) -> Vec<Face>
     ordered
 }
 
-fn builtin_extends(classpath: &Classpath, sub: TypeName, sup: TypeName) -> bool {
+/// Whether builtin `sub` extends builtin `sup`, through the builtins' own supertypes.
+pub(super) fn builtin_extends(classpath: &Classpath, sub: TypeName, sup: TypeName) -> bool {
     let mut pending = vec![sub];
     let mut seen = HashSet::default();
     while let Some(current) = pending.pop() {
@@ -465,19 +482,7 @@ fn face_stubs(classpath: &Classpath, face: Face, applied: Ty) -> Vec<ReadOnlyStu
                     parameters[usize::from(index)] = Ty::nullable(Ty::obj("kotlin/Any"));
                 }
             }
-            let barrier = type_safe_policy.and_then(|policy| {
-                let outcome = match policy.failure {
-                    CollectionBridgeFailure::False => BarrierOutcome::False,
-                    CollectionBridgeFailure::Null => BarrierOutcome::Null,
-                    CollectionBridgeFailure::NotFound => BarrierOutcome::NotFound,
-                    // A default-value declaration (`getOrDefault`) is no mutable member.
-                    CollectionBridgeFailure::Argument(_) => return None,
-                };
-                Some(StubBarrier {
-                    checked_parameters: policy.checked_parameters,
-                    outcome,
-                })
-            });
+            let barrier = type_safe_policy.and_then(stub_barrier);
             // kotlinc's signature policies for the realization of this exact declaration.
             let signature_policy =
                 overridden_declaration_policy(classpath, face.mutable, |owner| {
@@ -1093,7 +1098,10 @@ fn inherited_along(visibility: Visibility, same_package_path: bool) -> bool {
 }
 
 /// Every classifier a dependency classifier extends, through its published direct supertypes.
-fn classifier_closure(classifiers: &dyn BackendClassifierSource, start: TypeName) -> Vec<TypeName> {
+pub(super) fn classifier_closure(
+    classifiers: &dyn BackendClassifierSource,
+    start: TypeName,
+) -> Vec<TypeName> {
     let mut closure = Vec::new();
     let mut pending = vec![start];
     let mut seen = HashSet::default();
@@ -1168,6 +1176,6 @@ fn implemented_members(
 }
 
 /// A member's JVM parameter shape, keyed with a `void` result so that only the parameters compare.
-fn parameter_descriptor(parameters: &[Ty]) -> String {
+pub(super) fn parameter_descriptor(parameters: &[Ty]) -> String {
     method_descriptor(&jvm_tys(parameters), Ty::Unit)
 }

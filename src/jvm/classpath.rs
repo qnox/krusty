@@ -32,7 +32,7 @@ mod jimage_locations;
 use builtin_signatures::{
     builtin_bounds, builtin_declared_return, builtin_descriptor, builtin_erased, builtin_ty,
 };
-mod mapped_builtin_realizations;
+pub(in crate::jvm) mod mapped_builtin_realizations;
 mod metadata_alignment;
 mod metadata_indexes;
 mod method_bodies;
