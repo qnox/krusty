@@ -234,7 +234,7 @@ pub struct ResolvedFunctionOverride {
     /// this from the selected edge instead of recognizing an ABI slot from its source spelling.
     pub overridden_semantic_role: Option<crate::types::SemanticCallRole>,
     /// Provider-normalized JVM collection ABI role of the exact overridden declaration.
-    pub collection_barrier: Option<crate::libraries::CollectionBarrierOutcome>,
+    pub collection_barrier: Option<crate::libraries::CollectionBarrier>,
     /// The overridden owner is an interface. This is a semantic classifier fact, retained so a
     /// representation backend does not re-query the declaration provider merely to distinguish
     /// superclass and interface dispatch obligations.

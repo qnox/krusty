@@ -4456,7 +4456,7 @@ fn emit_placed_method(
     let declared_nullability::DeclaredNullability {
         result: ret_ann,
         parameters: param_anns,
-    } = override_result_emission::declared_nullability(ir, e.override_results, fid);
+    } = override_result_emission::declared_nullability(ir, env, fid);
     let emitted_param_anns = holder_receiver.map_or_else(
         || param_anns.clone(),
         |_| {
