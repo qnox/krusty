@@ -1394,13 +1394,18 @@ pub(crate) fn merge_inferred_ty_from_symbols(
             })
         })
         .collect::<Vec<_>>();
-    let [common] = most_specific.as_slice() else {
-        return merged;
+    // Several incomparable most-specific supertypes join at their intersection, as kotlinc's
+    // common supertype does (`A : Base(), I` and `B : Base(), J`, `J : I`, join at `Base & I`):
+    // keeping only one of them would discard members the other contributes.
+    let common = match most_specific.as_slice() {
+        [] => return merged,
+        [single] => *single,
+        parts => Ty::intersection(parts),
     };
     if current.is_nullable() || actual.is_nullable() {
         Ty::nullable(common.non_null())
     } else {
-        *common
+        common
     }
 }
 

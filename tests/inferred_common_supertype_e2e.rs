@@ -32,3 +32,30 @@ fun box(): String {
 fn inferred_type_variable_joins_at_the_most_specific_shared_supertype() {
     common::expect_box_same_as_kotlinc(SHARED_INTERFACE, "InferredCommonSupertype");
 }
+
+/// Incomparable most-specific shared supertypes join at their intersection: `A : Base(), I` and
+/// `B : Base(), J` with `J : I` share both `Base` and `I`, and the inferred type keeps the members
+/// of each.
+const INCOMPARABLE_SHARED_SUPERTYPES: &str = r#"open class Base { fun baseMember(): String = "base" }
+interface I { fun iMember(): String = "i" }
+interface J : I
+class A : Base(), I
+class B : Base(), J
+
+fun <T> pick(a: T, b: T): T = a
+
+fun box(): String {
+    val picked = pick(A(), B())
+    val both = listOf(A(), B())
+    val text = picked.baseMember() + picked.iMember() + both.first().baseMember() + both.last().iMember()
+    return if (text == "baseibasei") "OK" else text
+}
+"#;
+
+#[test]
+fn incomparable_shared_supertypes_join_at_their_intersection() {
+    common::expect_box_same_as_kotlinc(
+        INCOMPARABLE_SHARED_SUPERTYPES,
+        "InferredIncomparableSupertypes",
+    );
+}

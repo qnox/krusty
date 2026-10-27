@@ -1,5 +1,14 @@
 # krusty — a memory-lean Kotlin→JVM compiler PoC
 
+## Inferred common supertype of different classes
+
+When lower bounds of a type variable are different classes, the join keeps the shared supertypes
+that no other shared supertype is more specific than, ignoring the erased top. One such supertype is
+the join, however far up each hierarchy it sits (`Leaf : Node`, `Group : Container : Node` join at
+`Node`, not `Any`). Several incomparable ones join at their intersection, as kotlinc's common
+supertype does (`A : Base(), I` and `B : Base(), J`, `J : I` join at `Base & I`, so members of both
+stay available). Covered by `tests/inferred_common_supertype_e2e.rs`.
+
 ## Source classifier identity publication
 
 The compact header inventory publishes non-local classifier identities through their declaration
