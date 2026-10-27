@@ -27,6 +27,7 @@ mod klib_types;
 mod local_values;
 mod lowering_checkpoint;
 mod primitive_calls;
+mod range_membership;
 #[cfg(test)]
 mod tests;
 
@@ -35,5 +36,12 @@ pub use body_unit::DependencyBodyUnit;
 pub(crate) use body_unit::EmittedDependencyCallable;
 pub use callee_facts::KlibCalleeFacts;
 pub(crate) use closure_forms::emitted_closure_function;
+
+/// The serialized forms common body lowering realizes without the declaration edges they name.
+pub(crate) const EMITTED_CALL_FORMS: crate::metadata::klib_ir::tree::EmittedCallForms =
+    crate::metadata::klib_ir::tree::EmittedCallForms {
+        closure: emitted_closure_function,
+        folded_call: range_membership::folds_range_literal_membership,
+    };
 pub use decline::{KlibBodyDecline, KlibBodyDeclineReason};
 pub use inline_templates::{lower_inline_template, KlibInlineTemplate, TemplateCallees};

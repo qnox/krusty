@@ -19,11 +19,16 @@ use crate::types::Ty;
 pub(super) enum CommonPrimitive {
     Unary(PrimitiveUnaryIntrinsic),
     Intrinsic(IrIntrinsic),
+    /// A builtin scalar's `rangeTo`/`rangeUntil`, the source range operator over its receiver
+    /// and its one argument.
+    RangeConstruction(crate::fir::FirRangeOperation),
 }
 
 pub(crate) struct CommonPrimitiveCall {
     pub(super) operation: CommonPrimitive,
     pub(super) receiver: Ty,
+    /// The declared value parameters: none, except a range construction's end bound.
+    pub(super) params: Vec<Ty>,
     pub(super) ret: Ty,
     pub(super) class_type_parameters: Vec<String>,
 }
@@ -42,11 +47,19 @@ pub(super) fn authenticate(
         Some(CompilerIntrinsic::StringLength) => {
             CommonPrimitive::Intrinsic(IrIntrinsic::StringLength)
         }
+        None => match selected.range_construction() {
+            Some(operation) => CommonPrimitive::RangeConstruction(operation),
+            None => return Ok(None),
+        },
         // Library algorithms and target instructions are deliberately not common primitives.
         _ => return Ok(None),
     };
+    let arity = match operation {
+        CommonPrimitive::RangeConstruction(_) => 1,
+        CommonPrimitive::Unary(_) | CommonPrimitive::Intrinsic(_) => 0,
+    };
     if !selected.is_member()
-        || !selected.params().is_empty()
+        || selected.params().len() != arity
         || selected.context_count() != 0
         || !selected.type_parameters().is_empty()
     {
@@ -55,7 +68,7 @@ pub(super) fn authenticate(
         ));
     }
     let signature_kind_matches = match operation {
-        CommonPrimitive::Unary(_) => {
+        CommonPrimitive::Unary(_) | CommonPrimitive::RangeConstruction(_) => {
             matches!(selected.signature(), KlibDeclarationSignature::Public(_))
         }
         CommonPrimitive::Intrinsic(_) => {
@@ -67,8 +80,9 @@ pub(super) fn authenticate(
             "a common primitive has a different declaration kind",
         ));
     }
-    let (header, formals) = authenticated_header(selected, bodies)?;
-    let (_, ret, _, _, receiver) = header.linked_signature();
+    let (header, formals) = authenticated_header(selected, bodies, arity)?;
+    let (params, ret, _, _, receiver) = header.linked_signature();
+    let params = params.to_vec();
     let receiver = receiver.expect("the authenticated member has dispatch");
     let valid = match operation {
         CommonPrimitive::Unary(_) => match receiver {
@@ -82,6 +96,21 @@ pub(super) fn authenticate(
         CommonPrimitive::Intrinsic(IrIntrinsic::StringLength) => {
             receiver == Ty::String && ret == Ty::Int
         }
+        // The provider proved the exact builtin declaration and its range result; the serialized
+        // header must state that same scalar operand pair and result.
+        CommonPrimitive::RangeConstruction(_) => {
+            let range_operand = |ty: Ty| {
+                matches!(
+                    ty,
+                    Ty::Byte | Ty::Short | Ty::Int | Ty::Long | Ty::Char | Ty::UInt | Ty::ULong
+                )
+            };
+            range_operand(receiver)
+                && matches!(params.as_slice(), &[param] if range_operand(param))
+                && params == selected.params()
+                && ret == selected.ret()
+                && ret.is_reference()
+        }
         _ => false,
     };
     if !valid {
@@ -92,6 +121,7 @@ pub(super) fn authenticate(
     Ok(Some(CommonPrimitiveCall {
         operation,
         receiver,
+        params,
         ret,
         class_type_parameters: formals,
     }))
@@ -100,6 +130,7 @@ pub(super) fn authenticate(
 fn authenticated_header(
     selected: KlibBodyCallable<'_>,
     bodies: &KlibDeclarationBodies,
+    arity: usize,
 ) -> Result<(FunctionHeader, Vec<String>), KlibBodyDeclineReason> {
     let super::class_headers::ClassMemberHeader {
         contract: class,
@@ -137,7 +168,7 @@ fn authenticated_header(
     } else {
         Ty::obj_args_name(class.classifier, &parameters.formals)
     };
-    if receiver != Some(expected_receiver) || !params.is_empty() || contexts != 0 || extension {
+    if receiver != Some(expected_receiver) || params.len() != arity || contexts != 0 || extension {
         return Err(mismatch(
             "the serialized primitive receiver or arguments disagree with its class contract",
         ));

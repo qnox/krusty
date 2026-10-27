@@ -4949,6 +4949,14 @@ code is the one the code generator already names: provider-owned bodies through 
   not declared from their headers: a constructor call needs its class's layout and initializers,
   not only a callable header. Next: member calls with their dispatch form and the fake-override
   walk, callee parameter defaults, inlined function blocks, then constructors.
+- **Lowering: range-literal membership.** `v in a..b`/`v !in a..b` over a builtin scalar range
+  construction lowers as the source membership comparison (`klib_lowering/range_membership.rs`
+  owns the serialized form, read by both dependency preparation and body lowering), and a
+  standalone range construction is the checked construction of its provider role. Native's
+  `intToString`/`longToString` externals are realized by the runtime (`RadixToString`).
+  kotlin-test's assertions and `kotlin.text.trim` still decline inside their library bodies
+  (`Asserter` interface dispatch, accessor calls); the generic fix is compiling those member
+  bodies, not intercepting the calls. Next: final library member bodies as ordinary roots.
 - Tests: the unit tests in `metadata/klib_ir/tree_decoding.rs`, `metadata/id_signature/` and
   `klib_lowering/` (whose stdlib checks run when `KRUSTY_KOTLIN_NATIVE` is set). End-to-end coverage comes through
   the box harness rather than a separate KLIB suite: the Native lane gains the `// MODULE:`
@@ -5605,9 +5613,15 @@ regress.
     functions through its class's accessors, and another file's internal member template takes
     its module-mangled JVM name for the frame marker: 17 more box files are byte-identical on
     2.4.21 (4,031 to 4,048) and none regresses.
-    ☐ `$default` calls, suspend callers and callees,
-    `crossinline` parameters, literals with non-local jumps, calls in default arguments, and callee
-    bodies with local classes or enum switches.
+    ✓ Literals with non-local jumps (`NonLocalJumpInLambda`): a lambda that returns from its caller
+    or breaks or continues a loop around the call is inlined from the compiled body through the
+    MethodInliner port's marked returns, and a `tailrec` self-call returned from such a lambda
+    still loops (the sweep enters the lambda's template in the lambda's frame): 5 more box files
+    are byte-identical on 2.4.21 (the four `inlinedBreakContinue` shapes and
+    `secondaryConstructors/withNonLocalReturn`), none regresses, and all 7,184 applicable files
+    run.
+    ☐ `$default` calls, suspend callers and callees, `crossinline` parameters, calls in default
+    arguments, and callee bodies with local classes or enum switches.
 - ☐ 7. Delete `InlineBodyPlan` and its resolver/FIR threading once the coroutine state machine runs
   on inlined bytecode (the plans exist only to reach IR before `lower_suspend`).
 
