@@ -2614,7 +2614,6 @@ strings/concatGenericWithStringUpperBound.kt
 strings/concatNullableGenericWithPrimitiveUpperBound.kt
 strings/constInStringTemplate.kt
 strings/kt13213.kt
-strings/kt13213a.kt
 strings/kt2592.kt
 strings/kt3571.kt
 strings/nestedConcat.kt

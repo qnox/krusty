@@ -178,17 +178,19 @@ impl BodyFirChecker<'_> {
             value: receiver,
             conversion: None,
         };
+        let mut call = FirCall {
+            target: selected.target,
+            dispatch_receiver: (!selected.extension).then_some(bound),
+            extension_receiver: selected.extension.then_some(bound),
+            parameter_types,
+            arguments: arguments.into_boxed_slice(),
+            substitutions: Box::new([]),
+        };
+        self.guard_operator_extension_receiver(receiver_source, &mut call)?;
         Ok(self.body.add_expr(FirExpr {
             origin,
             ty: ResolvedTy::new(Ty::Unit).expect("Unit is a publishable FIR type"),
-            kind: FirExprKind::Call(FirCall {
-                target: selected.target,
-                dispatch_receiver: (!selected.extension).then_some(bound),
-                extension_receiver: selected.extension.then_some(bound),
-                parameter_types,
-                arguments: arguments.into_boxed_slice(),
-                substitutions: Box::new([]),
-            }),
+            kind: FirExprKind::Call(call),
         }))
     }
 

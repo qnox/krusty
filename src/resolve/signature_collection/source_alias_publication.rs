@@ -11,6 +11,7 @@ use super::*;
 /// One source alias declaration to publish under its qualified identity.
 pub(in crate::resolve) struct SourceAlias<'a> {
     pub(in crate::resolve) identity: TypeName,
+    pub(in crate::resolve) declaration_name: crate::types::ClassifierDeclarationName,
     /// The classifier whose body declares the alias, and the alias's name there; `None` for a
     /// top-level alias.
     pub(in crate::resolve) nested_in: Option<(TypeName, &'a str)>,
@@ -67,9 +68,14 @@ pub(in crate::resolve) fn publish_source_alias(
             .insert((owner, name.to_owned()), alias.identity);
     }
     let formals = alias.formals.to_vec();
-    table
-        .source_alias_expansions
-        .insert(alias.identity, (formals.clone(), expansion));
+    table.source_alias_expansions.insert(
+        alias.identity,
+        crate::libraries::TypeAliasTemplate {
+            declaration_name: Some(alias.declaration_name),
+            formals: formals.clone(),
+            expansion,
+        },
+    );
     // Recorded unconditionally: even a right-hand side that spells no alias carries the formals and
     // expansion a use site needs to place ITS spellings into the parameter positions (`typealias
     // Boxed<T> = PBox<T, T>` spells nothing, yet `Boxed<Cargo>` abbreviates both expanded arguments).

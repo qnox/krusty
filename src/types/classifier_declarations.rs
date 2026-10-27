@@ -21,6 +21,14 @@ impl ClassifierDeclarationName {
             Self::TopLevel { name, .. } | Self::Nested { name, .. } => name,
         }
     }
+
+    /// Publish this declaration's identity from its retained container and exact segment.
+    pub(crate) fn identity(&self) -> TypeName {
+        match self {
+            Self::TopLevel { package, name } => super::type_name_child(*package, name),
+            Self::Nested { owner, name } => super::type_name_nested_child(*owner, name),
+        }
+    }
 }
 
 /// Return-value statuses of the four overrides every serialization-plugin generated serializer

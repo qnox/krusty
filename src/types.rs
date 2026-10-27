@@ -51,6 +51,7 @@ pub(crate) use raw_erasure::{formal_erasures, raw_member_type};
 mod thin_handles;
 mod ty_kind;
 mod ty_table;
+pub(crate) use primitive_arrays::array_declaration_name;
 pub use primitive_arrays::{prim_array_element, prim_array_name, primitive_array_creator_element};
 pub(crate) use spelling::type_name_from_multifile_facade;
 pub use spelling::{existing_type_name, existing_type_name_child, type_name, type_name_from};

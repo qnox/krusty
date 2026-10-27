@@ -180,6 +180,34 @@ KRef kt_ushort_to_string(kt_short value) { return kt_unsigned_to_string((uint16_
 KRef kt_uint_to_string(kt_int value) { return kt_unsigned_to_string((uint32_t)value); }
 KRef kt_ulong_to_string(kt_long value) { return kt_unsigned_to_string((uint64_t)value); }
 
+/* `kotlin.text.longToString`/`intToString` (`Kotlin_Long_toStringRadix`): the value in a radix the
+   stdlib has already checked to be in 2..36, with lowercase digits and a leading `-` when negative.
+   The magnitude is taken in unsigned space so `Long.MIN_VALUE` has one. */
+KRef kt_long_to_string_radix(kt_long value, kt_int radix) {
+    char digits[64];
+    kt_int count = 0;
+    uint64_t magnitude = value < 0 ? (uint64_t)0 - (uint64_t)value : (uint64_t)value;
+    do {
+        kt_int digit = (kt_int)(magnitude % (uint64_t)radix);
+        digits[count++] = (char)(digit < 10 ? '0' + digit : 'a' + (digit - 10));
+        magnitude /= (uint64_t)radix;
+    } while (magnitude != 0);
+    KByteArray *buffer = kt_bytes_new(count + 1);
+    char *out = kt_bytes_of(buffer);
+    kt_int length = 0;
+    if (value < 0) {
+        out[length++] = '-';
+    }
+    while (count > 0) {
+        out[length++] = digits[--count];
+    }
+    return kt_string_of((KRef)buffer, out, length);
+}
+
+KRef kt_int_to_string_radix(kt_int value, kt_int radix) {
+    return kt_long_to_string_radix((kt_long)value, radix);
+}
+
 /* Division and remainder. Only division by zero is undefined for unsigned operands — there is no
    `MIN_VALUE / -1` to wrap — so this is the signed helpers minus that case. */
 kt_int kt_div_uint(kt_int a, kt_int b) {

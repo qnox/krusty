@@ -639,6 +639,65 @@ fn a_type_naming_an_alias_is_refused() {
 
 #[test]
 #[ignore = "downloads symbol-processing-api 2.3.12 and a JDK"]
+fn getter_return_types_are_what_ksp2_reports() {
+    log_is_what_ksp2_reports(
+        "Accessors",
+        "accessors.AccessorsProvider",
+        &[fixtures().join("accessors/Accessors.kt")],
+        "ksp-outputs-accessors",
+        "accessors.expected",
+    );
+}
+
+/// A getter that writes its own return type (`get(): Long`) is refused: KSP2 serves that written
+/// reference, which the round does not describe yet.
+#[test]
+#[ignore = "downloads symbol-processing-api 2.3.12 and a JDK"]
+fn the_return_type_a_getter_writes_is_refused() {
+    let (runtime, env) = runtime();
+    let processor = processor_in(
+        &runtime,
+        "Accessors",
+        "accessors.AccessorsProvider",
+        "ksp-processor-accessors-refusals",
+    );
+    let out = scratch("ksp-outputs-accessors-refused");
+    let outputs = KspOutputs {
+        kotlin: out.join("kotlin"),
+        java: out.join("java"),
+        classes: out.join("classes"),
+        resources: out.join("resources"),
+    };
+    let error = run(
+        &runtime,
+        &env,
+        &processor,
+        &[fixtures().join("accessors-refused/TypedGetter.kt")],
+        &[],
+        &outputs,
+    )
+    .err()
+    .expect("the host refuses a getter's written return type");
+    assert_eq!(
+        error.to_string(),
+        "krusty's KSP host does not implement KSPropertyGetter.returnType yet, which a processor uses"
+    );
+}
+
+#[test]
+#[ignore = "downloads symbol-processing-api 2.3.12 and a JDK"]
+fn effective_java_modifiers_are_what_ksp2_reports() {
+    log_is_what_ksp2_reports(
+        "JavaModifiers",
+        "javamodifiers.JavaModifiersProvider",
+        &[fixtures().join("java-modifiers/JavaModifiers.kt")],
+        "ksp-outputs-java-modifiers",
+        "java-modifiers.expected",
+    );
+}
+
+#[test]
+#[ignore = "downloads symbol-processing-api 2.3.12 and a JDK"]
 fn class_literal_arguments_are_what_ksp2_reports() {
     log_with_dependencies_is_what_ksp2_reports(
         "Annotations",
@@ -651,4 +710,66 @@ fn class_literal_arguments_are_what_ksp2_reports() {
         "ksp-outputs-class-literals",
         "class-literals.expected",
     );
+}
+
+#[test]
+#[ignore = "downloads symbol-processing-api 2.3.12 and a JDK"]
+fn all_functions_and_properties_of_source_classifiers_are_what_ksp2_lists() {
+    let (runtime, env) = runtime();
+    let processor = processor(&runtime, "AllMembers", "allmembers.AllMembersProvider");
+    let out = scratch("ksp-outputs-all-members");
+    let outputs = KspOutputs {
+        kotlin: out.join("kotlin"),
+        java: out.join("java"),
+        classes: out.join("classes"),
+        resources: out.join("resources"),
+    };
+    let sources = [fixtures().join("all-members/AllMembers.kt")];
+    let run = run(&runtime, &env, &processor, &sources, &[], &outputs)
+        .unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(run.generated, Vec::<String>::new());
+    let expected: Vec<String> = std::fs::read_to_string(fixtures().join("all-members.expected"))
+        .unwrap()
+        .lines()
+        .filter(|line| !line.starts_with('#'))
+        .map(str::to_string)
+        .collect();
+    assert_eq!(run.log, expected);
+}
+
+#[test]
+#[ignore = "downloads symbol-processing-api 2.3.12 and a JDK"]
+fn all_functions_whose_order_krusty_cannot_say_are_refused() {
+    let (runtime, env) = runtime();
+    let processor = processor_in(
+        &runtime,
+        "AllMembers",
+        "allmembers.AllMembersProvider",
+        "ksp-processor-all-members-refusals",
+    );
+    for case in [
+        "Intersection",
+        "UnrelatedInterfaces",
+        "SiblingOverrides",
+        "Substitution",
+        "EnumClass",
+        "LibrarySupertype",
+    ] {
+        let out = scratch(&format!("ksp-outputs-all-members-{case}"));
+        let outputs = KspOutputs {
+            kotlin: out.join("kotlin"),
+            java: out.join("java"),
+            classes: out.join("classes"),
+            resources: out.join("resources"),
+        };
+        let sources = [fixtures().join(format!("all-members-refused/{case}.kt"))];
+        let error = run(&runtime, &env, &processor, &sources, &[], &outputs)
+            .err()
+            .unwrap_or_else(|| panic!("{case}: the host lists members it cannot order"));
+        assert_eq!(
+            error.to_string(),
+            "krusty's KSP host does not implement KSClassDeclaration.getAllFunctions of a classifier whose members it cannot order yet, which a processor uses",
+            "{case}"
+        );
+    }
 }

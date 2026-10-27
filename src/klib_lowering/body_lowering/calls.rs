@@ -98,7 +98,7 @@ impl BodyLowering<'_> {
             ty,
             CalleeShape {
                 receiver: Some(primitive.receiver),
-                params: &[],
+                params: &primitive.params,
                 ret: primitive.ret,
                 context_count: 0,
                 class_type_parameters: &primitive.class_type_parameters,
@@ -134,6 +134,26 @@ impl BodyLowering<'_> {
                 dispatch_receiver: Some(receiver),
                 args: Vec::new(),
             }),
+            // The source range operator over the receiver and the end bound, as checked FIR
+            // lowers `start..end` once the provider's declaration fixed the range it builds.
+            CommonPrimitive::RangeConstruction(operation) => {
+                let (&[end], &[end_type]) = (operands.args.as_slice(), operands.params.as_slice())
+                else {
+                    return Err(mismatch(
+                        "a range construction is called with another shape than its declaration's",
+                    ));
+                };
+                self.ir.add_expr(IrExpr::Checked(Box::new(
+                    IrCheckedOperation::RangeConstruction {
+                        operation,
+                        start: receiver,
+                        start_type: primitive.receiver,
+                        end,
+                        end_type,
+                        result: primitive.ret,
+                    },
+                )))
+            }
         })
     }
 
@@ -322,6 +342,24 @@ impl BodyLowering<'_> {
                 };
                 let inner = self.ty(expression, "call")?;
                 self.equality(access, operator, inner, true)
+            }
+            Some("NOT_IN") => {
+                let expression = self.arena.expr(operand);
+                let membership = match super::super::range_membership::range_literal_membership(
+                    self.arena, expression,
+                ) {
+                    Some(membership)
+                        if membership.membership.origin.as_deref() == Some("NOT_IN") =>
+                    {
+                        let inner = self.ty(expression, "call")?;
+                        self.range_literal_membership(membership, inner, true)?
+                    }
+                    _ => None,
+                };
+                membership.map_or_else(
+                    || unsupported("a `!in` of another form than a membership in a range literal"),
+                    Ok,
+                )
             }
             Some(_) => unsupported("a negation of another form than `!`, `!=` or `!==`"),
         }

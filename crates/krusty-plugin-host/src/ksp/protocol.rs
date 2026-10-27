@@ -15,7 +15,7 @@ use crate::protocol::{malformed, put_list, put_str, read_frame, utf8, write_fram
 
 use super::{GeneratedKind, KspGenerated, KspLoad, KspOutcome};
 
-pub(crate) const PROTOCOL: u32 = 11;
+pub(crate) const PROTOCOL: u32 = 13;
 
 const HELLO: u8 = 0;
 const LOAD: u8 = 1;
@@ -175,11 +175,17 @@ fn put_class(payload: &mut Vec<u8>, class: &KspClass) {
     put_option(payload, &class.jvm_signature, |payload, text| {
         put_str(payload, text)
     });
+    put_option(payload, &class.all_properties, |payload, members| {
+        put_members(payload, members)
+    });
+    put_option(payload, &class.all_functions, |payload, members| {
+        put_members(payload, members)
+    });
 }
 
 /// A classpath classifier: its header as a class's, then its package, the qualified name of the
-/// classifier it is nested in if any, its origin (0 Kotlin, 1 Java), whether its annotations are
-/// complete, and the members it lists with the inherited ones: its properties, then its functions.
+/// classifier it is nested in if any, its origin (0 Kotlin, 1 Java), and whether its annotations
+/// are complete.
 fn put_library_class(payload: &mut Vec<u8>, library: &KspLibraryClass) {
     put_class(payload, &library.class);
     put_str(payload, &library.package_name);
@@ -191,16 +197,11 @@ fn put_library_class(payload: &mut Vec<u8>, library: &KspLibraryClass) {
         KspOrigin::JavaLib => 1,
     });
     payload.push(u8::from(library.annotations_complete));
-    put_option(payload, &library.all_properties, |payload, members| {
-        put_members(payload, members)
-    });
-    put_option(payload, &library.all_functions, |payload, members| {
-        put_members(payload, members)
-    });
 }
 
-/// Members a classifier lists: 0 and the index of one of its own declarations, or 1, the
-/// qualified name of the classifier that declares an inherited one, and that declaration.
+/// Members a classifier lists: 0 and the index of one of its own declarations; 1, the qualified
+/// name of the classifier that declares one described here, and that declaration; or 2, the
+/// qualified name of a source classifier and the index of one of its declarations.
 fn put_members(payload: &mut Vec<u8>, members: &[KspMember]) {
     put_list(payload, members, |payload, member| match member {
         KspMember::Declared(index) => {
@@ -211,6 +212,11 @@ fn put_members(payload: &mut Vec<u8>, members: &[KspMember]) {
             payload.push(1);
             put_str(payload, owner);
             put_declaration(payload, declaration);
+        }
+        KspMember::Source { owner, index } => {
+            payload.push(2);
+            put_str(payload, owner);
+            payload.extend_from_slice(&index.to_be_bytes());
         }
     });
 }
@@ -280,7 +286,7 @@ fn put_property(payload: &mut Vec<u8>, property: &KspProperty) {
 }
 
 /// An accessor: its origin, its modifiers and annotations, a setter's parameter name and
-/// annotations, and its JVM name.
+/// annotations, its JVM name, and whether a getter returns the property's type.
 fn put_accessor(payload: &mut Vec<u8>, accessor: &KspAccessor) {
     put_origin(payload, accessor.origin);
     put_modifiers(payload, &accessor.modifiers);
@@ -296,6 +302,10 @@ fn put_accessor(payload: &mut Vec<u8>, accessor: &KspAccessor) {
     put_option(payload, &accessor.jvm_name, |payload, text| {
         put_str(payload, text)
     });
+    // A getter, which has no parameter, then says whether it returns the property's type.
+    if accessor.parameter.is_none() {
+        payload.push(u8::from(accessor.returns_property_type));
+    }
 }
 
 /// A parameter: its name, its type and a flags byte (bit 0 `val`, 1 `var`, 2 vararg, 3 default,
@@ -637,6 +647,14 @@ mod tests {
                     declarations: vec![KspDeclaration::Function(constructor)],
                     declarations_complete: true,
                     jvm_signature: Some("Lp/A;".into()),
+                    all_properties: None,
+                    all_functions: Some(vec![
+                        KspMember::Declared(0),
+                        KspMember::Source {
+                            owner: "p.B".into(),
+                            index: 2,
+                        },
+                    ]),
                 })],
                 declarations_complete: false,
             }],
@@ -697,6 +715,11 @@ mod tests {
         // The classifier's JVM signature.
         expected.extend([1, 0, 0, 0, 5]);
         expected.extend(b"Lp/A;");
+        // No properties listed, and as functions its own constructor and the third declaration of
+        // the source classifier `p.B`.
+        expected.extend([0, 1, 0, 0, 0, 2, 0, 0, 0, 0, 0, 2, 0, 0, 0, 3]);
+        expected.extend(b"p.B");
+        expected.extend([0, 0, 0, 2]);
         let mut frame = (expected.len() as u32).to_be_bytes().to_vec();
         frame.extend(expected);
         assert_eq!(framed, frame);

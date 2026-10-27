@@ -42,9 +42,6 @@ pub(in super::super) enum ExpansionReason {
     SuspendCaller,
     /// The callee is a suspend function.
     SuspendCallee,
-    /// A literal lambda argument leaves its body by a non-local `return`, `break` or `continue`,
-    /// which the backend's inliner places only on its byte splice.
-    NonLocalJumpInLambda,
     /// The call omits an argument that has a default.
     DefaultArguments,
     /// A parameter (or the receiver) of the callee has a suspend function type, whose lambdas
@@ -99,13 +96,6 @@ impl BodyLowering<'_> {
         }
         if has_defaults {
             return Some(ExpansionReason::DefaultArguments);
-        }
-        if inline_lambdas
-            .iter()
-            .flatten()
-            .any(|&lambda| self.lambda_leaves_non_locally(lambda))
-        {
-            return Some(ExpansionReason::NonLocalJumpInLambda);
         }
         if inline_lambdas.iter().flatten().any(|&lambda| {
             matches!(
@@ -252,19 +242,6 @@ impl BodyLowering<'_> {
                 .inline_call_type_arguments
                 .insert(call, type_arguments);
         }
-    }
-
-    /// Whether the literal `lambda` leaves its inline body non-locally, the fact common lowering
-    /// records once for that body (`IrFile::record_lambda_exit`).
-    fn lambda_leaves_non_locally(&mut self, lambda: ExprId) -> bool {
-        let IrExpr::Lambda {
-            inline_body: Some(body),
-            ..
-        } = *self.ir.expr(lambda)
-        else {
-            return false;
-        };
-        self.ir.record_lambda_exit(body)
     }
 }
 

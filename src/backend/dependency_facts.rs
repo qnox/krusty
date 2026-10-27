@@ -255,6 +255,7 @@ impl BackendCallableFact {
                 compiler_intrinsic: self
                     .compiler_intrinsic
                     .or(self.member_realization.compiler_intrinsic()),
+                range_construction: self.member_realization.range_construction(),
                 declaration_modifiers: self.klib_body_declaration_modifiers,
                 class_contract: self.klib_body_class_contract.as_ref(),
             },

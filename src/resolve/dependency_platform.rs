@@ -62,7 +62,7 @@ impl DependencyPlatform {
         &self,
         identity: TypeName,
     ) -> Option<crate::libraries::AliasExpansion> {
-        let (formals, expansion) = self.symbols.source_alias_expansions.get(&identity)?;
+        let template = self.symbols.source_alias_expansions.get(&identity)?;
         let target = *self.symbols.source_alias_fqns.get(&identity)?;
         let expansion_spelling = self
             .symbols
@@ -72,9 +72,10 @@ impl DependencyPlatform {
             .unwrap_or_default();
         Some(crate::libraries::AliasExpansion {
             identity,
+            declaration_name: template.declaration_name.clone().map(std::sync::Arc::new),
             target,
-            formals: formals.clone(),
-            expansion: *expansion,
+            formals: template.formals.clone(),
+            expansion: template.expansion,
             expansion_spelling,
         })
     }
