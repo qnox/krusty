@@ -534,11 +534,11 @@
     }
    ],
    "measured": {
-    "date": "2026-10-26",
-    "commit": "ee5b59db59361e88a921a427646286affa142079",
-    "run": "https://github.com/qnox/krusty/actions/runs/40281561250"
+    "date": "2026-10-27",
+    "commit": "80cc8099ddb8c233bfdc4dabf6234c4cae2d8eea",
+    "run": "https://github.com/qnox/krusty/actions/runs/40462256929"
    },
-   "stars": 9301,
+   "stars": 9302,
    "misses": [
     [
      "not run: a task it depends on failed",
@@ -579,7 +579,7 @@
    "compilations": 19,
    "built": 4,
    "classes": 3705,
-   "identical": 76,
+   "identical": 78,
    "rows": [
     {
      "task": ":core:benchmark:compileKotlinJvm",
@@ -643,7 +643,7 @@
      "fallback": null,
      "error": null,
      "classes": 212,
-     "identical": 65,
+     "identical": 66,
      "only_kotlinc": 3,
      "only_krusty": 2
     },
@@ -775,7 +775,7 @@
      "fallback": null,
      "error": null,
      "classes": 3,
-     "identical": 2,
+     "identical": 3,
      "only_kotlinc": 0,
      "only_krusty": 0
     },
@@ -819,11 +819,11 @@
     }
    ],
    "measured": {
-    "date": "2026-10-26",
-    "commit": "ee5b59db59361e88a921a427646286affa142079",
-    "run": "https://github.com/qnox/krusty/actions/runs/40281561250"
+    "date": "2026-10-27",
+    "commit": "80cc8099ddb8c233bfdc4dabf6234c4cae2d8eea",
+    "run": "https://github.com/qnox/krusty/actions/runs/40462256929"
    },
-   "stars": 10023,
+   "stars": 10024,
    "misses": [
     [
      "not run: a task it depends on failed",
@@ -1283,11 +1283,11 @@
     }
    ],
    "measured": {
-    "date": "2026-10-26",
-    "commit": "ee5b59db59361e88a921a427646286affa142079",
-    "run": "https://github.com/qnox/krusty/actions/runs/40281561250"
+    "date": "2026-10-27",
+    "commit": "80cc8099ddb8c233bfdc4dabf6234c4cae2d8eea",
+    "run": "https://github.com/qnox/krusty/actions/runs/40462256929"
    },
-   "stars": 13823,
+   "stars": 13822,
    "misses": [
     [
      "left to kotlinc: krusty does not implement everything it requests (freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead)",
@@ -3938,11 +3938,11 @@
     }
    ],
    "measured": {
-    "date": "2026-10-26",
-    "commit": "ee5b59db59361e88a921a427646286affa142079",
-    "run": "https://github.com/qnox/krusty/actions/runs/40281561250"
+    "date": "2026-10-27",
+    "commit": "80cc8099ddb8c233bfdc4dabf6234c4cae2d8eea",
+    "run": "https://github.com/qnox/krusty/actions/runs/40462256929"
    },
-   "stars": 14555,
+   "stars": 14556,
    "misses": [
     [
      "left to kotlinc: argument -Xreport-all-warnings, argument -Xrender-internal-diagnostic-names",
@@ -4403,11 +4403,11 @@
     }
    ],
    "measured": {
-    "date": "2026-10-26",
-    "commit": "ee5b59db59361e88a921a427646286affa142079",
-    "run": "https://github.com/qnox/krusty/actions/runs/40281561250"
+    "date": "2026-10-27",
+    "commit": "80cc8099ddb8c233bfdc4dabf6234c4cae2d8eea",
+    "run": "https://github.com/qnox/krusty/actions/runs/40462256929"
    },
-   "stars": 30005,
+   "stars": 30004,
    "misses": [
     [
      "not run: a task it depends on failed",
@@ -4699,11 +4699,11 @@
     }
    ],
    "measured": {
-    "date": "2026-10-26",
-    "commit": "ee5b59db59361e88a921a427646286affa142079",
-    "run": "https://github.com/qnox/krusty/actions/runs/40281561250"
+    "date": "2026-10-27",
+    "commit": "80cc8099ddb8c233bfdc4dabf6234c4cae2d8eea",
+    "run": "https://github.com/qnox/krusty/actions/runs/40462256929"
    },
-   "stars": 16217,
+   "stars": 16233,
    "misses": [
     [
      "not run: a task it depends on failed",
@@ -5521,9 +5521,9 @@
     }
    ],
    "measured": {
-    "date": "2026-10-26",
-    "commit": "ee5b59db59361e88a921a427646286affa142079",
-    "run": "https://github.com/qnox/krusty/actions/runs/40281561250"
+    "date": "2026-10-27",
+    "commit": "80cc8099ddb8c233bfdc4dabf6234c4cae2d8eea",
+    "run": "https://github.com/qnox/krusty/actions/runs/40462256929"
    },
    "stars": 14795,
    "misses": [
@@ -5739,9 +5739,9 @@
     }
    ],
    "measured": {
-    "date": "2026-10-26",
-    "commit": "ee5b59db59361e88a921a427646286affa142079",
-    "run": "https://github.com/qnox/krusty/actions/runs/40281561250"
+    "date": "2026-10-27",
+    "commit": "80cc8099ddb8c233bfdc4dabf6234c4cae2d8eea",
+    "run": "https://github.com/qnox/krusty/actions/runs/40462256929"
    },
    "stars": 10166,
    "misses": [
@@ -5780,7 +5780,7 @@
    "compilations": 58,
    "built": 24,
    "classes": 1110,
-   "identical": 225,
+   "identical": 229,
    "rows": [
     {
      "task": ":app:compileDemoDebugAndroidTestKotlin",
@@ -5987,7 +5987,7 @@
      "fallback": null,
      "error": null,
      "classes": 5,
-     "identical": 1,
+     "identical": 2,
      "only_kotlinc": 0,
      "only_krusty": 0
     },
@@ -6075,7 +6075,7 @@
      "fallback": null,
      "error": null,
      "classes": 32,
-     "identical": 13,
+     "identical": 16,
      "only_kotlinc": 8,
      "only_krusty": 0
     },
@@ -6514,11 +6514,11 @@
     }
    ],
    "measured": {
-    "date": "2026-10-26",
-    "commit": "ee5b59db59361e88a921a427646286affa142079",
-    "run": "https://github.com/qnox/krusty/actions/runs/40281561250"
+    "date": "2026-10-27",
+    "commit": "80cc8099ddb8c233bfdc4dabf6234c4cae2d8eea",
+    "run": "https://github.com/qnox/krusty/actions/runs/40462256929"
    },
-   "stars": 21969,
+   "stars": 21972,
    "misses": [
     [
      "left to kotlinc: compiler plugin androidx.compose.compiler.plugins.kotlin, argument -Xallow-unstable-dependencies",
@@ -7270,11 +7270,11 @@
     }
    ],
    "measured": {
-    "date": "2026-10-26",
-    "commit": "ee5b59db59361e88a921a427646286affa142079",
-    "run": "https://github.com/qnox/krusty/actions/runs/40281561250"
+    "date": "2026-10-27",
+    "commit": "80cc8099ddb8c233bfdc4dabf6234c4cae2d8eea",
+    "run": "https://github.com/qnox/krusty/actions/runs/40462256929"
    },
-   "stars": 47097,
+   "stars": 47099,
    "misses": [
     [
      "not run: a task it depends on failed",
@@ -7436,11 +7436,11 @@
     }
    ],
    "measured": {
-    "date": "2026-10-26",
-    "commit": "ee5b59db59361e88a921a427646286affa142079",
-    "run": "https://github.com/qnox/krusty/actions/runs/40281561250"
+    "date": "2026-10-27",
+    "commit": "80cc8099ddb8c233bfdc4dabf6234c4cae2d8eea",
+    "run": "https://github.com/qnox/krusty/actions/runs/40462256929"
    },
-   "stars": 9053,
+   "stars": 9054,
    "misses": [
     [
      "left to kotlinc: compiler plugin burst-kotlin-plugin",
@@ -7942,11 +7942,11 @@
     }
    ],
    "measured": {
-    "date": "2026-10-26",
-    "commit": "ee5b59db59361e88a921a427646286affa142079",
-    "run": "https://github.com/qnox/krusty/actions/runs/40281561250"
+    "date": "2026-10-27",
+    "commit": "80cc8099ddb8c233bfdc4dabf6234c4cae2d8eea",
+    "run": "https://github.com/qnox/krusty/actions/runs/40462256929"
    },
-   "stars": 16326,
+   "stars": 16338,
    "misses": [
     [
      "not run: a task it depends on failed",
@@ -8079,11 +8079,11 @@
     }
    ],
    "measured": {
-    "date": "2026-10-26",
-    "commit": "ee5b59db59361e88a921a427646286affa142079",
-    "run": "https://github.com/qnox/krusty/actions/runs/40281561250"
+    "date": "2026-10-27",
+    "commit": "80cc8099ddb8c233bfdc4dabf6234c4cae2d8eea",
+    "run": "https://github.com/qnox/krusty/actions/runs/40462256929"
    },
-   "stars": 11488,
+   "stars": 11494,
    "misses": [
     [
      "left to kotlinc: compiler plugin purityPlugin",

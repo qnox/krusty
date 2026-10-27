@@ -7,20 +7,20 @@ on master); `projects/` holds each project's latest result and `history.tsv` eve
 
 | Project | Stars | Kotlin LOC | Java LOC | Reference build | Compilations built by krusty | Identical classes | Measured |
 | --- | ---: | ---: | ---: | --- | ---: | ---: | --- |
-| Exposed | 9,301 | 138,105 | 0 | ok | 0 / 43 | 0 / 8,100 (0.0%) | [2026-10-26, krusty ee5b59d](https://github.com/qnox/krusty/actions/runs/40281561250) |
-| koin | 10,023 | 33,677 | 123 | ok | 4 / 19 | 76 / 3,705 (2.1%) | [2026-10-26, krusty ee5b59d](https://github.com/qnox/krusty/actions/runs/40281561250) |
-| kotlinx.coroutines | 13,823 | 102,096 | 897 | ok | 0 / 34 | 0 / 9,482 (0.0%) | [2026-10-26, krusty ee5b59d](https://github.com/qnox/krusty/actions/runs/40281561250) |
-| ktor | 14,555 | 259,026 | 85 | ok | 0 / 220 | 0 / 15,418 (0.0%) | [2026-10-26, krusty ee5b59d](https://github.com/qnox/krusty/actions/runs/40281561250) |
-| leakcanary | 30,005 | 100,627 | 172 | ok | 6 / 34 | 23 / 1,798 (1.3%) | [2026-10-26, krusty ee5b59d](https://github.com/qnox/krusty/actions/runs/40281561250) |
-| Maestro | 16,217 | 65,644 | 0 | ok | 1 / 19 | 26 / 2,156 (1.2%) | [2026-10-26, krusty ee5b59d](https://github.com/qnox/krusty/actions/runs/40281561250) |
-| mirai | 14,795 | 156,072 | 559 | ok | 0 / 51 | 0 / 2,536 (0.0%) | [2026-10-26, krusty ee5b59d](https://github.com/qnox/krusty/actions/runs/40281561250) |
-| moshi | 10,166 | 16,749 | 13,212 | ok | 0 / 12 | 0 / 512 (0.0%) | [2026-10-26, krusty ee5b59d](https://github.com/qnox/krusty/actions/runs/40281561250) |
-| nowinandroid | 21,969 | 26,596 | 0 | ok | 24 / 58 | 225 / 1,110 (20.3%) | [2026-10-26, krusty ee5b59d](https://github.com/qnox/krusty/actions/runs/40281561250) |
-| okhttp | 47,097 | 126,665 | 3,816 | ok | 9 / 38 | 40 / 1,483 (2.7%) | [2026-10-26, krusty ee5b59d](https://github.com/qnox/krusty/actions/runs/40281561250) |
-| okio | 9,053 | 46,812 | 2,398 | failed (exit 1) | 0 / 6 | 0 / 343 (0.0%) | [2026-10-26, krusty ee5b59d](https://github.com/qnox/krusty/actions/runs/40281561250) |
-| quarkdown | 16,326 | 87,771 | 23 | ok | 5 / 37 | 28 / 2,345 (1.2%) | [2026-10-26, krusty ee5b59d](https://github.com/qnox/krusty/actions/runs/40281561250) |
-| Unciv | 11,488 | 139,231 | 1,184 | ok | 0 / 4 | 0 / 3,341 (0.0%) | [2026-10-26, krusty ee5b59d](https://github.com/qnox/krusty/actions/runs/40281561250) |
-| **Measured total** | | | | | **49 / 569** | **418 / 51,986 (0.8%)** | |
+| Exposed | 9,302 | 138,105 | 0 | ok | 0 / 43 | 0 / 8,100 (0.0%) | [2026-10-27, krusty 80cc809](https://github.com/qnox/krusty/actions/runs/40462256929) |
+| koin | 10,024 | 33,677 | 123 | ok | 4 / 19 | 78 / 3,705 (2.1%) | [2026-10-27, krusty 80cc809](https://github.com/qnox/krusty/actions/runs/40462256929) |
+| kotlinx.coroutines | 13,822 | 102,096 | 897 | ok | 0 / 34 | 0 / 9,482 (0.0%) | [2026-10-27, krusty 80cc809](https://github.com/qnox/krusty/actions/runs/40462256929) |
+| ktor | 14,556 | 259,026 | 85 | ok | 0 / 220 | 0 / 15,418 (0.0%) | [2026-10-27, krusty 80cc809](https://github.com/qnox/krusty/actions/runs/40462256929) |
+| leakcanary | 30,004 | 100,627 | 172 | ok | 6 / 34 | 23 / 1,798 (1.3%) | [2026-10-27, krusty 80cc809](https://github.com/qnox/krusty/actions/runs/40462256929) |
+| Maestro | 16,233 | 65,644 | 0 | ok | 1 / 19 | 26 / 2,156 (1.2%) | [2026-10-27, krusty 80cc809](https://github.com/qnox/krusty/actions/runs/40462256929) |
+| mirai | 14,795 | 156,072 | 559 | ok | 0 / 51 | 0 / 2,536 (0.0%) | [2026-10-27, krusty 80cc809](https://github.com/qnox/krusty/actions/runs/40462256929) |
+| moshi | 10,166 | 16,749 | 13,212 | ok | 0 / 12 | 0 / 512 (0.0%) | [2026-10-27, krusty 80cc809](https://github.com/qnox/krusty/actions/runs/40462256929) |
+| nowinandroid | 21,972 | 26,596 | 0 | ok | 24 / 58 | 229 / 1,110 (20.6%) | [2026-10-27, krusty 80cc809](https://github.com/qnox/krusty/actions/runs/40462256929) |
+| okhttp | 47,099 | 126,665 | 3,816 | ok | 9 / 38 | 40 / 1,483 (2.7%) | [2026-10-27, krusty 80cc809](https://github.com/qnox/krusty/actions/runs/40462256929) |
+| okio | 9,054 | 46,812 | 2,398 | failed (exit 1) | 0 / 6 | 0 / 343 (0.0%) | [2026-10-27, krusty 80cc809](https://github.com/qnox/krusty/actions/runs/40462256929) |
+| quarkdown | 16,338 | 87,771 | 23 | ok | 5 / 37 | 28 / 2,345 (1.2%) | [2026-10-27, krusty 80cc809](https://github.com/qnox/krusty/actions/runs/40462256929) |
+| Unciv | 11,494 | 139,231 | 1,184 | ok | 0 / 4 | 0 / 3,341 (0.0%) | [2026-10-27, krusty 80cc809](https://github.com/qnox/krusty/actions/runs/40462256929) |
+| **Measured total** | | | | | **49 / 569** | **424 / 51,986 (0.8%)** | |
 
 ## Missed compilations
 

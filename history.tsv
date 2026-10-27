@@ -38,3 +38,16 @@ date	krusty commit	project	reference exit	built	compilations	identical	classes	r
 2026-10-26	ee5b59db59361e88a921a427646286affa142079	okhttp	0	9	38	40	1483	https://github.com/qnox/krusty/actions/runs/40281561250
 2026-10-26	ee5b59db59361e88a921a427646286affa142079	okio	1	0	6	0	343	https://github.com/qnox/krusty/actions/runs/40281561250
 2026-10-26	ee5b59db59361e88a921a427646286affa142079	quarkdown	0	5	37	28	2345	https://github.com/qnox/krusty/actions/runs/40281561250
+2026-10-27	80cc8099ddb8c233bfdc4dabf6234c4cae2d8eea	Exposed	0	0	43	0	8100	https://github.com/qnox/krusty/actions/runs/40462256929
+2026-10-27	80cc8099ddb8c233bfdc4dabf6234c4cae2d8eea	Maestro	0	1	19	26	2156	https://github.com/qnox/krusty/actions/runs/40462256929
+2026-10-27	80cc8099ddb8c233bfdc4dabf6234c4cae2d8eea	Unciv	0	0	4	0	3341	https://github.com/qnox/krusty/actions/runs/40462256929
+2026-10-27	80cc8099ddb8c233bfdc4dabf6234c4cae2d8eea	koin	0	4	19	78	3705	https://github.com/qnox/krusty/actions/runs/40462256929
+2026-10-27	80cc8099ddb8c233bfdc4dabf6234c4cae2d8eea	kotlinx.coroutines	0	0	34	0	9482	https://github.com/qnox/krusty/actions/runs/40462256929
+2026-10-27	80cc8099ddb8c233bfdc4dabf6234c4cae2d8eea	ktor	0	0	220	0	15418	https://github.com/qnox/krusty/actions/runs/40462256929
+2026-10-27	80cc8099ddb8c233bfdc4dabf6234c4cae2d8eea	leakcanary	0	6	34	23	1798	https://github.com/qnox/krusty/actions/runs/40462256929
+2026-10-27	80cc8099ddb8c233bfdc4dabf6234c4cae2d8eea	mirai	0	0	51	0	2536	https://github.com/qnox/krusty/actions/runs/40462256929
+2026-10-27	80cc8099ddb8c233bfdc4dabf6234c4cae2d8eea	moshi	0	0	12	0	512	https://github.com/qnox/krusty/actions/runs/40462256929
+2026-10-27	80cc8099ddb8c233bfdc4dabf6234c4cae2d8eea	nowinandroid	0	24	58	229	1110	https://github.com/qnox/krusty/actions/runs/40462256929
+2026-10-27	80cc8099ddb8c233bfdc4dabf6234c4cae2d8eea	okhttp	0	9	38	40	1483	https://github.com/qnox/krusty/actions/runs/40462256929
+2026-10-27	80cc8099ddb8c233bfdc4dabf6234c4cae2d8eea	okio	1	0	6	0	343	https://github.com/qnox/krusty/actions/runs/40462256929
+2026-10-27	80cc8099ddb8c233bfdc4dabf6234c4cae2d8eea	quarkdown	0	5	37	28	2345	https://github.com/qnox/krusty/actions/runs/40462256929

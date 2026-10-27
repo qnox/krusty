@@ -8,7 +8,7 @@
  "compilations": 19,
  "built": 4,
  "classes": 3705,
- "identical": 76,
+ "identical": 78,
  "rows": [
   {
    "task": ":core:benchmark:compileKotlinJvm",
@@ -72,7 +72,7 @@
    "fallback": null,
    "error": null,
    "classes": 212,
-   "identical": 65,
+   "identical": 66,
    "only_kotlinc": 3,
    "only_krusty": 2
   },
@@ -204,7 +204,7 @@
    "fallback": null,
    "error": null,
    "classes": 3,
-   "identical": 2,
+   "identical": 3,
    "only_kotlinc": 0,
    "only_krusty": 0
   },
@@ -248,8 +248,8 @@
   }
  ],
  "measured": {
-  "date": "2026-10-26",
-  "commit": "ee5b59db59361e88a921a427646286affa142079",
-  "run": "https://github.com/qnox/krusty/actions/runs/40281561250"
+  "date": "2026-10-27",
+  "commit": "80cc8099ddb8c233bfdc4dabf6234c4cae2d8eea",
+  "run": "https://github.com/qnox/krusty/actions/runs/40462256929"
  }
 }
