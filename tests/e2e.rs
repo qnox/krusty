@@ -148,6 +148,8 @@ mod api_version_availability_e2e;
 mod apt_host_e2e;
 #[path = "arity_error_coverage_e2e.rs"]
 mod arity_error_coverage_e2e;
+#[path = "array_clone_e2e.rs"]
+mod array_clone_e2e;
 #[path = "array_member_reference_e2e.rs"]
 mod array_member_reference_e2e;
 #[path = "assert_intrinsic_e2e.rs"]
