@@ -13,6 +13,7 @@ mod control_forms;
 mod demo_package;
 mod inline_templates;
 mod primitive_calls;
+mod range_membership_producers;
 mod returnable_blocks;
 mod target_calls;
 mod varargs;

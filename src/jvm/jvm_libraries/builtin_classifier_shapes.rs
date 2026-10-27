@@ -17,7 +17,11 @@ pub(super) fn mapped_builtin_signature(internal: TypeName) -> Option<LibraryType
         })
         .collect();
     Some(LibraryType {
-        declaration_name: None,
+        runtime_exception: None,
+        declaration_name: Some(crate::types::ClassifierDeclarationName::TopLevel {
+            package: crate::types::wk::kotlin_package(),
+            name: "String".into(),
+        }),
         is_kotlin: true,
         is_data: false,
         access: crate::libraries::ClassifierAccess::Public,
@@ -81,6 +85,8 @@ impl JvmLibraries {
             .cp
             .builtin_class_signature_name(internal)
             .expect("a decoded builtin classifier shape must retain its generic signature");
+        let declaration_name =
+            (signature.declaration == internal).then_some(signature.declaration_name);
         let formals = signature.formals;
         let formal_bounds = signature.formal_bounds;
         let supertype_templates = signature.supertypes;
@@ -121,6 +127,7 @@ impl JvmLibraries {
                 supertype_templates,
             },
         );
+        classifier.declaration_name = declaration_name;
         classifier.companion_object = self.cp.builtin_companion_object(internal);
         classifier.constants = crate::fx_hash::HashMap::default();
         // The builtin's own modality, as a class file would state it: `kotlin.Throwable` stays
@@ -169,6 +176,7 @@ pub(super) fn builtin_library_type(
         .collect::<Vec<_>>();
     let callable_signature = callable_signatures.first().copied();
     LibraryType {
+        runtime_exception: None,
         declaration_name: None,
         is_kotlin: true,
         is_data: false,

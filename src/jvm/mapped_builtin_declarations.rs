@@ -165,6 +165,82 @@ pub(super) fn collection_bridge_policy_for_declaration(
         })
 }
 
+/// How kotlinc writes the generic signature of one exact Kotlin collection declaration's
+/// realization, where it departs from the declaration's own types. Like the type-safe policy, this
+/// is behavior `.kotlin_builtins` does not encode, keyed by full declaration identity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum CollectionSignaturePolicy {
+    /// kotlinc's `METHODS_WITH_DECLARATION_SITE_WILDCARDS`: every declaration-site variance of the
+    /// parameters is written, so `addAll(Collection<E>)` is `Collection<? extends E>`.
+    DeclarationSiteWildcards,
+    /// kotlinc's `ERASED_COLLECTION_PARAMETER_SIGNATURES`: the collection parameter at this index
+    /// is written star-projected, so `removeAll(Collection<E>)` is `Collection<?>`.
+    ErasedCollectionParameter(u16),
+}
+
+pub(super) fn collection_signature_policy_for_declaration(
+    declaration_owner: TypeName,
+    source_name: &str,
+    descriptor: &str,
+    kind: MappedBuiltinMemberKind,
+) -> Option<CollectionSignaturePolicy> {
+    use CollectionSignaturePolicy::{DeclarationSiteWildcards, ErasedCollectionParameter};
+    const ROWS: [(&str, &str, &str, CollectionSignaturePolicy); 7] = [
+        (
+            "kotlin/collections/MutableCollection",
+            "addAll",
+            "(Ljava/util/Collection;)Z",
+            DeclarationSiteWildcards,
+        ),
+        (
+            "kotlin/collections/MutableList",
+            "addAll",
+            "(Ljava/util/Collection;)Z",
+            DeclarationSiteWildcards,
+        ),
+        (
+            "kotlin/collections/MutableList",
+            "addAll",
+            "(ILjava/util/Collection;)Z",
+            DeclarationSiteWildcards,
+        ),
+        (
+            "kotlin/collections/MutableMap",
+            "putAll",
+            "(Ljava/util/Map;)V",
+            DeclarationSiteWildcards,
+        ),
+        (
+            "kotlin/collections/Collection",
+            "containsAll",
+            "(Ljava/util/Collection;)Z",
+            ErasedCollectionParameter(0),
+        ),
+        (
+            "kotlin/collections/MutableCollection",
+            "removeAll",
+            "(Ljava/util/Collection;)Z",
+            ErasedCollectionParameter(0),
+        ),
+        (
+            "kotlin/collections/MutableCollection",
+            "retainAll",
+            "(Ljava/util/Collection;)Z",
+            ErasedCollectionParameter(0),
+        ),
+    ];
+    if kind != MappedBuiltinMemberKind::Function {
+        return None;
+    }
+    ROWS.iter()
+        .find(|(owner, name, row_descriptor, _)| {
+            declaration_owner == type_name(owner)
+                && *name == source_name
+                && *row_descriptor == descriptor
+        })
+        .map(|(_, _, _, policy)| *policy)
+}
+
 /// One metadata-declared Kotlin builtin member paired with its exact JVM realization.
 ///
 /// Source and physical names deliberately remain separate. The declaring Kotlin identity and full

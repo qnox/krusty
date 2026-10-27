@@ -19,6 +19,7 @@ use crate::types::{type_name, Ty, TypeName, TypeNameList, TypeParameters};
 #[derive(Clone)]
 pub(super) struct OptionalAnnotationClass {
     identity: TypeName,
+    declaration_name: crate::types::ClassifierDeclarationName,
     declaration: Arc<semantic::KotlinClass>,
 }
 
@@ -42,6 +43,7 @@ pub(super) fn module_optional_annotations(
                     .any(|annotation| annotation.identity == marker)
         })
         .map(|(internal, declaration)| OptionalAnnotationClass {
+            declaration_name: crate::libraries::metadata_declaration_name(&internal),
             identity: type_name(&internal),
             declaration: Arc::new(declaration),
         })
@@ -80,10 +82,7 @@ impl OptionalAnnotationIndex {
                 packages.insert(current);
                 package = current.parent();
             }
-            classifiers.insert(
-                class.identity,
-                Arc::new(annotation_type(&class.declaration)),
-            );
+            classifiers.insert(class.identity, Arc::new(annotation_type(&class)));
         }
         Self {
             classifiers,
@@ -106,7 +105,8 @@ impl OptionalAnnotationIndex {
     }
 }
 
-fn annotation_type(declaration: &semantic::KotlinClass) -> LibraryType {
+fn annotation_type(class: &OptionalAnnotationClass) -> LibraryType {
+    let declaration = &class.declaration;
     let bounds = semantic::semantic_bounds(&declaration.type_params, &HashMap::default());
     let type_parameters = TypeParameters::new(
         declaration
@@ -175,7 +175,8 @@ fn annotation_type(declaration: &semantic::KotlinClass) -> LibraryType {
         });
     }
     LibraryType {
-        declaration_name: None,
+        runtime_exception: None,
+        declaration_name: Some(class.declaration_name.clone()),
         access: declaration.visibility.into(),
         is_kotlin: true,
         is_data: false,
@@ -231,6 +232,116 @@ mod tests {
 
     use crate::jvm::classpath::Classpath;
     use crate::types::{type_name, AnnotationTargets, KotlinTarget};
+
+    fn optional_module(segments: &[&str]) -> Vec<u8> {
+        use crate::metadata::protobuf::Pb;
+
+        let mut strings = Pb::new();
+        let mut names = Pb::new();
+        for name in ["projection_optional", "kotlin", "OptionalExpectation"]
+            .into_iter()
+            .chain(segments.iter().copied())
+        {
+            strings.field_bytes(1, name.as_bytes());
+        }
+        for index in 0..3 + segments.len() {
+            let mut name = Pb::new();
+            name.field_varint(2, index as u64);
+            name.field_varint(3, u64::from(index < 2));
+            if index == 2 {
+                name.field_varint(1, 1);
+            } else if index >= 3 {
+                name.field_varint(1, if index == 3 { 0 } else { (index - 1) as u64 });
+            }
+            names.field_message(1, &name);
+        }
+        let mut module = Pb::new();
+        module.field_message(4, &strings);
+        module.field_message(5, &names);
+        for index in 3..3 + segments.len() {
+            let mut class = Pb::new();
+            class.field_varint(1, 6 | 1 | (4 << 6) | (1 << 12));
+            class.field_varint(3, index as u64);
+            let mut annotation = Pb::new();
+            annotation.field_varint(1, 2);
+            class.field_message(150, &annotation);
+            module.field_message(16, &class);
+        }
+        let mut bytes = Vec::new();
+        for word in [3i32, 2, 4, 0, 0] {
+            bytes.extend_from_slice(&word.to_be_bytes());
+        }
+        bytes.extend_from_slice(module.as_bytes());
+        bytes
+    }
+
+    #[test]
+    fn declaration_name_projections_preserve_optional_metadata_snapshot_ownership() {
+        use crate::types::ClassifierDeclarationName;
+
+        let identity = type_name("projection_optional/Literal$Name");
+        let top = super::OptionalAnnotationIndex::new(
+            super::module_optional_annotations(&optional_module(&["Literal$Name"])).unwrap(),
+        )
+        .classifier(identity)
+        .expect("optional top-level annotation");
+        let nested = super::OptionalAnnotationIndex::new(
+            super::module_optional_annotations(&optional_module(&["Literal", "Name"])).unwrap(),
+        )
+        .classifier(identity)
+        .expect("optional nested annotation");
+        assert_eq!(
+            top.declaration_name,
+            Some(ClassifierDeclarationName::TopLevel {
+                package: type_name("projection_optional"),
+                name: "Literal$Name".into(),
+            })
+        );
+        assert_eq!(
+            nested.declaration_name,
+            Some(ClassifierDeclarationName::Nested {
+                owner: type_name("projection_optional/Literal"),
+                name: "Name".into(),
+            })
+        );
+        assert_eq!(top.kind, crate::libraries::TypeKind::Annotation);
+        assert_eq!(nested.kind, crate::libraries::TypeKind::Annotation);
+    }
+
+    #[test]
+    fn declaration_name_projections_preserve_selected_stdlib_optional_owners() {
+        use crate::types::ClassifierDeclarationName;
+
+        let stdlib = crate::toolchain::stdlib_jar().expect("selected reference stdlib");
+        let classes = Classpath::new(vec![stdlib])
+            .optional_annotation_classes()
+            .unwrap();
+        let index = super::OptionalAnnotationIndex::new(classes);
+        for (identity, expected) in [
+            (
+                "kotlin/js/JsStatic",
+                ClassifierDeclarationName::TopLevel {
+                    package: type_name("kotlin/js"),
+                    name: "JsStatic".into(),
+                },
+            ),
+            (
+                "kotlin/js/JsExport.Ignore",
+                ClassifierDeclarationName::Nested {
+                    owner: type_name("kotlin/js/JsExport"),
+                    name: "Ignore".into(),
+                },
+            ),
+        ] {
+            assert_eq!(
+                index
+                    .classifier(type_name(identity))
+                    .unwrap()
+                    .declaration_name,
+                Some(expected)
+            );
+        }
+    }
 
     /// The stdlib publishes its JS- and Native-only optional annotations through
     /// `META-INF/kotlin-stdlib.kotlin_module`, with their declared retention and targets.

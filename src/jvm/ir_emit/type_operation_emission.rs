@@ -99,6 +99,9 @@ impl Emitter<'_> {
             }
             _ => self.emit_type_op_operand(arg, code),
         };
+        if op == IrTypeOp::ImplicitCoercion {
+            self.mark_intrinsic_instruction(expression, code);
+        }
         if matches!(op, IrTypeOp::Cast | IrTypeOp::CastNonNull)
             && semantic_arg.non_null().is_reference_array()
             && crate::jvm::array_casts::compatible(

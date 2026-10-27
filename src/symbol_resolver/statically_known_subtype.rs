@@ -26,6 +26,7 @@ pub(crate) fn nominal_type(ty: Ty) -> Ty {
         ),
         TyKind::Nullable(inner) => Ty::nullable(nominal_type(inner)),
         TyKind::PlatformNullable(inner) => Ty::platform_nullable(nominal_type(inner)),
+        TyKind::MutabilityFlexible(inner) => Ty::mutability_flexible(nominal_type(inner)),
         TyKind::InProjection(inner) => Ty::in_projection(nominal_type(inner)),
         TyKind::OutProjection(inner) => Ty::out_projection(nominal_type(inner)),
         TyKind::StarProjection(inner) => Ty::star_projection(nominal_type(inner)),
@@ -151,7 +152,7 @@ fn projected_type(ty: Ty) -> Option<Ty> {
         _ => ty,
     };
     Some(match inner.kind() {
-        TyKind::PlatformNullable(lower) => lower,
+        TyKind::PlatformNullable(lower) | TyKind::MutabilityFlexible(lower) => lower,
         _ => inner,
     })
 }

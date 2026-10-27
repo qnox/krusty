@@ -718,6 +718,7 @@ impl BodyLowering<'_> {
                 declared_result,
                 overridden_results,
                 semantic_role,
+                intrinsic_const: _,
                 overridden_declarations,
                 suspend,
                 inline,

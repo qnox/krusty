@@ -54,9 +54,8 @@ pub(crate) use anonymous_object::{
     copy_sam_wrapper, regenerate, CallSite, CallSiteSource, Regeneration, RegenerationError,
 };
 pub(crate) use callee_shape::{
-    can_inline_arguments_in_place, constructs_regenerated_object,
-    in_place_arguments_begin_at_entry, requires_empty_stack_on_entry, unsupported_shape,
-    UnsupportedShape,
+    can_inline_arguments_in_place, constructs_regenerated_object, requires_empty_stack_on_entry,
+    unsupported_shape, UnsupportedShape,
 };
 pub(crate) use class_roles::ClassRoles;
 pub(in crate::jvm) use default_lambda::load as load_default_lambda;
@@ -66,7 +65,9 @@ pub(crate) use default_masks::{
 pub(crate) use functional_arguments::lambda_placements;
 pub(crate) use lambda_expansion::{Lambda, SourceLines};
 pub(crate) use name_generator::ClassNameGenerators;
-pub(crate) use object_regeneration::{AnonymousObjects, ObjectLambda, RegeneratedObject};
+pub(crate) use object_regeneration::{
+    suspend_lambda_without_for_inline_copy, AnonymousObjects, ObjectLambda, RegeneratedObject,
+};
 pub(crate) use parameters::{Binding, Parameter, Parameters};
 pub(crate) use preparation::reads_local;
 pub(in crate::jvm) use reified::has_reified_markers;

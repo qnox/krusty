@@ -100,12 +100,7 @@ impl BodyLowering<'_> {
                         external_capture_arguments: None,
                     },
                 ))?;
-            let FirStatementKind::LocalFunction {
-                body,
-                tailrec,
-                suspend,
-                ..
-            } = &self
+            let FirStatementKind::LocalFunction { body, tailrec, .. } = &self
                 .body
                 .statement(statement)
                 .ok_or(FirLoweringFailure::MissingStatement(statement))?
@@ -120,7 +115,6 @@ impl BodyLowering<'_> {
                 unit_as_value: false,
                 retain_inline_template: false,
                 tailrec,
-                suspend_context: *suspend,
             };
             let lowered = self.lower_nested_function(body, function, enclosure, enclosure, form)?;
             self.ir.functions[function as usize].body = Some(lowered.callable);
@@ -322,11 +316,14 @@ impl BodyLowering<'_> {
                     array_type,
                     elements,
                     spreads,
-                } => Some(self.ir.add_expr(IrExpr::Vararg {
+                    source_line,
+                } => Some(super::checked_arguments::vararg_value(
+                    self.ir,
                     array_type,
                     elements,
                     spreads,
-                })),
+                    source_line,
+                )),
                 CheckedArgumentSlot::Default(_) | CheckedArgumentSlot::Missing => None,
             })
             .collect::<Vec<_>>();
@@ -467,7 +464,6 @@ impl BodyLowering<'_> {
             unit_as_value,
             retain_inline_template: true,
             tailrec: false,
-            suspend_context: suspend || self.suspend_context,
         };
         let lowered = self.lower_nested_function(
             body,
@@ -719,6 +715,7 @@ impl BodyLowering<'_> {
                         parameter,
                         array_type,
                         elements,
+                        source_line: 0,
                     }
                 }
             });
@@ -1181,7 +1178,6 @@ impl BodyLowering<'_> {
             unit_as_value,
             retain_inline_template,
             tailrec,
-            suspend_context,
         } = form;
         #[cfg(feature = "trace")]
         super::body_trace::trace_checked_body(body, self.index);
@@ -1246,7 +1242,6 @@ impl BodyLowering<'_> {
             self.allows_empty_inline_caller_name && body.source_lambda().is_some();
         nested.inline_declaration = self.inline_declaration;
         nested.inline_parameter_values = inline_parameter_values;
-        nested.suspend_context = suspend_context;
         nested.declaration_lambda = if body.source_lambda().is_some() {
             Some(function)
         } else {
@@ -1371,8 +1366,6 @@ struct NestedCallableForm {
     /// The body is also kept as the template its inline call sites splice (a lambda's).
     retain_inline_template: bool,
     tailrec: bool,
-    /// The body runs in a suspend function's or suspend lambda's state machine.
-    suspend_context: bool,
 }
 
 #[derive(Clone, Copy)]

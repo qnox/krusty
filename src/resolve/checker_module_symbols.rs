@@ -84,6 +84,16 @@ impl<'a> CheckerModuleSymbols<'a> {
 }
 
 impl SymbolSource for CheckerModuleSymbols<'_> {
+    fn classifier_declaration_name(
+        &self,
+        declaration: crate::libraries::ClassifierDeclarationKey,
+    ) -> Option<Option<crate::types::ClassifierDeclarationName>> {
+        match self {
+            Self::Legacy(source) => source.classifier_declaration_name(declaration),
+            Self::Streamed(source) => source.classifier_declaration_name(declaration),
+        }
+    }
+
     fn actualized_expect(&self, internal: TypeName) -> Option<TypeName> {
         match self {
             Self::Legacy(source) => source.actualized_expect(internal),

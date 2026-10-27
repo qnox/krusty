@@ -903,17 +903,9 @@ pub(super) fn emit_class_static_initializer(
                 continue;
             };
             let pc = clinit.bytes.len() as u16;
-            // A hoisted companion property's line lives on the companion. A static a compiler
-            // plugin generated has no property to look up and carries its own.
-            let line = if ir.is_jvm_companion_hoisted_static(static_index) {
-                c.companion_class
-                    .as_ref()
-                    .and_then(|companion| ir.prop_decl_lines.get(&(*companion, s.name.clone())))
-                    .copied()
-                    .unwrap_or(0)
-            } else {
-                s.line
-            };
+            // Every static carries its declaration's line: a hoisted companion property and its
+            // `x$delegate` storage the companion declaration's, a plugin-generated static its own.
+            let line = s.line;
             if line != 0 && clinit_lines.last().map(|&(_, last)| last) != Some(line) {
                 clinit_lines.push((pc, line));
             }
@@ -973,9 +965,11 @@ impl<'a> Emitter<'a> {
                 .expect("a companion initializer belongs to a class that declares one");
             let companion_name = companion.render();
             let descriptor = format!("L{companion_name};");
-            let field = self
-                .cw
-                .fieldref(fq_name, companion.nested_segment_ref(), &descriptor);
+            let field = self.cw.fieldref(
+                fq_name,
+                crate::jvm::companion_storage::field_name(c.fq_name, companion),
+                &descriptor,
+            );
             clinit.getstatic(field, 1);
             let receiver_ty = Ty::obj_name(companion);
             let existing = self.slots.get(&0).map(|(slot, _)| *slot);
@@ -1243,7 +1237,12 @@ impl Emitter<'_> {
                     .unwrap_or_else(|| self.ir.functions[setter as usize].name.clone());
                 Some((
                     companion_name,
-                    companion.fq_name.nested_segment_ref().to_string(),
+                    crate::jvm::companion_storage::field_name(
+                        s.owner
+                            .expect("a hoisted companion static has an outer owner"),
+                        companion.fq_name,
+                    )
+                    .to_string(),
                     setter_name,
                 ))
             })

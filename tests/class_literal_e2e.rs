@@ -31,6 +31,30 @@ fn class_literals_are_values_beside_postponed_callable_arguments() {
     common::expect_box_same_as_kotlinc(CLASS_LITERAL_ARGUMENT_VALUES, "ClassLiteralArgumentValues");
 }
 
+const JAVA_VOID_CLASS_LITERALS: &str = r#"import kotlin.reflect.KClass
+fun <T> peek(type: Class<T>): T? = if (type.isInstance(null)) type.cast(null) else null
+fun voidClass(): Class<Void> = Void::class.java
+fun qualifiedVoidClass(): Class<Void> = java.lang.Void::class.java
+fun voidKClass(): KClass<Void> = Void::class
+fun inferredVoid() = peek(Void::class.java)
+fun declaredVoid(): Void? = peek(Void::class.java)
+fun primitiveVoid(): Class<Void> = Void.TYPE
+fun box(): String {
+    val names = listOf(voidClass().name, qualifiedVoidClass().name, voidKClass().java.name)
+    if (names.any { it != "java.lang.Void" }) return "wrong class: $names"
+    if (inferredVoid() != null || declaredVoid() != null) return "not null"
+    return if (primitiveVoid().name == "void") "OK" else "wrong TYPE: ${primitiveVoid()}"
+}
+"#;
+
+/// `java.lang.Void` is the class `Nothing` erases to, but a reference to it, a class literal or a
+/// Java member's generic signature, names that ordinary Java class (`KClass<Void>`, not
+/// `KClass<Nothing>`).
+#[test]
+fn java_void_class_literals_name_the_java_class() {
+    common::expect_box_same_as_kotlinc(JAVA_VOID_CLASS_LITERALS, "JavaVoidClassLiterals");
+}
+
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "Main")
 }

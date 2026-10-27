@@ -47,13 +47,26 @@ impl FunctionClassifier {
     }
 
     pub(crate) fn identity(self) -> TypeName {
+        let (package, name) = self.declaration();
+        type_name_child(package, &name)
+    }
+
+    fn declaration_name(self) -> crate::types::ClassifierDeclarationName {
+        let (package, name) = self.declaration();
+        crate::types::ClassifierDeclarationName::TopLevel {
+            package,
+            name: name.into(),
+        }
+    }
+
+    fn declaration(self) -> (TypeName, String) {
         let (package, prefix) = match self.kind {
             FunctionClassKind::Function => ("kotlin", "Function"),
             FunctionClassKind::SuspendFunction => ("kotlin/coroutines", "SuspendFunction"),
             FunctionClassKind::KFunction => ("kotlin/reflect", "KFunction"),
             FunctionClassKind::KSuspendFunction => ("kotlin/reflect", "KSuspendFunction"),
         };
-        type_name_child(type_name(package), &format!("{prefix}{}", self.arity))
+        (type_name(package), format!("{prefix}{}", self.arity))
     }
 }
 
@@ -315,6 +328,7 @@ pub(crate) fn normalize(function: FunctionClassifier, mut shape: LibraryType) ->
         function.is_suspend(),
     );
     shape.is_kotlin = true;
+    shape.declaration_name = Some(function.declaration_name());
     shape.kind = TypeKind::Interface;
     shape.inheritance = ClassifierInheritance {
         is_abstract: true,
@@ -368,6 +382,41 @@ pub(crate) fn synthetic(function: FunctionClassifier) -> Arc<LibraryType> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn builtin_declaration_names_follow_each_function_family_and_seed() {
+        use crate::types::ClassifierDeclarationName;
+
+        for (kind, package, prefix) in [
+            (FunctionClassKind::Function, "kotlin", "Function"),
+            (
+                FunctionClassKind::SuspendFunction,
+                "kotlin/coroutines",
+                "SuspendFunction",
+            ),
+            (FunctionClassKind::KFunction, "kotlin/reflect", "KFunction"),
+            (
+                FunctionClassKind::KSuspendFunction,
+                "kotlin/reflect",
+                "KSuspendFunction",
+            ),
+        ] {
+            for arity in [0, 30] {
+                let function = FunctionClassifier { kind, arity };
+                let expected = ClassifierDeclarationName::TopLevel {
+                    package: type_name(package),
+                    name: format!("{prefix}{arity}").into(),
+                };
+                assert_eq!(synthetic(function).declaration_name, Some(expected.clone()));
+                let mut seed = LibraryType::declaration_header();
+                seed.declaration_name = Some(ClassifierDeclarationName::TopLevel {
+                    package: type_name("physical_function"),
+                    name: "Carrier".into(),
+                });
+                assert_eq!(normalize(function, seed).declaration_name, Some(expected));
+            }
+        }
+    }
 
     #[test]
     fn classifier_name_in_recognizes_numeric_families_without_a_rendered_path() {

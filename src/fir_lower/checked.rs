@@ -417,10 +417,12 @@ impl BodyLowering<'_> {
                                 *whole_array,
                             ));
                         }
+                        // An adapted reference's arguments are generated; they have no position.
                         IrCheckedArgument::Vararg {
                             parameter,
                             array_type,
                             elements,
+                            source_line: 0,
                         }
                     }
                 });
@@ -653,6 +655,7 @@ impl BodyLowering<'_> {
                 declared_result,
                 overridden_results,
                 semantic_role,
+                intrinsic_const: _,
                 overridden_declarations,
                 suspend,
                 inline,
@@ -997,6 +1000,7 @@ impl BodyLowering<'_> {
                         array_type,
                         elements,
                         parameter,
+                        ..
                     } => {
                         let element_type = array_type.array_read_elem().ok_or(
                             FirLoweringFailure::MissingExternalParameter {
@@ -1377,6 +1381,9 @@ impl BodyLowering<'_> {
                             ))
                         })
                         .collect::<Result<Vec<_>, FirLoweringFailure>>()?,
+                    source_line: elements.first().map_or(0, |element| {
+                        self.body.expression_debug_lines(element.value).source
+                    }),
                 }),
             })
             .collect()

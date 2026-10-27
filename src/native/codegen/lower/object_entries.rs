@@ -237,7 +237,7 @@ impl FileLowering<'_> {
     /// `equals` checks the other operand's type before reading its field: a reference that is not
     /// one of these boxes has no value at that offset, so it is simply not equal. Two boxes compare
     /// their values by the rule a data class compares a field by. `toString` renders `V(x=1)`:
-    /// the class's Kotlin name, the property's, and the value through the runtime's rendering.
+    /// the class's simple name, the property's, and the value through the runtime's rendering.
     pub(super) fn define_value_member(
         &mut self,
         class: ClassId,
@@ -253,7 +253,18 @@ impl FileLowering<'_> {
             .expect("value_field validated exactly one recorded property coordinate")
             .name
             .clone();
-        let kotlin_name = self.kotlin_name(class);
+        // The class's own declared name, whatever it is nested in: `C.IC1` prints `IC1(s=…)`, and
+        // a backticked `Cash$Tag` keeps its `$`.
+        let simple_name = self.ir.classes[class as usize]
+            .declaration_name
+            .as_ref()
+            .map(|declaration| declaration.name().to_owned())
+            .ok_or_else(|| {
+                declined!(
+                    "value class `{}` without a retained declaration name",
+                    self.ir.classes[class as usize].fq_name()
+                )
+            })?;
         let name = format!("{}.{member:?}", self.ir.classes[class as usize].fq_name());
         let clif = self.carrier(ty).clif().expect("a value is never `Unit`");
         let descriptor = self.classes[class as usize].descriptor;
@@ -308,7 +319,7 @@ impl FileLowering<'_> {
                 })
             }
             AnyMember::ToString => {
-                let opening = format!("{kotlin_name}({property}=");
+                let opening = format!("{simple_name}({property}=");
                 let signature = self.signature_of(&[any()], any())?;
                 self.emit_function(id, signature, any(), &name, &mut |body, params| {
                     let value = body.builder.ins().load(clif, trusted(), params[0], offset);

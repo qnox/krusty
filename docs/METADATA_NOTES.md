@@ -1,5 +1,25 @@
 # `@kotlin.Metadata` — reverse-engineering notes (Phase 4b)
 
+## Identity-keyed declaration-name projection
+
+Providers project name evidence directly from their selected classifier and alias records. Typed
+ordinary/alias keys retain both declarations when their flattened identity is the same. The
+outer option distinguishes an absent declaration from a selected declaration whose name is unknown.
+Federation stops at the first present record; source-unit caches retain all three states. Frozen
+backend module facts keep source class and alias names independently of alias targets, and forward
+only absent identities to the dependency inventory. Literal-dollar ownership stays snapshot-owned.
+The metadata encoder callback and class-ID sinks remain a separate consumer change.
+
+## Alias declaration-name evidence
+
+Package and Class type-alias tables supply the alias's exact simple name and declaring container.
+Package metadata honors its `pn` relocation; classifier ownership comes from the raw Class
+`fq_name` evidence, independently of the alias's existing lookup key and physical classfile owner.
+An unavailable classifier declaration name stays unknown. Classpath indexes, paired stdlib lookup
+and provider normalization retain that fact independently of target normalization. Metadata output
+still needs the separate identity-keyed declaration-name lookup; alias semantic keys are not
+descriptor payloads and an expansion target's owner never substitutes for the alias's own owner.
+
 ## Source inventory publication
 
 Compact source headers publish classifier identities from explicit declaration ownership and exact
@@ -8,6 +28,22 @@ prefix identities before later consumers run. Metadata class-ID encoding still n
 snapshot ownership lookup; publication alone does not supply authoritative negative nesting facts
 for every cached or cross-module identity.
 
+## Platform exception storage authority
+
+Only the explicitly selected platform stdlib may publish an admitted runtime-exception storage
+role. Class shape, generic/outer-instance state and metadata supertypes constrain that role;
+subclasses with additional declared instance state are not admitted. The frozen classifier record
+retains the role and exact parent identity. Wasm's physical registry consumes those records rather
+than selected constructor inventory or classifier spelling, and validates the complete chain even
+when its leaf already has a GC type. Ordinary source and JVM classifier records retain no role.
+
+## Companion fields and class metadata
+
+Physical companion storage uses the whole segment within the recorded holder, never the last
+dollar-delimited fragment. This field-ABI change preserves metadata production independently.
+The declaration-owned metadata header work retains the separate whole-owner classfile oracle;
+field inventories and complete caller classfiles validate this change without omitting any field.
+
 ## JVM member-class rows
 
 The JVM attribute writer now consumes retained non-local ownership and exact declaration segments
@@ -15,6 +51,16 @@ for member rows, including names with literal dollars. The cross-file module res
 the current declaration's precedence over classpath rows. Local and anonymous implementation rows
 retain their existing provenance. This changes no Kotlin metadata class-ID encoding; aliases and
 builtin ownership evidence belong to the remaining metadata handoff.
+
+## Builtin declaration-name evidence
+
+Capture raw builtin Class names before name-tree normalization, so a literal dollar remains
+distinct from the metadata's classifier separator. The selected builtin signature carries its
+own declaration identity and name; a mapped physical class does not supply that semantic owner.
+Exact physical classifiers retain their own classfile/Kotlin metadata authority. Compiler-owned
+function, array, reflection and JVM Cloneable factories publish names from their existing
+declaration definitions. These facts are input to the later metadata name consumer; this producer
+change does not itself repair the retained complete-classfile literal-dollar regression.
 
 ## Declaration-name evidence
 
@@ -37,6 +83,14 @@ producer after erasure. Null assertions preserve that producer's slot, and value
 uses the same marked edge to distinguish declaration carriers from generic boxes. The extra
 nullable-to-nonnull coercion retains that declaration boundary. Source metadata types continue
 to describe the selected declaration independently of this JVM representation decision.
+
+## Source and optional-annotation projection
+
+The source index already owns each classifier's optional declaration name; its provider projection
+copies that fact without reinterpretation. A `.kotlin_module` optional-annotation class supplies a
+raw qualified class name even though no physical classfile exists. Retain its package/owner and
+exact segment before name-tree normalization, then publish that fact with the annotation shape.
+This preserves literal-dollar and nested names across separate metadata snapshots.
 
 ## Serialization constructor handoff
 
@@ -1217,3 +1271,10 @@ their local-variable ranges at nested lexical boundaries, and each store restore
 after an inlined value. Class-initializer table curation preserves intentional marks at distinct
 offsets, including returns to the same source line. The JVM uses these debug points to preserve
 inline markers and closing anchors; Kotlin metadata and constructor descriptors are unchanged.
+
+## Nominal function subtype evidence
+
+Provider-normalized function classifiers supply their declared generic supertypes to the common
+subtype relation. A typed function signature supplies its canonical classifier application, and
+the hierarchy walk checks the nominal value against that application. Reflective function types
+retain their nominal identity; no new metadata payload or physical JVM descriptor is introduced.

@@ -73,6 +73,66 @@ fn builtin_operations_over_constants_fold() {
     );
 }
 
+/// A builtin's `toString`, `equals` and `compareTo` are `@IntrinsicConstEvaluation` too, so a call
+/// on constant operands folds: `(1 == 2).toString()` is `"false"`, not `String.valueOf(false)`.
+/// `equals` is the boxed value's (`1.equals(1L)` and `1.0.equals(-0.0)` are false, NaN equals
+/// itself), `String.compareTo` is Java's unit difference, an unsigned `compareTo` orders unsigned
+/// values, and `<` over a selected `compareTo` folds with it. `hashCode` is not intrinsic-const,
+/// and a non-constant operand keeps the call.
+#[test]
+fn builtin_member_calls_over_constants_fold() {
+    assert_matches_kotlinc(
+        "FoldedMemberCalls",
+        "fun sink(value: Any?) {}\n\
+         fun strings(x: Int, s: String) {\n\
+         \x20   sink((1 == 2).toString())\n\
+         \x20   sink((1 + 2).toString())\n\
+         \x20   sink((1 < 2).toString())\n\
+         \x20   sink(2.5.toString())\n\
+         \x20   sink((-0.0).toString())\n\
+         \x20   sink((1.0 / 0.0).toString())\n\
+         \x20   sink(1.5f.toString())\n\
+         \x20   sink('c'.toString())\n\
+         \x20   sink(1L.toString())\n\
+         \x20   sink(3.toShort().toString())\n\
+         \x20   sink(\"ab\".toString())\n\
+         \x20   sink(\"abc\"[1].toString())\n\
+         \x20   sink(null.toString())\n\
+         \x20   sink(1u.toString())\n\
+         \x20   sink(2147483647.toString())\n\
+         \x20   sink(\"x\" + true.toString())\n\
+         \x20   sink(x.toString())\n\
+         \x20   sink(s.toString())\n\
+         }\n\
+         fun equalities(x: Int) {\n\
+         \x20   sink(1.equals(2))\n\
+         \x20   sink(1.equals(1L))\n\
+         \x20   sink(1.equals(\"1\"))\n\
+         \x20   sink(1.toByte().equals(1))\n\
+         \x20   sink(1.0.equals(-0.0))\n\
+         \x20   sink((0.0 / 0.0).equals(0.0 / 0.0))\n\
+         \x20   sink(1.0f.equals(1.0f))\n\
+         \x20   sink('a'.equals('a'))\n\
+         \x20   sink(true.equals(false))\n\
+         \x20   sink(\"a\".equals(\"a\"))\n\
+         \x20   sink(\"a\".equals(null))\n\
+         \x20   sink(1u.equals(1u))\n\
+         \x20   sink(1.hashCode())\n\
+         \x20   sink(x.equals(1))\n\
+         }\n\
+         fun comparisons(s: String) {\n\
+         \x20   sink(\"abc\".compareTo(\"abd\"))\n\
+         \x20   sink(\"b\".compareTo(\"abc\"))\n\
+         \x20   sink(\"ab\".compareTo(\"abc\"))\n\
+         \x20   sink(\"a\" < \"b\")\n\
+         \x20   sink(1u.compareTo(2u))\n\
+         \x20   sink(10L.compareTo(3))\n\
+         \x20   sink('a'.compareTo('b'))\n\
+         \x20   sink(s.compareTo(\"a\"))\n\
+         }\n",
+    );
+}
+
 #[test]
 fn operations_kotlinc_cannot_evaluate_stay_operations() {
     assert_matches_kotlinc(
@@ -194,6 +254,11 @@ fn folded_values_are_kotlin_values() {
                \x20   check(15, 1e20.toInt() == 2147483647)\n\
                \x20   check(16, nan.toLong() == 0L)\n\
                \x20   check(17, \"\\uD83D\\uDE00\".length == 2)\n\
+               \x20   check(18, (1 == 2).toString() == \"false\")\n\
+               \x20   check(19, !1.equals(1L) && (0.0 / 0.0).equals(0.0 / 0.0) && !0.0.equals(-0.0))\n\
+               \x20   check(20, \"b\".compareTo(\"abc\") == 1 && \"ab\".compareTo(\"abcd\") == -2)\n\
+               \x20   check(21, 4294967295u.compareTo(1u) == 1 && 4294967295u.toString() == \"4294967295\")\n\
+               \x20   check(22, null.toString() == \"null\" && (-0.0).toString() == \"-0.0\")\n\
                \x20   if (failed.length > 0) return \"failed$failed\"\n\
                \x20   return \"${1.0f / 3}|${1e7}|${1e-4}|${100.0}|${'x'}${true}${null}|${7L * 3}\"\n\
                }\n";
