@@ -15,7 +15,7 @@ fn close_reopen_with_reused_version_discards_in_flight_batch() {
             span: krusty::diag::Span::new(0, 0),
             editor_span: None,
             identity: None,
-            warning_name: None,
+            name: None,
             severity: Severity::Error,
             kind: DiagnosticKind::Compiler,
             msg: "from stale batch".to_string(),
