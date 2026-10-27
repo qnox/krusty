@@ -412,7 +412,7 @@ fn assert_official_dependency_closures(
     if matches!(purpose, DependencyConsumer::SourceClassifierCollision) {
         assert_eq!(
             diags.diags.iter().map(|diag| (
-                diag.file, diag.span, diag.editor_span, diag.severity, diag.warning_name,
+                diag.file, diag.span, diag.editor_span, diag.severity, diag.name,
                 diag.kind, diag.identity, diag.msg.as_str(),
             )).collect::<Vec<_>>(),
             vec![(
