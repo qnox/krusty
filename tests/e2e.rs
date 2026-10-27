@@ -544,6 +544,8 @@ mod companion_e2e;
 mod companion_init_block_e2e;
 #[path = "companion_initializer_lambda_e2e.rs"]
 mod companion_initializer_lambda_e2e;
+#[path = "companion_initializer_value_class_e2e.rs"]
+mod companion_initializer_value_class_e2e;
 #[path = "companion_member_read_e2e.rs"]
 mod companion_member_read_e2e;
 #[path = "companion_nested_classifier_scope_e2e.rs"]
@@ -605,6 +607,8 @@ mod construction_default_arg_e2e;
 #[path = "constructor_argument_specificity_e2e.rs"]
 mod constructor_argument_specificity_e2e;
 mod constructor_continuation_e2e;
+#[path = "constructor_default_expression_lines_e2e.rs"]
+mod constructor_default_expression_lines_e2e;
 #[path = "constructor_initialization_order_e2e.rs"]
 mod constructor_initialization_order_e2e;
 #[path = "constructor_locals_pool_e2e.rs"]
@@ -697,6 +701,8 @@ mod dataclass_hash_and_sam_e2e;
 mod decl_body_on_next_line_e2e;
 #[path = "declaration_matches_body_position_e2e.rs"]
 mod declaration_matches_body_position_e2e;
+#[path = "declared_companion_fields_e2e.rs"]
+mod declared_companion_fields_e2e;
 #[path = "deep_class_bail_reason_e2e.rs"]
 mod deep_class_bail_reason_e2e;
 #[path = "deep_expression_nesting_check.rs"]
@@ -709,6 +715,8 @@ mod deep_nested_type_e2e;
 mod default_args_member_e2e;
 #[path = "default_args_synthetic_e2e.rs"]
 mod default_args_synthetic_e2e;
+#[path = "default_argument_fill_lines_e2e.rs"]
+mod default_argument_fill_lines_e2e;
 #[path = "default_constructor_header_pool_e2e.rs"]
 mod default_constructor_header_pool_e2e;
 #[path = "default_import_resolution_e2e.rs"]
@@ -833,6 +841,8 @@ mod elvis_newline_continuation_e2e;
 mod elvis_nullability_join_e2e;
 #[path = "elvis_over_safe_call_e2e.rs"]
 mod elvis_over_safe_call_e2e;
+#[path = "elvis_own_line_e2e.rs"]
+mod elvis_own_line_e2e;
 #[path = "elvis_return_smartcast_e2e.rs"]
 mod elvis_return_smartcast_e2e;
 #[path = "elvis_signature_inference_e2e.rs"]
@@ -1292,6 +1302,8 @@ mod is_nullable_primitive_e2e;
 mod is_primitive_smartcast_e2e;
 #[path = "java_abstract_override_e2e.rs"]
 mod java_abstract_override_e2e;
+#[path = "java_annotation_element_property_e2e.rs"]
+mod java_annotation_element_property_e2e;
 #[path = "java_array_covariance_e2e.rs"]
 mod java_array_covariance_e2e;
 #[path = "java_bridge_members_e2e.rs"]
@@ -1332,6 +1344,8 @@ java_member_modules::declare!();
 mod java_nested_static_e2e;
 #[path = "java_not_null_null_argument_e2e.rs"]
 mod java_not_null_null_argument_e2e;
+#[path = "java_operator_receiver_null_check_e2e.rs"]
+mod java_operator_receiver_null_check_e2e;
 #[path = "java_parameters_attribute_e2e.rs"]
 mod java_parameters_attribute_e2e;
 #[path = "java_platform_type_publication_e2e.rs"]
@@ -1731,18 +1745,22 @@ mod type_parameter_nullability_annotations_e2e;
 mod type_resolution;
 #[path = "unit_expression_body_return_line_e2e.rs"]
 mod unit_expression_body_return_line_e2e;
-#[path = "unsigned_operations_e2e.rs"]
-mod unsigned_operations_e2e;
+#[path = "e2e/unsigned_values.rs"]
+mod unsigned_values;
 #[path = "unsupported_kotlinc_arguments_e2e.rs"]
 mod unsupported_kotlinc_arguments_e2e;
 #[path = "upper_bound_violations_e2e.rs"]
 mod upper_bound_violations_e2e;
+#[path = "value_class_any_override_e2e.rs"]
+mod value_class_any_override_e2e;
 #[path = "value_class_bound_reference_receiver_e2e.rs"]
 mod value_class_bound_reference_receiver_e2e;
 #[path = "value_class_bounded_parameter_bridge_e2e.rs"]
 mod value_class_bounded_parameter_bridge_e2e;
 #[path = "value_class_carrier_parameter_bridge_e2e.rs"]
 mod value_class_carrier_parameter_bridge_e2e;
+#[path = "value_class_companion_property_storage_e2e.rs"]
+mod value_class_companion_property_storage_e2e;
 #[path = "value_class_constructor_bodies_e2e.rs"]
 mod value_class_constructor_bodies_e2e;
 #[path = "value_class_constructor_default_e2e.rs"]
@@ -2206,12 +2224,8 @@ mod platform_null_check_line_e2e;
 mod private_constructor_accessors_e2e;
 #[path = "private_inline_property_ref_e2e.rs"]
 mod private_inline_property_ref_e2e;
-#[path = "read_only_iterator_stubs_e2e.rs"]
-mod read_only_iterator_stubs_e2e;
-#[path = "read_only_stub_inheritability_e2e.rs"]
-mod read_only_stub_inheritability_e2e;
-#[path = "read_only_stub_override_bridges_e2e.rs"]
-mod read_only_stub_override_bridges_e2e;
+#[path = "e2e/read_only_collection_stubs.rs"]
+mod read_only_collection_stubs;
 #[path = "redundant_checkcast_e2e.rs"]
 mod redundant_checkcast_e2e;
 #[path = "redundant_checkcasts_before_aastore_e2e.rs"]
@@ -2371,6 +2385,7 @@ mod private_inline_access_e2e;
 mod private_inline_property_access_e2e;
 #[path = "private_member_extension_accessor_e2e.rs"]
 mod private_member_extension_accessor_e2e;
+mod private_property_inline_access_e2e;
 #[path = "private_set_e2e.rs"]
 mod private_set_e2e;
 #[path = "probe_argument_call_e2e.rs"]
@@ -2928,26 +2943,8 @@ mod var_extension_property_e2e;
 mod var_smartcast_after_assign_e2e;
 #[path = "var_smartcast_e2e.rs"]
 mod var_smartcast_e2e;
-#[path = "vararg_constructor_property_e2e.rs"]
-mod vararg_constructor_property_e2e;
-#[path = "vararg_e2e.rs"]
-mod vararg_e2e;
-#[path = "vararg_element_default_e2e.rs"]
-mod vararg_element_default_e2e;
-#[path = "vararg_element_specificity_e2e.rs"]
-mod vararg_element_specificity_e2e;
-#[path = "vararg_elements_before_named_e2e.rs"]
-mod vararg_elements_before_named_e2e;
-#[path = "vararg_extension_overload_e2e.rs"]
-mod vararg_extension_overload_e2e;
-#[path = "vararg_inline_argument_splice_e2e.rs"]
-mod vararg_inline_argument_splice_e2e;
-#[path = "vararg_lambda_element_shape_e2e.rs"]
-mod vararg_lambda_element_shape_e2e;
-#[path = "vararg_member_overload_clash_e2e.rs"]
-mod vararg_member_overload_clash_e2e;
-#[path = "vararg_spread_shapes_e2e.rs"]
-mod vararg_spread_shapes_e2e;
+#[path = "e2e/varargs.rs"]
+mod varargs;
 #[path = "vc_mangled_default_e2e.rs"]
 mod vc_mangled_default_e2e;
 #[path = "when_branch_if_no_else_e2e.rs"]
@@ -3047,5 +3044,7 @@ mod field_store_lines_e2e;
 #[path = "written_default_accessor_e2e.rs"]
 mod written_default_accessor_e2e;
 
+#[path = "intersection_bound_metadata_order_e2e.rs"]
+mod intersection_bound_metadata_order_e2e;
 #[path = "where_bound_arguments_e2e.rs"]
 mod where_bound_arguments_e2e;

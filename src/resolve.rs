@@ -47,6 +47,7 @@ mod annotation_bindings;
 use annotation_bindings::{BoundAnnotation, BoundAnnotations};
 mod anonymous_extension_functions;
 mod anonymous_object_capture;
+mod backing_field_binding;
 mod boolean_implications;
 mod dependency_annotation_defaults;
 use anonymous_object_capture::{
@@ -556,34 +557,6 @@ fn resolved_compact_jvm_name(
                 .map(|value| value.to_string())
         })
         .unwrap_or_else(|| fallback.to_string())
-}
-
-fn classifier_bound_is_interface(
-    source_headers: &HashMap<TypeName, SourceClassHeader>,
-    source: &dyn SymbolSource,
-    bound: Ty,
-) -> bool {
-    bound
-        .non_null()
-        .kotlin_class_internal()
-        .is_some_and(|classifier| {
-            source_headers
-                .get(&classifier)
-                .is_some_and(|header| header.flags.has(ClassFlags::INTERFACE))
-                || source
-                    .classifier(classifier)
-                    .is_some_and(|shape| shape.is_interface())
-        })
-}
-
-fn order_primary_class_bounds(
-    signature: &mut GenericSig,
-    source_headers: &HashMap<TypeName, SourceClassHeader>,
-    source: &dyn SymbolSource,
-) {
-    type_parameter_bounds::order_primary_class_bounds(signature, |bound| {
-        classifier_bound_is_interface(source_headers, source, bound)
-    });
 }
 
 impl Checker<'_> {
@@ -2675,7 +2648,7 @@ pub struct SymbolTable {
     /// CLASSIFIER, which is all name resolution needs; `@Metadata` must describe the expansion so a
     /// consumer can place a use site's arguments. Every valid source alias has one; an unresolved
     /// declaration is a frontend error and compilation stops before emission.
-    pub source_alias_expansions: HashMap<TypeName, (Vec<String>, Ty)>,
+    pub source_alias_expansions: HashMap<TypeName, crate::libraries::TypeAliasTemplate>,
     /// Source SPELLINGS of declared types, keyed by stable Pass-1 identity — see
     /// [`crate::spelling`]. `@Metadata` records a `typealias` named in a declared type as
     /// `Type.abbreviated_type`, and `Ty` is fully expanded by the time the builders see it, so the
@@ -21260,7 +21233,10 @@ impl<'a> Checker<'a> {
         self.record_local_write(s, scoped);
         let local = self
             .lookup(scope, &name)
-            .filter(|local| !matches!(local.origin, ReceiverFnValueOrigin::DispatchProperty { .. }))
+            .filter(|local| {
+                !matches!(local.origin, ReceiverFnValueOrigin::DispatchProperty { .. })
+                    && !self.backing_field_shadows(&name, local.origin)
+            })
             .map(|local| {
                 (
                     local.write_ty.unwrap_or(local.ty),
@@ -22855,11 +22831,11 @@ mod tests {
         assert_eq!(extension.receiver, Ty::String);
         assert_eq!(extension.ty, Ty::Char);
         assert_eq!(
-            symbols.source_alias_expansions[&type_name("Count")].1,
+            symbols.source_alias_expansions[&type_name("Count")].expansion,
             Ty::Long
         );
         assert_eq!(
-            symbols.source_alias_expansions[&type_name("Box/Alias")].1,
+            symbols.source_alias_expansions[&type_name("Box/Alias")].expansion,
             Ty::String
         );
         let class = symbols
@@ -47279,7 +47255,9 @@ impl<'a> Checker<'a> {
                         let field_ty =
                             (bp.receiver.is_none() && bp.context_params.is_empty()).then_some(ty);
                         if let Some(getter) = &bp.getter {
-                            self.with_ret_field(ty, field_ty, &accessor_scope, |checker| {
+                            let getter_field = field_ty
+                                .filter(|_| backing_field_binding::getter_declares_field(bp));
+                            self.with_ret_field(ty, getter_field, &accessor_scope, |checker| {
                                 match getter {
                                     FunBody::Expr(body) => {
                                         checker.check_expression_getter(
@@ -48693,7 +48671,9 @@ impl<'a> Checker<'a> {
                             .as_ref()
                             .filter(|body| self.should_check_selected_fun_body(body))
                         {
-                            self.with_ret_field(prop_ty, field_ty, scope, |c| match getter {
+                            let getter_field = field_ty
+                                .filter(|_| backing_field_binding::getter_declares_field(bp));
+                            self.with_ret_field(prop_ty, getter_field, scope, |c| match getter {
                                 FunBody::Expr(g) => {
                                     c.check_expression_getter(
                                         scope,
@@ -53943,8 +53923,8 @@ impl<'a> Checker<'a> {
             let its: Vec<Ty> = indices.iter().map(|&i| self.expr(scope, i)).collect();
             if let [index] = indices.as_slice() {
                 // A read consumes the projection rather than exposing it as an expression type.
-                if let Some(elem) = at
-                    .array_read_elem()
+                if let Some(elem) = self
+                    .builtin_array_read_element(at)
                     .filter(|_| self.receiver_is_assignable(its[0], Ty::Int))
                 {
                     self.expect_assignable(Ty::Int, its[0], self.span(*index), "array index");
@@ -55768,6 +55748,9 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
+        }
+        if lookup.is_some_and(|binding| self.backing_field_shadows(&n, binding.origin)) {
+            lookup = None;
         }
         if let Some(local) = lookup {
             self.report_uninitialized_default_parameter_read(e, local.flow_identity);

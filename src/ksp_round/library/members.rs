@@ -292,6 +292,7 @@ impl MemberView<'_> {
                 annotations,
                 parameter,
                 jvm_name: None,
+                returns_property_type: false,
             }
         };
         KspProperty {
@@ -326,6 +327,9 @@ impl MemberView<'_> {
                     Some(("value".to_string(), Vec::new())),
                 )
             }),
+            // KSP2 reads a Java annotation element as a property with a field; a Kotlin library
+            // property's answer depends on what its metadata records, which is not read yet.
+            has_backing_field: property.from_java_method.then_some(true),
             jvm_signature: None,
         }
     }
@@ -346,6 +350,7 @@ impl MemberView<'_> {
             ty: self.scope.ty(property.ty),
             getter: None,
             setter: None,
+            has_backing_field: Some(true),
             jvm_signature: None,
         }
     }

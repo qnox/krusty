@@ -7,7 +7,7 @@
 //! implementation like any bridge and maps to the class declaration's line.
 
 use super::super::{
-    box_prim_free, emit_return, finish_code_sig, jvm_declared_ty, jvm_tys, load,
+    box_prim_free, discard, emit_return, finish_code_sig, jvm_declared_ty, jvm_tys, load,
     local_variable_desc, method_descriptor, slot_words, unbox_prim_from, ClassWriter, CodeBuilder,
     EmitEnv, JvmSignatureFormatter,
 };
@@ -61,8 +61,8 @@ impl<'a> StubBridges<'a> {
             .filter(|stub| stub.bridge.is_some())
             .collect();
         // Stable: equal keys keep the candidates' order.
-        pending.sort_by_key(|stub| match stub.body {
-            StubBody::Implemented { order } => (0, order),
+        pending.sort_by_key(|stub| match &stub.body {
+            StubBody::Implemented { order, .. } => (0, *order),
             StubBody::Throwing => (1, 0),
         });
         Self { pending }
@@ -75,7 +75,7 @@ impl<'a> StubBridges<'a> {
             .pending
             .iter()
             .take_while(
-                |stub| matches!(stub.body, StubBody::Implemented { order: own } if own < order),
+                |stub| matches!(&stub.body, StubBody::Implemented { order: own, .. } if *own < order),
             )
             .count();
         for stub in self.pending.drain(..ready) {
@@ -107,29 +107,46 @@ fn emit_stub_bridge(class: &IrClass, cw: &mut ClassWriter, stub: &ReadOnlyStub) 
         descriptor: &descriptor,
         signature: None,
     };
-    match stub.body {
+    match &stub.body {
         StubBody::Throwing => emit_throwing::<{ 0x0001 | 0x0040 | 0x1000 }>(class, cw, &method),
-        StubBody::Implemented { .. } => emit_forwarding(class, cw, stub, &method, *result),
+        StubBody::Implemented {
+            target,
+            target_result,
+            ..
+        } => {
+            let target = Target {
+                parameters: target,
+                result: *target_result,
+            };
+            emit_forwarding(class, cw, &target, &method, *result);
+        }
     }
 }
 
-/// The bridge of an implemented member: each erased argument is cast or unboxed to the stub's
-/// parameter, the class's member at the stub's descriptor is called, and its result is boxed back
-/// to the erased result when that is a reference.
+/// The physical descriptor of the member a bridge forwards to.
+struct Target<'a> {
+    parameters: &'a [Ty],
+    result: Ty,
+}
+
+/// The bridge of an implemented member: each erased argument is cast or unboxed to the
+/// implementation's physical parameter, the class's member at that descriptor is called, and its
+/// result is discarded for a `void` bridge (a `Nothing` member's `Void`) or boxed back to the
+/// erased result when that is a reference.
 fn emit_forwarding(
     class: &IrClass,
     cw: &mut ClassWriter,
-    stub: &ReadOnlyStub,
+    target: &Target<'_>,
     bridge: &ThrowingMethod,
     erased_result: Ty,
 ) {
+    let targets = target.parameters;
     cw.reserve_method_pool(bridge.name, bridge.descriptor, None, &[]);
     let words: u16 = bridge.parameters.iter().map(|ty| slot_words(*ty)).sum();
     let mut code = CodeBuilder::new(1 + words);
     code.aload(0);
-    let targets = jvm_tys(&stub.parameters);
     let mut slot = 1u16;
-    for (&erased, &target) in bridge.parameters.iter().zip(&targets) {
+    for (&erased, &target) in bridge.parameters.iter().zip(targets) {
         load(erased, slot, &mut code);
         slot += slot_words(erased);
         if erased == target {
@@ -146,12 +163,16 @@ fn emit_forwarding(
             unbox_prim_from(cw, &mut code, erased, target);
         }
     }
-    let result = jvm_declared_ty(&stub.result);
+    let result = target.result;
     let owner = class.fq_name();
-    let target = cw.methodref(&owner, bridge.name, &stub.descriptor());
+    let method = cw.methodref(&owner, bridge.name, &method_descriptor(targets, result));
     let arguments: i32 = targets.iter().map(|ty| i32::from(slot_words(*ty))).sum();
-    code.invokevirtual(target, arguments, i32::from(slot_words(result)));
-    if result != erased_result {
+    code.invokevirtual(method, arguments, i32::from(slot_words(result)));
+    if erased_result == Ty::Unit {
+        if result != Ty::Unit {
+            discard(result, &mut code);
+        }
+    } else if result != erased_result {
         assert!(
             erased_result.is_reference(),
             "a read-only collection bridge returns an erased reference, got {erased_result:?}"

@@ -55,3 +55,56 @@ fun box(): String {
         Some("OK".to_string())
     );
 }
+
+/// kotlinc states a `!!`'s own line before its operand and keeps it when the operand's first
+/// instruction marks another line at the same offset: `foo(\n a)!!` writes `line 7: 0, line 8: 0`.
+#[test]
+fn a_not_null_assertion_keeps_its_own_line_beside_its_operands_line() {
+    let source = "class Box(val v: Int?) { fun get(a: Int): Int? = v }\n\
+         fun foo(a: Int): Int? = a\n\
+         fun bar(a: Int): Int = a\n\
+         fun any(a: Int): Any? = a\n\
+         \n\
+         fun declared(a: Int): Int {\n\
+         \x20   val y = foo(\n\
+         \x20       a)!!\n\
+         \x20   return y\n\
+         }\n\
+         fun argument(a: Int): Int {\n\
+         \x20   return bar(foo(\n\
+         \x20       a)!!)\n\
+         }\n\
+         fun body(a: Int): Int = foo(\n\
+         \x20   a)!!\n\
+         fun member(b: Box, a: Int): Int = b.get(\n\
+         \x20   a)!!\n\
+         fun later(a: Int): Int {\n\
+         \x20   val y =\n\
+         \x20       foo(\n\
+         \x20           a)!!\n\
+         \x20   return y\n\
+         }\n\
+         fun coerced(a: Int): Any {\n\
+         \x20   val y: Any = any(\n\
+         \x20       a)!!\n\
+         \x20   return y\n\
+         }\n\
+         fun oneLine(a: Int): Int = foo(a)!! + 1\n\
+         fun property(b: Box): Int = b\n\
+         \x20   .v!!\n\
+         \n\
+         fun box(): String {\n\
+         \x20   val total = declared(1) + argument(2) + body(3) + member(Box(4), 0) + later(5) +\n\
+         \x20       (coerced(6) as Int) + oneLine(6) + property(Box(8))\n\
+         \x20   return if (total == 36) \"OK\" else \"fail $total\"\n\
+         }\n\
+         ";
+    common::expect_box_ok_with_stdlib(source, "NotNullOwnLine");
+    let classes = common::classes_against_kotlinc_module(&[("NotNullOwnLine.kt", source)]);
+    let differences = classes.differences();
+    assert!(
+        differences.is_empty(),
+        "classes differ from kotlinc's:\n\n{}",
+        differences.join("\n\n")
+    );
+}

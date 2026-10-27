@@ -1,5 +1,45 @@
 # krusty — implementation plan
 
+## Alias declaration-name producers
+
+Retain an alias's own optional container and exact segment through stable source headers, the
+legacy source template record, bootstrap/body-local aliases, common KLIB normalization and JVM
+metadata/classpath records. Keep existing alias identities, expansion templates, target
+normalization and spelling sidecars intact. Metadata class-ID consumers and builtin declaration
+names remain separate prerequisites; this producer handoff does not repair their output by itself.
+
+## Source classifier inventory identities
+
+Replace lookup-spelling splitting in the foreign-source classifier inventory with the existing
+declaration-owned name operation. Preserve exact segments, owner edges, visibility, order and
+non-local exclusions without interning undeclared prefixes. This producer correction is separate
+from the remaining metadata class-ID encoder and dependency/alias-name fact handoff.
+
+## JVM companion field ABI
+
+Centralize the physical companion field segment from the selected holder/companion identities.
+Use it consistently in field emission, initialization, singleton loads, wrappers, hoisted property
+receivers and collision planning. Singleton realization reads retained declaration ownership and
+authenticates the holder's companion tuple; it never guesses a prefix owner. Preserve dependency-published names. Whole-owner metadata class
+IDs remain a separate consumer migration; this change establishes the independent field ABI with
+complete field/facade comparisons and reference/runtime controls.
+
+## JVM declaration-owned member rows
+
+Consume classifier declaration-name facts in both per-file `InnerClasses` candidates and the
+cross-file module resolver. Keep top-level and unavailable module records from being replaced by
+a classpath record with the same physical identity. Preserve local/coroutine/reference provenance
+and exact table order. This slice leaves source identity publication and metadata class-ID encoding
+for subsequent changes; the complete literal-dollar classfile regression remains open there.
+
+## Builtin declaration-name producers
+
+Populate the existing declaration-name fact from admitted core/function/array factories and raw
+`.kotlin_builtins` declarations. Carry the selected builtin identity alongside its name through
+signature and classless/mapped shape publication; retain exact physical declaration authority.
+Reuse the current inventories and mappings. Metadata name lookup/encoding, source classifier
+projection and optional-annotation name retention remain separate follow-ups.
+
 ## Classifier declaration-name handoff
 
 Retain an optional declaration-owned package/owner and exact segment across source bootstrap,
@@ -23,6 +63,12 @@ Phased, each phase ends in a **green `cargo test`** and a runnable artifact. The
 front-to-back so the streaming/arena shape is real from the start, then widened.
 
 Legend: ✅ done · 🚧 in progress · ⬜ todo
+
+## Preserve classifier name evidence at projection boundaries
+
+Copy source header declaration names into finalized module provider shapes. Retain optional
+annotation names from decoded module metadata until annotation shape publication. These close two
+producer omissions; the metadata name inventory/query and class-ID consumers remain separate work.
 
 ## Anonymous construction argument scope
 
@@ -4934,6 +4980,14 @@ code is the one the code generator already names: provider-owned bodies through 
   not declared from their headers: a constructor call needs its class's layout and initializers,
   not only a callable header. Next: member calls with their dispatch form and the fake-override
   walk, callee parameter defaults, inlined function blocks, then constructors.
+- **Lowering: range-literal membership.** `v in a..b`/`v !in a..b` over a builtin scalar range
+  construction lowers as the source membership comparison (`klib_lowering/range_membership.rs`
+  owns the serialized form, read by both dependency preparation and body lowering), and a
+  standalone range construction is the checked construction of its provider role. Native's
+  `intToString`/`longToString` externals are realized by the runtime (`RadixToString`).
+  kotlin-test's assertions and `kotlin.text.trim` still decline inside their library bodies
+  (`Asserter` interface dispatch, accessor calls); the generic fix is compiling those member
+  bodies, not intercepting the calls. Next: final library member bodies as ordinary roots.
 - Tests: the unit tests in `metadata/klib_ir/tree_decoding.rs`, `metadata/id_signature/` and
   `klib_lowering/` (whose stdlib checks run when `KRUSTY_KOTLIN_NATIVE` is set). End-to-end coverage comes through
   the box harness rather than a separate KLIB suite: the Native lane gains the `// MODULE:`

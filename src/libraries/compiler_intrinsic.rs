@@ -180,6 +180,11 @@ pub enum CompilerIntrinsic {
     UnsignedRemainder {
         operand: crate::types::Ty,
     },
+    /// Native's runtime rendering of an `Int` or `Long` in a radix the stdlib already checked
+    /// (`kotlin.text.intToString`/`longToString`, `@GCUnsafeCall` externals without a body).
+    RadixToString {
+        operand: crate::types::Ty,
+    },
     /// A fully normalized `Result` helper reached from an expanded library inline body.
     ResultFailure(ResultFailureIntrinsic),
     /// `next()` declared by a Kotlin primitive iterator (`kotlin.collections.IntIterator.next`).
