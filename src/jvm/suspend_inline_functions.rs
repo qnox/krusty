@@ -87,7 +87,7 @@ fn crossinline_capture_fields(class: &IrClass) -> HashSet<u32> {
             argument
                 .capture
                 .as_ref()
-                .is_some_and(|capture| capture.crossinline)
+                .is_some_and(|capture| capture.crossinline_parameter.is_some())
         })
         .filter_map(|argument| argument.field_index)
         .collect()

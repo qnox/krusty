@@ -27,6 +27,9 @@ pub(super) struct CallSite<'a> {
     pub caller_source_name: &'a str,
     pub inline_callee: crate::fir::CallableId,
     pub inline_callee_source_name: &'a str,
+    /// For each of the callee's operands, by its value slot: the caller's `crossinline` parameter
+    /// the expansion binds it to, when it is one.
+    pub crossinline_operands: &'a [Option<u32>],
 }
 
 /// Point each copied construction of an anonymous object at a class specialized for this
@@ -389,10 +392,18 @@ fn specialized_class(
     copy.enclosure = expansion.site.caller.or(copy.enclosure);
     copy.methods = cloned_methods.clone();
     // The copy is the class regenerated for this call: the inline function's parameters are bound
-    // to its arguments, so none of the copy's captures holds a `crossinline` parameter any more.
+    // to its arguments. A capture of one still holds a `crossinline` parameter only when the call
+    // binds it to one of the caller's own.
     for argument in &mut copy.ctor_args {
         if let Some(capture) = &mut argument.capture {
-            capture.crossinline = false;
+            capture.crossinline_parameter = capture.crossinline_parameter.and_then(|parameter| {
+                expansion
+                    .site
+                    .crossinline_operands
+                    .get(parameter as usize)
+                    .copied()
+                    .flatten()
+            });
         }
     }
     remap_property_accessors(&mut copy, &cloned).map_err(|()| malformed(class_name))?;
@@ -453,6 +464,7 @@ fn specialized_class(
             caller_source_name: expansion.site.caller_source_name.to_string(),
             inline_callee: expansion.site.inline_callee,
             inline_callee_source_name: expansion.site.inline_callee_source_name.to_string(),
+            crossinline_operands: expansion.site.crossinline_operands.to_vec(),
             method_clones: cloned,
             bindings: expansion.bindings.clone(),
             reified_bindings: expansion.reified_bindings.clone(),
@@ -820,6 +832,7 @@ fn publish_one_copy(
             caller_source_name: &spec.caller_source_name,
             inline_callee: spec.inline_callee,
             inline_callee_source_name: &spec.inline_callee_source_name,
+            crossinline_operands: &spec.crossinline_operands,
         },
     )?;
     retarget_copied_property_calls(ir, copy_id, source, source_name, &clones)?;

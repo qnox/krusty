@@ -471,7 +471,15 @@ fn run_backend_passes_after_plugins(
     // on the caller's lifted spelling, which exists only now.
     let closure_names =
         crate::jvm::lambda_classes::rename_specialized_lambda_classes(ir, facade, lambda_modes);
-    crate::jvm::reified_anonymous::rename(ir, facade, lambda_modes);
+    crate::jvm::reified_anonymous::rename(
+        ir,
+        facade,
+        lambda_modes,
+        crate::jvm::reified_anonymous::Continuations {
+            machines: &mut facts.emit_time_machines,
+            metadata: &mut facts.continuation_metadata,
+        },
+    );
     facts
         .property_reference_realizations
         .remap_delegated_owners(&closure_names);

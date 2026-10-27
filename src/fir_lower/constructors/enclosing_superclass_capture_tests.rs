@@ -43,7 +43,7 @@ fn capture(field: u32, identity: ClassCaptureIdentity) -> IrCtorArg {
                 label: "same".into(),
                 owner: crate::fir::CapturedCallableOwner::Declaration,
             }),
-            crossinline: false,
+            crossinline_parameter: None,
         }),
         Some(identity),
     )

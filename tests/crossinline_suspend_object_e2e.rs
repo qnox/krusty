@@ -679,3 +679,127 @@ fn a_caller_regenerates_a_lambda_that_passes_a_suspend_lambda_on_like_kotlinc() 
     let code = classes.code_differences();
     assert!(code.is_empty(), "{}", code.join("\n\n"));
 }
+
+const FORWARDED_LIB: &str = r#"
+package lib
+
+interface Source<out T> {
+    suspend fun next(): T
+}
+
+inline fun <reified T> factory(crossinline produce: suspend () -> Any?): Source<T> =
+    object : Source<T> {
+        override suspend fun next(): T {
+            val value = produce()
+            return value as T
+        }
+    }
+
+inline fun <reified T> wrapper(crossinline produce: suspend () -> Any?): Source<T> =
+    factory<T>(produce)
+"#;
+
+/// A reified inline wrapper forwards its own `crossinline` parameter to a reified inline factory
+/// whose object captures it. The wrapper's expansion copies the object for its reified type, and
+/// the copy's capture is bound to the wrapper's `crossinline` parameter, so the copy keeps the
+/// `$$forInline` method and its continuation (`{copy}$1`), as kotlinc's regenerated object does.
+/// The factory's object has kotlinc's methods and code (its metadata still lists the capture as a
+/// property, a known divergence) and its continuation is kotlinc's to the byte. Of the copy, the
+/// methods and the `$$forInline` body are kotlinc's. kotlinc writes a regenerated copy's generic
+/// signatures differently, a divergence of every reified copy, so the copy's declarations are
+/// compared by descriptor.
+#[test]
+fn a_forwarded_crossinline_parameter_keeps_the_copys_for_inline_method() {
+    let classes = common::classes_against_kotlinc_module(&[("Lib.kt", FORWARDED_LIB)]);
+    let inventory = [
+        "lib/LibKt",
+        "lib/LibKt$factory$1",
+        "lib/LibKt$factory$1$next$1",
+        "lib/LibKt$wrapper$$inlined$factory$1",
+        "lib/LibKt$wrapper$$inlined$factory$1$1",
+        "lib/Source",
+    ];
+    assert_eq!(classes.reference.keys().collect::<Vec<_>>(), inventory);
+    assert_eq!(classes.krusty.keys().collect::<Vec<_>>(), inventory);
+    let declaration = "lib/LibKt$factory$1";
+    let (reference, krusty) = classes
+        .method_declarations(declaration)
+        .expect("both compilers write the class");
+    assert_eq!(krusty, reference, "{declaration}");
+    let code = classes
+        .code_differences()
+        .into_iter()
+        .filter(|difference| difference.starts_with("lib/LibKt$factory$1 "))
+        .collect::<Vec<_>>();
+    assert!(code.is_empty(), "{}", code.join("\n\n"));
+    let continuation = "lib/LibKt$factory$1$next$1";
+    let (reference, krusty) = classes.class_listing(continuation);
+    assert_eq!(krusty, reference, "{continuation}");
+    assert!(
+        classes.reference[continuation] == classes.krusty[continuation],
+        "{continuation}: the listings agree, the bytes do not"
+    );
+    let copy = "lib/LibKt$wrapper$$inlined$factory$1";
+    let (reference, krusty) = classes.class_listing(copy);
+    assert_eq!(
+        method_descriptors(&krusty),
+        method_descriptors(&reference),
+        "{copy}"
+    );
+    let body = |listing: &str| {
+        let lines = listing.lines().collect::<Vec<_>>();
+        let start = lines
+            .iter()
+            .position(|line| line.contains(" next$$forInline("))
+            .expect("the copy declares `next$$forInline`");
+        lines[start + 1..]
+            .iter()
+            .take_while(|line| !line.is_empty() && **line != "}")
+            .filter(|line| !line.starts_with("Signature:"))
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(body(&krusty), body(&reference), "{copy}: next$$forInline");
+}
+
+/// Each method's name and descriptor in a `javap -v` listing, in class-file order.
+fn method_descriptors(listing: &str) -> Vec<(String, String)> {
+    let lines = listing.lines().collect::<Vec<_>>();
+    lines
+        .windows(2)
+        .filter_map(|pair| {
+            let descriptor = pair[1].strip_prefix("descriptor: (")?;
+            let name = pair[0].split('(').next()?.rsplit(' ').next()?;
+            Some((name.to_string(), format!("({descriptor}")))
+        })
+        .collect()
+}
+
+const FORWARDED_RUN_MAIN: &str = r#"
+import lib.*
+import kotlin.coroutines.*
+
+var pending: Continuation<Any?>? = null
+
+fun later(): Source<String> = wrapper { suspendCoroutine<Any?> { pending = it } }
+
+fun box(): String {
+    var result: Any? = null
+    suspend { later().next() }
+        .startCoroutine(Continuation(EmptyCoroutineContext) { result = it.getOrThrow() })
+    if (result != null) return "FAIL completed before the resume: $result"
+    pending!!.resume("OK")
+    return result as String
+}
+"#;
+
+/// The same module inlines the wrapper into a caller: the wrapper's copy binds the factory's
+/// parameter to the wrapper's own, and the caller's copy binds it to a literal lambda, which is no
+/// `crossinline` parameter. The caller's object suspends and resumes.
+#[test]
+fn a_same_module_caller_of_a_forwarded_crossinline_copy_runs() {
+    common::expect_box_ok_files_with_stdlib(
+        &[("Lib.kt", FORWARDED_LIB), ("Main.kt", FORWARDED_RUN_MAIN)],
+        "forwarded_for_inline",
+    );
+}

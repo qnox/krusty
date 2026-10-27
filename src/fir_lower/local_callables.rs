@@ -1169,28 +1169,55 @@ impl BodyLowering<'_> {
         }
     }
 
-    /// Whether `capture` holds a `crossinline` parameter: this body's own, a local class's capture
-    /// of one, or one an enclosing callable captured.
-    fn capture_source_is_crossinline(
+    /// The `crossinline` parameter `capture` holds, by its slot in the inline function that
+    /// declares it: this body's own, a local class's capture of one, or one an enclosing callable
+    /// captured.
+    fn captured_crossinline_parameter(
         &self,
         capture: &crate::fir::FirCapture,
-    ) -> Result<bool, FirLoweringFailure> {
+    ) -> Result<Option<u32>, FirLoweringFailure> {
         match (capture.enclosing_depth.checked_sub(1), capture.source) {
             (None, crate::fir::FirCaptureSource::Value(value)) => {
-                Ok(self.body.is_crossinline_parameter(value))
+                Ok(self.crossinline_parameter_slot(value))
             }
             (None, crate::fir::FirCaptureSource::ConstructorPrefix { owner, field }) => {
-                self.class_capture_is_crossinline(owner, field)
+                self.class_capture_crossinline_parameter(owner, field)
             }
             (Some(depth), source) => self
                 .capture_slots
                 .get(&(depth, source))
-                .map(|slot| slot.crossinline)
+                .map(|slot| slot.crossinline_parameter)
                 .ok_or(FirLoweringFailure::MissingCapture {
                     enclosing_depth: depth,
                     source,
                 }),
         }
+    }
+
+    /// The slot of `value` when it is a `crossinline` parameter of this body.
+    pub(super) fn crossinline_parameter_slot(
+        &self,
+        value: crate::fir::LocalValueId,
+    ) -> Option<u32> {
+        self.body
+            .is_crossinline_parameter(value)
+            .then(|| self.value_slot(value))
+    }
+
+    /// The `crossinline` parameter value slot `slot` of this body holds: one of its own
+    /// parameters, or an enclosing inline function's that it captured.
+    pub(super) fn crossinline_parameter_at(&self, slot: u32) -> Option<u32> {
+        self.body
+            .parameters()
+            .iter()
+            .filter_map(|parameter| self.crossinline_parameter_slot(parameter.value))
+            .find(|&parameter| parameter == slot)
+            .or_else(|| {
+                self.capture_slots
+                    .values()
+                    .find(|capture| capture.slot == slot)
+                    .and_then(|capture| capture.crossinline_parameter)
+            })
     }
 
     fn lower_nested_function(
@@ -1241,7 +1268,7 @@ impl BodyLowering<'_> {
                         ty: capture.ty,
                         shared_cell: capture.shared_cell,
                         stable: self.capture_source_is_stable(capture),
-                        crossinline: self.capture_source_is_crossinline(capture)?,
+                        crossinline_parameter: self.captured_crossinline_parameter(capture)?,
                         declared,
                     },
                 ))

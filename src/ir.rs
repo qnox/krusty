@@ -1276,6 +1276,10 @@ pub struct IrSpecializedAnonymousClass {
     pub caller_source_name: String,
     pub inline_callee: crate::fir::CallableId,
     pub inline_callee_source_name: String,
+    /// For each of the callee's operands, by its value slot: the caller's `crossinline` parameter
+    /// the expansion binds it to, when it is one. A copy remaps its captures' provenance through
+    /// it, and so does an object nested in the copy that is specialized later.
+    pub crossinline_operands: Vec<Option<u32>>,
     /// Source function → the function on this copy. Accessor functions materialized after the
     /// copy are added here before bridges and metadata read the copy.
     pub method_clones: crate::fx_hash::HashMap<FunId, FunId>,

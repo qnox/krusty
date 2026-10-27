@@ -7168,8 +7168,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   common lowering records on each constructor capture whether the captured declaration is a
   `crossinline` parameter (`IrConstructorCapture::crossinline`), where the capture is produced,
   through any chain of enclosing lambdas, local functions and classes, so a capture an object
-  receives from a lambda's capture or from its enclosing object's field keeps it. A call-site copy
-  of the class binds the function's parameters to the call's arguments and clears it. That
+  receives from a lambda's capture or from its enclosing object's field keeps it. The fact is the
+  parameter's value slot in the declaring inline function; a call-site copy of the class remaps it
+  through the expansion's bindings, so a capture bound to one of the caller's own `crossinline`
+  parameters (a reified wrapper forwarding its parameter to a reified factory) keeps it, and one
+  bound to anything else, such as a literal lambda, loses it. A call-site copy's methods take
+  their source methods' lines, and the continuations of its suspend methods are named with the
+  copy, `{copy}$N` in method order, as kotlinc numbers the classes a regenerated object declares. That
   continuation is public, constructor included, its
   `@Metadata.xi` carries the public visibility and, like any continuation whose function is in a
   public inline function's scope, `METADATA_PUBLIC_ABI_FLAG`; it is written even when the method's

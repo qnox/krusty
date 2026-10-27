@@ -4542,7 +4542,13 @@ fn emit_placed_method(
             .get(&completion)
             .map(|&(slot, _)| slot)
             .expect("a suspend method's copy has a completion parameter");
-        let continuation = coroutine_machine::continuation_internal(ir, fid, owner, &f.name);
+        // The class the machine re-enters, under its final name: a copy's continuation is renamed
+        // with the copy, after coroutine lowering named it.
+        let continuation = env
+            .emit_time_machines
+            .transformed(fid)
+            .map(|machine| machine.continuation_class.clone())
+            .expect("a method's `$$forInline` copy is written beside its transformed machine");
         e.emit_fake_continuation_construction(&continuation, completion, &mut code);
     }
     // The marker and the parameter guards carry no line. The method's first entry is the first

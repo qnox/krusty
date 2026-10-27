@@ -938,6 +938,10 @@ impl BodyLowering<'_> {
         // fallible specialization: both lambda transformations above have already been preflighted,
         // and every operation after it commits without declining the containing expansion.
         if let Some(module_callee) = module_callee {
+            let crossinline_operands = operand_slots
+                .iter()
+                .map(|slot| slot.and_then(|slot| self.crossinline_parameter_at(slot)))
+                .collect::<Vec<_>>();
             if let Err(failure) = escaping_anonymous::specialize(
                 self.ir,
                 escaping_copies
@@ -953,6 +957,7 @@ impl BodyLowering<'_> {
                     caller_source_name: &caller_source_name,
                     inline_callee: module_callee,
                     inline_callee_source_name: &callee,
+                    crossinline_operands: &crossinline_operands,
                 },
             ) {
                 *malformed_anonymous = Some(failure);

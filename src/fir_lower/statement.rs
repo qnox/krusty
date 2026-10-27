@@ -385,9 +385,9 @@ impl BodyLowering<'_> {
                     self.ir.add_expr(IrExpr::GetValue(slot))
                 }
             };
-            let crossinline = match &capture.source {
+            let crossinline_parameter = match &capture.source {
                 FirLocalClassCaptureSource::Value(source) => {
-                    self.body.is_crossinline_parameter(*source)
+                    self.crossinline_parameter_slot(*source)
                 }
                 FirLocalClassCaptureSource::Captured {
                     enclosing_depth,
@@ -400,17 +400,17 @@ impl BodyLowering<'_> {
                             enclosing_depth: *enclosing_depth,
                             source,
                         })?
-                        .crossinline
+                        .crossinline_parameter
                 }
                 FirLocalClassCaptureSource::ClassStorage { owner, field, .. }
                 | FirLocalClassCaptureSource::ConstructorCapture { owner, field, .. }
                 | FirLocalClassCaptureSource::CapturedClassStorage { owner, field, .. } => {
-                    self.class_capture_is_crossinline(*owner, *field)?
+                    self.class_capture_crossinline_parameter(*owner, *field)?
                 }
                 FirLocalClassCaptureSource::DispatchReceiver
                 | FirLocalClassCaptureSource::EnclosingReceiver { .. }
                 | FirLocalClassCaptureSource::CapturedImplicitReceiver { .. }
-                | FirLocalClassCaptureSource::ImplicitReceiver { .. } => false,
+                | FirLocalClassCaptureSource::ImplicitReceiver { .. } => None,
             };
             values.push((value, capture.ty.get()));
             if let Some(field) = field {
@@ -442,7 +442,7 @@ impl BodyLowering<'_> {
                 capture: Some(crate::ir::IrConstructorCapture {
                     source_name: capture.name.clone(),
                     receiver,
-                    crossinline,
+                    crossinline_parameter,
                 }),
                 provenance: crate::ir::IrCtorParameterProvenance::Capture,
                 capture_identity: capture.capture_identity,

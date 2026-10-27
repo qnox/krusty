@@ -630,8 +630,9 @@ struct CaptureSlot {
     shared_cell: bool,
     /// The captured declaration is a `val` or a parameter, which no code can reassign.
     stable: bool,
-    /// The captured declaration is a `crossinline` parameter of the callable that declares it.
-    crossinline: bool,
+    /// When the captured declaration is a `crossinline` parameter: its value slot in the inline
+    /// function that declares it.
+    crossinline_parameter: Option<u32>,
     /// The captured declaration as the callable that supplies this slot named and classified it.
     /// A callable nested deeper captures the same value through this slot, and names it the same.
     declared: CapturedDeclaration,

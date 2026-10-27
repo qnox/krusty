@@ -2175,20 +2175,20 @@ impl BodyLowering<'_> {
         }
     }
 
-    /// Whether capture `field` (its identity) of local class `owner` holds a `crossinline`
-    /// parameter, as recorded when the class's captures were prepared.
-    pub(super) fn class_capture_is_crossinline(
+    /// The `crossinline` parameter capture `field` (its identity) of local class `owner` holds, as
+    /// recorded when the class's captures were prepared.
+    pub(super) fn class_capture_crossinline_parameter(
         &self,
         owner: crate::fir::DeclarationId,
         field: u32,
-    ) -> Result<bool, FirLoweringFailure> {
+    ) -> Result<Option<u32>, FirLoweringFailure> {
         let declaration = &self.ir.classes[self.storage_class(owner)? as usize];
-        Ok(field < declaration.constructor_prefix_count
-            && declaration
-                .ctor_args
-                .get(field as usize)
-                .and_then(|argument| argument.capture.as_ref())
-                .is_some_and(|capture| capture.crossinline))
+        Ok(declaration
+            .ctor_args
+            .get(field as usize)
+            .filter(|_| field < declaration.constructor_prefix_count)
+            .and_then(|argument| argument.capture.as_ref())
+            .and_then(|capture| capture.crossinline_parameter))
     }
 
     pub(super) fn constructor_capture_parameter(
