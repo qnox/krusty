@@ -381,6 +381,7 @@ mod tests {
                         classifier_declaration: Some(ClassifierDeclaration::TypeAlias(
                             crate::libraries::AliasExpansion {
                                 identity: crate::types::type_name("fixture/Transform"),
+                                declaration_name: None,
                                 target: crate::types::type_name("fixture/Outer$Nested"),
                                 formals: Vec::new(),
                                 expansion: crate::types::Ty::obj("fixture/Outer$Nested"),
@@ -412,6 +413,7 @@ mod tests {
                 Some(ClassifierDeclaration::TypeAlias(
                     crate::libraries::AliasExpansion {
                         identity: alias,
+                        declaration_name: None,
                         target,
                         formals: Vec::new(),
                         expansion: crate::types::Ty::obj("fixture/Outer$Nested"),

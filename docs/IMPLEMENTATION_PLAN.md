@@ -1,5 +1,20 @@
 # krusty — implementation plan
 
+## Bound declaration-name inventory
+
+Expose selected declaration-name evidence by typed resolved key across source, JVM, KLIB and their
+federated views. Preserve absent, selected-unknown and selected-known records in caches and frozen
+backend facts, including aliases without target shapes. This supplies the metadata consumer seam;
+the full class-ID encoder and callable-reference adapter regressions remain separate follow-ups.
+
+## Alias declaration-name producers
+
+Retain an alias's own optional container and exact segment through stable source headers, the
+legacy source template record, bootstrap/body-local aliases, common KLIB normalization and JVM
+metadata/classpath records. Keep existing alias identities, expansion templates, target
+normalization and spelling sidecars intact. Metadata class-ID consumers and builtin declaration
+names remain separate prerequisites; this producer handoff does not repair their output by itself.
+
 ## Source classifier inventory identities
 
 Replace lookup-spelling splitting in the foreign-source classifier inventory with the existing
@@ -24,6 +39,15 @@ mutating module state. The shared Throwable hierarchy case starts from exact JVM
 Native results and exercises both Wasm hosts. Reference-array storage and checked array reads
 consume this registry in a separate slice of #2531.
 
+## JVM companion field ABI
+
+Centralize the physical companion field segment from the selected holder/companion identities.
+Use it consistently in field emission, initialization, singleton loads, wrappers, hoisted property
+receivers and collision planning. Singleton realization reads retained declaration ownership and
+authenticates the holder's companion tuple; it never guesses a prefix owner. Preserve dependency-published names. Whole-owner metadata class
+IDs remain a separate consumer migration; this change establishes the independent field ABI with
+complete field/facade comparisons and reference/runtime controls.
+
 ## JVM declaration-owned member rows
 
 Consume classifier declaration-name facts in both per-file `InnerClasses` candidates and the
@@ -31,6 +55,14 @@ cross-file module resolver. Keep top-level and unavailable module records from b
 a classpath record with the same physical identity. Preserve local/coroutine/reference provenance
 and exact table order. This slice leaves source identity publication and metadata class-ID encoding
 for subsequent changes; the complete literal-dollar classfile regression remains open there.
+
+## Builtin declaration-name producers
+
+Populate the existing declaration-name fact from admitted core/function/array factories and raw
+`.kotlin_builtins` declarations. Carry the selected builtin identity alongside its name through
+signature and classless/mapped shape publication; retain exact physical declaration authority.
+Reuse the current inventories and mappings. Metadata name lookup/encoding, source classifier
+projection and optional-annotation name retention remain separate follow-ups.
 
 ## Classifier declaration-name handoff
 
@@ -55,6 +87,12 @@ Phased, each phase ends in a **green `cargo test`** and a runnable artifact. The
 front-to-back so the streaming/arena shape is real from the start, then widened.
 
 Legend: ✅ done · 🚧 in progress · ⬜ todo
+
+## Preserve classifier name evidence at projection boundaries
+
+Copy source header declaration names into finalized module provider shapes. Retain optional
+annotation names from decoded module metadata until annotation shape publication. These close two
+producer omissions; the metadata name inventory/query and class-ID consumers remain separate work.
 
 ## Anonymous construction argument scope
 
@@ -5550,8 +5588,9 @@ regress.
     and FixStack saves the stack around it, and the lambda's lines are mapped into the copy's SMAP from
     the caller's. The call site passes the captured values instead of the lambda; code compiled only
     for the object is rolled back from the caller's constant pool (`ClassWriter::checkpoint`). The
-    route is probed with the lambdas' shapes before any code is emitted, so a shape not ported yet
-    keeps the bridge, as does a lambda that reaches a private member of the caller (a backing
+    route is decided from the callee's facts before any code is emitted, never by inlining the body
+    on trial: an object whose suspend method lacks the `$$forInline` copy keeps the bridge
+    (`SpliceReason::SuspendMethodWithoutForInlineCopy`), as does a lambda that reaches a private member of the caller (a backing
     field, a private function, `invokespecial`, a materialized lambda) until kotlinc's synthetic
     accessors are ported. ✅ Lambdas taking or returning a value class (`Continuation.resumeWith`'s
     `Result`): the inline body takes the parameter unboxed (`value_classes::inline_body_slots`) and
@@ -5636,8 +5675,15 @@ regress.
     are byte-identical on 2.4.21 (the four `inlinedBreakContinue` shapes and
     `secondaryConstructors/withNonLocalReturn`), none regresses, and all 7,184 applicable files
     run.
-    ☐ `$default` calls, suspend callers and callees, `crossinline` parameters, calls in default
-    arguments, and callee bodies with local classes or enum switches.
+    ✓ Suspend callers (`SuspendCaller`): a call in a suspend function, a suspend lambda or a
+    lambda written in one is inlined from the compiled body, and the coroutine transformer builds
+    the caller's machine over the inlined bytecode, taking a placed lambda's suspensions as the
+    caller's: 1 more box file is byte-identical on 2.4.21
+    (`coroutines/featureIntersection/suspendInlineSuspendFinally`), none regresses, and all 7,184
+    applicable files run.
+    ☐ `$default` calls, suspend callees (and the calls a suspend inline function holds),
+    `crossinline` parameters, calls in default arguments, and callee bodies with local classes or
+    enum switches.
 - ☐ 7. Delete `InlineBodyPlan` and its resolver/FIR threading once the coroutine state machine runs
   on inlined bytecode (the plans exist only to reach IR before `lower_suspend`).
 
@@ -6172,3 +6218,8 @@ after an inline value resets the caller line. Ordinary method local-table orderi
 Full-class/runtime controls cover consecutive initializers, object and companion storage with an
 `init` block, and ordinary callable bodies. The batched bytecode oracle now isolates fixture packages
 and fails compilation errors (#2639).
+
+Nominal function values use the shared subtype relation to reach the canonical function classifier
+of the expected signature. Applied hierarchy traversal retains declared variance, nullability,
+arity and suspend kind. Owning semantic tests cover reflective and inherited function declarations
+and unrelated-callable rejection; the JVM round trip covers nominal and reflection interface slots.

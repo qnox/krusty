@@ -32,6 +32,65 @@ pub(super) fn bind_current_continuation(
     });
 }
 
+/// [`bind_current_continuation`] for a suspend lambda's body whose machine kotlinc's transformer
+/// builds, where the method inliner places the inline lambdas it holds. A lambda's inline body
+/// numbers its values from the lambda's own frame, so a read of the continuation there is not the
+/// value at `slot`: it stays the current continuation, which the lambda's node captures from that
+/// slot, and `coroutineContext` there reads that continuation's context.
+pub(super) fn bind_own_continuation(
+    ir: &mut IrFile,
+    root: ExprId,
+    slot: u32,
+    continuations: &mut super::IntrinsicProbeContinuations,
+) {
+    let inline_bodies = inline_bodies_of(ir, root);
+    for &body in &inline_bodies {
+        super::realize_coroutine_context(ir, body, IrExpr::CurrentContinuation);
+    }
+    bind_probed_continuations(
+        ir,
+        root,
+        super::ProbedContinuation::Value(slot),
+        continuations,
+    );
+    super::realize_coroutine_context(ir, root, IrExpr::GetValue(slot));
+    let mut pending = vec![root];
+    let mut seen = HashSet::default();
+    while let Some(expression) = pending.pop() {
+        if !seen.insert(expression) || inline_bodies.contains(&expression) {
+            continue;
+        }
+        if matches!(ir.exprs[expression as usize], IrExpr::CurrentContinuation) {
+            ir.exprs[expression as usize] = IrExpr::GetValue(slot);
+        }
+        for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+    }
+}
+
+/// The inline bodies of the lambdas `root` holds outside any other inline body.
+fn inline_bodies_of(ir: &IrFile, root: ExprId) -> HashSet<ExprId> {
+    let mut bodies = HashSet::default();
+    let mut pending = vec![root];
+    let mut seen = HashSet::default();
+    while let Some(expression) = pending.pop() {
+        if !seen.insert(expression) {
+            continue;
+        }
+        if let IrExpr::Lambda {
+            captures,
+            inline_body,
+            ..
+        } = &ir.exprs[expression as usize]
+        {
+            pending.extend(captures.iter().copied());
+            bodies.extend(inline_body.iter().copied());
+            continue;
+        }
+        for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+    }
+    bodies
+}
+
 /// Bind every unintercepted intrinsic point in `root`, a body whose machine emission owns, to that
 /// machine's continuation. The block reads it as the same `CurrentContinuation` emission resolves.
 pub(super) fn bind_machine_continuation(

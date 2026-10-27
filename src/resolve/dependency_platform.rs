@@ -62,7 +62,7 @@ impl DependencyPlatform {
         &self,
         identity: TypeName,
     ) -> Option<crate::libraries::AliasExpansion> {
-        let (formals, expansion) = self.symbols.source_alias_expansions.get(&identity)?;
+        let template = self.symbols.source_alias_expansions.get(&identity)?;
         let target = *self.symbols.source_alias_fqns.get(&identity)?;
         let expansion_spelling = self
             .symbols
@@ -72,9 +72,10 @@ impl DependencyPlatform {
             .unwrap_or_default();
         Some(crate::libraries::AliasExpansion {
             identity,
+            declaration_name: template.declaration_name.clone().map(std::sync::Arc::new),
             target,
-            formals: formals.clone(),
-            expansion: *expansion,
+            formals: template.formals.clone(),
+            expansion: template.expansion,
             expansion_spelling,
         })
     }
@@ -315,6 +316,15 @@ fn merge_type(
 }
 
 impl SymbolSource for DependencyPlatform {
+    fn classifier_declaration_name(
+        &self,
+        declaration: crate::libraries::ClassifierDeclarationKey,
+    ) -> Option<Option<crate::types::ClassifierDeclarationName>> {
+        self.source()
+            .classifier_declaration_name(declaration)
+            .or_else(|| self.platform.classifier_declaration_name(declaration))
+    }
+
     fn package_exists(&self, parent: TypeName, name: &str) -> bool {
         self.source().package_exists(parent, name) || self.platform.package_exists(parent, name)
     }

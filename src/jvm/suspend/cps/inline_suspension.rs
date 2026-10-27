@@ -25,12 +25,17 @@ use crate::jvm::inline_parameters::is_inline_parameter;
 use crate::jvm::placed_lambda_captures::is_placed_capture;
 use crate::libraries::InlineKind;
 
-/// Whether `expression` is a call whose callee the JVM backend may splice here.
+/// Whether `expression` is a call whose callee the JVM backend may splice here: a classpath
+/// inline callee, or a same-module one inlined from its compiled body
+/// ([`IrFile::compiled_inline_call`]), whose lambdas the backend places exactly as a library's.
 ///
 /// Carrying an `inline_body` does NOT make a lambda's body part of this frame: lowering attaches
 /// one wherever it can, including to the lambda of an ordinary function (`launch { … }`). Only the
 /// argument of an INLINE call can be spliced, so only there does the body belong to this frame.
 fn calls_an_inline_function(ir: &IrFile, expression: ExprId) -> bool {
+    if ir.compiled_inline_call(expression).is_some() {
+        return true;
+    }
     let IrExpr::Call {
         callee: call_callee,
         ..
@@ -472,8 +477,15 @@ impl HostedSearch<'_> {
 /// rule as `try_splice_static_inline`): the copy is the untransformed body, its call to another
 /// suspend function marked as kotlinc's codegen marks one, so the transformer builds a single
 /// machine over the copy, the placed lambda and the caller, and the call is no state of its own.
-/// A reified suspend callee is neither: it splices no `$$forInline` copy.
+/// A reified suspend callee is neither: it splices no `$$forInline` copy. A same-module callee
+/// inlined from its compiled body ([`IrFile::compiled_inline_call`]) is one too: kotlinc's
+/// `IrSourceCompilerForInline` hands the method inliner that body, and the transformer then runs
+/// over the caller's inlined bytecode, so the machine takes the lambda's suspensions as the
+/// caller's own. A suspend callee is not inlined from its compiled body.
 fn places_literal_lambdas(ir: &IrFile, call: ExprId, suspend_set: &HashSet<u32>) -> bool {
+    if ir.compiled_inline_call(call).is_some() {
+        return !is_suspension_point(ir, call, suspend_set);
+    }
     let reified = ir.reified_call_subst.contains_key(&call);
     if is_suspension_point(ir, call, suspend_set) {
         let can_inline = matches!(

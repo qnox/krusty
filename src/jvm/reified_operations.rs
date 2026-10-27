@@ -493,6 +493,7 @@ fn collect_type_reified_parameters(
         }
         TyKind::Nullable(inner)
         | TyKind::PlatformNullable(inner)
+        | TyKind::MutabilityFlexible(inner)
         | TyKind::InProjection(inner)
         | TyKind::OutProjection(inner)
         | TyKind::RawProjection(inner)

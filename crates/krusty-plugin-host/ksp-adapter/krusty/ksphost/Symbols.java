@@ -265,6 +265,7 @@ final class Symbols {
                 throw new IOException("a getter has no parameter");
             }
             getter.jvmName = readOptionalString(in);
+            getter.returnsPropertyType = Wire.readBoolean(in);
             property.getter = getter;
         }
         if (Wire.readBoolean(in)) {
@@ -285,7 +286,8 @@ final class Symbols {
     }
 
     // An accessor up to its parameter (`put_accessor` in `src/ksp/protocol.rs`): whether it has
-    // one, which follows with its JVM name.
+    // one, which follows with its JVM name, and for a getter whether it returns the property's
+    // type.
     private boolean readAccessor(DataInputStream in, SourceAccessor accessor) throws IOException {
         accessor.origin = origin(in.readByte());
         accessor.modifiers = readModifiers(in);

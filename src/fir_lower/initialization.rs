@@ -63,6 +63,9 @@ pub(super) fn accept_non_callable_body(
                         .ok_or(FirFileLoweringFailure::UnsupportedCallableOwner(
                             declaration,
                         ))?,
+                    source_order: index
+                        .source_order(declaration)
+                        .ok_or(FirFileLoweringFailure::MissingSourceOrder(declaration))?,
                     class,
                     body,
                 });

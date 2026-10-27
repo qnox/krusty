@@ -45,6 +45,8 @@ mod property_identity;
 mod stub_overlay;
 pub(super) use stub_overlay::StubOverlayGuard;
 #[cfg(test)]
+mod alias_declaration_names_tests;
+#[cfg(test)]
 mod test_support;
 mod value_class_erasure;
 
@@ -896,10 +898,8 @@ pub struct TypeIndex {
     type_aliases: HashMap<TypeName, TypeName>,
     /// Alias name → its EXPANSION: the target applied to its own arguments, with the alias's own
     /// parameters left as `Ty::TyParam`. A use site substitutes its arguments into this template.
-    /// `(target, formals, expansion, right-hand-side argument spellings)` — the last carries the
-    /// dependency's own `typealias` spellings so a consumer's use site inherits them (see
-    /// [`crate::spelling`]).
-    alias_expansions: HashMap<TypeName, (TypeName, Vec<String>, Ty, crate::spelling::Spelled)>,
+    /// The record also retains the alias's own declaration name and right-hand-side spellings.
+    alias_expansions: HashMap<TypeName, crate::libraries::AliasExpansion>,
 }
 
 impl TypeIndex {
@@ -1053,6 +1053,7 @@ struct BuiltinFunction {
 }
 
 struct BuiltinClass {
+    declaration_name: crate::types::ClassifierDeclarationName,
     supertypes: TypeNameList,
     /// Supertypes with type arguments, used when no JVM class generic signature is available.
     supertype_tys: Vec<Ty>,
@@ -1077,6 +1078,8 @@ struct BuiltinClass {
 /// The generic declaration facts decoded from one builtin classifier. They travel together so no
 /// provider consumer can observe formals without their parallel bounds.
 pub(super) struct BuiltinClassSignature {
+    pub(super) declaration: TypeName,
+    pub(super) declaration_name: crate::types::ClassifierDeclarationName,
     pub(super) formals: Vec<String>,
     pub(super) formal_bounds: Vec<Vec<Ty>>,
     pub(super) supertypes: Vec<Ty>,
@@ -1140,6 +1143,7 @@ impl BuiltinsFile {
             });
         }
         for (internal, class) in package.classes {
+            let declaration_name = crate::libraries::metadata_declaration_name(&internal);
             let companion_object = class
                 .companion_name
                 .as_ref()
@@ -1222,6 +1226,7 @@ impl BuiltinsFile {
             file.classes.insert(
                 canonical,
                 BuiltinClass {
+                    declaration_name,
                     supertypes,
                     supertype_tys,
                     formals,
@@ -1487,7 +1492,7 @@ impl Classpath {
     pub(super) fn paired_stdlib_type_alias_expansion(
         &self,
         identity: TypeName,
-    ) -> Option<(TypeName, Vec<String>, Ty, crate::spelling::Spelled)> {
+    ) -> Option<crate::libraries::AliasExpansion> {
         let entry = self.paired_stdlib_entry()?;
         let aliases = self.entry_package_types(entry, identity.namespace());
         if self.class_load_error.borrow().is_some() {
@@ -2316,6 +2321,8 @@ impl Classpath {
                     "builtin formals and bounds must be decoded in parallel"
                 );
                 BuiltinClassSignature {
+                    declaration: kotlin,
+                    declaration_name: class.declaration_name.clone(),
                     formals: class.formals.clone(),
                     formal_bounds: class.formal_bounds.clone(),
                     supertypes: class.supertype_tys.clone(),
@@ -2362,8 +2369,8 @@ impl Classpath {
         if self.class_load_error.borrow().is_some() {
             return None;
         }
-        if let Some((target, _, _, _)) = self.nested_type_alias(internal) {
-            return Some(target);
+        if let Some(alias) = self.nested_type_alias(internal) {
+            return Some(alias.target);
         }
         let tree = self.package_tree();
         if !tree.catalog_complete() {
@@ -2415,7 +2422,7 @@ impl Classpath {
     pub fn type_alias_expansion(
         &self,
         internal: TypeName,
-    ) -> Option<(TypeName, Vec<String>, Ty, crate::spelling::Spelled)> {
+    ) -> Option<crate::libraries::AliasExpansion> {
         if let Some(alias) = self.nested_type_alias(internal) {
             return Some(alias);
         }
@@ -2442,22 +2449,21 @@ impl Classpath {
             .find(|identity| identity.segment_ref() == name)
     }
 
-    fn nested_type_alias(
-        &self,
-        identity: TypeName,
-    ) -> Option<(TypeName, Vec<String>, Ty, crate::spelling::Spelled)> {
+    fn nested_type_alias(&self, identity: TypeName) -> Option<crate::libraries::AliasExpansion> {
         let semantic_owner = identity.parent()?;
         let owner = self.source_classifier_name(semantic_owner)?;
         let class = self.find_name(owner)?;
         let alias = super::metadata::metadata_type_aliases(&class)
             .iter()
             .find(|alias| alias.name == identity)?;
-        Some((
-            type_name(&alias.target),
-            alias.formals.clone(),
-            alias.expansion,
-            alias.expansion_spelling.clone(),
-        ))
+        Some(crate::libraries::AliasExpansion {
+            identity,
+            declaration_name: alias.declaration_name.clone().map(std::sync::Arc::new),
+            target: type_name(&alias.target),
+            formals: alias.formals.clone(),
+            expansion: alias.expansion,
+            expansion_spelling: alias.expansion_spelling.clone(),
+        })
     }
 
     /// Convert a source classifier path (`pkg/Outer/Inner`) into its declared JVM classifier

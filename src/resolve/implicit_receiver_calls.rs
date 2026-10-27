@@ -59,7 +59,7 @@ impl Checker<'_> {
         let type_args = self.resolved_explicit_type_args(scope, call);
         // A platform type `T!` is usable as `T` for member calls, as on an explicit receiver.
         let member_receiver = match rt.kind() {
-            TyKind::PlatformNullable(inner) => inner,
+            TyKind::PlatformNullable(inner) | TyKind::MutabilityFlexible(inner) => inner,
             _ => rt,
         };
         let (rung, rejected_candidates, mut member_mapping_failure) = if member_receiver

@@ -638,8 +638,9 @@ pub(crate) fn build(ir: &IrFile, c: &IrClass) -> Option<ClassDeclarationRecord> 
                 setter_visibility: property.setter_visibility,
                 tparam: match property.ty.kind() {
                     TyKind::TyParam(name, _) => Some(name),
-                    TyKind::Nullable(inner) | TyKind::PlatformNullable(inner) => match inner.kind()
-                    {
+                    TyKind::Nullable(inner)
+                    | TyKind::PlatformNullable(inner)
+                    | TyKind::MutabilityFlexible(inner) => match inner.kind() {
                         TyKind::TyParam(name, _) => Some(name),
                         _ => None,
                     },
