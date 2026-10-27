@@ -378,14 +378,27 @@ pub(super) fn carrier(ty: Ty) -> Result<Option<ValType>, Unsupported> {
         // Every object, interface and `Any` value, and a type parameter's: a reference the
         // frontend checked, cast to its class where one is read (see `super::super::objects`).
         TyKind::Obj(..) | TyKind::TyParam(..) => REFERENCE,
+        TyKind::Intersection(..) if is_reference_intersection(ty) => REFERENCE,
         TyKind::DefinitelyNotNull(inner) if inner.is_ty_param() => REFERENCE,
         TyKind::Nullable(inner)
-            if matches!(inner.kind(), TyKind::Obj(..) | TyKind::TyParam(..)) =>
+            if matches!(inner.kind(), TyKind::Obj(..) | TyKind::TyParam(..))
+                || is_reference_intersection(inner) =>
         {
             REFERENCE
         }
         _ => return Err(format!("the type `{}`", describe(ty))),
     }))
+}
+
+/// Whether `ty` is an intersection whose every component is carried as a reference: its value is
+/// each of those types at once, so it is carried as one too.
+fn is_reference_intersection(ty: Ty) -> bool {
+    match ty.kind() {
+        TyKind::Intersection(parts) => parts
+            .iter()
+            .all(|&part| matches!(carrier(part), Ok(Some(REFERENCE)))),
+        _ => false,
+    }
 }
 
 /// Carrier admitted to the ordinary signed numeric instruction table. Unsigned values are carried
