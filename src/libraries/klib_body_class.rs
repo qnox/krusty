@@ -27,6 +27,12 @@ pub(crate) struct KlibBodyClassContract {
     pub(crate) primary_constructor: Option<KlibPublicIdSignature>,
 }
 
+impl KlibBodyClassContract {
+    pub(crate) fn self_type(&self) -> Ty {
+        Ty::obj_args_name(self.classifier, &self.parameters.formals)
+    }
+}
+
 /// A complete declared instance layout. Its field ordinals belong to this exact producer class;
 /// retaining the layout grants no constructor, initializer, singleton or descriptor definition.
 #[derive(Clone, Debug, PartialEq, Eq)]

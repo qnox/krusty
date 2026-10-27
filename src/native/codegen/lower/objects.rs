@@ -2062,7 +2062,13 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         // and also for a primary the lowering could not recognize as such — an anonymous object's,
         // whose constructor is not its class's first declaration. So match the secondaries first,
         // and fall back to the primary when the list is its own.
-        let (constructor, params) = match selected {
+        let declaration_selection = self
+            .file
+            .ir
+            .construction_declared_params
+            .get(&site)
+            .map_or(selected, |parameters| Some(parameters.as_ref()));
+        let (constructor, params) = match declaration_selection {
             Some(selected) => {
                 let ordinal = declaration.secondary_ctors.iter().position(|candidate| {
                     // Either spelling of the same constructor: the declaration's own parameter
