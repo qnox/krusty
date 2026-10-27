@@ -221,3 +221,46 @@ fn a_class_initializer_takes_its_declaration_order_against_an_inline_member() {
     .expect("reference kotlinc is provisioned")
     .unwrap_or_else(|diff| panic!("{diff}"));
 }
+
+/// A secondary constructor is a declaration of its own, its delegation's arguments included:
+/// `A` and `C` are first constructed by a constructor before the inline member (in the delegation's
+/// arguments and in the body), so their implementations stay unmarked; `B` and `D` are first
+/// constructed by an inline member before the constructor, so they are marked.
+const CONSTRUCTOR_ORDER_SOURCE: &str = r#"package app
+
+annotation class A(val i: Int)
+annotation class B(val i: Int)
+annotation class C(val i: Int)
+annotation class D(val i: Int)
+
+open class Base(val any: Any)
+
+class K : Base {
+    constructor() : super(A(0))
+    inline fun later(): Any = A(1)
+    inline fun earlier(): Any = B(1)
+    constructor(i: Int) : super(B(0))
+    constructor(s: String) : super(s) { C(0) }
+    inline fun lastly(): Any = C(1)
+    inline fun before(): Any = D(1)
+    constructor(l: Long) : super(l) { D(0) }
+}
+"#;
+
+#[test]
+fn a_secondary_constructor_takes_its_declaration_order_against_an_inline_member() {
+    let classpath = [common::stdlib_jar(), common::jdk_modules()];
+    common::metadata_headers_diff_against_kotlinc_cp(
+        "ConstructorOrder",
+        CONSTRUCTOR_ORDER_SOURCE,
+        &[
+            "app/K$annotationImpl$app_A$0",
+            "app/K$annotationImpl$app_B$0",
+            "app/K$annotationImpl$app_C$0",
+            "app/K$annotationImpl$app_D$0",
+        ],
+        &classpath,
+    )
+    .expect("reference kotlinc is provisioned")
+    .unwrap_or_else(|diff| panic!("{diff}"));
+}

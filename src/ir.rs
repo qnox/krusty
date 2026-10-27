@@ -60,7 +60,9 @@ mod emitted_body_roots;
 mod enums;
 mod expect_actualization;
 mod expression_provenance;
-pub(crate) use emitted_body_roots::emitted_body_roots;
+pub(crate) use emitted_body_roots::{
+    emitted_body_roots, emitted_declaration_roots, EmittedDeclaration,
+};
 mod field_flags;
 mod fields;
 mod function_scope;

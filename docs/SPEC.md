@@ -1078,10 +1078,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   function that is not private nor a member of a private class (its lambdas and local classes
   included), even when a later construction is. Declaration order is the frontend's source order
   of the declaration a construction is evaluated in, a function, a top-level or class property's
-  initializer, or an `init` block, never an arena position. Tests:
+  initializer, an `init` block, or a secondary constructor with its delegation, never an arena
+  position. The constructions are those of the emitted declaration roots
+  (`ir::emitted_declaration_roots`), the inventory every target's emission walks. Tests:
   `metadata_inline_object_abi_e2e::a_synthesized_reference_or_annotation_class_is_marked_public_abi_like_kotlinc`,
   `a_property_initializer_takes_its_declaration_order_against_an_inline_function`,
-  `a_class_initializer_takes_its_declaration_order_against_an_inline_member`.
+  `a_class_initializer_takes_its_declaration_order_against_an_inline_member`,
+  `a_secondary_constructor_takes_its_declaration_order_against_an_inline_member`.
 
 - **A suspend inline function emits its own `$$forInline` copy.** Beside the state machine a
   direct caller runs, krusty now writes kotlinc's private `name$$forInline` method: the body before

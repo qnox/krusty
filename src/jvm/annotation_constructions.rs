@@ -6,7 +6,10 @@
 
 use crate::fx_hash::{HashMap, HashSet};
 
-use crate::ir::{ExprId, IrClass, IrCtorArg, IrEnclosure, IrExpr, IrField, IrFile};
+use crate::ir::{
+    emitted_declaration_roots, EmittedDeclaration, ExprId, IrClass, IrCtorArg, IrEnclosure, IrExpr,
+    IrField, IrFile,
+};
 use crate::types::{type_name, Ty, TypeName};
 
 pub(crate) fn lower_annotation_constructions(ir: &mut IrFile, facade: &str) {
@@ -128,31 +131,15 @@ pub(crate) fn lower_annotation_constructions(ir: &mut IrFile, facade: &str) {
 /// nor a member of a private class), its lambdas and local classes included, the class is
 /// `isInPublicInlineScope`.
 ///
-/// Declaration order is the frontend's source order of the declaration each construction is
-/// evaluated in: a function (a lambda or a local class's member by the declaration it is written
-/// in), a property's initializer, or an `init` block. Arena positions say nothing about it.
+/// The constructions are those of the emitted declaration roots ([`emitted_declaration_roots`]),
+/// the inventory every target's emission walks, each ordered by the frontend's source order of the
+/// declaration it is evaluated in: a function (a lambda or a local class's member by the
+/// declaration it is written in), a property's initializer, an `init` block, or a constructor with
+/// its delegation. Arena positions say nothing about it.
 fn public_abi_interfaces(
     ir: &IrFile,
     sites: &HashMap<u32, crate::ir::IrAnnotationConstruction>,
 ) -> HashSet<TypeName> {
-    let mut first_sites = FirstSites::default();
-    for (function, declaration) in ir.functions.iter().enumerate() {
-        let Some(body) = declaration.body else {
-            continue;
-        };
-        let function = u32::try_from(function).expect("too many functions for a function id");
-        let scope = Scope::of(ir, Some(IrEnclosure::Function(function)), Some(function));
-        first_sites.visit(ir, sites, body, scope, &HashMap::default());
-    }
-    for property in &ir.statics {
-        if let Some(initializer) = property.init {
-            let scope = Scope {
-                order: property.source_order,
-                public: false,
-            };
-            first_sites.visit(ir, sites, initializer, scope, &HashMap::default());
-        }
-    }
     // A class's initialization runs its property initializers and `init` blocks; each is its own
     // declaration.
     let initializers: HashMap<ExprId, u32> = ir
@@ -165,11 +152,14 @@ fn public_abi_interfaces(
                 .map(|initializer| (initializer.body, initializer.source_order)),
         )
         .collect();
-    for class in &ir.classes {
-        if let Some(body) = class.init_body {
-            let scope = Scope::of(ir, class.enclosure, None);
-            first_sites.visit(ir, sites, body, scope, &initializers);
-        }
+    let mut roots = emitted_declaration_roots(ir)
+        .into_iter()
+        .map(|root| (Scope::of_declaration(ir, root.declaration), root.root))
+        .collect::<Vec<_>>();
+    roots.sort_by_key(|(scope, _)| scope.order);
+    let mut first_sites = FirstSites::default();
+    for (scope, root) in roots {
+        first_sites.visit(ir, sites, root, scope, &initializers);
     }
     first_sites
         .0
@@ -188,31 +178,63 @@ struct Scope {
 }
 
 impl Scope {
-    /// The scope of code written in `enclosure`, ordered by the outermost function it is in, or,
-    /// outside every function, by `own` (a function's own id when `enclosure` is that function),
-    /// or last when there is neither.
-    fn of(ir: &IrFile, enclosure: Option<IrEnclosure>, own: Option<u32>) -> Self {
-        let functions =
-            crate::jvm::ir_emit::enclosure::enclosing_functions(ir, enclosure).collect::<Vec<_>>();
-        let public = functions.iter().any(|&(enclosing, owner)| {
-            ir.inline_fns.contains(&enclosing)
-                && !ir.method_visibility(enclosing).is_private()
-                && owner.is_none_or(|owner| {
-                    !ir.class_visibilities
-                        .get(&owner)
-                        .is_some_and(|visibility| visibility.is_private())
-                })
-        });
-        let order = functions
-            .last()
-            .map(|&(root, _)| root)
-            .or(own)
-            .and_then(|root| ir.fn_source_order.get(&root).copied());
+    /// The scope of the code `declaration` emits. Code written in a function is ordered by the
+    /// outermost function it is in; a property's or a class's own code by that declaration.
+    fn of_declaration(ir: &IrFile, declaration: EmittedDeclaration) -> Self {
+        match declaration {
+            EmittedDeclaration::Function(function) => {
+                let (root, public) = enclosing(ir, Some(IrEnclosure::Function(function)));
+                Self::ordered(ir.fn_source_order.get(&root.unwrap_or(function)), public)
+            }
+            EmittedDeclaration::Static(index) => Self {
+                order: ir.statics[index].source_order,
+                public: false,
+            },
+            EmittedDeclaration::PrimaryConstructor(class) => {
+                Self::of_class_code(ir, class, ir.class_source_order(class))
+            }
+            EmittedDeclaration::SecondaryConstructor { class, ordinal } => Self::of_class_code(
+                ir,
+                class,
+                Some(ir.classes[class as usize].secondary_ctors[ordinal].source_order),
+            ),
+        }
+    }
+
+    /// The scope of a constructor of `class` at `own` source order: a local class's is the
+    /// function it is written in.
+    fn of_class_code(ir: &IrFile, class: crate::ir::ClassId, own: Option<u32>) -> Self {
+        let (root, public) = enclosing(ir, ir.classes[class as usize].enclosure);
+        match root {
+            Some(root) => Self::ordered(ir.fn_source_order.get(&root), public),
+            None => Self::ordered(own.as_ref(), public),
+        }
+    }
+
+    /// A scope at `order`, last when the declaration has none.
+    fn ordered(order: Option<&u32>, public: bool) -> Self {
         Self {
-            order: order.unwrap_or(u32::MAX),
+            order: order.copied().unwrap_or(u32::MAX),
             public,
         }
     }
+}
+
+/// The outermost function `enclosure` is in, and whether it is in a public inline function's
+/// scope.
+fn enclosing(ir: &IrFile, enclosure: Option<IrEnclosure>) -> (Option<u32>, bool) {
+    let functions =
+        crate::jvm::ir_emit::enclosure::enclosing_functions(ir, enclosure).collect::<Vec<_>>();
+    let public = functions.iter().any(|&(enclosing, owner)| {
+        ir.inline_fns.contains(&enclosing)
+            && !ir.method_visibility(enclosing).is_private()
+            && owner.is_none_or(|owner| {
+                !ir.class_visibilities
+                    .get(&owner)
+                    .is_some_and(|visibility| visibility.is_private())
+            })
+    });
+    (functions.last().map(|&(root, _)| root), public)
 }
 
 /// Each annotation's first construction in declaration order.
