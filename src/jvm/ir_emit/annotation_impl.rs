@@ -206,7 +206,7 @@ pub(super) fn emit_annotation_impl_class(
         // `<init>(members…, int mask, DefaultConstructorMarker)` overload an ordinary class gets. The impl
         // class is what `C()` actually constructs, so without it a call omitting a default targets a
         // constructor nothing emits (`NoSuchMethodError`). kotlinc emits it on the impl class too.
-        if let Some(defaults) = ir.class_ctor_defaults(&fq) {
+        if let Some(defaults) = crate::jvm::default_wrappers::primary_constructor(ir, c) {
             let param_tys: Vec<Ty> = members.iter().map(|(_, jt)| *jt).collect();
             // An annotation class's members carry no declaration annotations of their own.
             constructor_defaults::emit_ctor_default_stub_with_prefix(
@@ -272,6 +272,21 @@ pub(super) fn emit_annotation_impl_class(
         );
     }
     env.inner_classes.register(&mut cw);
+    // Part of the public ABI when created in a public inline function's body.
+    if ir
+        .public_abi_annotation_implementations
+        .contains(&c.fq_name_id())
+    {
+        cw.set_kotlin_metadata(
+            3,
+            env.metadata_stamp,
+            super::metadata_policy::synthetic_class_xi(super::metadata_policy::SYNTHETIC_LOCAL)
+                | super::metadata_policy::METADATA_PUBLIC_ABI_FLAG,
+            &[],
+            &[],
+        );
+        return env.run.finish_class(cw);
+    }
     finish_local_synthetic_class(cw, env)
 }
 

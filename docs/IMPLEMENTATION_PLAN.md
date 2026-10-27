@@ -5564,8 +5564,9 @@ regress.
     and FixStack saves the stack around it, and the lambda's lines are mapped into the copy's SMAP from
     the caller's. The call site passes the captured values instead of the lambda; code compiled only
     for the object is rolled back from the caller's constant pool (`ClassWriter::checkpoint`). The
-    route is probed with the lambdas' shapes before any code is emitted, so a shape not ported yet
-    keeps the bridge, as does a lambda that reaches a private member of the caller (a backing
+    route is decided from the callee's facts before any code is emitted, never by inlining the body
+    on trial: an object whose suspend method lacks the `$$forInline` copy keeps the bridge
+    (`SpliceReason::SuspendMethodWithoutForInlineCopy`), as does a lambda that reaches a private member of the caller (a backing
     field, a private function, `invokespecial`, a materialized lambda) until kotlinc's synthetic
     accessors are ported. ✅ Lambdas taking or returning a value class (`Continuation.resumeWith`'s
     `Result`): the inline body takes the parameter unboxed (`value_classes::inline_body_slots`) and

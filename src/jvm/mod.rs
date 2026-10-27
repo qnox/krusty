@@ -33,6 +33,7 @@ mod declaration_collisions;
 mod declared_type_nullability;
 mod default_call_operands;
 mod default_parameter_representation;
+mod default_wrappers;
 mod deferred_local_storage;
 mod enum_when_mappings;
 mod external_calls;
