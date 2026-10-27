@@ -3326,7 +3326,7 @@ impl JvmLibraries {
                         .member_functions_with_renames(recv, &setter_name, function_renames)
                         .overloads
                         .into_iter()
-                        .find(|setter| self.pairs_java_setter(ty, &setter.callable.params));
+                        .find(|setter| self.pairs_java_setter(ty, &setter.semantic_params()));
                     let setter_visibility = setter
                         .as_ref()
                         .map_or(visibility, |setter| setter.visibility);

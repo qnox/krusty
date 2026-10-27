@@ -84,12 +84,17 @@ impl super::JvmLibraries {
     }
 
     /// Type equality where a platform occurrence `T!` equals `T` and `T?`, at every nesting level.
-    /// Classifiers compare in the provider's value form; their arguments compare recursively.
+    /// Nullability, projections and arguments compare level by level; only a classifier itself
+    /// compares in the provider's value form.
     fn flexibly_equal(&self, left: Ty, right: Ty) -> bool {
         let (left, right) = if left.is_platform_nullable() || right.is_platform_nullable() {
             (left.non_null(), right.non_null())
         } else {
-            (left, right)
+            match (left.kind(), right.kind()) {
+                (TyKind::Nullable(left), TyKind::Nullable(right)) => (left, right),
+                (TyKind::Nullable(_), _) | (_, TyKind::Nullable(_)) => return false,
+                _ => (left, right),
+            }
         };
         match (left.kind(), right.kind()) {
             (TyKind::InProjection(left), TyKind::InProjection(right))

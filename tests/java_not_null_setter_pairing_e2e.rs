@@ -2,7 +2,8 @@
 //! and a platform type `T!` equals both `T` and `T?`. A setter whose parameter is annotated
 //! `@NotNull` (an override narrowing an inherited setter, or a class that annotates only one
 //! accessor) is still the property's setter; a `@NotNull` getter with a `@Nullable` setter is not,
-//! nor is a setter whose parameter differs from the getter only in a type argument.
+//! nor is a setter whose parameter differs from the getter only in a type argument. Fixed
+//! nullability, projections and arguments compare level by level, through either accessor lookup.
 
 use std::path::PathBuf;
 
@@ -11,13 +12,13 @@ use super::common;
 const NOT_NULL: &str = "package org.jetbrains.annotations;\n\
     import java.lang.annotation.*;\n\
     @Retention(RetentionPolicy.CLASS)\n\
-    @Target({ElementType.METHOD, ElementType.PARAMETER})\n\
+    @Target({ElementType.METHOD, ElementType.PARAMETER, ElementType.TYPE_USE})\n\
     public @interface NotNull { String value() default \"\"; }\n";
 
 const NULLABLE: &str = "package org.jetbrains.annotations;\n\
     import java.lang.annotation.*;\n\
     @Retention(RetentionPolicy.CLASS)\n\
-    @Target({ElementType.METHOD, ElementType.PARAMETER})\n\
+    @Target({ElementType.METHOD, ElementType.PARAMETER, ElementType.TYPE_USE})\n\
     public @interface Nullable { String value() default \"\"; }\n";
 
 const BASE: &str = "package js;\n\
@@ -54,6 +55,18 @@ const ONE_SIDED: &str = "package js;\n\
         public void setTags(@NotNull java.util.List<Integer> tags) {}\n\
     }\n";
 
+const NESTED: &str = "package js;\n\
+    import java.util.List;\n\
+    import org.jetbrains.annotations.*;\n\
+    public class Nested {\n\
+        private List<String> a;\n\
+        private List<? extends CharSequence> b;\n\
+        public @Nullable List<String> getA() { return a; }\n\
+        public void setA(@Nullable List<@NotNull String> a) { this.a = a; }\n\
+        public List<? extends CharSequence> getB() { return b; }\n\
+        public void setB(List<? extends @NotNull CharSequence> b) { this.b = b; }\n\
+    }\n";
+
 fn classpath() -> Vec<PathBuf> {
     let sources = [
         ("NotNull.java".to_string(), NOT_NULL.to_string()),
@@ -61,6 +74,7 @@ fn classpath() -> Vec<PathBuf> {
         ("Base.java".to_string(), BASE.to_string()),
         ("Sub.java".to_string(), SUB.to_string()),
         ("OneSided.java".to_string(), ONE_SIDED.to_string()),
+        ("Nested.java".to_string(), NESTED.to_string()),
     ];
     let (library, _) =
         common::javac_compile(&sources, &[]).expect("javac must compile the setter fixture");
@@ -78,6 +92,10 @@ fun box(): String {\n\
     if (sub.name != \"a!\") return \"name=${sub.name}\"\n\
     if (sub.sink !== sink) return \"sink\"\n\
     if (one.label != \"b\") return \"label=${one.label}\"\n\
+    val nested = Nested()\n\
+    nested.a = mutableListOf(\"c\")\n\
+    nested.b = listOf(\"d\")\n\
+    if (nested.a != listOf(\"c\") || nested.b != listOf(\"d\")) return \"nested\"\n\
     return \"OK\"\n\
 }\n";
 
