@@ -444,7 +444,7 @@ impl BodyLowering<'_> {
         self.linked_call(linked, access, ty)
     }
 
-    fn linked_call(
+    pub(super) fn linked_call(
         &mut self,
         linked: LinkedCallee,
         access: &KlibIrMemberAccess,

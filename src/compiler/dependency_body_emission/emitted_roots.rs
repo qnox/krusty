@@ -21,7 +21,7 @@ pub(super) fn declarations(
     externals: &HashMap<KlibDependencyCallable, super::EmittedDependencyCallable>,
     capabilities: &super::DependencyLeafCapabilities<'_>,
     requires_ordinary: bool,
-) -> Result<Vec<ExternalCallableRealization>, String> {
+) -> Result<Vec<(crate::fir::ExternalCallableId, ExternalCallableRealization)>, String> {
     let mut pending = roots
         .iter()
         .map(|root| root.identity().clone())
@@ -48,9 +48,9 @@ pub(super) fn declarations(
             .callees
             .target_intrinsic(&identity, bodies, capabilities.target_realizes_intrinsic)
             .map_err(|reason| format!("an invalid target declaration: {reason:?}"))?;
-        let realization =
+        let (declaration_target, realization) =
             match platform.external_callable_by_dependency(&identity) {
-                Some((_, realization)) => realization,
+                Some(declaration) => declaration,
                 None if raw_header_capability && known_target.is_none() => {
                     pending.extend(bodies.emitted_body_callables(
                         &identity,
@@ -110,7 +110,7 @@ pub(super) fn declarations(
                 bodies.emitted_body_callables(&identity, crate::klib_lowering::EMITTED_CALL_FORMS),
             );
         }
-        declarations.push(realization);
+        declarations.push((declaration_target, realization));
     }
     Ok(declarations)
 }

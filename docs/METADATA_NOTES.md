@@ -1,5 +1,31 @@
 # `@kotlin.Metadata` — reverse-engineering notes (Phase 4b)
 
+## KLIB reference wrappers and provider declarations
+
+The serialized reflection target and the wrapper's actual call must name the same public
+declaration. Its linked provider contract authenticates the whole declared signature; a matching
+name or body shape alone grants no external authority. Raw and prepared lowering retain the exact
+selected provider ID, while emitted-body planning preserves the full module-qualified declaration
+key. Header evidence never becomes a selected/export obligation by itself. This slice handles only
+unbound, non-generic, non-suspend top-level forwarding references; broader captures remain separate.
+
+## Native reference identities and exported entry points
+
+A KLIB export's physical invocation alias is independent of its declaration marker. The Native
+export handoff carries the source key so a dependent module agrees with references created in the
+declaring source module. Dependency-support keys encode the exact module and Public/Accessor
+signature through the existing declaration-identity encoder, retaining every segment, member ID and
+mask. This changes target symbol publication without changing Kotlin metadata or runtime layout.
+
+## Native source callable-reference identity
+
+The checked source-module callable ID and source-module identity own the Native reflection marker's
+linkage. Weak definitions in dedicated COMDAT sections give all emitted files the same address,
+which the existing reference equality and hash runtime reads. The invocation adapter and carrier
+remain separate from declaration identity. KLIB references need their retained module-qualified
+signature before receiving the same program scope; a raw provider-local callable number is
+insufficient across independently analyzed modules.
+
 ## Alias declaration-name evidence
 
 Package and Class type-alias tables supply the alias's exact simple name and declaring container.

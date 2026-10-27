@@ -1,5 +1,31 @@
 # krusty — a memory-lean Kotlin→JVM compiler PoC
 
+## Serialized top-level callable references
+
+An unbound, non-generic, non-suspend top-level reference in a KLIB body retains its exact provider
+declaration identity independently of its invocation adapter. Admission proves the entire serialized
+wrapper forwards its own parameters once and in order to the reflected declaration, with the same
+parameter/result ABI and no captures, adaptation, defaults or receiver binding. Other shapes decline.
+Preparation and ordinary lowering use the same admission. The public fixture establishes the Kotlin
+reference answer before requiring Native identity, invocation and evaluation-order agreement.
+
+## Native callable-reference identity at module exports
+
+A reference created by a source module and a reference selected through that module's KLIB export
+compare equal and hash alike. Native export records retain the source declaration's marker key
+independently of the emitted call-entry alias. Authenticated KLIB declarations retain their complete
+module-qualified signature for identity; provider-local callable numbers never become global keys.
+The shared conformance target checks the identical module graph with JVM and Native reference
+compilers before requiring Native identity, hash and different-declaration agreement.
+
+## Native function-reference identity across source files
+
+Two references to the same source-module callable compare equal and hash alike across emitted
+object files. Native emission keys their shared marker on the exact source module and checked
+callable identity, retaining the bound/unbound distinction. Different declarations remain unequal.
+The Native object-linkage regression in `tests/native_cross_file_e2e.rs` establishes the identical
+multi-file program's kotlinc and JVM results before requiring Native equality and hash agreement.
+
 ## Type-alias declaration names
 
 A type alias retains its own declaring package or classifier and exact name segment, independently

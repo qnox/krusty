@@ -13,6 +13,7 @@
 
 mod body_lowering;
 mod body_unit;
+mod callable_references;
 mod callee_facts;
 mod class_headers;
 mod class_initialization;
