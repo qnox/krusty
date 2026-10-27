@@ -71,6 +71,16 @@ impl ProductionSignatureSemantics<'_> {
         }
     }
 
+    /// The classifier whose own header (primary constructor or primary-constructor property) the
+    /// scope resolves, as distinct from the classifiers lexically enclosing that header.
+    fn header_owner_classifier(
+        &self,
+        scope: crate::fir::SignatureScope,
+    ) -> Option<crate::types::TypeName> {
+        self.classifier_header_scope_owner(scope.owner)
+            .and_then(|owner| self.classifier_types.get(&owner).copied())
+    }
+
     /// A contextual lambda has the function type requested by its call site once its body result is
     /// accepted by the ordinary subtype relation. An unresolved expected type parameter remains an
     /// inference target, so its concrete body result continues through the compact constraint graph.
@@ -669,6 +679,7 @@ impl ProductionSignatureSemantics<'_> {
         let declaration_nested = (!header_scope)
             .then(|| self.lexically_nested_classifier_at(scope, first, true))
             .flatten();
+        let header_owner = self.header_owner_classifier(scope);
         self.with_resolver(scope, |resolver| {
             let mut current = declaration_nested;
             // Expression qualification selects its nearest root before walking the suffix. A later
@@ -684,8 +695,15 @@ impl ProductionSignatureSemantics<'_> {
                     }
                 }
             }
-            let inherited = || {
-                for &owner in &lexical_owners {
+            // Inherited nested classifiers of the lexical owners. The classifier whose own header is
+            // being resolved has not entered its body, so its inherited classifiers rank after the
+            // file and imports (`deferred`); every enclosing owner's body already surrounds the
+            // header, so its inherited classifiers rank before them, as in a body.
+            let inherited = |deferred: bool| {
+                for &owner in lexical_owners
+                    .iter()
+                    .filter(|&&owner| (Some(owner) == header_owner) == deferred)
+                {
                     match resolver.nested_classifier(Ty::obj_name(owner), first) {
                         crate::symbol_resolver::CandidateSelection::Selected(classifier) => {
                             return crate::symbol_resolver::CandidateSelection::Selected(
@@ -700,8 +718,8 @@ impl ProductionSignatureSemantics<'_> {
                 }
                 crate::symbol_resolver::CandidateSelection::None
             };
-            if current.is_none() && !header_scope {
-                match inherited() {
+            if current.is_none() {
+                match inherited(false) {
                     crate::symbol_resolver::CandidateSelection::Selected(classifier) => {
                         current = Some(classifier);
                     }
@@ -721,20 +739,17 @@ impl ProductionSignatureSemantics<'_> {
                     crate::symbol_resolver::CandidateSelection::Ambiguous => {
                         return Some((None, failed_segment));
                     }
-                    crate::symbol_resolver::CandidateSelection::None => {
-                        return Some((None, failed_segment));
-                    }
-                }
-            }
-            if current.is_none() && header_scope {
-                match inherited() {
-                    crate::symbol_resolver::CandidateSelection::Selected(classifier) => {
-                        current = Some(classifier);
-                    }
-                    crate::symbol_resolver::CandidateSelection::Ambiguous => {
-                        return Some((None, Some(first.to_string())));
-                    }
-                    crate::symbol_resolver::CandidateSelection::None => {}
+                    crate::symbol_resolver::CandidateSelection::None => match inherited(true) {
+                        crate::symbol_resolver::CandidateSelection::Selected(classifier) => {
+                            current = Some(classifier);
+                        }
+                        crate::symbol_resolver::CandidateSelection::Ambiguous => {
+                            return Some((None, Some(first.to_string())));
+                        }
+                        crate::symbol_resolver::CandidateSelection::None => {
+                            return Some((None, failed_segment));
+                        }
+                    },
                 }
             }
             let mut current = match current {
@@ -812,6 +827,7 @@ impl ProductionSignatureSemantics<'_> {
         let declaration_nested = (!header_scope)
             .then(|| self.lexically_nested_classifier_at(scope, first, include_scope_owner_body))
             .flatten();
+        let header_owner = self.header_owner_classifier(scope);
         self.with_resolver(scope, |resolver| {
             let mut failure = None;
             let mut advance = |candidate| {
@@ -840,8 +856,13 @@ impl ProductionSignatureSemantics<'_> {
                     }
                 }
             }
-            let inherited = || {
-                for &owner in &lexical_owners {
+            // As in `qualified_scoped_classifier_binding`: only the header owner's own inherited
+            // classifiers are `deferred` past the file and imports.
+            let inherited = |deferred: bool| {
+                for &owner in lexical_owners
+                    .iter()
+                    .filter(|&&owner| (Some(owner) == header_owner) == deferred)
+                {
                     match resolver.nested_classifier(Ty::obj_name(owner), first) {
                         crate::symbol_resolver::CandidateSelection::Selected(classifier) => {
                             let (selected, _) = resolver
@@ -860,28 +881,26 @@ impl ProductionSignatureSemantics<'_> {
                 }
                 crate::symbol_resolver::CandidateSelection::None
             };
-            if !header_scope {
-                match inherited() {
-                    crate::symbol_resolver::CandidateSelection::Selected(classifier) => {
-                        return Some((
-                            Some(
-                                crate::symbol_resolver::CompletedClassifierPath::ordinary_root(
-                                    classifier,
-                                ),
+            match inherited(false) {
+                crate::symbol_resolver::CandidateSelection::Selected(classifier) => {
+                    return Some((
+                        Some(
+                            crate::symbol_resolver::CompletedClassifierPath::ordinary_root(
+                                classifier,
                             ),
-                            None,
-                        ));
-                    }
-                    crate::symbol_resolver::CandidateSelection::Ambiguous => {
-                        return Some((
-                            None,
-                            Some(crate::symbol_resolver::ClassifierMiss::Unresolved(
-                                first.to_string(),
-                            )),
-                        ));
-                    }
-                    crate::symbol_resolver::CandidateSelection::None => {}
+                        ),
+                        None,
+                    ));
                 }
+                crate::symbol_resolver::CandidateSelection::Ambiguous => {
+                    return Some((
+                        None,
+                        Some(crate::symbol_resolver::ClassifierMiss::Unresolved(
+                            first.to_string(),
+                        )),
+                    ));
+                }
+                crate::symbol_resolver::CandidateSelection::None => {}
             }
             let (selection, failed_segment) =
                 resolver.qualified_type_classifier_binding_in_scope(spelling);
@@ -906,28 +925,26 @@ impl ProductionSignatureSemantics<'_> {
                     }
                 }
             }
-            if header_scope {
-                match inherited() {
-                    crate::symbol_resolver::CandidateSelection::Selected(classifier) => {
-                        return Some((
-                            Some(
-                                crate::symbol_resolver::CompletedClassifierPath::ordinary_root(
-                                    classifier,
-                                ),
+            match inherited(true) {
+                crate::symbol_resolver::CandidateSelection::Selected(classifier) => {
+                    return Some((
+                        Some(
+                            crate::symbol_resolver::CompletedClassifierPath::ordinary_root(
+                                classifier,
                             ),
-                            None,
-                        ));
-                    }
-                    crate::symbol_resolver::CandidateSelection::Ambiguous => {
-                        return Some((
-                            None,
-                            Some(crate::symbol_resolver::ClassifierMiss::Unresolved(
-                                first.to_string(),
-                            )),
-                        ));
-                    }
-                    crate::symbol_resolver::CandidateSelection::None => {}
+                        ),
+                        None,
+                    ));
                 }
+                crate::symbol_resolver::CandidateSelection::Ambiguous => {
+                    return Some((
+                        None,
+                        Some(crate::symbol_resolver::ClassifierMiss::Unresolved(
+                            first.to_string(),
+                        )),
+                    ));
+                }
+                crate::symbol_resolver::CandidateSelection::None => {}
             }
             Some((
                 None,

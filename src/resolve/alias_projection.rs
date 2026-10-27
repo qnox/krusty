@@ -63,6 +63,9 @@ fn alias_target_star_bounds(
         TyKind::PlatformNullable(inner) => {
             Ty::platform_nullable(alias_target_star_bounds(inner, classifier))
         }
+        TyKind::MutabilityFlexible(inner) => {
+            Ty::mutability_flexible(alias_target_star_bounds(inner, classifier))
+        }
         TyKind::DefinitelyNotNull(inner) => Ty::from(TyKind::DefinitelyNotNull(
             alias_target_star_bounds(inner, classifier),
         )),
@@ -154,6 +157,7 @@ fn generated_star_argument(ty: Ty) -> bool {
         TyKind::StarProjection(_) => true,
         TyKind::Nullable(inner)
         | TyKind::PlatformNullable(inner)
+        | TyKind::MutabilityFlexible(inner)
         | TyKind::DefinitelyNotNull(inner)
         | TyKind::InProjection(inner)
         | TyKind::OutProjection(inner) => generated_star_argument(inner),
@@ -562,6 +566,7 @@ fn note_template_conflicts(
         }
         TyKind::Nullable(inner)
         | TyKind::PlatformNullable(inner)
+        | TyKind::MutabilityFlexible(inner)
         | TyKind::DefinitelyNotNull(inner)
         | TyKind::StarProjection(inner)
         | TyKind::RawProjection(inner) => note_template_conflicts(inner, bindings, conflicting),
@@ -591,6 +596,7 @@ fn projected_formal(inner: Ty) -> Option<String> {
         TyKind::TyParam(name, _) => Some(name.to_string()),
         TyKind::Nullable(inner)
         | TyKind::PlatformNullable(inner)
+        | TyKind::MutabilityFlexible(inner)
         | TyKind::DefinitelyNotNull(inner) => projected_formal(inner),
         _ => None,
     }

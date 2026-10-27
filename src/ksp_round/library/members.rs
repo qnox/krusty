@@ -292,6 +292,7 @@ impl MemberView<'_> {
                 annotations,
                 parameter,
                 jvm_name: None,
+                returns_property_type: false,
             }
         };
         KspProperty {

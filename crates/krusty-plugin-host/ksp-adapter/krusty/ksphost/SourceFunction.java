@@ -1,5 +1,6 @@
 package krusty.ksphost;
 
+import com.google.devtools.ksp.UtilsKt;
 import com.google.devtools.ksp.symbol.FunctionKind;
 import com.google.devtools.ksp.symbol.KSAnnotation;
 import com.google.devtools.ksp.symbol.KSDeclaration;
@@ -110,6 +111,14 @@ final class SourceFunction implements KSFunctionDeclaration {
 
     @Override
     public KSDeclaration findOverridee() {
+        // A constructor overrides nothing, and neither does a written function without
+        // `override`; a generated one's `override` (a data class's `componentN`) says nothing.
+        if (UtilsKt.isConstructor(this)
+                || (origin == Origin.KOTLIN
+                        && modifiers != null
+                        && !modifiers.contains(Modifier.OVERRIDE))) {
+            return null;
+        }
         throw Nodes.notImplemented("KSFunctionDeclaration.findOverridee");
     }
 

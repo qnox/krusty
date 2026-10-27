@@ -473,6 +473,7 @@ fn substitute_expansion_spelling(
         unsafe_variance: spelling.unsafe_variance,
         parameter_name: spelling.parameter_name.clone(),
         flexible_upper_bound: spelling.flexible_upper_bound,
+        mutability_upper_bound: spelling.mutability_upper_bound,
         enhanced_nullability: spelling.enhanced_nullability,
         actualized_expect: spelling.actualized_expect,
     }

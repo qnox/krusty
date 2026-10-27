@@ -617,8 +617,15 @@ impl Source<'_> {
                 None => Some(ty),
             });
         let modifiers = self.written_modifiers(property.declaration_span.lo);
-        let (getter, setter) =
-            self.written_accessors(subject, property, declaration, modifiers.as_deref())?;
+        let in_interface =
+            matches!(owner, Owner::Class { header, .. } if header.kind == KspClassKind::Interface);
+        let (getter, setter) = self.written_accessors(
+            subject,
+            property,
+            declaration,
+            modifiers.as_deref(),
+            in_interface,
+        )?;
         let mut described = KspProperty {
             name: property.name.clone(),
             is_mutable: property.is_var,
@@ -645,7 +652,7 @@ impl Source<'_> {
             setter,
             has_backing_field: super::backing_field::source_property_has_backing_field(
                 property,
-                matches!(owner, Owner::Class { header, .. } if header.kind == KspClassKind::Interface),
+                in_interface,
             ),
             jvm_signature: None,
         };

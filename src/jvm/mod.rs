@@ -23,6 +23,7 @@ pub mod classreader;
 mod collection_barriers;
 mod common_metadata;
 pub mod companion;
+mod companion_storage;
 pub mod compilation_inputs;
 mod concatenated_to_string;
 mod constructor_debug;

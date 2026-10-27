@@ -658,9 +658,14 @@ pub(super) fn member_extension_lambda_shape_with(
     for shape in
         member_extension_function_shapes_in(source, receivers, call.extension_receiver, call.name)
     {
-        let Some(instantiated) =
-            instantiate_member_extension_with(probes, result_constraint, None, &shape, call)
-        else {
+        let Some(instantiated) = instantiate_member_extension_with(
+            source,
+            probes,
+            result_constraint,
+            None,
+            &shape,
+            call,
+        ) else {
             continue;
         };
         let mut lambda_shape = crate::symbol_resolver::LambdaCallShape {
