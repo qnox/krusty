@@ -1,6 +1,7 @@
 //! Read-only collection faces: kotlinc's throwing stubs for a mutable face's members, the bridges
 //! of the members a class implements, the builtin members an abstract class materializes, and the
-//! special bridges of a renamed member with a narrower result.
+//! special bridges of a renamed member with a narrower result, and those of members inherited from a
+//! Kotlin collection base.
 
 use super::common;
 
@@ -12,6 +13,8 @@ mod collection_override_signature_e2e;
 mod collection_to_array_e2e;
 #[path = "../collection_type_safe_members_e2e.rs"]
 mod collection_type_safe_members_e2e;
+#[path = "../kotlin_collection_superclass_bridges_e2e.rs"]
+mod kotlin_collection_superclass_bridges_e2e;
 #[path = "../read_only_collection_face_stubs_e2e.rs"]
 mod read_only_collection_face_stubs_e2e;
 #[path = "../read_only_iterator_stubs_e2e.rs"]

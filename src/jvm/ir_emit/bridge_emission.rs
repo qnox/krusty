@@ -998,13 +998,23 @@ fn emit_inherited_collection_bridge(
             delegate_result,
             signature: _,
         } => {
+            // A Kotlin superclass's generic member takes a reference where the class's fake
+            // override takes a scalar (`containsValue(int)` calling `containsValue(Object)`).
+            let (super_params, _) = crate::jvm::jvm_libraries::parse_method_desc(super_descriptor)
+                .expect("an inherited superclass member has a valid descriptor");
             code.aload(0);
             let mut slot = 1u16;
-            for ty in &params {
+            for (ty, super_param) in params.iter().zip(&super_params) {
                 load(*ty, slot, &mut code);
+                if ty.is_jvm_scalar() && super_param.is_reference() {
+                    box_prim_free(cw, &mut code, *ty);
+                }
                 slot += slot_words(*ty);
             }
-            let arg_words: i32 = params.iter().map(|ty| i32::from(slot_words(*ty))).sum();
+            let arg_words: i32 = super_params
+                .iter()
+                .map(|ty| i32::from(slot_words(*ty)))
+                .sum();
             let owner = owner.render();
             let method = cw.methodref(&owner, name, super_descriptor);
             let delegate_result = jvm_declared_ty(delegate_result);
@@ -1050,22 +1060,33 @@ fn emit_inherited_collection_bridge(
                     cw,
                     failure.expect("a checked inherited collection bridge has a failure result"),
                     &params,
+                    ret,
                 );
                 code.bind(pass);
             }
+            // The checked entry passes an erased argument to a scalar specialization unboxed
+            // (`containsValue(Object)` calling `containsValue(int)`).
+            let (delegate_params, _) =
+                crate::jvm::jvm_libraries::parse_method_desc(delegate_descriptor)
+                    .expect("an inherited collection bridge delegate has a valid descriptor");
             code.aload(0);
             let mut slot = 1u16;
-            for (index, ty) in params.iter().enumerate() {
+            for (index, (ty, delegate_param)) in params.iter().zip(&delegate_params).enumerate() {
                 load(*ty, slot, &mut code);
                 if let Some(cast) = cast_arguments
                     .iter()
                     .find(|cast| usize::from(cast.parameter) == index)
                 {
                     code.checkcast(cw.class_ref(&cast.class_name));
+                } else if ty.is_reference() && delegate_param.is_jvm_scalar() {
+                    unbox_prim_from(cw, &mut code, *ty, *delegate_param);
                 }
                 slot += slot_words(*ty);
             }
-            let arg_words: i32 = params.iter().map(|ty| i32::from(slot_words(*ty))).sum();
+            let arg_words: i32 = delegate_params
+                .iter()
+                .map(|ty| i32::from(slot_words(*ty)))
+                .sum();
             let owner = class.fq_name();
             let method = cw.methodref(&owner, delegate_name, delegate_descriptor);
             let delegate_result = jvm_declared_ty(delegate_result);
@@ -1204,6 +1225,7 @@ fn emit_inherited_failure(
     cw: &mut ClassWriter,
     failure: crate::jvm::mapped_builtin_declarations::CollectionBridgeFailure,
     params: &[Ty],
+    result: Ty,
 ) {
     match failure {
         crate::jvm::mapped_builtin_declarations::CollectionBridgeFailure::False => {
@@ -1222,7 +1244,13 @@ fn emit_inherited_failure(
             let index = usize::from(index);
             let ty = params[index];
             load(ty, parameter_slot(params, index), code);
-            emit_return(ty, code);
+            // A scalar default answers the boxed result (`getOrDefault(Object, int): Integer`).
+            if ty.is_jvm_scalar() && result.is_reference() {
+                box_prim_free(cw, code, ty);
+                emit_return(result, code);
+            } else {
+                emit_return(ty, code);
+            }
         }
     }
 }
