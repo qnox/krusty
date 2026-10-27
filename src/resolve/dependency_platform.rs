@@ -316,6 +316,15 @@ fn merge_type(
 }
 
 impl SymbolSource for DependencyPlatform {
+    fn classifier_declaration_name(
+        &self,
+        declaration: crate::libraries::ClassifierDeclarationKey,
+    ) -> Option<Option<crate::types::ClassifierDeclarationName>> {
+        self.source()
+            .classifier_declaration_name(declaration)
+            .or_else(|| self.platform.classifier_declaration_name(declaration))
+    }
+
     fn package_exists(&self, parent: TypeName, name: &str) -> bool {
         self.source().package_exists(parent, name) || self.platform.package_exists(parent, name)
     }
