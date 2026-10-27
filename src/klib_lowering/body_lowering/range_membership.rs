@@ -52,13 +52,15 @@ impl BodyLowering<'_> {
         if construction.params != [element] || !matches!(element, Ty::Int | Ty::Long | Ty::Char) {
             return unsupported("a membership in a range of mixed or unsigned bounds");
         }
-        if header.receiver != Some(construction.ret)
-            || header.params != [element]
-            || header.ret != Ty::Boolean
-        {
+        // A membership operator declares a `Boolean` result; any other is inconsistent evidence.
+        if header.ret != Ty::Boolean {
             return Err(mismatch(
-                "a range literal's `contains` is not the constructed range's membership operator",
+                "a range membership operator is not declared `Boolean`",
             ));
+        }
+        // Another range's or element's `contains` is a valid declaration this fold does not model.
+        if header.receiver != Some(construction.ret) || header.params != [element] {
+            return unsupported("a membership through another `contains` than the range's own");
         }
         if ty != Ty::Boolean {
             return Err(mismatch("a range membership is not typed `Boolean`"));

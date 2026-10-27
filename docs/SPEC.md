@@ -19329,7 +19329,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the source form: the value compared with both bounds, each operand evaluated once in source order,
   and no range is constructed. Dependency preparation reads the same structural form and omits the
   `contains` declaration edge, so a dependency body never calls that unprepared `contains`: a
-  membership whose operator or `contains` is not proven declines the body. The one exception is a
+  membership whose operator or `contains` is not proven declines the body. A valid declaration
+  outside this fold (the stdlib's mixed-element `LongRange.contains(Int)` extension, another range's
+  or element's `contains`) declines as an unsupported operation, never as an internal
+  inconsistency; only a membership operator not declared `Boolean` is one. The one exception is a
   `contains` that a checked source edge or retained export already needs, which stays that ordinary
   call and is never folded, so its selection and ambiguity diagnostics are preserved. An inline
   template, whose callees preparation does not fold, keeps every membership an ordinary call.
@@ -19338,6 +19341,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`Char.isSurrogate`), `stdlib_range_literal_negation_lowers_past_the_membership` (`checkRadix`),
   `stdlib_range_literal_membership_without_a_range_construction_declines`,
   `stdlib_range_literal_membership_keeps_a_selected_contains`,
+  `range_membership_producers::official_mixed_element_membership_declines_as_unsupported`,
   `a_negation_of_another_source_form_declines`, box
   `tests/box_regressions/libraryRangeMembership.kt`.
 

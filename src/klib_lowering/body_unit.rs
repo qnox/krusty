@@ -548,9 +548,11 @@ impl CallLinker for Linker<'_, '_> {
         };
         let header = raw_function_header(None, HeaderPurpose::External, arena, declaration)?;
         let (params, ret, context_count, extension_receiver, receiver) = header.linked_signature();
+        // The stdlib declares mixed-element `contains` extensions (`LongRange.contains(Int)`), a
+        // valid declaration this fold does not model rather than inconsistent evidence.
         if context_count != 0 || extension_receiver {
-            return Err(KlibBodyDeclineReason::SignatureMismatch(
-                "a range literal's `contains` is not a dispatch-receiver member".to_owned(),
+            return Err(KlibBodyDeclineReason::UnsupportedOperation(
+                "a membership through a `contains` that is not a member of the range",
             ));
         }
         Ok(Some(super::body_lowering::RangeMembershipHeader {
