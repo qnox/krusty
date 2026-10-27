@@ -207,3 +207,50 @@ fn value_class_extension_property_runs() {
         "ValueClassExtensionProperty",
     );
 }
+
+/// An overridable suspend member extension keeps its declaration as a trampoline and moves its
+/// body to the static `<name>$suspendImpl`. kotlinc names the trampoline's receiver after the
+/// mangled declaration (`$this$work_u2dwnUzFvI`) and annotates its CPS result `@Nullable`; the
+/// static takes the receiver as `$receiver`. krusty split the declaration from its body before
+/// carrying the mangle over, naming the trampoline's receiver `$this$work`, and annotated the
+/// trampoline's result from the declared value-class type.
+const SUSPEND_MEMBER_EXTENSIONS: &str = r#"import kotlin.coroutines.*
+
+@JvmInline
+value class IC(val x: Int)
+
+open class Base {
+    open suspend fun IC.work(y: IC): Int = x + y.x
+    open suspend fun String.label(y: IC): String = this + y.x
+}
+
+interface Api {
+    suspend fun IC.twice(): Int = x * 2
+}
+
+class Impl : Base(), Api
+
+fun box(): String {
+    var result = ""
+    suspend {
+        with(Impl()) {
+            result = "" + IC(1).work(IC(2)) + "k".label(IC(3)) + IC(4).twice()
+        }
+    }.startCoroutine(Continuation(EmptyCoroutineContext) { it.getOrThrow() })
+    return if (result == "3k38") "OK" else result
+}
+"#;
+
+#[test]
+fn a_suspend_member_extension_trampoline_names_its_mangled_receiver() {
+    common::assert_classes_identical_to_kotlinc(
+        "SuspendMemberExtensions",
+        SUSPEND_MEMBER_EXTENSIONS,
+        &["Base", "Api", "Api$DefaultImpls"],
+    );
+}
+
+#[test]
+fn suspend_member_extensions_run() {
+    common::expect_box_ok_with_stdlib(SUSPEND_MEMBER_EXTENSIONS, "SuspendMemberExtensions");
+}

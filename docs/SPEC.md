@@ -20827,8 +20827,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   under, before the rename (`$this$top2`). The value-class pass records the `-<hash>` suffix it
   appended to any other function (`IrFile::value_class_mangle_suffixes`); the JVM local-table
   projection formats the receiver from the source name and that suffix
-  (`jvm/parameter_names.rs`). Test:
-  `tests/value_class_mangled_names_e2e.rs::an_extension_receiver_is_named_after_the_mangled_function`.
+  (`jvm/parameter_names.rs`). An overridable suspend member's split keeps the fact on both of its
+  physical methods (`jvm/suspend_impls.rs`): the trampoline is the declaration and names its
+  receiver `$this$work_u2dwnUzFvI`, while the `$suspendImpl` body carrier names it `$receiver`.
+  Tests:
+  `tests/value_class_mangled_names_e2e.rs::an_extension_receiver_is_named_after_the_mangled_function`,
+  `a_suspend_member_extension_trampoline_names_its_mangled_receiver`.
+- **A split suspend member's trampoline annotates its CPS result `@Nullable`.** The trampoline that
+  stays the declaration of an overridable suspend member returns the body carrier's `Object`, the
+  value or `COROUTINE_SUSPENDED`, and kotlinc annotates it `@Nullable` like any suspend function's.
+  The suspend pass recorded only the body carrier as suspend, so a trampoline carrying a value-class
+  declaration signature (`open suspend fun IC.work(y: IC): Int`) took `@NotNull` from its declared
+  `Int`
+  (`jvm/ir_emit/declared_nullability.rs`, `jvm/suspend_impls.rs::is_suspend_trampoline`). Test:
+  `tests/value_class_mangled_names_e2e.rs::a_suspend_member_extension_trampoline_names_its_mangled_receiver`.
 
 - **Classes with value-class constructor parameters publish full metadata; secondary VC ctors get
   the marker ABI.** The blanket "no @Metadata for a value-param ctor class" decline is lifted — the
