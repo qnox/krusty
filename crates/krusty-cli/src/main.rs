@@ -669,10 +669,7 @@ pub fn compile(opts: &cli::Options) -> Result<usize, String> {
         if diagnostic.severity != krusty::diag::Severity::Warning {
             return true;
         }
-        match opts
-            .warning_policy
-            .compiler_disposition(diagnostic.warning_name)
-        {
+        match opts.warning_policy.compiler_disposition(diagnostic.name) {
             cli::WarningDisposition::Disabled => false,
             cli::WarningDisposition::Warning => true,
             cli::WarningDisposition::Error => {

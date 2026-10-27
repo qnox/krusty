@@ -4,6 +4,8 @@ use crate::types::TypeName;
 
 pub mod names;
 
+pub use names::DiagnosticName;
+
 /// A byte range into the source file. `u32` offsets keep this 8 bytes (data-oriented).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct Span {
@@ -21,137 +23,6 @@ impl Span {
 pub enum Severity {
     Error,
     Warning,
-}
-
-/// Stable compiler-warning names exposed through kotlinc's `-Xwarning-level` contract.
-///
-/// This is separate from [`DiagnosticIdentity`]: a warning name selects command-line policy,
-/// while an identity says when two reports describe the same semantic occurrence.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-pub enum CompilerWarningName {
-    DataClassCopyVisibilityWillBeChanged,
-    DataClassInvisibleCopyUsage,
-    ClassLiteralLhsNotAClass,
-    Deprecation,
-    DeprecationErrorMigrationPeriodWarning,
-    ExplicitTypeArgumentsInPropertyAccess,
-    InapplicableOperatorModifier,
-    ParenthesizedPackageQualifier,
-    TypeIntersectionAsReified,
-    TypeIntersectionAsReifiedDeprecation,
-    TypeParameterAsReifiedDeprecation,
-    TypeArgumentsNotAllowed,
-    TypeArgumentsNotAllowedInPackageQualifier,
-    WrongNumberOfTypeArgumentsInGetClass,
-    ValueClassCannotBeRecursiveViaTypeParameters,
-}
-
-impl CompilerWarningName {
-    pub const ALL: [Self; 15] = [
-        Self::DataClassCopyVisibilityWillBeChanged,
-        Self::DataClassInvisibleCopyUsage,
-        Self::ClassLiteralLhsNotAClass,
-        Self::Deprecation,
-        Self::DeprecationErrorMigrationPeriodWarning,
-        Self::ExplicitTypeArgumentsInPropertyAccess,
-        Self::InapplicableOperatorModifier,
-        Self::ParenthesizedPackageQualifier,
-        Self::TypeIntersectionAsReified,
-        Self::TypeIntersectionAsReifiedDeprecation,
-        Self::TypeParameterAsReifiedDeprecation,
-        Self::TypeArgumentsNotAllowed,
-        Self::TypeArgumentsNotAllowedInPackageQualifier,
-        Self::WrongNumberOfTypeArgumentsInGetClass,
-        Self::ValueClassCannotBeRecursiveViaTypeParameters,
-    ];
-
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::DataClassCopyVisibilityWillBeChanged => {
-                "DATA_CLASS_COPY_VISIBILITY_WILL_BE_CHANGED_WARNING"
-            }
-            Self::DataClassInvisibleCopyUsage => "DATA_CLASS_INVISIBLE_COPY_USAGE_WARNING",
-            Self::ClassLiteralLhsNotAClass => "CLASS_LITERAL_LHS_NOT_A_CLASS_WARNING",
-            Self::Deprecation => "DEPRECATION",
-            Self::DeprecationErrorMigrationPeriodWarning => {
-                "DEPRECATION_ERROR_MIGRATION_PERIOD_WARNING"
-            }
-            Self::ExplicitTypeArgumentsInPropertyAccess => {
-                "EXPLICIT_TYPE_ARGUMENTS_IN_PROPERTY_ACCESS_WARNING"
-            }
-            Self::InapplicableOperatorModifier => "INAPPLICABLE_OPERATOR_MODIFIER_WARNING",
-            Self::ParenthesizedPackageQualifier => "PARENTHESIZED_PACKAGE_QUALIFIER_WARNING",
-            Self::TypeIntersectionAsReified => "TYPE_INTERSECTION_AS_REIFIED_WARNING",
-            Self::TypeIntersectionAsReifiedDeprecation => {
-                "TYPE_INTERSECTION_AS_REIFIED_DEPRECATION_WARNING"
-            }
-            Self::TypeParameterAsReifiedDeprecation => {
-                "TYPE_PARAMETER_AS_REIFIED_DEPRECATION_WARNING"
-            }
-            Self::TypeArgumentsNotAllowed => "TYPE_ARGUMENTS_NOT_ALLOWED_WARNING",
-            Self::TypeArgumentsNotAllowedInPackageQualifier => {
-                "TYPE_ARGUMENTS_NOT_ALLOWED_IN_PACKAGE_QUALIFIER_WARNING"
-            }
-            Self::WrongNumberOfTypeArgumentsInGetClass => {
-                "WRONG_NUMBER_OF_TYPE_ARGUMENTS_IN_GET_CLASS_WARNING"
-            }
-            Self::ValueClassCannotBeRecursiveViaTypeParameters => {
-                "VALUE_CLASS_CANNOT_BE_RECURSIVE_VIA_TYPE_PARAMETERS_WARNING"
-            }
-        }
-    }
-
-    pub fn parse(name: &str) -> Option<Self> {
-        Some(match name {
-            "DATA_CLASS_COPY_VISIBILITY_WILL_BE_CHANGED_WARNING" => {
-                Self::DataClassCopyVisibilityWillBeChanged
-            }
-            "DATA_CLASS_INVISIBLE_COPY_USAGE_WARNING" => Self::DataClassInvisibleCopyUsage,
-            "CLASS_LITERAL_LHS_NOT_A_CLASS_WARNING" => Self::ClassLiteralLhsNotAClass,
-            "DEPRECATION" => Self::Deprecation,
-            "DEPRECATION_ERROR_MIGRATION_PERIOD_WARNING" => {
-                Self::DeprecationErrorMigrationPeriodWarning
-            }
-            "EXPLICIT_TYPE_ARGUMENTS_IN_PROPERTY_ACCESS_WARNING" => {
-                Self::ExplicitTypeArgumentsInPropertyAccess
-            }
-            "INAPPLICABLE_OPERATOR_MODIFIER_WARNING" => Self::InapplicableOperatorModifier,
-            "PARENTHESIZED_PACKAGE_QUALIFIER_WARNING" => Self::ParenthesizedPackageQualifier,
-            "TYPE_INTERSECTION_AS_REIFIED_WARNING" => Self::TypeIntersectionAsReified,
-            "TYPE_INTERSECTION_AS_REIFIED_DEPRECATION_WARNING" => {
-                Self::TypeIntersectionAsReifiedDeprecation
-            }
-            "TYPE_PARAMETER_AS_REIFIED_DEPRECATION_WARNING" => {
-                Self::TypeParameterAsReifiedDeprecation
-            }
-            "TYPE_ARGUMENTS_NOT_ALLOWED_WARNING" => Self::TypeArgumentsNotAllowed,
-            "TYPE_ARGUMENTS_NOT_ALLOWED_IN_PACKAGE_QUALIFIER_WARNING" => {
-                Self::TypeArgumentsNotAllowedInPackageQualifier
-            }
-            "WRONG_NUMBER_OF_TYPE_ARGUMENTS_IN_GET_CLASS_WARNING" => {
-                Self::WrongNumberOfTypeArgumentsInGetClass
-            }
-            "VALUE_CLASS_CANNOT_BE_RECURSIVE_VIA_TYPE_PARAMETERS_WARNING" => {
-                Self::ValueClassCannotBeRecursiveViaTypeParameters
-            }
-            _ => return None,
-        })
-    }
-}
-
-#[cfg(test)]
-mod warning_name_tests {
-    use super::CompilerWarningName;
-
-    #[test]
-    fn every_compiler_warning_name_round_trips_through_its_wire_spelling() {
-        let names = CompilerWarningName::ALL;
-        assert_eq!(
-            names.map(|name| CompilerWarningName::parse(name.as_str())),
-            names.map(Some)
-        );
-        assert_eq!(CompilerWarningName::parse("UNKNOWN_WARNING"), None);
-    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
@@ -186,8 +57,9 @@ pub struct Diagnostic {
     /// Optional editor-facing source range.
     pub editor_span: Option<Span>,
     pub severity: Severity,
-    /// The `-Xwarning-level` identity of a warning, when kotlinc exposes one.
-    pub warning_name: Option<CompilerWarningName>,
+    /// kotlinc's name for this diagnostic, the identity `-Xwarning-level` selects. Diagnostics
+    /// whose report does not name its kotlinc factory yet carry `None`.
+    pub name: Option<DiagnosticName>,
     pub kind: DiagnosticKind,
     pub msg: String,
     pub identity: Option<DiagnosticIdentity>,
@@ -288,12 +160,12 @@ impl DiagSink {
         self.push_warning(span, None, msg.into());
     }
 
-    /// Report a warning whose stable name can be configured through `-Xwarning-level`.
-    pub fn warning_named(&mut self, span: Span, name: CompilerWarningName, msg: impl Into<String>) {
+    /// Report a warning under its kotlinc name, which `-Xwarning-level` can configure.
+    pub fn warning_named(&mut self, span: Span, name: DiagnosticName, msg: impl Into<String>) {
         self.push_warning(span, Some(name), msg.into());
     }
 
-    fn push_warning(&mut self, span: Span, name: Option<CompilerWarningName>, msg: String) {
+    fn push_warning(&mut self, span: Span, name: Option<DiagnosticName>, msg: String) {
         if !self.accepts(span) {
             return;
         }
@@ -301,7 +173,7 @@ impl DiagSink {
             span,
             editor_span: None,
             severity: Severity::Warning,
-            warning_name: name,
+            name,
             kind: DiagnosticKind::Compiler,
             msg,
             identity: None,
@@ -323,7 +195,7 @@ impl DiagSink {
             span,
             editor_span: None,
             severity: Severity::Error,
-            warning_name: None,
+            name: None,
             kind,
             msg,
             identity: None,
@@ -351,7 +223,7 @@ impl DiagSink {
             span,
             editor_span: None,
             severity: Severity::Error,
-            warning_name: None,
+            name: None,
             kind: DiagnosticKind::Compiler,
             msg,
             identity: Some(identity),
@@ -379,7 +251,7 @@ impl DiagSink {
             span,
             editor_span: Some(editor_span),
             severity: Severity::Error,
-            warning_name: None,
+            name: None,
             kind: DiagnosticKind::Compiler,
             msg,
             identity: None,
@@ -402,7 +274,7 @@ impl DiagSink {
                 seen_identities.insert((
                     diagnostic.file,
                     diagnostic.severity,
-                    diagnostic.warning_name,
+                    diagnostic.name,
                     diagnostic.kind,
                     identity,
                 ))
@@ -412,7 +284,7 @@ impl DiagSink {
                     diagnostic.span,
                     diagnostic.editor_span,
                     diagnostic.severity,
-                    diagnostic.warning_name,
+                    diagnostic.name,
                     diagnostic.kind,
                     diagnostic.msg.clone(),
                 ))
@@ -542,20 +414,17 @@ mod tests {
     }
 
     #[test]
-    fn warning_policy_name_is_part_of_duplicate_identity() {
+    fn kotlinc_name_is_part_of_duplicate_identity() {
         let mut s = DiagSink::new();
         let span = Span::new(3, 4);
         s.warning(span, "same rendering");
-        s.warning_named(span, CompilerWarningName::Deprecation, "same rendering");
+        s.warning_named(span, names::DEPRECATION, "same rendering");
 
         s.collapse_duplicates();
 
         assert_eq!(s.diags.len(), 2, "{:?}", s.diags);
-        assert_eq!(s.diags[0].warning_name, None);
-        assert_eq!(
-            s.diags[1].warning_name,
-            Some(CompilerWarningName::Deprecation)
-        );
+        assert_eq!(s.diags[0].name, None);
+        assert_eq!(s.diags[1].name, Some(names::DEPRECATION));
     }
 
     #[test]

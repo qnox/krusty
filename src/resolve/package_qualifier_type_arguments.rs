@@ -118,7 +118,7 @@ impl Checker<'_> {
             list.span,
             forbidden,
             warning.as_deref(),
-            crate::diag::CompilerWarningName::TypeArgumentsNotAllowed,
+            crate::diag::names::TYPE_ARGUMENTS_NOT_ALLOWED_WARNING,
             MESSAGE,
         );
     }
