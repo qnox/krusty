@@ -13781,7 +13781,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   arguments in the child context: `Base<T>.set(T)` suppresses the parent's stub but not an applied
   child's `set(String)` stub and erased bridge. A concrete generic intermediate's existing stub is
   still inherited rather than repeated. The stubs never enter Kotlin metadata. The collection faces
-  (`Iterable`, `Collection`, `List`, `Set`, `Map`, `Map.Entry`), with `removeAt`, the lifted
+  (`Iterable`, `List`, `Set`, `Map`, `Map.Entry`; `Collection` is below), with `removeAt`, the lifted
   `iterator` result types, the JDK members and `toArray`, follow in later slices. Tests:
   `tests/read_only_iterator_stubs_e2e.rs`. Corpus: `objects/useAnonymousObjectAsIterator.kt`,
   `builtinStubMethods/customReadOnlyIterator.kt`.
@@ -13835,6 +13835,30 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   The inherited adapter casts nothing, so `java.util.ListIterator.set(1)` reaches the member.
   Tests: `tests/read_only_stub_override_return_e2e.rs` (class bytes and box runs against kotlinc,
   with calls through `java.util.ListIterator.set`).
+- **A read-only `Collection` gets the mutable `java.util.Collection` members as stubs.** A class
+  that implements `kotlin.collections.Collection` but not `MutableCollection` gets kotlinc's
+  throwing stubs, in `MutableCollection`'s order, for each mutable member it does not implement:
+  `add`, `remove`, `addAll`, `removeAll`, `retainAll`, `clear` (and `iterator` when abstract). Each
+  stub is written in the signature kotlinc gives that exact declaration, chosen from the
+  declaration's owner, name and erased descriptor: `remove(Object)` is type-safely erased,
+  `addAll(Collection<? extends E>)` keeps its declaration-site wildcard, and
+  `removeAll`/`retainAll(Collection<?>)` are star-projected. The override check lifts a mutable
+  collection result to its read-only counterpart (kotlinc's `liftStubMethodReturnType`), so a
+  declared `iterator(): Iterator<E>` implements `MutableIterator<E>`. A `Collection<Int>` stub is
+  `add(int)` with a throwing `add(Object)` bridge; a generic `Bag<T>`'s `add(T)` needs no bridge.
+  A member the class declares (`fun add(element: String)`, `fun clear()`) writes no stub, and its
+  forwarding `add(Object)` bridge takes the declaration's place among the ordinary bridges, which
+  are ordered by their target function or, for a property accessor bridge (`size()`), by the
+  class's own property it implements. A member implements a type-safe declaration by the
+  declaration's substituted parameters, not its erased stub: a declared
+  `fun remove(element: String)` implements `remove(Object)`, which becomes kotlinc's
+  `ACC_PUBLIC|ACC_FINAL|ACC_BRIDGE` special bridge returning `false` unless the argument is
+  `instanceof String` (or `null`, for a `String?`), and an inherited `Base<T>.remove(e: T)` under
+  `Base<String>` already has the erased descriptor, so nothing is written for it. The List, Set
+  and Map faces, the JDK members (`removeIf`),
+  `toArray`, the `Collection<?>` signature of a declared `containsAll` override and an abstract
+  class's fake-override bridges follow in later slices. Tests:
+  `tests/read_only_collection_face_stubs_e2e.rs` (member bytes and box runs against kotlinc).
 - **A nested value class over a reference carrier is read as its carrier.** In `ZN(val z: Z1?)`
   with `Z1(val x: En)`, `Z1?` is carried as `En?`, so `zn.z` and `zn.z!!` already are `Z1`'s
   carrier and `.x` of them is that carrier itself, with no cast. krusty took the unboxed property
