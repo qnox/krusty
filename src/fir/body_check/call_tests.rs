@@ -4,9 +4,10 @@ use super::test_support::{
     checked_source_set_function_body, jvm_semantics, jvm_stdlib_semantics, root_expression,
 };
 use super::*;
-use crate::fir::{FirExpressionDebugLines, FirInlineBodyPlan};
+use crate::fir::FirInlineBodyPlan;
 use crate::types::TyKind;
 mod collection_call_plans;
+mod debug_lines;
 
 struct DependencyDefaultSource {
     name: &'static str,
@@ -4742,48 +4743,6 @@ fn generic_overloads_use_the_primary_class_bound_for_declaration_identity() {
         .expect("selected generic overload call");
     assert_eq!(root.ty.get(), Ty::String);
     assert!(matches!(root.kind, FirExprKind::Call(_)));
-}
-
-#[test]
-fn multiline_member_call_keeps_the_selected_call_source_and_end_lines() {
-    let (body, index) = checked_function_body(
-        "class Recorder {\n\
-             suspend fun save(label: String, value: Int): Int = value\n\
-         }\n\
-         suspend fun work(recorder: Recorder): Int {\n\
-             val result = recorder.save(\n\
-                 value = 3,\n\
-                 label = \"entry\",\n\
-             )\n\
-             return result\n\
-         }\n",
-        "work",
-    );
-    let call = (0..body.expression_count())
-        .map(|raw| FirExprId::from_raw(raw as u32))
-        .find(|expression| {
-            let Some(FirExpr {
-                kind: FirExprKind::Call(call),
-                ..
-            }) = body.expr(*expression)
-            else {
-                return false;
-            };
-            call.target
-                .module()
-                .and_then(|target| index.callable_name(target))
-                == Some("save")
-        })
-        .expect("selected suspend member call");
-    assert_eq!(
-        body.expression_debug_lines(call),
-        FirExpressionDebugLines {
-            start: 5,
-            source: 5,
-            end: 8,
-            positionless: false
-        }
-    );
 }
 
 /// `a + b` selects the same generic operator as `a.plus(b)` and publishes the type arguments that
