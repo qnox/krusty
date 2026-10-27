@@ -1,4 +1,5 @@
-//! Line numbers around an unsigned bitwise `constructor-impl` match kotlinc.
+//! Line numbers around an unsigned bitwise `constructor-impl`, and around an inline-only unsigned
+//! operator whose arguments are read in place, match kotlinc.
 //!
 //! Those members are inline-only. kotlinc drops the callee's own line numbers and, after the
 //! body, either writes the caller's line again (inside a condition, on the jump) or forgets it so
@@ -11,6 +12,14 @@
 //! that line twice at the receiver load. A loop condition keeps an unsigned test's line on the
 //! receiver load. The other argument, when it is a plain local, records
 //! no line of its own.
+//!
+//! An operator such as `plus` is inlined with its arguments read in place. kotlinc generates them
+//! before the call marks its line and then moves their code, line labels included, to where the
+//! body loads them; a declaration or a `return` marks its line only once its value is on the
+//! stack. In `fun f(x: UInt) = x + 1u` the receiver is the caller's local, the literal marks the
+//! line first, and the call's own mark repeats it, so the entry sits on the literal. Two local
+//! operands mark nothing, so the line stays where the body begins. An assignment, a condition and
+//! an intrinsic such as `toString()` mark their line before their operand and keep it there.
 
 use super::common;
 
@@ -118,4 +127,65 @@ fun readU(readNextByte: () -> Byte): UInt {\n\
 #[test]
 fn unsigned_bitwise_lines_match_kotlinc() {
     expect_class_matches("UnsignedBitwiseLines", LINES, "UnsignedBitwiseLinesKt");
+}
+
+const OPERATOR_LINES: &str = "fun g(): UInt = 1u\n\
+\n\
+fun expressionBody(x: UInt) = x + 1u\n\
+\n\
+fun returned(x: UInt): UInt {\n\
+    return x + 1u\n\
+}\n\
+\n\
+fun declared(x: UInt): UInt {\n\
+    val y = x + 1u\n\
+    return y\n\
+}\n\
+\n\
+fun nextLine(x: UInt) =\n\
+    x + 1u\n\
+\n\
+fun operatorOnNextLine(x: UInt) = x +\n\
+    1u\n\
+\n\
+fun explicitCall(x: UInt) = x.plus(1u)\n\
+\n\
+fun callArgument(x: UInt) = x + g()\n\
+\n\
+fun ulong(x: ULong) = x * 10uL\n\
+\n\
+fun literalReceiver(x: UInt) = 1u + x\n\
+\n\
+fun bothLocals(x: UInt, y: UInt) = x * y\n\
+\n\
+fun conversion(x: UInt) = x.toLong()\n\
+\n\
+fun assigned(x: UInt): UInt {\n\
+    var y = x\n\
+    y = y + 2u\n\
+    return y\n\
+}\n\
+\n\
+fun compound(x: UInt): UInt {\n\
+    var y = x\n\
+    y += 5u\n\
+    return y\n\
+}\n\
+\n\
+fun condition(x: UInt): Int {\n\
+    if (x + 1u == 0u) return 1\n\
+    return 0\n\
+}\n\
+\n\
+fun rendered(x: UInt) = (x + 1u).toString()\n\
+\n\
+fun element(xs: List<UInt>) = xs[0] + 1u\n";
+
+#[test]
+fn unsigned_operator_lines_match_kotlinc() {
+    expect_class_matches(
+        "UnsignedOperatorLines",
+        OPERATOR_LINES,
+        "UnsignedOperatorLinesKt",
+    );
 }

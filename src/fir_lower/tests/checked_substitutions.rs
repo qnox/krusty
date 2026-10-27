@@ -31,6 +31,7 @@ fn external_call_keeps_checked_type_substitutions_until_provider_realization() {
                 inline_plan: None,
                 extension_receiver_parameter: None,
                 semantic_role: Some(crate::types::SemanticCallRole::KotlinAnyToString),
+                intrinsic_const: false,
                 overridden_declarations: Box::new([]),
             },
             dispatch_receiver: None,

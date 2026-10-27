@@ -1437,6 +1437,9 @@ impl Emitter<'_> {
         let Some(&line) = self.ir.expr_lines.get(&statement) else {
             return;
         };
+        // kotlinc's `visitStatementContainer` marks no line for a statement apart from its
+        // expression, so this eager entry is the statement value's own until that value marks it.
+        code.mark_value_boundary(statement);
         // A dispatch owns the line entry at the physical call, so this writes no second entry
         // and the statement keeps its source line. Otherwise the marked line is the mapped
         // output line of an inline copy: a later instruction that returns to this statement
