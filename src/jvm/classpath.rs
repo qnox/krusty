@@ -1053,6 +1053,7 @@ struct BuiltinFunction {
 }
 
 struct BuiltinClass {
+    declaration_name: crate::types::ClassifierDeclarationName,
     supertypes: TypeNameList,
     /// Supertypes with type arguments, used when no JVM class generic signature is available.
     supertype_tys: Vec<Ty>,
@@ -1077,6 +1078,8 @@ struct BuiltinClass {
 /// The generic declaration facts decoded from one builtin classifier. They travel together so no
 /// provider consumer can observe formals without their parallel bounds.
 pub(super) struct BuiltinClassSignature {
+    pub(super) declaration: TypeName,
+    pub(super) declaration_name: crate::types::ClassifierDeclarationName,
     pub(super) formals: Vec<String>,
     pub(super) formal_bounds: Vec<Vec<Ty>>,
     pub(super) supertypes: Vec<Ty>,
@@ -1140,6 +1143,7 @@ impl BuiltinsFile {
             });
         }
         for (internal, class) in package.classes {
+            let declaration_name = crate::libraries::metadata_declaration_name(&internal);
             let companion_object = class
                 .companion_name
                 .as_ref()
@@ -1222,6 +1226,7 @@ impl BuiltinsFile {
             file.classes.insert(
                 canonical,
                 BuiltinClass {
+                    declaration_name,
                     supertypes,
                     supertype_tys,
                     formals,
@@ -2316,6 +2321,8 @@ impl Classpath {
                     "builtin formals and bounds must be decoded in parallel"
                 );
                 BuiltinClassSignature {
+                    declaration: kotlin,
+                    declaration_name: class.declaration_name.clone(),
                     formals: class.formals.clone(),
                     formal_bounds: class.formal_bounds.clone(),
                     supertypes: class.supertype_tys.clone(),

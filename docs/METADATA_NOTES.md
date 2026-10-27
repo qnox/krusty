@@ -16,6 +16,16 @@ the current declaration's precedence over classpath rows. Local and anonymous im
 retain their existing provenance. This changes no Kotlin metadata class-ID encoding; aliases and
 builtin ownership evidence belong to the remaining metadata handoff.
 
+## Builtin declaration-name evidence
+
+Capture raw builtin Class names before name-tree normalization, so a literal dollar remains
+distinct from the metadata's classifier separator. The selected builtin signature carries its
+own declaration identity and name; a mapped physical class does not supply that semantic owner.
+Exact physical classifiers retain their own classfile/Kotlin metadata authority. Compiler-owned
+function, array, reflection and JVM Cloneable factories publish names from their existing
+declaration definitions. These facts are input to the later metadata name consumer; this producer
+change does not itself repair the retained complete-classfile literal-dollar regression.
+
 ## Declaration-name evidence
 
 Kotlin metadata class IDs delimit the package with `/` and lexical classifier ownership with `.`;

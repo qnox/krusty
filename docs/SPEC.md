@@ -18,6 +18,15 @@ Anonymous classes, reference carriers and checked body-local naming keep their s
 Complete table comparisons cover top-level and nested literal-dollar names in both source orders.
 Metadata class-ID encoding and source-name publication remain separate follow-ups.
 
+## Builtin declaration names
+
+Language-owned classifier factories retain their admitted package and exact segment. Function
+families derive identity and declaration name from the same family/arity definition; array names
+come from the existing canonical array inventory. Decoded builtin metadata retains raw classifier
+ownership independently of a physical JVM realization. A selected Kotlin builtin name applies only
+to its declared semantic identity. An exact physical classifier keeps its own metadata authority,
+including unknown ownership when its Kotlin metadata supplies no name.
+
 ## Classifier declaration-name ownership
 
 A non-local classifier retains its exact declaration segment and either its package or its
