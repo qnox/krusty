@@ -47,6 +47,12 @@ front-to-back so the streaming/arena shape is real from the start, then widened.
 
 Legend: ✅ done · 🚧 in progress · ⬜ todo
 
+## Preserve classifier name evidence at projection boundaries
+
+Copy source header declaration names into finalized module provider shapes. Retain optional
+annotation names from decoded module metadata until annotation shape publication. These close two
+producer omissions; the metadata name inventory/query and class-ID consumers remain separate work.
+
 ## Anonymous construction argument scope
 
 Primary constructor argument checking has a dedicated owner. Anonymous base arguments use the

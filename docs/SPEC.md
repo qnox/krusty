@@ -46,6 +46,13 @@ synthetic payload. Missing declaration ownership does not authorize a classfile-
 visibility and metadata local-name indices both exclude non-local ownership; a public member of a
 local class still carries a local class ID.
 
+## Declaration-name projection
+
+A finalized source classifier keeps its declaration-name fact when projected into a common
+provider shape. Optional-expectation annotations without JVM classfiles keep their raw module
+metadata name through publication. Exact segments and lexical ownership remain snapshot-owned;
+a later declaration with the same flattened identity cannot change an earlier snapshot's fact.
+
 ## JVM generic result consumption
 
 A checked generic call's declaration-result coercion can retain its recorded reference slot until
