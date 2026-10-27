@@ -1,5 +1,12 @@
 # `@kotlin.Metadata` — reverse-engineering notes (Phase 4b)
 
+## Numeric dependency slot representation
+
+Wasm keeps the emitted generic function's declared parameter/result types beside its exact export
+identity. The checked application selects Int or Long for a declared formal, authorizing the
+corresponding ABI adapter without reconstructing substitutions from receiver or operand types.
+Each box retains the AnyTable prefix, a nullable interface-table slot, and its full signed payload.
+
 ## Null-pointer exception storage
 
 The platform NullPointerException declaration carries the existing runtime-exception storage role.

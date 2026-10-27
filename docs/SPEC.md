@@ -1,5 +1,16 @@
 # krusty — a memory-lean Kotlin→JVM compiler PoC
 
+## Wasm numeric dependency ABI
+
+An authenticated generic dependency slot applied as non-null Int or Long crosses the exported
+reference ABI through a distinct full-width numeric box. The checked application owns the scalar
+type; the retained export owns the declared slot. Argument and result adapters stay at that call
+edge. Operand subexpressions and source casts retain their own conversion rules.
+`genericNumericExtremes.kt` checks signed limits and reordered named arguments;
+`genericDependencyNullBoundaries.kt` checks nullable generic arguments and catchable null failures.
+The existing `genericDependencyAbi.kt` covers source and serialized extension receiver positions
+and evaluation counts. Reference null failures use the separate typed assertion implementation.
+
 ## Wasm reference not-null assertions
 
 A failed reference `!!` throws the platform declaration's `NullPointerException` through the

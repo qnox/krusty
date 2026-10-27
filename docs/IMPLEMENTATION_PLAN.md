@@ -1,5 +1,12 @@
 # krusty — implementation plan
 
+## Wasm generic numeric call edges
+
+Realize declared type-parameter slots applied as Int or Long with separate full-width GC payloads
+and the ordinary object/table prefix. Adapt only authenticated dependency arguments and results;
+evaluate each operand under its existing conversion rules. Typed reference null assertions are a
+prerequisite. Boxed Any operations and additional scalar kinds remain separate follow-ups.
+
 ## Wasm reference assertion exceptions
 
 Authenticate NullPointerException storage through the existing platform exception declaration

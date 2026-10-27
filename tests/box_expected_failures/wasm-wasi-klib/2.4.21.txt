@@ -5671,7 +5671,6 @@ regressions/directInvokeNameBasedDestructuring.kt
 regressions/floatingRangeContainsMixedWidths.kt
 regressions/functionLiteralAsLastExpressionInBlock.kt
 regressions/generic.kt
-regressions/genericDependencyAbi.kt
 regressions/hashCodeNPE.kt
 regressions/inlineCallsInInitializerLambda.kt
 regressions/kt10143.kt

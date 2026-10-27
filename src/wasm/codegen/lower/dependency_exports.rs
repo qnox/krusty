@@ -150,12 +150,6 @@ impl Body<'_> {
                 "a dependency export whose declared operand count disagrees with its call".into(),
             );
         }
-        numeric_references::authenticate_numeric_formals(
-            &callable.params,
-            &instantiated.parameters,
-            callable.ret,
-            instantiated.result,
-        )?;
         match call {
             DependencyExportCall::TopLevel | DependencyExportCall::SerializedExtension => {
                 self.dependency_arguments(arguments, abi, params)?;

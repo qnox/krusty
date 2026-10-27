@@ -2,7 +2,7 @@
 //!
 //! Ordinary expressions, source casts and concrete Any parameters keep their existing lowering.
 
-use super::{carrier, Body, Ty, TyKind, Unsupported};
+use super::{Body, Ty, Unsupported};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum NumericSlot {
@@ -21,42 +21,6 @@ impl NumericSlot {
             _ => None,
         }
     }
-}
-
-/// A new numeric realization must cover every occurrence of that same declaration formal.
-/// An unrelated nullable parameter does not restrict another formal's numeric ABI. A null-only
-/// reference call introduces no numeric realization and retains its existing reference path.
-pub(super) fn authenticate_numeric_formals(
-    parameters: &[Ty],
-    applied_parameters: &[Ty],
-    result: Ty,
-    applied_result: Ty,
-) -> Result<(), Unsupported> {
-    if parameters.len() != applied_parameters.len() {
-        return Err("a numeric dependency ABI without matching checked slots".into());
-    }
-    let slots = || {
-        parameters
-            .iter()
-            .copied()
-            .zip(applied_parameters.iter().copied())
-            .chain([(result, applied_result)])
-    };
-    for (declared, applied) in slots() {
-        if NumericSlot::selected(declared, applied).is_none() {
-            continue;
-        }
-        let TyKind::TyParam(formal, _) = declared.kind() else {
-            unreachable!("numeric slots are declaration formals");
-        };
-        let names = [formal.to_string()];
-        for (other, applied_other) in slots() {
-            if crate::types::ty_mentions_param(other, &names) && carrier(applied_other).is_err() {
-                return Err("a numeric instantiation of an unsupported generic ABI slot".into());
-            }
-        }
-    }
-    Ok(())
 }
 
 impl Body<'_> {
@@ -120,28 +84,5 @@ mod tests {
         }
         assert_eq!(NumericSlot::selected(Ty::obj("kotlin/Any"), Ty::Int), None);
         assert_eq!(NumericSlot::selected(Ty::nullable(formal), Ty::Int), None);
-    }
-
-    #[test]
-    fn nullable_occurrences_restrict_only_the_realized_formal() {
-        let formal = Ty::ty_param("T", Ty::nullable(Ty::obj("kotlin/Any")));
-        assert_eq!(
-            authenticate_numeric_formals(
-                &[formal, Ty::nullable(Ty::Int)],
-                &[Ty::Int, Ty::nullable(Ty::Int)],
-                formal,
-                Ty::Int,
-            ),
-            Ok(()),
-        );
-        assert_eq!(
-            authenticate_numeric_formals(
-                &[Ty::nullable(formal)],
-                &[Ty::nullable(Ty::Int)],
-                formal,
-                Ty::Int,
-            ),
-            Err("a numeric instantiation of an unsupported generic ABI slot".into()),
-        );
     }
 }
