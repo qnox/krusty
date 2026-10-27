@@ -33,6 +33,20 @@ classifier or owner. Publication retains visibility and declaration order, and e
 anonymous classifiers as before. Header-boundary regressions check the complete published inventory,
 absence of invented prefixes, and exact nesting for literal-dollar owner/member names.
 
+## Wasm reference-array literals and reads
+
+Reference-element `Array<T>` literals without spreads preserve element evaluation order and array
+identity. A read evaluates its receiver and index once, then casts the physical nullable-reference
+element to the checked readable element type. Primitive arrays, scalar boxing, writes, spreads and
+size/initializer constructors remain separate representation work.
+
+Wasm bounds checks follow the selected Kotlin release's default, with an explicit per-backend
+override for `-Xwasm-enable-array-range-checks`. Checked negative and high indices throw distinct
+authenticated IndexOutOfBoundsException objects with a null message through the existing Throwable
+transport; unchecked accesses retain the host bounds trap. The shared `referenceArrayLiteralRead.kt`
+fixture covers values, projection, nulls, identity and effect order. The marked Wasm-only bounds test
+covers both hosts, release defaults, explicit options, parent types and rethrow identity.
+
 ## Wasm runtime-exception type tests
 
 Selected platform-stdlib declarations publish authenticated storage roles for Throwable,

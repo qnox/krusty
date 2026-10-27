@@ -592,6 +592,100 @@ fn expect_wasm_decline(src: &str, stem: &str, reason: &str) {
     }
 }
 
+// PLATFORM-SPECIFIC: Wasm's checked-access default and host trap are independent of the portable
+// reference-array value/identity/effect-order case in the shared box inventory.
+const REFERENCE_ARRAY_BOUNDS: &str = r#"fun captured(index: Int): Throwable? {
+    try {
+        val value = arrayOf("value")[index]
+        return null
+    } catch (failure: Throwable) {
+        try { throw failure } catch (same: Throwable) {
+            return if (same === failure) same else null
+        }
+    }
+}
+
+fun check(failure: Throwable?): String {
+    if (failure == null) return "missing failure or changed identity"
+    if (failure !is IndexOutOfBoundsException) return "wrong bounds type"
+    if (failure !is RuntimeException) return "wrong parent type"
+    if (failure.message != null) return "wrong message"
+    return "OK"
+}
+
+fun box(): String {
+    val negative = captured(-1)
+    val high = captured(1)
+    if (negative === high) return "reused exception"
+    val first = check(negative)
+    if (first != "OK") return first
+    return check(high)
+}
+"#;
+
+// PLATFORM-SPECIFIC: both the Kotlin exception and the unchecked host trap are observable here.
+#[test]
+fn wasm_reference_array_bounds_preserve_reference_defaults_and_explicit_options() {
+    use krusty::kotlin_version::{KotlinVersion, ReleaseRecords};
+    const DEFAULTS: ReleaseRecords<bool> = ReleaseRecords::new(&[
+        (KotlinVersion::V2_4_0, false),
+        (KotlinVersion::V2_4_20, true),
+    ]);
+    assert_eq!(DEFAULTS.check(), Ok(()));
+    let default = *DEFAULTS
+        .get(krusty::kotlin_version::target())
+        .expect("supported release");
+    let source = REFERENCE_ARRAY_BOUNDS;
+    for target in WasmTarget::ALL {
+        let lane = WasmLane { target };
+        if !focused_wasm_lane_available(&lane, "referenceArrayBounds") {
+            return;
+        }
+        for requested in [None, Some(false), Some(true)] {
+            let checked = requested.unwrap_or(default);
+            let mut backend = WasmBackend::new(target).with_entry(Entry::Box);
+            if let Some(requested) = requested {
+                backend = backend.with_array_range_checks(requested);
+            }
+            let stem = format!("referenceArrayBounds{requested:?}");
+            let mut program = box_lane::compile(
+                &[("Bounds.kt".to_owned(), source.to_owned())],
+                source,
+                Libraries::StdlibKlib,
+                lane.test_target(),
+                &backend,
+                "box",
+                DECLINE_PREFIX,
+            )
+            .unwrap_or_else(|outcome| panic!("{stem}: {outcome:?}"));
+            if !checked {
+                // Observe the exact host trap without altering the generated Wasm or its loader.
+                // Every unexpected exception and normal completion remains a test failure.
+                let loader = program
+                    .artifacts
+                    .iter_mut()
+                    .find(|(name, _)| name == "box.mjs")
+                    .expect("generated loader");
+                loader.0 = "bounds-program.mjs".to_owned();
+                program.artifacts.push(("box.mjs".to_owned(), br#"try {
+    await import('./bounds-program.mjs');
+    throw new Error('unchecked array access unexpectedly completed');
+} catch (failure) {
+    if (!(failure instanceof WebAssembly.RuntimeError) || failure.message !== 'array element access out of bounds') throw failure;
+    process.stdout.write('OK');
+}
+"#.to_vec()));
+            }
+            assert_eq!(
+                lane.run_artifacts(&std::env::temp_dir(), &stem, "bounds", program),
+                Outcome::Pass,
+                "{stem} on {}",
+                target.name()
+            );
+        }
+    }
+}
+
 // PLATFORM-SPECIFIC: a reference assertion cannot implement nullable scalar unboxing.
 fn expect_reference_assertion_box(src: &str, stem: &str) {
     let jdk = super::common::jdk_modules();

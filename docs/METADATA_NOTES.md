@@ -37,6 +37,15 @@ prefix identities before later consumers run. Metadata class-ID encoding still n
 snapshot ownership lookup; publication alone does not supply authoritative negative nesting facts
 for every cached or cross-module identity.
 
+## Wasm reference-array representation
+
+Reference-array reads consume the selected callable's frozen ArrayGet operation and the checked
+array element type; no classifier/member spelling lookup is added. Physical elements share nullable
+reference storage, with ordinary backend coercion restoring the checked result carrier. Bounds
+failures consume the platform exception storage evidence already retained beside classifiers.
+Array range-check defaults and overrides are Wasm representation policy and change no metadata,
+provider identity or frontend overload decision.
+
 ## Platform exception storage authority
 
 Only the explicitly selected platform stdlib may publish an admitted runtime-exception storage
