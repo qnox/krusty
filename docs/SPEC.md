@@ -7176,7 +7176,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   own suspension points are all tail calls, then without `@DebugMetadata`. The route is decided
   once from the callee's facts before any code is emitted, and the body is not inlined on trial: once a call is routed to the inliner, or a lambda-free call to a
   compiled body is, a failure to inline or regenerate is an emission error, never a direct call.
-  Tests: `tests/crossinline_suspend_object_e2e.rs`. An object the copied method constructs that reads the lambda through the copy's field (the
+  Tests: `tests/crossinline_suspend_object_e2e.rs`. Only a `$$forInline` copy's machine takes
+  the suspension points a suspend lambda brings, so a regenerated method without one is refused
+  when it invokes a suspend lambda; a method that only passes the lambda to an object it constructs
+  (a non-suspend lambda's `invoke` building the object) is regenerated, and the object takes the
+  lambda into its own copy. An object the copied method constructs that reads the lambda through the copy's field (the
   `FlowCollector` that `Flow.map`'s object creates) is regenerated too, as kotlinc's
   `MethodInliner` does: it takes the copy's next number after the continuation
   (`…$map$1$2`, its own continuation `…$map$1$2$1`), the lambda is inlined into its methods, and

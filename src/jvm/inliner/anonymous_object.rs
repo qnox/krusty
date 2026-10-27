@@ -393,13 +393,6 @@ pub(crate) fn regenerate(
         };
         remap_declaration(&mut method, &mut remapper)?;
         if let Some(code) = &method.code {
-            // Only a `$$forInline` copy's machine takes the suspension points a suspend lambda
-            // brings: kotlinc writes one for every suspend method that invokes such a lambda.
-            if continuation.is_none() && lambda_inlining::reads_suspend_lambda(code, &lambdas) {
-                return Err(RegenerationError::Unsupported(
-                    "a suspend lambda in a method without a $$forInline copy",
-                ));
-            }
             // kotlinc's `MethodInliner` transforms every method of a copy: one that reads an inlined
             // lambda, or names an object the copy regenerates in turn (a reified lambda nested in
             // it), has its objects regenerated as the copy's next ones.
@@ -429,6 +422,7 @@ pub(crate) fn regenerate(
                 let code = lambda_inlining::inline_into(
                     &code,
                     new,
+                    continuation.is_some(),
                     &lambdas,
                     &mut lines,
                     regeneration.caller_lines,

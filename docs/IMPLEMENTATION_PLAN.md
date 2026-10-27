@@ -5552,10 +5552,10 @@ regress.
     capture, with its public continuation (`suspend_inline_functions::for_inline_copy`). The
     capture's `crossinline` provenance is recorded by common lowering where the capture is
     produced (`IrConstructorCapture::crossinline`), so a capture moved through a lambda or an
-    enclosing object keeps the copy. Still open: a caller inlining a function whose lambda
-    constructs such an object is refused by route planning (`the inliner rejected a call`), with a
-    kotlinc library too; and a lambda returning an anonymous object takes the object's type for
-    `invoke` instead of the expected function type's `Source<T>`.
+    enclosing object keeps the copy. A regenerated method refuses only a suspend lambda it invokes
+    without a `$$forInline` copy; one that passes the lambda on to an object it constructs
+    regenerates that object. Still open: a lambda returning an anonymous object takes the object's
+    type for `invoke` instead of the expected function type's `Source<T>`.
 - ☐ 5. `$default` inline functions (mask expansion) and `finally` blocks around inlined returns.
   Mask expansion and singleton default lambdas (`DefaultLambda`, with reification) are ported;
   a default lambda constructed with captured values and `finally` rewriting remain.

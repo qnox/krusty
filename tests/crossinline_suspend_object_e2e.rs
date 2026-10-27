@@ -622,10 +622,16 @@ const MOVED_RUN_MAIN: &str = r#"
 import lib.*
 import kotlin.coroutines.*
 
+fun deferredPlusOne(n: Int) = deferred { n + 1 }
+
 fun nestedPlusOne(n: Int) = nested { n + 1 }
 
 fun box(): String {
     var result: Any? = null
+    suspend { deferredPlusOne(41)().next() }
+        .startCoroutine(Continuation(EmptyCoroutineContext) { result = it.getOrThrow() })
+    if (result != 42) return "FAIL deferred: $result"
+    result = null
     suspend { nestedPlusOne(41).next().next() }
         .startCoroutine(Continuation(EmptyCoroutineContext) { result = it.getOrThrow() })
     if (result != 42) return "FAIL nested: $result"
@@ -633,11 +639,43 @@ fun box(): String {
 }
 "#;
 
-/// A caller inlines the copies krusty wrote for a capture moved through the enclosing object, and
-/// the regenerated objects run.
+/// A caller inlines the copies krusty wrote for the moved captures, and the regenerated objects
+/// run. The lambda's `invoke` only passes the suspend lambda on to the object it constructs, so it
+/// needs no `$$forInline` copy of its own: the object it regenerates takes the lambda.
 #[test]
-fn a_krusty_compiled_copy_of_a_capture_moved_through_an_object_runs() {
+fn a_krusty_compiled_copy_of_a_moved_crossinline_capture_runs() {
     let output = common::expect_box_run_against("moved_for_inline", MOVED_LIB, MOVED_RUN_MAIN)
         .expect("the library is compiled");
     assert_eq!(output, "OK");
+}
+
+const MOVED_CALLER: &str = r#"
+import lib.*
+
+fun deferredPlusOne(n: Int) = deferred { n + 1 }
+
+fun nestedPlusOne(n: Int) = nested { n + 1 }
+"#;
+
+/// The caller of the moved captures, against kotlinc's library: krusty regenerates the lambda and
+/// the object it constructs, with the suspend lambda inlined into the object's copy, as kotlinc
+/// does.
+#[test]
+fn a_caller_regenerates_a_lambda_that_passes_a_suspend_lambda_on_like_kotlinc() {
+    let Some(classes) =
+        common::classes_against_kotlinc_lib("moved_caller", &[("Lib.kt", MOVED_LIB)], MOVED_CALLER)
+    else {
+        return;
+    };
+    let inventory = [
+        "Moved_callerKt",
+        "Moved_callerKt$deferredPlusOne$$inlined$deferred$1",
+        "Moved_callerKt$deferredPlusOne$$inlined$deferred$1$1",
+        "Moved_callerKt$nestedPlusOne$$inlined$nested$1",
+        "Moved_callerKt$nestedPlusOne$$inlined$nested$1$2",
+    ];
+    assert_eq!(classes.reference.keys().collect::<Vec<_>>(), inventory);
+    assert_eq!(classes.krusty.keys().collect::<Vec<_>>(), inventory);
+    let code = classes.code_differences();
+    assert!(code.is_empty(), "{}", code.join("\n\n"));
 }
