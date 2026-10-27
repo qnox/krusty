@@ -1,5 +1,13 @@
 # krusty — a memory-lean Kotlin→JVM compiler PoC
 
+## Wasm reference not-null assertions
+
+A failed reference `!!` throws the platform declaration's `NullPointerException` through the
+Kotlin exception tag. Its message and cause are null. The assertion evaluates its input once and
+preserves the input's reference carrier on success, including String's distinct heap type.
+`referenceNotNullException.kt` checks nullable String and hidden nullable generic locals against
+the JVM reference and every backend. Nullable scalar unboxing remains separately unsupported.
+
 ## Bound declaration-name evidence
 
 A query for an already-bound classifier or alias key projects the selected declaration's own
