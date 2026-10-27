@@ -130,6 +130,7 @@ impl Checker<'_> {
             .cloned()
             .collect::<Vec<_>>();
         let rejected_candidates = overloads.clone();
+        let extension_offset = inner_constructors.len() + member_overloads.len();
 
         let selection = self.select_callable_candidate(
             scope,
@@ -215,11 +216,19 @@ impl Checker<'_> {
                 self.report_selected_callable_missing_context(scope, call, &selected);
                 return MemberSlotCall::Rejected;
             }
-            Some(CallableCandidateSelection::Ambiguous(candidates)) => {
+            Some(CallableCandidateSelection::Ambiguous(candidates, positions)) => {
                 if candidates.iter().all(|candidate| candidate.is_extension()) {
                     return MemberSlotCall::ExtensionRung {
                         extension: ExtensionRungSelection {
-                            selection: Some(CallableCandidateSelection::Ambiguous(candidates)),
+                            // The positions move from the whole member level to its
+                            // extension rung.
+                            selection: Some(CallableCandidateSelection::Ambiguous(
+                                candidates,
+                                positions
+                                    .into_iter()
+                                    .map(|position| position - extension_offset)
+                                    .collect(),
+                            )),
                             overloads: extension_overloads,
                         },
                         member_mapping_failure: None,

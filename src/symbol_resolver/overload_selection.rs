@@ -117,14 +117,6 @@ pub(crate) fn extension_tower_rank(
     }
 }
 
-/// The most specific of `candidates`, keeping every tied maximal candidate in provider order.
-pub(crate) fn most_specific_with_ties<T>(
-    candidates: impl IntoIterator<Item = (Vec<Ty>, T)>,
-    at_least_as_specific: impl Fn(usize, Ty, Ty) -> bool,
-) -> CandidateSelectionWithTies<T> {
-    unique_most_specific_with_conflicts_and_ties(candidates, at_least_as_specific, |_, _| true)
-}
-
 /// Compare fixed-arity shapes with vararg element shapes in one specificity pass.
 ///
 /// Element expansion is included only when some candidate already matches argument
@@ -446,6 +438,8 @@ pub(super) struct ExtCtx<'a> {
     pub(super) fn_scope: Option<FunctionScopeRef<'a>>,
     pub(super) source: &'a dyn SymbolSource,
     pub(super) type_variables: &'a [String],
+    /// `+EagerLambdaAnalysis`: a lambda's checked result decides applicability.
+    pub(super) eager_lambda_results: bool,
 }
 
 /// The single call-overload selector for a receiver call `recv.name(args)`. It is parameterized by
@@ -800,7 +794,7 @@ pub(super) fn select_overload_tracking_with_functions(
         return None;
     }
     for cands in by_rank.values() {
-        match best_by_args_with_ties(lib, assign_src, cands, args) {
+        match best_by_args_with_ties(lib, assign_src, cands, args, ext.eager_lambda_results) {
             CandidateSelectionWithTies::Selected(overload) => return Some(overload.clone()),
             CandidateSelectionWithTies::Ambiguous(candidates) => {
                 *ambiguous = true;
@@ -865,7 +859,13 @@ pub(super) fn select_overload_tracking_with_functions(
                     vararg_shape(candidate, parameters, exact).map(|shape| (*candidate, shape))
                 })
                 .collect::<Vec<_>>();
-            match best_by_args_with_ties(lib, assign_src, &applicable, args) {
+            match best_by_args_with_ties(
+                lib,
+                assign_src,
+                &applicable,
+                args,
+                ext.eager_lambda_results,
+            ) {
                 CandidateSelectionWithTies::Selected(candidate) => return Some(candidate.clone()),
                 CandidateSelectionWithTies::Ambiguous(candidates) => {
                     *ambiguous = true;
@@ -1391,20 +1391,25 @@ pub(crate) fn best_by_args<'a>(
     cands: &[(&'a FunctionInfo, Vec<Ty>)],
     args: &[CallArgKind],
 ) -> CandidateSelection<&'a FunctionInfo> {
-    best_by_args_with_ties(lib, src, cands, args).collapse()
+    best_by_args_with_ties(lib, src, cands, args, false).collapse()
 }
 
 /// Kotlin decides applicability and most-specific selection without analyzing lambda bodies, so a
 /// lambda literal's result first takes part only as a postponed probe. The checked result refines
 /// a tie only where the specification's lambda-return-type refinement applies
 /// ([`lambda_result_refines`]); every other tie is an ambiguity, and a unique most specific
-/// candidate keeps its own result expectation for the lambda.
+/// candidate keeps its own result expectation for the lambda. Under `+EagerLambdaAnalysis`
+/// (`eager_lambda_results`) the checked result instead takes part in applicability.
 fn best_by_args_with_ties<'a>(
     lib: &dyn SemanticPlatform,
     src: &dyn SymbolSource,
     cands: &[(&'a FunctionInfo, Vec<Ty>)],
     args: &[CallArgKind],
+    eager_lambda_results: bool,
 ) -> CandidateSelectionWithTies<&'a FunctionInfo> {
+    if eager_lambda_results {
+        return best_by_args_by_priority_with_ties(lib, src, cands, args);
+    }
     let postponed = args
         .iter()
         .map(CallArgKind::with_postponed_lambda_result)

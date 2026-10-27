@@ -111,9 +111,8 @@ use member_specialization::{
 #[cfg(test)]
 use overload_selection::fun_return_compatible;
 pub(crate) use overload_selection::{
-    best_by_args, callable_tower_rank, extension_tower_rank, most_specific_with_ties,
-    CandidateSelectionWithTies, OverloadTowerRank, ReceiverFunctionSelection,
-    SelectedReceiverFunction,
+    best_by_args, callable_tower_rank, extension_tower_rank, CandidateSelectionWithTies,
+    ReceiverFunctionSelection, SelectedReceiverFunction,
 };
 use overload_selection::{
     generic_bounds_admit, generic_bounds_admit_slots, indexed_call_shape, integer_literal_overload,
@@ -797,6 +796,8 @@ pub struct SymbolResolver<'a> {
     visibility_suppressed: bool,
     /// Type variables of the enclosing postponed calls; extension receivers match over them.
     type_variables: &'a [String],
+    /// `+EagerLambdaAnalysis` in the calling file: a lambda's checked result decides applicability.
+    eager_lambda_results: bool,
 }
 
 /// Which accessor a property selection will execute. Provider-normalized candidate availability
@@ -1125,6 +1126,7 @@ impl<'a> SymbolResolver<'a> {
                 fn_scope: self.fn_scope,
                 source: &self.src,
                 type_variables: self.type_variables,
+                eager_lambda_results: self.eager_lambda_results,
             },
             callables.functions(),
             IndexedConvention::Get,
@@ -1212,6 +1214,7 @@ impl<'a> SymbolResolver<'a> {
                 fn_scope: self.fn_scope,
                 source: &self.src,
                 type_variables: self.type_variables,
+                eager_lambda_results: self.eager_lambda_results,
             },
             callables.functions(),
             IndexedConvention::Set,
@@ -1873,6 +1876,7 @@ impl<'a> SymbolResolver<'a> {
                         fn_scope: self.fn_scope,
                         source: &self.src,
                         type_variables: self.type_variables,
+                        eager_lambda_results: self.eager_lambda_results,
                     },
                     Some(callables.functions()),
                     &mut call_ambiguous,
@@ -3331,6 +3335,7 @@ fn select_instance_info(
             fn_scope: None,
             source,
             type_variables: &[],
+            eager_lambda_results: false,
         },
     )
 }

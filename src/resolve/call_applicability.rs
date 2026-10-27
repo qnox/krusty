@@ -449,7 +449,7 @@ pub(super) fn score(
 /// candidates before most-specific selection, as kotlinc's `EagerLambdaResolution` does: the
 /// candidates the result does not fit are dropped while one still fits. Without the feature the
 /// result takes part only in the specification's refinement of a tie.
-pub(super) fn retain_eager_lambda_fits<T>(
+pub(super) fn retain_eager_fits<T>(
     file: &crate::ast::File,
     applicable: &mut Vec<T>,
     fits: impl Fn(&T) -> bool,
@@ -461,12 +461,12 @@ pub(super) fn retain_eager_lambda_fits<T>(
 
 /// Kotlin's lambda-return refinement of a most-specific tie. It applies only when a tied
 /// candidate is `@OverloadResolutionByLambdaReturnType`, the call has exactly one lambda literal,
-/// and every tied parameter for it is a function type with the same inputs; the candidates whose
-/// checked lambda result does not fit are then dropped, and the refined set prefers unannotated
-/// candidates. Every other tie is left for the ordinary ambiguity.
-pub(super) fn refine_tie_by_lambda_result<T>(
+/// and every tied parameter for it is a function type with the same inputs; once the lambda is
+/// analyzed, the candidates whose checked lambda result does not fit are dropped, and the refined
+/// set prefers unannotated candidates. Every other tie is left for the ordinary ambiguity.
+pub(super) fn refine_lambda_tie<T>(
     file: &crate::ast::File,
-    args: &[ExprId],
+    (args, arg_tys): (&[ExprId], &[Ty]),
     tied: &mut Vec<T>,
     candidate: impl Fn(&T) -> (&crate::libraries::FunctionInfo, &[Ty], bool),
 ) {
@@ -486,6 +486,13 @@ pub(super) fn refine_tie_by_lambda_result<T>(
     let (Some(lambda), None) = (lambdas.next(), lambdas.next()) else {
         return;
     };
+    // Before the lambda is analyzed (a call's pre-lambda selection) a tie stays a tie.
+    let analyzed = arg_tys.get(lambda).is_some_and(|actual| {
+        matches!(actual.non_null().kind(), TyKind::Fun(function) if !function.ret.mentions_error())
+    });
+    if !analyzed {
+        return;
+    }
     let inputs = |tie: &T| match candidate(tie).1.get(lambda)?.non_null().kind() {
         TyKind::Fun(function) => Some((
             function.params.clone(),

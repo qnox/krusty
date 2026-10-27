@@ -197,3 +197,42 @@ fun box(): String {\n\
     let classes = common::classes_against_kotlinc_module(&sources);
     assert_eq!(classes.differences(), Vec::<String>::new());
 }
+
+// The overloads differ in their JVM descriptors, so they need no distinct JVM names.
+const PRIORITY_DECLARATIONS: &str =
+    "fun Int.pick(f: (Int) -> String, suffix: String = \"!\"): String = \"d\" + f(this) + suffix\n\
+fun Int.pick(f: (Int) -> Int): String = \"p\" + f(this)\n\
+fun Int.tag(f: (Int) -> String, vararg extra: Int): String = \"v\" + f(this) + extra.size\n\
+fun Int.tag(f: (Int) -> Int): String = \"t\" + f(this)\n";
+
+#[test]
+fn an_ordinary_winner_by_defaults_or_varargs_shapes_the_lambda_like_kotlinc() {
+    // Both pairs tie on the lambda's parameter alone. Ordinary selection prefers the candidate
+    // that omits no default and the one without a vararg, so their lambda results shape the
+    // lambdas before any refinement is considered.
+    let source = format!(
+        "{PRIORITY_DECLARATIONS}fun box(): String {{\n\
+    val r = 1.pick {{ it + 1 }} + 2.tag {{ it * 3 }}\n\
+    return if (r == \"p2t6\") \"OK\" else r\n\
+}}\n"
+    );
+    common::expect_box_ok_with_stdlib(&source, "PriorityPick");
+    let classes = common::classes_against_kotlinc_module(&[("PriorityPick.kt", &source)]);
+    assert_eq!(classes.differences(), Vec::<String>::new());
+}
+
+#[test]
+fn an_ordinary_winner_by_defaults_or_varargs_keeps_its_result_like_kotlinc() {
+    let source = format!(
+        "{PRIORITY_DECLARATIONS}fun bad() = 1.pick {{ it.toString() }}\n\
+fun worse() = 2.tag {{ \"x$it\" }}\n"
+    );
+    assert_diagnostics_match_kotlinc(
+        "PriorityMismatch.kt",
+        &source,
+        &[
+            &["5:22: error: return type mismatch: expected 'Int', actual 'String'."],
+            &["6:23: error: return type mismatch: expected 'Int', actual 'String'."],
+        ],
+    );
+}

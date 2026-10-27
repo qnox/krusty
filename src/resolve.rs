@@ -14688,7 +14688,7 @@ impl<'a> Checker<'a> {
                 );
                 return Ty::Error;
             }
-            Some(CallableCandidateSelection::Ambiguous(_)) => {
+            Some(CallableCandidateSelection::Ambiguous(..)) => {
                 self.diags.error(
                     span,
                     "collection literal factory overload ambiguity".to_string(),
@@ -14740,7 +14740,7 @@ impl<'a> Checker<'a> {
                     );
                     return Ty::Error;
                 }
-                Some(CallableCandidateSelection::Ambiguous(_)) => {
+                Some(CallableCandidateSelection::Ambiguous(..)) => {
                     self.diags.error(
                         span,
                         "collection literal factory overload ambiguity".to_string(),
@@ -15343,7 +15343,7 @@ impl<'a> Checker<'a> {
                                     None,
                                 );
                             }
-                            Some(CallableCandidateSelection::Ambiguous(candidates)) => {
+                            Some(CallableCandidateSelection::Ambiguous(candidates, _)) => {
                                 self.report_callable_ambiguity(call, &name, &candidates);
                                 return Ty::Error;
                             }
@@ -19896,7 +19896,7 @@ impl<'a> Checker<'a> {
                                         &crate::types::type_name("kotlin/internal/HidesMembers"),
                                     )
                             }
-                            Some(CallableCandidateSelection::Ambiguous(candidates)) => candidates
+                            Some(CallableCandidateSelection::Ambiguous(tied, _)) => tied
                                 .iter()
                                 .all(|candidate| candidate.scope_rung.is_import()),
                             None => false,
@@ -19916,7 +19916,7 @@ impl<'a> Checker<'a> {
                         }
                         match &extension.selection {
                             Some(CallableCandidateSelection::Selected(_))
-                            | Some(CallableCandidateSelection::Ambiguous(_)) => {
+                            | Some(CallableCandidateSelection::Ambiguous(..)) => {
                                 let type_args = self.resolved_explicit_type_args(scope, call);
                                 if let Some(ret) = self.record_extension_selection(
                                     scope,
@@ -20106,7 +20106,7 @@ impl<'a> Checker<'a> {
                 let top_level_owns_the_name = matches!(
                     &top_level,
                     Some(CallableCandidateSelection::Selected(_))
-                        | Some(CallableCandidateSelection::Ambiguous(_))
+                        | Some(CallableCandidateSelection::Ambiguous(..))
                 );
                 for implicit_receiver in callee_receivers.iter().copied() {
                     if top_level_owns_the_name
@@ -20233,7 +20233,7 @@ impl<'a> Checker<'a> {
                 // ambiguity rule for source, sibling-module, and dependency declarations.
                 let error_argument = self.call_has_error_argument(args);
                 let ambiguous = top_level_sam_ambiguous.or_else(|| match &top_level {
-                    Some(CallableCandidateSelection::Ambiguous(candidates)) => {
+                    Some(CallableCandidateSelection::Ambiguous(candidates, _)) => {
                         Some(candidates.clone())
                     }
                     _ => None,
@@ -33460,7 +33460,8 @@ impl std::ops::Deref for SelectedCallable {
 enum CallableCandidateSelection {
     Selected(Box<SelectedCallable>),
     MissingContext(Box<SelectedCallable>),
-    Ambiguous(Vec<crate::libraries::FunctionInfo>),
+    /// The tied candidates, and their positions in the family passed to the selection.
+    Ambiguous(Vec<crate::libraries::FunctionInfo>, Vec<usize>),
 }
 
 enum InvokeResolution {
@@ -33479,14 +33480,14 @@ impl CallableCandidateSelection {
     fn candidate(self) -> Option<SelectedCallable> {
         match self {
             Self::Selected(candidate) | Self::MissingContext(candidate) => Some(*candidate),
-            Self::Ambiguous(_) => None,
+            Self::Ambiguous(..) => None,
         }
     }
 
     fn available(self) -> Option<SelectedCallable> {
         match self {
             Self::Selected(candidate) => Some(*candidate),
-            Self::MissingContext(_) | Self::Ambiguous(_) => None,
+            Self::MissingContext(_) | Self::Ambiguous(..) => None,
         }
     }
 }
@@ -36952,7 +36953,7 @@ impl<'a> Checker<'a> {
             };
         let mut applicable = Vec::new();
         let mut sam_converted = crate::fx_hash::HashSet::default();
-        let mut lambda_misfits = crate::fx_hash::HashSet::default();
+        let mut misfits = crate::fx_hash::HashSet::default();
         for (index, mut candidate) in overloads.iter().cloned().enumerate() {
             if self.file.infix_calls.contains(&call.0) && !candidate.flags.infix {
                 continue;
@@ -38155,7 +38156,7 @@ impl<'a> Checker<'a> {
                 candidate_index: Some(index),
             };
             if !score.lambda_result_fits {
-                lambda_misfits.insert(index);
+                misfits.insert(index);
             }
             applicable.push((
                 score.rank,
@@ -38199,8 +38200,7 @@ impl<'a> Checker<'a> {
         // members above ordinary extensions, and skip a rung whose only candidates lack context.
         // Later rules share one rung. Argument score there is type fit and omitted defaults;
         // a vararg loses only after element specificity, as a tie-break among equal shapes.
-        let tower_rank =
-            |candidate: &SelectedCallable| crate::symbol_resolver::callable_tower_rank(candidate);
+        let tower_rank = |c: &SelectedCallable| crate::symbol_resolver::callable_tower_rank(c);
         let nearest_available_rung = applicable
             .iter()
             .filter(|(_, _, _, missing_context, ..)| !missing_context)
@@ -38230,8 +38230,8 @@ impl<'a> Checker<'a> {
                     .contains(&low_priority_annotation)
             });
         }
-        call_applicability::retain_eager_lambda_fits(self.file, &mut applicable, |candidate| {
-            !lambda_misfits.contains(&candidate.2)
+        call_applicability::retain_eager_fits(self.file, &mut applicable, |c| {
+            !misfits.contains(&c.2)
         });
         let has_context = applicable
             .iter()
@@ -38341,8 +38341,8 @@ impl<'a> Checker<'a> {
                 (receiver, parameters, *generic, member_owner)
             },
         );
-        call_applicability::refine_tie_by_lambda_result(self.file, args, &mut maximal, |tie| {
-            (&tie.5.info, &tie.6, !lambda_misfits.contains(&tie.2))
+        call_applicability::refine_lambda_tie(self.file, (args, arg_tys), &mut maximal, |t| {
+            (&t.5.info, &t.6, !misfits.contains(&t.2))
         });
         // Distinct SAM target types do not make an overload family inherently ambiguous. The
         // ordinary most-specific relation below must still compare them: if one SAM interface
@@ -38440,6 +38440,7 @@ impl<'a> Checker<'a> {
                                 .iter()
                                 .map(|(_, _, _, _, _, candidate, _, _)| candidate.info.clone())
                                 .collect(),
+                            maximal.iter().filter_map(|t| t.5.candidate_index).collect(),
                         ));
                     }
                     crate::symbol_resolver::CandidateSelection::None => return None,
@@ -52692,7 +52693,7 @@ impl<'a> Checker<'a> {
             if !consider_extension || extension_claimed {
                 return None;
             }
-            let shape = self.extension_lambda_shape(scope, receiver, name, untyped);
+            let shape = self.extension_lambda_shape(scope, call, receiver, name, untyped);
             extension_claimed = matches!(
                 shape,
                 member_extension_selection::MemberExtensionLambdaShape::Ambiguous
@@ -59349,7 +59350,7 @@ impl<'a> Checker<'a> {
                     self.report_selected_callable_missing_context(scope, e, &selected);
                     return Some(Ty::Error);
                 }
-                CallableCandidateSelection::Ambiguous(candidates) => {
+                CallableCandidateSelection::Ambiguous(candidates, _) => {
                     let message = Self::ambiguous_candidates_message(name, &candidates);
                     self.diags.error(self.call_callee_name_span(e), message);
                     // No candidate shapes the lambdas of an ambiguous call.
