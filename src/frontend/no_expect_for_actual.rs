@@ -977,9 +977,11 @@ fn render_type_alias(
     name: &str,
     declared: Visibility,
 ) -> Result<String, &'static str> {
-    let (formals, target) = declarations
+    let template = declarations
         .alias_expansion(stable)
         .ok_or("has no resolved expansion")?;
+    let formals = &template.formals;
+    let target = template.expansion;
     if target.mentions_pending() {
         return Err("expands to a type that did not resolve");
     }

@@ -337,10 +337,7 @@ impl<'a> JvmSignatureFormatter<'a> {
     }
 
     fn can_have_subtypes_ignoring_nullability(&self, ty: Ty) -> Option<bool> {
-        let ty = match ty.kind() {
-            TyKind::Nullable(inner) | TyKind::PlatformNullable(inner) => inner,
-            _ => ty,
-        };
+        let ty = ty.non_null();
         if ty == Ty::Nothing {
             return Some(false);
         }
@@ -504,10 +501,7 @@ impl<'a> JvmSignatureFormatter<'a> {
     /// variance stays (`vararg x: In<E>` is `[LIn<-TE;>;`). A non-vararg `Array<In<E>>` parameter
     /// suppresses that wildcard and must keep going through [`Self::method_ty`].
     pub(super) fn vararg_element_ty(&self, ty: &Ty, wildcards: Wildcards) -> Option<String> {
-        let semantic = match ty.kind() {
-            TyKind::Nullable(inner) | TyKind::PlatformNullable(inner) => inner,
-            _ => *ty,
-        };
+        let semantic = ty.non_null();
         let TyKind::Obj(owner, arguments) = semantic.kind() else {
             return self.method_ty(ty, wildcards);
         };
@@ -533,10 +527,7 @@ impl<'a> JvmSignatureFormatter<'a> {
         if let Some((expanded, wildcards)) = self.value_class_position(*ty, wildcards) {
             return self.method_ty(&expanded, wildcards);
         }
-        let semantic = match ty.kind() {
-            TyKind::Nullable(inner) | TyKind::PlatformNullable(inner) => inner,
-            _ => *ty,
-        };
+        let semantic = ty.non_null();
         match semantic.kind() {
             TyKind::TyParam(..) | TyKind::Fun(_) => self.ty_at(ty, wildcards),
             TyKind::Intersection(_) => {
@@ -578,7 +569,10 @@ impl<'a> JvmSignatureFormatter<'a> {
     }
 
     pub(super) fn ty_at(&self, ty: &Ty, wildcards: Wildcards) -> Option<String> {
-        if let TyKind::Nullable(inner) | TyKind::PlatformNullable(inner) = ty.kind() {
+        if let TyKind::Nullable(inner)
+        | TyKind::PlatformNullable(inner)
+        | TyKind::MutabilityFlexible(inner) = ty.kind()
+        {
             return self.ty_at(&inner, wildcards);
         }
         if let TyKind::TyParam(name, _) = ty.kind() {

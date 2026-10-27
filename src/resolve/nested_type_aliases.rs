@@ -27,6 +27,12 @@ impl BodyLocalTypeAliases {
             (owner, name.into()),
             AliasExpansion {
                 identity: crate::types::type_name_child(owner, name),
+                declaration_name: Some(std::sync::Arc::new(
+                    crate::types::ClassifierDeclarationName::Nested {
+                        owner,
+                        name: name.into(),
+                    },
+                )),
                 target: alias.target,
                 formals: alias.formals.clone(),
                 expansion: alias.expansion,

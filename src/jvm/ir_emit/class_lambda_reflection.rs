@@ -160,6 +160,7 @@ fn approximate_type_parameters(ty: Ty, names: &[&str]) -> Ty {
         TyKind::Nullable(inner) => Ty::nullable(approximate(inner)),
         TyKind::DefinitelyNotNull(inner) => approximate(inner).non_null(),
         TyKind::PlatformNullable(inner) => Ty::platform_nullable(approximate(inner)),
+        TyKind::MutabilityFlexible(inner) => Ty::mutability_flexible(approximate(inner)),
         TyKind::InProjection(inner) => Ty::in_projection(approximate(inner)),
         TyKind::OutProjection(inner) => Ty::out_projection(approximate(inner)),
         TyKind::Intersection(parts) => Ty::intersection(
