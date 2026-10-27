@@ -5555,7 +5555,8 @@ regress.
     enclosing object keeps the copy. A regenerated method refuses only a suspend lambda it invokes
     without a `$$forInline` copy; one that passes the lambda on to an object it constructs
     regenerates that object. A call-site copy remaps the provenance through the expansion's
-    bindings, names its continuations `{copy}$N` and takes its source methods' lines. Still open:
+    bindings (the selected argument's provenance, kept through operand staging), names its
+    continuations `{copy}$N` and takes its source methods' lines. Still open:
     a lambda returning an anonymous object takes the object's type for `invoke` instead of the
     expected function type's `Source<T>`; a reified copy's generic signatures and constructor
     debug tables differ from kotlinc's regenerated copy; a caller inlining a reified wrapper that

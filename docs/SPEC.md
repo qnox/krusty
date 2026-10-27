@@ -7172,7 +7172,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   parameter's value slot in the declaring inline function; a call-site copy of the class remaps it
   through the expansion's bindings, so a capture bound to one of the caller's own `crossinline`
   parameters (a reified wrapper forwarding its parameter to a reified factory) keeps it, and one
-  bound to anything else, such as a literal lambda, loses it. A call-site copy's methods take
+  bound to anything else, such as a literal lambda, loses it. The binding is the selected
+  argument's provenance, recorded on each read of such a parameter, its capture slot or its class
+  capture field where the read is produced, so it holds however the expansion stages the argument:
+  an object's method that forwards the outer parameter from its capture field to a reified factory
+  keeps the factory copy's `$$forInline` method, as kotlinc does. A call-site copy's methods take
   their source methods' lines, and the continuations of its suspend methods are named with the
   copy, `{copy}$N` in method order, as kotlinc numbers the classes a regenerated object declares. That
   continuation is public, constructor included, its

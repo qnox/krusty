@@ -142,6 +142,7 @@ impl BodyLowering<'_> {
                 source: crate::fir::FirCaptureSource::Value(source),
             })?;
         let holder = self.ir.add_expr(IrExpr::GetValue(capture.slot));
+        self.record_crossinline_read(holder, capture.crossinline_parameter);
         if capture.shared_cell {
             Ok(self.ir.add_expr(IrExpr::RefGet {
                 elem: capture.ty.get(),
@@ -1204,20 +1205,18 @@ impl BodyLowering<'_> {
             .then(|| self.value_slot(value))
     }
 
-    /// The `crossinline` parameter value slot `slot` of this body holds: one of its own
-    /// parameters, or an enclosing inline function's that it captured.
-    pub(super) fn crossinline_parameter_at(&self, slot: u32) -> Option<u32> {
-        self.body
-            .parameters()
-            .iter()
-            .filter_map(|parameter| self.crossinline_parameter_slot(parameter.value))
-            .find(|&parameter| parameter == slot)
-            .or_else(|| {
-                self.capture_slots
-                    .values()
-                    .find(|capture| capture.slot == slot)
-                    .and_then(|capture| capture.crossinline_parameter)
-            })
+    /// Record that `read` yields `parameter`, a `crossinline` parameter by its slot in the inline
+    /// function declaring it.
+    pub(super) fn record_crossinline_read(&mut self, read: ExprId, parameter: Option<u32>) {
+        if let Some(parameter) = parameter {
+            self.crossinline_reads.insert(read, parameter);
+        }
+    }
+
+    /// The `crossinline` parameter an argument expression of this body reads, as recorded where
+    /// the read was produced.
+    pub(super) fn crossinline_read(&self, argument: ExprId) -> Option<u32> {
+        self.crossinline_reads.get(&argument).copied()
     }
 
     fn lower_nested_function(

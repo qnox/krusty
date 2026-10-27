@@ -803,3 +803,81 @@ fn a_same_module_caller_of_a_forwarded_crossinline_copy_runs() {
         "forwarded_for_inline",
     );
 }
+
+const RELAYED_LIB: &str = r#"
+package lib
+
+interface Source<out T> {
+    suspend fun next(): T
+}
+
+inline fun <reified T> factory(crossinline produce: suspend () -> Any?): Source<T> =
+    object : Source<T> {
+        override suspend fun next(): T {
+            val value = produce()
+            return value as T
+        }
+    }
+
+inline fun <reified T> relay(crossinline produce: suspend () -> Any?): Source<T> =
+    object : Source<T> {
+        override suspend fun next(): T = factory<T>(produce).next()
+    }
+"#;
+
+/// An object's method forwards the outer `crossinline` parameter, which the object holds in a
+/// capture field, to a reified inline factory. The expansion stages the field read in a temporary,
+/// and the factory's copy still binds its capture to the outer parameter, so it keeps the
+/// `$$forInline` method and its continuation, as kotlinc's regenerated object does. The copy's
+/// declarations are compared by descriptor for the reason given above.
+#[test]
+fn a_crossinline_capture_an_object_forwards_keeps_the_copys_for_inline_method() {
+    let classes = common::classes_against_kotlinc_module(&[("Lib.kt", RELAYED_LIB)]);
+    let inventory = [
+        "lib/LibKt",
+        "lib/LibKt$factory$1",
+        "lib/LibKt$factory$1$next$1",
+        "lib/LibKt$relay$1",
+        "lib/LibKt$relay$1$next$$inlined$factory$1",
+        "lib/LibKt$relay$1$next$$inlined$factory$1$1",
+        "lib/LibKt$relay$1$next$1",
+        "lib/Source",
+    ];
+    assert_eq!(classes.reference.keys().collect::<Vec<_>>(), inventory);
+    assert_eq!(classes.krusty.keys().collect::<Vec<_>>(), inventory);
+    let copy = "lib/LibKt$relay$1$next$$inlined$factory$1";
+    let (reference, krusty) = classes.class_listing(copy);
+    assert_eq!(
+        method_descriptors(&krusty),
+        method_descriptors(&reference),
+        "{copy}"
+    );
+}
+
+const RELAYED_RUN_MAIN: &str = r#"
+import lib.*
+import kotlin.coroutines.*
+
+var pending: Continuation<Any?>? = null
+
+fun later(): Source<String> = relay { suspendCoroutine<Any?> { pending = it } }
+
+fun box(): String {
+    var result: Any? = null
+    suspend { later().next() }
+        .startCoroutine(Continuation(EmptyCoroutineContext) { result = it.getOrThrow() })
+    if (result != null) return "FAIL completed before the resume: $result"
+    pending!!.resume("OK")
+    return result as String
+}
+"#;
+
+/// A same-module caller inlines the relaying object's function: its copy suspends in the factory's
+/// object and resumes.
+#[test]
+fn a_same_module_caller_of_a_relayed_crossinline_copy_runs() {
+    common::expect_box_ok_files_with_stdlib(
+        &[("Lib.kt", RELAYED_LIB), ("Main.kt", RELAYED_RUN_MAIN)],
+        "relayed_for_inline",
+    );
+}

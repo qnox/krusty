@@ -938,9 +938,11 @@ impl BodyLowering<'_> {
         // fallible specialization: both lambda transformations above have already been preflighted,
         // and every operation after it commits without declining the containing expansion.
         if let Some(module_callee) = module_callee {
-            let crossinline_operands = operand_slots
+            // Provenance belongs to the selected argument, not to the slot staging gave it: a
+            // copied operand's temporary is a fresh slot that reads nothing.
+            let crossinline_operands = operands
                 .iter()
-                .map(|slot| slot.and_then(|slot| self.crossinline_parameter_at(slot)))
+                .map(|operand| operand.and_then(|operand| self.crossinline_read(operand)))
                 .collect::<Vec<_>>();
             if let Err(failure) = escaping_anonymous::specialize(
                 self.ir,
