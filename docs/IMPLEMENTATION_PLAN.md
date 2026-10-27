@@ -1,5 +1,12 @@
 # krusty — implementation plan
 
+## Wasm reference assertion exceptions
+
+Authenticate NullPointerException storage through the existing platform exception declaration
+normalizer and metadata parent chain. Failed reference assertions construct that exact class and
+throw through the shared Kotlin tag. Keep scalar-reference conversion outside this change; the
+generic numeric dependency ABI will consume this exception prerequisite separately.
+
 ## Bound declaration-name inventory
 
 Expose selected declaration-name evidence by typed resolved key across source, JVM, KLIB and their

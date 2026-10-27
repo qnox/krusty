@@ -8,6 +8,39 @@ use crate::types::TypeName;
 use super::*;
 
 impl Body<'_> {
+    /// A reference assertion keeps its precise heap carrier and evaluates its input once. Its
+    /// failed edge throws the authenticated Kotlin NPE through the ordinary exception tag.
+    pub(super) fn assert_nonnull_reference(
+        &mut self,
+        operand: u32,
+        reference: ValType,
+    ) -> Result<(), Unsupported> {
+        let structure = self.runtime.exceptions.ensure_class(
+            self.module,
+            self.classifiers,
+            crate::libraries::RuntimeExceptionKind::NullPointer.classifier(),
+        )?;
+        let value = self.local(reference);
+        self.expression(operand)?;
+        self.code
+            .local_set(value)
+            .local_get(value)
+            .ref_is_null()
+            .if_(BlockType::Empty);
+        self.runtime.exceptions.construct_class(
+            &mut self.code,
+            structure,
+            None,
+            self.runtime.string,
+        );
+        self.code
+            .throw(self.runtime.exceptions.tag)
+            .end()
+            .local_get(value)
+            .ref_as_non_null();
+        Ok(())
+    }
+
     pub(super) fn new_object(
         &mut self,
         internal: TypeName,
