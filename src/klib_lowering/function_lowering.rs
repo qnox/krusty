@@ -28,6 +28,8 @@ mod closure_headers;
 pub(super) use class_initializers::initializer_header;
 mod declared_type_parameters;
 pub(super) use closure_headers::{closure_header, CaptureParameter};
+mod reference_headers;
+pub(super) use reference_headers::reference_header;
 pub(super) mod vararg_parameters;
 
 /// One parameter as the body reads it.

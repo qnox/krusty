@@ -535,11 +535,10 @@ impl CallLinker for TemplateCalls<'_> {
                 "a callable reference changed its provider handle while linking".to_owned(),
             ));
         }
-        Ok(LinkedCallableReference {
-            declaration,
-            kind: realization.kind,
-            call,
-        })
+        let callable = realization
+            .klib_body_callable()
+            .ok_or(KlibBodyDeclineReason::Unjoined)?;
+        Ok(LinkedCallableReference::new(declaration, callable, call))
     }
 }
 

@@ -14,6 +14,15 @@ federated views. Preserve absent, selected-unknown and selected-known records in
 backend facts, including aliases without target shapes. This supplies the metadata consumer seam;
 the full class-ID encoder and callable-reference adapter regressions remain separate follow-ups.
 
+## Bound serialized extension-reference frames
+
+Extend the shared declaration-reference admission with one authenticated bound extension receiver.
+Relabel the serialized wrapper's existing storage and invocation slots without prepending a lexical
+capture. Preserve provider-owned extension coordinates, ordinary operand lowering, reference identity
+and the existing Native capture ABI. Validate raw and prepared producers, computed-receiver evaluation,
+exact target/receiver equality, refusal rollback and reuse, followed by the modular kotlinc consumer
+oracle and Native execution. Other reference and mutable/suspend capture capabilities remain separate.
+
 ## Authenticated serialized reference admission
 
 Lower admitted top-level KLIB reference wrappers to the existing checked common callable-reference

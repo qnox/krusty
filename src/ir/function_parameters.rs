@@ -92,6 +92,9 @@ pub enum IrGeneratedParameterRole {
     ReferenceInvokeValue {
         ordinal: u32,
     },
+    /// The explicitly bound receiver stored by a callable-reference adapter, ahead of its own
+    /// invocation inputs. It carries no lexical-capture or source-parameter-name provenance.
+    ReferenceBoundReceiver,
     /// A parameter of the `FunctionN.invoke` a generated function class overrides, by its position
     /// in the interface's parameter list. A suspend function type's continuation is one of them:
     /// it is the interface's last parameter, not a declared completion.
