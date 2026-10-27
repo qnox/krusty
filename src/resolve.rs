@@ -10698,6 +10698,7 @@ type CandidateScorer<'s> = dyn Fn(&[Ty], &CallSig, ArgSlots<'_>) -> Option<CallC
 /// caller-supplied probes, so a caller with no expressions (signature solving in Pass 1, where the
 /// only member-extension reads are zero-argument) passes probes that are never consulted.
 fn instantiate_member_extension_with(
+    source: &dyn SymbolSource,
     probes: MemberExtensionProbes<'_>,
     result_constraint: CallResultConstraint,
     inference_bindings: Option<&crate::symbol_resolver::GSigBinds>,
@@ -10749,7 +10750,9 @@ fn instantiate_member_extension_with(
     }
     // Both receiver and parameter inference consume the provider-normalized semantic signature.
     // The same `Ty::TyParam` unifier therefore handles source syntax and decoded metadata; neither
-    // path needs to retain or reconstruct a provider-specific spelling.
+    // path needs to retain or reconstruct a provider-specific spelling. A receiver whose classifier
+    // differs from the declared one constrains the formals through its applied supertype, as an
+    // ordinary extension receiver does (`List<String>` binds `T` of `Iterable<T>`).
     let declared_receiver = generic
         .and_then(|signature| signature.receiver)
         .unwrap_or(function.receiver_ty);
@@ -10759,7 +10762,12 @@ fn instantiate_member_extension_with(
         extension_receiver,
         &mut lower_inputs,
     );
-    crate::symbol_resolver::unify_ty(declared_receiver, extension_receiver, &mut bindings);
+    crate::symbol_resolver::unify_ty_from_symbols(
+        source,
+        declared_receiver,
+        extension_receiver,
+        &mut bindings,
+    );
     let declared_params = generic.map_or(function.signature.params.as_slice(), |signature| {
         signature.params.as_slice()
     });
@@ -31107,6 +31115,7 @@ fn member_extension_function_with(
             rejected_candidates.push(candidate);
         }
         let Some(instantiated) = instantiate_member_extension_with(
+            source,
             probes,
             result_constraint,
             inference_bindings,
@@ -62810,7 +62819,14 @@ impl<'a> Checker<'a> {
         result_constraint: CallResultConstraint,
     ) -> Option<InstantiatedMemberExtension> {
         self.with_member_extension_probes(scope, call.args, |probes| {
-            instantiate_member_extension_with(probes, result_constraint, None, shape, call)
+            instantiate_member_extension_with(
+                &self.fed_source(),
+                probes,
+                result_constraint,
+                None,
+                shape,
+                call,
+            )
         })
     }
 

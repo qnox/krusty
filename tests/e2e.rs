@@ -1565,6 +1565,8 @@ mod member_extension_nested_hof_e2e;
 mod member_extension_property_e2e;
 #[path = "member_extension_property_override_e2e.rs"]
 mod member_extension_property_override_e2e;
+#[path = "member_extension_receiver_supertype_e2e.rs"]
+mod member_extension_receiver_supertype_e2e;
 #[path = "member_extension_recursive_bound_e2e.rs"]
 mod member_extension_recursive_bound_e2e;
 #[path = "member_extension_reified_e2e.rs"]
