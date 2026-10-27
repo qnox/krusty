@@ -127,3 +127,13 @@ abstract class Fields(val fromConstructor: Int) {
         objectMember = 20
     }
 }
+
+class Spelled(val fromConstructor: List<String>, plain: Map<String, Int?>) {
+    val property: Map<String, List<Int?>>? = null
+
+    fun function(parameter: Set<out Number>, vararg rest: String): Array<String> = arrayOf()
+}
+
+fun List<String>.spelledExtension(): Unit {}
+
+class Plain(val names: List<String>)

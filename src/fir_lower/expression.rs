@@ -237,15 +237,7 @@ impl BodyLowering<'_> {
                         .map(|signature| signature.result.get()),
                     crate::fir::FirPropertyTarget::External { result, .. } => Some(result.get()),
                 };
-                if declared.is_some_and(|declared| declared != expression.ty.get()) {
-                    self.ir.add_expr(IrExpr::TypeOp {
-                        op: IrTypeOp::ImplicitCoercion,
-                        arg: lowered,
-                        type_operand: expression.ty.get(),
-                    })
-                } else {
-                    lowered
-                }
+                self.declaration_result(lowered, declared, expression.ty.get())
             }
             FirExprKind::PropertyWrite {
                 target,
@@ -1084,7 +1076,16 @@ impl BodyLowering<'_> {
                     lhs: condition_lhs,
                     rhs: null,
                 });
+                let chained = matches!(
+                    self.body.expr(*rhs).map(|rhs| &rhs.kind),
+                    Some(FirExprKind::Elvis { .. })
+                );
                 let rhs = self.expression(*rhs)?;
+                if chained {
+                    // `a ?: b ?: c` is one chain that begins with `a`, as kotlinc folds it: the
+                    // later elvis does not state a start line of its own.
+                    self.ir.kept_start_lines.remove(&rhs);
+                }
                 let rhs = self.coerce_result(rhs, expression.ty.get());
                 let lhs = self.ir.add_expr(IrExpr::GetValue(temporary));
                 let lhs = self.coerce_result(lhs, expression.ty.get());
@@ -1104,10 +1105,14 @@ impl BodyLowering<'_> {
                     self.ir.null_guards.insert(result);
                     self.ir.elvis_safe_call_guards.insert(result);
                 }
-                self.ir.add_expr(IrExpr::Block {
+                let elvis = self.ir.add_expr(IrExpr::Block {
                     stmts: vec![variable],
                     value: Some(result),
-                })
+                });
+                // kotlinc states the elvis's own line where it begins and again where its value is
+                // stored, and keeps it when the left value or the store marks another line there.
+                self.ir.kept_start_lines.insert(elvis);
+                elvis
             }
             FirExprKind::Throw(value) => {
                 let operand = self.expression(*value)?;

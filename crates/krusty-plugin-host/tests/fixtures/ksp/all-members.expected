@@ -1,0 +1,172 @@
+# What KSP2 2.3.12 (KSPJvmMain) logs with AllMembers.kt over all-members/: what getAllFunctions and
+# getAllProperties list for every classifier, nested ones after their owner's lists.
+w: [ksp] allmembers.Shape fun area(): Double parent=allmembers.Shape origin=KOTLIN modifiers=[] abstract=true
+w: [ksp] allmembers.Shape fun name(): String parent=allmembers.Shape origin=KOTLIN modifiers=[] abstract=false
+w: [ksp] allmembers.Shape fun equals(other: Any?): Boolean parent=kotlin.Any origin=KOTLIN_LIB modifiers=[OPEN, OPERATOR, OVERRIDE, PUBLIC] abstract=false
+w: [ksp] allmembers.Shape fun hashCode(): Int parent=kotlin.Any origin=KOTLIN_LIB modifiers=[OPEN, PUBLIC] abstract=false
+w: [ksp] allmembers.Shape fun toString(): String parent=kotlin.Any origin=KOTLIN_LIB modifiers=[OPEN, PUBLIC] abstract=false
+w: [ksp] allmembers.Shape property sides: Int parent=allmembers.Shape origin=KOTLIN modifiers=[]
+w: [ksp] allmembers.Base fun describe(): String parent=allmembers.Base origin=KOTLIN modifiers=[OPEN] abstract=false
+w: [ksp] allmembers.Base fun fixed(): Unit parent=allmembers.Base origin=KOTLIN modifiers=[] abstract=false
+w: [ksp] allmembers.Base fun prot(): Unit parent=allmembers.Base origin=KOTLIN modifiers=[PROTECTED] abstract=false
+w: [ksp] allmembers.Base fun priv(): Unit parent=allmembers.Base origin=KOTLIN modifiers=[PRIVATE] abstract=false
+w: [ksp] allmembers.Base fun inner(): Unit parent=allmembers.Base origin=KOTLIN modifiers=[INTERNAL] abstract=false
+w: [ksp] allmembers.Base fun abs(): Int parent=allmembers.Base origin=KOTLIN modifiers=[ABSTRACT] abstract=true
+w: [ksp] allmembers.Base fun toString(): String parent=allmembers.Base origin=KOTLIN modifiers=[OVERRIDE] abstract=false
+w: [ksp] allmembers.Base fun equals(other: Any?): Boolean parent=kotlin.Any origin=KOTLIN_LIB modifiers=[OPEN, OPERATOR, OVERRIDE, PUBLIC] abstract=false
+w: [ksp] allmembers.Base fun hashCode(): Int parent=kotlin.Any origin=KOTLIN_LIB modifiers=[OPEN, PUBLIC] abstract=false
+w: [ksp] allmembers.Base fun <init>(): Base parent=allmembers.Base origin=SYNTHETIC modifiers=[FINAL, PUBLIC] abstract=false
+w: [ksp] allmembers.Base property label: String parent=allmembers.Base origin=KOTLIN modifiers=[OPEN]
+w: [ksp] allmembers.Point fun area(): Double parent=allmembers.Point origin=KOTLIN modifiers=[OVERRIDE] abstract=false
+w: [ksp] allmembers.Point fun abs(): Int parent=allmembers.Point origin=KOTLIN modifiers=[OVERRIDE] abstract=false
+w: [ksp] allmembers.Point fun own(): Unit parent=allmembers.Point origin=KOTLIN modifiers=[] abstract=false
+w: [ksp] allmembers.Point fun overload(a: Int): Unit parent=allmembers.Point origin=KOTLIN modifiers=[] abstract=false
+w: [ksp] allmembers.Point fun overload(a: String): Unit parent=allmembers.Point origin=KOTLIN modifiers=[] abstract=false
+w: [ksp] allmembers.Point fun component1(): Int parent=allmembers.Point origin=SYNTHETIC modifiers=[FINAL, OPERATOR, OVERRIDE, PUBLIC] abstract=false
+w: [ksp] allmembers.Point fun component2(): Int parent=allmembers.Point origin=SYNTHETIC modifiers=[FINAL, OPERATOR, OVERRIDE, PUBLIC] abstract=false
+w: [ksp] allmembers.Point fun copy(x: Int, y: Int): Point parent=allmembers.Point origin=SYNTHETIC modifiers=[FINAL, PUBLIC] abstract=false
+w: [ksp] allmembers.Point fun describe(): String parent=allmembers.Base origin=KOTLIN modifiers=[OPEN] abstract=false
+w: [ksp] allmembers.Point fun fixed(): Unit parent=allmembers.Base origin=KOTLIN modifiers=[] abstract=false
+w: [ksp] allmembers.Point fun prot(): Unit parent=allmembers.Base origin=KOTLIN modifiers=[PROTECTED] abstract=false
+w: [ksp] allmembers.Point fun inner(): Unit parent=allmembers.Base origin=KOTLIN modifiers=[INTERNAL] abstract=false
+w: [ksp] allmembers.Point fun toString(): String parent=allmembers.Point origin=SYNTHETIC modifiers=[OPEN, PUBLIC] abstract=false
+w: [ksp] allmembers.Point fun equals(other: Any?): Boolean parent=allmembers.Point origin=SYNTHETIC modifiers=[OPEN, OPERATOR, OVERRIDE, PUBLIC] abstract=false
+w: [ksp] allmembers.Point fun hashCode(): Int parent=allmembers.Point origin=SYNTHETIC modifiers=[OPEN, PUBLIC] abstract=false
+w: [ksp] allmembers.Point fun name(): String parent=allmembers.Shape origin=KOTLIN modifiers=[] abstract=false
+w: [ksp] allmembers.Point fun <init>(x: Int, y: Int): Point parent=allmembers.Point origin=KOTLIN modifiers=[FINAL] abstract=false
+w: [ksp] allmembers.Point fun <init>(x: Int): Point parent=allmembers.Point origin=KOTLIN modifiers=[FINAL] abstract=false
+w: [ksp] allmembers.Point property x: Int parent=allmembers.Point origin=KOTLIN modifiers=[]
+w: [ksp] allmembers.Point property y: Int parent=allmembers.Point origin=KOTLIN modifiers=[]
+w: [ksp] allmembers.Point property sides: Int parent=allmembers.Point origin=KOTLIN modifiers=[OVERRIDE]
+w: [ksp] allmembers.Point property label: String parent=allmembers.Base origin=KOTLIN modifiers=[OPEN]
+w: [ksp] allmembers.Plain fun a(): Unit parent=allmembers.Plain origin=KOTLIN modifiers=[] abstract=false
+w: [ksp] allmembers.Plain fun equals(other: Any?): Boolean parent=kotlin.Any origin=KOTLIN_LIB modifiers=[OPEN, OPERATOR, OVERRIDE, PUBLIC] abstract=false
+w: [ksp] allmembers.Plain fun hashCode(): Int parent=kotlin.Any origin=KOTLIN_LIB modifiers=[OPEN, PUBLIC] abstract=false
+w: [ksp] allmembers.Plain fun toString(): String parent=kotlin.Any origin=KOTLIN_LIB modifiers=[OPEN, PUBLIC] abstract=false
+w: [ksp] allmembers.Plain fun <init>(): Plain parent=allmembers.Plain origin=SYNTHETIC modifiers=[FINAL, PUBLIC] abstract=false
+w: [ksp] allmembers.Empty fun equals(other: Any?): Boolean parent=kotlin.Any origin=KOTLIN_LIB modifiers=[OPEN, OPERATOR, OVERRIDE, PUBLIC] abstract=false
+w: [ksp] allmembers.Empty fun hashCode(): Int parent=kotlin.Any origin=KOTLIN_LIB modifiers=[OPEN, PUBLIC] abstract=false
+w: [ksp] allmembers.Empty fun toString(): String parent=kotlin.Any origin=KOTLIN_LIB modifiers=[OPEN, PUBLIC] abstract=false
+w: [ksp] allmembers.Single fun s(): Unit parent=allmembers.Single origin=KOTLIN modifiers=[] abstract=false
+w: [ksp] allmembers.Single fun equals(other: Any?): Boolean parent=kotlin.Any origin=KOTLIN_LIB modifiers=[OPEN, OPERATOR, OVERRIDE, PUBLIC] abstract=false
+w: [ksp] allmembers.Single fun hashCode(): Int parent=kotlin.Any origin=KOTLIN_LIB modifiers=[OPEN, PUBLIC] abstract=false
+w: [ksp] allmembers.Single fun toString(): String parent=kotlin.Any origin=KOTLIN_LIB modifiers=[OPEN, PUBLIC] abstract=false
+w: [ksp] allmembers.Single fun <init>(): Single parent=allmembers.Single origin=SYNTHETIC modifiers=[FINAL, PUBLIC] abstract=false
+w: [ksp] allmembers.Outer fun equals(other: Any?): Boolean parent=kotlin.Any origin=KOTLIN_LIB modifiers=[OPEN, OPERATOR, OVERRIDE, PUBLIC] abstract=false
+w: [ksp] allmembers.Outer fun hashCode(): Int parent=kotlin.Any origin=KOTLIN_LIB modifiers=[OPEN, PUBLIC] abstract=false
+w: [ksp] allmembers.Outer fun toString(): String parent=kotlin.Any origin=KOTLIN_LIB modifiers=[OPEN, PUBLIC] abstract=false
+w: [ksp] allmembers.Outer fun <init>(): Outer parent=allmembers.Outer origin=SYNTHETIC modifiers=[FINAL, PUBLIC] abstract=false
+w: [ksp] allmembers.Outer.Inner fun i(): Unit parent=allmembers.Outer.Inner origin=KOTLIN modifiers=[] abstract=false
+w: [ksp] allmembers.Outer.Inner fun equals(other: Any?): Boolean parent=kotlin.Any origin=KOTLIN_LIB modifiers=[OPEN, OPERATOR, OVERRIDE, PUBLIC] abstract=false
+w: [ksp] allmembers.Outer.Inner fun hashCode(): Int parent=kotlin.Any origin=KOTLIN_LIB modifiers=[OPEN, PUBLIC] abstract=false
+w: [ksp] allmembers.Outer.Inner fun toString(): String parent=kotlin.Any origin=KOTLIN_LIB modifiers=[OPEN, PUBLIC] abstract=false
+w: [ksp] allmembers.Outer.Inner fun <init>(): Inner parent=allmembers.Outer.Inner origin=SYNTHETIC modifiers=[FINAL, PUBLIC] abstract=false
+w: [ksp] allmembers.Outer.Companion fun make(): Unit parent=allmembers.Outer.Companion origin=KOTLIN modifiers=[] abstract=false
+w: [ksp] allmembers.Outer.Companion fun equals(other: Any?): Boolean parent=kotlin.Any origin=KOTLIN_LIB modifiers=[OPEN, OPERATOR, OVERRIDE, PUBLIC] abstract=false
+w: [ksp] allmembers.Outer.Companion fun hashCode(): Int parent=kotlin.Any origin=KOTLIN_LIB modifiers=[OPEN, PUBLIC] abstract=false
+w: [ksp] allmembers.Outer.Companion fun toString(): String parent=kotlin.Any origin=KOTLIN_LIB modifiers=[OPEN, PUBLIC] abstract=false
+w: [ksp] allmembers.Outer.Companion fun <init>(): Companion parent=allmembers.Outer.Companion origin=SYNTHETIC modifiers=[FINAL, PUBLIC] abstract=false
+w: [ksp] allmembers.Middle fun abs(): Int parent=allmembers.Middle origin=KOTLIN modifiers=[OVERRIDE] abstract=false
+w: [ksp] allmembers.Middle fun describe(): String parent=allmembers.Base origin=KOTLIN modifiers=[OPEN] abstract=false
+w: [ksp] allmembers.Middle fun fixed(): Unit parent=allmembers.Base origin=KOTLIN modifiers=[] abstract=false
+w: [ksp] allmembers.Middle fun prot(): Unit parent=allmembers.Base origin=KOTLIN modifiers=[PROTECTED] abstract=false
+w: [ksp] allmembers.Middle fun inner(): Unit parent=allmembers.Base origin=KOTLIN modifiers=[INTERNAL] abstract=false
+w: [ksp] allmembers.Middle fun toString(): String parent=allmembers.Base origin=KOTLIN modifiers=[OVERRIDE] abstract=false
+w: [ksp] allmembers.Middle fun equals(other: Any?): Boolean parent=kotlin.Any origin=KOTLIN_LIB modifiers=[OPEN, OPERATOR, OVERRIDE, PUBLIC] abstract=false
+w: [ksp] allmembers.Middle fun hashCode(): Int parent=kotlin.Any origin=KOTLIN_LIB modifiers=[OPEN, PUBLIC] abstract=false
+w: [ksp] allmembers.Middle fun <init>(): Middle parent=allmembers.Middle origin=SYNTHETIC modifiers=[FINAL, PUBLIC] abstract=false
+w: [ksp] allmembers.Middle property label: String parent=allmembers.Base origin=KOTLIN modifiers=[OPEN]
+w: [ksp] allmembers.Leaf fun describe(): String parent=allmembers.Leaf origin=KOTLIN modifiers=[OVERRIDE] abstract=false
+w: [ksp] allmembers.Leaf fun abs(): Int parent=allmembers.Middle origin=KOTLIN modifiers=[OVERRIDE] abstract=false
+w: [ksp] allmembers.Leaf fun fixed(): Unit parent=allmembers.Base origin=KOTLIN modifiers=[] abstract=false
+w: [ksp] allmembers.Leaf fun prot(): Unit parent=allmembers.Base origin=KOTLIN modifiers=[PROTECTED] abstract=false
+w: [ksp] allmembers.Leaf fun inner(): Unit parent=allmembers.Base origin=KOTLIN modifiers=[INTERNAL] abstract=false
+w: [ksp] allmembers.Leaf fun toString(): String parent=allmembers.Base origin=KOTLIN modifiers=[OVERRIDE] abstract=false
+w: [ksp] allmembers.Leaf fun equals(other: Any?): Boolean parent=kotlin.Any origin=KOTLIN_LIB modifiers=[OPEN, OPERATOR, OVERRIDE, PUBLIC] abstract=false
+w: [ksp] allmembers.Leaf fun hashCode(): Int parent=kotlin.Any origin=KOTLIN_LIB modifiers=[OPEN, PUBLIC] abstract=false
+w: [ksp] allmembers.Leaf fun <init>(): Leaf parent=allmembers.Leaf origin=SYNTHETIC modifiers=[FINAL, PUBLIC] abstract=false
+w: [ksp] allmembers.Leaf property label: String parent=allmembers.Base origin=KOTLIN modifiers=[OPEN]
+w: [ksp] allmembers.Named fun name(): String parent=allmembers.Named origin=KOTLIN modifiers=[] abstract=false
+w: [ksp] allmembers.Named fun extra(): Unit parent=allmembers.Named origin=KOTLIN modifiers=[] abstract=false
+w: [ksp] allmembers.Named fun equals(other: Any?): Boolean parent=kotlin.Any origin=KOTLIN_LIB modifiers=[OPEN, OPERATOR, OVERRIDE, PUBLIC] abstract=false
+w: [ksp] allmembers.Named fun hashCode(): Int parent=kotlin.Any origin=KOTLIN_LIB modifiers=[OPEN, PUBLIC] abstract=false
+w: [ksp] allmembers.Named fun toString(): String parent=kotlin.Any origin=KOTLIN_LIB modifiers=[OPEN, PUBLIC] abstract=false
+w: [ksp] allmembers.Named property title: String parent=allmembers.Named origin=KOTLIN modifiers=[]
+w: [ksp] allmembers.Extended fun component1(): Int parent=allmembers.Extended origin=SYNTHETIC modifiers=[FINAL, OPERATOR, OVERRIDE, PUBLIC] abstract=false
+w: [ksp] allmembers.Extended fun copy(v: Int): Extended parent=allmembers.Extended origin=SYNTHETIC modifiers=[FINAL, PUBLIC] abstract=false
+w: [ksp] allmembers.Extended fun abs(): Int parent=allmembers.Middle origin=KOTLIN modifiers=[OVERRIDE] abstract=false
+w: [ksp] allmembers.Extended fun describe(): String parent=allmembers.Base origin=KOTLIN modifiers=[OPEN] abstract=false
+w: [ksp] allmembers.Extended fun fixed(): Unit parent=allmembers.Base origin=KOTLIN modifiers=[] abstract=false
+w: [ksp] allmembers.Extended fun prot(): Unit parent=allmembers.Base origin=KOTLIN modifiers=[PROTECTED] abstract=false
+w: [ksp] allmembers.Extended fun inner(): Unit parent=allmembers.Base origin=KOTLIN modifiers=[INTERNAL] abstract=false
+w: [ksp] allmembers.Extended fun toString(): String parent=allmembers.Extended origin=SYNTHETIC modifiers=[OPEN, PUBLIC] abstract=false
+w: [ksp] allmembers.Extended fun equals(other: Any?): Boolean parent=allmembers.Extended origin=SYNTHETIC modifiers=[OPEN, OPERATOR, OVERRIDE, PUBLIC] abstract=false
+w: [ksp] allmembers.Extended fun hashCode(): Int parent=allmembers.Extended origin=SYNTHETIC modifiers=[OPEN, PUBLIC] abstract=false
+w: [ksp] allmembers.Extended fun <init>(v: Int): Extended parent=allmembers.Extended origin=KOTLIN modifiers=[FINAL] abstract=false
+w: [ksp] allmembers.Extended property v: Int parent=allmembers.Extended origin=KOTLIN modifiers=[]
+w: [ksp] allmembers.Extended property label: String parent=allmembers.Base origin=KOTLIN modifiers=[OPEN]
+w: [ksp] allmembers.SubShape fun more(): Unit parent=allmembers.SubShape origin=KOTLIN modifiers=[] abstract=true
+w: [ksp] allmembers.SubShape fun name(): String parent=allmembers.SubShape origin=KOTLIN modifiers=[OVERRIDE] abstract=false
+w: [ksp] allmembers.SubShape fun area(): Double parent=allmembers.Shape origin=KOTLIN modifiers=[] abstract=true
+w: [ksp] allmembers.SubShape fun equals(other: Any?): Boolean parent=kotlin.Any origin=KOTLIN_LIB modifiers=[OPEN, OPERATOR, OVERRIDE, PUBLIC] abstract=false
+w: [ksp] allmembers.SubShape fun hashCode(): Int parent=kotlin.Any origin=KOTLIN_LIB modifiers=[OPEN, PUBLIC] abstract=false
+w: [ksp] allmembers.SubShape fun toString(): String parent=kotlin.Any origin=KOTLIN_LIB modifiers=[OPEN, PUBLIC] abstract=false
+w: [ksp] allmembers.SubShape property sides: Int parent=allmembers.Shape origin=KOTLIN modifiers=[]
+w: [ksp] allmembers.Impl fun name(): String parent=allmembers.Impl origin=KOTLIN modifiers=[OVERRIDE] abstract=false
+w: [ksp] allmembers.Impl fun more(): Unit parent=allmembers.SubShape origin=KOTLIN modifiers=[] abstract=true
+w: [ksp] allmembers.Impl fun area(): Double parent=allmembers.Shape origin=KOTLIN modifiers=[] abstract=true
+w: [ksp] allmembers.Impl fun equals(other: Any?): Boolean parent=kotlin.Any origin=KOTLIN_LIB modifiers=[OPEN, OPERATOR, OVERRIDE, PUBLIC] abstract=false
+w: [ksp] allmembers.Impl fun hashCode(): Int parent=kotlin.Any origin=KOTLIN_LIB modifiers=[OPEN, PUBLIC] abstract=false
+w: [ksp] allmembers.Impl fun toString(): String parent=kotlin.Any origin=KOTLIN_LIB modifiers=[OPEN, PUBLIC] abstract=false
+w: [ksp] allmembers.Impl fun extra(): Unit parent=allmembers.Named origin=KOTLIN modifiers=[] abstract=false
+w: [ksp] allmembers.Impl fun <init>(): Impl parent=allmembers.Impl origin=SYNTHETIC modifiers=[FINAL, PUBLIC] abstract=false
+w: [ksp] allmembers.Impl property sides: Int parent=allmembers.Shape origin=KOTLIN modifiers=[]
+w: [ksp] allmembers.Impl property title: String parent=allmembers.Named origin=KOTLIN modifiers=[]
+w: [ksp] allmembers.Final fun component1(): Int parent=allmembers.Final origin=SYNTHETIC modifiers=[FINAL, OPERATOR, OVERRIDE, PUBLIC] abstract=false
+w: [ksp] allmembers.Final fun copy(v: Int): Final parent=allmembers.Final origin=SYNTHETIC modifiers=[FINAL, PUBLIC] abstract=false
+w: [ksp] allmembers.Final fun toString(): String parent=allmembers.Sealed origin=KOTLIN modifiers=[FINAL, OVERRIDE] abstract=false
+w: [ksp] allmembers.Final fun equals(other: Any?): Boolean parent=allmembers.Sealed origin=KOTLIN modifiers=[FINAL, OVERRIDE] abstract=false
+w: [ksp] allmembers.Final fun hashCode(): Int parent=allmembers.Final origin=SYNTHETIC modifiers=[OPEN, PUBLIC] abstract=false
+w: [ksp] allmembers.Final fun <init>(v: Int): Final parent=allmembers.Final origin=KOTLIN modifiers=[FINAL] abstract=false
+w: [ksp] allmembers.Final property v: Int parent=allmembers.Final origin=KOTLIN modifiers=[]
+w: [ksp] allmembers.Sealed fun toString(): String parent=allmembers.Sealed origin=KOTLIN modifiers=[FINAL, OVERRIDE] abstract=false
+w: [ksp] allmembers.Sealed fun equals(other: Any?): Boolean parent=allmembers.Sealed origin=KOTLIN modifiers=[FINAL, OVERRIDE] abstract=false
+w: [ksp] allmembers.Sealed fun hashCode(): Int parent=kotlin.Any origin=KOTLIN_LIB modifiers=[OPEN, PUBLIC] abstract=false
+w: [ksp] allmembers.Sealed fun <init>(): Sealed parent=allmembers.Sealed origin=SYNTHETIC modifiers=[FINAL, PUBLIC] abstract=false
+w: [ksp] allmembers.Box fun get(): T? parent=allmembers.Box origin=KOTLIN modifiers=[] abstract=false
+w: [ksp] allmembers.Box fun put(value: T): Unit parent=allmembers.Box origin=KOTLIN modifiers=[OPEN] abstract=false
+w: [ksp] allmembers.Box fun equals(other: Any?): Boolean parent=kotlin.Any origin=KOTLIN_LIB modifiers=[OPEN, OPERATOR, OVERRIDE, PUBLIC] abstract=false
+w: [ksp] allmembers.Box fun hashCode(): Int parent=kotlin.Any origin=KOTLIN_LIB modifiers=[OPEN, PUBLIC] abstract=false
+w: [ksp] allmembers.Box fun toString(): String parent=kotlin.Any origin=KOTLIN_LIB modifiers=[OPEN, PUBLIC] abstract=false
+w: [ksp] allmembers.Box fun <init>(): Box<*> parent=allmembers.Box origin=SYNTHETIC modifiers=[FINAL, PUBLIC] abstract=false
+w: [ksp] allmembers.Box property item: T? parent=allmembers.Box origin=KOTLIN modifiers=[OPEN]
+w: [ksp] allmembers.Declared fun toString(): String parent=allmembers.Declared origin=KOTLIN modifiers=[OVERRIDE] abstract=true
+w: [ksp] allmembers.Declared fun equals(other: Any?): Boolean parent=kotlin.Any origin=KOTLIN_LIB modifiers=[OPEN, OPERATOR, OVERRIDE, PUBLIC] abstract=false
+w: [ksp] allmembers.Declared fun hashCode(): Int parent=kotlin.Any origin=KOTLIN_LIB modifiers=[OPEN, PUBLIC] abstract=false
+w: [ksp] allmembers.Inheriting fun toString(): String parent=allmembers.Declared origin=KOTLIN modifiers=[OVERRIDE] abstract=true
+w: [ksp] allmembers.Inheriting fun equals(other: Any?): Boolean parent=kotlin.Any origin=KOTLIN_LIB modifiers=[OPEN, OPERATOR, OVERRIDE, PUBLIC] abstract=false
+w: [ksp] allmembers.Inheriting fun hashCode(): Int parent=kotlin.Any origin=KOTLIN_LIB modifiers=[OPEN, PUBLIC] abstract=false
+w: [ksp] allmembers.Inheriting fun <init>(): Inheriting parent=allmembers.Inheriting origin=SYNTHETIC modifiers=[FINAL, PUBLIC] abstract=false
+w: [ksp] allmembers.Record fun component1(): Int parent=allmembers.Record origin=SYNTHETIC modifiers=[FINAL, OPERATOR, OVERRIDE, PUBLIC] abstract=false
+w: [ksp] allmembers.Record fun component2(): String parent=allmembers.Record origin=SYNTHETIC modifiers=[FINAL, OPERATOR, OVERRIDE, PUBLIC] abstract=false
+w: [ksp] allmembers.Record fun copy(a: Int, b: String): Record parent=allmembers.Record origin=SYNTHETIC modifiers=[FINAL, PUBLIC] abstract=false
+w: [ksp] allmembers.Record fun equals(other: Any?): Boolean parent=allmembers.Record origin=SYNTHETIC modifiers=[OPEN, OPERATOR, OVERRIDE, PUBLIC] abstract=false
+w: [ksp] allmembers.Record fun hashCode(): Int parent=allmembers.Record origin=SYNTHETIC modifiers=[OPEN, PUBLIC] abstract=false
+w: [ksp] allmembers.Record fun toString(): String parent=allmembers.Record origin=SYNTHETIC modifiers=[OPEN, PUBLIC] abstract=false
+w: [ksp] allmembers.Record fun <init>(a: Int, b: String): Record parent=allmembers.Record origin=KOTLIN modifiers=[FINAL] abstract=false
+w: [ksp] allmembers.Record property a: Int parent=allmembers.Record origin=KOTLIN modifiers=[]
+w: [ksp] allmembers.Record property b: String parent=allmembers.Record origin=KOTLIN modifiers=[]
+w: [ksp] allmembers.Record property extra: Int parent=allmembers.Record origin=KOTLIN modifiers=[]
+w: [ksp] allmembers.Hiding fun equals(other: Any?): Boolean parent=kotlin.Any origin=KOTLIN_LIB modifiers=[OPEN, OPERATOR, OVERRIDE, PUBLIC] abstract=false
+w: [ksp] allmembers.Hiding fun hashCode(): Int parent=kotlin.Any origin=KOTLIN_LIB modifiers=[OPEN, PUBLIC] abstract=false
+w: [ksp] allmembers.Hiding fun toString(): String parent=kotlin.Any origin=KOTLIN_LIB modifiers=[OPEN, PUBLIC] abstract=false
+w: [ksp] allmembers.Hiding fun <init>(): Hiding parent=allmembers.Hiding origin=SYNTHETIC modifiers=[FINAL, PUBLIC] abstract=false
+w: [ksp] allmembers.Hiding property hidden: Int parent=allmembers.Hiding origin=KOTLIN modifiers=[PRIVATE]
+w: [ksp] allmembers.Hiding property shown: Int parent=allmembers.Hiding origin=KOTLIN modifiers=[OPEN, PROTECTED]
+w: [ksp] allmembers.Hiding property mutable: Int parent=allmembers.Hiding origin=KOTLIN modifiers=[INTERNAL]
+w: [ksp] allmembers.Showing fun equals(other: Any?): Boolean parent=kotlin.Any origin=KOTLIN_LIB modifiers=[OPEN, OPERATOR, OVERRIDE, PUBLIC] abstract=false
+w: [ksp] allmembers.Showing fun hashCode(): Int parent=kotlin.Any origin=KOTLIN_LIB modifiers=[OPEN, PUBLIC] abstract=false
+w: [ksp] allmembers.Showing fun toString(): String parent=kotlin.Any origin=KOTLIN_LIB modifiers=[OPEN, PUBLIC] abstract=false
+w: [ksp] allmembers.Showing fun <init>(): Showing parent=allmembers.Showing origin=SYNTHETIC modifiers=[FINAL, PUBLIC] abstract=false
+w: [ksp] allmembers.Showing property shown: Int parent=allmembers.Showing origin=KOTLIN modifiers=[OVERRIDE]
+w: [ksp] allmembers.Showing property mutable: Int parent=allmembers.Hiding origin=KOTLIN modifiers=[INTERNAL]
