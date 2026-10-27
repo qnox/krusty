@@ -853,14 +853,6 @@ mod tests {
                     "Kotlin compiler 2.4.0 differs from Kotlin Gradle plugin 2.4.10",
                 ),
                 (
-                    "jvm-default-conflict",
-                    "compilerOptions.jvmDefault and freeCompilerArg '-jvm-default=disable' are both set; configure exactly one",
-                ),
-                (
-                    "progressive-free-argument",
-                    "freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead",
-                ),
-                (
                     "free-end-of-options",
                     "freeCompilerArg '--' would make the arguments after it sources; add sources to the task's source set instead",
                 ),
@@ -875,10 +867,6 @@ mod tests {
                 (
                     "classpath-alias",
                     "freeCompilerArg '-cp' conflicts with the task libraries classpath; configure the structured Gradle input instead",
-                ),
-                (
-                    "progressive-alias",
-                    "freeCompilerArg '-Xprogressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead",
                 ),
                 (
                     "compiler-plugin-alias",
@@ -908,10 +896,6 @@ mod tests {
                     "duplicate-opt-in",
                     "compilerOptions.optIn contains duplicate marker 'krusty.fixture.ExperimentalFirstApi'",
                 ),
-                (
-                    "opt-in-overlap",
-                    "compilerOptions.optIn and freeCompilerArg '-opt-in=krusty.fixture.ExperimentalFirstApi' both request marker 'krusty.fixture.ExperimentalFirstApi'; configure exactly one",
-                ),
             ] {
                 clear_invocation_log(&log);
                 clear_invocation_log(&fixture.probes);
@@ -933,24 +917,23 @@ mod tests {
             }
 
             // End to end, such a compile is kotlinc's: the replacement is skipped and the Kotlin
-            // task writes the classes. A free `-progressive` is one kotlinc compiles as it is.
+            // task writes the classes. Extra warnings are a request kotlinc compiles as it is.
             clear_invocation_log(&log);
             clear_invocation_log(&fixture.probes);
             let _ = std::fs::remove_dir_all(&kotlin_classes);
             let output = build()
-                .property("krusty.negative", "progressive-free-argument")
+                .property("krusty.negative", "structured-option")
                 .tasks([":compiler:util:compileKotlin"])
                 .run_output()
-                .unwrap_or_else(|error| panic!("progressive-free-argument: {error}"));
+                .unwrap_or_else(|error| panic!("structured-option: {error}"));
             assert_left_to_kotlinc(
                 &output,
                 ":compiler:util:compileKotlin",
-                &["freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead"
-                    .to_string()],
+                &["krusty does not support compilerOptions.extraWarnings".to_string()],
             );
             assert!(
                 !fixture.probes.exists(),
-                "the plugin refuses a free -progressive without asking krusty"
+                "the plugin refuses extra warnings without asking krusty"
             );
             assert!(
                 !log.exists(),
@@ -962,6 +945,37 @@ mod tests {
                     .is_file(),
                 "kotlinc wrote the module's classes"
             );
+
+            // Free arguments follow the arguments derived from the structured options, as KGP passes
+            // them to kotlinc, so one that restates such an option overrides it there too. The
+            // compile stays krusty's.
+            for (case, free) in [
+                ("progressive-free-argument", &["-progressive"][..]),
+                ("progressive-alias", &["-Xprogressive"]),
+                ("module-name-free-argument", &["-module-name=overridden"]),
+                ("jvm-default-conflict", &["-jvm-default=disable"]),
+                ("opt-in-overlap", &["-opt-in=krusty.fixture.ExperimentalFirstApi"]),
+            ] {
+                clear_invocation_log(&log);
+                build()
+                    .property("krusty.negative", case)
+                    .tasks([":compiler:util:compileKotlin"])
+                    .run()
+                    .unwrap_or_else(|error| panic!("{case}: {error}"));
+                let invocation = single_module_invocation(&log, "kotlin-compiler-util");
+                let structured = invocation
+                    .iter()
+                    .position(|argument| argument == "-module-name")
+                    .unwrap_or_else(|| panic!("{case}: structured -module-name: {invocation:?}"));
+                let free_start = invocation
+                    .windows(free.len())
+                    .rposition(|window| window == free)
+                    .unwrap_or_else(|| panic!("{case}: free {free:?}: {invocation:?}"));
+                assert!(
+                    structured < free_start,
+                    "{case}: free arguments follow the structured ones: {invocation:?}"
+                );
+            }
 
             // A Kotlin JVM target that differs from the Java one fails the build, as it does with
             // kotlinc under the default validation mode.
@@ -3159,6 +3173,7 @@ tasks.withType<KotlinJvmCompile>().configureEach {
             "old-api-version" -> apiVersion.set(KotlinVersion.fromVersion("1.9"))
             "progressive-free-argument" -> freeCompilerArgs.add("-progressive")
             "progressive-mode" -> progressiveMode.set(true)
+            "module-name-free-argument" -> freeCompilerArgs.add("-module-name=overridden")
             "free-end-of-options" -> freeCompilerArgs.addAll("--", "-d", "elsewhere")
             "free-argfile" -> freeCompilerArgs.add("@overrides.args")
             "free-source" -> freeCompilerArgs.add("Extra.kt")
