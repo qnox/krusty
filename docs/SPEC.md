@@ -1,5 +1,13 @@
 # krusty — a memory-lean Kotlin→JVM compiler PoC
 
+## Bound-only formals of member extensions
+
+A member extension's formal that occurs only in another formal's bound (`T` of
+`<T : Any, E : Entity<T>> Column<out E>.table(): Table<T>`) is solved from that formal's applied
+bound once the receiver binds it, exactly as for a top-level extension: `Column<Entity<U>>` gives
+`T = U`, not the fallback `Any`. Tests: `tests/box_regressions/memberExtensionBoundOnlyFormal.kt`
+and `resolver_regression_e2e::a_member_extension_bound_only_formal_reports_the_receiver_argument_like_kotlinc`.
+
 ## Dependency conversion type evidence
 
 Ordinary KLIB bodies and prepared inline templates prove subtype conversions through the calling
