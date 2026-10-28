@@ -194,7 +194,7 @@ pub(crate) fn run_backend_passes(
         .map_err(|_| SkipReason::SuperCalls)?;
     // A plugin's generated code calls the runtime declarations it selected at the handoff by their
     // identities; they become JVM calls here, exactly like the file's own dependency calls did.
-    crate::jvm::external_calls::realize_from(
+    crate::jvm::external_calls::realize_plugin_runtime_calls(
         ir,
         classifiers,
         classpath,

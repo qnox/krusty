@@ -591,9 +591,16 @@ pub struct CheckedBackendCallables {
     properties: HashMap<ExternalPropertyId, BackendPropertyFact>,
     singleton_dispatches: HashMap<crate::ir::ExprId, SingletonDispatch>,
     singleton_selections: HashMap<ExternalCallableId, Vec<SingletonDispatch>>,
+    /// The runtime declarations native plugins selected at the handoff for their generated code.
+    plugin_runtime: crate::fx_hash::HashSet<ExternalCallableId>,
 }
 
 impl CheckedBackendCallables {
+    /// Whether native plugins selected `identity` at the handoff for the code they generate.
+    pub(crate) fn is_plugin_runtime_callable(&self, identity: ExternalCallableId) -> bool {
+        self.plugin_runtime.contains(&identity)
+    }
+
     /// The exact declaration view for one emitted edge, retaining only its checked singleton.
     pub(crate) fn klib_body_callable_at(
         &self,
@@ -735,6 +742,7 @@ impl CheckedBackendCallables {
             ExternalCallableId,
         ) -> Option<crate::libraries::ExternalCallableRealization>,
     ) -> Result<(), DependencyFactError> {
+        self.plugin_runtime.extend(identities.iter().copied());
         self.freeze_callables(identities, provider)
     }
 

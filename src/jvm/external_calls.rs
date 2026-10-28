@@ -19,19 +19,20 @@ pub(super) fn realize(
     callables: &crate::backend::CheckedBackendCallables,
     default_call_operands: &mut DefaultCallOperands,
 ) -> Result<(), ExternalRealizationError> {
-    realize_from(
+    realize_expressions(
         ir,
         classifiers,
         classpath,
         callables,
         default_call_operands,
-        0,
+        Realized::File,
     )
 }
 
-/// Realize the dependency calls of the expressions from `first` on: the whole file at lowering,
-/// and later only what a native plugin appended after the file's own calls were realized.
-pub(super) fn realize_from(
+/// Realize the calls native plugins generated, from expression `first` on, to the runtime
+/// declarations they selected at the handoff. The file's own dependency calls were realized at
+/// lowering; any other expression a plugin appended keeps its own realization path.
+pub(super) fn realize_plugin_runtime_calls(
     ir: &mut IrFile,
     classifiers: &dyn crate::backend::BackendClassifierSource,
     classpath: &Classpath,
@@ -39,13 +40,68 @@ pub(super) fn realize_from(
     default_call_operands: &mut DefaultCallOperands,
     first: usize,
 ) -> Result<(), ExternalRealizationError> {
+    realize_expressions(
+        ir,
+        classifiers,
+        classpath,
+        callables,
+        default_call_operands,
+        Realized::PluginRuntimeCalls { first },
+    )
+}
+
+/// Which expressions one realization pass rewrites.
+#[derive(Clone, Copy)]
+enum Realized {
+    /// Every dependency call and construction of the file.
+    File,
+    /// The calls to plugin-selected runtime declarations among the expressions from `first` on.
+    PluginRuntimeCalls { first: usize },
+}
+
+impl Realized {
+    fn first(self) -> usize {
+        match self {
+            Self::File => 0,
+            Self::PluginRuntimeCalls { first } => first,
+        }
+    }
+
+    fn includes(
+        self,
+        expression: &IrExpr,
+        callables: &crate::backend::CheckedBackendCallables,
+    ) -> bool {
+        match self {
+            Self::File => true,
+            Self::PluginRuntimeCalls { .. } => matches!(
+                expression,
+                IrExpr::Call { callee, .. }
+                    if matches!(**callee, Callee::External { target, .. }
+                        if callables.is_plugin_runtime_callable(target))
+            ),
+        }
+    }
+}
+
+fn realize_expressions(
+    ir: &mut IrFile,
+    classifiers: &dyn crate::backend::BackendClassifierSource,
+    classpath: &Classpath,
+    callables: &crate::backend::CheckedBackendCallables,
+    default_call_operands: &mut DefaultCallOperands,
+    realized: Realized,
+) -> Result<(), ExternalRealizationError> {
     // Body-local, anonymous, and backend-generated receivers are complete only in this file's
     // common IR. Freeze them before mutating call nodes and combine them with the stable
     // module/dependency snapshot for every dispatch-owner decision below.
     let dispatch_classifiers =
         crate::jvm::member_dispatch::CheckedDispatchClassifiers::new(ir, classifiers);
     let expression_count = ir.exprs.len();
-    for index in first..expression_count {
+    for index in realized.first()..expression_count {
+        if !realized.includes(&ir.exprs[index], callables) {
+            continue;
+        }
         let expression = u32::try_from(index).expect("too many common IR expressions");
         let (defaults, default_prefix_count) = match &ir.exprs[index] {
             IrExpr::New {
