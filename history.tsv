@@ -51,3 +51,6 @@ date	krusty commit	project	reference exit	built	compilations	identical	classes	r
 2026-10-27	80cc8099ddb8c233bfdc4dabf6234c4cae2d8eea	okhttp	0	9	38	40	1483	https://github.com/qnox/krusty/actions/runs/40462256929
 2026-10-27	80cc8099ddb8c233bfdc4dabf6234c4cae2d8eea	okio	1	0	6	0	343	https://github.com/qnox/krusty/actions/runs/40462256929
 2026-10-27	80cc8099ddb8c233bfdc4dabf6234c4cae2d8eea	quarkdown	0	5	37	28	2345	https://github.com/qnox/krusty/actions/runs/40462256929
+2026-10-28	2f08633c609bede7e10f645d55c45a1f3982113f	kotlinx.coroutines	0	0	34	0	9482	https://github.com/qnox/krusty/actions/runs/40626567765
+2026-10-28	2f08633c609bede7e10f645d55c45a1f3982113f	ktor	0	0	220	0	15418	https://github.com/qnox/krusty/actions/runs/40626567765
+2026-10-28	2f08633c609bede7e10f645d55c45a1f3982113f	okhttp	0	9	38	40	1483	https://github.com/qnox/krusty/actions/runs/40626567765

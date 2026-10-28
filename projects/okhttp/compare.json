@@ -83,7 +83,7 @@
    "fallback": null,
    "error": null,
    "classes": 29,
-   "identical": 16,
+   "identical": 18,
    "only_kotlinc": 0,
    "only_krusty": 0
   },
@@ -226,7 +226,7 @@
    "fallback": null,
    "error": null,
    "classes": 13,
-   "identical": 10,
+   "identical": 8,
    "only_kotlinc": 0,
    "only_krusty": 0
   },
@@ -366,7 +366,7 @@
    "task": ":okhttp:compileKotlinJvm",
    "dir": "okhttp/build/classes/kotlin/jvm/main",
    "built": false,
-   "fallback": "krusty does not implement everything it requests (freeCompilerArg '-module-name=okhttp' conflicts with compilerOptions.moduleName; configure the structured Gradle input instead)",
+   "fallback": "krusty does not implement everything it requests (krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/app.cash.burst/burst-kotlin-plugin/2.14.0/18ea5fbb5fc62dbafd0552da69c94e5d1059e59e/burst-kotlin-plugin-2.14.0.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
    "error": null,
    "classes": 384,
    "identical": 0,
@@ -377,7 +377,7 @@
    "task": ":okhttp:compileTestKotlinJvm",
    "dir": "okhttp/build/classes/kotlin/jvm/test",
    "built": false,
-   "fallback": "krusty does not implement everything it requests (freeCompilerArg '-module-name=okhttp' conflicts with compilerOptions.moduleName; configure the structured Gradle input instead)",
+   "fallback": "krusty does not implement everything it requests (krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/app.cash.burst/burst-kotlin-plugin/2.14.0/18ea5fbb5fc62dbafd0552da69c94e5d1059e59e/burst-kotlin-plugin-2.14.0.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
    "error": null,
    "classes": 573,
    "identical": 0,
@@ -677,8 +677,8 @@
   }
  ],
  "measured": {
-  "date": "2026-10-27",
-  "commit": "80cc8099ddb8c233bfdc4dabf6234c4cae2d8eea",
-  "run": "https://github.com/qnox/krusty/actions/runs/40462256929"
+  "date": "2026-10-28",
+  "commit": "2f08633c609bede7e10f645d55c45a1f3982113f",
+  "run": "https://github.com/qnox/krusty/actions/runs/40626567765"
  }
 }

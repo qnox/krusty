@@ -9,17 +9,17 @@ on master); `projects/` holds each project's latest result and `history.tsv` eve
 | --- | ---: | ---: | ---: | --- | ---: | ---: | --- |
 | Exposed | 9,302 | 138,105 | 0 | ok | 0 / 43 | 0 / 8,100 (0.0%) | [2026-10-27, krusty 80cc809](https://github.com/qnox/krusty/actions/runs/40462256929) |
 | koin | 10,024 | 33,677 | 123 | ok | 4 / 19 | 78 / 3,705 (2.1%) | [2026-10-27, krusty 80cc809](https://github.com/qnox/krusty/actions/runs/40462256929) |
-| kotlinx.coroutines | 13,822 | 102,096 | 897 | ok | 0 / 34 | 0 / 9,482 (0.0%) | [2026-10-27, krusty 80cc809](https://github.com/qnox/krusty/actions/runs/40462256929) |
-| ktor | 14,556 | 259,026 | 85 | ok | 0 / 220 | 0 / 15,418 (0.0%) | [2026-10-27, krusty 80cc809](https://github.com/qnox/krusty/actions/runs/40462256929) |
+| kotlinx.coroutines | 13,822 | 102,096 | 897 | ok | 0 / 34 | 0 / 9,482 (0.0%) | [2026-10-28, krusty 2f08633](https://github.com/qnox/krusty/actions/runs/40626567765) |
+| ktor | 14,556 | 259,026 | 85 | ok | 0 / 220 | 0 / 15,418 (0.0%) | [2026-10-28, krusty 2f08633](https://github.com/qnox/krusty/actions/runs/40626567765) |
 | leakcanary | 30,004 | 100,627 | 172 | ok | 6 / 34 | 23 / 1,798 (1.3%) | [2026-10-27, krusty 80cc809](https://github.com/qnox/krusty/actions/runs/40462256929) |
-| Maestro | 16,233 | 65,644 | 0 | ok | 1 / 19 | 26 / 2,156 (1.2%) | [2026-10-27, krusty 80cc809](https://github.com/qnox/krusty/actions/runs/40462256929) |
-| mirai | 14,795 | 156,072 | 559 | ok | 0 / 51 | 0 / 2,536 (0.0%) | [2026-10-27, krusty 80cc809](https://github.com/qnox/krusty/actions/runs/40462256929) |
-| moshi | 10,166 | 16,749 | 13,212 | ok | 0 / 12 | 0 / 512 (0.0%) | [2026-10-27, krusty 80cc809](https://github.com/qnox/krusty/actions/runs/40462256929) |
-| nowinandroid | 21,972 | 26,596 | 0 | ok | 24 / 58 | 229 / 1,110 (20.6%) | [2026-10-27, krusty 80cc809](https://github.com/qnox/krusty/actions/runs/40462256929) |
-| okhttp | 47,099 | 126,665 | 3,816 | ok | 9 / 38 | 40 / 1,483 (2.7%) | [2026-10-27, krusty 80cc809](https://github.com/qnox/krusty/actions/runs/40462256929) |
+| Maestro | 16,240 | 65,644 | 0 | ok | 1 / 19 | 26 / 2,156 (1.2%) | [2026-10-27, krusty 80cc809](https://github.com/qnox/krusty/actions/runs/40462256929) |
+| mirai | 14,793 | 156,072 | 559 | ok | 0 / 51 | 0 / 2,536 (0.0%) | [2026-10-27, krusty 80cc809](https://github.com/qnox/krusty/actions/runs/40462256929) |
+| moshi | 10,167 | 16,749 | 13,212 | ok | 0 / 12 | 0 / 512 (0.0%) | [2026-10-27, krusty 80cc809](https://github.com/qnox/krusty/actions/runs/40462256929) |
+| nowinandroid | 21,974 | 26,596 | 0 | ok | 24 / 58 | 229 / 1,110 (20.6%) | [2026-10-27, krusty 80cc809](https://github.com/qnox/krusty/actions/runs/40462256929) |
+| okhttp | 47,100 | 126,665 | 3,816 | ok | 9 / 38 | 40 / 1,483 (2.7%) | [2026-10-28, krusty 2f08633](https://github.com/qnox/krusty/actions/runs/40626567765) |
 | okio | 9,054 | 46,812 | 2,398 | failed (exit 1) | 0 / 6 | 0 / 343 (0.0%) | [2026-10-27, krusty 80cc809](https://github.com/qnox/krusty/actions/runs/40462256929) |
-| quarkdown | 16,338 | 87,771 | 23 | ok | 5 / 37 | 28 / 2,345 (1.2%) | [2026-10-27, krusty 80cc809](https://github.com/qnox/krusty/actions/runs/40462256929) |
-| Unciv | 11,494 | 139,231 | 1,184 | ok | 0 / 4 | 0 / 3,341 (0.0%) | [2026-10-27, krusty 80cc809](https://github.com/qnox/krusty/actions/runs/40462256929) |
+| quarkdown | 16,339 | 87,771 | 23 | ok | 5 / 37 | 28 / 2,345 (1.2%) | [2026-10-27, krusty 80cc809](https://github.com/qnox/krusty/actions/runs/40462256929) |
+| Unciv | 11,496 | 139,231 | 1,184 | ok | 0 / 4 | 0 / 3,341 (0.0%) | [2026-10-27, krusty 80cc809](https://github.com/qnox/krusty/actions/runs/40462256929) |
 | **Measured total** | | | | | **49 / 569** | **424 / 51,986 (0.8%)** | |
 
 ## Missed compilations
@@ -34,10 +34,9 @@ on master); `projects/` holds each project's latest result and `history.tsv` eve
   - 1 × projects/core/koin-test/src/commonMain/kotlin/org/koin/test/check/CheckModules.kt:154:22: error: none of the following candidates is applicable:
   - 1 × projects/ktor/koin-ktor/src/commonMain/kotlin/org/koin/ktor/ext/ApplicationExt.kt:22:29: error: unresolved reference 'KOIN_ATTRIBUTE_KEY'.
 - **kotlinx.coroutines**
-  - 30 × left to kotlinc: krusty does not implement everything it requests (freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead)
-  - 4 × left to kotlinc: krusty does not implement everything it requests (freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead; freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead)
+  - 34 × left to kotlinc: compiler plugin kotlin-atomicfu-compiler-plugin-embeddable, argument -Xrender-internal-diagnostic-names, argument -Xno-receiver-assertions
 - **ktor**
-  - 220 × left to kotlinc: argument -Xreport-all-warnings, argument -Xrender-internal-diagnostic-names
+  - 220 × left to kotlinc: argument -Xrender-internal-diagnostic-names
 - **leakcanary**
   - 24 × not run: a task it depends on failed
   - 2 × left to kotlinc: krusty does not implement everything it requests (freeCompilerArg '-P' conflicts with compiler plugin configuration; configure the structured Gradle input instead)
@@ -62,8 +61,7 @@ on master); `projects/` holds each project's latest result and `history.tsv` eve
   - 1 × core/datastore/src/test/kotlin/com/google/samples/apps/nowinandroid/core/datastore/IntToStringIdsMigrationTest.kt:1:1: error: internal error: module signatures were not finalized and no source diagnostic explains it
 - **okhttp**
   - 24 × not run: a task it depends on failed
-  - 2 × left to kotlinc: compiler plugin burst-kotlin-plugin
-  - 2 × left to kotlinc: krusty does not implement everything it requests (freeCompilerArg '-module-name=okhttp' conflicts with compilerOptions.moduleName; configure the structured Gradle input instead)
+  - 4 × left to kotlinc: compiler plugin burst-kotlin-plugin
   - 1 × okhttp-tls/src/main/kotlin/okhttp3/tls/internal/der/Adapters.kt:38:68: error: unresolved reference 'readBoolean'.
 - **okio**
   - 2 × left to kotlinc: compiler plugin burst-kotlin-plugin
