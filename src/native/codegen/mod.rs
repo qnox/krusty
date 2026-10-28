@@ -324,6 +324,29 @@ impl Backend for CraneliftBackend {
             );
         }
         let mut field_getter_exports = FieldGetterExports::default();
+        let constructors = match lower::dependency_constructor_exports(
+            &file.ir,
+            file.module_name,
+            &file.dependency_exports,
+        ) {
+            Ok(exports) => exports,
+            Err(error) => {
+                diags.error(
+                    crate::diag::Span::new(0, 0),
+                    format!("internal error: {error}"),
+                );
+                return Vec::new();
+            }
+        };
+        for (identity, export) in constructors {
+            if state.dependency_symbols.insert(identity, export).is_some() {
+                diags.error(
+                    crate::diag::Span::new(0, 0),
+                    "internal error: two constructor exports share one KLIB identity",
+                );
+                return Vec::new();
+            }
+        }
         let mut getters = file.dependency_exports.field_getters().collect::<Vec<_>>();
         getters.sort_unstable_by_key(|(getter, _)| (getter.class(), getter.field()));
         for (getter, identity) in getters {

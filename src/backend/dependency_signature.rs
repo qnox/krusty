@@ -52,6 +52,16 @@ pub(crate) struct DependencyFunctionSignature {
 }
 
 impl DependencyFunctionSignature {
+    /// The allocating entry takes declared operands and returns the constructed classifier.
+    pub(crate) fn allocating_constructor(record: &crate::ir::IrModuleConstructor) -> Self {
+        let mut parameters: Vec<Ty> = record.outer.map(Ty::obj_name).into_iter().collect();
+        parameters.extend_from_slice(&record.parameters);
+        Self {
+            parameters: parameters.into_boxed_slice(),
+            result: Ty::obj_name(record.owner),
+        }
+    }
+
     pub(super) fn field_getter(receiver: DependencyMemberReceiver, result: Ty) -> Self {
         Self {
             parameters: vec![receiver.semantic_type()].into_boxed_slice(),

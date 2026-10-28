@@ -16,8 +16,8 @@ use crate::ir::{IrClass, IrFile};
 use crate::metadata::class_declarations::{ClassTailOptions, FunctionOrigin, PropertyOrigin};
 use crate::metadata::declaration_records;
 use crate::metadata::id_signature::{
-    package_function_signature, package_property_accessor_signature, MetadataAccessor,
-    MetadataClass, MetadataContainer,
+    constructor_signature, package_function_signature, package_property_accessor_signature,
+    MetadataAccessor, MetadataClass, MetadataContainer,
 };
 use crate::metadata::klib_fragment::{
     package_fragment_with_inner_classifiers, KlibClass, KlibFileMembers,
@@ -554,6 +554,42 @@ fn record_class_function_exports(
             classes: &chain,
             native_interop_library: false,
         };
+        if let Some(primary) = class
+            .constructors
+            .iter()
+            .find(|constructor| constructor.is_primary)
+        {
+            if primary.visibility != crate::types::Visibility::Private {
+                let class_id = ir
+                    .class_id_by_name(source.fq_name_id())
+                    .ok_or_else(|| format!("class {name} has no IR declaration"))?;
+                let mut bodies = ir
+                    .checked_constructor_bodies
+                    .iter()
+                    .filter(|(_, body)| body.class == class_id && body.ordinal == 0);
+                if let Some((&constructor, body)) = bodies.next() {
+                    if bodies.next().is_some() {
+                        return Err(format!("class {name} has two checked primary constructors"));
+                    }
+                    if body.body_attached {
+                        let signature = constructor_signature(container, primary)
+                            .map_err(|error| format!("{name} constructor: {error}"))?;
+                        exports
+                            .record_constructor(
+                                ir,
+                                constructor,
+                                crate::libraries::KlibDependencyCallable {
+                                    module: module_name.to_owned(),
+                                    declaration: crate::libraries::KlibDeclarationSignature::Public(
+                                        signature,
+                                    ),
+                                },
+                            )
+                            .map_err(str::to_owned)?;
+                    }
+                }
+            }
+        }
         for (declaration, origin) in class.functions.iter().zip(&record.method_origins) {
             if declaration.visibility == crate::types::Visibility::Private {
                 continue;

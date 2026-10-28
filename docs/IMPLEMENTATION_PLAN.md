@@ -6273,6 +6273,15 @@ of the expected signature. Applied hierarchy traversal retains declared variance
 arity and suspend kind. Owning semantic tests cover reflective and inherited function declarations
 and unrelated-callable rejection; the JVM round trip covers nominal and reflection interface slots.
 
+## Link source-class constructor entries
+
+Join the decoded primary constructor's KLIB identity to its checked defining declaration and
+retain the existing allocating entry's declared ABI. Native dependency construction consumes the
+exact selected external identity, then calls that same defining-module allocator. Reuse its file
+initialization, layout and declared-to-physical conversion; never materialize the dependency's
+class body to construct it. Prove the original #2780 graph alongside generic storage, named-argument
+effects, inner enclosing operands and primary/secondary/default-bridge controls.
+
 ## Publish source-class getter entries
 
 Retain ordinary property accessors alongside class function exports. A default getter carries its

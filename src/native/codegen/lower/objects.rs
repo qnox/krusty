@@ -2004,6 +2004,11 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         defaulted: Option<&[u32]>,
         placement: super::frame_objects::Placement,
     ) -> Result<Option<Value>, Unsupported> {
+        if let Some(outcome) =
+            self.dependency_construction(site, internal, args, defaulted.is_some())
+        {
+            return outcome;
+        }
         // A class another file declares is constructed through the entry point of the selected
         // module constructor; its layout and constructor are that file's.
         if self.file.ir.class_id_by_name(internal).is_none() {
