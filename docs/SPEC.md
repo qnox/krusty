@@ -22276,6 +22276,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `tests/context_parameters_e2e.rs::ordinary_delegate_operator_beats_a_nearer_context_receiver`.
   Corpus: `contextParameters/sameExtensionContextAndDispatchReceiver.kt`.
 
+- **A member extension that rejects an explicit-receiver call gives way to an applicable top-level
+  extension.** In `with(Builder()) { items.appendTo(this, prefix = "SET ") { ... } }`, the
+  implicit receiver's member extension `List<T>.appendTo(separator: String, ...)` maps `this` to
+  `separator` and rejects it, while the top-level `List<T>.appendTo(builder: Builder, ...)` accepts
+  the call. kotlinc selects the top-level extension: an inapplicable tower level does not end
+  resolution. Krusty reported the member extension's argument mismatch instead. The member
+  extension's rejection is still the diagnostic when the receiver's top-level extensions have no
+  applicable candidate, for example when the only one is declared on `Set<T>`.
+  Tests: `tests/box_regressions/memberExtensionRejectionYieldsToTopLevel.kt` (a portable
+  `String.tag` control) and `tests/resolver_regression_e2e.rs`
+  (`a_rejected_member_extension_gives_way_to_a_top_level_builder_extension` with the builder
+  shape and kotlinc's classes, and
+  `a_rejected_member_extension_without_an_applicable_top_level_extension_reports_its_mismatch`).
+
 - **A super-constructor argument's captures come from the constructor's synthetic prefix
   parameters, however deeply the argument nests them.** A local class lifts each captured local
   into a constructor prefix parameter and stores it into a field, but the super-constructor call

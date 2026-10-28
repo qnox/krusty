@@ -379,7 +379,10 @@ use lambda_returns::{call_implicit_lambda_label, LambdaResultConstraint, LambdaR
 use local_class_scope::EnclosingTypeParameterDeclaration;
 pub(crate) use local_class_scope::{pass_one_local_class_context, PassOneLocalClassContext};
 use loop_flow::collect_all_reassigned;
-use member_extension_selection::{MemberExtensionFunctionSelection, MemberExtensionSelection};
+use member_extension_selection::{
+    MemberExtensionFunctionSelection, MemberExtensionSearch, MemberExtensionSelection,
+    RejectedMemberExtensions,
+};
 pub(crate) use named_class_constructors::publish_named_class_constructors;
 pub(crate) use override_plans::publish_override_plans;
 use postponed_constraints::PostponedCallConstraints;
@@ -10767,7 +10770,11 @@ impl<'a> Checker<'a> {
             },
             extension_receiver,
             name,
-            (MemberExtensionSelection::All, None),
+            MemberExtensionSearch {
+                kinds: MemberExtensionSelection::All,
+                receivers: None,
+                rejections: RejectedMemberExtensions::YieldToApplicableExtension,
+            },
             CallResultConstraint::direct(None),
             inference_bindings,
         )
@@ -10785,13 +10792,15 @@ impl<'a> Checker<'a> {
         call_args: CallArgs<'_>,
         extension_receiver: Ty,
         name: &str,
-        // Which candidates this selection may consider: the declaration kinds it admits, and the
-        // implicit-receiver tower to search when one other than the scope's own applies.
-        selection: (MemberExtensionSelection, Option<&[ImplicitReceiver]>),
+        search: MemberExtensionSearch<'_>,
         result_constraint: CallResultConstraint,
         inference_bindings: Option<&crate::symbol_resolver::GSigBinds>,
     ) -> Option<Ty> {
-        let (selection, receivers) = selection;
+        let MemberExtensionSearch {
+            kinds: selection,
+            receivers,
+            rejections: rejected,
+        } = search;
         let CallArgs {
             call,
             args,
@@ -10889,6 +10898,23 @@ impl<'a> Checker<'a> {
                     .insert(call, candidate.resolved_call(dispatch_receiver, interface));
                 self.mark_extension_receiver_used(call, candidate.dispatch_receiver);
                 Some(result)
+            }
+            MemberExtensionFunctionSelection::None(rejections)
+                if rejected == RejectedMemberExtensions::YieldToApplicableExtension
+                    && !rejections.call_candidates.is_empty()
+                    && self
+                        .select_extension_rung(
+                            scope,
+                            call_args,
+                            extension_receiver,
+                            &explicit_type_args,
+                            result_constraint.expected(),
+                            &self.stable_receiver_callables(extension_receiver, name),
+                        )
+                        .selection
+                        .is_some() =>
+            {
+                None
             }
             MemberExtensionFunctionSelection::None(rejections) => self
                 .report_single_mapped_candidate_type_errors(
@@ -19730,7 +19756,11 @@ impl<'a> Checker<'a> {
                                 },
                                 bt,
                                 &fname,
-                                (MemberExtensionSelection::All, Some(&receivers)),
+                                MemberExtensionSearch {
+                                    kinds: MemberExtensionSelection::All,
+                                    receivers: Some(&receivers),
+                                    rejections: RejectedMemberExtensions::Report,
+                                },
                                 CallResultConstraint::direct(expected),
                                 Some(&postponed_solutions),
                             ) {
@@ -53694,7 +53724,11 @@ impl<'a> Checker<'a> {
                     },
                     at,
                     "get",
-                    (MemberExtensionSelection::Operators, None),
+                    MemberExtensionSearch {
+                        kinds: MemberExtensionSelection::Operators,
+                        receivers: None,
+                        rejections: RejectedMemberExtensions::Report,
+                    },
                     // A subscript's expectation describes the ELEMENT the `get` yields, which is
                     // this selection's result; it is threadable, but `get` seeding is its own
                     // change with its own fixtures.

@@ -1222,7 +1222,11 @@ impl Checker<'_> {
                     },
                     receiver_ty,
                     CALLABLE_INVOKE_OPERATOR,
-                    (MemberExtensionSelection::Operators, None),
+                    MemberExtensionSearch {
+                        kinds: MemberExtensionSelection::Operators,
+                        receivers: None,
+                        rejections: RejectedMemberExtensions::Report,
+                    },
                     result_constraint,
                     None,
                 ) {
