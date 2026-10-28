@@ -1,5 +1,14 @@
 # krusty — implementation plan
 
+## Class-generic dependency method exports
+
+Retain the complete declared self type, including captured parameters, at FIR lowering and consume
+it when source class methods publish KLIB export identities.
+Share consumption of FIR-checked class applications across Native and Wasm dependency calls,
+retaining exact fixed-type and callable-substitution validation. Exercise the existing method
+export path with one portable multimodule fixture and JVM-first Native validation. Backing-field
+getter materialization remains a subsequent consumer of this signature boundary.
+
 ## Wasm generic numeric call edges
 
 Realize declared type-parameter slots applied as Int or Long with separate full-width GC payloads

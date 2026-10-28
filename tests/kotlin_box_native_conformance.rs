@@ -385,3 +385,16 @@ fn native_module_abi_symbols_keep_same_named_internal_classifiers_distinct() {
         "Native ABI identities must remain distinct across the exact module graph"
     );
 }
+
+#[test]
+fn native_generic_class_members_instantiate_their_declared_dependency_exports() {
+    let source = include_str!("box_regressions/multimodule/multimoduleGenericClassMembers.kt");
+    let stem = "multimoduleGenericClassMembers";
+    super::box_reference_classes::checked_box(source, stem)
+        .expect("the JVM oracle must run the complete generic-member module graph");
+    assert_eq!(
+        run_native_abi_case(source, stem),
+        Outcome::Pass,
+        "class and method formals must instantiate independently without changing the export ABI"
+    );
+}

@@ -584,7 +584,18 @@ fn record_class_function_exports(
                             declaration.name
                         )
                     })?;
-                Some(crate::types::Ty::obj_name(receiver))
+                if receiver != source.fq_name_id() {
+                    return Err(format!(
+                        "class function {} lost its declared receiver signature",
+                        declaration.name
+                    ));
+                }
+                Some(ir.declared_class_self_type(receiver).ok_or_else(|| {
+                    format!(
+                        "class function {} lost its declared receiver application",
+                        declaration.name
+                    )
+                })?)
             };
             // The current prepared writer can serialize a non-generic dispatch classifier exactly.
             // A generic owner also needs its class parameters remapped into the synthetic prepared

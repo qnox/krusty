@@ -1,5 +1,15 @@
 # `@kotlin.Metadata` — reverse-engineering notes (Phase 4b)
 
+## Declared class receivers and checked member applications
+
+Source KLIB method exports retain the complete declared self application recorded during FIR
+lowering, in the checker's own-and-captured parameter order, including captured-only inner classes.
+The exported receiver and parameters keep declaration-owned formals. A dependent checked call
+already carries its applied parameter/result types, including applications selected through an
+inherited receiver. The common dependency-signature boundary consumes those types for
+class-dependent slots while authenticating fixed types and callable type-argument records.
+This preserves one declared ABI for distinct Int, String, Long and nullable applications.
+
 ## Numeric dependency slot representation
 
 Wasm keeps the emitted generic function's declared parameter/result types beside its exact export
