@@ -47,13 +47,7 @@ struct DependencyExportDefinition {
     member_receiver: Option<crate::backend::DependencyMemberReceiver>,
 }
 
-type FieldGetterExports = crate::fx_hash::HashMap<
-    (crate::ir::ClassId, u32),
-    (
-        crate::backend::DependencyFieldGetter,
-        DependencyExportDefinition,
-    ),
->;
+use lower::FieldGetterExports;
 
 /// The symbol every program object must define for the runtime's `_start` to call.
 pub const PROGRAM_ENTRY: &str = "kt_program_entry";
