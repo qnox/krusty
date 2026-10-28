@@ -65,22 +65,19 @@ fn receiver_type_args_match(
     // `Iterable<Double>`, so it is checked through its bounds like any other argument.
     let declared_wildcard =
         |t: Ty| t.projection_inner().unwrap_or(t).is_ty_param() || erased_top(t);
-    // A nullable formal (`E?`) binds the same values as `E` wherever a non-null actual may stand
-    // for the nullable declared argument: under `out` (`Column<out E?>` against
-    // `Column<EntityID<U>>`) and for an actual that is itself nullable. An invariant `E?` slot
-    // still rejects a non-null actual, as kotlinc does.
-    let nullable_declared_wildcard = |d: Ty, r: Ty| {
+    // A nullable formal (`E?`) is the same wildcard as `E` here. Whether the receiver admits the
+    // call (`Column<out E?>` takes `Column<EntityID<U>>`, an invariant `Column<E?>` does not) is
+    // decided by applicability once `E` is bound, which reports the receiver type mismatch.
+    let nullable_declared_wildcard = |d: Ty| {
         let inner = d.projection_inner().unwrap_or(d);
-        inner.is_nullable()
-            && inner.non_null().is_ty_param()
-            && (matches!(d.kind(), TyKind::OutProjection(_)) || r.admits_null())
+        inner.is_nullable() && inner.non_null().is_ty_param()
     };
     decl_recv
         .type_args()
         .iter()
         .zip(recv.type_args().iter())
         .all(|(&d, &r)| {
-            if declared_wildcard(d) || nullable_declared_wildcard(d, r) || erased_top(r) {
+            if declared_wildcard(d) || nullable_declared_wildcard(d) || erased_top(r) {
                 return true;
             }
             match d.kind() {
