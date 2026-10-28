@@ -1340,6 +1340,16 @@ subtype relation. A typed function signature supplies its canonical classifier a
 the hierarchy walk checks the nominal value against that application. Reflective function types
 retain their nominal identity; no new metadata payload or physical JVM descriptor is introduced.
 
+## Source-class constructor linkage
+
+A primary constructor's metadata signature joins its checked class/constructor ordinal to the
+declaration-owned module constructor record. No function ID is invented. Native registers the
+existing module allocator's symbol and declared signature under that exact KLIB identity; its
+hidden linkage remains visible to the linked program's objects. A dependent `New` consumes its
+retained external callable, declared parameter ledger and checked operand order. Specialized
+Int/Long/reference/null arguments cross the producer's declared generic ABI. Secondary identities
+remain distinct, and an owned primary with omitted operands declines without a default bridge.
+
 ## Ordinary source-class accessor linkage
 
 Property accessor signatures come from the same metadata declaration and retained PropertyOrigin

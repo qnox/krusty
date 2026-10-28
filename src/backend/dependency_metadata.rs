@@ -222,6 +222,7 @@ impl SingletonMemberReceiver {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct DependencyExportSignatures {
     callables: HashMap<FunId, KlibDependencyCallable>,
+    constructors: HashMap<crate::fir::DeclarationId, KlibDependencyCallable>,
     field_getters: HashMap<crate::fir::PropertyId, (DependencyFieldGetter, KlibDependencyCallable)>,
     /// Every visible function an interface of this file declares, abstract ones included: the
     /// identity a dependent module's implementation of the member is recorded under.
@@ -233,6 +234,43 @@ pub struct DependencyExportSignatures {
 }
 
 impl DependencyExportSignatures {
+    /// Allocating entries retain constructor declarations, never synthetic function IDs.
+    pub(crate) fn constructors(
+        &self,
+    ) -> impl Iterator<Item = (crate::fir::DeclarationId, &KlibDependencyCallable)> {
+        self.constructors
+            .iter()
+            .map(|(&constructor, identity)| (constructor, identity))
+    }
+
+    pub(crate) fn record_constructor(
+        &mut self,
+        ir: &crate::ir::IrFile,
+        constructor: crate::fir::DeclarationId,
+        identity: KlibDependencyCallable,
+    ) -> Result<(), &'static str> {
+        let checked = ir
+            .checked_constructor_bodies
+            .get(&constructor)
+            .ok_or("a constructor export has no checked defining body")?;
+        let declared = ir
+            .module_constructions
+            .records
+            .get(&constructor)
+            .ok_or("a constructor export has no declared module signature")?;
+        let class = ir
+            .classes
+            .get(checked.class as usize)
+            .ok_or("a constructor export has no declaring class")?;
+        if checked.ordinal != 0 || !checked.body_attached || class.fq_name_id() != declared.owner {
+            return Err("a primary constructor export disagrees with its checked declaration");
+        }
+        if self.constructors.insert(constructor, identity).is_some() {
+            return Err("one constructor cannot publish two declaration identities");
+        }
+        Ok(())
+    }
+
     pub(crate) fn field_getters(
         &self,
     ) -> impl Iterator<Item = (&DependencyFieldGetter, &KlibDependencyCallable)> {

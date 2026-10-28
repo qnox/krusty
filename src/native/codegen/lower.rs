@@ -46,6 +46,7 @@ mod lists;
 mod local_delegates;
 mod maps;
 mod module_abi;
+pub(super) use module_abi::dependency_constructor_exports;
 mod object_entries;
 mod objects;
 mod ranges;

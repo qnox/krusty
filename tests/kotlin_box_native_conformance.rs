@@ -568,3 +568,129 @@ fun box(): String {
         .expect("the JVM oracle must establish both static-dispatch results");
     assert_eq!(run_native_abi_case(source, stem), Outcome::Pass);
 }
+
+// PLATFORM-SPECIFIC: the allocating export must preserve declared generic storage and operands.
+#[test]
+fn native_source_constructor_exports_preserve_storage_evaluation_and_file_initialization() {
+    let source = r#"// MODULE: lib
+package fixture
+var events: String = "I"
+class Cell<T>(val value: T) { init { events += "C" } }
+class Pair<T>(val first: T, val second: T?) { init { events += "P" } }
+fun event(value: String): String { events += value; return value }
+fun observed(): String = events
+// MODULE: main(lib)
+fun box(): String {
+    if (fixture.Cell(42).value != 42) return "Int storage"
+    if (fixture.observed() != "IC") return "initialization"
+    val pair = fixture.Pair(second = fixture.event("K"), first = fixture.event("O"))
+    if (pair.first != "O" || pair.second != "K") return "named arguments"
+    if (fixture.Cell(Long.MIN_VALUE).value != Long.MIN_VALUE) return "Long storage"
+    if (fixture.Cell<String?>(null).value != null) return "nullable storage"
+    return if (fixture.observed() == "ICKOPCC") "OK" else "evaluation order"
+}
+"#;
+    let stem = "nativeSourceConstructorStorageAndEffects";
+    super::box_reference_classes::checked_box(source, stem)
+        .expect("the JVM oracle must establish constructor storage and operand effects");
+    assert_eq!(run_native_abi_case(source, stem), Outcome::Pass);
+}
+
+// PLATFORM-SPECIFIC: the exact selected constructor identity owns the allocating entry.
+#[test]
+fn native_source_constructor_exports_select_the_primary_beside_a_secondary() {
+    let source = r#"// MODULE: lib
+package fixture
+class Choice(val value: String) { constructor(number: Int) : this("secondary") }
+// MODULE: main(lib)
+fun box(): String = fixture.Choice("OK").value
+"#;
+    let stem = "nativeSourcePrimaryConstructorIdentity";
+    super::box_reference_classes::checked_box(source, stem)
+        .expect("the JVM oracle must establish the selected primary constructor");
+    assert_eq!(run_native_abi_case(source, stem), Outcome::Pass);
+}
+
+// PLATFORM-SPECIFIC: an inner constructor's checked enclosing operand leads its export ABI.
+#[test]
+fn native_source_constructor_exports_preserve_an_inner_enclosing_instance() {
+    let source = r#"// MODULE: lib
+package fixture
+class Envelope(val prefix: String) {
+    inner class Part(val suffix: String) { fun result(): String = prefix + suffix }
+}
+// MODULE: main(lib)
+fun box(): String = fixture.Envelope("O").Part("K").result()
+"#;
+    let stem = "nativeSourceInnerConstructorOperands";
+    super::box_reference_classes::checked_box(source, stem)
+        .expect("the JVM oracle must establish the enclosing constructor operand");
+    assert_eq!(run_native_abi_case(source, stem), Outcome::Pass);
+}
+
+// PLATFORM-SPECIFIC: a primary export cannot realize another selected constructor.
+#[test]
+fn native_source_constructor_exports_do_not_substitute_a_primary_for_a_secondary() {
+    let source = r#"// MODULE: lib
+package fixture
+class Choice(val value: String) { constructor(number: Int) : this("OK") }
+// MODULE: main(lib)
+fun box(): String = fixture.Choice(7).value
+"#;
+    let stem = "nativeSourceSecondaryConstructorIdentity";
+    super::box_reference_classes::checked_box(source, stem)
+        .expect("the JVM oracle must establish the selected secondary constructor");
+    assert_eq!(
+        run_native_abi_case(source, stem),
+        Outcome::Declined(
+            "construction of `fixture/Choice`, which is not declared in this file".into()
+        )
+    );
+}
+
+// PLATFORM-SPECIFIC: an owned allocating entry has no exported default-mask bridge yet.
+#[test]
+fn native_source_constructor_exports_decline_omitted_arguments_without_a_bridge() {
+    let source = r#"// MODULE: lib
+package fixture
+class Defaults(val value: String = "OK")
+// MODULE: main(lib)
+fun box(): String = fixture.Defaults().value
+"#;
+    let stem = "nativeSourceConstructorDefaultBridge";
+    super::box_reference_classes::checked_box(source, stem)
+        .expect("the JVM oracle must establish the constructor default");
+    assert_eq!(
+        run_native_abi_case(source, stem),
+        Outcome::Declined(
+            "a dependency constructor with omitted arguments and no exported default bridge".into()
+        )
+    );
+}
+
+// PLATFORM-SPECIFIC: imported field-layout ABI with the pinned Native module oracle.
+#[test]
+fn native_generic_field_getters_read_the_producers_declared_storage() {
+    let source = format!(
+        "// MODULE: lib\n{}\n// MODULE: main(lib)\n{}",
+        include_str!("fixtures/klib_final_field_reads/Library.kt"),
+        r#"
+fun box(): String {
+    if (fixture.makeStringCell("OK").value != "OK") return "String field"
+    if (fixture.makeIntCell(42).value != 42) return "Int field"
+    val readings = fixture.Readings("O", "K")
+    if (readings.first != "O") return "val field ordinal"
+    if (readings.second != "K") return "var field ordinal"
+    return "OK"
+}
+"#,
+    );
+    let stem = "nativeGenericFieldGetters";
+    super::box_reference_classes::checked_box(&source, stem)
+        .expect("the JVM oracle must run the complete field-read module graph");
+    assert_eq!(
+        run_native_abi_case(&source, stem),
+        Outcome::Pass,
+        "Native must read declared generic storage through the exact exported getter ABI",
+    );
+}

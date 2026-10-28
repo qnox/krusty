@@ -22907,6 +22907,19 @@ a same-named classifier gains no such subtype relation. Tests: the normalized de
 `symbol_resolver::hierarchy_projection` and the JVM nominal-slot round trip in
 `function_reference_invoke_e2e`.
 
+## Source-class primary constructor exports
+
+Native source-module KLIB primary constructors retain the exact signed declaration identity and
+the defining module's allocating ABI. A selected external construction calls that existing entry,
+which initializes its defining file once, allocates the class's actual layout and converts declared
+parameters to physical storage before invoking its checked constructor. The call uses checked
+operands in their recorded order, including an inner enclosing instance and reordered named
+arguments, without reconstructing overloads or importing class bodies. The same generic entry
+accepts Int, Long, String and nullable applications. A secondary constructor never selects the
+primary entry; a primary call with omitted arguments declines until a default bridge is exported.
+The original direct-construction graph retained in #2780 and the constructor ABI regressions in
+`tests/kotlin_box_native_conformance.rs` establish JVM and pinned Native oracle results first.
+
 ## Source-class property getter exports
 
 A Native source module publishes ordinary class property getters under the exact accessor identity

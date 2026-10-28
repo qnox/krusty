@@ -21,13 +21,13 @@ struct ConstructorAbi {
     owner: TypeName,
     /// What the entry point takes: the enclosing instance of an inner class, then the declared
     /// parameters.
-    parameters: Vec<Ty>,
+    signature: crate::backend::DependencyFunctionSignature,
     symbol: String,
 }
 
 impl ConstructorAbi {
     fn result(&self) -> Ty {
-        Ty::obj_name(self.owner)
+        self.signature.result()
     }
 }
 
@@ -65,13 +65,51 @@ fn plan(module_name: &str, record: &IrModuleConstructor) -> Result<ConstructorAb
                     "internal: a module constructor of `{name}` with an unchecked parameter type"
                 )
             })?;
-    let mut parameters: Vec<Ty> = record.outer.map(Ty::obj_name).into_iter().collect();
-    parameters.extend(record.parameters.iter().copied());
     Ok(ConstructorAbi {
         owner: record.owner,
-        parameters,
+        signature: crate::backend::DependencyFunctionSignature::allocating_constructor(record),
         symbol,
     })
+}
+
+/// Join KLIB constructor identities to the allocator already defined by their source file.
+/// Its hidden symbol is linkable by every object in this emission session; no second allocator
+/// or target function identity is needed. Unsupported plans publish no executable promise.
+pub(in super::super::super) fn dependency_constructor_exports(
+    ir: &IrFile,
+    module_name: &str,
+    exports: &crate::backend::DependencyExportSignatures,
+) -> Result<
+    Vec<(
+        crate::backend::KlibDependencyCallable,
+        super::super::super::DependencyExport,
+    )>,
+    Unsupported,
+> {
+    let mut constructors = exports.constructors().collect::<Vec<_>>();
+    constructors.sort_unstable_by_key(|(constructor, _)| constructor.raw());
+    let mut result = Vec::with_capacity(constructors.len());
+    for (constructor, identity) in constructors {
+        let record = ir
+            .module_constructions
+            .records
+            .get(&constructor)
+            .ok_or("a dependency constructor export lost its declaration record")?;
+        let Ok(abi) = plan(module_name, record) else {
+            continue;
+        };
+        result.push((
+            identity.clone(),
+            super::super::super::DependencyExport {
+                symbol: abi.symbol,
+                signature: abi.signature,
+                member_receiver: None,
+                singleton_member_receiver: None,
+                singleton_extension_receiver: None,
+            },
+        ));
+    }
+    Ok(result)
 }
 
 impl FileLowering<'_> {
@@ -139,12 +177,12 @@ impl FileLowering<'_> {
                     "internal: the module constructor {ordinal} of `{name}` has no local constructor"
                 ).into());
             };
-            if physical.len() != abi.parameters.len() {
+            if physical.len() != abi.signature.parameters().len() {
                 return Err(format!(
                     "internal: the module constructor {ordinal} of `{name}` takes {} parameters here, \
                      not the {} its plan declares",
                     physical.len(),
-                    abi.parameters.len()
+                    abi.signature.parameters().len()
                 ).into());
             }
             self.define_constructor_entry_point(&abi, class, function, &physical, file_init)?;
@@ -161,14 +199,14 @@ impl FileLowering<'_> {
         file_init: FuncId,
     ) -> Result<(), Unsupported> {
         let result = abi.result();
-        let signature = self.signature_of(&abi.parameters, result)?;
+        let signature = self.signature_of(abi.signature.parameters(), result)?;
         let id = self
             .module
             .declare_function(&abi.symbol, Linkage::Hidden, &signature)
             .map_err(|error| format!("declaring `{}` ({error})", abi.symbol))?;
         let descriptor = self.classes[class as usize].descriptor;
         let size = self.model.layout(class).instance_size;
-        let declared = abi.parameters.clone();
+        let declared = abi.signature.parameters().to_vec();
         let name = abi.owner.render();
         self.emit_function(id, signature, result, &abi.symbol, &mut |body, params| {
             let init = body.func_ref(file_init);
@@ -201,6 +239,79 @@ impl FileLowering<'_> {
 }
 
 impl BodyLowering<'_, '_, '_> {
+    /// An exact emitted constructor owns its checked construction before local/runtime storage.
+    pub(in super::super) fn dependency_construction(
+        &mut self,
+        site: u32,
+        internal: TypeName,
+        args: &[u32],
+        defaulted: bool,
+    ) -> Option<Result<Option<Value>, Unsupported>> {
+        let IrExpr::New {
+            external_target: Some(target),
+            ..
+        } = self.file.ir.expr(site)
+        else {
+            return None;
+        };
+        let Some(realization) = self.file.callables.callable(*target) else {
+            return Some(Err(
+                "a dependency construction lost its checked callable".into()
+            ));
+        };
+        let identity = realization.dependency_callable.as_ref()?;
+        let export = self.file.dependency_symbols.get(identity)?;
+        Some((|| {
+            if realization.kind != crate::libraries::ExternalCallableKind::Constructor
+                || realization.declaration_owner
+                    != Some(crate::types::SemanticCallableOwner::Classifier(internal))
+                || export.signature.result() != Ty::obj_name(internal)
+                || export.member_receiver.is_some()
+                || realization.source_receiver.is_some()
+                || realization.context_count != 0
+            {
+                return Err("a dependency constructor export disagrees with its checked owner or operand roles".into());
+            }
+            if defaulted {
+                return Err("a dependency constructor with omitted arguments and no exported default bridge".into());
+            }
+            let declared = self
+                .file
+                .ir
+                .construction_declared_params
+                .get(&site)
+                .ok_or("a dependency construction lost its declared parameter ledger")?;
+            let parameters = export.signature.parameters();
+            if args.len() != parameters.len() || declared.len() != parameters.len() {
+                return Err(
+                    "a dependency constructor export disagrees with its checked operand count"
+                        .into(),
+                );
+            }
+            let result = export.signature.result();
+            let id = self.file.import(&export.symbol, parameters, result)?;
+            let arguments = self.arguments(args, parameters)?;
+            if self.terminated {
+                return Ok(None);
+            }
+            let function = self.func_ref(id);
+            let call = self.emit_call(function, &arguments)?;
+            if self.terminated {
+                return Ok(None);
+            }
+            let value = self
+                .builder
+                .inst_results(call)
+                .first()
+                .copied()
+                .ok_or("a dependency constructor export returned no instance")?;
+            let checked = self
+                .checked_type(site)
+                .ok_or("a dependency construction lost its checked result type")?;
+            self.convert(value, Some(result), checked)
+        })())
+    }
+
     /// Construct a class another file of this module declares, through the entry point of the
     /// constructor the checker selected.
     pub(in super::super) fn module_construction(
@@ -232,17 +343,19 @@ impl BodyLowering<'_, '_, '_> {
                 format!("a cross-file constructor with a default argument (`{name}`)").into(),
             );
         }
-        if args.len() != abi.parameters.len() {
+        if args.len() != abi.signature.parameters().len() {
             return Err(format!(
                 "internal: a construction of `{name}` passes {} arguments to a constructor of {}",
                 args.len(),
-                abi.parameters.len()
+                abi.signature.parameters().len()
             )
             .into());
         }
         let result = abi.result();
-        let id = self.file.import(&abi.symbol, &abi.parameters, result)?;
-        let arguments = self.arguments(args, &abi.parameters)?;
+        let id = self
+            .file
+            .import(&abi.symbol, abi.signature.parameters(), result)?;
+        let arguments = self.arguments(args, abi.signature.parameters())?;
         if self.terminated {
             return Ok(None);
         }
