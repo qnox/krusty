@@ -1,5 +1,12 @@
 # krusty — a memory-lean Kotlin→JVM compiler PoC
 
+## File policies under signature recovery
+
+A file's own annotations (`@file:Suppress`, opt-ins) are published before recovery diagnostics
+even when pass-1 signature finalization fails for some declaration. A genuine signature error
+therefore does not add the diagnostics that file suppresses. Test:
+`editor_failed_signature_recovery_e2e::file_level_suppression_survives_a_failed_signature`.
+
 ## Abstract obligations of body-local classes
 
 A local class or object expression whose superclass is emitted in another file checks its abstract
