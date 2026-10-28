@@ -13155,7 +13155,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `-Xplugin=assignment-compiler-plugin.jar` (registrar `AssignmentComponentRegistrar`) with
   `-P plugin:org.jetbrains.kotlin.assignment:annotation=<fqname>` runs krusty's native pass. It
   applies when the target is a non-local `val` property (member, top-level, or through an implicit
-  receiver, including in an initializer) or a final Java field or setter-less Java getter, and the
+  receiver, package-qualified, or an object's or companion's, including in an initializer) or a final Java field or setter-less Java getter, and the
   target's type has a class or supertype carrying one of the annotations; a `var` stays an ordinary
   assignment. The call resolves like any receiver call, member or extension, with no `operator`
   modifier (`OperatorConvention { requires_operator: false }`). The checker records
@@ -13165,7 +13165,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `Unit` is rejected there too, and at its declaration (its result type, or its name when
   inferred) whenever it could serve: one value parameter, on an annotated receiver. Known gap:
   kotlinc also reports the failed `target.assign(value)` call's own candidate diagnostic beside
-  the `=` one, which krusty does not yet. The annotation list is a frontend fact
+  the `=` one, which krusty does not yet; nor does krusty yet lower an `assign` whose parameter is a
+  `vararg`. The annotation list is a frontend fact
   (`SymbolSource::annotation_conventions`). Tests: `tests/assignment_plugin_e2e.rs` (member,
   extension, inherited and interface annotations, top-level, initializer, extension-receiver and
   scope-function targets, a `var`, Java fields and getters, byte-identical to kotlinc and run; the

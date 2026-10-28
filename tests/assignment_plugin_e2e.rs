@@ -72,12 +72,15 @@ fun Settable.assign(value: Char) { (this as Impl).v += value }
 
 val top = Prop()
 
+object Config { val p = Prop() }
+
 class Holder {
     val p = Prop()
     val c = Child()
     val s: Settable = Impl()
     var q = Prop()
     init { p = "init" }
+    companion object { val shared = Prop() }
 }
 
 fun Holder.fill() { p = "ext"; c = 4 }
@@ -86,6 +89,9 @@ fun scoped(h: Holder) { with(h) { p = "with"; s = 'y' } }
 
 fun box(): String {
     top = "a"
+    k.top = "b"
+    Config.p = "c"
+    Holder.shared = "d"
     val h = Holder()
     h.p = "b"
     h.fill()
@@ -93,7 +99,8 @@ fun box(): String {
     h.s = 'x'
     scoped(h)
     h.q = Prop()
-    if (top.v != "a") return "top=${top.v}"
+    if (top.v != "ab") return "top=${top.v}"
+    if (Config.p.v + Holder.shared.v != "cd") return "qualified=${Config.p.v}${Holder.shared.v}"
     if (h.p.v != "initbextwith") return "member=${h.p.v}"
     if (h.c.log != "45") return "supertype=${h.c.log}"
     val impl = h.s as Impl
@@ -103,8 +110,9 @@ fun box(): String {
 "#;
 
 /// Member and extension `assign`, an annotation inherited from a superclass or an interface, a
-/// top-level `val`, an initializer, an extension's and a scope function's implicit receiver; and a
-/// `var`, which stays an ordinary assignment.
+/// top-level `val` (also package-qualified), an object's and a companion's `val`, an initializer,
+/// an extension's and a scope function's implicit receiver; and a `var`, which stays an ordinary
+/// assignment.
 #[test]
 fn val_assignments_call_assign_like_kotlinc() {
     let fixture = PluginFixture::new("assignment");
