@@ -17519,6 +17519,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   KSP2 2.3.12 reports. A Kotlin library annotation keeps the rule for a `vararg` element only.
   (`crates/krusty-plugin-host/tests/ksp.rs`,
   `java_annotation_array_elements_default_to_empty_arrays`.)
+- **A Java `@Target` reads as Kotlin targets in `AnnotationTarget` order.** A Java annotation
+  class's `@java.lang.annotation.Target` reads as `kotlin.annotation.Target` whose
+  `allowedTargets` are the Kotlin targets each `ElementType` maps to (kotlinc's
+  `JavaAnnotationTargetMapper`), once each and in `AnnotationTarget` declaration order whatever
+  order the Java annotation writes its element types in, as kotlinc collects them into an enum set:
+  `{PARAMETER, TYPE, METHOD, FIELD}` reads as `CLASS, FIELD, VALUE_PARAMETER, FUNCTION,
+  PROPERTY_GETTER, PROPERTY_SETTER, FILE`, as KSP2 2.3.12 reports.
+  (`crates/krusty-plugin-host/tests/ksp.rs`, `library_annotation_members_are_what_ksp2_reports`;
+  `src/jvm/jvm_libraries/declaration_headers.rs`.)
 - **A KSP source classifier lists its members with the inherited ones as KSP2 does.**
   `getAllFunctions` lists the classifier's own functions in declaration order (a data class's
   `componentN` and `copy` among them), then each direct supertype's functions in written order
