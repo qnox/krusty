@@ -17516,18 +17516,31 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the class, take the place
   of the member each overrides: `kotlin.Any`'s, or a superclass's that overrides it, so with no
   superclass they follow `kotlin.Any`'s order. A classifier with no written supertype inherits
-  `kotlin.Any`'s functions and no property. Members inherited along two supertypes as different
-  declarations (a superclass's `toString` and an interface's `kotlin.Any.toString`, two unrelated
-  interfaces' `fun shared(): Int` or `val label: String`, or two interfaces' overrides of one
-  ancestor's member) are one intersection override KSP2 declares on the classifier (`SYNTHETIC`,
-  parent the classifier). The frontend publishes no relation between inherited members, so the
-  round treats two different inherited members of one name from different supertypes as such a
-  pair, which also refuses an inherited overload pair. A member
-  of a supertype applied to type arguments a substituted copy; neither is described yet, so the
-  lists of such a classifier, of one with another library supertype, of an enum class, an
-  annotation class and an enum entry are refused. (`crates/krusty-plugin-host/tests/ksp.rs`,
+  `kotlin.Any`'s functions and no property. A member of a supertype applied to type arguments is
+  a substituted copy, which is not described yet, so the lists of such a classifier, of one with
+  another library supertype, of an enum class, an annotation class and an enum entry are refused.
+  (`crates/krusty-plugin-host/tests/ksp.rs`,
   `all_functions_and_properties_of_source_classifiers_are_what_ksp2_lists`,
   `all_functions_whose_order_krusty_cannot_say_are_refused`.)
+- **Members of two KSP supertypes with one signature meet in one intersection member.** Different
+  declarations two direct supertypes list with one signature (same name and parameter types; a
+  property by name), such as a superclass's `toString` and an interface's `kotlin.Any.toString`,
+  two unrelated interfaces' `fun shared(x: Int): Int`, or an interface's override of an ancestor's
+  member and the ancestor's member another interface inherits, are one member KSP2 makes for the
+  classifier, in the place of the first, as KSP2 2.3.12 reports. It is a `SYNTHETIC` copy of the
+  first in supertype order, whose parent is the classifier: that member's parameters (their
+  origin `SYNTHETIC`), annotations, file and line, and it overrides that member. It is
+  `ABSTRACT` when every member it is made from is, otherwise `FINAL` or `OPEN` as the one that is
+  not, and `PUBLIC`; a property's modifiers also carry `OVERRIDE`, it has no backing field, and
+  its accessors are `SYNTHETIC`, unannotated, and `ABSTRACT PUBLIC` or `PUBLIC`. A subclass lists
+  the member as the classifier it was made for. A member of one name and other parameter types
+  is an overload, listed as it is. The round refuses the list where KSP2 picks the copy by more
+  than order: members of different return types, property types or mutability, and generic,
+  extension, non-public or final-property members. (`crates/krusty-plugin-host/tests/ksp.rs`,
+  `members_meeting_in_an_intersection_are_listed_as_ksp2_lists_them`,
+  `intersection_members_are_what_ksp2_makes`,
+  `all_functions_whose_order_krusty_cannot_say_are_refused`;
+  `src/ksp_round/all_members/intersections.rs`.)
 - **KSP maps names between Kotlin and the JVM by kotlinc's class map.** `mapKotlinNameToJava` and
   `mapJavaNameToKotlin` answer what kotlinc's `JavaToKotlinClassMap` does for the classifier the
   name resolves to on the module's classpath. A mapped builtin, a read-only or mutable collection

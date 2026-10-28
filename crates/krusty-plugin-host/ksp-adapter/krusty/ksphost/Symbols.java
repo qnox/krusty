@@ -19,6 +19,7 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.HashMap;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -32,6 +33,8 @@ final class Symbols {
     private final Classpath classpath;
     private final Map<String, SourceClass> sourceClasses = new HashMap<>();
     private final Map<Integer, KSTypeParameter> typeParameters = new HashMap<>();
+    // Each intersection member with the path of the file it takes, placed once every file is read.
+    private final Map<KSDeclaration, String> intersectionFiles = new IdentityHashMap<>();
 
     private Symbols(Classpath classpath) {
         this.classpath = classpath;
@@ -48,6 +51,7 @@ final class Symbols {
             symbols.readDeclarations(in, file, null, file.declarations);
             symbols.files.add(file);
         }
+        symbols.placeIntersections();
         return symbols;
     }
 
@@ -152,7 +156,8 @@ final class Symbols {
 
     // The members a classifier lists (`put_members` in `src/ksp/protocol.rs`): its own
     // declarations by index, ones described with the list together with the classifier that
-    // declares them, and declarations of other source classifiers by index.
+    // declares them, declarations of other source classifiers by index, and intersection members
+    // described with the list.
     private Members readMembers(DataInputStream in, List<KSDeclaration> declarations)
             throws IOException {
         int count = in.readInt();
@@ -186,8 +191,37 @@ final class Symbols {
                 int index = in.readInt();
                 return () -> sourceClasses.get(owner).declarations.get(index);
             }
+            case 3: {
+                KSDeclaration owner = resolvedClass(Wire.readString(in));
+                String path = readOptionalString(in);
+                KSDeclaration described = readDeclaration(in, null, owner);
+                if (path != null) {
+                    intersectionFiles.put(described, path);
+                }
+                return () -> described;
+            }
             default:
                 throw new IOException("unknown member " + tag);
+        }
+    }
+
+    // Gives each intersection member the file of the member it is made from.
+    private void placeIntersections() throws IOException {
+        Map<String, SourceFile> byPath = new HashMap<>();
+        for (SourceFile file : files) {
+            byPath.put(file.getFilePath(), file);
+        }
+        for (Map.Entry<KSDeclaration, String> entry : intersectionFiles.entrySet()) {
+            SourceFile file = byPath.get(entry.getValue());
+            if (file == null) {
+                throw new IOException("an intersection member of no file " + entry.getValue());
+            }
+            KSDeclaration member = entry.getKey();
+            if (member instanceof SourceFunction) {
+                ((SourceFunction) member).file = file;
+            } else {
+                ((SourceProperty) member).file = file;
+            }
         }
     }
 

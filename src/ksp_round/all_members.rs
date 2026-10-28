@@ -6,17 +6,12 @@
 //! one, one already listed, and one a member listed before overrides; it then groups them by name,
 //! each name where it first appears among the classifier's own names and then its supertypes'. A
 //! data class's generated `equals`, `hashCode` and `toString` take the place of the member each
-//! overrides. Constructors come last. Members inherited along two supertypes that are not one
-//! declaration become an intersection override of KSP2's own, and a member of a supertype applied
-//! to type arguments a substituted copy; neither is described yet, so neither is a classifier with
-//! a library supertype other than `kotlin.Any`, an enum class, or an annotation class: the round
-//! leaves their lists undescribed and the host refuses the queries.
-//!
-//! The frontend publishes no override relation between members a classifier only inherits, so two
-//! inherited members that may meet in an intersection are recognized conservatively: a member one
-//! supertype lists that is not a member an earlier supertype listed, but shares its name, leaves
-//! the list undescribed. That refuses an inherited overload pair too, which KSP2 lists plainly; it
-//! never lists two members where KSP2 lists one.
+//! overrides. Constructors come last. Members of two supertypes with one signature that are not
+//! one declaration meet in an intersection member KSP2 makes for the classifier, in the place of
+//! the first ([`intersections`]). A member of a supertype applied to type arguments becomes a
+//! substituted copy, which is not described yet, so neither is a classifier with a library
+//! supertype other than `kotlin.Any`, an enum class, or an annotation class: the round leaves their
+//! lists undescribed and the host refuses the queries.
 
 use std::cell::RefCell;
 
@@ -26,6 +21,8 @@ use krusty_plugin_ir::{
 };
 
 use super::KspLibraries;
+
+mod intersections;
 use crate::frontend::{FrontendDeclarationId, OverriddenMember, SourceSetAnalysis};
 use crate::fx_hash::{HashMap, HashSet};
 use crate::types::{wk, TypeName};
@@ -63,11 +60,13 @@ pub(super) fn order(
 ) {
     let lists = {
         let mut classes = HashMap::default();
+        let mut paths = HashMap::default();
         for file in files.iter() {
-            collect(file.classes(), &mut classes);
+            collect(file.classes(), &file.path, &mut classes, &mut paths);
         }
         let mut order = Order {
             classes,
+            paths,
             ledger,
             analysis,
             any: any_functions(analysis),
@@ -99,11 +98,14 @@ type MemberLists = (Option<Vec<KspMember>>, Option<Vec<KspMember>>);
 
 fn collect<'a>(
     classes: impl Iterator<Item = &'a KspClass>,
+    path: &'a str,
     into: &mut HashMap<&'a str, &'a KspClass>,
+    paths: &mut HashMap<&'a str, &'a str>,
 ) {
     for class in classes {
         into.insert(&class.qualified_name, class);
-        collect(class.classes(), into);
+        paths.insert(&class.qualified_name, path);
+        collect(class.classes(), path, into, paths);
     }
 }
 
@@ -139,6 +141,7 @@ fn any_functions(analysis: &SourceSetAnalysis) -> Option<Vec<Entry>> {
             private: false,
             constructor: false,
             closure: Vec::new(),
+            parts: Vec::new(),
             place: Place::Described {
                 owner: ANY.to_string(),
                 declaration: Box::new(KspDeclaration::Function(function.clone())),
@@ -177,6 +180,13 @@ enum Place {
         owner: String,
         declaration: Box<KspDeclaration>,
     },
+    /// An intersection member made for `owner`, described with the list; `file` is the path of the
+    /// source file declaring the member it is made from.
+    Intersection {
+        owner: String,
+        file: Option<String>,
+        declaration: Box<KspDeclaration>,
+    },
 }
 
 #[derive(Clone)]
@@ -188,6 +198,8 @@ struct Entry {
     constructor: bool,
     /// Every member this one overrides, directly or not.
     closure: Vec<Identity>,
+    /// For an intersection member, the members it is made from, in supertype order.
+    parts: Vec<Entry>,
     place: Place,
 }
 
@@ -204,6 +216,15 @@ impl Entry {
                 owner: owner.clone(),
                 declaration: declaration.clone(),
             },
+            Place::Intersection {
+                owner,
+                file,
+                declaration,
+            } => KspMember::Intersection {
+                owner: owner.clone(),
+                file: file.clone(),
+                declaration: declaration.clone(),
+            },
         }
     }
 
@@ -217,6 +238,8 @@ impl Entry {
 
 struct Order<'a> {
     classes: HashMap<&'a str, &'a KspClass>,
+    /// The path of the file declaring each source classifier.
+    paths: HashMap<&'a str, &'a str>,
     ledger: &'a HashMap<String, ClassLedger>,
     analysis: &'a SourceSetAnalysis,
     any: Option<Vec<Entry>>,
@@ -293,6 +316,7 @@ impl Order<'_> {
                 private: modifiers.as_ref()?.contains(&KspModifier::Private),
                 constructor: false,
                 closure,
+                parts: Vec::new(),
                 place,
             });
         }
@@ -310,6 +334,7 @@ impl Order<'_> {
         // The names of the members earlier supertypes contributed.
         let mut earlier_names: HashSet<String> = HashSet::default();
         for super_type in class.super_types.as_ref()? {
+            let earlier = inherited.len();
             let KspTypeDeclaration::Class(super_name) = &super_type.declaration else {
                 return None;
             };
@@ -344,6 +369,7 @@ impl Order<'_> {
                         private: false,
                         constructor: false,
                         closure,
+                        parts: Vec::new(),
                         place: Place::Described {
                             owner: name.to_string(),
                             declaration: Box::new(KspDeclaration::Function(function)),
@@ -354,15 +380,19 @@ impl Order<'_> {
                 if listed.contains(&entry.identity) {
                     continue;
                 }
-                let intersects = entry
-                    .closure
-                    .iter()
-                    .any(|identity| listed.contains(identity))
-                    || inherited
-                        .iter()
-                        .any(|listed| listed.closure.contains(&entry.identity));
-                if intersects || earlier_names.contains(&entry.name) {
-                    return None;
+                if earlier_names.contains(&entry.name) {
+                    if let Some(position) = self.meeting(&inherited[..earlier], entry)? {
+                        // A third member meeting the classifier's own intersection joins it.
+                        let met = &inherited[position];
+                        let mut parts = match &met.place {
+                            Place::Intersection { owner, .. } if owner == name => met.parts.clone(),
+                            _ => vec![met.clone()],
+                        };
+                        parts.push(entry.clone());
+                        inherited[position] = self.intersect(name, parts, position)?;
+                        listed.insert(entry.identity.clone());
+                        continue;
+                    }
                 }
                 listed.insert(entry.identity.clone());
                 inherited.push(entry.clone());
@@ -394,6 +424,7 @@ impl Order<'_> {
             private: false,
             constructor: true,
             closure: Vec::new(),
+            parts: Vec::new(),
             place,
         }));
         Some(entries)

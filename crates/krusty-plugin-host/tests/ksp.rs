@@ -841,6 +841,30 @@ fn all_members_sharing_a_name_are_listed_together_as_ksp2_lists_them() {
 
 #[test]
 #[ignore = "downloads symbol-processing-api 2.3.12 and a JDK"]
+fn members_meeting_in_an_intersection_are_listed_as_ksp2_lists_them() {
+    log_is_what_ksp2_reports(
+        "AllMembers",
+        "allmembers.AllMembersProvider",
+        &[fixtures().join("intersections/Intersections.kt")],
+        "ksp-outputs-intersections",
+        "intersections.expected",
+    );
+}
+
+#[test]
+#[ignore = "downloads symbol-processing-api 2.3.12 and a JDK"]
+fn intersection_members_are_what_ksp2_makes() {
+    log_is_what_ksp2_reports(
+        "Intersections",
+        "intersections.IntersectionsProvider",
+        &[fixtures().join("intersections/Intersections.kt")],
+        "ksp-outputs-intersection-members",
+        "intersection-members.expected",
+    );
+}
+
+#[test]
+#[ignore = "downloads symbol-processing-api 2.3.12 and a JDK"]
 fn all_functions_whose_order_krusty_cannot_say_are_refused() {
     let (runtime, env) = runtime();
     let processor = processor_in(
@@ -850,9 +874,7 @@ fn all_functions_whose_order_krusty_cannot_say_are_refused() {
         "ksp-processor-all-members-refusals",
     );
     for case in [
-        "Intersection",
-        "UnrelatedInterfaces",
-        "SiblingOverrides",
+        "CovariantIntersection",
         "Substitution",
         "EnumClass",
         "LibrarySupertype",
