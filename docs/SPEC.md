@@ -22967,3 +22967,11 @@ reflective function classifiers and classes inheriting a function interface; an 
 a same-named classifier gains no such subtype relation. Tests: the normalized declaration cases in
 `symbol_resolver::hierarchy_projection` and the JVM nominal-slot round trip in
 `function_reference_invoke_e2e`.
+
+## Extension results specialized to caller variables
+
+An extension's result is its declared return type with the call's bindings substituted. When a
+formal binds to the caller's own type variable (`b + t` for
+`operator fun <A : Number?, B : A> Box<A>.plus(t: B): Pair2<A, B>` inside
+`fun <X : Number?, Y : X>`), the result names that variable (`Pair2<X, Y>`); the declaration's
+formal never survives the call, whatever its bound. Test: `box_regressions/boundedFormalExtensionReturn.kt`.
