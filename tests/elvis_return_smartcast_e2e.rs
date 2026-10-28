@@ -128,3 +128,56 @@ fn corpus_kt9277_named_argument_elvis_return() {
         assert_eq!(out, "OK");
     }
 }
+
+#[test]
+fn a_succeeded_safe_cast_narrows_its_operand() {
+    // `x as? T` is non-null only when the cast succeeded, so a diverging elvis or a `!= null`
+    // check on it proves `x` is `T`, for a parameter and for a stable property path alike.
+    const SRC: &str = "class Box<T>(val value: T)\n\
+@Suppress(\"UNCHECKED_CAST\")\n\
+fun elvisError(x: Any?): String {\n\
+    (x as? Box<String>) ?: error(\"not a box\")\n\
+    return x.value\n\
+}\n\
+fun elvisReturn(x: Any?): String {\n\
+    x as? String ?: return \"none\"\n\
+    return x\n\
+}\n\
+fun condition(x: Any?): String = if (x as? String != null) x else \"none\"\n\
+class Holder(val item: Any?)\n\
+fun property(holder: Holder): String {\n\
+    holder.item as? String ?: return \"none\"\n\
+    return holder.item\n\
+}\n\
+fun box(): String {\n\
+    if (elvisReturn(1) != \"none\" || condition(2) != \"none\" || property(Holder(3)) != \"none\") return \"FAIL\"\n\
+    return elvisError(Box(\"O\")) + elvisReturn(\"K\") + condition(\"\") + property(Holder(\"\"))\n\
+}\n";
+    assert_eq!(run(SRC).expect("safe-cast smart casts compile + run"), "OK");
+}
+
+#[test]
+fn a_safe_cast_proves_nothing_without_divergence_or_stability() {
+    // A non-diverging elvis leaves `x` unnarrowed, and a closure-mutated `var` declines the cast
+    // with kotlinc's smart-cast diagnostic.
+    const SRC: &str = "fun fallback(x: Any?): String {\n\
+    x as? String ?: \"fallback\"\n\
+    return x\n\
+}\n\
+fun mutated(): String {\n\
+    var x: Any? = \"a\"\n\
+    val reset = { x = 1 }\n\
+    x as? String ?: return \"none\"\n\
+    reset()\n\
+    return x\n\
+}\n";
+    let diagnostics = common::front_end_diagnostics(SRC, &[], None);
+    assert_eq!(diagnostics.len(), 2);
+    assert_eq!(
+        diagnostics,
+        [
+            "return type mismatch: expected 'String', actual 'Any?'.",
+            "smart cast to 'String' is impossible, because 'x' is a local variable that is mutated in a capturing closure.",
+        ]
+    );
+}

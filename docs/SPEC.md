@@ -22931,3 +22931,11 @@ reflective function classifiers and classes inheriting a function interface; an 
 a same-named classifier gains no such subtype relation. Tests: the normalized declaration cases in
 `symbol_resolver::hierarchy_projection` and the JVM nominal-slot round trip in
 `function_reference_invoke_e2e`.
+
+## Safe casts as null checks
+
+`x as? T` is non-null exactly when the cast succeeded. A proof that it is non-null therefore
+narrows a stable `x` to `T`. This covers a diverging elvis (`x as? T ?: return`,
+`(x as? T) ?: error(...)`) and a condition (`if (x as? T != null)`). The proof does not narrow
+after a non-diverging elvis. A local `var` that a closure mutates declines the cast with kotlinc's
+smart-cast-impossible diagnostic. Tests: `elvis_return_smartcast_e2e`.
