@@ -868,3 +868,67 @@ fn body_local_classes_with_inferred_overrides_match_kotlinc() {
         ],
     );
 }
+
+const BODY_LOCAL_INFERRED_BASE: &str = r#"abstract class Source {
+    abstract fun next(): Boolean
+}
+
+abstract class Adapter<T> {
+    abstract fun read(source: Source): T
+    abstract fun write(value: T): String
+}
+"#;
+
+const BODY_LOCAL_INFERRED_OVERRIDES: &str = r#"class Constant(private val value: Boolean) : Source() {
+    override fun next() = value
+}
+
+val booleans: Adapter<Boolean> = object : Adapter<Boolean>() {
+    override fun read(source: Source) = source.next()
+    override fun write(value: Boolean) = value.toString()
+}
+
+fun negated(): Adapter<Boolean> {
+    class Negated : Adapter<Boolean>() {
+        override fun read(source: Source) = !source.next()
+        override fun write(value: Boolean) = "not $value"
+    }
+    return Negated()
+}
+
+fun box(): String {
+    if (!booleans.read(Constant(true))) return "fail: anonymous read"
+    if (booleans.write(false) != "false") return "fail: anonymous write"
+    if (negated().read(Constant(true))) return "fail: local read"
+    if (negated().write(true) != "not true") return "fail: local write"
+    return "OK"
+}
+"#;
+
+/// A local or anonymous class implements an abstract member of a superclass declared in another
+/// file with an override whose result its expression body infers. The Wasm and Native KLIB lanes do
+/// not lower a superclass declared outside the file yet, so the runtime result and the complete
+/// class inventory are compared with kotlinc here.
+#[test]
+fn body_local_inferred_overrides_across_files_run_like_kotlinc() {
+    let sources = [
+        ("base.kt", BODY_LOCAL_INFERRED_BASE),
+        ("main.kt", BODY_LOCAL_INFERRED_OVERRIDES),
+    ];
+    let reference_args = common::language_directives::kotlinc_args(sources[0].1);
+    assert_eq!(
+        common::reference_error_blocks(&sources, &reference_args),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        common::front_end_diagnostics_files_with_stdlib(&[sources[0].1, sources[1].1]),
+        Vec::<String>::new()
+    );
+    common::expect_box_ok_files_with_stdlib(&sources, "BodyLocalInferredOverrides");
+    let differences = common::classes_against_kotlinc_module(&sources).differences();
+    assert!(
+        differences.is_empty(),
+        "classes differ from kotlinc's:\n\n{}",
+        differences.join("\n\n")
+    );
+}

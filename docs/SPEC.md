@@ -8,7 +8,7 @@ overlay, and an override whose expression body infers its result implements a me
 body is checked; the obligation check reads the overlay and the checked result. The diagnostic names
 an object expression `<anonymous>` and a local classifier from its outermost local class
 (`Partial`, `Outer.Missing`), as kotlinc 2.4.21 does. Covered by
-`tests/box_regressions/localOverrideInferredResultAcrossFiles.kt` and
+`override_candidate_rendering_e2e::body_local_inferred_overrides_across_files_run_like_kotlinc` and
 `override_candidate_rendering_e2e::body_local_classes_with_inferred_overrides_match_kotlinc`. A
 classifier nested in an object expression keeps its synthetic container name, and an override whose
 result is not a subtype of the overridden one is not yet reported (`RETURN_TYPE_MISMATCH_ON_OVERRIDE`,
