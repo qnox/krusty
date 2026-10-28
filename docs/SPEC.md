@@ -1,5 +1,18 @@
 # krusty — a memory-lean Kotlin→JVM compiler PoC
 
+## Smart casts from a non-null safe cast
+
+A non-null `operand as? T` result proves its stable operand is `T`, exactly where the result itself
+is proven non-null: after `(x as? T) ?: return`, after `if ((x as? T) == null) return`, and on the
+true side of a safe-call chain rooted at the cast compared with `true`
+(`(x as? T)?.f() == true && x.g()`). An elvis that completes normally, a guarded statement, or a
+chain compared with `false` proves nothing, as kotlinc 2.4.21 reports. The proof is of a non-null
+result, so a nullable target narrows to its non-null form (`(x as? String?) ?: return` makes `x` a
+`String`). A local `var` that a closure mutates declines the cast with kotlinc's
+smart-cast-impossible diagnostic. Tests: `tests/box_regressions/safeCastNonNullSmartCast.kt`,
+`resolver_regression_e2e::a_safe_cast_without_a_non_null_proof_does_not_smart_cast_like_kotlinc`
+and `elvis_return_smartcast_e2e`.
+
 ## File policies under signature recovery
 
 A file's own annotations (`@file:Suppress`, opt-ins) are published before recovery diagnostics
@@ -23024,14 +23037,6 @@ reflective function classifiers and classes inheriting a function interface; an 
 a same-named classifier gains no such subtype relation. Tests: the normalized declaration cases in
 `symbol_resolver::hierarchy_projection` and the JVM nominal-slot round trip in
 `function_reference_invoke_e2e`.
-
-## Safe casts as null checks
-
-`x as? T` is non-null exactly when the cast succeeded. A proof that it is non-null therefore
-narrows a stable `x` to `T`. This covers a diverging elvis (`x as? T ?: return`,
-`(x as? T) ?: error(...)`) and a condition (`if (x as? T != null)`). The proof does not narrow
-after a non-diverging elvis. A local `var` that a closure mutates declines the cast with kotlinc's
-smart-cast-impossible diagnostic. Tests: `elvis_return_smartcast_e2e`.
 
 ## Extension results specialized to caller variables
 

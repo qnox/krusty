@@ -71,38 +71,39 @@ impl Checker<'_> {
         }
     }
 
-    /// A non-null `x as? T` proves `x` is `T`. Returns whether `expression` is such a safe cast.
-    /// The fact is recorded only when `x` is a stable path; a local `var` that a closure mutates
-    /// records the declined cast instead, so its use reports the impossible smart cast.
-    pub(super) fn append_safe_cast_narrowing(
+    /// A non-null `operand as? T` result proves its stable operand is `T`: `(x as? T) ?: return`,
+    /// `(x as? T) != null`, and a safe-call chain rooted at the cast (`(x as? T)?.f() == true`).
+    /// The proof is of a non-null result, so even a nullable target (`as? String?`) narrows to its
+    /// non-null form. A local `var` that a closure mutates records the declined cast instead, so its
+    /// use reports the impossible smart cast.
+    pub(super) fn safe_cast_non_null_narrowing(
         &self,
         scope: &CheckerScope<'_>,
         expression: ExprId,
         out: &mut Vec<(NarrowPath, Ty)>,
         declined: &mut Vec<(String, Ty)>,
-    ) -> bool {
+    ) {
         let Expr::As {
             operand,
             ty,
             nullable: true,
         } = self.file.expr(expression)
         else {
-            return false;
+            return;
         };
         let Some(path) = self.expr_access_path(*operand) else {
-            return true;
+            return;
         };
         let site = self.span(expression);
         let stable_ty = self.stable_path_ty(scope, &path, site);
         let Some(narrowed) = self.proven_narrowed_ty(scope, stable_ty, ty) else {
-            return true;
+            return;
         };
         if stable_ty.is_some() {
-            out.push((path, narrowed));
+            out.push((path, narrowed.non_null()));
         } else if let Some((name, _)) = self.closure_mutated_decline(scope, &path, site) {
-            declined.push((name, narrowed));
+            declined.push((name, narrowed.non_null()));
         }
-        true
     }
 
     /// Scope for the right operand of an eager operator. `None` when the left operand ran no

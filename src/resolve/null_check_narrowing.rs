@@ -18,10 +18,6 @@ impl Checker<'_> {
         out: &mut Vec<(NarrowPath, Ty)>,
         declined: &mut Vec<(String, Ty)>,
     ) {
-        // `x as? T` is non-null exactly when the cast succeeded, so the proof narrows `x` to `T`.
-        if self.append_safe_cast_narrowing(scope, operand, out, declined) {
-            return;
-        }
         let Some(path) = self.expr_access_path(operand) else {
             // Not a property path. A SAFE-CALL chain ending in a method (`u?.f() != null`,
             // `u?.f() ?: return`) is no property read, but a non-null result still proves the
@@ -36,6 +32,9 @@ impl Checker<'_> {
             {
                 self.null_proof_or_decline(scope, &root_path, out, declined, self.span(operand));
             }
+            // `x as? T` is non-null exactly when the cast succeeded, so a proof on the chain's
+            // root narrows `x` to `T`.
+            self.safe_cast_non_null_narrowing(scope, root, out, declined);
             return;
         };
         // A plain chain's proof covers only the full path; a safe-call chain's covers every prefix.
