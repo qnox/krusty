@@ -17548,6 +17548,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   library declaration is refused for that query. A compiler accessor of an interface's property
   without modifiers, or of an `abstract` property, is public and abstract.
   (`crates/krusty-plugin-host/tests/ksp.rs`, `effective_java_modifiers_are_what_ksp2_reports`.)
+- **A header-only analysis keeps every declaration identity beside an inline function.**
+  An analysis that checks no body of a source declaring an `inline` function (a KSP round checks
+  none) has no checked FIR for its inline body. It publishes the module's declaration inventory
+  without inline bodies, so the classifier's other members keep their resolved identities: a KSP
+  round describes them and reads the JVM annotations written on them, as it does with no inline
+  member. (`src/ksp_round.rs`, `an_inline_member_leaves_its_classifiers_members_resolved`;
+  `crates/krusty-plugin-host/tests/ksp.rs`, `effective_java_modifiers_are_what_ksp2_reports`.)
 - **A KSP source declaration written without `override` has no overridee.**
   `findOverridee` of a written (`KOTLIN`) function or property without the `override` modifier,
   and of any constructor, is `null`, as KSP2 2.3.12 reports. The overridee of an `override`
