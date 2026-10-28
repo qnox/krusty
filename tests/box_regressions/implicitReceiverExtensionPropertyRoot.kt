@@ -6,11 +6,11 @@ val Holder.kotlin: String get() = text
 
 fun Holder.viaExtensionReceiver(): Int = kotlin.length
 
-fun viaLambdaReceiver(holder: Holder): String = with(holder) { kotlin.uppercase() }
+fun viaLambdaReceiver(holder: Holder): Int = with(holder) { kotlin.length + 1 }
 
 fun box(): String {
     val holder = Holder("ok")
     if (holder.viaExtensionReceiver() != 2) return "fail: extension receiver"
-    if (viaLambdaReceiver(holder) != "OK") return "fail: lambda receiver"
+    if (viaLambdaReceiver(holder) != 3) return "fail: lambda receiver"
     return "OK"
 }
