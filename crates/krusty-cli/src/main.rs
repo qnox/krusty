@@ -696,15 +696,23 @@ pub fn compile(opts: &cli::Options) -> Result<usize, String> {
     }
 
     if diags.has_errors() {
-        // Like kotlinc, a failed compilation reports its errors only.
-        diags
+        // Like kotlinc, a failed compilation reports its errors only, unless
+        // `-Xreport-all-warnings` keeps its warnings too. `-Werror` adds no summary then: the
+        // compilation has already failed on its errors.
+        if !opts.report_all_warnings {
+            diags
+                .diags
+                .retain(|diagnostic| diagnostic.severity == krusty::diag::Severity::Error);
+            diags.module_warnings.clear();
+        }
+        let errors = diags
             .diags
-            .retain(|diagnostic| diagnostic.severity == krusty::diag::Severity::Error);
-        diags.module_warnings.clear();
+            .iter()
+            .filter(|diagnostic| diagnostic.severity == krusty::diag::Severity::Error)
+            .count();
         return Err(format!(
-            "{}krusty: {} error(s)\n",
-            diags.render_all(&rendered),
-            diags.diags.len()
+            "{}krusty: {errors} error(s)\n",
+            diags.render_all(&rendered)
         ));
     }
     // The same typed policy owns ordinary compiler and module warnings. Unlike command-line

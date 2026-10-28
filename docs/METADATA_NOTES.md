@@ -1,5 +1,14 @@
 # `@kotlin.Metadata` — reverse-engineering notes (Phase 4b)
 
+## Native source callable-reference identity
+
+The checked source-module callable ID and source-module identity own the Native reflection marker's
+linkage. Weak definitions in dedicated COMDAT sections give all emitted files the same address,
+which the existing reference equality and hash runtime reads. The invocation adapter and carrier
+remain separate from declaration identity. KLIB references need their retained module-qualified
+signature before receiving the same program scope; a raw provider-local callable number is
+insufficient across independently analyzed modules.
+
 ## Identity-keyed declaration-name projection
 
 Providers project name evidence directly from their selected classifier and alias records. Typed
@@ -27,6 +36,15 @@ segments rather than splitting lookup names on dots and dollars. This avoids cre
 prefix identities before later consumers run. Metadata class-ID encoding still needs its separate
 snapshot ownership lookup; publication alone does not supply authoritative negative nesting facts
 for every cached or cross-module identity.
+
+## Wasm reference-array representation
+
+Reference-array reads consume the selected callable's frozen ArrayGet operation and the checked
+array element type; no classifier/member spelling lookup is added. Physical elements share nullable
+reference storage, with ordinary backend coercion restoring the checked result carrier. Bounds
+failures consume the platform exception storage evidence already retained beside classifiers.
+Array range-check defaults and overrides are Wasm representation policy and change no metadata,
+provider identity or frontend overload decision.
 
 ## Platform exception storage authority
 
