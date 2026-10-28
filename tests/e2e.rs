@@ -1415,6 +1415,8 @@ mod lambda_vs_block_fun_type_e2e;
 mod language_feature_arguments_e2e;
 #[path = "language_level_features_e2e.rs"]
 mod language_level_features_e2e;
+#[path = "library_inline_lambda_brace_line_e2e.rs"]
+mod library_inline_lambda_brace_line_e2e;
 #[path = "large_metadata_parts_e2e.rs"]
 mod large_metadata_parts_e2e;
 #[path = "lateinit_companion_read_e2e.rs"]

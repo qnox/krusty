@@ -7468,6 +7468,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   effect gets the same mark. An inline call is that trailing expression itself; the lambda body
   blocks around it are looked through.
   Tests: `tests/nested_inline_lambda_line_e2e.rs`.
+- **A `Unit` lambda in a dependency's inline iteration closes on its `}` first.** For
+  `items.forEach {⏎ add(it)⏎ }` kotlinc marks the lambda's closing brace on a `nop` while the
+  lambda's locals are open (the lambda's own fall-off `return`), then closes the inlined frame on
+  the dependency's invocation line with a second `nop` once those locals end. A one-line lambda's
+  brace shares its body's line, so that first `nop` is cleaned up. The lowered lambda frame ends in
+  the lambda's `Unit` value and carries the brace line, the same shape a same-file inline call's
+  lambda frame has. Tests: `tests/library_inline_lambda_brace_line_e2e.rs`.
 - **A same-file inline call's result is adapted after its copied frame ends.** kotlinc ends the
   `$i$f$` marker and the inlined parameter locals at the copied body's end label before its caller
   adapts the result. An erased type-parameter result is narrowed after those locals end, a
