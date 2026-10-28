@@ -22829,6 +22829,15 @@ does not lend its result constraints to nested argument calls. Nested constructo
 their own explicit arguments and independent value arguments. The outer applicability and bound
 errors precede any missing nested result parameter diagnostic.
 
+A fixed type argument outside its declaration bound also rejects the constructor's postponed
+function-expression constraints. The diagnostic retains the mapped parameter's substituted type
+and the checked lambda or anonymous-function type, even when both render identically. A concrete
+function parameter independent of the rejected type variable participates in the same candidate
+constraint system. Argument-owned failures replace the constructor-wide inapplicable message;
+ordinary typed values retain that message and the explicit bound error. Fixed lambda inputs remain
+available, and rejected result context still cannot complete a nested producer. Callable-reference
+completion requires separate selected-declaration diagnostic provenance, tracked in #2776.
+
 When a receiver-bound alias constructor is rejected before argument checking, retained declaration
 and receiver bindings still describe its lambda inputs. Missing callable formals are diagnosed at
 the written, untyped input parameters; explicit annotations and independently fixed inputs survive.

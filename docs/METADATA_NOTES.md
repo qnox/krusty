@@ -1296,3 +1296,11 @@ Provider-normalized function classifiers supply their declared generic supertype
 subtype relation. A typed function signature supplies its canonical classifier application, and
 the hierarchy walk checks the nominal value against that application. Reflective function types
 retain their nominal identity; no new metadata payload or physical JVM descriptor is introduced.
+
+## Rejected constructor lambda constraints
+
+Normalized constructor signatures and the canonical source-argument mapping retain postponed
+function-expression expectations when an explicit class argument violates its bound. Reporting
+uses the same typed failure evidence for source and reference-produced dependency declarations;
+it does not reconstruct parameter types from constructor text. Metadata encoding and callable ABI
+are unchanged. Callable-reference selected-declaration diagnostic retention is tracked in #2776.
