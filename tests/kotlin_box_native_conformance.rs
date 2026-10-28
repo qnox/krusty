@@ -506,3 +506,65 @@ fun box(): String {
         .expect("the JVM oracle must run the complete explicit-setter graph");
     assert_eq!(run_native_abi_case(source, stem), Outcome::Pass);
 }
+
+// PLATFORM-SPECIFIC: an external virtual getter must execute its override or decline cleanly.
+#[test]
+fn native_virtual_field_getter_exports_never_select_base_storage_directly() {
+    assert_virtual_getter_export(
+        "open class Base { open val value: String = \"base\" }\n\
+         class Derived : Base() { override val value: String = \"OK\" }",
+        "nativeVirtualFieldGetterExport",
+    );
+}
+
+// PLATFORM-SPECIFIC: explicit virtual accessor bodies have the same dispatch obligation.
+#[test]
+fn native_virtual_explicit_getter_exports_never_select_a_base_body_directly() {
+    assert_virtual_getter_export(
+        "open class Base { open val value: String get() = \"base\" }\n\
+         class Derived : Base() { override val value: String get() = \"OK\" }",
+        "nativeVirtualExplicitGetterExport",
+    );
+}
+
+fn assert_virtual_getter_export(declarations: &str, stem: &str) {
+    let source = format!(
+        "// MODULE: lib\npackage fixture\n{declarations}\n\
+         fun produce(): Base = Derived()\n\
+         // MODULE: main(lib)\nfun box(): String = fixture.produce().value\n"
+    );
+    super::box_reference_classes::checked_box(&source, stem)
+        .expect("the JVM oracle must establish the virtual getter result");
+    match run_native_abi_case(&source, stem) {
+        Outcome::Pass => {}
+        Outcome::Declined(reason) => assert_eq!(
+            reason, "a read of the property `fixture/Base.value`",
+            "unsupported dynamic dispatch must remain an explicit property decline"
+        ),
+        other => panic!("a virtual getter must not call its base entry directly: {other:?}"),
+    }
+}
+
+// PLATFORM-SPECIFIC: effective finality admits safe entries without requiring every class final.
+#[test]
+fn native_source_getter_exports_admit_both_forms_of_static_dispatch() {
+    let source = r#"// MODULE: lib
+package fixture
+open class FinalProperty { val value: String = "OK" }
+class Inherited : FinalProperty()
+open class VirtualProperty { open val value: String = "base" }
+class FinalOverride : VirtualProperty() { override val value: String = "OK" }
+fun inherited(): FinalProperty = Inherited()
+fun overridden(): FinalOverride = FinalOverride()
+// MODULE: main(lib)
+fun box(): String {
+    if (fixture.inherited().value != "OK") return "final property"
+    if (fixture.overridden().value != "OK") return "final owner"
+    return "OK"
+}
+"#;
+    let stem = "nativeStaticallyDispatchedGetterExports";
+    super::box_reference_classes::checked_box(source, stem)
+        .expect("the JVM oracle must establish both static-dispatch results");
+    assert_eq!(run_native_abi_case(source, stem), Outcome::Pass);
+}

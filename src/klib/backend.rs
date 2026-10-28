@@ -667,6 +667,14 @@ fn record_class_property_exports(
         if declaration.visibility == crate::types::Visibility::Private {
             continue;
         }
+        // These exports invoke a selected implementation directly. Open accessors need external
+        // virtual dispatch; a final enum owner can still have entry-specific overriding bodies.
+        let direct = declaration.modality == crate::metadata::semantic::KotlinModality::Final
+            || (class.modality == crate::metadata::semantic::KotlinModality::Final
+                && !source.is_enum);
+        if !source.is_interface && !direct {
+            continue;
+        }
         let Some((property, getter, setter)) =
             ir.local_property_layouts
                 .iter()

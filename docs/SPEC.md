@@ -22916,6 +22916,10 @@ the backend materializes their real accessor entry without inventing a common fu
 adding a virtual slot. Export trampolines preserve file initialization and declared result storage.
 Existing explicit setter bodies publish their value parameter and void result through the same
 function-export path; generic String and Int round trips retain their declared class formal ABI.
+Direct exports require a final property or an effectively final non-enum owner. Open properties
+retain metadata without acquiring a direct executable export; dynamic external dispatch remains
+#2523. Both stored and explicit virtual-getter controls reject a base implementation's wrong value
+while allowing correct dynamic execution or the existing explicit unsupported-property decline.
 Separate producer-factory and effectful explicit-getter graphs establish JVM and pinned Native
 reference results before requiring Native getter execution. The original graph with direct imported
 construction remains an outstanding constructor-linkage control in #2780; these getter checks do
