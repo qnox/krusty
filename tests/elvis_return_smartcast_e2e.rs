@@ -153,6 +153,11 @@ fun box(): String {\n\
     if (elvisReturn(1) != \"none\" || condition(2) != \"none\" || property(Holder(3)) != \"none\") return \"FAIL\"\n\
     return elvisError(Box(\"O\")) + elvisReturn(\"K\") + condition(\"\") + property(Holder(\"\"))\n\
 }\n";
+    assert_eq!(
+        common::reference_error_messages("Main", SRC),
+        Vec::<String>::new(),
+        "kotlinc must accept the safe-cast smart casts"
+    );
     assert_eq!(run(SRC).expect("safe-cast smart casts compile + run"), "OK");
 }
 
@@ -171,13 +176,12 @@ fun mutated(): String {\n\
     reset()\n\
     return x\n\
 }\n";
-    let diagnostics = common::front_end_diagnostics(SRC, &[], None);
+    let expected = [
+        "return type mismatch: expected 'String', actual 'Any?'.",
+        "smart cast to 'String' is impossible, because 'x' is a local variable that is mutated in a capturing closure.",
+    ];
+    assert_eq!(common::reference_error_messages("Main", SRC), expected);
+    let diagnostics = common::front_end_diagnostics_with_stdlib(SRC);
     assert_eq!(diagnostics.len(), 2);
-    assert_eq!(
-        diagnostics,
-        [
-            "return type mismatch: expected 'String', actual 'Any?'.",
-            "smart cast to 'String' is impossible, because 'x' is a local variable that is mutated in a capturing closure.",
-        ]
-    );
+    assert_eq!(diagnostics, expected);
 }
