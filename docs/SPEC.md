@@ -11231,8 +11231,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   it (a null check on a stable `val`, or a `val`'s initializing assignment in `init`, which is a
   stable write that narrows later reads through the same receiver). Type parameters in
   diagnostics name their owner with its written bounds and variance (`T (of fun <A, T : ((Int) ->
-  A)?> f)`, `X (of class Box<out X, in Y : Number>)`). Tests: `tests/type_parameter_invoke_e2e.rs`,
-  `tests/generic_argument_wildcards_e2e.rs`, `tests/tparam_bounded_by_tparam_e2e.rs`.
+  A)?> f)`, `X (of class Box<out X, in Y : Number>)`). An extension function's owner includes its
+  receiver as written, as a property's does (`T (of fun <T : Number> List<T>.firstName)`).
+  Tests: `tests/type_parameter_invoke_e2e.rs`, `tests/generic_argument_wildcards_e2e.rs`,
+  `tests/tparam_bounded_by_tparam_e2e.rs`,
+  `resolver_regression_e2e::an_extension_function_type_parameter_owner_names_its_receiver`.
 - **A type argument outside its parameter's bounds is `UPPER_BOUND_VIOLATED`.** Each written
   argument of a classifier application must be a subtype of every declared bound of its parameter,
   substituted with the same application's arguments: `I<T : Comparable<T>>` written `I<Any>`
