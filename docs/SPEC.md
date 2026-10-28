@@ -20240,6 +20240,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the stored field layout. The official-producer generic-initializer regression checks Int/Long
   extremes, String and null through callbacks and initializer effect counts. Reading imported
   properties remains part of the separate getter capability.
+  Native keeps a checked known-primary constructor selection through physical parameter
+  normalization. Retained declaration parameters refine an explicit signature selection only;
+  they cannot turn that known target into a second overload-matching obligation. Native owning
+  E2Es cover Unit-bearing ordinary/data classes, generated copies and explicit secondary calls.
   Unsupported inheritance, secondary/default/vararg constructors, value/inner/expect classes
   and member dispatch remain separate capabilities. Existing target runtime
   constructors retain their frozen external contract. Before target emission, a same-name source

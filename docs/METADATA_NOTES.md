@@ -990,6 +990,11 @@ layout. Constructor nodes retain declared parameter selection separately from ch
 operands. The official-producer regression observes generic values through initializer callbacks;
 imported property reads remain a separate getter capability.
 
+The declaration-parameter ledger is independent of the checked constructor-selection role. A
+missing explicit parameter selection denotes the already known in-IR primary constructor; Native
+preserves it even when the ledger is present. An explicit selection still consumes that ledger's
+declared ABI before physical frame adaptation. No metadata encoding or provider identity changes.
+
 Preparation follows only the initializer edges of this same positive plan. Class and helper
 publication share the body's rollback checkpoint. Until qualified class facts and constructor
 exports connect independent units, emission explicitly rejects equal source classifier names,

@@ -7,6 +7,11 @@ declaration alongside the layout, and consume that record when materializing fie
 initializer accesses. This supplies the shared storage evidence for the subsequent imported getter
 consumer without changing constructor arguments or initializer order.
 
+Native constructor realization preserves an already checked primary target. Only an explicit
+signature selection consumes the retained declaration-parameter ledger. Physical frame types stay
+separate, including normalized Unit fields and captured outer-instance prefixes. Owning Native
+E2Es establish the JVM answer before exercising primary, generated-copy and secondary calls.
+
 ## Class-generic dependency method exports
 
 Retain the complete declared self type, including captured parameters, at FIR lowering and consume
