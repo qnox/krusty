@@ -22931,3 +22931,12 @@ reflective function classifiers and classes inheriting a function interface; an 
 a same-named classifier gains no such subtype relation. Tests: the normalized declaration cases in
 `symbol_resolver::hierarchy_projection` and the JVM nominal-slot round trip in
 `function_reference_invoke_e2e`.
+
+## Extension receivers bound to caller variables
+
+An extension receiver is applicable when its declared receiver, specialized by the bindings the
+receiver itself supplies, is a supertype of the actual receiver. Type variables of the caller
+that remain in the specialized receiver are fixed types there: `Column<EntityID<X>>` fits
+`Column<out E?>` for `<T : Any, E : EntityID<T>>` once `E := EntityID<X>`. A callee formal that
+the receiver leaves unbound stays rigid in this check, so it cannot make the receiver fit. Test:
+`box_regressions/extensionReceiverBindsCallerVariable.kt`.
