@@ -3,19 +3,20 @@
 //!
 //! KSP2 lists the classifier's own functions (or properties) in declaration order, then the members
 //! of each direct supertype in written order as that supertype lists them, leaving out a private
-//! one, one already listed, and one a member listed before overrides. A data class's generated
-//! `equals`, `hashCode` and `toString` take the place of the member each overrides. Constructors
-//! come last. Members inherited along two supertypes that are not one declaration become an
-//! intersection override of KSP2's own, and a member of a supertype applied to type arguments a
-//! substituted copy; neither is described yet, so neither is a classifier with a library supertype
-//! other than `kotlin.Any`, an enum class, or an annotation class: the round leaves their lists
-//! undescribed and the host refuses the queries.
+//! one, one already listed, and one a member listed before overrides; it then groups them by name,
+//! each name where it first appears among the classifier's own names and then its supertypes'. A
+//! data class's generated `equals`, `hashCode` and `toString` take the place of the member each
+//! overrides. Constructors come last. Members inherited along two supertypes that are not one
+//! declaration become an intersection override of KSP2's own, and a member of a supertype applied
+//! to type arguments a substituted copy; neither is described yet, so neither is a classifier with
+//! a library supertype other than `kotlin.Any`, an enum class, or an annotation class: the round
+//! leaves their lists undescribed and the host refuses the queries.
 //!
-//! The frontend publishes no override relation between members a classifier only inherits, so
-//! two inherited members that may meet in an intersection are recognized conservatively: a member
-//! one supertype lists that is not a member an earlier supertype listed, but shares its name,
-//! leaves the list undescribed. That refuses an inherited overload pair too, which KSP2 lists
-//! plainly; it never lists two members where KSP2 lists one.
+//! The frontend publishes no override relation between members a classifier only inherits, so two
+//! inherited members that may meet in an intersection are recognized conservatively: a member one
+//! supertype lists that is not a member an earlier supertype listed, but shares its name, leaves
+//! the list undescribed. That refuses an inherited overload pair too, which KSP2 lists plainly; it
+//! never lists two members where KSP2 lists one.
 
 use std::cell::RefCell;
 
@@ -65,6 +66,7 @@ pub(super) fn order(files: &mut [KspFile], ledger: Ledger, analysis: &SourceSetA
             any: any_functions(analysis),
             closures: HashMap::default(),
             lists: HashMap::default(),
+            names: HashMap::default(),
         };
         let names: Vec<&str> = order.classes.keys().copied().collect();
         names
@@ -214,6 +216,8 @@ struct Order<'a> {
     closures: HashMap<FrontendDeclarationId, Vec<Identity>>,
     /// Each list worked out, `None` while it is being worked out or when it cannot be.
     lists: HashMap<(String, Kind), Option<std::rc::Rc<Vec<Entry>>>>,
+    /// Each classifier's member names in KSP2's order, worked out as [`Order::list`]s are.
+    names: HashMap<String, Option<std::rc::Rc<Vec<String>>>>,
 }
 
 impl Order<'_> {
@@ -361,6 +365,20 @@ impl Order<'_> {
         }
         let mut entries = own;
         entries.extend(inherited);
+        // KSP2 lists the members by name, each name where it first appears among the classifier's
+        // own names and then its supertypes'.
+        let names = self.names(name)?;
+        let mut rank: HashMap<&str, usize> = HashMap::default();
+        for member_name in names.iter() {
+            let next = rank.len();
+            rank.entry(member_name.as_str()).or_insert(next);
+        }
+        let mut ranked = entries
+            .into_iter()
+            .map(|entry| Some((*rank.get(entry.name.as_str())?, entry)))
+            .collect::<Option<Vec<_>>>()?;
+        ranked.sort_by_key(|(rank, _)| *rank);
+        let mut entries: Vec<Entry> = ranked.into_iter().map(|(_, entry)| entry).collect();
         entries.extend(constructors.into_iter().map(|place| Entry {
             identity: Identity::Made(name.to_string(), String::new()),
             name: String::new(),
@@ -370,6 +388,50 @@ impl Order<'_> {
             place,
         }));
         Some(entries)
+    }
+
+    /// The member names of the classifier `name` in the order KSP2 groups its members by: the names
+    /// of its own functions and properties as it declares them, then each direct supertype's, or
+    /// `None` when the round cannot order its members.
+    fn names(&mut self, name: &str) -> Option<std::rc::Rc<Vec<String>>> {
+        if let Some(names) = self.names.get(name) {
+            return names.clone();
+        }
+        self.names.insert(name.to_string(), None);
+        let names = self.work_out_names(name).map(std::rc::Rc::new);
+        self.names.insert(name.to_string(), names.clone());
+        names
+    }
+
+    fn work_out_names(&mut self, name: &str) -> Option<Vec<String>> {
+        if name == ANY {
+            return Some(
+                self.any
+                    .as_ref()?
+                    .iter()
+                    .map(|entry| entry.name.clone())
+                    .collect(),
+            );
+        }
+        let class = *self.classes.get(name)?;
+        let mut names: Vec<String> = class
+            .declarations
+            .iter()
+            .filter_map(|declaration| match declaration {
+                KspDeclaration::Function(function) if function.kind == KspFunctionKind::Member => {
+                    Some(function.name.clone())
+                }
+                KspDeclaration::Property(property) => Some(property.name.clone()),
+                _ => None,
+            })
+            .collect();
+        for super_type in class.super_types.as_ref()? {
+            let KspTypeDeclaration::Class(super_name) = &super_type.declaration else {
+                return None;
+            };
+            names.extend(self.names(super_name)?.iter().cloned());
+        }
+        Some(names)
     }
 
     /// Every member `identity` overrides, directly or not, as the frontend selected them.

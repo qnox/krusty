@@ -17486,6 +17486,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   KSP2 2.3.12 reports. A Kotlin library annotation keeps the rule for a `vararg` element only.
   (`crates/krusty-plugin-host/tests/ksp.rs`,
   `java_annotation_array_elements_default_to_empty_arrays`.)
+- **A KSP source classifier lists members sharing a name together.**
+  `KSClassDeclaration.declarations` lists a classifier's functions and properties, written and
+  generated, by name: each name where it first appears, and under one name its functions before its
+  properties, each in their own order; constructors and nested classifiers follow as before. A
+  file lists its own callables in source order. `getAllFunctions` and `getAllProperties` group
+  their members by name the same way, each name where it first appears among the classifier's own
+  names and then each supertype's, as KSP2 2.3.12 reports. (`crates/krusty-plugin-host/tests/ksp.rs`,
+  `members_sharing_a_name_are_listed_together_as_ksp2_lists_them`,
+  `all_members_sharing_a_name_are_listed_together_as_ksp2_lists_them`.)
 - **A KSP source classifier lists its members with the inherited ones as KSP2 does.**
   `getAllFunctions` lists the classifier's own functions in declaration order (a data class's
   `componentN` and `copy` among them), then each direct supertype's functions in written order
