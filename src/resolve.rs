@@ -17867,12 +17867,13 @@ impl<'a> Checker<'a> {
                     .lexical_value_claims_call_with_arguments(scope, &fname, args)
                     && known_sig.is_none()
                     && has_lambda_argument;
-                let ordinary_this_member_lambda_shape: Option<MemberLambdaShape> =
+                let ordinary_this_member_lambda_shape: Option<(usize, MemberLambdaShape)> =
                     if implicit_member_lambda_enabled {
                         let partial = this_member_partial.as_deref().unwrap_or_default();
                         self.implicit_member_receiver_types(scope)
                             .into_iter()
-                            .find_map(|receiver| {
+                            .enumerate()
+                            .find_map(|(depth, receiver)| {
                                 let (member, generic_member) = self.module_member_lambda_plan(
                                     scope, call, receiver, &fname, args, partial, expected,
                                 );
@@ -17893,6 +17894,7 @@ impl<'a> Checker<'a> {
                                     arg_names.as_deref(),
                                     self.file.call_has_trailing_lambda.contains(&call.0),
                                 )
+                                .map(|shape| (depth, shape))
                             })
                     } else {
                         None
@@ -17905,13 +17907,16 @@ impl<'a> Checker<'a> {
                 // because extensions were swept first, which is backwards: the tower is innermost
                 // first, and within a receiver a member outranks an extension.
                 //
-                // This closes that inversion between those two sources only. Source members are not
-                // part of this decision — they are found by their own whole-tower sweep just above,
-                // which still wins outright wherever it answers, so an outer receiver's SOURCE
-                // member still beats an inner receiver's classpath member. That inversion is older
-                // than this decision point and is not addressed here.
+                // Source members come from their own sweep just above. Its answer bounds this one:
+                // only receivers strictly inside the receiver that answered there are asked, so an
+                // inner receiver's classpath member or (member) extension beats an outer receiver's
+                // source member, while the answering receiver's own source member still outranks
+                // its extensions.
+                let source_member_depth = ordinary_this_member_lambda_shape
+                    .as_ref()
+                    .map(|(depth, _)| *depth);
                 let this_member_shaping = (implicit_member_lambda_enabled
-                    && ordinary_this_member_lambda_shape.is_none())
+                    && source_member_depth != Some(0))
                 .then(|| {
                     let type_args = self
                         .file
@@ -17925,6 +17930,7 @@ impl<'a> Checker<'a> {
                     let partial = this_member_partial.clone().unwrap_or_default();
                     self.implicit_member_receiver_types(scope)
                         .into_iter()
+                        .take(source_member_depth.unwrap_or(usize::MAX))
                         .find_map(|receiver| {
                             let shaping = self.call_lambda_shaping(
                                 scope,
@@ -17959,6 +17965,9 @@ impl<'a> Checker<'a> {
                         })
                 })
                 .flatten();
+                let ordinary_this_member_lambda_shape = ordinary_this_member_lambda_shape
+                    .filter(|_| this_member_shaping.is_none())
+                    .map(|(_, shape)| shape);
                 let this_member_ext_lambda_plan =
                     this_member_shaping.as_ref().and_then(|shaping| {
                         shaping
