@@ -1,5 +1,18 @@
 # `@kotlin.Metadata` — reverse-engineering notes (Phase 4b)
 
+## Declaration-owned Class header IDs
+
+The common Class schema takes a mandatory resolved class ID. Its package and exact lexical
+segments determine JVM `pkg/Outer.Inner` spelling, predefined records and descriptor compression;
+compression is unavailable when a retained segment contains a literal dollar. KLIB writes those
+same segments into its qualified-name table and reuses the Class header ID for field 174's class
+inventory. Its root/child declaration traversal uses retained ownership too, so literal-dollar
+classes cannot disappear before serialization. Explicit local JVM names retain the existing
+local-name record and enum-body handling. `companionObjectName` and the companion's `nestedClassName`
+retain the same exact owner-relative segment, including a dollar inside a named companion.
+Unknown declaration facts never activate a spelling-derived fallback. Other type/class-ID fields
+remain separate consumer migrations.
+
 ## Dependency conversion proof
 
 Ordinary body conversions and prepared-inline templates consume the same explicit semantic class
