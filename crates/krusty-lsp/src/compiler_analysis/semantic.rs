@@ -930,8 +930,7 @@ impl<'a> SemanticClassifier<'a> {
             self.push_definition(self.tokens[terminal].span, target);
         } else if let Some(internal) = self
             .symbols
-            .class_names
-            .get_class(name)
+            .library_import_classifier(&qualified)
             .filter(|internal| self.symbols.libraries.classifier(*internal).is_some())
         {
             self.push_library_definition(

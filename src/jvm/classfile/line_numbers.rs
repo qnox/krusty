@@ -338,6 +338,15 @@ impl CodeBuilder {
             _ => {
                 if forgotten {
                     self.pending_lines.restated_pc = Some(pc);
+                    // The caller's line written again after an inlined body is that body's
+                    // restoration, which a debug-table curation keeps beside an equal entry.
+                    if self
+                        .line_marks
+                        .last()
+                        .is_some_and(|&(_, previous)| previous == line)
+                    {
+                        self.inlined_line_marks.push((pc, line));
+                    }
                 }
                 self.line_marks.push((pc, line));
                 Some(self.line_marks.len() - 1)

@@ -185,6 +185,12 @@ impl Checker<'_> {
                                     signature.clone(),
                                 )
                             }),
+                            self.rejected_constructor_lambdas(
+                                args,
+                                &argument_slots,
+                                signature,
+                                &explicit_type_arguments,
+                            ),
                         )
                     });
                     continue;
@@ -557,6 +563,7 @@ impl Checker<'_> {
                                     signature.clone(),
                                 )
                             }),
+                            Vec::new(),
                         )
                     });
                     continue;
@@ -647,8 +654,12 @@ impl Checker<'_> {
                                 return Err(failure);
                             }
                         }
-                        if let Some(((expected, actual), constructor, bound_constructor)) =
-                            type_argument_bound_failure
+                        if let Some((
+                            (expected, actual),
+                            constructor,
+                            bound_constructor,
+                            postponed_lambdas,
+                        )) = type_argument_bound_failure
                         {
                             return Err(LibraryConstructorFailure::TypeArgumentMismatch {
                                 expected,
@@ -657,6 +668,7 @@ impl Checker<'_> {
                                 explicit: explicit_type_arguments,
                                 constructor,
                                 bound_constructor,
+                                postponed_lambdas,
                             });
                         }
                         if let Some((failure, (params, call_sig))) =
