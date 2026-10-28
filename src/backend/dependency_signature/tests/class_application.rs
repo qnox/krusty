@@ -2,16 +2,13 @@
 
 use super::*;
 use crate::fir::ResolvedParameterIdentity;
-use crate::libraries::{
-    ExternalCallableKind, KlibBodyClassContract, KlibBodyClassParameters, KlibDeclarationSignature,
-    KlibDependencyCallable,
-};
-use crate::metadata::id_signature::{decode_public_id_signature, KlibPublicIdSignature};
-use crate::metadata::protobuf::Pb;
-use crate::types::{type_name, SemanticCallableOwner, TypeVariance};
+use crate::libraries::{klib_body_class_fixture, ExternalCallableKind};
+use crate::types::{type_name, SemanticCallableOwner};
 
 fn member() -> BackendCallableFact {
-    let class_formal = Ty::ty_param("sample.Owner.T", Ty::nullable(Ty::obj("kotlin/Any")));
+    let (class_contract, dependency_callable) =
+        klib_body_class_fixture::generic_member_declaration();
+    let class_formal = class_contract.parameters.formals[0];
     let mut signature = generic();
     signature.receiver = None;
     signature.params = vec![Ty::String, class_formal, signature.ret];
@@ -19,45 +16,13 @@ fn member() -> BackendCallableFact {
     let mut fact = frozen(signature);
     fact.context_count = 0;
     fact.kind = ExternalCallableKind::Member;
-    let owner = type_name("sample/Owner");
+    let owner = class_contract.classifier;
     fact.declaration_owner = Some(SemanticCallableOwner::Classifier(owner));
     fact.parameter_identities = ["fixed", "classValue", "methodValue"]
         .map(|name| ResolvedParameterIdentity::Source(name.into()))
         .into();
-    let mut common = Pb::new();
-    common.field_varint(1, 0);
-    common.field_varint(2, 1);
-    common.field_varint(2, 2);
-    common.field_fixed64(6, 71);
-    let mut wrapper = Pb::new();
-    wrapper.field_message(1, &common);
-    let method = decode_public_id_signature(
-        wrapper.as_bytes(),
-        &["sample".into(), "Owner".into(), "echo".into()],
-    )
-    .unwrap()
-    .unwrap();
-    fact.dependency_callable = Some(KlibDependencyCallable {
-        module: "sample".into(),
-        declaration: KlibDeclarationSignature::Public(method),
-    });
-    fact.klib_body_class_contract = Some(KlibBodyClassContract {
-        module: "sample".into(),
-        signature: KlibPublicIdSignature::classifier(owner),
-        classifier: owner,
-        parameters: KlibBodyClassParameters {
-            formals: vec![class_formal].into_boxed_slice(),
-            bounds: vec![Vec::new()].into_boxed_slice(),
-            variances: vec![TypeVariance::Invariant].into_boxed_slice(),
-            own_count: 1,
-        },
-        kind: crate::libraries::TypeKind::Class,
-        modality: crate::metadata::semantic::KotlinModality::Open,
-        is_value: false,
-        is_inner: false,
-        is_expect: false,
-        primary_constructor: None,
-    });
+    fact.dependency_callable = Some(dependency_callable);
+    fact.klib_body_class_contract = Some(class_contract);
     fact
 }
 

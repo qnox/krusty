@@ -107,6 +107,8 @@ pub use inline_body::{
     InlineCollectionCapacity, InlineCollectionLocalNames, InlineIterationIndex,
     InlineIterationTraversal,
 };
+#[cfg(test)]
+pub(crate) use klib_body_class::test_fixture as klib_body_class_fixture;
 pub(crate) use klib_body_class::{
     KlibBodyClassContract, KlibBodyClassParameters, KlibClassStorage, KlibStoredField,
 };

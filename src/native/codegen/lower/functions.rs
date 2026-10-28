@@ -27,6 +27,13 @@ use super::*;
 /// function value answers `equals`/`hashCode`/`toString` like any other object.
 const INVOKE_SLOT: u32 = 3;
 
+/// A declaration marker is shared only within the scope that authenticates its identity.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub(super) enum ReferenceIdentity {
+    Local(String),
+    Program(String),
+}
+
 /// A site that creates a function value. A lambda and a callable reference differ in how they are
 /// written and in nothing else that matters here: each names a function holding the body and a list
 /// of values to carry, and `obj::method`'s bound receiver is simply the first of those. Common
@@ -41,7 +48,7 @@ struct Site {
     sam: Option<crate::ir::IrSamTarget>,
     /// Set for a CALLABLE REFERENCE: the declaration it names, which is what equality compares.
     /// A lambda leaves it unset and keeps identity equality, which is what Kotlin gives one.
-    identity: Option<String>,
+    identity: Option<ReferenceIdentity>,
     /// Which capture holds the value EQUALITY reads — a reference's bound receiver, or the
     /// function a SAM delegate wraps — when one does. The descriptor records where it lands so
     /// the runtime does not have to guess it is the first reference-typed field: a reference to a
@@ -50,7 +57,7 @@ struct Site {
 }
 
 /// The site an expression creates, or `None` when it creates none.
-fn closure_site(expr: &IrExpr) -> Option<Result<Site, Unsupported>> {
+fn closure_site(expr: &IrExpr, module_name: &str) -> Option<Result<Site, Unsupported>> {
     match expr {
         // The declared arity is deliberately not read here: the implementation function's own
         // parameters are the source of truth, and a suspend lambda's body carries a continuation
@@ -88,7 +95,7 @@ fn closure_site(expr: &IrExpr) -> Option<Result<Site, Unsupported>> {
                 // A callable reference converted to a `fun interface` arrives as a lambda with a
                 // SAM target, not as a reference, so there is none to carry here.
                 sam: None,
-                identity: Some(reference_identity(reference)),
+                identity: Some(reference_identity(reference, module_name)),
                 receiver_capture: reference
                     .bound_receiver
                     .is_some()
@@ -106,13 +113,22 @@ fn closure_site(expr: &IrExpr) -> Option<Result<Site, Unsupported>> {
 /// Kotlin says they are equal — so this is the thing they must share. `foo::bar` gets a different
 /// one from `Foo::bar` for the opposite reason: those must not be equal. Derived from the IR's
 /// `target`, which is the declaration's own identity rather than anything about the site.
-fn reference_identity(reference: &crate::ir::IrCallableReference) -> String {
+fn reference_identity(
+    reference: &crate::ir::IrCallableReference,
+    module_name: &str,
+) -> ReferenceIdentity {
     use crate::ir::IrCallableReferenceTarget as Target;
+    let bound = if reference.bound_receiver.is_some() {
+        "b"
+    } else {
+        "u"
+    };
     let named = match &reference.target {
-        Target::Module(callable) => format!(
-            "m{}",
-            super::super::super::symbols::c_identifier(&format!("{callable:?}"))
-        ),
+        Target::Module(callable) => {
+            let declaration =
+                super::super::super::symbols::module_function_symbol(module_name, *callable);
+            return ReferenceIdentity::Program(format!("kt_refid_{bound}_{declaration}"));
+        }
         Target::Constructor { classifier } => {
             format!(
                 "c{}",
@@ -152,12 +168,7 @@ fn reference_identity(reference: &crate::ir::IrCallableReference) -> String {
             }
         ),
     };
-    let bound = if reference.bound_receiver.is_some() {
-        "b"
-    } else {
-        "u"
-    };
-    format!("kt_refid_{bound}_{named}")
+    ReferenceIdentity::Local(format!("kt_refid_{bound}_{named}"))
 }
 
 /// The emitted pieces of one lambda site.
@@ -197,29 +208,35 @@ fn layout(
 }
 
 impl<'a> FileLowering<'a> {
-    /// The marker two callable references to the same declaration share, defined once per file.
+    /// A file-local marker for a reference whose declaration identity has file scope.
     ///
     /// Its ADDRESS is the identity; nothing ever reads its contents. One byte, because a symbol
     /// needs storage to have an address at all.
     pub(super) fn reference_identity_marker(&mut self, name: &str) -> Result<DataId, Unsupported> {
-        if let Some(existing) = self.reference_identities.get(name) {
+        self.scoped_reference_identity_marker(&ReferenceIdentity::Local(name.to_owned()))
+    }
+
+    fn scoped_reference_identity_marker(
+        &mut self,
+        identity: &ReferenceIdentity,
+    ) -> Result<DataId, Unsupported> {
+        if let Some(existing) = self.reference_identities.get(identity) {
             return Ok(*existing);
         }
-        let id = self.declare_local_data(name, false)?;
-        let mut description = DataDescription::new();
-        description.define(vec![0u8; 1].into_boxed_slice());
-        description.set_align(1);
-        self.module
-            .define_data(id, &description)
-            .map_err(|error| format!("defining `{name}` ({error})"))?;
-        self.reference_identities.insert(name.to_string(), id);
+        let (shared, local) = match identity {
+            ReferenceIdentity::Local(name) => (None, name.as_str()),
+            ReferenceIdentity::Program(name) => (Some(name.as_str()), name.as_str()),
+        };
+        let id = self.declare_reflection_object(shared, local)?;
+        self.define_reflection_object(id, shared, vec![0u8; 1], &[])?;
+        self.reference_identities.insert(identity.clone(), id);
         Ok(id)
     }
 
     /// Declare a type and a thunk for every lambda in the file, before any body is compiled.
     pub(super) fn declare_lambdas(&mut self) -> Result<(), Unsupported> {
         for index in 0..self.ir.exprs.len() {
-            let Some(site) = closure_site(&self.ir.exprs[index]) else {
+            let Some(site) = closure_site(&self.ir.exprs[index], self.module_name) else {
                 continue;
             };
             let Site {
@@ -280,10 +297,10 @@ impl<'a> FileLowering<'a> {
             let sam_identity = {
                 sam.as_ref().zip(captures.first()).and_then(|(target, _)| {
                     (target.function_adapter || target.wraps_function_value).then(|| {
-                        format!(
+                        ReferenceIdentity::Local(format!(
                             "kt_refid_sam_{}",
                             super::super::super::symbols::c_identifier(&target.classifier.render())
-                        )
+                        ))
                     })
                 })
             };
@@ -326,7 +343,7 @@ impl<'a> FileLowering<'a> {
                     } = self.sam_table(target, &base, impl_fn, &capture_offsets)?;
                     let marker = match &identity {
                         Some(name) => {
-                            let marker = self.reference_identity_marker(name)?;
+                            let marker = self.scoped_reference_identity_marker(name)?;
                             vtable[0] = self.runtime_member_import("kt_reference_equals")?;
                             vtable[1] = self.runtime_member_import("kt_reference_hash_code")?;
                             Some((marker, receiver_offset))
@@ -367,7 +384,7 @@ impl<'a> FileLowering<'a> {
                     // answer as one through the reference's own type.
                     let marker = match &identity {
                         Some(name) => {
-                            let marker = self.reference_identity_marker(name)?;
+                            let marker = self.scoped_reference_identity_marker(name)?;
                             // `any_vtable` builds the three `kotlin.Any` slots in order, so these
                             // two are `equals` and `hashCode` (`KT_SLOT_*` in `krusty_rt.h`).
                             vtable[0] = self.runtime_member_import("kt_reference_equals")?;
@@ -774,7 +791,8 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     /// Allocate a function value and fill in what it captured.
     pub(super) fn lambda(&mut self, site: u32) -> Result<Option<Value>, Unsupported> {
         let Site { captures, sam, .. } =
-            closure_site(self.file.ir.expr(site)).expect("only a closure site reaches here")?;
+            closure_site(self.file.ir.expr(site), self.file.module_name)
+                .expect("only a closure site reaches here")?;
         // Converting a NULLABLE function value to a `fun interface` yields null when the value is
         // null — `isNull(nullableFun(true))` must answer true, not call `invoke` on a wrapper
         // around nothing. The checked lowering expresses such a conversion as a lambda whose one
@@ -793,7 +811,8 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     fn wrap_closure(&mut self, site: u32) -> Result<Option<Value>, Unsupported> {
         let Site {
             impl_fn, captures, ..
-        } = closure_site(self.file.ir.expr(site)).expect("only a closure site reaches here")?;
+        } = closure_site(self.file.ir.expr(site), self.file.module_name)
+            .expect("only a closure site reaches here")?;
         let items = self
             .file
             .lambdas
