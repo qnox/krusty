@@ -104,3 +104,108 @@ fn failed_constructor_context_handles_a_fixed_nested_parameter_declaration() {
     let result = common::compiler_diagnostics(&[("Use.kt", source)], &[common::stdlib_jar()]);
     common::expect_identical_rejection(&result, "fixed nested parameter declaration");
 }
+
+#[test]
+fn an_explicit_constructor_bound_failure_keeps_the_lambda_argument_diagnostic() {
+    let source = "class Callback<T : Number>(block: (T) -> String)\n\
+        fun wrong() = Callback<String> { value -> value.toString() }\n";
+    let result = common::compiler_diagnostics(&[("Use.kt", source)], &[common::stdlib_jar()]);
+    assert_eq!(
+        common::compiler_errors(&result.reference_stderr),
+        vec![
+            common::CompilerError {
+                file: "Use.kt".to_owned(),
+                line: 2,
+                column: 24,
+                message: "type argument is not within its bounds: type parameter 'T (of class Callback<T : Number>)' must be subtype of 'Number', but actual: 'String'.".to_owned(),
+            },
+            common::CompilerError {
+                file: "Use.kt".to_owned(),
+                line: 2,
+                column: 32,
+                message: "argument type mismatch: actual type is '(String) -> String', but '(String) -> String' was expected.".to_owned(),
+            },
+        ]
+    );
+    common::expect_identical_rejection(&result, "explicit constructor bound and inferred lambda");
+}
+
+#[test]
+fn an_explicit_constructor_bound_failure_preserves_a_written_lambda_input() {
+    let source = "class Callback<T : Number>(block: (T) -> String)\n\
+        fun wrong() = Callback<String> { value: String -> value.toString() }\n";
+    let result = common::compiler_diagnostics(&[("Use.kt", source)], &[common::stdlib_jar()]);
+    common::expect_identical_rejection(
+        &result,
+        "explicit constructor bound and written lambda input",
+    );
+}
+
+#[test]
+fn an_explicit_bound_failure_keeps_each_arguments_declaration_constraints() {
+    for source in [
+        "class Value<T : Number>(val value: T)\n\
+            fun wrong() = Value<String>(\"value\")\n",
+        "class Independent<T : Number>(block: (Int) -> String)\n\
+            fun wrong() = Independent<String> { value -> value.toString() }\n",
+        "class Producer<T : Number>(block: () -> T)\n\
+            fun wrong() = Producer<String> { \"value\" }\n",
+        "class Reordered<T : Number>(before: Int = 0, block: (T) -> String)\n\
+            fun wrong() = Reordered<String>(block = { value -> value.toString() }, before = 1)\n",
+        "class Multiple<T : Number>(first: (Int) -> String, last: () -> T)\n\
+            fun wrong() = Multiple<String>({ value -> value.toString() }, { \"value\" })\n",
+    ] {
+        let result = common::compiler_diagnostics(&[("Use.kt", source)], &[common::stdlib_jar()]);
+        common::expect_identical_rejection(
+            &result,
+            "declaration-owned rejected argument constraint",
+        );
+    }
+}
+
+#[test]
+fn an_explicit_dependency_constructor_bound_failure_keeps_the_lambda_diagnostic() {
+    let library = common::kotlinc_lib_out(&[(
+        "Declarations.kt",
+        "package bounds\nclass Callback<T : Number>(block: (T) -> String)\n",
+    )])
+    .expect("reference provisions the bounded callback declaration");
+    let result = common::compiler_diagnostics(
+        &[(
+            "Use.kt",
+            "import bounds.Callback\nfun wrong() = Callback<String> { value -> value.toString() }\n",
+        )],
+        &[library, common::stdlib_jar()],
+    );
+    common::expect_identical_rejection(&result, "dependency constructor bound and inferred lambda");
+}
+
+#[test]
+fn an_explicit_bound_failure_keeps_an_anonymous_function_constraint() {
+    let source = "class Callback<T : Number>(block: (T) -> String)\n\
+        fun wrong() = Callback<String>(fun(value: String): String = value)\n";
+    let result = common::compiler_diagnostics(&[("Use.kt", source)], &[common::stdlib_jar()]);
+    common::expect_identical_rejection(&result, "constructor bound and anonymous function");
+}
+
+#[test]
+fn an_explicit_bound_failure_preserves_a_pretyped_function_argument() {
+    let source = "class Callback<T : Number>(block: (T) -> String)\n\
+        val block: (String) -> String = { value -> value }\n\
+        fun wrong() = Callback<String>(block)\n";
+    let result = common::compiler_diagnostics(&[("Use.kt", source)], &[common::stdlib_jar()]);
+    common::expect_identical_rejection(&result, "constructor bound and pretyped function value");
+}
+
+#[test]
+fn a_valid_constructor_bound_preserves_inferred_and_written_lambda_inputs() {
+    let source = r#"
+class Callback<T : Number>(val block: (T) -> String)
+fun box(): String {
+    val inferred = Callback<Int> { value -> value.inc().toString() }
+    val written = Callback<Int> { value: Int -> (value + 2).toString() }
+    return if (inferred.block(41) == "42" && written.block(40) == "42") "OK" else "wrong inputs"
+}
+"#;
+    common::expect_box_same_as_kotlinc(source, "valid_constructor_bound_lambda_inputs");
+}

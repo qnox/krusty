@@ -13,6 +13,20 @@ type mismatch". Regressions: `tests/box_regressions/nullableProjectedReceiverVar
 `tests/box_regressions/nullableBoundedCallerReceiverVariable.kt` and
 `resolver_regression_e2e::an_invariant_nullable_receiver_variable_rejects_a_non_null_argument_like_kotlinc`.
 
+## Declaration-owned metadata class headers
+
+JVM Class metadata and KLIB Class headers name their selected declaration through retained package
+and lexical segments. Literal dollars stay inside a segment; they never introduce an owner.
+Declared nested-class inventories use the same retained owners and exact segments; a top-level
+literal-dollar declaration contributes no invented member. Companion-object and nested-class
+name fields agree on the exact companion segment, including literal dollars. KLIB selects its root declarations by
+their retained top-level fact, and its class inventory uses the same resolved ID as each header.
+Missing, unknown or
+cyclic ownership is an emission error. Explicit source-local provenance preserves JVM raw local
+names; KLIB declines a local header it cannot represent. Serialization-generated classifiers retain
+the exact owner and segment published by their frontend plugin. Tests: the full classfile oracle
+in `backtick_identifier_e2e`, shared class-ID wire tests, and the generated-header boundary test.
+
 ## Dependency conversion type evidence
 
 Ordinary KLIB bodies and prepared inline templates prove subtype conversions through the calling
@@ -22869,6 +22883,15 @@ A constructor application whose fixed class arguments violate every mapped decla
 does not lend its result constraints to nested argument calls. Nested constructors still infer from
 their own explicit arguments and independent value arguments. The outer applicability and bound
 errors precede any missing nested result parameter diagnostic.
+
+A fixed type argument outside its declaration bound also rejects the constructor's postponed
+function-expression constraints. The diagnostic retains the mapped parameter's substituted type
+and the checked lambda or anonymous-function type, even when both render identically. A concrete
+function parameter independent of the rejected type variable participates in the same candidate
+constraint system. Argument-owned failures replace the constructor-wide inapplicable message;
+ordinary typed values retain that message and the explicit bound error. Fixed lambda inputs remain
+available, and rejected result context still cannot complete a nested producer. Callable-reference
+completion requires separate selected-declaration diagnostic provenance, tracked in #2776.
 
 When a receiver-bound alias constructor is rejected before argument checking, retained declaration
 and receiver bindings still describe its lambda inputs. Missing callable formals are diagnosed at
