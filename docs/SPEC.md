@@ -1,5 +1,13 @@
 # krusty — a memory-lean Kotlin→JVM compiler PoC
 
+## Smart casts from `when` guards
+
+An arm's guard (`is Lit if e.type is Marker -> ...`) is checked with the arm's own condition facts
+and adds its true-branch facts to that arm's body, so `e.type` reads as `Marker` there. The facts
+do not reach later arms: a guarded arm adds no fall-through facts, and a guard joined by `||`
+proves nothing. Tests: `box_regressions/whenGuardSmartCast.kt` and
+`when_null_guard_smartcast_e2e::a_when_guard_narrows_only_its_own_arm`.
+
 ## File policies under signature recovery
 
 A file's own annotations (`@file:Suppress`, opt-ins) are published before recovery diagnostics

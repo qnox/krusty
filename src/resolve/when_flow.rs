@@ -189,6 +189,44 @@ impl Checker<'_> {
         }
     }
 
+    /// The facts every later arm may assume once this arm's conditions all failed. Conditions
+    /// joined by commas are alternatives, so reaching the next arm means each one was false.
+    pub(super) fn when_fallthrough_narrowings(
+        &self,
+        scope: &CheckerScope<'_>,
+        subject: Option<ExprId>,
+        conditions: &[WhenCondition],
+    ) -> WhenNarrowings {
+        let (mut casts, mut declined) = (Vec::new(), Vec::new());
+        for &condition in conditions {
+            let (mut condition_casts, mut condition_declined) =
+                self.when_condition_narrowings(scope, subject, condition, false);
+            crate::trace_compiler!(
+                "smartcast",
+                "when fallthrough condition={} casts={condition_casts:?} declined={condition_declined:?}",
+                condition.expression().0,
+            );
+            casts.append(&mut condition_casts);
+            declined.append(&mut condition_declined);
+        }
+        (casts, declined)
+    }
+
+    /// Check an arm's `if` guard in the scope its conditions narrowed, and apply its true-branch
+    /// facts to the arm body: `is Lit if e.type is Marker -> e.type.binary` reads `e.type` as a
+    /// `Marker`. The facts are returned so a recheck of the body reapplies them.
+    pub(super) fn checked_when_guard(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        guard: ExprId,
+    ) -> WhenNarrowings {
+        let guard_ty = self.expr(scope, guard);
+        self.expect_assignable(Ty::Boolean, guard_ty, self.span(guard), "when guard");
+        let (casts, declined) = self.condition_narrowings(scope, guard, true);
+        self.apply_narrowings(scope, &casts, &declined, false);
+        (casts, declined)
+    }
+
     /// Flow facts established by one `when` condition. Predicate conditions already contain the
     /// subject in their checked expression (`is T`, `in range`) and use ordinary condition flow.
     /// A subject-equality condition stores only the candidate expression, so null equality must be
