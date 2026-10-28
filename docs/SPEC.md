@@ -12588,7 +12588,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Tests: `tests/serializer_property_with_over_contextual_e2e.rs` (the `$serializer` and the class
   byte for byte against the reference compiler), and
   `a_file_contextual_element_uses_the_three_argument_contextual_serializer` in
-  `tests/serialization_companion_byte_parity_e2e.rs`.
+  `tests/serialization_file_contextual_elements_e2e.rs`.
 - **`@Serializable(with = S::class)` on a property's TYPE ARGUMENT selects that argument's
   serializer.** `val items: List<@Serializable(with = S::class) Item>` serializes each element with
   `S` whatever serializer `Item` has, including none: kotlinc builds
