@@ -1,5 +1,13 @@
 # krusty — a memory-lean Kotlin→JVM compiler PoC
 
+## Nullable type variables in extension receivers
+
+An extension declared on `Column<out E?>` applies to `Column<EntityID<U>>` where `U` is the
+caller's own type parameter: the callee's formal `E` binds `EntityID<U>`, and a non-null actual
+may stand for the nullable declared argument under `out`, or when the actual is itself nullable.
+An invariant `Column<E?>` receiver still rejects a non-null `Column<EntityID<U>>`, as kotlinc
+does. Regression: `tests/box_regressions/nullableProjectedReceiverVariable.kt`.
+
 ## Native function-reference identity across source files
 
 Two references to the same source-module callable compare equal and hash alike across emitted
