@@ -215,7 +215,7 @@ fn verify_task_reports_only_the_current_invocation() {
 #[ignore = "downloads Gradle and the Kotlin Gradle plugin"]
 fn verify_task_reports_an_unsupported_kotlin_gradle_plugin() {
     let fixture = IntegrationFixture::new("krusty-verify-kgp", write_unsupported_kgp_build);
-    assert_unsupported_kotlin_gradle_plugin_reported(&fixture, UNSUPPORTED_KGP);
+    assert_unsupported_kotlin_gradle_plugin_reported(&fixture, UNSUPPORTED_KGP, true);
 }
 
 /// A Kotlin Gradle plugin release older than the plugin API the krusty plugin is compiled against,
@@ -226,13 +226,20 @@ fn verify_task_reports_an_unsupported_kotlin_gradle_plugin() {
 #[ignore = "downloads Gradle and the Kotlin Gradle plugin"]
 fn verify_task_reports_a_kotlin_gradle_plugin_older_than_the_plugin_api() {
     let fixture = IntegrationFixture::new("krusty-verify-old-kgp", write_old_kgp_build);
-    assert_unsupported_kotlin_gradle_plugin_reported(&fixture, OLD_KGP);
+    // That release registers build-event listeners the configuration cache rejects on Gradle 9
+    // whether or not the krusty plugin is applied, so this build runs without the cache.
+    assert_unsupported_kotlin_gradle_plugin_reported(&fixture, OLD_KGP, false);
 }
 
-fn assert_unsupported_kotlin_gradle_plugin_reported(fixture: &IntegrationFixture, kgp: &str) {
+fn assert_unsupported_kotlin_gradle_plugin_reported(
+    fixture: &IntegrationFixture,
+    kgp: &str,
+    configuration_cache: bool,
+) {
     let root = &fixture.root;
     let output = fixture
         .build()
+        .configuration_cache(configuration_cache)
         .tasks(["krustyVerify"])
         .run_output()
         .unwrap_or_else(|error| panic!("{error}"));
