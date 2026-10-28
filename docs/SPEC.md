@@ -183,6 +183,16 @@ or an `invokedynamic` argument in its erased slot, whose descriptor is `Base` or
 `tests/consumer_materialized_result_e2e.rs` (`bound_result_order`), for one file and for a
 kotlinc-built dependency at JVM 1.8 and JVM 11.
 
+## JVM nullable upcast consumption
+
+A non-null reference committed to a nullable supertype (`S` passed where `V?` is expected) is an
+upcast, which kotlinc writes no cast for: its consumer materializes the value at its own slot. A
+declared `Base?` parameter or local casts to `Base` exactly as a `Base` one does, and a generic
+parameter whose `T` is inferred as `V?` takes the value in its `Object` slot with no
+`checkcast V`. krusty emitted the nullability widening as a cast to the target's class. An erased
+generic result and a carried value class keep their own boundary. Tests:
+`tests/upcast_checkcast_e2e.rs` (`a_value_widened_to_a_nullable_supertype_is_cast_like_kotlincs`).
+
 ## Serialization constructor contract checks
 
 The deserialization-constructor handoff test retains nullable value-class element parameters and
