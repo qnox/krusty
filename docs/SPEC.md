@@ -1,5 +1,15 @@
 # krusty — a memory-lean Kotlin→JVM compiler PoC
 
+## Dependency conversion type evidence
+
+Ordinary KLIB bodies and prepared inline templates prove subtype conversions through the calling
+compilation's explicit class model, layered with every authenticated bound of the current dependency
+function's type parameters. Without that model, ordinary lowering proves only identical types.
+Nullability and scalar/reference changes retain typed common coercions for backend representation.
+Constructor-bound proof keeps its existing behavior. Tests: `klib_lowering::type_evidence::tests`,
+the two `klib_` upcast tests in `klib_lowering::tests::body_forms`, and the unchanged shared
+`box_regressions/multimodule/dependencyArrayView.kt` fixture.
+
 ## Native function-reference identity across source files
 
 Two references to the same source-module callable compare equal and hash alike across emitted
