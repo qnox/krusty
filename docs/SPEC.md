@@ -1,5 +1,19 @@
 # krusty — a memory-lean Kotlin→JVM compiler PoC
 
+## Abstract obligations of body-local classes
+
+A local class or object expression whose superclass is emitted in another file checks its abstract
+obligations after its own method walk, not on its header. Its methods live only in the body-local
+overlay, and an override whose expression body infers its result implements a member only once that
+body is checked; the obligation check reads the overlay and the checked result. The diagnostic names
+an object expression `<anonymous>` and a local classifier from its outermost local class
+(`Partial`, `Outer.Missing`), as kotlinc 2.4.21 does. Covered by
+`override_candidate_rendering_e2e::body_local_inferred_overrides_across_files_run_like_kotlinc` and
+`override_candidate_rendering_e2e::body_local_classes_with_inferred_overrides_match_kotlinc`. A
+classifier nested in an object expression keeps its synthetic container name, and an override whose
+result is not a subtype of the overridden one is not yet reported (`RETURN_TYPE_MISMATCH_ON_OVERRIDE`,
+also missing for top-level classes).
+
 ## Declaration-owned metadata class headers
 
 JVM Class metadata and KLIB Class headers name their selected declaration through retained package
