@@ -723,6 +723,18 @@ fn overridees_are_what_ksp2_reports() {
 
 #[test]
 #[ignore = "downloads symbol-processing-api 2.3.12 and a JDK"]
+fn overridees_of_listed_members_are_what_ksp2_reports() {
+    log_is_what_ksp2_reports(
+        "AllOverridees",
+        "alloverridees.AllOverrideesProvider",
+        &[fixtures().join("all-overridees/AllOverridees.kt")],
+        "ksp-outputs-all-overridees",
+        "all-overridees.expected",
+    );
+}
+
+#[test]
+#[ignore = "downloads symbol-processing-api 2.3.12 and a JDK"]
 fn an_overridee_the_round_cannot_describe_is_refused() {
     let (runtime, env) = runtime();
     let processor = processor_in(

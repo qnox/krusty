@@ -1065,11 +1065,13 @@ impl Source<'_> {
         members
     }
 
-    /// The `equals`, `hashCode` and `toString` the compiler generates for a data class, each one
-    /// the resolved class has: a superclass's final one is inherited instead. KSP2 lists them
-    /// among the inherited members rather than the declarations.
+    /// The `equals`, `hashCode` and `toString` the compiler generates for a data class or data
+    /// object, each one the resolved class has: a superclass's final one is inherited instead.
+    /// KSP2 lists them among the inherited members rather than the declarations.
     pub(super) fn data_object_members(&self, header: &ClassHeader<'_>) -> Vec<KspFunction> {
-        if !header.class.is_data || header.kind != KspClassKind::Class {
+        if !header.class.is_data
+            || !matches!(header.kind, KspClassKind::Class | KspClassKind::Object)
+        {
             return Vec::new();
         }
         let generated = |name: &str| {

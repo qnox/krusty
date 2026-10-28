@@ -304,7 +304,11 @@ impl MemberView<'_> {
             return_type: self.scope.ty(function.ret),
             jvm_signature: None,
             jvm_name: None,
-            overridee: KspOverridee::Undescribed,
+            // `kotlin.Any` has no supertype, so its members override nothing.
+            overridee: match self.class == wk::any() {
+                true => KspOverridee::Nothing,
+                false => KspOverridee::Undescribed,
+            },
         }
     }
 

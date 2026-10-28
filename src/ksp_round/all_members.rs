@@ -22,7 +22,7 @@ use std::cell::RefCell;
 
 use krusty_plugin_ir::{
     KspClass, KspClassKind, KspClasspath, KspDeclaration, KspDeclarationOrigin, KspFile,
-    KspFunction, KspFunctionKind, KspMember, KspModifier, KspTypeDeclaration,
+    KspFunction, KspFunctionKind, KspMember, KspModifier, KspOverridee, KspTypeDeclaration,
 };
 
 use super::KspLibraries;
@@ -332,7 +332,9 @@ impl Order<'_> {
                     .iter()
                     .position(|function| entry.is_any_slot(&function.name))
                 {
-                    let function = generated.remove(position);
+                    // The generated member overrides the one it takes the place of.
+                    let mut function = generated.remove(position).clone();
+                    function.overridee = KspOverridee::Member(entry.member(name));
                     let mut closure = vec![entry.identity.clone()];
                     closure.extend(entry.closure.iter().cloned());
                     overridden.extend(closure.iter().cloned());
@@ -344,7 +346,7 @@ impl Order<'_> {
                         closure,
                         place: Place::Described {
                             owner: name.to_string(),
-                            declaration: Box::new(KspDeclaration::Function(function.clone())),
+                            declaration: Box::new(KspDeclaration::Function(function)),
                         },
                     });
                     continue;
