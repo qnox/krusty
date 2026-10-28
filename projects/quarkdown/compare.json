@@ -456,8 +456,8 @@
   }
  ],
  "measured": {
-  "date": "2026-10-27",
-  "commit": "80cc8099ddb8c233bfdc4dabf6234c4cae2d8eea",
-  "run": "https://github.com/qnox/krusty/actions/runs/40462256929"
+  "date": "2026-10-28",
+  "commit": "bf115cc9cfdcc4fa9ac248cb776a31507f4133f6",
+  "run": "https://github.com/qnox/krusty/actions/runs/40648260963"
  }
 }

@@ -15,7 +15,7 @@
    "dir": "exposed-core/build/classes/kotlin/main",
    "built": false,
    "fallback": null,
-   "error": "exposed-core/src/main/kotlin/org/jetbrains/exposed/v1/core/AbstractQuery.kt:231:43: error: operator cannot be applied to 'Any'",
+   "error": "exposed-core/src/main/kotlin/org/jetbrains/exposed/v1/core/Alias.kt:41:90: error: cannot access 'fun clone(): Any!': it is protected in 'java.lang.Object'.",
    "classes": 533,
    "identical": 0,
    "only_kotlinc": null,
@@ -532,8 +532,8 @@
   }
  ],
  "measured": {
-  "date": "2026-10-27",
-  "commit": "80cc8099ddb8c233bfdc4dabf6234c4cae2d8eea",
-  "run": "https://github.com/qnox/krusty/actions/runs/40462256929"
+  "date": "2026-10-28",
+  "commit": "bf115cc9cfdcc4fa9ac248cb776a31507f4133f6",
+  "run": "https://github.com/qnox/krusty/actions/runs/40648260963"
  }
 }

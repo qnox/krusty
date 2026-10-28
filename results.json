@@ -17,7 +17,7 @@
      "dir": "exposed-core/build/classes/kotlin/main",
      "built": false,
      "fallback": null,
-     "error": "exposed-core/src/main/kotlin/org/jetbrains/exposed/v1/core/AbstractQuery.kt:231:43: error: operator cannot be applied to 'Any'",
+     "error": "exposed-core/src/main/kotlin/org/jetbrains/exposed/v1/core/Alias.kt:41:90: error: cannot access 'fun clone(): Any!': it is protected in 'java.lang.Object'.",
      "classes": 533,
      "identical": 0,
      "only_kotlinc": null,
@@ -534,9 +534,9 @@
     }
    ],
    "measured": {
-    "date": "2026-10-27",
-    "commit": "80cc8099ddb8c233bfdc4dabf6234c4cae2d8eea",
-    "run": "https://github.com/qnox/krusty/actions/runs/40462256929"
+    "date": "2026-10-28",
+    "commit": "bf115cc9cfdcc4fa9ac248cb776a31507f4133f6",
+    "run": "https://github.com/qnox/krusty/actions/runs/40648260963"
    },
    "stars": 9302,
    "misses": [
@@ -545,7 +545,7 @@
      42
     ],
     [
-     "exposed-core/src/main/kotlin/org/jetbrains/exposed/v1/core/AbstractQuery.kt:231:43: error: operator cannot be applied to 'Any'",
+     "exposed-core/src/main/kotlin/org/jetbrains/exposed/v1/core/Alias.kt:41:90: error: cannot access 'fun clone(): Any!': it is protected in 'java.lang.Object'.",
      1
     ]
    ],
@@ -579,7 +579,7 @@
    "compilations": 19,
    "built": 4,
    "classes": 3705,
-   "identical": 78,
+   "identical": 79,
    "rows": [
     {
      "task": ":core:benchmark:compileKotlinJvm",
@@ -643,7 +643,7 @@
      "fallback": null,
      "error": null,
      "classes": 212,
-     "identical": 66,
+     "identical": 67,
      "only_kotlinc": 3,
      "only_krusty": 2
     },
@@ -819,9 +819,9 @@
     }
    ],
    "measured": {
-    "date": "2026-10-27",
-    "commit": "80cc8099ddb8c233bfdc4dabf6234c4cae2d8eea",
-    "run": "https://github.com/qnox/krusty/actions/runs/40462256929"
+    "date": "2026-10-28",
+    "commit": "bf115cc9cfdcc4fa9ac248cb776a31507f4133f6",
+    "run": "https://github.com/qnox/krusty/actions/runs/40648260963"
    },
    "stars": 10024,
    "misses": [
@@ -1284,8 +1284,8 @@
    ],
    "measured": {
     "date": "2026-10-28",
-    "commit": "2f08633c609bede7e10f645d55c45a1f3982113f",
-    "run": "https://github.com/qnox/krusty/actions/runs/40626567765"
+    "commit": "bf115cc9cfdcc4fa9ac248cb776a31507f4133f6",
+    "run": "https://github.com/qnox/krusty/actions/runs/40648260963"
    },
    "stars": 13822,
    "misses": [
@@ -1828,7 +1828,7 @@
      "task": ":ktor-client-webrtc:compileKotlinJvm",
      "dir": "ktor-client/ktor-client-webrtc/build/classes/kotlin/jvm/main",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
      "error": null,
      "classes": 129,
      "identical": 0,
@@ -1839,7 +1839,7 @@
      "task": ":ktor-client-webrtc:compileTestKotlinJvm",
      "dir": "ktor-client/ktor-client-webrtc/build/classes/kotlin/jvm/test",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
      "error": null,
      "classes": 105,
      "identical": 0,
@@ -1971,7 +1971,7 @@
      "task": ":ktor-htmx:compileKotlinJvm",
      "dir": "ktor-shared/ktor-htmx/build/classes/atomicfu-orig/jvm/main",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
      "error": null,
      "classes": 6,
      "identical": 0,
@@ -2059,7 +2059,7 @@
      "task": ":ktor-network-tls-certificates:compileTestKotlinJvm",
      "dir": "ktor-network/ktor-network-tls/ktor-network-tls-certificates/build/classes/atomicfu-orig/jvm/test",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
      "error": null,
      "classes": 4,
      "identical": 0,
@@ -2147,7 +2147,7 @@
      "task": ":ktor-openapi-schema:compileTestKotlinJvm",
      "dir": "ktor-shared/ktor-openapi-schema/build/classes/atomicfu-orig/jvm/test",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
      "error": null,
      "classes": 14,
      "identical": 0,
@@ -2246,7 +2246,7 @@
      "task": ":ktor-serialization-kotlinx-cbor:compileKotlinJvm",
      "dir": "ktor-shared/ktor-serialization/ktor-serialization-kotlinx/ktor-serialization-kotlinx-cbor/build/classes/atomicfu-orig/jvm/main",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
      "error": null,
      "classes": 1,
      "identical": 0,
@@ -2400,7 +2400,7 @@
      "task": ":ktor-server-auth-api-key:compileTestKotlinJvm",
      "dir": "ktor-server/ktor-server-plugins/ktor-server-auth-api-key/build/classes/atomicfu-orig/jvm/test",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
      "error": null,
      "classes": 45,
      "identical": 0,
@@ -2444,7 +2444,7 @@
      "task": ":ktor-server-auth-ldap:compileTestKotlinJvm",
      "dir": "ktor-server/ktor-server-plugins/ktor-server-auth-ldap/build/classes/atomicfu-orig/jvm/test",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
      "error": null,
      "classes": 10,
      "identical": 0,
@@ -2455,7 +2455,7 @@
      "task": ":ktor-server-auth-oidc:compileKotlinJvm",
      "dir": "ktor-server/ktor-server-plugins/ktor-server-auth-oidc/build/classes/atomicfu-orig/jvm/main",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
      "error": null,
      "classes": 135,
      "identical": 0,
@@ -2488,7 +2488,7 @@
      "task": ":ktor-server-auth:compileTestKotlinJvm",
      "dir": "ktor-server/ktor-server-plugins/ktor-server-auth/build/classes/atomicfu-orig/jvm/test",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
      "error": null,
      "classes": 702,
      "identical": 0,
@@ -2675,7 +2675,7 @@
      "task": ":ktor-server-content-negotiation:compileTestKotlinJvm",
      "dir": "ktor-server/ktor-server-plugins/ktor-server-content-negotiation/build/classes/atomicfu-orig/jvm/test",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
      "error": null,
      "classes": 97,
      "identical": 0,
@@ -2807,7 +2807,7 @@
      "task": ":ktor-server-double-receive:compileTestKotlinJvm",
      "dir": "ktor-server/ktor-server-plugins/ktor-server-double-receive/build/classes/atomicfu-orig/jvm/test",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
      "error": null,
      "classes": 4,
      "identical": 0,
@@ -2829,7 +2829,7 @@
      "task": ":ktor-server-freemarker:compileKotlinJvm",
      "dir": "ktor-server/ktor-server-plugins/ktor-server-freemarker/build/classes/atomicfu-orig/jvm/main",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
      "error": null,
      "classes": 4,
      "identical": 0,
@@ -2950,7 +2950,7 @@
      "task": ":ktor-server-jetty-jakarta:compileKotlinJvm",
      "dir": "ktor-server/ktor-server-jetty-jakarta/build/classes/atomicfu-orig/jvm/main",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
      "error": null,
      "classes": 51,
      "identical": 0,
@@ -2961,7 +2961,7 @@
      "task": ":ktor-server-jetty-jakarta:compileTestKotlinJvm",
      "dir": "ktor-server/ktor-server-jetty-jakarta/build/classes/atomicfu-orig/jvm/test",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
      "error": null,
      "classes": 71,
      "identical": 0,
@@ -2994,7 +2994,7 @@
      "task": ":ktor-server-jetty:compileKotlinJvm",
      "dir": "ktor-server/ktor-server-jetty/build/classes/atomicfu-orig/jvm/main",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
      "error": null,
      "classes": 24,
      "identical": 0,
@@ -3071,7 +3071,7 @@
      "task": ":ktor-server-metrics:compileKotlinJvm",
      "dir": "ktor-server/ktor-server-plugins/ktor-server-metrics/build/classes/atomicfu-orig/jvm/main",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
      "error": null,
      "classes": 13,
      "identical": 0,
@@ -3126,7 +3126,7 @@
      "task": ":ktor-server-netty:compileTestKotlinJvm",
      "dir": "ktor-server/ktor-server-netty/build/classes/atomicfu-orig/jvm/test",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
      "error": null,
      "classes": 290,
      "identical": 0,
@@ -3214,7 +3214,7 @@
      "task": ":ktor-server-rate-limit:compileTestKotlinJvm",
      "dir": "ktor-server/ktor-server-plugins/ktor-server-rate-limit/build/classes/atomicfu-orig/jvm/test",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
      "error": null,
      "classes": 73,
      "identical": 0,
@@ -3247,7 +3247,7 @@
      "task": ":ktor-server-resources:compileKotlinJvm",
      "dir": "ktor-server/ktor-server-plugins/ktor-server-resources/build/classes/atomicfu-orig/jvm/main",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
      "error": null,
      "classes": 30,
      "identical": 0,
@@ -3258,7 +3258,7 @@
      "task": ":ktor-server-resources:compileTestKotlinJvm",
      "dir": "ktor-server/ktor-server-plugins/ktor-server-resources/build/classes/atomicfu-orig/jvm/test",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
      "error": null,
      "classes": 278,
      "identical": 0,
@@ -3280,7 +3280,7 @@
      "task": ":ktor-server-routing-openapi:compileTestKotlinJvm",
      "dir": "ktor-server/ktor-server-plugins/ktor-server-routing-openapi/build/classes/atomicfu-orig/jvm/test",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
      "error": null,
      "classes": 176,
      "identical": 0,
@@ -3313,7 +3313,7 @@
      "task": ":ktor-server-servlet-jakarta:compileKotlinJvm",
      "dir": "ktor-server/ktor-server-servlet-jakarta/build/classes/atomicfu-orig/jvm/main",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
      "error": null,
      "classes": 62,
      "identical": 0,
@@ -3346,7 +3346,7 @@
      "task": ":ktor-server-servlet:compileTestKotlinJvm",
      "dir": "ktor-server/ktor-server-servlet/build/classes/atomicfu-orig/jvm/test",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
      "error": null,
      "classes": 10,
      "identical": 0,
@@ -3390,7 +3390,7 @@
      "task": ":ktor-server-sse:compileTestKotlinJvm",
      "dir": "ktor-server/ktor-server-plugins/ktor-server-sse/build/classes/atomicfu-orig/jvm/test",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
      "error": null,
      "classes": 63,
      "identical": 0,
@@ -3478,7 +3478,7 @@
      "task": ":ktor-server-test-host:compileTestKotlinJvm",
      "dir": "ktor-server/ktor-server-test-host/build/classes/atomicfu-orig/jvm/test",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
      "error": null,
      "classes": 147,
      "identical": 0,
@@ -3533,7 +3533,7 @@
      "task": ":ktor-server-thymeleaf:compileTestKotlinJvm",
      "dir": "ktor-server/ktor-server-plugins/ktor-server-thymeleaf/build/classes/atomicfu-orig/jvm/test",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
      "error": null,
      "classes": 33,
      "identical": 0,
@@ -3566,7 +3566,7 @@
      "task": ":ktor-server-tomcat:compileKotlinJvm",
      "dir": "ktor-server/ktor-server-tomcat/build/classes/atomicfu-orig/jvm/main",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
      "error": null,
      "classes": 6,
      "identical": 0,
@@ -3687,7 +3687,7 @@
      "task": ":ktor-test-base:compileTestKotlinJvm",
      "dir": "ktor-shared/ktor-test-base/build/classes/atomicfu-orig/jvm/test",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
      "error": null,
      "classes": 16,
      "identical": 0,
@@ -3731,7 +3731,7 @@
      "task": ":ktor-websocket-serialization:compileKotlinJvm",
      "dir": "ktor-shared/ktor-websocket-serialization/build/classes/atomicfu-orig/jvm/main",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
      "error": null,
      "classes": 3,
      "identical": 0,
@@ -3935,10 +3935,10 @@
    ],
    "measured": {
     "date": "2026-10-28",
-    "commit": "2f08633c609bede7e10f645d55c45a1f3982113f",
-    "run": "https://github.com/qnox/krusty/actions/runs/40626567765"
+    "commit": "bf115cc9cfdcc4fa9ac248cb776a31507f4133f6",
+    "run": "https://github.com/qnox/krusty/actions/runs/40648260963"
    },
-   "stars": 14556,
+   "stars": 14557,
    "misses": [
     [
      "left to kotlinc: argument -Xrender-internal-diagnostic-names",
@@ -4399,9 +4399,9 @@
     }
    ],
    "measured": {
-    "date": "2026-10-27",
-    "commit": "80cc8099ddb8c233bfdc4dabf6234c4cae2d8eea",
-    "run": "https://github.com/qnox/krusty/actions/runs/40462256929"
+    "date": "2026-10-28",
+    "commit": "bf115cc9cfdcc4fa9ac248cb776a31507f4133f6",
+    "run": "https://github.com/qnox/krusty/actions/runs/40648260963"
    },
    "stars": 30004,
    "misses": [
@@ -4695,11 +4695,11 @@
     }
    ],
    "measured": {
-    "date": "2026-10-27",
-    "commit": "80cc8099ddb8c233bfdc4dabf6234c4cae2d8eea",
-    "run": "https://github.com/qnox/krusty/actions/runs/40462256929"
+    "date": "2026-10-28",
+    "commit": "bf115cc9cfdcc4fa9ac248cb776a31507f4133f6",
+    "run": "https://github.com/qnox/krusty/actions/runs/40648260963"
    },
-   "stars": 16240,
+   "stars": 16241,
    "misses": [
     [
      "not run: a task it depends on failed",
@@ -4744,32 +4744,43 @@
    "name": "mirai",
    "reference_exit": 0,
    "loc": {
-    "kotlin": 156072,
+    "kotlin": 156078,
     "java": 559
    },
-   "compilations": 51,
-   "built": 0,
-   "classes": 2536,
-   "identical": 0,
+   "compilations": 56,
+   "built": 3,
+   "classes": 11399,
+   "identical": 7,
    "rows": [
     {
      "task": ":ci-release-helper:compileKotlin",
      "dir": "ci-release-helper/build/classes/kotlin/main",
      "built": false,
      "fallback": null,
-     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
-     "classes": 19,
+     "error": "ci-release-helper/src/CiHelper.kt:198:68: error: krusty: empty arrayOf() needs an explicit type (unsupported)",
+     "classes": 15,
      "identical": 0,
      "only_kotlinc": null,
      "only_krusty": null
+    },
+    {
+     "task": ":mirai-console-compiler-annotations:compileKotlinJvm",
+     "dir": "mirai-console/tools/compiler-annotations/build/classes/kotlin/jvm/main",
+     "built": true,
+     "fallback": null,
+     "error": null,
+     "classes": 7,
+     "identical": 5,
+     "only_kotlinc": 0,
+     "only_krusty": 0
     },
     {
      "task": ":mirai-console-compiler-common:compileKotlin",
      "dir": "mirai-console/tools/compiler-common/build/classes/kotlin/main",
      "built": false,
      "fallback": null,
-     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
-     "classes": 8,
+     "error": "mirai-console/tools/compiler-common/src/diagnostics/MiraiConsoleErrorsRendering.kt:40:9: error: unresolved reference 'put'.",
+     "classes": 7,
      "identical": 0,
      "only_kotlinc": null,
      "only_krusty": null
@@ -4779,8 +4790,8 @@
      "dir": "mirai-console/frontend/mirai-console-frontend-base/build/classes/kotlin/main",
      "built": false,
      "fallback": null,
-     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
-     "classes": 35,
+     "error": "not run: a task it depends on failed",
+     "classes": 17,
      "identical": 0,
      "only_kotlinc": null,
      "only_krusty": null
@@ -4790,7 +4801,7 @@
      "dir": "mirai-console/frontend/mirai-console-frontend-base/build/classes/kotlin/test",
      "built": false,
      "fallback": null,
-     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
+     "error": "not run: a task it depends on failed",
      "classes": 2,
      "identical": 0,
      "only_kotlinc": null,
@@ -4799,43 +4810,21 @@
     {
      "task": ":mirai-console-gradle:compileIntegTestKotlin",
      "dir": "mirai-console/tools/gradle-plugin/build/classes/kotlin/integTest",
-     "built": false,
+     "built": true,
      "fallback": null,
-     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
+     "error": null,
      "classes": 4,
-     "identical": 0,
-     "only_kotlinc": null,
-     "only_krusty": null
+     "identical": 1,
+     "only_kotlinc": 0,
+     "only_krusty": 0
     },
     {
      "task": ":mirai-console-gradle:compileKotlin",
      "dir": "mirai-console/tools/gradle-plugin/build/classes/kotlin/main",
      "built": false,
      "fallback": null,
-     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
-     "classes": 38,
-     "identical": 0,
-     "only_kotlinc": null,
-     "only_krusty": null
-    },
-    {
-     "task": ":mirai-console-intellij:compileKotlin",
-     "dir": "mirai-console/tools/intellij-plugin/build/classes/kotlin/main",
-     "built": false,
-     "fallback": null,
-     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
-     "classes": 210,
-     "identical": 0,
-     "only_kotlinc": null,
-     "only_krusty": null
-    },
-    {
-     "task": ":mirai-console-intellij:compileTestKotlin",
-     "dir": "mirai-console/tools/intellij-plugin/build/classes/kotlin/test",
-     "built": false,
-     "fallback": null,
-     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
-     "classes": 5,
+     "error": "mirai-console/tools/gradle-plugin/src/main/kotlin/IGNORED_DEPENDENCIES_IN_SHADOW.kt:10:7: error: @file:JvmMultifileClass is not supported for JVM compilation yet; its part classes and delegating facade require distinct physical owners",
+     "classes": 21,
      "identical": 0,
      "only_kotlinc": null,
      "only_krusty": null
@@ -4845,8 +4834,8 @@
      "dir": "mirai-console/frontend/mirai-console-terminal/build/classes/kotlin/main",
      "built": false,
      "fallback": null,
-     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
-     "classes": 61,
+     "error": "not run: a task it depends on failed",
+     "classes": 41,
      "identical": 0,
      "only_kotlinc": null,
      "only_krusty": null
@@ -4856,8 +4845,8 @@
      "dir": "mirai-console/frontend/mirai-console-terminal/build/classes/kotlin/test",
      "built": false,
      "fallback": null,
-     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
-     "classes": 6,
+     "error": "not run: a task it depends on failed",
+     "classes": 5,
      "identical": 0,
      "only_kotlinc": null,
      "only_krusty": null
@@ -4866,9 +4855,9 @@
      "task": ":mirai-console.codegen:compileKotlin",
      "dir": "mirai-console/backend/codegen/build/classes/kotlin/main",
      "built": false,
-     "fallback": null,
-     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
-     "classes": 56,
+     "fallback": "krusty does not implement everything it requests (compilerOptions.optIn contains duplicate marker 'kotlin.contracts.ExperimentalContracts')",
+     "error": null,
+     "classes": 47,
      "identical": 0,
      "only_kotlinc": null,
      "only_krusty": null
@@ -4878,7 +4867,7 @@
      "dir": "mirai-console/backend/integration-test/testers/MCITSelfTestPlugin/build/classes/kotlin/main",
      "built": false,
      "fallback": null,
-     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
+     "error": "not run: a task it depends on failed",
      "classes": 1,
      "identical": 0,
      "only_kotlinc": null,
@@ -4889,8 +4878,8 @@
      "dir": "mirai-console/backend/integration-test/build/classes/kotlin/main",
      "built": false,
      "fallback": null,
-     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
-     "classes": 26,
+     "error": "not run: a task it depends on failed",
+     "classes": 13,
      "identical": 0,
      "only_kotlinc": null,
      "only_krusty": null
@@ -4900,8 +4889,8 @@
      "dir": "mirai-console/backend/integration-test/build/classes/kotlin/test",
      "built": false,
      "fallback": null,
-     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
-     "classes": 19,
+     "error": "not run: a task it depends on failed",
+     "classes": 10,
      "identical": 0,
      "only_kotlinc": null,
      "only_krusty": null
@@ -4911,7 +4900,7 @@
      "dir": "mirai-console/backend/integration-test/testers/mirai-plugin-compatibility/mirai-jar-after-2_11-without-new/build/classes/kotlin/main",
      "built": false,
      "fallback": null,
-     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
+     "error": "not run: a task it depends on failed",
      "classes": 1,
      "identical": 0,
      "only_kotlinc": null,
@@ -4922,7 +4911,7 @@
      "dir": "mirai-console/backend/integration-test/testers/mirai-plugin-compatibility/mirai-jar-after-2_11/build/classes/kotlin/main",
      "built": false,
      "fallback": null,
-     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
+     "error": "not run: a task it depends on failed",
      "classes": 1,
      "identical": 0,
      "only_kotlinc": null,
@@ -4933,7 +4922,7 @@
      "dir": "mirai-console/backend/integration-test/testers/mirai-plugin-compatibility/mirai-jar-before-2_11/build/classes/kotlin/main",
      "built": false,
      "fallback": null,
-     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
+     "error": "not run: a task it depends on failed",
      "classes": 1,
      "identical": 0,
      "only_kotlinc": null,
@@ -4944,7 +4933,7 @@
      "dir": "mirai-console/backend/integration-test/testers/mirai-plugin-compatibility/same-pkg-1/build/classes/kotlin/main",
      "built": false,
      "fallback": null,
-     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
+     "error": "not run: a task it depends on failed",
      "classes": 1,
      "identical": 0,
      "only_kotlinc": null,
@@ -4955,7 +4944,7 @@
      "dir": "mirai-console/backend/integration-test/testers/mirai-plugin-compatibility/same-pkg-2/build/classes/kotlin/main",
      "built": false,
      "fallback": null,
-     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
+     "error": "not run: a task it depends on failed",
      "classes": 1,
      "identical": 0,
      "only_kotlinc": null,
@@ -4966,7 +4955,7 @@
      "dir": "mirai-console/backend/integration-test/testers/never-override-jdk-modules/build/classes/kotlin/main",
      "built": false,
      "fallback": null,
-     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
+     "error": "not run: a task it depends on failed",
      "classes": 1,
      "identical": 0,
      "only_kotlinc": null,
@@ -4977,7 +4966,7 @@
      "dir": "mirai-console/backend/integration-test/testers/never-override-jdk-modules/module-jdk-module/build/classes/kotlin/main",
      "built": false,
      "fallback": null,
-     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
+     "error": "not run: a task it depends on failed",
      "classes": 1,
      "identical": 0,
      "only_kotlinc": null,
@@ -4988,7 +4977,7 @@
      "dir": "mirai-console/backend/integration-test/testers/options-properties/build/classes/kotlin/main",
      "built": false,
      "fallback": null,
-     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
+     "error": "not run: a task it depends on failed",
      "classes": 1,
      "identical": 0,
      "only_kotlinc": null,
@@ -4999,7 +4988,7 @@
      "dir": "mirai-console/backend/integration-test/testers/options-properties/independent-plugin/build/classes/kotlin/main",
      "built": false,
      "fallback": null,
-     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
+     "error": "not run: a task it depends on failed",
      "classes": 1,
      "identical": 0,
      "only_kotlinc": null,
@@ -5010,7 +4999,7 @@
      "dir": "mirai-console/backend/integration-test/testers/plugin-can-depends-on-mirai-console/build/classes/kotlin/main",
      "built": false,
      "fallback": null,
-     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
+     "error": "not run: a task it depends on failed",
      "classes": 1,
      "identical": 0,
      "only_kotlinc": null,
@@ -5021,7 +5010,7 @@
      "dir": "mirai-console/backend/integration-test/testers/plugin-dep-dependon-dep-issue-2054/build/classes/kotlin/main",
      "built": false,
      "fallback": null,
-     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
+     "error": "not run: a task it depends on failed",
      "classes": 1,
      "identical": 0,
      "only_kotlinc": null,
@@ -5032,7 +5021,7 @@
      "dir": "mirai-console/backend/integration-test/testers/plugin-dep-dependon-dep-issue-2054/module-moda/build/classes/kotlin/main",
      "built": false,
      "fallback": null,
-     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
+     "error": "not run: a task it depends on failed",
      "classes": 1,
      "identical": 0,
      "only_kotlinc": null,
@@ -5043,7 +5032,7 @@
      "dir": "mirai-console/backend/integration-test/testers/plugin-dep-dependon-dep-issue-2054/module-modb/build/classes/kotlin/main",
      "built": false,
      "fallback": null,
-     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
+     "error": "not run: a task it depends on failed",
      "classes": 1,
      "identical": 0,
      "only_kotlinc": null,
@@ -5054,7 +5043,7 @@
      "dir": "mirai-console/backend/integration-test/testers/plugin-dep-dependon-dep-issue-2054/module-private-issue2108/build/classes/kotlin/main",
      "built": false,
      "fallback": null,
-     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
+     "error": "not run: a task it depends on failed",
      "classes": 1,
      "identical": 0,
      "only_kotlinc": null,
@@ -5065,8 +5054,8 @@
      "dir": "mirai-console/backend/integration-test/testers/plugin-dep-dependon-dep-issue-2054/second-plugin/build/classes/kotlin/main",
      "built": false,
      "fallback": null,
-     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
-     "classes": 3,
+     "error": "not run: a task it depends on failed",
+     "classes": 1,
      "identical": 0,
      "only_kotlinc": null,
      "only_krusty": null
@@ -5076,7 +5065,7 @@
      "dir": "mirai-console/backend/integration-test/testers/plugin-depend-on-other/build/classes/kotlin/main",
      "built": false,
      "fallback": null,
-     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
+     "error": "not run: a task it depends on failed",
      "classes": 5,
      "identical": 0,
      "only_kotlinc": null,
@@ -5087,7 +5076,7 @@
      "dir": "mirai-console/backend/integration-test/testers/plugin-dynamic-dependencies-download/build/classes/kotlin/main",
      "built": false,
      "fallback": null,
-     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
+     "error": "not run: a task it depends on failed",
      "classes": 1,
      "identical": 0,
      "only_kotlinc": null,
@@ -5098,8 +5087,8 @@
      "dir": "mirai-console/backend/integration-test/testers/plugin-resolve-self-dependencies-over-console-ones/build/classes/kotlin/main",
      "built": false,
      "fallback": null,
-     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
-     "classes": 2,
+     "error": "not run: a task it depends on failed",
+     "classes": 1,
      "identical": 0,
      "only_kotlinc": null,
      "only_krusty": null
@@ -5109,7 +5098,7 @@
      "dir": "mirai-console/backend/integration-test/testers/plugin-use-console-deps-fallback/build/classes/kotlin/main",
      "built": false,
      "fallback": null,
-     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
+     "error": "not run: a task it depends on failed",
      "classes": 1,
      "identical": 0,
      "only_kotlinc": null,
@@ -5120,7 +5109,7 @@
      "dir": "mirai-console/backend/integration-test/testers/plugin-with-pluginyml-can-use-libraries-while-clinit/clinit-library/build/classes/kotlin/main",
      "built": false,
      "fallback": null,
-     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
+     "error": "not run: a task it depends on failed",
      "classes": 1,
      "identical": 0,
      "only_kotlinc": null,
@@ -5131,7 +5120,7 @@
      "dir": "mirai-console/backend/integration-test/testers/plugin-with-pluginyml-can-use-libraries-while-clinit/build/classes/kotlin/main",
      "built": false,
      "fallback": null,
-     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
+     "error": "not run: a task it depends on failed",
      "classes": 2,
      "identical": 0,
      "only_kotlinc": null,
@@ -5142,7 +5131,7 @@
      "dir": "mirai-console/backend/integration-test/testers/plugin-with-pluginyml/build/classes/kotlin/main",
      "built": false,
      "fallback": null,
-     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
+     "error": "not run: a task it depends on failed",
      "classes": 1,
      "identical": 0,
      "only_kotlinc": null,
@@ -5153,8 +5142,8 @@
      "dir": "mirai-console/backend/integration-test/testers/service-loader/build/classes/kotlin/main",
      "built": false,
      "fallback": null,
-     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
-     "classes": 3,
+     "error": "not run: a task it depends on failed",
+     "classes": 1,
      "identical": 0,
      "only_kotlinc": null,
      "only_krusty": null
@@ -5164,7 +5153,7 @@
      "dir": "mirai-console/backend/integration-test/testers/service-loader/module-service-loader-impl/build/classes/kotlin/main",
      "built": false,
      "fallback": null,
-     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
+     "error": "not run: a task it depends on failed",
      "classes": 1,
      "identical": 0,
      "only_kotlinc": null,
@@ -5175,7 +5164,7 @@
      "dir": "mirai-console/backend/integration-test/testers/service-loader/module-service-loader-typedef/build/classes/kotlin/main",
      "built": false,
      "fallback": null,
-     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
+     "error": "not run: a task it depends on failed",
      "classes": 1,
      "identical": 0,
      "only_kotlinc": null,
@@ -5186,8 +5175,8 @@
      "dir": "mirai-console/backend/integration-test/testers/service-loader/service-loader-2dep-plugin/build/classes/kotlin/main",
      "built": false,
      "fallback": null,
-     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
-     "classes": 4,
+     "error": "not run: a task it depends on failed",
+     "classes": 2,
      "identical": 0,
      "only_kotlinc": null,
      "only_krusty": null
@@ -5197,8 +5186,8 @@
      "dir": "mirai-console/backend/mirai-console/build/classes/kotlin/main",
      "built": false,
      "fallback": null,
-     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
-     "classes": 1077,
+     "error": "not run: a task it depends on failed",
+     "classes": 869,
      "identical": 0,
      "only_kotlinc": null,
      "only_krusty": null
@@ -5207,9 +5196,31 @@
      "task": ":mirai-console:compileTestKotlin",
      "dir": "mirai-console/backend/mirai-console/build/classes/kotlin/test",
      "built": false,
+     "fallback": "krusty does not implement everything it requests (compilerOptions.optIn contains duplicate marker 'kotlinx.serialization.ExperimentalSerializationApi')",
+     "error": null,
+     "classes": 229,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":mirai-core-api:compileKotlinJvm",
+     "dir": "mirai-core-api/build/classes/atomicfu-orig/jvm/main",
+     "built": false,
      "fallback": null,
-     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
-     "classes": 257,
+     "error": "not run: a task it depends on failed",
+     "classes": 1074,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":mirai-core-api:compileTestKotlinJvm",
+     "dir": "mirai-core-api/build/classes/atomicfu-orig/jvm/test",
+     "built": false,
+     "fallback": null,
+     "error": "not run: a task it depends on failed",
+     "classes": 51,
      "identical": 0,
      "only_kotlinc": null,
      "only_krusty": null
@@ -5219,8 +5230,8 @@
      "dir": "mirai-core-mock/build/classes/kotlin/main",
      "built": false,
      "fallback": null,
-     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
-     "classes": 359,
+     "error": "not run: a task it depends on failed",
+     "classes": 254,
      "identical": 0,
      "only_kotlinc": null,
      "only_krusty": null
@@ -5229,9 +5240,53 @@
      "task": ":mirai-core-mock:compileTestKotlin",
      "dir": "mirai-core-mock/build/classes/kotlin/test",
      "built": false,
+     "fallback": "krusty does not implement everything it requests (compilerOptions.optIn contains duplicate marker 'net.mamoe.mirai.utils.MiraiInternalApi')",
+     "error": null,
+     "classes": 276,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":mirai-core-utils:compileKotlinJvm",
+     "dir": "mirai-core-utils/build/classes/atomicfu-orig/jvm/main",
+     "built": false,
      "fallback": null,
-     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
-     "classes": 289,
+     "error": "mirai-core-utils/src/commonMain/kotlin/AtomicInteger.kt:21:28: error: overload resolution ambiguity between candidates:",
+     "classes": 169,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":mirai-core-utils:compileTestKotlinJvm",
+     "dir": "mirai-core-utils/build/classes/atomicfu-orig/jvm/test",
+     "built": false,
+     "fallback": null,
+     "error": "not run: a task it depends on failed",
+     "classes": 101,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":mirai-core:compileKotlinJvm",
+     "dir": "mirai-core/build/classes/atomicfu-orig/jvm/main",
+     "built": false,
+     "fallback": null,
+     "error": "not run: a task it depends on failed",
+     "classes": 7246,
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
+    },
+    {
+     "task": ":mirai-core:compileTestKotlinJvm",
+     "dir": "mirai-core/build/classes/atomicfu-orig/jvm/test",
+     "built": false,
+     "fallback": "krusty does not implement everything it requests (compilerOptions.optIn contains duplicate marker 'kotlinx.serialization.ExperimentalSerializationApi')",
+     "error": null,
+     "classes": 888,
      "identical": 0,
      "only_kotlinc": null,
      "only_krusty": null
@@ -5241,8 +5296,8 @@
      "dir": "mirai-deps-test/build/classes/kotlin/test",
      "built": false,
      "fallback": null,
-     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
-     "classes": 15,
+     "error": "mirai-deps-test/test/CoreDependencyResolutionTest.kt:27:6: error: annotation argument is not a supported compile-time constant",
+     "classes": 11,
      "identical": 0,
      "only_kotlinc": null,
      "only_krusty": null
@@ -5250,20 +5305,20 @@
     {
      "task": ":mirai-dokka:compileKotlin",
      "dir": "mirai-dokka/build/classes/kotlin/main",
-     "built": false,
+     "built": true,
      "fallback": null,
-     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
-     "classes": 5,
-     "identical": 0,
-     "only_kotlinc": null,
-     "only_krusty": null
+     "error": null,
+     "classes": 4,
+     "identical": 1,
+     "only_kotlinc": 0,
+     "only_krusty": 0
     },
     {
      "task": ":mirai-logging-log4j2:compileKotlin",
      "dir": "logging/mirai-logging-log4j2/build/classes/kotlin/main",
      "built": false,
      "fallback": null,
-     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
+     "error": "not run: a task it depends on failed",
      "classes": 1,
      "identical": 0,
      "only_kotlinc": null,
@@ -5274,7 +5329,7 @@
      "dir": "logging/mirai-logging-log4j2/build/classes/kotlin/test",
      "built": false,
      "fallback": null,
-     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
+     "error": "not run: a task it depends on failed",
      "classes": 1,
      "identical": 0,
      "only_kotlinc": null,
@@ -5285,7 +5340,7 @@
      "dir": "logging/mirai-logging-slf4j-logback/build/classes/kotlin/test",
      "built": false,
      "fallback": null,
-     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
+     "error": "not run: a task it depends on failed",
      "classes": 1,
      "identical": 0,
      "only_kotlinc": null,
@@ -5296,7 +5351,7 @@
      "dir": "logging/mirai-logging-slf4j-simple/build/classes/kotlin/test",
      "built": false,
      "fallback": null,
-     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
+     "error": "not run: a task it depends on failed",
      "classes": 1,
      "identical": 0,
      "only_kotlinc": null,
@@ -5307,7 +5362,7 @@
      "dir": "logging/mirai-logging-slf4j/build/classes/kotlin/test",
      "built": false,
      "fallback": null,
-     "error": "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
+     "error": "not run: a task it depends on failed",
      "classes": 1,
      "identical": 0,
      "only_kotlinc": null,
@@ -5318,6 +5373,11 @@
     {
      "task": ":ci-release-helper:compileTestKotlin",
      "dir": "ci-release-helper/build/classes/kotlin/test",
+     "krusty_classes": 0
+    },
+    {
+     "task": ":mirai-console-compiler-annotations:compileTestKotlinJvm",
+     "dir": "mirai-console/tools/compiler-annotations/build/classes/kotlin/jvm/test",
      "krusty_classes": 0
     },
     {
@@ -5517,48 +5577,64 @@
     }
    ],
    "measured": {
-    "date": "2026-10-27",
-    "commit": "80cc8099ddb8c233bfdc4dabf6234c4cae2d8eea",
-    "run": "https://github.com/qnox/krusty/actions/runs/40462256929"
+    "date": "2026-10-28",
+    "commit": "bf115cc9cfdcc4fa9ac248cb776a31507f4133f6",
+    "run": "https://github.com/qnox/krusty/actions/runs/40648260963"
    },
-   "stars": 14793,
+   "stars": 14792,
    "misses": [
     [
-     "not run: the krusty build failed: Found class org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension, but interface was expected",
-     51
+     "not run: a task it depends on failed",
+     44
+    ],
+    [
+     "left to kotlinc: krusty does not implement everything it requests (compilerOptions.optIn contains duplicate marker 'kotlinx.serialization.ExperimentalSerializationApi')",
+     2
+    ],
+    [
+     "ci-release-helper/src/CiHelper.kt:198:68: error: krusty: empty arrayOf() needs an explicit type (unsupported)",
+     1
+    ],
+    [
+     "mirai-console/tools/compiler-common/src/diagnostics/MiraiConsoleErrorsRendering.kt:40:9: error: unresolved reference 'put'.",
+     1
+    ],
+    [
+     "mirai-console/tools/gradle-plugin/src/main/kotlin/IGNORED_DEPENDENCIES_IN_SHADOW.kt:10:7: error: @file:JvmMultifileClass is not supported for JVM compilation yet; its part classes and delegating facade require distinct physical owners",
+     1
+    ],
+    [
+     "left to kotlinc: krusty does not implement everything it requests (compilerOptions.optIn contains duplicate marker 'kotlin.contracts.ExperimentalContracts')",
+     1
+    ],
+    [
+     "left to kotlinc: krusty does not implement everything it requests (compilerOptions.optIn contains duplicate marker 'net.mamoe.mirai.utils.MiraiInternalApi')",
+     1
+    ],
+    [
+     "mirai-core-utils/src/commonMain/kotlin/AtomicInteger.kt:21:28: error: overload resolution ambiguity between candidates:",
+     1
+    ],
+    [
+     "mirai-deps-test/test/CoreDependencyResolutionTest.kt:27:6: error: annotation argument is not a supported compile-time constant",
+     1
     ]
    ],
    "plugins": {
     "compiler": {
-     "kotlin-gradle-plugin-api": 40,
-     "kotlin-native-utils": 40,
-     "kotlin-project-model": 40,
-     "kotlin-serialization": 40,
-     "kotlin-stdlib-common": 49,
-     "kotlin-tooling-core": 40,
-     "kotlin-util-io": 40,
-     "kotlin-dynamic-delegation-compiler-embeddable": 3,
-     "kotlin-jvm-blocking-bridge-compiler-embeddable": 6
+     "kotlin-serialization-compiler-plugin-embeddable": 40
     },
     "gradle": {
      "com.google.osdetector": 1,
-     "me.him188.kotlin-jvm-blocking-bridge": 7,
      "org.jetbrains.dokka": 3,
      "io.codearte.nexus-staging": 1,
-     "org.jetbrains.kotlin.jvm": 45,
-     "org.jetbrains.kotlin.plugin.scripting": 49,
+     "org.jetbrains.kotlin.jvm": 44,
+     "org.jetbrains.kotlin.plugin.scripting": 48,
      "org.jetbrains.kotlin.plugin.serialization": 40,
-     "me.him188.kotlin-dynamic-delegation": 3,
-     "com.android.internal.library": 4,
-     "com.android.internal.version-check": 4,
-     "com.android.library": 4,
-     "de.mannodermaus.android-junit5": 4,
      "explicit-api": 4,
      "org.jetbrains.kotlin.multiplatform": 4,
      "com.gradle.plugin-publish": 1,
-     "org.jetbrains.gradle.plugin.idea-ext": 1,
-     "kotlinx-atomicfu": 3,
-     "org.jetbrains.kotlin.plugin.atomicfu": 3
+     "org.jetbrains.kotlinx.atomicfu": 3
     }
    }
   },
@@ -5689,7 +5765,7 @@
      "dir": "moshi/build/classes/kotlin/main",
      "built": false,
      "fallback": null,
-     "error": "moshi/src/main/java/com/squareup/moshi/-JsonValueReader.kt:348:31: error: return type mismatch: expected 'Void?', actual 'Nothing?'.",
+     "error": "moshi/src/main/java/com/squareup/moshi/-MoshiKotlinTypesExtensions.kt:80:61: error: unresolved reference 'asArrayType'.",
      "classes": 102,
      "identical": 0,
      "only_kotlinc": null,
@@ -5735,18 +5811,18 @@
     }
    ],
    "measured": {
-    "date": "2026-10-27",
-    "commit": "80cc8099ddb8c233bfdc4dabf6234c4cae2d8eea",
-    "run": "https://github.com/qnox/krusty/actions/runs/40462256929"
+    "date": "2026-10-28",
+    "commit": "bf115cc9cfdcc4fa9ac248cb776a31507f4133f6",
+    "run": "https://github.com/qnox/krusty/actions/runs/40648260963"
    },
-   "stars": 10167,
+   "stars": 10166,
    "misses": [
     [
      "not run: a task it depends on failed",
      11
     ],
     [
-     "moshi/src/main/java/com/squareup/moshi/-JsonValueReader.kt:348:31: error: return type mismatch: expected 'Void?', actual 'Nothing?'.",
+     "moshi/src/main/java/com/squareup/moshi/-MoshiKotlinTypesExtensions.kt:80:61: error: unresolved reference 'asArrayType'.",
      1
     ]
    ],
@@ -5774,9 +5850,9 @@
     "java": 0
    },
    "compilations": 58,
-   "built": 24,
+   "built": 16,
    "classes": 1110,
-   "identical": 229,
+   "identical": 144,
    "rows": [
     {
      "task": ":app:compileDemoDebugAndroidTestKotlin",
@@ -5847,31 +5923,31 @@
     {
      "task": ":core:data-test:compileDemoDebugKotlin",
      "dir": "core/data-test/build/intermediates/built_in_kotlinc/demoDebug/compileDemoDebugKotlin/classes",
-     "built": true,
+     "built": false,
      "fallback": null,
-     "error": null,
+     "error": "not run: a task it depends on failed",
      "classes": 14,
-     "identical": 3,
-     "only_kotlinc": 4,
-     "only_krusty": 0
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
     },
     {
      "task": ":core:data:compileDemoDebugKotlin",
      "dir": "core/data/build/intermediates/built_in_kotlinc/demoDebug/compileDemoDebugKotlin/classes",
-     "built": true,
+     "built": false,
      "fallback": null,
-     "error": null,
+     "error": "core/data/src/main/kotlin/com/google/samples/apps/nowinandroid/core/data/repository/DefaultSearchContentsRepository.kt:1:1: error: the compiled inline body of `flatMapLatest` cannot be inlined: Regeneration(Unsupported(\"a $$forInline method without a continuation\"))",
      "classes": 87,
-     "identical": 45,
-     "only_kotlinc": 11,
-     "only_krusty": 2
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
     },
     {
      "task": ":core:data:compileDemoDebugUnitTestKotlin",
      "dir": "core/data/build/intermediates/built_in_kotlinc/demoDebugUnitTest/compileDemoDebugUnitTestKotlin/classes",
      "built": false,
      "fallback": null,
-     "error": "core/data/src/test/kotlin/com/google/samples/apps/nowinandroid/core/data/repository/OfflineFirstNewsRepositoryTest.kt:323:18: error: overload resolution ambiguity",
+     "error": "not run: a task it depends on failed",
      "classes": 158,
      "identical": 0,
      "only_kotlinc": null,
@@ -5968,24 +6044,24 @@
     {
      "task": ":core:domain:compileDemoDebugKotlin",
      "dir": "core/domain/build/intermediates/built_in_kotlinc/demoDebug/compileDemoDebugKotlin/classes",
-     "built": true,
+     "built": false,
      "fallback": null,
-     "error": null,
+     "error": "not run: a task it depends on failed",
      "classes": 9,
-     "identical": 5,
-     "only_kotlinc": 0,
-     "only_krusty": 0
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
     },
     {
      "task": ":core:domain:compileDemoDebugUnitTestKotlin",
      "dir": "core/domain/build/intermediates/built_in_kotlinc/demoDebugUnitTest/compileDemoDebugUnitTestKotlin/classes",
-     "built": true,
+     "built": false,
      "fallback": null,
-     "error": null,
+     "error": "not run: a task it depends on failed",
      "classes": 5,
-     "identical": 2,
-     "only_kotlinc": 0,
-     "only_krusty": 0
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
     },
     {
      "task": ":core:model:compileKotlin",
@@ -6067,13 +6143,13 @@
     {
      "task": ":core:testing:compileDemoDebugKotlin",
      "dir": "core/testing/build/intermediates/built_in_kotlinc/demoDebug/compileDemoDebugKotlin/classes",
-     "built": true,
+     "built": false,
      "fallback": null,
-     "error": null,
+     "error": "not run: a task it depends on failed",
      "classes": 32,
-     "identical": 16,
-     "only_kotlinc": 8,
-     "only_krusty": 0
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
     },
     {
      "task": ":core:ui:compileDemoDebugAndroidTestKotlin",
@@ -6232,13 +6308,13 @@
     {
      "task": ":feature:search:api:compileDemoDebugKotlin",
      "dir": "feature/search/api/build/intermediates/built_in_kotlinc/demoDebug/compileDemoDebugKotlin/classes",
-     "built": true,
+     "built": false,
      "fallback": null,
-     "error": null,
+     "error": "not run: a task it depends on failed",
      "classes": 1,
-     "identical": 1,
-     "only_kotlinc": 0,
-     "only_krusty": 0
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
     },
     {
      "task": ":feature:search:impl:compileDemoDebugAndroidTestKotlin",
@@ -6375,13 +6451,13 @@
     {
      "task": ":sync:sync-test:compileDemoDebugKotlin",
      "dir": "sync/sync-test/build/intermediates/built_in_kotlinc/demoDebug/compileDemoDebugKotlin/classes",
-     "built": true,
+     "built": false,
      "fallback": null,
-     "error": null,
+     "error": "not run: a task it depends on failed",
      "classes": 2,
-     "identical": 2,
-     "only_kotlinc": 0,
-     "only_krusty": 0
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
     },
     {
      "task": ":sync:work:compileDemoDebugAndroidTestKotlin",
@@ -6397,13 +6473,13 @@
     {
      "task": ":sync:work:compileDemoDebugKotlin",
      "dir": "sync/work/build/intermediates/built_in_kotlinc/demoDebug/compileDemoDebugKotlin/classes",
-     "built": true,
+     "built": false,
      "fallback": null,
-     "error": null,
+     "error": "not run: a task it depends on failed",
      "classes": 23,
-     "identical": 11,
-     "only_kotlinc": 2,
-     "only_krusty": 1
+     "identical": 0,
+     "only_kotlinc": null,
+     "only_krusty": null
     },
     {
      "task": ":ui-test-hilt-manifest:compileDemoDebugKotlin",
@@ -6510,11 +6586,11 @@
     }
    ],
    "measured": {
-    "date": "2026-10-27",
-    "commit": "80cc8099ddb8c233bfdc4dabf6234c4cae2d8eea",
-    "run": "https://github.com/qnox/krusty/actions/runs/40462256929"
+    "date": "2026-10-28",
+    "commit": "bf115cc9cfdcc4fa9ac248cb776a31507f4133f6",
+    "run": "https://github.com/qnox/krusty/actions/runs/40648260963"
    },
-   "stars": 21974,
+   "stars": 21975,
    "misses": [
     [
      "left to kotlinc: compiler plugin androidx.compose.compiler.plugins.kotlin, argument -Xallow-unstable-dependencies",
@@ -6525,11 +6601,15 @@
      9
     ],
     [
+     "not run: a task it depends on failed",
+     8
+    ],
+    [
      "left to kotlinc: argument -Xuse-inline-scopes-numbers",
      2
     ],
     [
-     "core/data/src/test/kotlin/com/google/samples/apps/nowinandroid/core/data/repository/OfflineFirstNewsRepositoryTest.kt:323:18: error: overload resolution ambiguity",
+     "core/data/src/main/kotlin/com/google/samples/apps/nowinandroid/core/data/repository/DefaultSearchContentsRepository.kt:1:1: error: the compiled inline body of `flatMapLatest` cannot be inlined: Regeneration(Unsupported(\"a $$forInline method without a continuation\"))",
      1
     ],
     [
@@ -7267,8 +7347,8 @@
    ],
    "measured": {
     "date": "2026-10-28",
-    "commit": "2f08633c609bede7e10f645d55c45a1f3982113f",
-    "run": "https://github.com/qnox/krusty/actions/runs/40626567765"
+    "commit": "bf115cc9cfdcc4fa9ac248cb776a31507f4133f6",
+    "run": "https://github.com/qnox/krusty/actions/runs/40648260963"
    },
    "stars": 47100,
    "misses": [
@@ -7428,9 +7508,9 @@
     }
    ],
    "measured": {
-    "date": "2026-10-27",
-    "commit": "80cc8099ddb8c233bfdc4dabf6234c4cae2d8eea",
-    "run": "https://github.com/qnox/krusty/actions/runs/40462256929"
+    "date": "2026-10-28",
+    "commit": "bf115cc9cfdcc4fa9ac248cb776a31507f4133f6",
+    "run": "https://github.com/qnox/krusty/actions/runs/40648260963"
    },
    "stars": 9054,
    "misses": [
@@ -7934,9 +8014,9 @@
     }
    ],
    "measured": {
-    "date": "2026-10-27",
-    "commit": "80cc8099ddb8c233bfdc4dabf6234c4cae2d8eea",
-    "run": "https://github.com/qnox/krusty/actions/runs/40462256929"
+    "date": "2026-10-28",
+    "commit": "bf115cc9cfdcc4fa9ac248cb776a31507f4133f6",
+    "run": "https://github.com/qnox/krusty/actions/runs/40648260963"
    },
    "stars": 16339,
    "misses": [
@@ -8071,9 +8151,9 @@
     }
    ],
    "measured": {
-    "date": "2026-10-27",
-    "commit": "80cc8099ddb8c233bfdc4dabf6234c4cae2d8eea",
-    "run": "https://github.com/qnox/krusty/actions/runs/40462256929"
+    "date": "2026-10-28",
+    "commit": "bf115cc9cfdcc4fa9ac248cb776a31507f4133f6",
+    "run": "https://github.com/qnox/krusty/actions/runs/40648260963"
    },
    "stars": 11496,
    "misses": [

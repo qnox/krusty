@@ -6,9 +6,9 @@
   "java": 0
  },
  "compilations": 58,
- "built": 24,
+ "built": 16,
  "classes": 1110,
- "identical": 229,
+ "identical": 144,
  "rows": [
   {
    "task": ":app:compileDemoDebugAndroidTestKotlin",
@@ -79,31 +79,31 @@
   {
    "task": ":core:data-test:compileDemoDebugKotlin",
    "dir": "core/data-test/build/intermediates/built_in_kotlinc/demoDebug/compileDemoDebugKotlin/classes",
-   "built": true,
+   "built": false,
    "fallback": null,
-   "error": null,
+   "error": "not run: a task it depends on failed",
    "classes": 14,
-   "identical": 3,
-   "only_kotlinc": 4,
-   "only_krusty": 0
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
   },
   {
    "task": ":core:data:compileDemoDebugKotlin",
    "dir": "core/data/build/intermediates/built_in_kotlinc/demoDebug/compileDemoDebugKotlin/classes",
-   "built": true,
+   "built": false,
    "fallback": null,
-   "error": null,
+   "error": "core/data/src/main/kotlin/com/google/samples/apps/nowinandroid/core/data/repository/DefaultSearchContentsRepository.kt:1:1: error: the compiled inline body of `flatMapLatest` cannot be inlined: Regeneration(Unsupported(\"a $$forInline method without a continuation\"))",
    "classes": 87,
-   "identical": 45,
-   "only_kotlinc": 11,
-   "only_krusty": 2
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
   },
   {
    "task": ":core:data:compileDemoDebugUnitTestKotlin",
    "dir": "core/data/build/intermediates/built_in_kotlinc/demoDebugUnitTest/compileDemoDebugUnitTestKotlin/classes",
    "built": false,
    "fallback": null,
-   "error": "core/data/src/test/kotlin/com/google/samples/apps/nowinandroid/core/data/repository/OfflineFirstNewsRepositoryTest.kt:323:18: error: overload resolution ambiguity",
+   "error": "not run: a task it depends on failed",
    "classes": 158,
    "identical": 0,
    "only_kotlinc": null,
@@ -200,24 +200,24 @@
   {
    "task": ":core:domain:compileDemoDebugKotlin",
    "dir": "core/domain/build/intermediates/built_in_kotlinc/demoDebug/compileDemoDebugKotlin/classes",
-   "built": true,
+   "built": false,
    "fallback": null,
-   "error": null,
+   "error": "not run: a task it depends on failed",
    "classes": 9,
-   "identical": 5,
-   "only_kotlinc": 0,
-   "only_krusty": 0
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
   },
   {
    "task": ":core:domain:compileDemoDebugUnitTestKotlin",
    "dir": "core/domain/build/intermediates/built_in_kotlinc/demoDebugUnitTest/compileDemoDebugUnitTestKotlin/classes",
-   "built": true,
+   "built": false,
    "fallback": null,
-   "error": null,
+   "error": "not run: a task it depends on failed",
    "classes": 5,
-   "identical": 2,
-   "only_kotlinc": 0,
-   "only_krusty": 0
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
   },
   {
    "task": ":core:model:compileKotlin",
@@ -299,13 +299,13 @@
   {
    "task": ":core:testing:compileDemoDebugKotlin",
    "dir": "core/testing/build/intermediates/built_in_kotlinc/demoDebug/compileDemoDebugKotlin/classes",
-   "built": true,
+   "built": false,
    "fallback": null,
-   "error": null,
+   "error": "not run: a task it depends on failed",
    "classes": 32,
-   "identical": 16,
-   "only_kotlinc": 8,
-   "only_krusty": 0
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
   },
   {
    "task": ":core:ui:compileDemoDebugAndroidTestKotlin",
@@ -464,13 +464,13 @@
   {
    "task": ":feature:search:api:compileDemoDebugKotlin",
    "dir": "feature/search/api/build/intermediates/built_in_kotlinc/demoDebug/compileDemoDebugKotlin/classes",
-   "built": true,
+   "built": false,
    "fallback": null,
-   "error": null,
+   "error": "not run: a task it depends on failed",
    "classes": 1,
-   "identical": 1,
-   "only_kotlinc": 0,
-   "only_krusty": 0
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
   },
   {
    "task": ":feature:search:impl:compileDemoDebugAndroidTestKotlin",
@@ -607,13 +607,13 @@
   {
    "task": ":sync:sync-test:compileDemoDebugKotlin",
    "dir": "sync/sync-test/build/intermediates/built_in_kotlinc/demoDebug/compileDemoDebugKotlin/classes",
-   "built": true,
+   "built": false,
    "fallback": null,
-   "error": null,
+   "error": "not run: a task it depends on failed",
    "classes": 2,
-   "identical": 2,
-   "only_kotlinc": 0,
-   "only_krusty": 0
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
   },
   {
    "task": ":sync:work:compileDemoDebugAndroidTestKotlin",
@@ -629,13 +629,13 @@
   {
    "task": ":sync:work:compileDemoDebugKotlin",
    "dir": "sync/work/build/intermediates/built_in_kotlinc/demoDebug/compileDemoDebugKotlin/classes",
-   "built": true,
+   "built": false,
    "fallback": null,
-   "error": null,
+   "error": "not run: a task it depends on failed",
    "classes": 23,
-   "identical": 11,
-   "only_kotlinc": 2,
-   "only_krusty": 1
+   "identical": 0,
+   "only_kotlinc": null,
+   "only_krusty": null
   },
   {
    "task": ":ui-test-hilt-manifest:compileDemoDebugKotlin",
@@ -742,8 +742,8 @@
   }
  ],
  "measured": {
-  "date": "2026-10-27",
-  "commit": "80cc8099ddb8c233bfdc4dabf6234c4cae2d8eea",
-  "run": "https://github.com/qnox/krusty/actions/runs/40462256929"
+  "date": "2026-10-28",
+  "commit": "bf115cc9cfdcc4fa9ac248cb776a31507f4133f6",
+  "run": "https://github.com/qnox/krusty/actions/runs/40648260963"
  }
 }
