@@ -6272,3 +6272,13 @@ Nominal function values use the shared subtype relation to reach the canonical f
 of the expected signature. Applied hierarchy traversal retains declared variance, nullability,
 arity and suspend kind. Owning semantic tests cover reflective and inherited function declarations
 and unrelated-callable rejection; the JVM round trip covers nominal and reflection interface slots.
+
+## Publish source-class getter entries
+
+Retain ordinary property accessors alongside class function exports. A default getter carries its
+validated source property/field role and declared receiver/result ABI across the metadata boundary.
+Native adds any missing field-accessor entry without changing dispatch slots, then publishes it
+through the existing module-qualified dependency registry. Explicit getters keep ordinary function
+exports and their declared generic receiver. Imported serialized-body getter admission remains a
+separate capability (#2522). This source-module handoff advances #2779; its original full graph
+still requires direct constructor export linkage in #2780.

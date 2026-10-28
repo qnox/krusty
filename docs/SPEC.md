@@ -22906,3 +22906,17 @@ reflective function classifiers and classes inheriting a function interface; an 
 a same-named classifier gains no such subtype relation. Tests: the normalized declaration cases in
 `symbol_resolver::hierarchy_projection` and the JVM nominal-slot round trip in
 `function_reference_invoke_e2e`.
+
+## Source-class property getter exports
+
+A Native source module publishes ordinary class property getters under the exact accessor identity
+written to its KLIB metadata. Explicit getter functions retain the declaring class's full generic
+receiver application. Default field getters retain the resolved property and backing-field role;
+the backend materializes their real accessor entry without inventing a common function identity or
+adding a virtual slot. Export trampolines preserve file initialization and declared result storage.
+Existing explicit setter bodies publish their value parameter and void result through the same
+function-export path; generic String and Int round trips retain their declared class formal ABI.
+Separate producer-factory and effectful explicit-getter graphs establish JVM and pinned Native
+reference results before requiring Native getter execution. The original graph with direct imported
+construction remains an outstanding constructor-linkage control in #2780; these getter checks do
+not claim that graph passes.
