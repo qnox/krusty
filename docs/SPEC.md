@@ -46,6 +46,15 @@ callable identity, retaining the bound/unbound distinction. Different declaratio
 The Native object-linkage regression in `tests/native_cross_file_e2e.rs` establishes the identical
 multi-file program's kotlinc and JVM results before requiring Native equality and hash agreement.
 
+## Explicit callable imports in type positions
+
+Imports share syntax but not namespaces. An explicit import whose path names only a callable or
+property (`import kotlin.metadata.jvm.Metadata`, a factory function) contributes nothing to
+classifier lookup, so a type reference with that simple name continues to the own package, star
+imports and default imports and binds the default-imported `kotlin.Metadata` (kotlinc 2.4.21).
+The signature-collection name universe and the checker's classifier tower apply the same rule.
+`tests/box_regressions/callableImportKeepsDefaultClassifier.kt` covers it.
+
 ## Bound declaration-name evidence
 
 A query for an already-bound classifier or alias key projects the selected declaration's own
