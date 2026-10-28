@@ -1162,6 +1162,7 @@ impl super::Emitter<'_> {
                             .and_then(|realization| {
                                 parse_descriptor_params(&realization.descriptor)
                             });
+                        let realized = realized_parameters.is_some();
                         let ptys = realized_parameters.unwrap_or(ptys);
                         let call_parameters = bridge.as_ref().map_or(ptys.as_slice(), |bridge| {
                             bridge.bridge_parameters.as_slice()
@@ -1187,6 +1188,10 @@ impl super::Emitter<'_> {
                         physical.extend(call_parameters.iter().copied());
                         let operand_result = if bridge.is_some() {
                             self.emit_source_access_bridge_operands(&ops, &physical, code)
+                        } else if realized {
+                            // The realized parameters are a physical signature of their own: an
+                            // `Int` argument is boxed for `remove(Object)`, not only re-cast.
+                            self.emit_call_descriptor_operands(e, 1, &ops, &physical, code)
                         } else {
                             self.emit_source_call_operands(e, 1, &ops, &physical, code)
                         };
