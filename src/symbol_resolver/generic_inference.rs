@@ -2470,6 +2470,9 @@ pub(super) fn merge_specialized_return(provider: Ty, inferred: Ty) -> Ty {
                 .collect::<Vec<_>>();
             Ty::obj_args_name(provider_name, &args)
         }
+        // The declaration's formal specialized to a caller variable (`A := X` for `X : Number?`)
+        // names that variable; restoring the declaration formal would leak it out of the call.
+        (TyKind::TyParam(..), TyKind::TyParam(..)) => inferred,
         _ => provider,
     }
 }
