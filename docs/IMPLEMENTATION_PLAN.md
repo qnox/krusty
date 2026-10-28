@@ -6253,3 +6253,19 @@ Nominal function values use the shared subtype relation to reach the canonical f
 of the expected signature. Applied hierarchy traversal retains declared variance, nullability,
 arity and suspend kind. Owning semantic tests cover reflective and inherited function declarations
 and unrelated-callable rejection; the JVM round trip covers nominal and reflection interface slots.
+
+## Compose compiler plugin  🚧
+
+krusty reimplements the Compose compiler plugin as a native pass (`src/plugins/compose`), one
+construct at a time, each byte-identical to kotlinc's output. The registry marks it partly
+implemented, so `krusty refusals` keeps a Compose module on kotlinc until the list below is done,
+and the pass rejects every construct it does not cover yet.
+
+- [x] Parameterless `Unit` top-level composables: restart groups, skipping, durable keys,
+  `@FunctionKeyMeta`, source information and trace markers; calls between them in one file.
+- [ ] Calls to composables of other files and modules, and the grouping annotations.
+- [ ] `@Composable` function types and lambdas, and the composable call checker's diagnostics.
+- [ ] Parameters: `$changed` bit sets per parameter, `$default` masks, stability inference.
+- [ ] The full body transform: control-flow groups, `remember`, early returns, inline composables.
+- [ ] `ComposableSingletons` lambda holders and the `$stable` field of classes.
+- [ ] Remove the partial marker and rerun the corpus for the Compose projects.
