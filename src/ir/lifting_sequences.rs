@@ -37,3 +37,60 @@ pub(crate) struct IrLiftingEntry {
     /// the stable key the frontend recorded.
     pub order: u32,
 }
+
+impl super::IrFile {
+    /// Place `implementation`, a lambda a compiler plugin generates in a declaration's body, as the
+    /// only callable lifted out of that declaration's sequence, so a target names it as it names
+    /// a source lambda there (kotlinc's IR plugins run before its lowering lifts lambdas). The
+    /// caller makes sure the sequence holds no source callable.
+    pub(crate) fn place_generated_lambda(
+        &mut self,
+        sequence: IrLiftingSequence,
+        source_order: u32,
+        container: super::IrEnclosure,
+        implementation: super::FunId,
+    ) {
+        let entries = self.lifting_sequences.entry(sequence.clone()).or_default();
+        assert!(
+            entries.is_empty(),
+            "a generated lambda is placed only in an otherwise empty lifting sequence"
+        );
+        entries.insert(
+            0,
+            IrLiftingEntry {
+                kind: crate::lifting_provenance::LiftingCallableKind::Lambda,
+                name: None,
+                lifted: true,
+                scope: None,
+                container: Some(container),
+                order: 0,
+            },
+        );
+        self.lifting_sequence_source_order
+            .entry(sequence.clone())
+            .or_insert(source_order);
+        self.lifted_functions.insert(
+            implementation,
+            (
+                sequence.clone(),
+                crate::fir::FirLiftingSite {
+                    owner: sequence.owner,
+                    container: sequence.container,
+                    path: Box::new([crate::fir::FirLiftingStep {
+                        kind: crate::lifting_provenance::LiftingCallableKind::Lambda,
+                        name: None,
+                        position: 0,
+                    }]),
+                    lifted: true,
+                },
+            ),
+        );
+    }
+
+    /// Whether any callable is lifted along `sequence`.
+    pub(crate) fn lifts_along(&self, sequence: &IrLiftingSequence) -> bool {
+        self.lifting_sequences
+            .get(sequence)
+            .is_some_and(|entries| !entries.is_empty())
+    }
+}
