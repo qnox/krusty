@@ -14,5 +14,5 @@ fun Pair<Int, Int>.sum(): Int = first + second
 
 fun box(): String {
     val pair = make(1) ?: return "null"
-    return if (pair.sum() == 3) "OK" else "FAIL: $pair"
+    return if (pair.sum() == 3) "OK" else "FAIL"
 }

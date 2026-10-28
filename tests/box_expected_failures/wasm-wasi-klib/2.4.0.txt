@@ -5547,6 +5547,7 @@ regressions/Kt1149.kt
 regressions/Kt1619Test.kt
 regressions/Kt2495Test.kt
 regressions/arrayLengthNPE.kt
+regressions/callableImportKeepsDefaultClassifier.kt
 regressions/collectionSizeInInlineBody.kt
 regressions/collectionSizeOrDefault.kt
 regressions/dataClassInInlineFunctionWithTypeParameters.kt
