@@ -99,6 +99,9 @@ pub struct BackendCallableFact {
     pub(crate) klib_body_class_contract: Option<crate::libraries::KlibBodyClassContract>,
     pub(crate) klib_body_vararg_index: Option<usize>,
     pub(crate) klib_body_parameter_defaults: Option<crate::libraries::ParamFlags>,
+    /// Qualified identities of the annotations the provider recorded on this declaration. A
+    /// compiler plugin keys its own calling convention on them (Compose's `@Composable`).
+    pub annotations: Box<[TypeName]>,
 }
 
 impl BackendCallableFact {
@@ -317,6 +320,7 @@ mod tests {
             klib_body_class_contract: None,
             klib_body_vararg_index: None,
             klib_body_parameter_defaults: None,
+            annotations: Box::new([]),
         }
     }
 
@@ -538,6 +542,7 @@ mod tests {
             klib_body_class_contract: None,
             klib_body_vararg_index: None,
             klib_body_parameter_defaults: None,
+            annotations: Box::new([]),
         };
         assert!(fact.matches_dependency_body_call(&[Ty::Int], None, true));
         assert!(!fact.matches_dependency_body_call(&[Ty::Int], None, false));
@@ -757,6 +762,7 @@ impl CheckedBackendCallables {
                 let klib_body_vararg_index = realization.klib_body_vararg_index;
                 let klib_body_parameter_defaults = realization.klib_body_parameter_defaults;
                 let callable = realization.callable;
+                let annotations = callable.annotations.into_boxed_slice();
                 slot.insert(BackendCallableFact {
                     name: callable.name,
                     physical_name: callable.physical_name,
@@ -798,6 +804,7 @@ impl CheckedBackendCallables {
                     klib_body_class_contract,
                     klib_body_vararg_index,
                     klib_body_parameter_defaults,
+                    annotations,
                 })
             }
         };

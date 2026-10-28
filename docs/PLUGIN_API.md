@@ -160,6 +160,23 @@ linked runtime is a **runtime linkage error**, so version-aware codegen is manda
 The PoC demonstrates the branch on the write-helper name; a full port carries a codegen profile per
 supported runtime version, validated by the differential harness against each.
 
+### Partial reimplementation — `compose`
+
+`src/plugins/compose` reimplements `androidx.compose.compiler.plugins.kotlin` construct by
+construct, byte for byte with kotlinc's output. Its registration is `ExtensionKind::PartialNative`:
+a compile runs the pass, and `record_source_facts` (the `IrPlugin` hook that runs at the backend
+handoff, the only point where the source text is still at hand) rejects any composable construct the
+pass does not cover with `krusty's Compose compiler plugin does not support <construct> yet; compile
+this module with kotlinc`. Until the coverage is complete `krusty refusals` reports the plugin, so a
+Gradle build never depends on that rejection. Options that change the generated code beyond what is
+covered (live literals, decoys, strong skipping off, the non-default feature flags) are
+`UnimplementedOption` errors.
+
+Covered so far: parameterless `Unit` top-level composable functions with a block body, made
+restartable and skippable, and their calls to each other. Durable group keys, `sourceInformation`
+strings, trace markers and `@FunctionKeyMeta` (class file only, never Kotlin metadata, as kotlinc's
+IR plugin adds it after FIR serialization) follow kotlinc's formulas.
+
 ## World 2 — codegen host (`ksp`)
 
 The host models the **codegen-only fixpoint** that KSP and APT both follow:
@@ -403,14 +420,17 @@ silently dropping a plugin would emit wrong bytecode, each activated plugin gets
 | native reimpl (serialization, all-open, no-arg, sam-with-receiver) | `NativeSubstitution` — krusty runs its own ABI-matched impl; the supplied jar is **not** executed | INFO |
 | hosted (KSP) | `Hosted` — the real jar runs via the sidecar | INFO |
 | hosted (KSP), from a driver with no codegen host (`Activation::codegen_host == false`) | `HostUnavailable` — reporting it hosted would drop its generated sources | **ERROR** (fails the compile) |
-| `-Xplugin` jar declaring a registrar no extension answers to (Compose, any third-party FIR/IR plugin) | `Unsupported` — krusty can neither run nor substitute it | **ERROR** (fails the compile) |
+| partly covered native reimpl (Compose) | `PartialSubstitution` — krusty runs its own pass, which rejects every construct it does not cover yet with an error at that construct; `krusty refusals` lists the plugin, so the Gradle integration hands the module to kotlinc | INFO |
+| `-Xplugin` jar declaring a registrar no extension answers to (any third-party FIR/IR plugin) | `Unsupported` — krusty can neither run nor substitute it | **ERROR** (fails the compile) |
 | `-Xplugin` entry krusty cannot read (not a zip, not a directory) | `Unsupported` — it cannot be identified, so it cannot be honoured | **ERROR** (fails the compile) |
 | `-P plugin:<id>:…` for an id no extension answers to | `Unsupported` (`plugin id '<id>'`) — the option cannot be honoured | **ERROR** (fails the compile) |
 | `-P plugin:<id>:<key>=…` with a key the extension's command-line processor does not declare (checked where the extension lists its keys, as all-open does) | `UnsupportedOption` — kotlinc's own `unsupported plugin option: <id>:<key>=<value>` | **ERROR** (fails the compile) |
 | `-P plugin:<id>:<key>=<value>` with a declared setting krusty's native pass does not implement (no-arg's `invokeInitializers=true`) | `UnimplementedOption` — the setting would change the generated code | **ERROR** (fails the compile) |
 
-So a build that pulls in Compose fails loudly with a clear message ("remove the plugin or compile this
-module with kotlinc") instead of producing a silently-broken artifact, and a serialization build is
+So a build that pulls in an unknown plugin fails loudly with a clear message ("remove the plugin or
+compile this module with kotlinc") instead of producing a silently-broken artifact, a Compose module
+either compiles exactly as kotlinc compiles it or fails at the first construct krusty's pass does not
+cover, and a serialization build is
 told plainly that krusty substituted its own implementation for the original plugin.
 
 ### Where the selection is made and carried

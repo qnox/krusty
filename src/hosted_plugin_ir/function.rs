@@ -19,9 +19,9 @@ use crate::libraries::ExternalCallableKind;
 use crate::types::{SemanticCallableOwner, Ty, TyKind, TypeName};
 
 use super::call_spans::CallSpans;
-use super::offsets::Utf16Offsets;
 use super::types::{class_name, identity, package_name, TypeParameters};
 use super::Refusal;
+use crate::kotlinc_offsets::Utf16Offsets;
 
 /// The function `declaration` whose checked body `observed` holds.
 pub(super) fn encode_function(

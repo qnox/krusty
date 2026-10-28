@@ -20,6 +20,8 @@ mod tests;
 /// The module-wide facts every file of one emission hands its backend alongside its own IR.
 pub(super) struct ModuleEmission<'a> {
     pub module_name: &'a str,
+    /// The text of the file being handed off, for plugins that record source facts.
+    pub text: &'a str,
     /// Each source file's output stem, by source identity.
     pub stems: &'a [String],
     /// Where each checked node came from, for a backend to place what it reports.
@@ -55,6 +57,29 @@ pub(super) fn checked_ir_file<'a>(
             return None;
         }
     };
+    let file_name = module
+        .stems
+        .get(source.raw() as usize)
+        .map(|stem| format!("{}.kt", stem.rsplit(['/', '\\']).next().unwrap_or(stem)))
+        .unwrap_or_default();
+    let rejections = crate::plugins::record_enabled_source_facts(
+        &mut ir,
+        symbols.native_plugins(),
+        module.module_name,
+        &crate::plugins::PluginSourceView {
+            text: module.text,
+            file_name: &file_name,
+            source,
+            origins: module.origins,
+            callables: &callables,
+        },
+    );
+    if !rejections.is_empty() {
+        for rejection in rejections {
+            diags.error(rejection.span, rejection.message);
+        }
+        return None;
+    }
     // Each class's declarations are recorded here, before any target lowers them.
     crate::metadata::class_declarations::record_all(&mut ir);
     // Common code typed an `expect` classifier as its own; every target realizes the classifier

@@ -162,11 +162,13 @@ fn refusals(opts: &cli::Options) -> Result<Vec<String>, String> {
     if let Some(report) = invalid {
         return Err(report);
     }
+    let plugins = opts.resolve_plugins(&[]);
     Ok(opts
         .refusals
         .iter()
         .cloned()
-        .chain(opts.resolve_plugins(&[]).errors)
+        .chain(plugins.errors)
+        .chain(plugins.partial)
         .collect())
 }
 

@@ -1474,12 +1474,16 @@ pub fn facade_package_metadata_from_ir(
             let jvm_name = physical
                 .filter(|function| function.name != declaration.name)
                 .map(|function| function.name.clone());
-            let physical_descriptor = if ir.vc_declared_sigs.contains_key(&declaration.function) {
+            let physical_descriptor = if ir.vc_declared_sigs.contains_key(&declaration.function)
+                || ir
+                    .plugin_extended_signatures
+                    .contains(&declaration.function)
+            {
                 physical
                     .map(|function| {
                         crate::jvm::names::method_descriptor(&function.params, function.ret)
                     })
-                    .expect("a value-class-rewritten package function has its IR realization")
+                    .expect("a rewritten package function has its IR realization")
             } else {
                 declared_method_descriptor(declaration)
             };

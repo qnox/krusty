@@ -18,6 +18,7 @@
 pub mod allopen;
 pub mod class_metadata;
 pub mod cli;
+pub mod compose;
 pub mod deps;
 pub mod noarg;
 pub mod registry;
@@ -792,6 +793,17 @@ pub trait IrPlugin {
     /// [`Self::complete_declarations`]; nothing here may name a target representation.
     fn generate_declarations(&self, _ir: &mut IrFile, _ctx: &PluginContext) {}
 
+    /// Record what the plugin's later phases need from the file's source text, which no target
+    /// phase can read, and reject every construct the plugin does not implement. This runs at the
+    /// frontend/backend handoff, once the dependency declarations the file selected are frozen.
+    fn record_source_facts(
+        &self,
+        _ir: &mut IrFile,
+        _source: &PluginSourceView<'_>,
+        _rejections: &mut Vec<PluginRejection>,
+    ) {
+    }
+
     /// Realize the declared members for the target: their bodies, and the storage and helpers
     /// that have no Kotlin declaration of their own.
     fn complete_declarations(&self, _ir: &mut IrFile, _ctx: &PluginContext) {}
@@ -813,6 +825,55 @@ pub trait IrPlugin {
         _out: &mut class_metadata::ClassMetadataExtensions<'_>,
     ) {
     }
+}
+
+/// The source a file's common IR was lowered from, as the frontend/backend handoff still holds it.
+pub struct PluginSourceView<'a> {
+    /// The file's text as written; spans are UTF-8 byte offsets into it.
+    pub text: &'a str,
+    /// The file's simple name (`Main.kt`).
+    pub file_name: &'a str,
+    pub source: crate::fir::SourceFileId,
+    pub origins: &'a crate::fir::OriginStore,
+    /// The frozen dependency declarations the file's IR selected.
+    pub callables: &'a crate::backend::CheckedBackendCallables,
+}
+
+impl PluginSourceView<'_> {
+    /// The span in this file that `expression` was lowered from, when it has one.
+    pub fn expression_span(
+        &self,
+        ir: &IrFile,
+        expression: crate::ir::ExprId,
+    ) -> Option<crate::diag::Span> {
+        let origin = ir.fir_origins.get(&expression)?.fir_origin();
+        let (file, span) = self.origins.source_span(origin)?;
+        (file == self.source).then_some(span)
+    }
+}
+
+/// A construct a native plugin does not implement, reported as an error at `span`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PluginRejection {
+    pub span: crate::diag::Span,
+    pub message: String,
+}
+
+/// Run each native plugin's [`IrPlugin::record_source_facts`] over a file at the handoff.
+pub fn record_enabled_source_facts(
+    ir: &mut IrFile,
+    plugins: &registry::NativePlugins,
+    module_name: &str,
+    source: &PluginSourceView<'_>,
+) -> Vec<PluginRejection> {
+    let mut rejections = Vec::new();
+    if plugins.is_empty() {
+        return rejections;
+    }
+    plugins
+        .host(module_name)
+        .record_source_facts(ir, source, &mut rejections);
+    rejections
 }
 
 /// Declare what this compilation's native plugins generate, at the frontend/backend handoff.
@@ -887,6 +948,7 @@ fn triggered(ir: &IrFile, plugins: &registry::NativePlugins, ctx: &PluginContext
         )
     });
     uses_serialization
+        || ir.compose.is_some()
         || !ctx
             .classes_with(crate::types::type_name(serialization::SERIALIZABLE_FQ))
             .is_empty()
@@ -1349,6 +1411,17 @@ impl PluginHost {
             plugin.plan_frontend_expressions(ctx, &mut plans);
         }
         plans
+    }
+
+    pub fn record_source_facts(
+        &self,
+        ir: &mut IrFile,
+        source: &PluginSourceView<'_>,
+        rejections: &mut Vec<PluginRejection>,
+    ) {
+        for plugin in &self.plugins {
+            plugin.record_source_facts(ir, source, rejections);
+        }
     }
 
     /// The handoff phase: all supertypes, then all declarations.

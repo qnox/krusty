@@ -413,6 +413,9 @@ pub struct PluginResolution {
     pub notes: Vec<String>,
     /// Printed as `error:` — any one fails the compilation before it starts.
     pub errors: Vec<String>,
+    /// Plugins krusty implements only in part: the compilation runs, but a build asking which
+    /// compilations krusty takes is refused it.
+    pub partial: Vec<String>,
 }
 
 impl Options {
@@ -433,6 +436,7 @@ impl Options {
                 native: NativePlugins::none(),
                 notes: Vec::new(),
                 errors: missing,
+                partial: Vec::new(),
             };
         }
         let classpath = classpath
@@ -453,6 +457,11 @@ impl Options {
             native: resolved.native,
             notes: notes.iter().map(|note| note.message()).collect(),
             errors: errors.iter().map(|error| error.message()).collect(),
+            partial: notes
+                .iter()
+                .filter(|note| note.is_refusal())
+                .map(|note| note.message())
+                .collect(),
         }
     }
 }

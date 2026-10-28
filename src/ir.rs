@@ -1361,6 +1361,9 @@ pub struct IrFile {
     /// Exact generated function metadata/debug contracts, keyed by semantic owning classifier.
     /// Producers publish once; backends consume function identities without name/descriptor scans.
     generated_member_publications: crate::fx_hash::HashMap<TypeName, IrGeneratedMemberPublication>,
+    /// Debug-only contracts of generated top-level functions, which the file facade owns. They
+    /// have no Kotlin `Function` record.
+    generated_facade_functions: Vec<IrGeneratedFunctionPublication>,
     /// Exact common-IR functions bound to compiler-synthesized data-class roles. The common
     /// producer records these before any backend rename; metadata and target realization consume
     /// the identities without scanning method spellings.
@@ -1615,6 +1618,12 @@ pub struct IrFile {
     /// same reason [`IrClass::field_annotations`] is one: the overwhelming majority of functions
     /// carry none, and every synthesized function stays constructible without naming them.
     pub function_annotations: crate::fx_hash::HashMap<u32, DeclarationAnnotations>,
+    /// What the Compose plugin recorded from this file's source at the handoff, for its body
+    /// transform. `None` unless the plugin is active and the file declares a composable function.
+    pub compose: Option<Box<crate::plugins::compose::ComposeFileFacts>>,
+    /// Package functions a compiler plugin gave physical parameters their declaration does not
+    /// have (Compose's `$composer` and `$changed`). Metadata records their realized signature.
+    pub(crate) plugin_extended_signatures: crate::fx_hash::HashSet<FunId>,
     /// `(class, property source order)` → the synthetic `get<Name>$annotations()` marker method that carries
     /// that property's annotations. The property's `JvmPropertySignature` names the marker, so
     /// emission reads its FINAL name from here (the value-class pass may have mangled it).
