@@ -22,6 +22,15 @@ fn main() {
         run_cinterop(&argv[1..]);
         return;
     }
+    // `krusty kotlinc-native …` is Kotlin/Native's compiler: sources and KLIBs to a static program
+    // or a library.
+    if argv
+        .first()
+        .is_some_and(|command| command == "kotlinc-native")
+    {
+        run_kotlinc_native(&argv[1..]);
+        return;
+    }
     // `krusty compilation-fingerprint <kotlinc arguments>` prints the digest of everything that
     // compilation reads; a build tool keeps the previous output while it is unchanged.
     if argv
@@ -105,6 +114,35 @@ fn main() {
     }
 }
 
+/// Compile what the `kotlinc-native` arguments describe, or print the diagnostics and exit 1.
+fn run_kotlinc_native(arguments: &[String]) {
+    let options = match krusty_cli::kotlinc_native::parse(arguments) {
+        Ok(krusty_cli::kotlinc_native::Invocation::Help) => {
+            println!("{}", krusty_cli::kotlinc_native::HELP);
+            return;
+        }
+        Ok(krusty_cli::kotlinc_native::Invocation::Compile(options)) => options,
+        Err(error) => {
+            eprintln!("error: {error}");
+            eprintln!("info: use krusty kotlinc-native -help for more information");
+            std::process::exit(1);
+        }
+    };
+    if let Err(error) =
+        krusty::kotlin_version::configured_target().and_then(krusty::kotlin_version::set_target)
+    {
+        eprintln!("error: {error}");
+        std::process::exit(1);
+    }
+    match krusty::native::compile_native(&options) {
+        Ok(compiled) => eprint!("{}", compiled.warnings),
+        Err(error) => {
+            eprint!("{error}");
+            std::process::exit(1);
+        }
+    }
+}
+
 /// Build the interop library the `cinterop` arguments describe, or say why not and exit 1.
 fn run_cinterop(arguments: &[String]) {
     match krusty_cli::cinterop::parse(arguments) {
@@ -162,11 +200,13 @@ fn refusals(opts: &cli::Options) -> Result<Vec<String>, String> {
     if let Some(report) = invalid {
         return Err(report);
     }
+    let plugins = opts.resolve_plugins(&[]);
     Ok(opts
         .refusals
         .iter()
         .cloned()
-        .chain(opts.resolve_plugins(&[]).errors)
+        .chain(plugins.errors)
+        .chain(plugins.partial)
         .collect())
 }
 
