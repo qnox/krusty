@@ -38,6 +38,8 @@ pub(super) struct Runtime {
     pub(super) chars: u32,
     /// `(struct (field (ref $chars)))`.
     pub(super) string: u32,
+    /// Reference-element array storage shared by every applied Kotlin `Array<T>`.
+    pub(super) references: u32,
     pub(super) string_equals: u32,
     pub(super) string_concat: u32,
     pub(super) string_of_i32: u32,
@@ -91,12 +93,17 @@ impl Runtime {
         let mut objects = ObjectRoot::declare(module, ValType::nullable(string));
         let exceptions =
             ExceptionTransport::declare(module, &mut objects, ValType::nullable(string));
+        let references = module.ty(CompositeType::Array(FieldType {
+            storage: StorageType::Val(super::objects::REFERENCE),
+            mutable: true,
+        }));
         let string_of_i32 = module.declare();
         let string_of_i64 = module.declare();
         let numbers = BoxedNumbers::declare(module, &objects, [string_of_i32, string_of_i64]);
         let mut runtime = Self {
             chars,
             string,
+            references,
             string_equals: module.declare(),
             string_concat: module.declare(),
             string_of_i32,

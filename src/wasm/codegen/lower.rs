@@ -18,6 +18,7 @@
 
 use crate::fx_hash::{HashMap, HashSet};
 
+mod arrays;
 mod default_arguments;
 mod dependency_exports;
 mod exceptions;
@@ -35,6 +36,7 @@ pub(super) use scalar_instructions::is_scalar_operation;
 pub(super) fn is_direct_operation(operation: crate::backend::BackendCompilerIntrinsic) -> bool {
     is_scalar_operation(operation)
         || operation == crate::backend::BackendCompilerIntrinsic::ThrowableMessage
+        || operation == crate::backend::BackendCompilerIntrinsic::ArrayGet
 }
 
 use crate::backend::class_tables::module_interfaces::ModuleInterfaces;
@@ -67,6 +69,7 @@ pub(super) struct LoweredFile {
 
 /// One file's checked IR and the facts frozen beside it.
 pub(super) struct FileInput<'a> {
+    pub(super) array_range_checks: bool,
     pub(super) classifiers: &'a dyn crate::backend::BackendClassifierSource,
     pub(super) ir: &'a IrFile,
     pub(super) properties: &'a RealizedProperties,
@@ -91,6 +94,7 @@ pub(super) fn lower_file(
     state: ModuleState<'_>,
 ) -> Result<LoweredFile, Unsupported> {
     let FileInput {
+        array_range_checks,
         classifiers,
         ir,
         properties,
@@ -192,6 +196,7 @@ pub(super) fn lower_file(
         Some(classes)
     };
     let context = FileContext {
+        array_range_checks,
         classifiers,
         module_name,
         numbers: plan.interfaces(),
@@ -337,6 +342,7 @@ pub(super) fn lower_file(
 /// What every body of one file reads: the file, and where its functions, properties and classes
 /// went in the module.
 struct FileContext<'a> {
+    array_range_checks: bool,
     classifiers: &'a dyn crate::backend::BackendClassifierSource,
     module_name: &'a str,
     /// The module-wide numbers of the module's interface members.
@@ -533,6 +539,7 @@ struct Loop {
 }
 
 struct Body<'a> {
+    array_range_checks: bool,
     classifiers: &'a dyn crate::backend::BackendClassifierSource,
     module_name: &'a str,
     numbers: &'a ModuleInterfaces,
@@ -612,6 +619,7 @@ impl<'a> Body<'a> {
         );
         Self {
             module_name: context.module_name,
+            array_range_checks: context.array_range_checks,
             classifiers: context.classifiers,
             numbers: context.numbers,
             ir: context.ir,
@@ -1052,6 +1060,29 @@ impl<'a> Body<'a> {
                 args,
             } if let Callee::External {
                 target,
+                params,
+                defaults,
+                extension_receiver_parameter: None,
+                ..
+            } = &**call_callee
+                && defaults.is_empty()
+                && params.as_slice() == [Ty::Int]
+                && self.callables.callable(*target).is_some_and(|fact| {
+                    fact.compiler_operation()
+                        == Some(crate::backend::BackendCompilerIntrinsic::ArrayGet)
+                }) =>
+            {
+                let (Some(receiver), [index]) = (dispatch_receiver, args.as_slice()) else {
+                    return Err("an authenticated array read with malformed operands".into());
+                };
+                self.reference_array_get(receiver, *index)?;
+            }
+            IrExpr::Call {
+                callee: ref call_callee,
+                dispatch_receiver,
+                args,
+            } if let Callee::External {
+                target,
                 ret,
                 defaults,
                 ..
@@ -1171,6 +1202,13 @@ impl<'a> Body<'a> {
                 )?;
             }
             IrExpr::Throw { operand } => self.throw_value(operand)?,
+            IrExpr::Vararg {
+                array_type,
+                spreads,
+                elements,
+            } => {
+                self.reference_array_literal(array_type, &spreads, &elements)?;
+            }
             IrExpr::Try {
                 body,
                 catches,
@@ -1734,6 +1772,7 @@ mod tests {
         );
         lower_file(
             FileInput {
+                array_range_checks: super::super::super::array_access::default_range_checks(),
                 classifiers: &classifiers,
                 ir,
                 properties,

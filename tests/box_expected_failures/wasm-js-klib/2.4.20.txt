@@ -2340,7 +2340,6 @@ escapeAnalysis/recursion.kt
 escapeAnalysis/stack_array.kt
 escapeAnalysis/test10.kt
 escapeAnalysis/test11.kt
-escapeAnalysis/test12.kt
 escapeAnalysis/test13.kt
 escapeAnalysis/zeroOutObjectOnAlloc.kt
 evaluate/annotationClassWithInner.kt
@@ -2684,7 +2683,6 @@ functions/kt58825_arrayOverloads.kt
 functions/kt785.kt
 functions/kt873.kt
 functions/localFunction.kt
-functions/localFunctions/boundTypeParameterInVararg.kt
 functions/localFunctions/callBetweenLocalFunctions.kt
 functions/localFunctions/callInlineLocalInLambda.kt
 functions/localFunctions/definedWithinLambda.kt
@@ -4030,7 +4028,6 @@ innerNested/superConstructorCall/localExtendsInner.kt
 innerNested/superConstructorCall/localExtendsLocalWithClosure.kt
 innerNested/superConstructorCall/localWithClosureExtendsLocalWithClosure.kt
 innerNested/superConstructorCall/objectExtendsClassDefaultArgument.kt
-innerNested/superConstructorCall/objectExtendsClassVararg.kt
 innerNested/superConstructorCall/objectExtendsInner.kt
 innerNested/superConstructorCall/objectExtendsInnerDefaultArgument.kt
 innerNested/superConstructorCall/objectExtendsInnerOfLocalVarargAndDefault.kt
@@ -4157,7 +4154,6 @@ lazyCodegen/exceptionInFieldInitializer.kt
 lazyCodegen/ifElse.kt
 lazyCodegen/optimizations/negateObjectComp.kt
 lazyCodegen/optimizations/negateObjectComp2.kt
-lazyCodegen/safeCallAndArray.kt
 lazyCodegen/tryCatchExpression.kt
 literals/listof1.kt
 literals/strdedup1.kt
@@ -5674,7 +5670,6 @@ regressions/kt1800.kt
 regressions/kt18779.kt
 regressions/kt2017.kt
 regressions/kt2060.kt
-regressions/kt2210.kt
 regressions/kt2470.kt
 regressions/kt24913.kt
 regressions/kt2509.kt
@@ -5856,7 +5851,6 @@ smartCasts/genericSet.kt
 smartCasts/invokeRecieverSmartcastK2.kt
 smartCasts/kt17725.kt
 smartCasts/kt19100.kt
-smartCasts/kt44804.kt
 smartCasts/kt44814.kt
 smartCasts/kt44932.kt
 smartCasts/kt72391.kt
@@ -6191,7 +6185,6 @@ vararg/emptyVarArg.kt
 vararg/evaluationOrder.kt
 vararg/inlineClassArraysAsNamedArgumentInVararg.kt
 vararg/kt10926.kt
-vararg/kt1978.kt
 vararg/kt37715.kt
 vararg/kt37779.kt
 vararg/kt581.kt
