@@ -135,6 +135,7 @@ fn ty(value: Ty, names: &IdentityRemap<'_>) -> Ty {
         ),
         TyKind::Nullable(inner) => Ty::nullable(ty(inner, names)),
         TyKind::PlatformNullable(inner) => Ty::platform_nullable(ty(inner, names)),
+        TyKind::MutabilityFlexible(inner) => Ty::mutability_flexible(ty(inner, names)),
         TyKind::InProjection(inner) => Ty::in_projection(ty(inner, names)),
         TyKind::OutProjection(inner) => Ty::out_projection(ty(inner, names)),
         TyKind::StarProjection(inner) => Ty::star_projection(ty(inner, names)),
@@ -1601,10 +1602,6 @@ impl super::IrFile {
             .map(|value| remapped_name(value, names))
             .collect();
         self.deprecated_classes = std::mem::take(&mut self.deprecated_classes)
-            .into_iter()
-            .map(|value| remapped_name(value, names))
-            .collect();
-        self.public_synthetics = std::mem::take(&mut self.public_synthetics)
             .into_iter()
             .map(|value| remapped_name(value, names))
             .collect();

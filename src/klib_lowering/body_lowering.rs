@@ -91,7 +91,9 @@ pub(super) trait CallLinker {
 
     /// The serialized header of the member `callee` an `in` over a range literal calls, read
     /// only to prove it is the range's own membership operator: its dispatch receiver, value
-    /// parameters and result. Template linkers keep membership an ordinary checked call.
+    /// parameters and result. `None` keeps the membership an ordinary checked call, as template
+    /// linkers do; a linker whose dependency preparation omits the membership's declaration
+    /// edge declines a header it cannot read instead.
     fn range_membership_header(
         &self,
         _callee: &KlibPublicIdSignature,

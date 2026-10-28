@@ -462,6 +462,7 @@ impl Checker<'_> {
                 }
                 (TyKind::Nullable(symbolic), TyKind::Nullable(actual))
                 | (TyKind::PlatformNullable(symbolic), TyKind::PlatformNullable(actual))
+                | (TyKind::MutabilityFlexible(symbolic), TyKind::MutabilityFlexible(actual))
                 | (TyKind::InProjection(symbolic), TyKind::InProjection(actual))
                 | (TyKind::OutProjection(symbolic), TyKind::OutProjection(actual))
                 | (TyKind::StarProjection(symbolic), TyKind::StarProjection(actual)) => {

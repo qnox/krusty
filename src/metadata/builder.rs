@@ -45,8 +45,7 @@ pub struct FnMeta {
     pub jvm_desc: Option<String>,
     /// The PHYSICAL JVM method NAME (`JvmMethodSignature.name`, f1) when it differs from the Kotlin
     /// one — a value-class-parametered function's mangled `taggedOnly-rnqsQGE`. `None` ⇒ omitted
-    /// (the name defaults to the function's), kotlinc's usual shape. Only read when `jvm_desc` is
-    /// recorded.
+    /// (the name defaults to the function's), kotlinc's usual shape.
     pub jvm_name: Option<String>,
     /// `inline fun` — sets `Function.flags` `IS_INLINE` (bit 10) so a reader resolves the function
     /// as inline (splice candidate), not a plain callable.
@@ -707,8 +706,7 @@ fn function_pb(
         let cb = contract_pb(st, contract_types, contract, &tps);
         p.field_message(32, &cb);
     }
-    // JvmProtoBuf.methodSignature extension (Function field 100): only the descriptor (field 2) — the
-    // name defaults to the function's, exactly as kotlinc emits for a top-level function.
+    // JvmProtoBuf.methodSignature extension (Function field 100): each part a reader cannot derive.
     signature = signature.or_else(|| method_signature_pb(st, f));
     if let Some(sig) = &signature {
         p.field_message(100, sig); // Function.methodSignature = 100
@@ -717,13 +715,22 @@ fn function_pb(
 }
 
 /// The function's `JvmMethodSignature` message, or `None` when it records no physical handle.
+///
+/// kotlinc records the physical name whenever it differs from the Kotlin one and the descriptor
+/// whenever a reader cannot rebuild it from the declared types, each independently of the other: a
+/// mangled function whose descriptor is derivable (`f-6FUe0Y4(LNX;)V` over `f(NX?)`) records its
+/// name alone.
 fn method_signature_pb(st: &mut StringTable<'_>, f: &FnMeta) -> Option<Pb> {
-    let desc = f.jvm_desc.as_ref()?;
+    if f.jvm_name.is_none() && f.jvm_desc.is_none() {
+        return None;
+    }
     let mut sig = Pb::new();
     if let Some(name) = &f.jvm_name {
         sig.field_varint(1, st.local(name) as u64); // JvmMethodSignature.name = 1 (mangled)
     }
-    sig.field_varint(2, st.local(desc) as u64); // JvmMethodSignature.desc = 2
+    if let Some(desc) = &f.jvm_desc {
+        sig.field_varint(2, st.local(desc) as u64); // JvmMethodSignature.desc = 2
+    }
     Some(sig)
 }
 

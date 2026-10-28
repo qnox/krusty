@@ -16,7 +16,7 @@ impl Body<'_> {
     ) -> Option<CompilerIntrinsic> {
         self.callables
             .callable(target)?
-            .compiler_intrinsic
+            .compiler_operation()
             .filter(|operation| is_scalar_operation(*operation))
     }
 

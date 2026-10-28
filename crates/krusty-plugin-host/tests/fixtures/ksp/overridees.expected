@@ -1,0 +1,16 @@
+# What KSP2 2.3.12 (KSPJvmMain) logs with Overridees.kt over overridees/: the name, origin and
+# findOverridee of every source function and property, members after their classifier.
+w: [ksp] overridees.topLevel KOTLIN overrides null
+w: [ksp] overridees.topLevelProperty KOTLIN overrides null
+w: [ksp] overridees.Greeting.name KOTLIN overrides null
+w: [ksp] overridees.Greeting.count KOTLIN overrides null
+w: [ksp] overridees.Greeting.length KOTLIN overrides null
+w: [ksp] overridees.Greeting.greet KOTLIN overrides null
+w: [ksp] <init> KOTLIN overrides null
+w: [ksp] overridees.Base.hook KOTLIN overrides null
+w: [ksp] overridees.Base.label KOTLIN overrides null
+w: [ksp] <init> SYNTHETIC overrides null
+w: [ksp] overridees.Shape.area KOTLIN overrides null
+w: [ksp] overridees.Shape.sides KOTLIN overrides null
+w: [ksp] overridees.Single.objectMember KOTLIN overrides null
+w: [ksp] <init> SYNTHETIC overrides null

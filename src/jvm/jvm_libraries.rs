@@ -13,6 +13,7 @@ mod classpath_annotation_classes;
 mod collection_canonicalization;
 mod declaration_headers;
 mod declared_members;
+mod symbol_source;
 use classpath_annotation_classes::{
     annotation_element_defaults, classpath_annotation_targets, java_annotation_parameter_list,
 };
@@ -2411,6 +2412,7 @@ impl JvmLibraries {
             let own_type_parameter_count = application_header.own_count;
             let type_parameters = application_header.parameters;
             Some(LibraryType {
+                runtime_exception: None,
                 declaration_name: if ci.this_class == internal_name {
                     classifier_facts::classifier_declaration_name(&ci)
                 } else {
@@ -4021,57 +4023,6 @@ impl JvmLibraries {
     }
 }
 
-impl SymbolSource for JvmLibraries {
-    /// Both answered by the classpath, which is where this provider interned them.
-    fn external_callable(
-        &self,
-        identity: crate::fir::ExternalCallableId,
-    ) -> Option<crate::libraries::ExternalCallableRealization> {
-        self.cp.external_callable(identity)
-    }
-
-    fn external_property(
-        &self,
-        identity: crate::fir::ExternalPropertyId,
-    ) -> Option<crate::libraries::ExternalPropertyRealization> {
-        self.cp.external_property(identity)
-    }
-
-    fn package_exists(&self, parent: TypeName, name: &str) -> bool {
-        JvmLibraries::package_exists(self, parent, name)
-    }
-
-    fn symbols(
-        &self,
-        namespace: SymbolNamespace,
-        name: &str,
-    ) -> std::rc::Rc<crate::libraries::ResolvedSymbols> {
-        JvmLibraries::symbols(self, namespace, name)
-    }
-
-    fn api_withheld_callable(&self, owner: TypeName, name: &str) -> bool {
-        self.api_withheld
-            .borrow()
-            .get(&owner)
-            .is_some_and(|names| names.contains(name))
-    }
-
-    fn platform_flexible_upper_bound(&self, lower: Ty) -> Ty {
-        super::jvm_class_map::platform_flexible_upper_bound(lower)
-    }
-
-    fn generated_serializer_singleton(&self, classifier: TypeName) -> Option<TypeName> {
-        classifier_facts::generated_serializer_singleton(self, classifier)
-    }
-
-    fn serializable_class_elements(
-        &self,
-        classifier: TypeName,
-    ) -> Option<crate::types::SerializableClassElements> {
-        classifier_facts::serializable_class_elements(self, classifier)
-    }
-}
-
 impl JvmLibraries {
     fn top_level_default_realization(
         &self,
@@ -4864,7 +4815,9 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
         // may find the JVM realization (`java/lang/String`, `java/util/List`), but its source identity
         // is the one `.kotlin_builtins` record that declares the Kotlin API. Keeping the physical name
         // here loses members such as inherited `CharSequence.length` and creates a second class model.
-        super::jvm_class_map::jvm_to_kotlin_builtin_metadata_name(internal).unwrap_or(internal)
+        // Only a group Java source maps to Kotlin has that identity: `java.lang.Void` is the realization
+        // `Nothing` erases to, yet a Java or Kotlin reference to it names the ordinary Java class.
+        super::jvm_class_map::to_kotlin_type_name(internal)
     }
 
     fn is_default_library_owner(&self, internal: TypeName) -> bool {
@@ -6163,6 +6116,10 @@ mod tests {
         assert_eq!(
             libs.canonical_source_type_name(type_name("java/lang/String")),
             type_name("kotlin/String")
+        );
+        assert_eq!(
+            libs.canonical_source_type_name(type_name("java/lang/Void")),
+            type_name("java/lang/Void")
         );
     }
 

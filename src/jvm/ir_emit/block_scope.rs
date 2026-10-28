@@ -1214,6 +1214,11 @@ impl Emitter<'_> {
             // FixStack replaces the opening marker with the saved caller stack. Keep that
             // generated store inside the lambda frame's mapped line interval.
             self.mark_statement_line(statement, code);
+            // A statement that states its own line before its operands (a safe call, an
+            // intrinsic call) keeps that entry where an operand marks another line.
+            if self.keeps_start_line(statement) {
+                self.mark_kept_start_line(statement, code);
+            }
             if normalize_at_lambda_frame
                 && matches!(
                     self.ir.debug_local_provenance(statement),
@@ -1432,6 +1437,9 @@ impl Emitter<'_> {
         let Some(&line) = self.ir.expr_lines.get(&statement) else {
             return;
         };
+        // kotlinc's `visitStatementContainer` marks no line for a statement apart from its
+        // expression, so this eager entry is the statement value's own until that value marks it.
+        code.mark_value_boundary(statement);
         // A dispatch owns the line entry at the physical call, so this writes no second entry
         // and the statement keeps its source line. Otherwise the marked line is the mapped
         // output line of an inline copy: a later instruction that returns to this statement

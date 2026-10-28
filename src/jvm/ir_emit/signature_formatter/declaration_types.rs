@@ -11,9 +11,9 @@ pub(in crate::jvm::ir_emit) struct JvmPropertySignatures {
 
 fn retains_generic_type_use(ty: Ty) -> bool {
     match ty.kind() {
-        TyKind::Nullable(inner) | TyKind::PlatformNullable(inner) => {
-            retains_generic_type_use(inner)
-        }
+        TyKind::Nullable(inner)
+        | TyKind::PlatformNullable(inner)
+        | TyKind::MutabilityFlexible(inner) => retains_generic_type_use(inner),
         TyKind::TyParam(..) | TyKind::Fun(_) | TyKind::Intersection(_) => true,
         TyKind::Obj(_, arguments) => !arguments.is_empty(),
         _ => false,

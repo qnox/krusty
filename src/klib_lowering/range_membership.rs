@@ -74,8 +74,9 @@ pub(super) fn range_literal_membership<'a>(
     })
 }
 
-/// Whether dependency preparation omits `expression`'s declaration edge, because body lowering
-/// realizes it as a comparison or declines it.
+/// Whether dependency preparation omits `expression`'s declaration edge. Body lowering realizes
+/// such a call as a comparison, keeps it a call only when another obligation already needs its
+/// declaration, and otherwise declines the body.
 pub(crate) fn folds_range_literal_membership(arena: &KlibIrArena, expression: &KlibIrExpr) -> bool {
     range_literal_membership(arena, expression).is_some()
 }
