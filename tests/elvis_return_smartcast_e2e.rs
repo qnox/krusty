@@ -176,12 +176,60 @@ fun mutated(): String {\n\
     reset()\n\
     return x\n\
 }\n";
-    let expected = [
-        "return type mismatch: expected 'String', actual 'Any?'.",
-        "smart cast to 'String' is impossible, because 'x' is a local variable that is mutated in a capturing closure.",
-    ];
-    assert_eq!(common::reference_error_messages("Main", SRC), expected);
-    let diagnostics = common::front_end_diagnostics_with_stdlib(SRC);
-    assert_eq!(diagnostics.len(), 2);
-    assert_eq!(diagnostics, expected);
+    let sources = [("Main.kt", SRC)];
+    let reference_args = common::language_directives::kotlinc_args(SRC);
+    assert_eq!(
+        common::reference_error_blocks(&sources, &reference_args),
+        [
+            "Main.kt:3:8: return type mismatch: expected 'String', actual 'Any?'.",
+            "Main.kt:10:8: smart cast to 'String' is impossible, because 'x' is a local variable that is mutated in a capturing closure.",
+        ]
+    );
+    common::assert_error_blocks_match_kotlinc(&sources, &reference_args);
+}
+
+#[test]
+fn a_non_null_safe_cast_to_a_nullable_target_narrows_to_its_non_null_form() {
+    // The proof is of a non-null result, so `as? String?` narrows `x` to `String`, not `String?`.
+    const SRC: &str = "fun nullableTarget(x: Any?): Int {\n\
+    (x as? String?) ?: return 0\n\
+    return x.length\n\
+}\n\
+fun box(): String =\n\
+    if (nullableTarget(\"ab\") == 2 && nullableTarget(null) == 0 && nullableTarget(1) == 0) \"OK\" else \"fail\"\n";
+    assert_eq!(
+        common::reference_error_messages("Main", SRC),
+        Vec::<String>::new(),
+        "kotlinc must narrow through a nullable safe-cast target"
+    );
+    assert_eq!(
+        run(SRC).expect("nullable-target smart cast compiles + runs"),
+        "OK"
+    );
+}
+
+#[test]
+fn a_nullable_safe_cast_target_proves_only_its_non_null_form() {
+    // `as? Any?` proves only `Any`, and a closure-mutated `var` declines the non-null target.
+    const SRC: &str = "fun anyTarget(x: Any?): Int {\n\
+    (x as? Any?) ?: return 0\n\
+    return x.length\n\
+}\n\
+fun mutatedNullableTarget(): Int {\n\
+    var x: Any? = \"a\"\n\
+    val reset = { x = 1 }\n\
+    (x as? String?) ?: return 0\n\
+    reset()\n\
+    return x.length\n\
+}\n";
+    let sources = [("Main.kt", SRC)];
+    let reference_args = common::language_directives::kotlinc_args(SRC);
+    assert_eq!(
+        common::reference_error_blocks(&sources, &reference_args),
+        [
+            "Main.kt:3:10: unresolved reference 'length' on receiver of type 'Any'.",
+            "Main.kt:10:8: smart cast to 'String' is impossible, because 'x' is a local variable that is mutated in a capturing closure.",
+        ]
+    );
+    common::assert_error_blocks_match_kotlinc(&sources, &reference_args);
 }
