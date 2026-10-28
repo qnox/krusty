@@ -2525,6 +2525,32 @@ fun box(): String = viaLambdaReceiver(Holder("ok"))
     );
 }
 
+/// An extension function's type parameter is named with its owner's receiver as the declaration
+/// spells it (`fun <T> T?.orName`), as kotlinc words it; a function without a receiver keeps the
+/// bare name.
+#[test]
+fn an_extension_function_type_parameter_owner_names_its_receiver() {
+    let sources = [(
+        "Owner.kt",
+        r#"fun <T : Number> List<T>.firstName(): T = "first"
+fun <T> T?.orName(): T = "name"
+fun <K, V> Map<in K, V>.valueName(key: K): V? = key.hashCode()
+fun <T : CharSequence> plainName(): T = 1
+"#,
+    )];
+    let reference_args = common::language_directives::kotlinc_args(sources[0].1);
+    assert_eq!(
+        common::reference_error_blocks(&sources, &reference_args),
+        [
+            "Owner.kt:1:43: return type mismatch: expected 'T (of fun <T : Number> List<T>.firstName)', actual 'String'.",
+            "Owner.kt:2:26: return type mismatch: expected 'T (of fun <T> T?.orName)', actual 'String'.",
+            "Owner.kt:3:49: return type mismatch: expected 'V? (of fun <K, V> Map<in K, V>.valueName)', actual 'Int'.",
+            "Owner.kt:4:41: return type mismatch: expected 'T (of fun <T : CharSequence> plainName)', actual 'Int'.",
+        ]
+    );
+    common::assert_error_blocks_match_kotlinc(&sources, &reference_args);
+}
+
 /// The builder shape from a SQL library: a member extension's defaulted `separator` rejects the
 /// builder that a top-level extension of the same name accepts, and a trailing receiver lambda
 /// follows. kotlinc selects the top-level extension; the classes match its output.
@@ -2586,18 +2612,6 @@ fun <T> Set<T>.appendTo(builder: Builder, transform: Builder.(T) -> Unit) {}
 fun render(items: List<String>): Unit = with(Builder()) {
     items.appendTo(this) { }
 }
-
-/// An extension function's type parameter is named with its owner's receiver as the declaration
-/// spells it (`fun <T> T?.orName`), as kotlinc words it; a function without a receiver keeps the
-/// bare name.
-#[test]
-fn an_extension_function_type_parameter_owner_names_its_receiver() {
-    let sources = [(
-        "Owner.kt",
-        r#"fun <T : Number> List<T>.firstName(): T = "first"
-fun <T> T?.orName(): T = "name"
-fun <K, V> Map<in K, V>.valueName(key: K): V? = key.hashCode()
-fun <T : CharSequence> plainName(): T = 1
 "#,
     )];
     let reference_args = common::language_directives::kotlinc_args(sources[0].1);
@@ -2605,11 +2619,6 @@ fun <T : CharSequence> plainName(): T = 1
         common::reference_error_blocks(&sources, &reference_args),
         [
             "Render.kt:8:20: argument type mismatch: actual type is 'Builder', but 'CharSequence' was expected.",
-
-            "Owner.kt:1:43: return type mismatch: expected 'T (of fun <T : Number> List<T>.firstName)', actual 'String'.",
-            "Owner.kt:2:26: return type mismatch: expected 'T (of fun <T> T?.orName)', actual 'String'.",
-            "Owner.kt:3:49: return type mismatch: expected 'V? (of fun <K, V> Map<in K, V>.valueName)', actual 'Int'.",
-            "Owner.kt:4:41: return type mismatch: expected 'T (of fun <T : CharSequence> plainName)', actual 'Int'.",
         ]
     );
     common::assert_error_blocks_match_kotlinc(&sources, &reference_args);
