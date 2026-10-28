@@ -22,6 +22,15 @@ pub(super) struct LibraryConstructorMappingFailure {
     class_name: String,
 }
 
+/// A postponed function expression belongs to the rejected constructor's constraint system even
+/// when substituting its fixed type arguments gives the same displayed function type. Retain the
+/// mapped declaration expectation rather than trying to recover it from the constructor display.
+pub(super) struct RejectedConstructorLambda {
+    argument: ExprId,
+    expected: Ty,
+    actual: Ty,
+}
+
 pub(super) enum LibraryConstructorFailure {
     Mapping(Box<LibraryConstructorMappingFailure>),
     TypeMismatch {
@@ -42,6 +51,7 @@ pub(super) enum LibraryConstructorFailure {
         /// kotlinc's rendering of the first constructor rejected by the bound.
         constructor: String,
         bound_constructor: Option<Box<BoundConstructorDiagnostic>>,
+        postponed_lambdas: Vec<RejectedConstructorLambda>,
     },
 }
 
@@ -69,6 +79,36 @@ impl LibraryConstructorFailure {
 }
 
 impl Checker<'_> {
+    pub(super) fn rejected_constructor_lambdas(
+        &self,
+        args: &[ExprId],
+        argument_slots: &[usize],
+        signature: &crate::libraries::GenericSig,
+        explicit: &[Ty],
+    ) -> Vec<RejectedConstructorLambda> {
+        let bindings = crate::symbol_resolver::seeded_gsig_binds(signature, explicit);
+        args.iter()
+            .zip(argument_slots)
+            .filter_map(|(&argument, &parameter)| {
+                if !matches!(self.file.expr(argument), Expr::Lambda { .. }) {
+                    return None;
+                }
+                let declared = *signature.params.get(parameter)?;
+                let expected = crate::types::ty_subst_keep_unbound(declared, &bindings);
+                let actual = self.expr_types[argument.0 as usize];
+                (expected.non_null().is_fun()
+                    && actual.non_null().is_fun()
+                    && !actual.mentions_error()
+                    && !actual.mentions_pending())
+                .then_some(RejectedConstructorLambda {
+                    argument,
+                    expected,
+                    actual,
+                })
+            })
+            .collect()
+    }
+
     /// The bound and argument of the first of a constructor's explicit type arguments `explicit`
     /// outside its bound, when every one of the classifier's `formals` is given explicitly.
     pub(super) fn explicit_constructor_bound_violation(
@@ -156,23 +196,39 @@ impl Checker<'_> {
                 explicit,
                 constructor,
                 bound_constructor,
+                postponed_lambdas,
             } => {
                 let reported_bound = bound_constructor.is_some_and(|bound| {
                     let display = format!("{}.{}", bound.outer.source_name(), constructor);
                     self.report_bound_inner_constructor_type_arguments(
-                        call, &explicit, &bound, &display,
+                        call,
+                        &explicit,
+                        &bound,
+                        &display,
+                        postponed_lambdas.is_empty(),
                     )
                 });
                 if !reported_bound
                     && !self.report_explicit_constructor_type_argument_bounds(
                         call,
                         classifier,
-                        !args.is_empty(),
+                        !args.is_empty() && postponed_lambdas.is_empty(),
                         &explicit,
                         &constructor,
                     )
                 {
                     self.expect_assignable(expected, actual, self.span(call), "type argument");
+                }
+                for constraint in postponed_lambdas {
+                    // The failed declaration bound is already proof that this postponed
+                    // constraint cannot complete. An assignability probe would discard it
+                    // merely because both substituted types happen to display alike.
+                    self.report_assignability_error(
+                        constraint.expected,
+                        constraint.actual,
+                        self.span(constraint.argument),
+                        "argument",
+                    );
                 }
                 for &argument in args {
                     self.report_unbound_call_result_type_parameter(scope, argument);
