@@ -45383,7 +45383,7 @@ impl<'a> Checker<'a> {
         if !self.fragment.is_type_use_annotations() {
             self.check_class_missing_supertypes(cl, d, current_owner, is_anonymous_object);
         }
-        self.validate_class_superclass(d, cl, current_owner);
+        self.validate_class_superclass(d, cl, current_owner, body_local_class);
         if !self.fragment.is_type_use_annotations() {
             self.check_value_class_parameters(scope, cl, current_owner);
         }
@@ -46628,6 +46628,9 @@ impl<'a> Checker<'a> {
                     self.finish_registered_local_method(declaration);
                 }
                 method_check_index += 1;
+            }
+            if body_local_class {
+                self.check_class_abstract_members(d, cl, current_owner);
             }
             // Enum entry bodies (`ENTRY { val y = … ; override fun m() = y }`): each override is
             // checked like a method of the enum — `this` is the enum type, the enum's properties AND

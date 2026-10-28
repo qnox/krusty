@@ -416,6 +416,24 @@ pub(super) fn from_checked_analysis(
     types: &[Option<FrontendTypeInfo>],
     symbols: &mut FrontendSymbols,
 ) -> Option<StreamedPassState> {
+    // An inline function in a source whose bodies this analysis does not check has no checked FIR
+    // to prepare. The analysis then publishes the declaration inventory without inline bodies,
+    // as a header-only analysis (a KSP round's) needs.
+    let unchecked = bodies.inline.units().iter().any(|work| {
+        module
+            .index()
+            .declaration_anchor(work.declaration)
+            .is_some_and(|anchor| {
+                types
+                    .get(anchor.source.raw() as usize)
+                    .is_none_or(Option::is_none)
+            })
+    });
+    if unchecked {
+        crate::trace_compiler!("fir", "Pass 1 inline work is in an unchecked source");
+        let (index, _, _, sources) = module.into_parts();
+        return Some(super::diagnostic_streamed_state(index, sources));
+    }
     let selection = bodies.inline_check_selection(module.index(), files.len());
     let payload_roots = inline_payload_roots(&selection, module.index())?;
     let (mut index, mut inline_bodies, initial_defaults, mut sources) = module.into_parts();
@@ -449,13 +467,7 @@ pub(super) fn from_checked_analysis(
             crate::trace_compiler!("fir", "Pass 1 inline-local source {raw_source} is absent",);
             return None;
         };
-        let Some(info) = types.get(raw_source).and_then(Option::as_ref) else {
-            crate::trace_compiler!(
-                "fir",
-                "Pass 1 inline-local source {raw_source} has no checked type information",
-            );
-            return None;
-        };
+        let info = types.get(raw_source).and_then(Option::as_ref)?;
         if let Err(declarations) = crate::resolve::publish_checked_inline_local_signatures(
             file, source, symbols, info, &mut index, owners, None,
         ) {

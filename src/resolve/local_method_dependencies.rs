@@ -378,7 +378,7 @@ impl Checker<'_> {
         })
     }
 
-    fn body_local_declared_member_candidates_at(
+    pub(super) fn body_local_declared_member_candidates_at(
         &self,
         receiver: Ty,
         name: &str,
