@@ -76,6 +76,7 @@ fn case_compiler_configuration(src: &str) -> Result<UnitCompilerConfiguration, S
 /// | `// STRING_CONCAT: X` | `-Xstring-concat=X` |
 /// | `// ASSERTIONS_MODE: X` | `-Xassertions=X` |
 /// | `// WHEN_EXPRESSIONS: X` | `-Xwhen-expressions=x` |
+/// | `// WITH_COMPOSE` | `-Xplugin=<the distribution's Compose plugin>`, with source information |
 ///
 /// The per-unit `// LAMBDAS:`, `// SAM_CONVERSIONS:` and `// JVM_DEFAULT_MODE:` directives belong
 /// to [`unit_kotlinc_arguments`]; a value of one that names no mode fails closed here, so no unit
@@ -148,6 +149,23 @@ fn case_cli_arguments(src: &str) -> Result<Vec<String>, String> {
     }
     if let Some(mode) = last_value(src, "WHEN_EXPRESSIONS") {
         arguments.push(format!("-Xwhen-expressions={}", mode.to_ascii_lowercase()));
+    }
+    if directive(src, "WITH_COMPOSE") {
+        // The reference distribution's own plugin jar, with source information on so a case
+        // covers its encoding; every other option keeps the plugin's default.
+        let plugin =
+            crate::toolchain::dist_jar("compose-compiler-plugin.jar").ok_or_else(|| {
+                "box directive `// WITH_COMPOSE` needs the reference distribution's Compose plugin"
+                    .to_string()
+            })?;
+        arguments.push(format!("-Xplugin={}", plugin.display()));
+        arguments.extend([
+            "-P".to_string(),
+            format!(
+                "plugin:{}:sourceInformation=true",
+                crate::plugins::cli::COMPOSE_PLUGIN_ID
+            ),
+        ]);
     }
     Ok(arguments)
 }
