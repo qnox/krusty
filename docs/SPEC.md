@@ -16268,6 +16268,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `named_warning_policy_controls_deprecation` in `tests/deprecation_usage_e2e.rs`;
   `warning_level_is_forwarded_to_the_typed_cli_policy` in `crates/krusty-cli/src/worker.rs`;
   `kotlin_compiler_slice_compiles_through_krusty` in `crates/krusty-build/src/gradle.rs`.)
+- **A failed compilation reports only its errors unless `-Xreport-all-warnings` is given.** With
+  the argument, kotlinc keeps the module warnings and the located source warnings of a compilation
+  that fails on an error, in the order a successful compilation reports them. `-nowarn` still removes
+  them; `-Werror` adds no `warnings found` summary, since the
+  compilation has already failed. The Bazel worker forwards `--x_report_all_warnings` as the same
+  argument. (`a_failed_compilation_reports_its_warnings_under_report_all_warnings` in
+  `tests/report_all_warnings_e2e.rs`.)
 - **The command line is parsed by kotlinc's rules, from kotlinc's own argument table.** Each
   supported release's JVM arguments (name, short and deprecated spellings, value type, delimiter,
   deprecation/removal, `@Enables`/`@Disables` features) are read by reflection from that release's
