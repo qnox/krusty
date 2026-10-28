@@ -1,5 +1,15 @@
 # krusty — a memory-lean Kotlin→JVM compiler PoC
 
+## Smart casts from a non-null safe cast
+
+A non-null `operand as? T` result proves its stable operand is `T`, exactly where the result itself
+is proven non-null: after `(x as? T) ?: return`, after `if ((x as? T) == null) return`, and on the
+true side of a safe-call chain rooted at the cast compared with `true`
+(`(x as? T)?.f() == true && x.g()`). An elvis that completes normally, a guarded statement, or a
+chain compared with `false` proves nothing, as kotlinc 2.4.21 reports. Tests:
+`tests/box_regressions/safeCastNonNullSmartCast.kt` and
+`resolver_regression_e2e::a_safe_cast_without_a_non_null_proof_does_not_smart_cast_like_kotlinc`.
+
 ## Dependency conversion type evidence
 
 Ordinary KLIB bodies and prepared inline templates prove subtype conversions through the calling

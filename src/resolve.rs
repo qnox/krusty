@@ -44226,6 +44226,7 @@ impl<'a> Checker<'a> {
             {
                 self.null_proof_or_decline(scope, &root_path, out, declined, self.span(operand));
             }
+            self.safe_cast_non_null_narrowing(scope, root, out);
             return;
         };
         // A plain chain's proof covers only the full path; a safe-call chain's covers every prefix.

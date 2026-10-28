@@ -71,6 +71,33 @@ impl Checker<'_> {
         }
     }
 
+    /// A non-null `operand as? T` result proves its stable operand is `T`: `(x as? T) ?: return`,
+    /// `(x as? T) != null`, and a safe-call chain rooted at the cast (`(x as? T)?.f() == true`).
+    pub(super) fn safe_cast_non_null_narrowing(
+        &self,
+        scope: &CheckerScope<'_>,
+        expression: ExprId,
+        out: &mut Vec<(NarrowPath, Ty)>,
+    ) {
+        let Expr::As {
+            operand,
+            ty,
+            nullable: true,
+        } = self.file.expr(expression)
+        else {
+            return;
+        };
+        let Some(path) = self.expr_access_path(*operand) else {
+            return;
+        };
+        let Some(stable_ty) = self.stable_path_ty(scope, &path, self.span(expression)) else {
+            return;
+        };
+        if let Some(narrowed) = self.proven_narrowed_ty(scope, Some(stable_ty), ty) {
+            out.push((path, narrowed.non_null()));
+        }
+    }
+
     /// Scope for the right operand of an eager operator. `None` when the left operand ran no
     /// non-null `as`.
     pub(super) fn evaluated_cast_scope<'a>(
