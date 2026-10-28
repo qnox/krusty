@@ -49,11 +49,18 @@ impl Ledger {
     pub(super) fn record(&self, qualified_name: String, class: ClassLedger) {
         self.0.borrow_mut().insert(qualified_name, class);
     }
+
+    pub(super) fn into_classes(self) -> HashMap<String, ClassLedger> {
+        self.0.into_inner()
+    }
 }
 
 /// Fills in the member lists of every source classifier of `files` that the round can order.
-pub(super) fn order(files: &mut [KspFile], ledger: Ledger, analysis: &SourceSetAnalysis) {
-    let ledger = ledger.0.into_inner();
+pub(super) fn order(
+    files: &mut [KspFile],
+    ledger: &HashMap<String, ClassLedger>,
+    analysis: &SourceSetAnalysis,
+) {
     let lists = {
         let mut classes = HashMap::default();
         for file in files.iter() {
@@ -61,7 +68,7 @@ pub(super) fn order(files: &mut [KspFile], ledger: Ledger, analysis: &SourceSetA
         }
         let mut order = Order {
             classes,
-            ledger: &ledger,
+            ledger,
             analysis,
             any: any_functions(analysis),
             closures: HashMap::default(),

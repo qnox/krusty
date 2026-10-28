@@ -17473,12 +17473,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   library declaration is refused for that query. A compiler accessor of an interface's property
   without modifiers, or of an `abstract` property, is public and abstract.
   (`crates/krusty-plugin-host/tests/ksp.rs`, `effective_java_modifiers_are_what_ksp2_reports`.)
-- **A KSP source declaration written without `override` has no overridee.**
-  `findOverridee` of a written (`KOTLIN`) function or property without the `override` modifier,
-  and of any constructor, is `null`, as KSP2 2.3.12 reports. The overridee of an `override`
-  member, and of a compiler-generated function whose `override` modifier says nothing of it (a
-  data class's `componentN`), is refused. (`crates/krusty-plugin-host/tests/ksp.rs`,
-  `overridees_are_what_ksp2_reports`, `the_overridee_of_an_override_is_refused`.)
+- **A KSP source member's overridee is the first member it directly overrides.**
+  `findOverridee` of a written (`KOTLIN`) `override` function or property is the first member it
+  directly overrides, in the order the classifier's supertypes are written, and a member only a
+  fake override inherits along the way is the declaration that fake override stands for: `C.f`
+  overrides `A.f` when `B` between them does not override it; `kotlin.Any`'s `toString` is
+  `KOTLIN_LIB`, declared by `kotlin.Any`. A member written
+  without `override`, any constructor, a top-level declaration, and a compiler-generated member
+  (a data class's `componentN` and `copy`) have none, as KSP2 2.3.12 reports. A library overridee
+  the round does not describe on its own is refused: a member of a Java classifier other than an
+  annotation (`Runnable.run`), one of a classifier with type parameters, which KSP2 reports
+  unsubstituted (`Comparable<F>.compareTo` takes a `T`), and one sharing its name with another of
+  its classifier's members. (`crates/krusty-plugin-host/tests/ksp.rs`,
+  `overridees_are_what_ksp2_reports`, `an_overridee_the_round_cannot_describe_is_refused`.)
 - **A KSP Java annotation's array elements without a default default to an empty array.**
   `KSAnnotation.defaultArguments` of an application of a Java library annotation lists an empty
   array for every array-typed element the annotation declares without a default, in declaration

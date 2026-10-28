@@ -17,6 +17,7 @@ mod annotations;
 mod backing_field;
 mod declarations;
 mod library;
+mod overridees;
 mod platform_names;
 mod type_model;
 
@@ -71,7 +72,9 @@ pub fn ksp_round(
         };
         files.push(source.file()?);
     }
-    all_members::order(&mut files, ledger, analysis);
+    let ledger = ledger.into_classes();
+    all_members::order(&mut files, &ledger, analysis);
+    overridees::assign(&mut files, &ledger, analysis);
     Ok(KspRound { files })
 }
 
