@@ -7,6 +7,11 @@ declaration alongside the layout, and consume that record when materializing fie
 initializer accesses. This supplies the shared storage evidence for the subsequent imported getter
 consumer without changing constructor arguments or initializer order.
 
+Native constructor realization preserves an already checked primary target. Only an explicit
+signature selection consumes the retained declaration-parameter ledger. Physical frame types stay
+separate, including normalized Unit fields and captured outer-instance prefixes. Owning Native
+E2Es establish the JVM answer before exercising primary, generated-copy and secondary calls.
+
 ## Class-generic dependency method exports
 
 Retain the complete declared self type, including captured parameters, at FIR lowering and consume
@@ -6140,9 +6145,14 @@ cover repeated allocation, initializer order, storage distinct from constructor 
 same-name source classifier's complete refusal diagnostic.
 
 Constructor exports across support units, qualified class facts across producer/source collisions,
-direct source construction, inheritance, secondary/default/vararg/generic constructors and imported
+direct source construction, inheritance, secondary/default/vararg constructors and imported
 accessor/member dispatch remain required follow-ups. The first slice explicitly declines identity
 collisions before backend emission. It does not close #2621 or change any outcome baseline.
+
+Generic initialization extends the same plan with authenticated class formals and bounds. Declared
+field types and full initializer receiver types remain unchanged across concrete constructor calls.
+An official-producer regression observes Int/Long extremes, String and nullable constructor values through
+callbacks and initializer counts. Getter admission and imported member dispatch remain separate.
 
 ## Anonymous declaration result publication
 

@@ -1896,6 +1896,8 @@ mod native_comparator_e2e;
 mod native_concurrency_e2e;
 #[path = "native_const_reference_e2e.rs"]
 mod native_const_reference_e2e;
+#[path = "native_constructor_selection_e2e.rs"]
+mod native_constructor_selection_e2e;
 #[path = "native_context_parameter_sam_e2e.rs"]
 mod native_context_parameter_sam_e2e;
 #[path = "native_cross_file_dispatch_e2e.rs"]

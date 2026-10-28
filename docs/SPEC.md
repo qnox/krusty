@@ -20258,7 +20258,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   admission contract below.
 
 - **Imported ordinary classes initialize from their declared storage.** A reached KLIB constructor
-  can materialize a final, non-generic ordinary class whose sole primary constructor delegates to
+  can materialize a final ordinary class whose sole primary constructor delegates to
   `Any` and runs its own instance initializer. Exact producer/class/constructor identities, metadata
   modifiers, receiver and field types must agree with the serialized declarations. Storage comes
   from actual field declarations, never constructor positions. Constructor arguments remain plain
@@ -20266,8 +20266,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   each fresh instance. The private initialization frame retains its instance receiver and argument
   identities, including captured values. Preparation and lowering use the same admission plan and
   follow initializer calls through the existing producer-origin graph.
-  Unsupported inheritance, secondary/default/vararg constructors, value/inner/expect classes,
-  generic classes and member dispatch remain separate capabilities. Existing target runtime
+  Generic class storage and initializer receivers retain the complete declared class formals and
+  bounds. Each call uses its checked constructor application; actual arguments never specialize
+  the stored field layout. The official-producer generic-initializer regression checks Int/Long
+  extremes, String and null through callbacks and initializer effect counts. Reading imported
+  properties remains part of the separate getter capability.
+  Native keeps a checked known-primary constructor selection through physical parameter
+  normalization. Retained declaration parameters refine an explicit signature selection only;
+  they cannot turn that known target into a second overload-matching obligation. Native owning
+  E2Es cover Unit-bearing ordinary/data classes, generated copies and explicit secondary calls.
+  Unsupported inheritance, secondary/default/vararg constructors, value/inner/expect classes
+  and member dispatch remain separate capabilities. Existing target runtime
   constructors retain their frozen external contract. Before target emission, a same-name source
   classifier, different producer or separately materialized support unit declines explicitly until
   qualified class facts and constructor exports can connect them safely. No partial support export

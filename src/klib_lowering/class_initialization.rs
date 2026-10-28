@@ -48,7 +48,6 @@ pub(super) fn plan<'a, 'b>(
         || contract.is_value
         || contract.is_inner
         || contract.is_expect
-        || !contract.parameters.formals.is_empty()
         || contract.primary_constructor.as_ref()
             != match &selected.identity().declaration {
                 KlibDeclarationSignature::Public(signature) => Some(signature),
@@ -96,8 +95,7 @@ pub(super) fn plan<'a, 'b>(
         .this_receiver
         .as_ref()
         .ok_or_else(|| mismatch("a materialized class has no serialized instance receiver"))?;
-    if semantic_type(header.arena, &header.types, receiver.ty)? != Ty::obj_name(contract.classifier)
-    {
+    if semantic_type(header.arena, &header.types, receiver.ty)? != contract.self_type() {
         return Err(mismatch(
             "a class instance receiver has another declared type",
         ));
