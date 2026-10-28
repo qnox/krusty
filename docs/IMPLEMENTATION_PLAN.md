@@ -1,5 +1,15 @@
 # krusty — implementation plan
 
+## Consume declaration names in metadata class headers
+
+Resolve selected declaration keys against the frozen name inventory and pass mandatory resolved
+class IDs into the common Class schema. JVM and KLIB headers share that writer; KLIB's class-name
+inventory reuses it. Select nested children and top-level KLIB roots from retained declaration
+ownership. Retain generated classifier names from the existing typed plugin facts.
+Keep explicit local provenance separate from unknown evidence. Other class-ID consumers in types,
+aliases, annotations and sealed-class inventories remain separate follow-ups; this step does not
+claim to replace their legacy encoding or callable-reference adapter naming.
+
 ## Shared dependency conversion evidence
 
 Reuse the constructor-bound collaborator for ordinary dependency bodies and prepared templates.
@@ -6213,8 +6223,11 @@ supplying nested result context; independently inferred arguments remain intact.
 selection completes untyped lambda inputs from the retained candidate and source argument mapping,
 then rechecks only affected bodies without the rejected expected result. Normal checking and
 recovery share the function input layout, including contexts and anonymous receiver slots. Exact
-source/dependency diagnostics and admitted-context controls cover #2587. Explicit invalid-bound
-lambda diagnostic ordering remains a separate follow-up in #2629.
+source/dependency diagnostics and admitted-context controls cover #2587. For #2629, explicit bound
+rejection retains mapped, substituted postponed-lambda constraints before discarding the candidate.
+Reporting consumes those typed failure facts without redoing selection or assignability; fixed
+inputs and nested-producer isolation remain intact. Callable-reference winner diagnostics remain
+the separate #2776 follow-up.
 
 Late extension admission now uses strict receiver assignability or the existing satisfiable
 postponed-frame trial. The common operation also serves unbound constructor-reference receivers;
@@ -6240,3 +6253,19 @@ Nominal function values use the shared subtype relation to reach the canonical f
 of the expected signature. Applied hierarchy traversal retains declared variance, nullability,
 arity and suspend kind. Owning semantic tests cover reflective and inherited function declarations
 and unrelated-callable rejection; the JVM round trip covers nominal and reflection interface slots.
+
+## Compose compiler plugin  🚧
+
+krusty reimplements the Compose compiler plugin as a native pass (`src/plugins/compose`), one
+construct at a time, each byte-identical to kotlinc's output. The registry marks it partly
+implemented, so `krusty refusals` keeps a Compose module on kotlinc until the list below is done,
+and the pass rejects every construct it does not cover yet.
+
+- [x] Parameterless `Unit` top-level composables: restart groups, skipping, durable keys,
+  `@FunctionKeyMeta`, source information and trace markers; calls between them in one file.
+- [ ] Calls to composables of other files and modules, and the grouping annotations.
+- [ ] `@Composable` function types and lambdas, and the composable call checker's diagnostics.
+- [ ] Parameters: `$changed` bit sets per parameter, `$default` masks, stability inference.
+- [ ] The full body transform: control-flow groups, `remember`, early returns, inline composables.
+- [ ] `ComposableSingletons` lambda holders and the `$stable` field of classes.
+- [ ] Remove the partial marker and rerun the corpus for the Compose projects.

@@ -831,8 +831,14 @@ fn write_closed_range_contains_klib_with_shadowed_declarations(
         .into_iter()
         .collect::<Vec<_>>();
     let class_tail = crate::metadata::class_builder::ClassTail::default();
+    let class_id = crate::metadata::class_id::ResolvedClassId::declared(
+        type_name("kotlin/ranges/DependencyOnlyClass"),
+        type_name("kotlin/ranges"),
+        &["DependencyOnlyClass"],
+    );
     let dependency_only_class = crate::metadata::class_builder::ClassDeclaration {
         name: type_name("kotlin/ranges/DependencyOnlyClass"),
+        class_id: &class_id,
         ctor_params: &[],
         props: &[],
         methods: &[],
