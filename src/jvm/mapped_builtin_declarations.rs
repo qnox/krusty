@@ -165,36 +165,50 @@ pub(super) fn collection_bridge_policy_for_declaration(
         })
 }
 
+/// The complete declared signature of one overridden declaration, before any substitution.
+#[derive(Clone, Copy)]
+pub(super) struct OverriddenSignature<'a> {
+    pub(super) owner: TypeName,
+    pub(super) name: &'a str,
+    pub(super) receiver: Option<crate::types::Ty>,
+    pub(super) parameters: &'a [crate::types::Ty],
+    pub(super) result: crate::types::Ty,
+}
+
 /// The call-site realization kotlinc gives an override of one type-safe collection declaration.
 /// Its JVM signature mapper calls such an override through the declaration's erased signature
 /// (`getOverriddenBuiltinReflectingJvmDescriptor`), so `override fun get(key: String)` of a
 /// `Map<String, V>` is invoked as `get(Ljava/lang/Object;)Ljava/lang/Object;` and reaches the
-/// override through its special bridge. The overridden declaration is identified by its owner,
-/// name and arity: each row's parameters are erased type parameters, so the arity alone
-/// distinguishes `MutableMap.remove(key)` from `MutableMap.remove(key, value)`.
+/// override through its special bridge. The overridden declaration is authenticated by its
+/// complete declared signature, erased, against the same policy rows its bridge uses.
+/// A member extension (`receiver`) never names a collection declaration.
 pub(super) fn type_safe_override_realization(
-    declaration_owner: TypeName,
-    source_name: &str,
-    arity: usize,
+    declaration: OverriddenSignature<'_>,
 ) -> Option<crate::libraries::OverriddenCallRealization> {
-    collection_bridge_policies()
+    if declaration.receiver.is_some() {
+        return None;
+    }
+    let parameters = declaration
+        .parameters
         .iter()
-        .find(|row| {
-            row.declaration_owner == declaration_owner
-                && row.source_name == source_name
-                && descriptor_parameter_count(row.descriptor) == arity
-        })
-        .map(|row| crate::libraries::OverriddenCallRealization {
-            kind: crate::libraries::OverriddenCallKind::Function,
-            declaration_owner,
-            physical_name: source_name.to_string(),
-            descriptor: row.descriptor.to_string(),
-        })
-}
-
-/// Parameter count of a policy row's descriptor, whose parameters are all `Ljava/lang/Object;`.
-fn descriptor_parameter_count(descriptor: &str) -> usize {
-    descriptor_parameters(descriptor).matches(';').count()
+        .map(|parameter| crate::jvm::bridges::bridge_erasure(*parameter))
+        .collect::<Vec<_>>();
+    let descriptor = crate::jvm::names::method_descriptor(
+        &parameters,
+        crate::jvm::bridges::bridge_erasure(declaration.result),
+    );
+    collection_bridge_policy_for_declaration(
+        declaration.owner,
+        declaration.name,
+        &descriptor,
+        MappedBuiltinMemberKind::Function,
+    )?;
+    Some(crate::libraries::OverriddenCallRealization {
+        kind: crate::libraries::OverriddenCallKind::Function,
+        declaration_owner: declaration.owner,
+        physical_name: declaration.name.to_string(),
+        descriptor,
+    })
 }
 
 /// How kotlinc writes the generic signature of one exact Kotlin collection declaration's

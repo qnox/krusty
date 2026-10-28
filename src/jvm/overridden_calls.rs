@@ -11,7 +11,7 @@ use crate::jvm::jvm_class_map::type_names_map_to_same_jvm_internal;
 use crate::libraries::{OverriddenCallKind, OverriddenCallRealization};
 use crate::types::TypeName;
 
-use super::mapped_builtin_declarations::type_safe_override_realization;
+use super::mapped_builtin_declarations::{type_safe_override_realization, OverriddenSignature};
 use super::member_dispatch::{CheckedDispatchClassifiers, MissingClassifier};
 
 fn callable_candidates(
@@ -53,11 +53,13 @@ fn function_candidates(
                 if let Some(fact) = callables.callable(target) {
                     candidates.extend(fact.overridden_declarations.iter().filter_map(
                         |declaration| {
-                            type_safe_override_realization(
-                                declaration.owner,
-                                &declaration.name,
-                                declaration.params.len(),
-                            )
+                            type_safe_override_realization(OverriddenSignature {
+                                owner: declaration.owner,
+                                name: &declaration.name,
+                                receiver: declaration.receiver,
+                                parameters: &declaration.params,
+                                result: declaration.ret,
+                            })
                         },
                     ));
                 }
@@ -70,11 +72,15 @@ fn function_candidates(
                     .filter(|edge| edge.implementation == current)
                 {
                     pending.push(edge.overridden);
-                    candidates.extend(type_safe_override_realization(
-                        edge.overridden_owner,
-                        &edge.name,
-                        edge.declared_parameters.len(),
-                    ));
+                    // A module edge records any extension receiver among its parameters, so the policy
+                    // signature never matches one.
+                    candidates.extend(type_safe_override_realization(OverriddenSignature {
+                        owner: edge.overridden_owner,
+                        name: &edge.name,
+                        receiver: None,
+                        parameters: &edge.declared_parameters,
+                        result: edge.declared_result,
+                    }));
                 }
             }
         }
