@@ -140,6 +140,14 @@ pub enum KspMember {
         file: Option<String>,
         declaration: Box<KspDeclaration>,
     },
+    /// The member at `position` of the properties (`property`) or functions the module's own
+    /// classifier `owner` lists: an intersection member made for that classifier, which another
+    /// one inherits.
+    Listed {
+        owner: String,
+        property: bool,
+        position: u32,
+    },
 }
 
 /// What `findOverridee` answers for a function or property.

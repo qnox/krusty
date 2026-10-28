@@ -35,17 +35,6 @@ w: [ksp] intersections.Right fun toString(): String parent=kotlin.Any origin=KOT
 w: [ksp] intersections.Right property label: String parent=intersections.Right origin=KOTLIN modifiers=[]
 w: [ksp] intersections.Right property other: Int parent=intersections.Right origin=KOTLIN modifiers=[]
 w: [ksp] intersections.Right property both: Int parent=intersections.Right origin=KOTLIN modifiers=[]
-w: [ksp] intersections.Joined fun shared(x: Int): Int parent=intersections.Joined origin=SYNTHETIC modifiers=[ABSTRACT, PUBLIC] abstract=true
-w: [ksp] intersections.Joined fun shared(y: String): Int parent=intersections.Right origin=KOTLIN modifiers=[] abstract=true
-w: [ksp] intersections.Joined fun same(): String parent=intersections.Joined origin=SYNTHETIC modifiers=[ABSTRACT, PUBLIC] abstract=true
-w: [ksp] intersections.Joined fun equals(other: Any?): Boolean parent=kotlin.Any origin=KOTLIN_LIB modifiers=[OPEN, OPERATOR, OVERRIDE, PUBLIC] abstract=false
-w: [ksp] intersections.Joined fun hashCode(): Int parent=kotlin.Any origin=KOTLIN_LIB modifiers=[OPEN, PUBLIC] abstract=false
-w: [ksp] intersections.Joined fun toString(): String parent=kotlin.Any origin=KOTLIN_LIB modifiers=[OPEN, PUBLIC] abstract=false
-w: [ksp] intersections.Joined fun <init>(): Joined parent=intersections.Joined origin=SYNTHETIC modifiers=[FINAL, PUBLIC] abstract=false
-w: [ksp] intersections.Joined property label: String parent=intersections.Joined origin=SYNTHETIC modifiers=[ABSTRACT, OVERRIDE, PUBLIC]
-w: [ksp] intersections.Joined property count: Int parent=intersections.Left origin=KOTLIN modifiers=[]
-w: [ksp] intersections.Joined property both: Int parent=intersections.Joined origin=SYNTHETIC modifiers=[ABSTRACT, OVERRIDE, PUBLIC]
-w: [ksp] intersections.Joined property other: Int parent=intersections.Right origin=KOTLIN modifiers=[]
 w: [ksp] intersections.Further fun shared(x: Int): Int parent=intersections.Joined origin=SYNTHETIC modifiers=[ABSTRACT, PUBLIC] abstract=true
 w: [ksp] intersections.Further fun shared(y: String): Int parent=intersections.Right origin=KOTLIN modifiers=[] abstract=true
 w: [ksp] intersections.Further fun same(): String parent=intersections.Joined origin=SYNTHETIC modifiers=[ABSTRACT, PUBLIC] abstract=true
@@ -57,6 +46,17 @@ w: [ksp] intersections.Further property label: String parent=intersections.Joine
 w: [ksp] intersections.Further property count: Int parent=intersections.Left origin=KOTLIN modifiers=[]
 w: [ksp] intersections.Further property both: Int parent=intersections.Joined origin=SYNTHETIC modifiers=[ABSTRACT, OVERRIDE, PUBLIC]
 w: [ksp] intersections.Further property other: Int parent=intersections.Right origin=KOTLIN modifiers=[]
+w: [ksp] intersections.Joined fun shared(x: Int): Int parent=intersections.Joined origin=SYNTHETIC modifiers=[ABSTRACT, PUBLIC] abstract=true
+w: [ksp] intersections.Joined fun shared(y: String): Int parent=intersections.Right origin=KOTLIN modifiers=[] abstract=true
+w: [ksp] intersections.Joined fun same(): String parent=intersections.Joined origin=SYNTHETIC modifiers=[ABSTRACT, PUBLIC] abstract=true
+w: [ksp] intersections.Joined fun equals(other: Any?): Boolean parent=kotlin.Any origin=KOTLIN_LIB modifiers=[OPEN, OPERATOR, OVERRIDE, PUBLIC] abstract=false
+w: [ksp] intersections.Joined fun hashCode(): Int parent=kotlin.Any origin=KOTLIN_LIB modifiers=[OPEN, PUBLIC] abstract=false
+w: [ksp] intersections.Joined fun toString(): String parent=kotlin.Any origin=KOTLIN_LIB modifiers=[OPEN, PUBLIC] abstract=false
+w: [ksp] intersections.Joined fun <init>(): Joined parent=intersections.Joined origin=SYNTHETIC modifiers=[FINAL, PUBLIC] abstract=false
+w: [ksp] intersections.Joined property label: String parent=intersections.Joined origin=SYNTHETIC modifiers=[ABSTRACT, OVERRIDE, PUBLIC]
+w: [ksp] intersections.Joined property count: Int parent=intersections.Left origin=KOTLIN modifiers=[]
+w: [ksp] intersections.Joined property both: Int parent=intersections.Joined origin=SYNTHETIC modifiers=[ABSTRACT, OVERRIDE, PUBLIC]
+w: [ksp] intersections.Joined property other: Int parent=intersections.Right origin=KOTLIN modifiers=[]
 w: [ksp] intersections.Impl fun shared(z: Int): Int parent=intersections.Impl origin=KOTLIN modifiers=[OPEN] abstract=false
 w: [ksp] intersections.Impl fun equals(other: Any?): Boolean parent=kotlin.Any origin=KOTLIN_LIB modifiers=[OPEN, OPERATOR, OVERRIDE, PUBLIC] abstract=false
 w: [ksp] intersections.Impl fun hashCode(): Int parent=kotlin.Any origin=KOTLIN_LIB modifiers=[OPEN, PUBLIC] abstract=false

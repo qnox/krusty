@@ -80,10 +80,21 @@ pub(super) fn order(
             .map(|name| {
                 let functions = order.list(name, Kind::Functions);
                 let properties = order.list(name, Kind::Properties);
-                let members = |entries: Option<std::rc::Rc<Vec<Entry>>>| {
-                    entries.map(|entries| entries.iter().map(|entry| entry.member(name)).collect())
+                let members = |entries: Option<std::rc::Rc<Vec<Entry>>>, kind| {
+                    entries.and_then(|entries| {
+                        entries
+                            .iter()
+                            .map(|entry| order.member(entry, name, kind))
+                            .collect()
+                    })
                 };
-                (name.to_string(), (members(properties), members(functions)))
+                (
+                    name.to_string(),
+                    (
+                        members(properties, Kind::Properties),
+                        members(functions, Kind::Functions),
+                    ),
+                )
             })
             .collect::<HashMap<String, MemberLists>>()
     };
@@ -359,7 +370,7 @@ impl Order<'_> {
                 {
                     // The generated member overrides the one it takes the place of.
                     let mut function = generated.remove(position).clone();
-                    function.overridee = KspOverridee::Member(entry.member(name));
+                    function.overridee = KspOverridee::Member(self.member(entry, name, kind)?);
                     let mut closure = vec![entry.identity.clone()];
                     closure.extend(entry.closure.iter().cloned());
                     overridden.extend(closure.iter().cloned());
@@ -476,6 +487,26 @@ impl Order<'_> {
         let mut seen = HashSet::default();
         names.retain(|name| seen.insert(name.clone()));
         Some(names)
+    }
+
+    /// `entry` as the classifier `class` lists it among its members of `kind`; an intersection
+    /// member made for another classifier by its place in that classifier's list, as a later file
+    /// may declare that classifier.
+    fn member(&self, entry: &Entry, class: &str, kind: Kind) -> Option<KspMember> {
+        match &entry.place {
+            Place::Intersection { owner, .. } if owner != class => {
+                let list = self.lists.get(&(owner.clone(), kind))?.as_ref()?;
+                let position = list
+                    .iter()
+                    .position(|listed| listed.identity == entry.identity)?;
+                Some(KspMember::Listed {
+                    owner: owner.clone(),
+                    property: kind == Kind::Properties,
+                    position: u32::try_from(position).ok()?,
+                })
+            }
+            _ => Some(entry.member(class)),
+        }
     }
 
     /// Every member `identity` overrides, directly or not, as the frontend selected them.

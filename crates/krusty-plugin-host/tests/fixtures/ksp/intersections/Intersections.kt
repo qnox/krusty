@@ -36,9 +36,10 @@ interface Right {
     var both: Int
 }
 
-abstract class Joined : Left, Right
-
+// Declared before the classifier its intersection members are made for.
 abstract class Further : Joined()
+
+abstract class Joined : Left, Right
 
 open class Impl {
     open fun shared(z: Int): Int = z

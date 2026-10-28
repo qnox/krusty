@@ -2,20 +2,20 @@
 # member each source classifier lists, constructors left out, as KSP2 makes them where members meet.
 w: [ksp] Both fun toString(): String parent=intersections.Both annotations=[] overrides=kotlin.Any.toString file=null line=null
 w: [ksp] After fun toString(): String parent=intersections.After annotations=[] overrides=intersections.Base.toString file=Intersections.kt line=8
-w: [ksp] Joined fun shared(x: Int SYNTHETIC []): Int parent=intersections.Joined annotations=[Deprecated] overrides=intersections.Left.shared file=Intersections.kt line=22
-w: [ksp] Joined fun same(): String parent=intersections.Joined annotations=[] overrides=intersections.Left.same file=Intersections.kt line=23
-w: [ksp] Joined property label: String mutable=false parent=intersections.Joined annotations=[Deprecated] overrides=intersections.Left.label file=Intersections.kt line=25 field=false getter=SYNTHETIC [ABSTRACT, PUBLIC] [] setter=null null
-w: [ksp] Joined property both: Int mutable=true parent=intersections.Joined annotations=[] overrides=intersections.Left.both file=Intersections.kt line=27 field=false getter=SYNTHETIC [ABSTRACT, PUBLIC] [] setter=SYNTHETIC [ABSTRACT, PUBLIC]
 w: [ksp] Further fun shared(x: Int SYNTHETIC []): Int parent=intersections.Joined annotations=[Deprecated] overrides=intersections.Left.shared file=Intersections.kt line=22
 w: [ksp] Further fun same(): String parent=intersections.Joined annotations=[] overrides=intersections.Left.same file=Intersections.kt line=23
 w: [ksp] Further property label: String mutable=false parent=intersections.Joined annotations=[Deprecated] overrides=intersections.Left.label file=Intersections.kt line=25 field=false getter=SYNTHETIC [ABSTRACT, PUBLIC] [] setter=null null
 w: [ksp] Further property both: Int mutable=true parent=intersections.Joined annotations=[] overrides=intersections.Left.both file=Intersections.kt line=27 field=false getter=SYNTHETIC [ABSTRACT, PUBLIC] [] setter=SYNTHETIC [ABSTRACT, PUBLIC]
+w: [ksp] Joined fun shared(x: Int SYNTHETIC []): Int parent=intersections.Joined annotations=[Deprecated] overrides=intersections.Left.shared file=Intersections.kt line=22
+w: [ksp] Joined fun same(): String parent=intersections.Joined annotations=[] overrides=intersections.Left.same file=Intersections.kt line=23
+w: [ksp] Joined property label: String mutable=false parent=intersections.Joined annotations=[Deprecated] overrides=intersections.Left.label file=Intersections.kt line=25 field=false getter=SYNTHETIC [ABSTRACT, PUBLIC] [] setter=null null
+w: [ksp] Joined property both: Int mutable=true parent=intersections.Joined annotations=[] overrides=intersections.Left.both file=Intersections.kt line=27 field=false getter=SYNTHETIC [ABSTRACT, PUBLIC] [] setter=SYNTHETIC [ABSTRACT, PUBLIC]
 w: [ksp] InterfaceFirst fun shared(x: Int SYNTHETIC []): Int parent=intersections.InterfaceFirst annotations=[Deprecated] overrides=intersections.Left.shared file=Intersections.kt line=22
 w: [ksp] InterfaceFirst property label: String mutable=false parent=intersections.InterfaceFirst annotations=[Deprecated] overrides=intersections.Left.label file=Intersections.kt line=25 field=false getter=SYNTHETIC [PUBLIC] [] setter=null null
-w: [ksp] ClassFirst fun shared(z: Int SYNTHETIC []): Int parent=intersections.ClassFirst annotations=[] overrides=intersections.Impl.shared file=Intersections.kt line=44
-w: [ksp] ClassFirst property label: String mutable=false parent=intersections.ClassFirst annotations=[] overrides=intersections.Impl.label file=Intersections.kt line=45 field=false getter=SYNTHETIC [PUBLIC] [] setter=null null
+w: [ksp] ClassFirst fun shared(z: Int SYNTHETIC []): Int parent=intersections.ClassFirst annotations=[] overrides=intersections.Impl.shared file=Intersections.kt line=45
+w: [ksp] ClassFirst property label: String mutable=false parent=intersections.ClassFirst annotations=[] overrides=intersections.Impl.label file=Intersections.kt line=46 field=false getter=SYNTHETIC [PUBLIC] [] setter=null null
 w: [ksp] ClosedSecond fun shared(x: Int SYNTHETIC []): Int parent=intersections.ClosedSecond annotations=[Deprecated] overrides=intersections.Left.shared file=Intersections.kt line=22
-w: [ksp] Sides fun root(): Int parent=intersections.Sides annotations=[] overrides=intersections.First.root file=Intersections.kt line=63
+w: [ksp] Sides fun root(): Int parent=intersections.Sides annotations=[] overrides=intersections.First.root file=Intersections.kt line=64
 w: [ksp] Three fun shared(x: Int SYNTHETIC []): Int parent=intersections.Three annotations=[Deprecated] overrides=intersections.Left.shared file=Intersections.kt line=22
 w: [ksp] Three fun same(): String parent=intersections.Three annotations=[] overrides=intersections.Left.same file=Intersections.kt line=23
 w: [ksp] Three property label: String mutable=false parent=intersections.Three annotations=[Deprecated] overrides=intersections.Left.label file=Intersections.kt line=25 field=false getter=SYNTHETIC [PUBLIC] [] setter=null null

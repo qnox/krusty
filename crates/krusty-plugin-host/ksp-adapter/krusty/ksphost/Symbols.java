@@ -156,8 +156,8 @@ final class Symbols {
 
     // The members a classifier lists (`put_members` in `src/ksp/protocol.rs`): its own
     // declarations by index, ones described with the list together with the classifier that
-    // declares them, declarations of other source classifiers by index, and intersection members
-    // described with the list.
+    // declares them, declarations of other source classifiers by index, intersection members
+    // described with the list, and members other source classifiers list, by position.
     private Members readMembers(DataInputStream in, List<KSDeclaration> declarations)
             throws IOException {
         int count = in.readInt();
@@ -199,6 +199,15 @@ final class Symbols {
                     intersectionFiles.put(described, path);
                 }
                 return () -> described;
+            }
+            case 4: {
+                String owner = Wire.readString(in);
+                boolean property = Wire.readBoolean(in);
+                int position = in.readInt();
+                return () -> {
+                    SourceClass listing = sourceClasses.get(owner);
+                    return (property ? listing.allProperties : listing.allFunctions).get(position);
+                };
             }
             default:
                 throw new IOException("unknown member " + tag);
