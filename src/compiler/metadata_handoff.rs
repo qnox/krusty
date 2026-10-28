@@ -300,6 +300,12 @@ fn attach_function_metadata(
     if annotations.declares_annotations() {
         ir.function_annotations.insert(function_id, annotations);
     }
+    let source_retained =
+        super::declaration_metadata::source_retained_annotations(&function.annotations, info);
+    if !source_retained.is_empty() {
+        ir.function_source_annotations
+            .insert(function_id, source_retained);
+    }
     let mut parameter_annotations = function
         .params
         .iter()

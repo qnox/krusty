@@ -644,9 +644,13 @@ impl Emitter<'_> {
     /// reference (a smart cast): kotlinc's `IMPLICIT_CAST`, which its codegen emits as the operand
     /// itself (`ExpressionCodegen.visitTypeOperator`), leaving the consumer to materialize it at its
     /// own type. A written `as` is not one.
+    ///
+    /// A non-null reference widened to a nullable type is the same: kotlinc inserts no cast for an
+    /// upcast, so its consumer materializes the value itself (`S` passed where a generic `T` is
+    /// inferred as `V?` reaches the `Object` slot uncast).
     pub(super) fn implicit_reference_cast_operand(&self, expression: ExprId) -> Option<ExprId> {
         let IrExpr::TypeOp {
-            op: IrTypeOp::Cast,
+            op,
             arg,
             type_operand,
         } = *self.ir.expr(expression)
@@ -654,10 +658,25 @@ impl Emitter<'_> {
             return None;
         };
         let reference_target = !ir_ty_to_jvm(&stored_value_ty(type_operand)).is_jvm_scalar();
-        (reference_target
-            && !self.ir.written_casts.contains(&expression)
-            && !self.value_ty(arg).is_jvm_scalar())
-        .then_some(arg)
+        let implicit = match op {
+            IrTypeOp::Cast => !self.ir.written_casts.contains(&expression),
+            IrTypeOp::ImplicitCoercion => {
+                // An erased call result keeps its widening: that boundary reads the callee's
+                // `Object` result straight into the consumer.
+                type_operand.is_nullable()
+                    && !self.ir.declaration_result_coercions.contains(&expression)
+                    && self.erased_reference_result(arg).is_none()
+                    && !self
+                        .ir
+                        .logical_types
+                        .get(&arg)
+                        .copied()
+                        .unwrap_or_else(|| self.value_ty(arg))
+                        .admits_null()
+            }
+            _ => false,
+        };
+        (reference_target && implicit && !self.value_ty(arg).is_jvm_scalar()).then_some(arg)
     }
 
     /// The value a consumer that materializes it at its own slot reads in place of `expression`:

@@ -109,3 +109,25 @@ fun useText(): Int = text.value.length
         "the unresolved supertypes must be reported exactly without erasing unrelated types"
     );
 }
+
+/// A file's own policies still govern its recovery diagnostics. With `broken`'s inferred result
+/// unresolved, the compiler reports from the partial index; `@file:Suppress` must still silence the
+/// internal-annotation access it covers, so kotlinc's single unresolved reference is the complete
+/// output.
+#[test]
+fn file_level_suppression_survives_a_failed_signature() {
+    common::assert_error_blocks_match_kotlinc(
+        &[(
+            "Policy.kt",
+            "@file:Suppress(\"INVISIBLE_REFERENCE\", \"INVISIBLE_MEMBER\")\n\
+             \n\
+             import kotlin.internal.LowPriorityInOverloadResolution\n\
+             \n\
+             @LowPriorityInOverloadResolution\n\
+             fun pick(value: Any): Int = 1\n\
+             \n\
+             fun broken() = missing()\n",
+        )],
+        &[],
+    );
+}
