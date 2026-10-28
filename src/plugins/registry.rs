@@ -25,9 +25,11 @@
 //!     plugin) → ERROR. Silently ignoring it would emit wrong bytecode, so a drop-in must fail loudly.
 
 use crate::plugins::allopen::AllOpenPlugin;
+use crate::plugins::assignment::AssignmentPlugin;
 use crate::plugins::cli::{
-    PluginConfig, PluginOption, ALLOPEN_PLUGIN_ID, KAPT_PLUGIN_ID, KSP_PLUGIN_ID, NOARG_PLUGIN_ID,
-    SAM_WITH_RECEIVER_PLUGIN_ID, SCRIPTING_PLUGIN_ID, SERIALIZATION_PLUGIN_ID,
+    PluginConfig, PluginOption, ALLOPEN_PLUGIN_ID, ASSIGNMENT_PLUGIN_ID, KAPT_PLUGIN_ID,
+    KSP_PLUGIN_ID, NOARG_PLUGIN_ID, SAM_WITH_RECEIVER_PLUGIN_ID, SCRIPTING_PLUGIN_ID,
+    SERIALIZATION_PLUGIN_ID,
 };
 use crate::plugins::noarg::NoArgPlugin;
 use crate::plugins::sam_with_receiver::SamWithReceiverPlugin;
@@ -352,6 +354,15 @@ fn build_sam_with_receiver(
     Box::new(SamWithReceiverPlugin::from_options(options))
 }
 
+/// Build the native assignment plugin from the compilation's options for it.
+fn build_assignment(
+    _act: &Activation,
+    _release: Option<&str>,
+    options: &[PluginOption],
+) -> Box<dyn IrPlugin> {
+    Box::new(AssignmentPlugin::from_options(options))
+}
+
 /// The set of extensions krusty knows about — independent of any compilation.
 #[derive(Default)]
 pub struct PluginRegistry {
@@ -392,6 +403,13 @@ impl PluginRegistry {
             plugin_id: SAM_WITH_RECEIVER_PLUGIN_ID,
             registrar: "org.jetbrains.kotlin.samWithReceiver.SamWithReceiverComponentRegistrar",
             kind: ExtensionKind::Native(build_sam_with_receiver),
+            option_keys: Some(&["annotation"]),
+            unimplemented_options: &[],
+        });
+        r.register(RegisteredExtension {
+            plugin_id: ASSIGNMENT_PLUGIN_ID,
+            registrar: "org.jetbrains.kotlin.assignment.plugin.AssignmentComponentRegistrar",
+            kind: ExtensionKind::Native(build_assignment),
             option_keys: Some(&["annotation"]),
             unimplemented_options: &[],
         });
@@ -843,7 +861,8 @@ mod tests {
         assert!(resolved
             .native
             .host("app")
-            .sam_with_receiver_annotations()
+            .annotation_conventions()
+            .sam_with_receiver
             .contains(&crate::types::type_name("test/WithReceiver")));
     }
 

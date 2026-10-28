@@ -83,7 +83,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                 })
             },
         ));
-    table.sam_with_receiver_annotations = frontend_plugins.sam_with_receiver_annotations();
+    table.annotation_conventions = frontend_plugins.annotation_conventions();
     let mut declaration_annotation_resolution_attempts = crate::fx_hash::HashSet::default();
     for file_index in 0..source_packages.len() {
         diags.set_file(file_index as u32);

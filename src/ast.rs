@@ -7,7 +7,7 @@ mod span_index;
 mod statement_render;
 mod traversal;
 use crate::diag::Span;
-use crate::kt_string::{KtString, KtStringBuf};
+use crate::kt_string::KtString;
 use crate::types::{ContextParameterKind, Visibility};
 use retained_defaults::{retain_class_default_spans, retain_param_default_spans};
 pub(crate) use return_labels::ReturnLabelSpans;
@@ -18,6 +18,7 @@ mod binary_reference_tokens;
 mod call_shape;
 mod classifier_owners;
 mod compound_assignments;
+mod constant_strings;
 mod constructors;
 mod declaration_prefixes;
 pub(crate) mod definitely_evaluated;
@@ -1616,6 +1617,8 @@ pub struct File {
     pub when_subject_variables: crate::fx_hash::HashSet<u32>,
     /// Assignment lvalue spans keyed by statement ID.
     pub assignment_target_spans: crate::fx_hash::HashMap<u32, Span>,
+    /// The lvalue of `name = value` or `receiver.name = value` as a read, keyed by statement ID.
+    pub assignment_target_reads: crate::fx_hash::HashMap<u32, ExprId>,
     /// Source-name spans keyed by the synthetic read expression made for `target op= value`.
     pub compound_assignment_read_spans: crate::fx_hash::HashMap<u32, Span>,
     /// Source span of the `init` KEYWORD introducing each initializer block, keyed by the block
@@ -2038,6 +2041,7 @@ impl File {
         // Both return-label span tables are keyed by the arenas released here.
         self.return_label_spans.clear();
         self.assignment_target_spans = Default::default();
+        self.assignment_target_reads = Default::default();
         self.compound_assignment_read_spans = Default::default();
         self.init_block_keywords = Default::default();
         self.incdec_accesses = Default::default();
@@ -2181,57 +2185,6 @@ impl File {
     /// with no Unicode-scalar form (`'\uD800'`), and a string literal may already carry one, so the
     /// value can only be spelled as code units. Recursion through property references is bounded so
     /// malformed or cyclic input cannot overflow the compiler stack.
-    pub(crate) fn const_string_value(&self, expression: ExprId) -> Option<KtString> {
-        self.const_string_value_at_depth(expression, 0)
-    }
-
-    fn const_string_value_at_depth(&self, expression: ExprId, depth: u32) -> Option<KtString> {
-        if depth > 32 {
-            return None;
-        }
-        // Pass-1 syntax compaction replaces expressions outside the retained inline/default
-        // dependency closure with a non-arena sentinel. Constant probes are optional semantic
-        // queries, so an absent node is simply not a foldable string; it must never index the
-        // compacted arena.
-        match self.expr_arena.get(expression.0 as usize)? {
-            Expr::StringLit(value) => Some(value.clone()),
-            Expr::CharLit(unit) => {
-                let mut value = KtStringBuf::new();
-                value.push_unit(*unit);
-                Some(value.finish())
-            }
-            Expr::Name(name) => self.top_level_const_string_at_depth(name, depth + 1),
-            Expr::Template(parts) => {
-                let mut value = KtStringBuf::new();
-                for part in parts {
-                    match part {
-                        TemplatePart::Str(text) => value.push_kt(text),
-                        TemplatePart::Expr(expression) => value
-                            .push_kt(&self.const_string_value_at_depth(*expression, depth + 1)?),
-                    }
-                }
-                Some(value.finish())
-            }
-            _ => None,
-        }
-    }
-
-    fn top_level_const_string_at_depth(&self, name: &str, depth: u32) -> Option<KtString> {
-        if depth > 32 {
-            return None;
-        }
-        self.decls
-            .iter()
-            .find_map(|&declaration| match self.decl(declaration) {
-                Decl::Property(property) if property.name == name => {
-                    property.init.and_then(|initializer| {
-                        self.const_string_value_at_depth(initializer, depth + 1)
-                    })
-                }
-                _ => None,
-            })
-    }
-
     /// Whether `declaration` is the synthetic class structurally owned by an anonymous-object
     /// construction in this file.
     ///

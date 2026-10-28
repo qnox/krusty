@@ -16,6 +16,7 @@
 //! generated symbols resolve. Body and expression rewriting belongs at the IR level.
 
 pub mod allopen;
+pub mod assignment;
 pub mod class_metadata;
 pub mod cli;
 pub mod deps;
@@ -783,6 +784,13 @@ pub trait IrPlugin {
         &[]
     }
 
+    /// Annotations whose classes an assignment to a `val` property calls `assign` on, as kotlinc's
+    /// assignment plugin does: `target.p = v` becomes `target.p.assign(v)` when the class of `p`'s
+    /// type, or one of its supertypes, carries one.
+    fn assignment_annotations(&self) -> &[TypeName] {
+        &[]
+    }
+
     /// Add interfaces or superclasses to existing classes.
     fn generate_supertypes(&self, _ir: &mut IrFile, _ctx: &PluginContext) {}
 
@@ -1259,12 +1267,19 @@ impl PluginHost {
         self.plugins.iter().map(|p| p.name()).collect()
     }
 
-    /// Every registered plugin's [`IrPlugin::sam_with_receiver_annotations`].
-    pub fn sam_with_receiver_annotations(&self) -> Vec<TypeName> {
-        self.plugins
-            .iter()
-            .flat_map(|plugin| plugin.sam_with_receiver_annotations().iter().copied())
-            .collect()
+    /// Every registered plugin's [`IrPlugin::sam_with_receiver_annotations`] and
+    /// [`IrPlugin::assignment_annotations`].
+    pub fn annotation_conventions(&self) -> crate::symbol_source::AnnotationConventions {
+        let annotations = |select: fn(&dyn IrPlugin) -> &[TypeName]| {
+            self.plugins
+                .iter()
+                .flat_map(|plugin| select(plugin.as_ref()).iter().copied())
+                .collect()
+        };
+        crate::symbol_source::AnnotationConventions {
+            sam_with_receiver: annotations(|plugin| plugin.sam_with_receiver_annotations()),
+            assignment: annotations(|plugin| plugin.assignment_annotations()),
+        }
     }
 
     /// Every registered plugin's [`IrPlugin::no_arg_constructor_annotations`].

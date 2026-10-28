@@ -201,6 +201,7 @@ mod member_extension_properties;
 mod member_extension_selection;
 pub use member_extension_properties::MemberExtPropSig;
 use member_extension_properties::MemberExtensionProperty;
+mod assignment_targets;
 mod member_overload_clash;
 mod missing_dependency_supertypes;
 mod named_class_constructors;
@@ -2709,9 +2710,9 @@ pub struct SymbolTable {
     pub libraries: Box<dyn SemanticPlatform>,
     /// The native compiler plugins this compilation runs (none unless the driver selects them).
     native_plugins: crate::plugins::registry::NativePlugins,
-    /// The annotations of kotlinc's sam-with-receiver plugin, from the native plugins this
-    /// compilation runs ([`crate::symbol_source::SymbolSource::sam_with_receiver_annotations`]).
-    pub(crate) sam_with_receiver_annotations: Vec<TypeName>,
+    /// The annotation-configured conventions of the native plugins this compilation runs
+    /// ([`crate::symbol_source::SymbolSource::annotation_conventions`]).
+    pub(crate) annotation_conventions: crate::symbol_source::AnnotationConventions,
     /// Top-level extension overloads keyed by name and semantic receiver.
     pub ext_funs: HashMap<String, HashMap<Ty, Vec<Signature>>>,
     source_ext_funs: HashMap<(u32, u32), (String, Ty, usize)>,
@@ -2845,7 +2846,7 @@ impl Default for SymbolTable {
             enums: HashMap::default(),
             libraries: Box::new(EmptySymbolSource),
             native_plugins: Default::default(),
-            sam_with_receiver_annotations: Vec::new(),
+            annotation_conventions: Default::default(),
             ext_funs: HashMap::default(),
             source_ext_funs: HashMap::default(),
             ext_props: HashMap::default(),
@@ -9002,6 +9003,12 @@ pub enum StmtLowering {
     LocalFunction(Box<LocalFunInfo>),
     /// A compound assignment (`target op= rhs`) selected as an in-place `opAssign` operator call.
     PlusAssign(CompoundAssignmentTarget),
+    /// `target = value` that kotlinc's assignment plugin selects as `target.assign(value)`, with
+    /// `target` the statement's lvalue read ([`crate::ast::File::assignment_target_reads`]).
+    OverloadedAssignment {
+        target: ExprId,
+        call: CompoundAssignmentTarget,
+    },
     /// `field = value` selected as the enclosing property's backing-field write. A lexical local
     /// named `field` never receives this target.
     BackingFieldWrite {
@@ -21120,6 +21127,11 @@ impl<'a> Checker<'a> {
         } else {
             PropertyWriteSelection::None
         };
+        if let Some((target_ty, false)) = property.storage() {
+            if self.try_overloaded_assignment(scope, s, target_ty, value) {
+                return;
+            }
+        }
         crate::trace_compiler!(
             "resolve",
             "assign name={name} local={:?} property={} deferred={}",
@@ -21596,7 +21608,9 @@ impl<'a> Checker<'a> {
             let deferred_constructor_write = property.setter.is_none()
                 && self.is_deferred_constructor_property_write(scope, receiver, &name, owner);
             if property.setter.is_none() && !deferred_constructor_write {
-                self.report_val_reassignment(target_span, "'val' cannot be reassigned.");
+                if !self.try_overloaded_assignment(scope, s, property.ty, value) {
+                    self.report_val_reassignment(target_span, "'val' cannot be reassigned.");
+                }
                 return;
             }
             let context_args = if deferred_constructor_write || property.context_count == 0 {
@@ -22036,7 +22050,7 @@ impl<'a> Checker<'a> {
         self.check_operator_declaration(
             f,
             semantic_ret_ty,
-            operator_declarations::OperatorDeclarationSite::NonMember,
+            operator_declarations::OperatorDeclarationSite::NonMember(semantic_receiver),
         );
 
         let generic_sig = (!f.type_params.is_empty()).then(|| {
@@ -39143,19 +39157,6 @@ impl<'a> Checker<'a> {
         self.file.expr_spans[e.0 as usize]
     }
 
-    fn assignment_target_span(&self, statement: StmtId) -> Span {
-        self.file
-            .assignment_target_spans
-            .get(&statement.0)
-            .copied()
-            .unwrap_or(self.file.stmt_spans[statement.0 as usize])
-    }
-
-    fn assignment_member_name_span(&self, statement: StmtId, name: &str) -> Span {
-        let span = self.assignment_target_span(statement);
-        Span::new(span.hi.saturating_sub(name.len() as u32), span.hi)
-    }
-
     fn value_operator_span(&self, value: ExprId) -> Span {
         self.file
             .value_operator_spans
@@ -43869,14 +43870,6 @@ impl<'a> Checker<'a> {
                 .insert((reference.span.lo, reference.span.hi), resolved);
         }
         resolved
-    }
-
-    fn report_val_reassignment(&mut self, span: Span, message: impl Into<String>) {
-        if self.unreachable_statement_depth != 0 {
-            return;
-        }
-        self.diags
-            .error_kind(span, crate::diag::DiagnosticKind::ValReassignment, message);
     }
 
     /// Resolve a type without emitting diagnostics (used for speculative smart-cast narrowing).
@@ -56123,7 +56116,7 @@ impl<'a> Checker<'a> {
                             arg_tys: &[rt],
                         },
                         lt,
-                        fname,
+                        operator_calls::OperatorConvention::operator(fname),
                         operator_span,
                     ) {
                         Ok(Some((ret, target))) => {
@@ -56239,7 +56232,7 @@ impl<'a> Checker<'a> {
                         arg_tys: &[rt],
                     },
                     lt,
-                    "compareTo",
+                    operator_calls::OperatorConvention::operator("compareTo"),
                     operator_span,
                 ) {
                     Ok(Some((Ty::Int, target))) => {
@@ -60295,7 +60288,7 @@ impl<'a> Checker<'a> {
                         arg_tys: &[],
                     },
                     recv,
-                    name,
+                    operator_calls::OperatorConvention::operator(name),
                     span,
                 )?
                 .map(|(_, target)| target),

@@ -110,6 +110,24 @@ enum OperatorTypeArguments {
     CommittedBySelection,
 }
 
+/// A convention a call is selected for: the function name and the modifier a candidate needs.
+#[derive(Clone, Copy)]
+pub(super) struct OperatorConvention<'a> {
+    pub(super) name: &'a str,
+    /// Whether only `operator` functions qualify. kotlinc's assignment plugin selects `assign`
+    /// among all functions of that name.
+    pub(super) requires_operator: bool,
+}
+
+impl<'a> OperatorConvention<'a> {
+    pub(super) fn operator(name: &'a str) -> Self {
+        Self {
+            name,
+            requires_operator: true,
+        }
+    }
+}
+
 /// The single right-hand operand of a binary operator expression (`b` in `a + b`, `a..b`,
 /// `a < b`): its checked type and its source expression.
 pub(super) struct OperatorOperand {
@@ -133,11 +151,40 @@ impl<'a> Checker<'a> {
             scope,
             site,
             receiver,
-            name,
+            OperatorConvention::operator(name),
             arg_tys,
             arg_exprs,
             span,
             expected_result,
+            None,
+        )
+        .map(|selected| (selected.ret, selected.call))
+    }
+
+    /// Select the function kotlinc's assignment plugin calls for `target = value`: `assign` on the
+    /// target, among every function of that name rather than only `operator` ones.
+    pub(super) fn assignment_overload_call_ret(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        target: ExprId,
+        target_ty: Ty,
+        value: (Ty, ExprId),
+        span: Span,
+    ) -> Option<(Ty, ResolvedCall)> {
+        let convention = OperatorConvention {
+            name: super::assignment_targets::ASSIGNMENT_CONVENTION,
+            requires_operator: false,
+        };
+        let (value_ty, value) = value;
+        self.select_operator(
+            scope,
+            target,
+            target_ty,
+            convention,
+            &[value_ty],
+            &[value],
+            span,
+            None,
             None,
         )
         .map(|selected| (selected.ret, selected.call))
@@ -216,7 +263,7 @@ impl<'a> Checker<'a> {
             scope,
             expression,
             receiver,
-            name,
+            OperatorConvention::operator(name),
             &[operand.ty],
             &[operand.expression],
             self.span(expression),
@@ -246,7 +293,7 @@ impl<'a> Checker<'a> {
         scope: &CheckerScope<'_>,
         site: ExprId,
         receiver: Ty,
-        name: &str,
+        convention: OperatorConvention<'_>,
         arg_tys: &[Ty],
         arg_exprs: &[ExprId],
         span: Span,
@@ -256,9 +303,11 @@ impl<'a> Checker<'a> {
         // `downTo` and the legacy `until` range spellings are represented by RangeKind in the AST,
         // but their Kotlin declarations are `infix`, not `operator`. They still go through the same
         // semantic callable selection and checked-FIR handoff as the operator range conventions.
+        let name = convention.name;
         let accepts_range_infix = matches!(name, "downTo" | "until");
-        let has_convention_modifier =
-            |operator: bool, infix: bool| operator || (accepts_range_infix && infix);
+        let has_convention_modifier = |operator: bool, infix: bool| {
+            !convention.requires_operator || operator || (accepts_range_infix && infix)
+        };
         if name == "set" {
             self.indexed_operator_ambiguous = false;
             let arg_kinds = checked_argument_kinds
@@ -302,7 +351,7 @@ impl<'a> Checker<'a> {
                             arg_tys,
                         },
                         receiver,
-                        name,
+                        convention,
                         span,
                     ) {
                         Ok(selected) => selected.map(|(ret, call)| SelectedOperator {
@@ -500,7 +549,7 @@ impl<'a> Checker<'a> {
                     arg_tys,
                 },
                 receiver,
-                name,
+                convention,
                 span,
             ) {
                 Ok(Some((ret, call))) => {
@@ -627,14 +676,15 @@ impl<'a> Checker<'a> {
         &mut self,
         scope: &CheckerScope<'_>,
         receiver: Ty,
-        name: &str,
+        convention: OperatorConvention<'_>,
         args: &[ExprId],
     ) -> Option<Vec<Ty>> {
+        let name = convention.name;
         let argument_kinds = self.call_arg_kinds(scope, args);
         let (mut functions, _) = self.stable_receiver_callables(receiver, name).into_parts();
         let resolver = self.resolver();
         functions.overloads.retain(|candidate| {
-            candidate.flags.operator
+            (candidate.flags.operator || !convention.requires_operator)
                 && self.source_callable_visible(candidate)
                 && (candidate.kind != crate::libraries::FnKind::Member
                     || candidate.context_count == 0)
@@ -970,7 +1020,7 @@ impl<'a> Checker<'a> {
             scope,
             expression,
             range_ty,
-            "contains",
+            OperatorConvention::operator("contains"),
             &[bound],
             &[value],
             self.span(expression),

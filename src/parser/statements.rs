@@ -295,18 +295,20 @@ impl Parser<'_> {
                             self.skip_newlines();
                             let value = self.parse_unlabelled_expr();
                             self.file.value_operator_spans.insert(value.0, operator);
-                            return self.finish_assignment_stmt(
+                            let statement = self.finish_assignment_stmt(
                                 Stmt::Assign { name: n, value },
                                 start,
                                 target_span,
                             );
+                            self.file.assignment_target_reads.insert(statement.0, e);
+                            return statement;
                         }
                         Expr::Member { receiver, name } => {
                             let operator = self.bump().span; // '='
                             self.skip_newlines();
                             let value = self.parse_unlabelled_expr();
                             self.file.value_operator_spans.insert(value.0, operator);
-                            return self.finish_assignment_stmt(
+                            let statement = self.finish_assignment_stmt(
                                 Stmt::AssignMember {
                                     receiver,
                                     name,
@@ -316,6 +318,8 @@ impl Parser<'_> {
                                 start,
                                 target_span,
                             );
+                            self.file.assignment_target_reads.insert(statement.0, e);
+                            return statement;
                         }
                         Expr::Index { array, indices } => {
                             let operator = self.bump().span; // '='

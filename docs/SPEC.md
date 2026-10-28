@@ -13144,13 +13144,32 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   its own shape in krusty. kotlinc 2.4.20's frontend instead drops that receiver and makes the first value
   parameter the receiver, but its backend then fails every such lambda conversion with an
   internal error (`LambdaMetafactoryArgumentsBuilder.validateMethodParameters`: "Mismatching
-  lambda and instance method parameters"), so there is no kotlinc output to match. The convention is a frontend fact (`SymbolSource::sam_with_receiver_annotations`, read
+  lambda and instance method parameters"), so there is no kotlinc output to match. The convention is a frontend fact (`SymbolSource::annotation_conventions`, read
   by `symbol_resolver::semantic_sam_signature`), so checking, lowering and the backend see the same
   receiver function type. Tests: `tests/sam_with_receiver_plugin_e2e.rs` (annotated Java and
   Kotlin interfaces, an inherited annotated method, a meta-annotation, an annotated subinterface of
   an unannotated method, a parameterless method, byte-identical to kotlinc and run),
   `plugins::sam_with_receiver` and `plugins::registry` unit tests
   (`sam_with_receiver_resolves_to_native_and_rejects_its_unregistered_preset_option`).
+- **The assignment plugin makes `target = value` the call `target.assign(value)`.**
+  `-Xplugin=assignment-compiler-plugin.jar` (registrar `AssignmentComponentRegistrar`) with
+  `-P plugin:org.jetbrains.kotlin.assignment:annotation=<fqname>` runs krusty's native pass. It
+  applies when the target is a non-local `val` property (member, top-level, or through an implicit
+  receiver, including in an initializer) or a final Java field or setter-less Java getter, and the
+  target's type has a class or supertype carrying one of the annotations; a `var` stays an ordinary
+  assignment. The call resolves like any receiver call, member or extension, with no `operator`
+  modifier (`OperatorConvention { requires_operator: false }`). The checker records
+  `StmtLowering::OverloadedAssignment`, which body checking lowers through the same in-place call
+  as `+=`. With no applicable `assign` the assignment is rejected at its `=` with kotlinc's "no
+  applicable 'assign' function found for '=' overload."; an `assign` returning anything but
+  `Unit` is rejected there too, and at its declaration (its result type, or its name when
+  inferred) whenever it could serve: one value parameter, on an annotated receiver. Known gap:
+  kotlinc also reports the failed `target.assign(value)` call's own candidate diagnostic beside
+  the `=` one, which krusty does not yet. The annotation list is a frontend fact
+  (`SymbolSource::annotation_conventions`). Tests: `tests/assignment_plugin_e2e.rs` (member,
+  extension, inherited and interface annotations, top-level, initializer, extension-receiver and
+  scope-function targets, a `var`, Java fields and getters, byte-identical to kotlinc and run; the
+  non-`Unit` declaration and use errors against kotlinc's), `plugins::assignment` unit test.
 - **`Pair`, `Triple` and `Map.Entry` serialize through the runtime's tuple serializers.** None of
   them is `@Serializable`, but kotlinc's plugin selects a serializer for each by the classifier,
   as it does for a standard collection. `Pair<A, B>` becomes `new PairSerializer(<A>, <B>)`,
