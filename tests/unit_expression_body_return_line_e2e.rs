@@ -53,3 +53,32 @@ fn unit_expression_body_returns_are_byte_identical_to_kotlinc() {
         .unwrap_or_else(|diff| panic!("{class} differs from kotlinc: {diff}"));
     }
 }
+
+const LIBRARY_INLINE: &str = "package store\n\
+                              \n\
+                              class Sink {\n\
+                              \x20   fun add(s: String) {}\n\
+                              }\n\
+                              \n\
+                              fun Sink.lines(s: String) = s.lineSequence().forEach { add(\"# $it\") }\n\
+                              \n\
+                              fun Sink.items(items: List<String>) = items.forEach { add(it) }\n\
+                              \n\
+                              fun Sink.declared(items: List<String>): Unit = items.forEach {\n\
+                              \x20   add(it)\n\
+                              }\n";
+
+/// A `Unit` expression body that is a dependency's inline call closes that call's frame on the
+/// declaration's closing line, on a `nop` ahead of the `return`, as a statement of a block body
+/// does.
+#[test]
+fn a_library_inline_expression_body_closes_its_frame_like_kotlinc() {
+    common::byte_diff_against_kotlinc_cp(
+        "UnitExpressionBodyLibraryInline",
+        LIBRARY_INLINE,
+        "store/UnitExpressionBodyLibraryInlineKt",
+        &[common::stdlib_jar()],
+    )
+    .expect("reference kotlinc is provisioned")
+    .unwrap_or_else(|diff| panic!("the library inline expression bodies differ: {diff}"));
+}
