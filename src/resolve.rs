@@ -37097,14 +37097,12 @@ impl<'a> Checker<'a> {
                     type_args,
                     declared_parameter,
                 );
-                let substituted =
-                    crate::symbol_resolver::ty_subst_keep_unbound(declared_parameter, &bindings);
-                let nested_expected = match substituted.kind() {
-                    TyKind::TyParam(_, bound) => {
-                        crate::symbol_resolver::ty_subst_keep_unbound(bound, &bindings)
-                    }
-                    _ => substituted,
-                };
+                let nested_expected = nested_producer_bindings::producer_expectation(
+                    &signature,
+                    type_args,
+                    &bindings,
+                    declared_parameter,
+                );
                 crate::trace_compiler!(
                     "resolve",
                     "postponed argument call={call:?} parameter={parameter} expected={nested_expected:?} generic_ret={:?}",
