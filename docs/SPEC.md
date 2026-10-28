@@ -2524,6 +2524,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 - Function call argument evaluation order; recursion.
 - Shadowing of locals; `val` reassignment is an error.
 - Empty file; file with only signatures; forward references between top-level functions.
+- A `data class` may declare its own overload of a `componentN` name: the generated
+  `componentN()` joins that name's overloads instead of replacing them, so `p.component1(3)` binds
+  the written overload and destructuring still reads the generated one, as kotlinc does
+  (`tests/data_class_component_overload_e2e.rs`).
 - `data class`: `equals`/`hashCode`/`toString`/`componentN` are synthesized (in IR lowering, so all
   backends share them). `equals` compares field-wise with IEEE-aware `Double/Float.compare` and
   structural reference equality, except that an enum-typed property, nullable or not, is compared
