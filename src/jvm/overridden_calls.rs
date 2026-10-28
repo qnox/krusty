@@ -11,6 +11,7 @@ use crate::jvm::jvm_class_map::type_names_map_to_same_jvm_internal;
 use crate::libraries::{OverriddenCallKind, OverriddenCallRealization};
 use crate::types::TypeName;
 
+use super::mapped_builtin_declarations::type_safe_override_realization;
 use super::member_dispatch::{CheckedDispatchClassifiers, MissingClassifier};
 
 fn callable_candidates(
@@ -49,15 +50,32 @@ fn function_candidates(
                     target,
                     OverriddenCallKind::Function,
                 ));
+                if let Some(fact) = callables.callable(target) {
+                    candidates.extend(fact.overridden_declarations.iter().filter_map(
+                        |declaration| {
+                            type_safe_override_realization(
+                                declaration.owner,
+                                &declaration.name,
+                                declaration.params.len(),
+                            )
+                        },
+                    ));
+                }
             }
             ResolvedFunctionOverrideTarget::Module(_) => {
-                pending.extend(
-                    ir.function_overrides
-                        .values()
-                        .flatten()
-                        .filter(|edge| edge.implementation == current)
-                        .map(|edge| edge.overridden),
-                );
+                for edge in ir
+                    .function_overrides
+                    .values()
+                    .flatten()
+                    .filter(|edge| edge.implementation == current)
+                {
+                    pending.push(edge.overridden);
+                    candidates.extend(type_safe_override_realization(
+                        edge.overridden_owner,
+                        &edge.name,
+                        edge.declared_parameters.len(),
+                    ));
+                }
             }
         }
     }

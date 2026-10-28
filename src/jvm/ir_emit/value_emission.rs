@@ -554,6 +554,14 @@ impl super::Emitter<'_> {
                     } else {
                         None
                     };
+                // A realized overridden signature takes its own parameters: an `Int` argument of
+                // `remove(element: Int)` is boxed for `remove(Object)`.
+                let realized_parameters = virtual_owner
+                    .is_some()
+                    .then(|| self.ir.jvm_overridden_call_realizations.get(&e))
+                    .flatten()
+                    .and_then(|realization| parse_descriptor_params(&realization.descriptor));
+                let call_param_tys = realized_parameters.as_deref().unwrap_or(call_param_tys);
                 let operand_result = if let Some(bridge) = protected_bridge.as_ref() {
                     let mut operands = Vec::with_capacity(call_args.len() + 1);
                     operands.push(*receiver);
@@ -1146,6 +1154,15 @@ impl super::Emitter<'_> {
                                 descriptor = realization.descriptor.clone();
                                 narrow
                             });
+                        // A realized overridden signature takes its own parameters: an `Int`
+                        // argument of `remove(element: Int)` is boxed for `remove(Object)`.
+                        let realized_parameters = ordinary_virtual
+                            .then(|| self.ir.jvm_overridden_call_realizations.get(&e))
+                            .flatten()
+                            .and_then(|realization| {
+                                parse_descriptor_params(&realization.descriptor)
+                            });
+                        let ptys = realized_parameters.unwrap_or(ptys);
                         let call_parameters = bridge.as_ref().map_or(ptys.as_slice(), |bridge| {
                             bridge.bridge_parameters.as_slice()
                         });
@@ -1227,10 +1244,15 @@ impl super::Emitter<'_> {
                         .borrow()
                         .get(&e)
                         .cloned();
+                    // An overridden declaration's realization can erase the result the selected
+                    // declaration names (`get(Ljava/lang/Object;)Ljava/lang/Object;` for an
+                    // override returning `Int?`); the call then narrows it back, as kotlinc does.
+                    let mut realized_result = false;
                     if protected_bridge.is_none() {
                         if let Some(realization) = self.ir.jvm_overridden_call_realizations.get(&e)
                         {
                             name = realization.physical_name.clone();
+                            realized_result = realization.descriptor != descriptor;
                             descriptor = realization.descriptor.clone();
                         }
                     }
@@ -1375,7 +1397,10 @@ impl super::Emitter<'_> {
                     let declared_ret = ty_from_descriptor_ret(&declared_descriptor);
                     if declared_ret != widened_ret
                         && declared_ret.is_reference()
-                        && !crate::jvm::ir_emit::declaration_types::jvm_is_erased_top(widened_ret)
+                        && (realized_result
+                            || !crate::jvm::ir_emit::declaration_types::jvm_is_erased_top(
+                                widened_ret,
+                            ))
                     {
                         let internal = crate::jvm::names::instanceof_internal_name(declared_ret);
                         let class = self.cw.class_ref(&internal);

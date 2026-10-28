@@ -165,6 +165,38 @@ pub(super) fn collection_bridge_policy_for_declaration(
         })
 }
 
+/// The call-site realization kotlinc gives an override of one type-safe collection declaration.
+/// Its JVM signature mapper calls such an override through the declaration's erased signature
+/// (`getOverriddenBuiltinReflectingJvmDescriptor`), so `override fun get(key: String)` of a
+/// `Map<String, V>` is invoked as `get(Ljava/lang/Object;)Ljava/lang/Object;` and reaches the
+/// override through its special bridge. The overridden declaration is identified by its owner,
+/// name and arity: each row's parameters are erased type parameters, so the arity alone
+/// distinguishes `MutableMap.remove(key)` from `MutableMap.remove(key, value)`.
+pub(super) fn type_safe_override_realization(
+    declaration_owner: TypeName,
+    source_name: &str,
+    arity: usize,
+) -> Option<crate::libraries::OverriddenCallRealization> {
+    collection_bridge_policies()
+        .iter()
+        .find(|row| {
+            row.declaration_owner == declaration_owner
+                && row.source_name == source_name
+                && descriptor_parameter_count(row.descriptor) == arity
+        })
+        .map(|row| crate::libraries::OverriddenCallRealization {
+            kind: crate::libraries::OverriddenCallKind::Function,
+            declaration_owner,
+            physical_name: source_name.to_string(),
+            descriptor: row.descriptor.to_string(),
+        })
+}
+
+/// Parameter count of a policy row's descriptor, whose parameters are all `Ljava/lang/Object;`.
+fn descriptor_parameter_count(descriptor: &str) -> usize {
+    descriptor_parameters(descriptor).matches(';').count()
+}
+
 /// How kotlinc writes the generic signature of one exact Kotlin collection declaration's
 /// realization, where it departs from the declaration's own types. Like the type-safe policy, this
 /// is behavior `.kotlin_builtins` does not encode, keyed by full declaration identity.
