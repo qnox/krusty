@@ -12,6 +12,14 @@ The Native storage ABI regression establishes each program's kotlinc result befo
 scalar-backed and reference-backed value-class equality, hashes, typed invocation and mixed capture
 ordering. The runtime reference-equality protocol and KType layout are unchanged.
 
+## Native function-reference identity across source files
+
+Two references to the same source-module callable compare equal and hash alike across emitted
+object files. Native emission keys their shared marker on the exact source module and checked
+callable identity, retaining the bound/unbound distinction. Different declarations remain unequal.
+The Native object-linkage regression in `tests/native_cross_file_e2e.rs` establishes the identical
+multi-file program's kotlinc and JVM results before requiring Native equality and hash agreement.
+
 ## Bound declaration-name evidence
 
 A query for an already-bound classifier or alias key projects the selected declaration's own
@@ -36,6 +44,20 @@ owners and exact retained segments. A dollar inside a declaration name never int
 classifier or owner. Publication retains visibility and declaration order, and excludes local and
 anonymous classifiers as before. Header-boundary regressions check the complete published inventory,
 absence of invented prefixes, and exact nesting for literal-dollar owner/member names.
+
+## Wasm reference-array literals and reads
+
+Reference-element `Array<T>` literals without spreads preserve element evaluation order and array
+identity. A read evaluates its receiver and index once, then casts the physical nullable-reference
+element to the checked readable element type. Primitive arrays, scalar boxing, writes, spreads and
+size/initializer constructors remain separate representation work.
+
+Wasm bounds checks follow the selected Kotlin release's default, with an explicit per-backend
+override for `-Xwasm-enable-array-range-checks`. Checked negative and high indices throw distinct
+authenticated IndexOutOfBoundsException objects with a null message through the existing Throwable
+transport; unchecked accesses retain the host bounds trap. The shared `referenceArrayLiteralRead.kt`
+fixture covers values, projection, nulls, identity and effect order. The marked Wasm-only bounds test
+covers both hosts, release defaults, explicit options, parent types and rethrow identity.
 
 ## Wasm runtime-exception type tests
 
@@ -1233,6 +1255,24 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `tests/inline_arguments_in_place_e2e.rs`, `tests/inline_repeat_local_e2e.rs`,
   `tests/inline_format_arguments_e2e.rs`, `tests/in_place_property_receiver_e2e.rs`,
   `tests/in_place_call_argument_e2e.rs`.
+- **An in-place call marks its line after its in-place arguments.** kotlinc's
+  `IrInlineCodegen` generates the arguments it reads in place before the call marks its line, and
+  `InplaceArgumentsMethodTransformer` then moves that code, its line labels included, to where the
+  body loads each parameter. The call's mark is deduplicated against the line those arguments
+  left in effect. A caller local the body reads directly (`genOrGetLocal`) generates nothing, so
+  in `fun f(x: UInt) = x + 1u` the literal marks the line first and the entry sits on it
+  (`line N: 1`), after the receiver load. Two local operands (`x * y`) mark nothing, and the
+  call's line stays where the body begins. A declaration (`visitVariable`) and a `return`
+  (`visitReturn`) mark their own line only once the value is on the stack, and a block statement
+  (`visitStatementContainer`) marks none apart from its expression: a lambda's `error("boom")`
+  has its entry on the in-place message, after the body's `new`. So emission withdraws the call's
+  entry, together with the eager entries such a statement and its directly returned, declared or
+  stated value (through an implicit coercion or a `Nothing` completion) left at that offset, and
+  puts the line back at the body's start only when the in-place arguments left another line, or
+  none, in effect (`CodeBuilder::defer_line_mark`, `settle_deferred_line`). An assignment, a condition and an intrinsic such as `toString()` mark
+  their line before the operand, so their entry stays. Test:
+  `tests/unsigned_bitwise_lines_e2e.rs` (`unsigned_operator_lines_match_kotlinc`),
+  `tests/classpath_inline_lambda_route_e2e.rs` (`failing`).
 - **An inlined lambda's body locals include the brace `nop` and follow its marker.** The lambda's
   inline template is the source block's statements, not a second block wrapped around that block,
   and a `Unit` coercion around the block is not another scope (`fir_lower/local_callables.rs`).
@@ -15720,10 +15760,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   entry's declaration name, so the read does not initialize the enum. A name read through a value
   stays a call of `name()` and does initialize it.
   (`tests/enum_name_const_e2e.rs`. Corpus: `evaluate/intrinsicConst/enumNameWithInit.kt`.)
-  kotlinc's interpreter also folds the
-  remaining `@IntrinsicConstEvaluation` library calls, which the checker publishes as ordinary calls
-  and krusty does not fold yet: `toString()`, `floorDiv`/`mod`, and unsigned arithmetic and
-  comparison (`1u + 2u` is `iconst_3` boxed to `UInt`). Neither folds an `if`/`when` over constants.
+  A builtin's `toString()`, `equals` and `compareTo` are `@IntrinsicConstEvaluation` too:
+  `(1 == 2).toString()` is `ldc "false"`, not `iconst_0; String.valueOf(Z)`. The checker records
+  on an external call whether its selected declaration carries the annotation (read from Kotlin
+  metadata), and the operation is the one its override role names: `toString()` is the value's
+  string conversion (also `Any?.toString()` on `null` and an unsigned value's text), `equals` is the
+  boxed value's (`1.equals(1L)` and `1.0.equals(-0.0)` are false, a NaN equals itself),
+  `String.compareTo` is Java's UTF-16 unit difference (`"b".compareTo("abc")` is 1), and an unsigned
+  `compareTo` orders the unsigned values. `<`, `<=`, `>`, `>=` over a selected `compareTo` fold with
+  it (`"a" < "b"`). `hashCode` is not intrinsic-const and stays a call.
+  (`constant_evaluation_e2e::builtin_member_calls_over_constants_fold`.)
+  kotlinc's interpreter also folds the remaining `@IntrinsicConstEvaluation` library calls, which
+  krusty does not fold yet: `floorDiv`/`mod`, and unsigned arithmetic and conversions (`1u + 2u` is
+  `iconst_3` boxed to `UInt`). Neither folds an `if`/`when` over constants.
   An overflowing constant expression wraps without a diagnostic, as in kotlinc.
   (`tests/constant_evaluation_e2e.rs`.)
   A safe call's selector does not fold over a constant receiver: kotlinc's safe-call lowering puts

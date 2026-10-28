@@ -2273,7 +2273,6 @@ escapeAnalysis/recursion.kt
 escapeAnalysis/stack_array.kt
 escapeAnalysis/test10.kt
 escapeAnalysis/test11.kt
-escapeAnalysis/test12.kt
 escapeAnalysis/test13.kt
 escapeAnalysis/zeroOutObjectOnAlloc.kt
 evaluate/annotationClassWithInner.kt
@@ -2596,7 +2595,6 @@ functions/kt58825_arrayOverloads.kt
 functions/kt785.kt
 functions/kt873.kt
 functions/localFunction.kt
-functions/localFunctions/boundTypeParameterInVararg.kt
 functions/localFunctions/callBetweenLocalFunctions.kt
 functions/localFunctions/callInlineLocalInLambda.kt
 functions/localFunctions/definedWithinLambda.kt
@@ -3926,7 +3924,6 @@ innerNested/superConstructorCall/localExtendsInner.kt
 innerNested/superConstructorCall/localExtendsLocalWithClosure.kt
 innerNested/superConstructorCall/localWithClosureExtendsLocalWithClosure.kt
 innerNested/superConstructorCall/objectExtendsClassDefaultArgument.kt
-innerNested/superConstructorCall/objectExtendsClassVararg.kt
 innerNested/superConstructorCall/objectExtendsInner.kt
 innerNested/superConstructorCall/objectExtendsInnerDefaultArgument.kt
 innerNested/superConstructorCall/objectExtendsInnerOfLocalVarargAndDefault.kt
@@ -3942,7 +3939,6 @@ interfaceCallsNCasts/diamond.kt
 interfaceCallsNCasts/finalMethod.kt
 interfaceCallsNCasts/interface0.kt
 intrinsics/charToInt.kt
-intrinsics/ea35953.kt
 intrinsics/kt10131.kt
 intrinsics/kt10131a.kt
 intrinsics/kt12125_2.kt
@@ -4055,7 +4051,6 @@ lazyCodegen/exceptionInFieldInitializer.kt
 lazyCodegen/ifElse.kt
 lazyCodegen/optimizations/negateObjectComp.kt
 lazyCodegen/optimizations/negateObjectComp2.kt
-lazyCodegen/safeCallAndArray.kt
 lazyCodegen/tryCatchExpression.kt
 literals/listof1.kt
 literals/strdedup1.kt
@@ -4512,7 +4507,6 @@ primitiveTypes/equalityWithObject/generated/primitiveEqObjectChar.kt
 primitiveTypes/equalityWithObject/generated/primitiveEqObjectInt.kt
 primitiveTypes/equalityWithObject/generated/primitiveEqObjectLong.kt
 primitiveTypes/equalityWithObject/generated/primitiveEqObjectShort.kt
-primitiveTypes/equalityWithObject/intEqualsNull.kt
 primitiveTypes/equalityWithObject/intEqualsNullableInt.kt
 primitiveTypes/equalityWithObject/intEqualsNullableIntWithSmartCasts.kt
 primitiveTypes/equalityWithObject/kt42281.kt
@@ -4622,8 +4616,6 @@ properties/generalAccess.kt
 properties/genericPropertyMultiModule.kt
 properties/genericWithSameName.kt
 properties/initOrderMultiModule.kt
-properties/initializerOfConstValWithConst.kt
-properties/initializerOfConstValWithConstExpr.kt
 properties/initializerOfValWithConstExpr.kt
 properties/initializerOfValWithNonConstExpr.kt
 properties/kt10729.kt
@@ -5568,7 +5560,6 @@ regressions/kt1800.kt
 regressions/kt18779.kt
 regressions/kt2017.kt
 regressions/kt2060.kt
-regressions/kt2210.kt
 regressions/kt2470.kt
 regressions/kt24913.kt
 regressions/kt2509.kt
@@ -5749,7 +5740,6 @@ smartCasts/genericSet.kt
 smartCasts/invokeRecieverSmartcastK2.kt
 smartCasts/kt17725.kt
 smartCasts/kt19100.kt
-smartCasts/kt44804.kt
 smartCasts/kt44814.kt
 smartCasts/kt44932.kt
 smartCasts/kt72391.kt
@@ -5906,7 +5896,6 @@ traits/interfaceWithNonAbstractFunIndirect.kt
 traits/interfaceWithNonAbstractFunIndirectGeneric.kt
 traits/kt2399.kt
 traits/kt2541.kt
-traits/kt3500.kt
 traits/kt36973.kt
 traits/kt5393_property.kt
 traits/multiple.kt
@@ -6072,7 +6061,6 @@ vararg/emptyVarArg.kt
 vararg/evaluationOrder.kt
 vararg/inlineClassArraysAsNamedArgumentInVararg.kt
 vararg/kt10926.kt
-vararg/kt1978.kt
 vararg/kt37715.kt
 vararg/kt37779.kt
 vararg/kt581.kt
