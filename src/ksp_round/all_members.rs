@@ -431,6 +431,10 @@ impl Order<'_> {
             };
             names.extend(self.names(super_name)?.iter().cloned());
         }
+        // Only a name's first place ranks it; keeping each once keeps a supertype diamond from
+        // repeating its names along every path.
+        let mut seen = HashSet::default();
+        names.retain(|name| seen.insert(name.clone()));
         Some(names)
     }
 
