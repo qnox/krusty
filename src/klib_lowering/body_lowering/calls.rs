@@ -403,7 +403,9 @@ impl BodyLowering<'_> {
         // already expanded inline function's type parameter erased to.
         if signature.ret != ty
             && self.header.erased(signature.ret) != ty
-            && !self.linker.is_subtype(signature.ret, ty)
+            && !self
+                .linker
+                .is_subtype(self.header.type_parameters(), signature.ret, ty)
         {
             return Err(mismatch(
                 "a function invocation is typed apart from its result",

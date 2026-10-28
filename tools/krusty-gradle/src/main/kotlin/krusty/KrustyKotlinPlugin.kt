@@ -151,6 +151,14 @@ private fun replaceKotlinJvmCompiles(
     val verifyReport = if (verifyRequested(project.gradle)) verifyReportTask(project, binaryPath) else null
     val verifying = verifyReport != null
     val timings = if (verifying) taskTimings(project, buildEvents) else null
+    // The applied Kotlin Gradle plugin's release, read through the plugin interface every release
+    // since 1.7 shares. This plugin is compiled against the API of the releases krusty supports, and
+    // an older release's API differs in kind (KotlinTopLevelExtension was an abstract class before
+    // 2.1), so a compile under an unsupported release is left to kotlinc before the rest of the API
+    // is read.
+    val kotlinPluginRelease by lazy {
+        project.plugins.withType(KotlinBasePlugin::class.java).single().pluginVersion
+    }
     project.tasks.withType(KotlinJvmCompile::class.java).all {
         val kotlinTask = this
         // A KotlinJvmCompile outside every source-set compilation is not a krusty compile either:
@@ -160,13 +168,17 @@ private fun replaceKotlinJvmCompiles(
         // plugin to write Java stubs, not classes; the compile after annotation processing is the
         // krusty compile, and a replacement here would depend on the processing that needs the stubs.
         val sourceSetName = kotlinTask.sourceSetName.orNull
+        // Read only for a compile no earlier reason leaves to kotlinc: a kotlin-dsl project applies
+        // more than one Kotlin plugin.
+        val supportedRelease by lazy { kotlinPluginRelease in supportedKotlinVersions }
         // A multiplatform project's KotlinJvmCompile tasks also compile Android targets, which
         // krusty does not compile.
-        val compilation = if (multiplatform) jvmCompilation(project, kotlinTask.name) else null
+        val compilation by lazy { if (multiplatform) jvmCompilation(project, kotlinTask.name) else null }
         val kotlincReason = when {
             kotlinTask is KaptGenerateStubs -> "it generates kapt stubs"
             sourceSetName == null -> "it belongs to no source set"
             kotlinDsl -> "its project applies kotlin-dsl"
+            !supportedRelease -> unsupportedKotlinPluginVersion(kotlinPluginRelease)
             multiplatform && compilation == null -> "it compiles no Kotlin/JVM target"
             else -> null
         }
@@ -184,13 +196,15 @@ private fun replaceKotlinJvmCompiles(
                     kotlinTask,
                     "krusty: the project applies kotlin-dsl, whose compiles stay with kotlinc",
                 )
+            } else if (verifyReport != null && sourceSetName != null && kotlinTask !is KaptGenerateStubs &&
+                !supportedRelease
+            ) {
+                reportUnsupported(verifyReport, kotlinTask, kotlincReason)
             }
             return@all
         }
         val replacementName = "${kotlinTask.name}WithKrusty"
-        val pluginVersion = project.provider {
-            project.plugins.withType(KotlinBasePlugin::class.java).single().pluginVersion
-        }
+        val pluginVersion = project.provider { kotlinPluginRelease }
         val compilerPluginArguments = kotlinTask.pluginOptions.map(::pluginOptionArguments)
         val compilerVersion = project.extensions.getByType(KotlinTopLevelExtension::class.java)
             .compilerVersion.orElse(pluginVersion)
@@ -222,8 +236,9 @@ private fun replaceKotlinJvmCompiles(
             )
             libraries.from(kotlinTask.libraries)
             friendPaths.from(kotlinTask.friendPaths)
-            if (compilation != null) {
-                val fragments = project.provider { fragmentStructure(compilation, project.projectDir) }
+            val jvmCompilation = compilation
+            if (jvmCompilation != null) {
+                val fragments = project.provider { fragmentStructure(jvmCompilation, project.projectDir) }
                 fragmentNames.set(fragments.map { it.names })
                 fragmentSources.set(fragments.map { it.sources })
                 fragmentRefines.set(fragments.map { it.refines })
@@ -669,9 +684,6 @@ private class KotlincRequest(val arguments: List<String>, val refusals: List<Str
 
 private fun kotlincRequest(task: KotlinJvmCompile, pluginVersion: String, compilerVersion: String): KotlincRequest {
     fun refused(reason: String) = KotlincRequest(emptyList(), listOf(reason))
-    if (pluginVersion !in supportedKotlinVersions) {
-        return refused(unsupportedKotlinPluginVersion(pluginVersion))
-    }
     if (compilerVersion != pluginVersion) {
         return refused("Kotlin compiler $compilerVersion differs from Kotlin Gradle plugin $pluginVersion")
     }
@@ -697,17 +709,9 @@ private fun kotlincRequest(task: KotlinJvmCompile, pluginVersion: String, compil
     val freeArguments = options.freeCompilerArgs.getOrElse(emptyList())
     structuredOptInRefusal(structuredOptIns)?.let { return refused(it) }
     freeArgumentRefusal(freeArguments, pluginVersion)?.let { return refused(it) }
-    structuredOptIns.firstOrNull { marker -> "-opt-in=$marker" in freeArguments }?.let { marker ->
-        return refused(
-            "compilerOptions.optIn and freeCompilerArg '-opt-in=$marker' both request marker '$marker'; configure exactly one",
-        )
-    }
-    freeArguments.firstOrNull(::isFreeJvmDefault)?.let { free ->
-        if (options.jvmDefault.orNull != null) {
-            return refused("compilerOptions.jvmDefault and freeCompilerArg '$free' are both set; configure exactly one")
-        }
-    }
-    val arguments = ArrayList(freeArguments)
+    // KGP fills kotlinc's arguments from the structured options and appends the free arguments
+    // after them, so a free argument overrides the structured option it restates.
+    val arguments = ArrayList<String>()
     languageVersion?.let { arguments.addPair("-language-version", it) }
     apiVersion?.let { arguments.addPair("-api-version", it) }
     structuredOptIns.forEach { marker ->
@@ -725,12 +729,9 @@ private fun kotlincRequest(task: KotlinJvmCompile, pluginVersion: String, compil
     if (options.allWarningsAsErrors.getOrElse(false) && "-Werror" !in freeArguments) {
         arguments.add("-Werror")
     }
+    arguments.addAll(freeArguments)
     return KotlincRequest(arguments, emptyList())
 }
-
-private fun isFreeJvmDefault(argument: String): Boolean =
-    argument == "-jvm-default" || argument == "-Xjvm-default" ||
-        argument.startsWith("-jvm-default=") || argument.startsWith("-Xjvm-default=")
 
 private fun structuredOptInRefusal(markers: List<String>): String? {
     val seen = HashSet<String>()
