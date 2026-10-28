@@ -13,6 +13,15 @@ retain the same exact owner-relative segment, including a dollar inside a named 
 Unknown declaration facts never activate a spelling-derived fallback. Other type/class-ID fields
 remain separate consumer migrations.
 
+## Dependency conversion proof
+
+Ordinary body conversions and prepared-inline templates consume the same explicit semantic class
+model with the dependency declaration's complete formal bounds layered over it. Known empty bounds
+remain declaration evidence; they do not fall through to another provider. No class model means
+identity-only ordinary proof. Value/reference conversions retain typed common IR operations rather
+than changing metadata or runtime layouts. Tests: `klib_lowering::type_evidence::tests` and
+`klib_lowering::tests::body_forms`.
+
 ## Native source callable-reference identity
 
 The checked source-module callable ID and source-module identity own the Native reflection marker's

@@ -562,9 +562,13 @@ impl CallLinker for Linker<'_, '_> {
         }))
     }
 
-    fn is_subtype(&self, sub: Ty, sup: Ty) -> bool {
-        // A support unit has no semantic model of the classes its body names.
-        sub == sup
+    fn is_subtype(
+        &self,
+        parameters: &super::klib_types::KlibTypeParameters,
+        sub: Ty,
+        sup: Ty,
+    ) -> bool {
+        self.sources.callees.is_subtype(parameters, sub, sup)
     }
 
     fn link_constructor(

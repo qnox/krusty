@@ -10,6 +10,14 @@ Keep explicit local provenance separate from unknown evidence. Other class-ID co
 aliases, annotations and sealed-class inventories remain separate follow-ups; this step does not
 claim to replace their legacy encoding or callable-reference adapter naming.
 
+## Shared dependency conversion evidence
+
+Reuse the constructor-bound collaborator for ordinary dependency bodies and prepared templates.
+Pass the active header's complete formal bounds into the same explicit class-model proof and keep
+typed common coercions when a conversion changes nullability or scalar/reference representation.
+Keep the already-landed generic-argument arity guard unchanged. Validate the owning proof and body
+tests and the portable dependency-array-view fixture without backend mutes or new outcome entries.
+
 ## Native source callable-reference markers
 
 Give source-module references a program-scoped marker keyed by the existing module-qualified
