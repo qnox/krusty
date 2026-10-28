@@ -2525,23 +2525,6 @@ fun box(): String = viaLambdaReceiver(Holder("ok"))
     );
 }
 
-/// A member extension's formal reached only through another formal's bound is the receiver's own
-/// type argument, so a conflicting expected result is reported against that argument
-/// (`Table<U>`), not against the bound's fallback (`Table<Any>`), as kotlinc reports.
-#[test]
-fn a_member_extension_bound_only_formal_reports_the_receiver_argument_like_kotlinc() {
-    let sources = [(
-        "Tables.kt",
-        r#"class Column<T>(val name: String)
-class Table<T : Any>(val name: String)
-open class Entity<T : Any>(val id: T)
-
-class Tables {
-    fun <T : Any, E : Entity<T>> Column<out E>.table(): Table<T> = Table(name)
-
-    fun <U : Any> wrongTable(column: Column<Entity<U>>): Table<String> = column.table()
-}
-
 /// An extension function's type parameter is named with its owner's receiver as the declaration
 /// spells it (`fun <T> T?.orName`), as kotlinc words it; a function without a receiver keeps the
 /// bare name.
@@ -2559,12 +2542,38 @@ fun <T : CharSequence> plainName(): T = 1
     assert_eq!(
         common::reference_error_blocks(&sources, &reference_args),
         [
-            "Tables.kt:8:74: return type mismatch: expected 'Table<String>', actual 'Table<U (of fun <U : Any> wrongTable)>'.",
-
             "Owner.kt:1:43: return type mismatch: expected 'T (of fun <T : Number> List<T>.firstName)', actual 'String'.",
             "Owner.kt:2:26: return type mismatch: expected 'T (of fun <T> T?.orName)', actual 'String'.",
             "Owner.kt:3:49: return type mismatch: expected 'V? (of fun <K, V> Map<in K, V>.valueName)', actual 'Int'.",
             "Owner.kt:4:41: return type mismatch: expected 'T (of fun <T : CharSequence> plainName)', actual 'Int'.",
+        ]
+    );
+    common::assert_error_blocks_match_kotlinc(&sources, &reference_args);
+}
+
+/// A member extension's formal reached only through another formal's bound is the receiver's own
+/// type argument, so a conflicting expected result is reported against that argument
+/// (`Table<U>`), not against the bound's fallback (`Table<Any>`), as kotlinc reports.
+#[test]
+fn a_member_extension_bound_only_formal_reports_the_receiver_argument_like_kotlinc() {
+    let sources = [(
+        "Tables.kt",
+        r#"class Column<T>(val name: String)
+class Table<T : Any>(val name: String)
+open class Entity<T : Any>(val id: T)
+
+class Tables {
+    fun <T : Any, E : Entity<T>> Column<out E>.table(): Table<T> = Table(name)
+
+    fun <U : Any> wrongTable(column: Column<Entity<U>>): Table<String> = column.table()
+}
+"#,
+    )];
+    let reference_args = common::language_directives::kotlinc_args(sources[0].1);
+    assert_eq!(
+        common::reference_error_blocks(&sources, &reference_args),
+        [
+            "Tables.kt:8:74: return type mismatch: expected 'Table<String>', actual 'Table<U (of fun <U : Any> wrongTable)>'.",
         ]
     );
     common::assert_error_blocks_match_kotlinc(&sources, &reference_args);
