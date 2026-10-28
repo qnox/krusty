@@ -16,6 +16,7 @@ mod body_unit;
 mod callee_facts;
 mod class_headers;
 mod class_initialization;
+mod class_storage;
 mod closure_forms;
 mod constructor_bounds;
 mod constructor_calls;

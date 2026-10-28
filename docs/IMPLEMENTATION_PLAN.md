@@ -1,5 +1,12 @@
 # krusty — implementation plan
 
+## Declared KLIB storage handoff
+
+Normalize storage fields during the existing constructor validation walk, retain their full class
+declaration alongside the layout, and consume that record when materializing fields and lowering
+initializer accesses. This supplies the shared storage evidence for the subsequent imported getter
+consumer without changing constructor arguments or initializer order.
+
 ## Class-generic dependency method exports
 
 Retain the complete declared self type, including captured parameters, at FIR lowering and consume
