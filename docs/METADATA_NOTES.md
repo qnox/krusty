@@ -1,5 +1,27 @@
 # `@kotlin.Metadata` — reverse-engineering notes (Phase 4b)
 
+## Declaration-owned Class header IDs
+
+The common Class schema takes a mandatory resolved class ID. Its package and exact lexical
+segments determine JVM `pkg/Outer.Inner` spelling, predefined records and descriptor compression;
+compression is unavailable when a retained segment contains a literal dollar. KLIB writes those
+same segments into its qualified-name table and reuses the Class header ID for field 174's class
+inventory. Its root/child declaration traversal uses retained ownership too, so literal-dollar
+classes cannot disappear before serialization. Explicit local JVM names retain the existing
+local-name record and enum-body handling. `companionObjectName` and the companion's `nestedClassName`
+retain the same exact owner-relative segment, including a dollar inside a named companion.
+Unknown declaration facts never activate a spelling-derived fallback. Other type/class-ID fields
+remain separate consumer migrations.
+
+## Dependency conversion proof
+
+Ordinary body conversions and prepared-inline templates consume the same explicit semantic class
+model with the dependency declaration's complete formal bounds layered over it. Known empty bounds
+remain declaration evidence; they do not fall through to another provider. No class model means
+identity-only ordinary proof. Value/reference conversions retain typed common IR operations rather
+than changing metadata or runtime layouts. Tests: `klib_lowering::type_evidence::tests` and
+`klib_lowering::tests::body_forms`.
+
 ## Native source callable-reference identity
 
 The checked source-module callable ID and source-module identity own the Native reflection marker's
@@ -1296,3 +1318,11 @@ Provider-normalized function classifiers supply their declared generic supertype
 subtype relation. A typed function signature supplies its canonical classifier application, and
 the hierarchy walk checks the nominal value against that application. Reflective function types
 retain their nominal identity; no new metadata payload or physical JVM descriptor is introduced.
+
+## Rejected constructor lambda constraints
+
+Normalized constructor signatures and the canonical source-argument mapping retain postponed
+function-expression expectations when an explicit class argument violates its bound. Reporting
+uses the same typed failure evidence for source and reference-produced dependency declarations;
+it does not reconstruct parameter types from constructor text. Metadata encoding and callable ABI
+are unchanged. Callable-reference selected-declaration diagnostic retention is tracked in #2776.

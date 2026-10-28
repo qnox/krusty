@@ -2467,3 +2467,26 @@ fun box(): String = invoked.values.greeting() + invoked.values.suffix()
 "#;
     assert_accepted_and_runs(src, "ResolverPackageQualifiedPropertyInvoke");
 }
+
+#[test]
+fn an_implicit_receiver_extension_property_root_binds_a_callable_suffix() {
+    // The root `kotlin` names both a root package and an extension property on the lambda's
+    // implicit receiver; the property wins at that receiver's level and the callable suffix binds
+    // on its value.
+    let src = r#"
+class Holder(val text: String)
+
+val Holder.kotlin: String get() = text
+
+fun viaLambdaReceiver(holder: Holder): String = with(holder) { kotlin.uppercase() }
+
+fun box(): String = viaLambdaReceiver(Holder("ok"))
+"#;
+    let stem = "ResolverImplicitReceiverPropertyCallSuffix";
+    assert_accepted_and_runs(src, stem);
+    common::assert_classes_identical_to_kotlinc(
+        stem,
+        src,
+        &["ResolverImplicitReceiverPropertyCallSuffixKt", "Holder"],
+    );
+}
