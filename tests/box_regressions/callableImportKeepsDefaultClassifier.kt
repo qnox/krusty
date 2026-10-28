@@ -3,16 +3,16 @@
 // FILE: lib.kt
 package lib
 
-fun Pair(value: Int): kotlin.Pair<Int, Int> = kotlin.Pair(value, value + 1)
+fun String(flag: Boolean): kotlin.String = if (flag) "yes" else "no"
 
 // FILE: main.kt
-import lib.Pair
+import lib.String
 
-fun make(value: Int): Pair<Int, Int>? = Pair(value)
+fun make(flag: Boolean): String? = String(flag)
 
-fun Pair<Int, Int>.sum(): Int = first + second
+fun String.isYes(): Boolean = length == 3
 
 fun box(): String {
-    val pair = make(1) ?: return "null"
-    return if (pair.sum() == 3) "OK" else "FAIL"
+    val answer = make(true) ?: return "null"
+    return if (answer.isYes()) "OK" else "FAIL: $answer"
 }
