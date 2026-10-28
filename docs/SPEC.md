@@ -1,5 +1,19 @@
 # krusty — a memory-lean Kotlin→JVM compiler PoC
 
+## In-projected receiver formals meet their declared bound
+
+A formal that occurs only contravariantly in an extension receiver, and in no value parameter or
+result, receives only upper constraints: `Expr<T>` against `Expr<in S>` says `S <: T`, not
+`S = T`. Its declared bound is one more upper constraint, so when the call's binding violates the
+bound, the formal is solved at their intersection. In `fun <T, S : T?> Expr<in S>.wrap(value: T)`
+called as `wrap(t)` from `fun <T : CharSequence?, S : T> Expr<T>.param(t: S)`, the callee's `S`
+is `T & S'?`, and the call is accepted as kotlinc 2.4.21 accepts it. A formal that a value
+parameter also mentions keeps its exact binding, so `sink.put(t, n)` against
+`<T, S : T?> Sink<in S>.put(value: T, extra: S)` still reports kotlinc's argument mismatch, and
+`hold(::foo)` against `<T : Bound, U> hold(f: (T) -> U)` still cannot infer `T`. Tests: `tests/box_regressions/inProjectedReceiverUpperConstraint.kt`,
+`resolver_regression_e2e::an_in_projected_formal_with_an_ordinary_occurrence_keeps_its_exact_binding`
+and `diagnostics_inference_parity_e2e::callable_reference_bound_failure_is_inference_error`.
+
 ## Declaration-owned metadata class headers
 
 JVM Class metadata and KLIB Class headers name their selected declaration through retained package
