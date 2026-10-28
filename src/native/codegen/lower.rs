@@ -482,7 +482,7 @@ struct FileLowering<'a> {
     /// The emitted pieces of each property reference, by the expression that creates it.
     references: HashMap<u32, references::ReferenceSite>,
     /// One marker per (referenced declaration, bound-ness) this file mentions.
-    reference_identities: HashMap<String, DataId>,
+    reference_identities: HashMap<functions::ReferenceIdentity, DataId>,
     /// The runtime-known types this file puts a class of its OWN behind, by resolved identity.
     ///
     /// A receiver typed by one of these may be an object of the program's rather than one the

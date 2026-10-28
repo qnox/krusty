@@ -32,6 +32,14 @@ preserves the input's reference carrier on success, including String's distinct 
 `referenceNotNullException.kt` checks nullable String and hidden nullable generic locals against
 the JVM reference and every backend. Nullable scalar unboxing remains separately unsupported.
 
+## Native function-reference identity across source files
+
+Two references to the same source-module callable compare equal and hash alike across emitted
+object files. Native emission keys their shared marker on the exact source module and checked
+callable identity, retaining the bound/unbound distinction. Different declarations remain unequal.
+The Native object-linkage regression in `tests/native_cross_file_e2e.rs` establishes the identical
+multi-file program's kotlinc and JVM results before requiring Native equality and hash agreement.
+
 ## Bound declaration-name evidence
 
 A query for an already-bound classifier or alias key projects the selected declaration's own
@@ -56,6 +64,20 @@ owners and exact retained segments. A dollar inside a declaration name never int
 classifier or owner. Publication retains visibility and declaration order, and excludes local and
 anonymous classifiers as before. Header-boundary regressions check the complete published inventory,
 absence of invented prefixes, and exact nesting for literal-dollar owner/member names.
+
+## Wasm reference-array literals and reads
+
+Reference-element `Array<T>` literals without spreads preserve element evaluation order and array
+identity. A read evaluates its receiver and index once, then casts the physical nullable-reference
+element to the checked readable element type. Primitive arrays, scalar boxing, writes, spreads and
+size/initializer constructors remain separate representation work.
+
+Wasm bounds checks follow the selected Kotlin release's default, with an explicit per-backend
+override for `-Xwasm-enable-array-range-checks`. Checked negative and high indices throw distinct
+authenticated IndexOutOfBoundsException objects with a null message through the existing Throwable
+transport; unchecked accesses retain the host bounds trap. The shared `referenceArrayLiteralRead.kt`
+fixture covers values, projection, nulls, identity and effect order. The marked Wasm-only bounds test
+covers both hosts, release defaults, explicit options, parent types and rethrow identity.
 
 ## Wasm runtime-exception type tests
 
@@ -10147,6 +10169,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   remainder resolves to none
   (`crates/krusty-lsp/src/compiler_analysis.rs::source_set_resolves_java_setter_backed_property_write`,
   `java_fluent_setter_e2e::java_setter_is_a_var_whatever_it_returns`).
+  "Matches the getter's type" is type equality, under which a platform type `T!` equals both `T`
+  and `T?`: a `@NotNull` setter parameter (an override narrowing an inherited `setX`, or a class
+  that annotates one accessor only) still pairs with an unannotated getter, while a `@Nullable`
+  setter of a `@NotNull` getter does not, and assigning that property is a `val` reassignment
+  (`tests/java_not_null_setter_pairing_e2e.rs`). The equality holds at every nesting level, so a
+  `setItems(List<Integer>)` is not the setter of `List<String> getItems()`, annotated or not, while
+  `setA(@Nullable List<String>)` pairs with `@Nullable List<String> getA()` and a wildcard setter
+  with the same wildcard getter. Fixed nullability, projections and arguments compare level by
+  level, in both the classpath and the hierarchy accessor lookup.
 
 - **Member types of a Java interface or annotation are implicitly public (JLS §9.5).** The Java
   signature stubs emit `interface Registry { final class Handler {…} }` with `ACC_PUBLIC` on
