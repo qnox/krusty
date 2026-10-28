@@ -13,6 +13,10 @@ class Plain(val primary: Int, var mutablePrimary: String) {
     internal fun internalMember() {}
     suspend fun suspending() {}
     inline fun inlined() {}
+    @Volatile var volatileProperty = 0
+    @Transient val transientProperty = 0
+    @Synchronized fun synchronizedMember() {}
+    @Strictfp fun strictMember() {}
 
     companion object {
         const val CONSTANT = 7

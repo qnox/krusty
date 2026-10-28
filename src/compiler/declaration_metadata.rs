@@ -35,6 +35,20 @@ pub(super) fn declaration_annotations(
     }))
 }
 
+/// The classifiers of the SOURCE-retained annotations `annotations` apply, in source order. No class
+/// file or metadata record names them; a compiler plugin may still read them.
+pub(super) fn source_retained_annotations(
+    annotations: &[ast::AnnotationRef],
+    info: &TypeInfo,
+) -> Vec<crate::types::TypeName> {
+    annotations
+        .iter()
+        .filter_map(|annotation| info.applied_annotation(annotation))
+        .filter(|applied| applied.retention == crate::types::AnnotationRetention::Source)
+        .map(|applied| applied.internal)
+        .collect()
+}
+
 fn property_site_annotations(
     declared: &[ast::AnnotationRef],
     info: &TypeInfo,

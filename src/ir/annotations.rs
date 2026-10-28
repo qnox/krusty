@@ -66,6 +66,9 @@ pub struct DeclarationAnnotations {
     /// uses this provenance to retain the property's empty annotation marker; it does not set
     /// Kotlin metadata's `HAS_ANNOTATIONS` bit.
     suppressed_source_application: bool,
+    /// How many trailing `retained` applications a compiler plugin attached after checking. They
+    /// reach the class file only: kotlinc serializes metadata from FIR, before its IR plugins run.
+    lowered: usize,
 }
 
 impl DeclarationAnnotations {
@@ -74,6 +77,7 @@ impl DeclarationAnnotations {
             retained: annotations,
             erased_optional_expectations: false,
             suppressed_source_application: false,
+            lowered: 0,
         }
     }
 
@@ -113,7 +117,7 @@ impl DeclarationAnnotations {
     /// Whether Kotlin metadata reports `HAS_ANNOTATIONS`. Suppressed SOURCE provenance can require
     /// a target carrier without making the source declaration annotated in metadata.
     pub(crate) fn declares_metadata_annotations(&self) -> bool {
-        !self.retained.is_empty() || self.erased_optional_expectations
+        self.retained.len() > self.lowered || self.erased_optional_expectations
     }
 
     pub(crate) fn with_suppressed_source_application(mut self, retained: bool) -> Self {
@@ -125,6 +129,12 @@ impl DeclarationAnnotations {
     /// provenance even though [`Self::retains_none`] is true.
     pub fn has_suppressed_source_application(&self) -> bool {
         self.suppressed_source_application
+    }
+
+    /// Append an application a compiler plugin attaches to the declaration after checking.
+    pub(crate) fn push(&mut self, annotation: RetainedAnnotation) {
+        self.retained.push(annotation);
+        self.lowered += 1;
     }
 
     pub fn iter(&self) -> std::slice::Iter<'_, RetainedAnnotation> {
@@ -139,6 +149,14 @@ impl DeclarationAnnotations {
     /// partition a backend may later require.
     pub fn applications(&self) -> impl Iterator<Item = &AppliedAnnotation> {
         self.retained.iter().map(|retained| &retained.annotation)
+    }
+
+    /// The checked applications Kotlin metadata records: [`Self::applications`] without the ones a
+    /// compiler plugin attached.
+    pub(crate) fn checked_applications(&self) -> impl Iterator<Item = &AppliedAnnotation> {
+        self.retained[..self.retained.len() - self.lowered]
+            .iter()
+            .map(|retained| &retained.annotation)
     }
 
     /// Whether no application survives into the class file. This is a physical fact; whether the

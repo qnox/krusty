@@ -99,6 +99,9 @@ pub struct BackendCallableFact {
     pub(crate) klib_body_class_contract: Option<crate::libraries::KlibBodyClassContract>,
     pub(crate) klib_body_vararg_index: Option<usize>,
     pub(crate) klib_body_parameter_defaults: Option<crate::libraries::ParamFlags>,
+    /// Qualified identities of the annotations the provider recorded on this declaration. A
+    /// compiler plugin keys its own calling convention on them (Compose's `@Composable`).
+    pub annotations: Box<[TypeName]>,
 }
 
 impl BackendCallableFact {
@@ -317,6 +320,7 @@ mod tests {
             klib_body_class_contract: None,
             klib_body_vararg_index: None,
             klib_body_parameter_defaults: None,
+            annotations: Box::new([]),
         }
     }
 
@@ -538,6 +542,7 @@ mod tests {
             klib_body_class_contract: None,
             klib_body_vararg_index: None,
             klib_body_parameter_defaults: None,
+            annotations: Box::new([]),
         };
         assert!(fact.matches_dependency_body_call(&[Ty::Int], None, true));
         assert!(!fact.matches_dependency_body_call(&[Ty::Int], None, false));
@@ -586,9 +591,16 @@ pub struct CheckedBackendCallables {
     properties: HashMap<ExternalPropertyId, BackendPropertyFact>,
     singleton_dispatches: HashMap<crate::ir::ExprId, SingletonDispatch>,
     singleton_selections: HashMap<ExternalCallableId, Vec<SingletonDispatch>>,
+    /// The runtime declarations native plugins selected at the handoff for their generated code.
+    plugin_runtime: crate::fx_hash::HashSet<ExternalCallableId>,
 }
 
 impl CheckedBackendCallables {
+    /// Whether native plugins selected `identity` at the handoff for the code they generate.
+    pub(crate) fn is_plugin_runtime_callable(&self, identity: ExternalCallableId) -> bool {
+        self.plugin_runtime.contains(&identity)
+    }
+
     /// The exact declaration view for one emitted edge, retaining only its checked singleton.
     pub(crate) fn klib_body_callable_at(
         &self,
@@ -721,6 +733,19 @@ impl CheckedBackendCallables {
         self.freeze_callables(references::external_super_callables(ir), provider)
     }
 
+    /// Freeze the runtime declarations native plugins selected at the handoff for the code they
+    /// generate (see [`crate::plugins::runtime_declarations`]).
+    pub(crate) fn freeze_plugin_runtime_callables(
+        &mut self,
+        identities: Vec<ExternalCallableId>,
+        provider: impl FnMut(
+            ExternalCallableId,
+        ) -> Option<crate::libraries::ExternalCallableRealization>,
+    ) -> Result<(), DependencyFactError> {
+        self.plugin_runtime.extend(identities.iter().copied());
+        self.freeze_callables(identities, provider)
+    }
+
     fn freeze_callables(
         &mut self,
         identities: impl IntoIterator<Item = ExternalCallableId>,
@@ -757,6 +782,7 @@ impl CheckedBackendCallables {
                 let klib_body_vararg_index = realization.klib_body_vararg_index;
                 let klib_body_parameter_defaults = realization.klib_body_parameter_defaults;
                 let callable = realization.callable;
+                let annotations = callable.annotations.into_boxed_slice();
                 slot.insert(BackendCallableFact {
                     name: callable.name,
                     physical_name: callable.physical_name,
@@ -798,6 +824,7 @@ impl CheckedBackendCallables {
                     klib_body_class_contract,
                     klib_body_vararg_index,
                     klib_body_parameter_defaults,
+                    annotations,
                 })
             }
         };
