@@ -13,8 +13,6 @@ mod nested_signature_argument_layout_e2e;
 mod abstract_serializable_e2e;
 #[path = "annotation_documented_mirror_e2e.rs"]
 mod annotation_documented_mirror_e2e;
-#[path = "backticked_dotted_package_qualifier_e2e.rs"]
-mod backticked_dotted_package_qualifier_e2e;
 #[path = "bridge_result_cast_e2e.rs"]
 mod bridge_result_cast_e2e;
 #[path = "common/bytecode_comparison.rs"]
@@ -1651,6 +1649,8 @@ mod primitive_explicit_equals_e2e;
 mod primitive_hash_code_e2e;
 #[path = "public_inline_property_access_e2e.rs"]
 mod public_inline_property_access_e2e;
+#[path = "e2e/qualified_access.rs"]
+mod qualified_access;
 #[path = "reference_carrier_cast_e2e.rs"]
 mod reference_carrier_cast_e2e;
 #[path = "reified_type_arguments_e2e.rs"]
@@ -2265,8 +2265,6 @@ mod optimization_gate_e2e;
 mod override_candidate_rendering_e2e;
 #[path = "override_type_parameter_bounds_e2e.rs"]
 mod override_type_parameter_bounds_e2e;
-#[path = "package_qualified_type_no_import_e2e.rs"]
-mod package_qualified_type_no_import_e2e;
 #[path = "pair_triple_e2e.rs"]
 mod pair_triple_e2e;
 #[path = "parenthesized_safe_call_e2e.rs"]
@@ -2352,10 +2350,6 @@ mod property_serializer_decode_e2e;
 mod protected_member_accessor_e2e;
 #[path = "qq1_safecall_diverging_scope_block_e2e.rs"]
 mod qq1_safecall_diverging_scope_block_e2e;
-#[path = "qualified_call_receiver_lambda_e2e.rs"]
-mod qualified_call_receiver_lambda_e2e;
-#[path = "qualified_name_e2e.rs"]
-mod qualified_name_e2e;
 #[path = "range_literal_membership_e2e.rs"]
 mod range_literal_membership_e2e;
 #[path = "range_property_e2e.rs"]
@@ -2432,8 +2426,6 @@ mod result_e2e;
 mod result_property_carrier_e2e;
 #[path = "rewritten_orphan_pool_e2e.rs"]
 mod rewritten_orphan_pool_e2e;
-#[path = "root_package_cast_message_e2e.rs"]
-mod root_package_cast_message_e2e;
 #[path = "run_catching_inline_e2e.rs"]
 mod run_catching_inline_e2e;
 #[path = "run_noreceiver_e2e.rs"]

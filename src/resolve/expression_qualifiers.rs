@@ -88,6 +88,10 @@ impl Checker<'_> {
                                 .classifier(owner)
                                 .is_some_and(|classifier| classifier.constants.contains_key(name))
                         })
+                        // An in-scope extension property applicable to the implicit receiver
+                        // binds the root as a value too; an ambiguous one is still a value whose
+                        // ambiguity ordinary expression checking reports.
+                        || !matches!(resolver.select_extension_property(receiver, name), Ok(None))
                 },
                 || {
                     resolver.top_level_properties(name).iter().any(|property| {

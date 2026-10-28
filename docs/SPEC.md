@@ -11807,7 +11807,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
     as an expression first, so a local, a member property reached through an implicit receiver, a
     top-level property, or a property brought in by an EXPLICIT OR WILDCARD import makes the
     reference a member chain. With `import other.plib` (or `import other.*`) binding a property named
-    `plib`, `plib.Cls` reads `plib`'s `Cls` member and does not name the class `plib.Cls`.
+    `plib`, `plib.Cls` reads `plib`'s `Cls` member and does not name the class `plib.Cls`. An
+    in-scope EXTENSION property applicable to an implicit receiver is a value root as well: inside
+    `fun KClass<*>.name()`, `java.simpleName` reads `KClass.java` rather than walking the package
+    `java` (`tests/qualifier_root_extension_property_e2e.rs`).
   - **An in-scope classifier shadows a package path**, so `Outer.Nested` resolves through the
     in-scope chain and never through a package named `Outer`.
 
