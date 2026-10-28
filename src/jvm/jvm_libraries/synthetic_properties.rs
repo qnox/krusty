@@ -9,8 +9,9 @@
 
 use crate::fx_hash::{HashMap, HashSet};
 
+use crate::libraries::SemanticPlatform;
 use crate::symbol_source::SymbolSource;
-use crate::types::Ty;
+use crate::types::{Ty, TyKind};
 
 /// Whether `class` declares a public instance field `name`, which a synthetic property of the same
 /// name gives way to.
@@ -74,6 +75,56 @@ pub(super) fn setter_name_for_getter(getter: &str) -> String {
         getter.strip_prefix("get").unwrap_or(getter)
     };
     format!("set{stem}")
+}
+
+impl super::JvmLibraries {
+    /// Whether a `set` method with `parameters` is the setter of a getter returning `getter`.
+    ///
+    /// Java synthetic-property pairing is declaration-shape matching, not call overload selection.
+    /// The setter takes one value parameter whose type equals the getter's, and a platform type
+    /// `T!` equals both `T` and `T?`: a `@NotNull` setter parameter still pairs with an unannotated
+    /// getter. The method's return type is not part of the shape: a fluent or otherwise non-void
+    /// Java setter is still a `var`, and the assignment discards the result.
+    pub(super) fn pairs_java_setter(&self, getter: Ty, parameters: &[Ty]) -> bool {
+        let [parameter] = *parameters else {
+            return false;
+        };
+        self.flexibly_equal(getter, parameter)
+    }
+
+    /// Type equality where a platform occurrence `T!` equals `T` and `T?`, at every nesting level.
+    /// Nullability, projections and arguments compare level by level; only a classifier itself
+    /// compares in the provider's value form.
+    fn flexibly_equal(&self, left: Ty, right: Ty) -> bool {
+        let (left, right) = if left.is_platform_nullable() || right.is_platform_nullable() {
+            (left.non_null(), right.non_null())
+        } else {
+            match (left.kind(), right.kind()) {
+                (TyKind::Nullable(left), TyKind::Nullable(right)) => (left, right),
+                (TyKind::Nullable(_), _) | (_, TyKind::Nullable(_)) => return false,
+                _ => (left, right),
+            }
+        };
+        match (left.kind(), right.kind()) {
+            (TyKind::InProjection(left), TyKind::InProjection(right))
+            | (TyKind::OutProjection(left), TyKind::OutProjection(right)) => {
+                return self.flexibly_equal(left, right);
+            }
+            (TyKind::StarProjection(_), TyKind::StarProjection(_)) => return true,
+            (TyKind::InProjection(_) | TyKind::OutProjection(_) | TyKind::StarProjection(_), _)
+            | (_, TyKind::InProjection(_) | TyKind::OutProjection(_) | TyKind::StarProjection(_)) => {
+                return false
+            }
+            _ => {}
+        }
+        let (left_arguments, right_arguments) = (left.type_args(), right.type_args());
+        self.library_value_form(left) == self.library_value_form(right)
+            && left_arguments.len() == right_arguments.len()
+            && left_arguments
+                .iter()
+                .zip(right_arguments)
+                .all(|(left, right)| self.flexibly_equal(*left, *right))
+    }
 }
 
 /// The accessor methods of one declaration scope, indexed by the synthetic property each declares.
