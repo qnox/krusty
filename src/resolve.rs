@@ -34,6 +34,7 @@ use scope::{ContextReceiver, ContextReceiverKind, FlowExclusion, NarrowPath, Ns}
 
 mod abstract_obligations;
 mod constructor_references;
+mod implicit_source_member_lambda;
 use constructor_references::ReferenceReceiver;
 mod access_control;
 mod accessor_annotations;
@@ -17867,38 +17868,18 @@ impl<'a> Checker<'a> {
                     .lexical_value_claims_call_with_arguments(scope, &fname, args)
                     && known_sig.is_none()
                     && has_lambda_argument;
-                let ordinary_this_member_lambda_shape: Option<(usize, MemberLambdaShape)> =
-                    if implicit_member_lambda_enabled {
-                        let partial = this_member_partial.as_deref().unwrap_or_default();
-                        self.implicit_member_receiver_types(scope)
-                            .into_iter()
-                            .enumerate()
-                            .find_map(|(depth, receiver)| {
-                                let (member, generic_member) = self.module_member_lambda_plan(
-                                    scope, call, receiver, &fname, args, partial, expected,
-                                );
-                                let member = member?;
-                                let contextual = self.contextual_call_shape(
-                                    scope,
-                                    &member.params,
-                                    &member.call_sig,
-                                    member.context_count,
-                                    arg_names.as_deref(),
-                                )?;
-                                module_member_lambda_shape(
-                                    &self.fed_source(),
-                                    &member,
-                                    generic_member.as_ref(),
-                                    &contextual,
-                                    args,
-                                    arg_names.as_deref(),
-                                    self.file.call_has_trailing_lambda.contains(&call.0),
-                                )
-                                .map(|shape| (depth, shape))
-                            })
-                    } else {
-                        None
-                    };
+                let ordinary_this_member_lambda_shape = implicit_member_lambda_enabled
+                    .then(|| {
+                        self.implicit_source_member_lambda_shape(
+                            scope,
+                            call,
+                            &fname,
+                            args,
+                            this_member_partial.as_deref().unwrap_or_default(),
+                            expected,
+                        )
+                    })
+                    .flatten();
                 // An implicit receiver's call shapes its lambdas through the same one decision an
                 // explicit receiver does: each receiver of the tower is asked for a whole decision —
                 // classpath member, then extension — and the innermost one that can shape a lambda
