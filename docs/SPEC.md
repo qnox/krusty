@@ -1,5 +1,19 @@
 # krusty — a memory-lean Kotlin→JVM compiler PoC
 
+## Declaration-owned metadata class headers
+
+JVM Class metadata and KLIB Class headers name their selected declaration through retained package
+and lexical segments. Literal dollars stay inside a segment; they never introduce an owner.
+Declared nested-class inventories use the same retained owners and exact segments; a top-level
+literal-dollar declaration contributes no invented member. Companion-object and nested-class
+name fields agree on the exact companion segment, including literal dollars. KLIB selects its root declarations by
+their retained top-level fact, and its class inventory uses the same resolved ID as each header.
+Missing, unknown or
+cyclic ownership is an emission error. Explicit source-local provenance preserves JVM raw local
+names; KLIB declines a local header it cannot represent. Serialization-generated classifiers retain
+the exact owner and segment published by their frontend plugin. Tests: the full classfile oracle
+in `backtick_identifier_e2e`, shared class-ID wire tests, and the generated-header boundary test.
+
 ## Dependency conversion type evidence
 
 Ordinary KLIB bodies and prepared inline templates prove subtype conversions through the calling
