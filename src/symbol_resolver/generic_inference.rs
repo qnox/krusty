@@ -523,7 +523,9 @@ fn unify_ty_impl(source: Option<&dyn SymbolSource>, sig: Ty, actual: Ty, binds: 
             // `V : EntityID<String>?` in `E : EntityID<T>`.
             while source.is_some() {
                 actual = match actual.kind() {
-                    TyKind::TyParam(_, bound) => bound.projection_inner().unwrap_or(bound).non_null(),
+                    TyKind::TyParam(_, bound) => {
+                        bound.projection_inner().unwrap_or(bound).non_null()
+                    }
                     TyKind::DefinitelyNotNull(inner) => inner.non_null(),
                     _ => break,
                 };
