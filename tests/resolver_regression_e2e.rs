@@ -2497,6 +2497,40 @@ fun <U : Any> nullableColumn(column: Column<EntityID<U>?>) = column.invariantTab
 }
 
 #[test]
+fn a_callable_import_keeps_the_default_imported_classifier_in_type_positions() {
+    let sources = [
+        (
+            "lib.kt",
+            r#"package lib
+
+fun Pair(value: Int): kotlin.Pair<Int, Int> = kotlin.Pair(value, value + 1)
+"#,
+        ),
+        (
+            "main.kt",
+            r#"import lib.Pair
+
+fun make(value: Int): Pair<Int, Int>? = Pair(value)
+
+fun Pair<Int, Int>.sum(): Int = first + second
+
+fun box(): String {
+    val pair = make(1) ?: return "null"
+    return if (pair.sum() == 3) "OK" else "FAIL: $pair"
+}
+"#,
+        ),
+    ];
+    assert_accepted_and_runs_files(&sources, "ResolverCallableImportDefaultClassifier");
+    let differences = common::classes_against_kotlinc_module(&sources).differences();
+    assert!(
+        differences.is_empty(),
+        "classes differ from kotlinc's:\n\n{}",
+        differences.join("\n\n")
+    );
+}
+
+#[test]
 fn an_implicit_receiver_extension_property_root_binds_a_callable_suffix() {
     // The root `kotlin` names both a root package and an extension property on the lambda's
     // implicit receiver; the property wins at that receiver's level and the callable suffix binds
