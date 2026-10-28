@@ -11,6 +11,7 @@
 //! are the program's types. So files are lowered into one growing module and the module is encoded
 //! once, when the backend is finalized.
 
+mod array_access;
 mod boxed_numbers;
 mod codegen;
 mod encode;

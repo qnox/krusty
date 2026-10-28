@@ -30,6 +30,15 @@ normalizer and metadata parent chain. Failed reference assertions construct that
 throw through the shared Kotlin tag. Keep scalar-reference conversion outside this change; the
 generic numeric dependency ABI will consume this exception prerequisite separately.
 
+## Native source callable-reference markers
+
+Give source-module references a program-scoped marker keyed by the existing module-qualified
+callable symbol. Reuse the static reflection-object COMDAT emitter so separate object files link
+to one marker address. Keep identity scope explicit in the cache; local declarations and current
+dependency identities retain their existing file scope. A separate KLIB follow-up must derive
+program identity from authenticated module-qualified declarations, since opaque provider IDs are
+rebound between modules.
+
 ## Bound declaration-name inventory
 
 Expose selected declaration-name evidence by typed resolved key across source, JVM, KLIB and their
@@ -52,6 +61,14 @@ declaration-owned name operation. Preserve exact segments, owner edges, visibili
 non-local exclusions without interning undeclared prefixes. This producer correction is separate
 from the remaining metadata class-ID encoder and dependency/alias-name fact handoff.
 
+## Wasm reference-array reads
+
+Realize reference-element literals and reads in the Wasm storage boundary, using the checked array
+element type and authenticated ArrayGet operation. Stage receiver/index operands once and share
+the existing runtime exception registry for checked bounds failures. ReleaseRecords owns the bounds
+default; the backend option is per compilation. Keep scalar boxing, primitive arrays, writes and
+spread/initializer construction as follow-ups rather than extending this slice of #2531.
+
 ## Wasm runtime-exception declarations
 
 Normalize admitted platform exception storage roles at the KLIB provider boundary, freeze them
@@ -59,7 +76,7 @@ beside classifier facts, and realize their metadata-owned parent chains in the W
 The registry authenticates every ancestor on every request, including cached leaves, before
 mutating module state. The shared Throwable hierarchy case starts from exact JVM/reference and
 Native results and exercises both Wasm hosts. Reference-array storage and checked array reads
-remain the next separate slice of #2531.
+consume this registry in a separate slice of #2531.
 
 ## JVM companion field ABI
 
