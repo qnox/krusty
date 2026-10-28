@@ -22,6 +22,7 @@ pub use options::ComposeOptions;
 pub use source_facts::ComposeFileFacts;
 
 use crate::ir::IrFile;
+use crate::plugins::runtime_declarations::PluginRuntime;
 use crate::plugins::{IrPlugin, PluginContext, PluginRejection, PluginSourceView};
 
 /// The runtime's `@Composable` annotation.
@@ -47,9 +48,10 @@ impl IrPlugin for ComposePlugin {
         &self,
         ir: &mut IrFile,
         source: &PluginSourceView<'_>,
+        runtime: &mut dyn PluginRuntime,
         rejections: &mut Vec<PluginRejection>,
     ) {
-        source_facts::record(ir, source, &self.options, rejections);
+        source_facts::record(ir, source, runtime, &self.options, rejections);
     }
 
     fn transform_bodies(&self, ir: &mut IrFile, _ctx: &PluginContext) {

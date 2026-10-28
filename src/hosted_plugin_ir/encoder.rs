@@ -11,7 +11,7 @@ use super::call_spans::CallSpans;
 use super::function::encode_function;
 use super::types::package_name;
 use super::Refusal;
-use crate::kotlinc_offsets::{kotlinc_text, Utf16Offsets};
+use crate::diag::kotlinc_offsets::{kotlinc_text, Utf16Offsets};
 
 pub(super) struct ModuleIrEncoder<'p> {
     /// The path of each source input, in input order.

@@ -108,7 +108,8 @@ mod when_facts;
 pub use crate::enclosing_declarations::EnclosingDeclaration;
 /// A declared type's checked source spelling, which the IR carries per declaration
 /// ([`IrFile::prop_declared_spellings`]) as part of its contract with backends and plugins.
-pub use crate::spelling::Spelled;
+pub use crate::fir::{CallableId, ExternalCallableId, SourceFileId};
+pub use crate::spelling::{Spelled, TypeUseAnnotation};
 pub use crate::types::EqualityMode;
 pub use annotations::{
     AccessorAnnotations, AnnoRetention, AnnoValue, AppliedAnnotation, DeclarationAnnotations,
@@ -1618,6 +1619,10 @@ pub struct IrFile {
     /// same reason [`IrClass::field_annotations`] is one: the overwhelming majority of functions
     /// carry none, and every synthesized function stays constructible without naming them.
     pub function_annotations: crate::fx_hash::HashMap<u32, DeclarationAnnotations>,
+    /// The classifiers of the SOURCE-retained annotations a source function applies, by function
+    /// id. Nothing emits them; they are checked facts a compiler plugin reads (Compose's
+    /// `@NonSkippableComposable`).
+    pub function_source_annotations: crate::fx_hash::HashMap<u32, Vec<TypeName>>,
     /// What the Compose plugin recorded from this file's source at the handoff, for its body
     /// transform. `None` unless the plugin is active and the file declares a composable function.
     pub compose: Option<Box<crate::plugins::compose::ComposeFileFacts>>,

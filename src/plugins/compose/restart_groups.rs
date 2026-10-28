@@ -23,12 +23,12 @@
 //! every target realizes it exactly as it realizes them.
 
 use crate::ir::{
-    Callee, ExprId, FunId, IrBinOp, IrConst, IrExpr, IrFile, IrFunction, IrParameterIdentity,
-    IrTypeOp,
+    Callee, ExprId, FunId, IrBinOp, IrConst, IrEnclosure, IrExpr, IrFile, IrFunction,
+    IrParameterIdentity, IrTypeOp,
 };
 use crate::types::{EqualityMode, Ty};
 
-use super::runtime;
+use super::runtime::{self, ComposeRuntime};
 use super::source_facts::{function_body, RestartableFunction};
 
 /// The value slots of a transformed static function's two generated parameters.
@@ -46,7 +46,7 @@ pub(super) fn transform(ir: &mut IrFile) {
         for &call in &function.calls {
             pass_composer(ir, call);
         }
-        restart_group(ir, function);
+        restart_group(ir, &facts.runtime, function);
         annotate_key(ir, function);
     }
 }
@@ -82,14 +82,14 @@ fn pass_composer(ir: &mut IrFile, call: ExprId) {
     args.extend([composer, changed]);
 }
 
-fn restart_group(ir: &mut IrFile, facts: &RestartableFunction) {
+fn restart_group(ir: &mut IrFile, runtime: &ComposeRuntime, facts: &RestartableFunction) {
     let body = function_body(ir, facts.function).expect("a restartable function has a block body");
     let function_line = facts.opening_line;
     let mut statements = Vec::new();
 
     let composer = ir.add_expr(IrExpr::GetValue(COMPOSER));
     let key = ir.add_expr(IrExpr::Const(IrConst::Int(facts.key)));
-    let started = runtime::composer_call(ir, composer, runtime::START_RESTART_GROUP, vec![key]);
+    let started = runtime::call(ir, &runtime.start_restart_group, Some(composer), vec![key]);
     let start = ir.add_expr(IrExpr::SetValue {
         var: COMPOSER,
         value: started,
@@ -100,9 +100,10 @@ fn restart_group(ir: &mut IrFile, facts: &RestartableFunction) {
     if let Some(information) = &facts.source_information {
         let composer = ir.add_expr(IrExpr::GetValue(COMPOSER));
         let text = ir.add_expr(IrExpr::Const(IrConst::String(information.as_str().into())));
-        statements.push(runtime::static_call(
+        statements.push(runtime::call(
             ir,
-            runtime::SOURCE_INFORMATION,
+            &runtime.source_information,
+            None,
             vec![composer, text],
         ));
     }
@@ -124,10 +125,10 @@ fn restart_group(ir: &mut IrFile, facts: &RestartableFunction) {
         lhs: changed,
         rhs: one,
     });
-    let execute = runtime::composer_call(
+    let execute = runtime::call(
         ir,
-        composer,
-        runtime::SHOULD_EXECUTE,
+        &runtime.should_execute,
+        Some(composer),
         vec![any_changed, force],
     );
 
@@ -137,24 +138,25 @@ fn restart_group(ir: &mut IrFile, facts: &RestartableFunction) {
         let changed = ir.add_expr(IrExpr::GetValue(CHANGED));
         let unused = ir.add_expr(IrExpr::Const(IrConst::Int(-1)));
         let text = ir.add_expr(IrExpr::Const(IrConst::String(trace.as_str().into())));
-        let event = runtime::static_call(
+        let event = runtime::call(
             ir,
-            runtime::TRACE_EVENT_START,
+            &runtime.trace_event_start,
+            None,
             vec![key, changed, unused, text],
         );
-        executed.push(if_trace_in_progress(ir, event));
+        executed.push(if_trace_in_progress(ir, runtime, event));
     }
     executed.extend(body.statements.iter().copied());
     if facts.trace.is_some() {
-        let event = runtime::static_call(ir, runtime::TRACE_EVENT_END, Vec::new());
-        executed.push(if_trace_in_progress(ir, event));
+        let event = runtime::call(ir, &runtime.trace_event_end, None, Vec::new());
+        executed.push(if_trace_in_progress(ir, runtime, event));
     }
     let executed = ir.add_expr(IrExpr::Block {
         stmts: executed,
         value: None,
     });
     let composer = ir.add_expr(IrExpr::GetValue(COMPOSER));
-    let skip = runtime::composer_call(ir, composer, runtime::SKIP_TO_GROUP_END, Vec::new());
+    let skip = runtime::call(ir, &runtime.skip_to_group_end, Some(composer), Vec::new());
     mark_line(ir, skip, function_line);
     ir.expr_source_lines.insert(skip, function_line);
     let skipped = ir.add_expr(IrExpr::Block {
@@ -168,7 +170,7 @@ fn restart_group(ir: &mut IrFile, facts: &RestartableFunction) {
     mark_line(ir, branch, function_line);
     statements.push(branch);
 
-    let end = update_scope(ir, facts);
+    let end = update_scope(ir, runtime, facts);
     mark_line(ir, end, facts.closing_line);
     statements.push(end);
 
@@ -179,8 +181,8 @@ fn restart_group(ir: &mut IrFile, facts: &RestartableFunction) {
 }
 
 /// `if (isTraceInProgress()) event`
-fn if_trace_in_progress(ir: &mut IrFile, event: ExprId) -> ExprId {
-    let probe = runtime::static_call(ir, runtime::IS_TRACE_IN_PROGRESS, Vec::new());
+fn if_trace_in_progress(ir: &mut IrFile, runtime: &ComposeRuntime, event: ExprId) -> ExprId {
+    let probe = runtime::call(ir, &runtime.is_trace_in_progress, None, Vec::new());
     let then = ir.add_expr(IrExpr::Block {
         stmts: vec![event],
         value: None,
@@ -198,10 +200,10 @@ fn if_trace_in_progress(ir: &mut IrFile, event: ExprId) -> ExprId {
 
 /// `$composer.endRestartGroup()?.updateScope { $composer, $force -> F($composer, …) }`, as common
 /// lowering realizes a safe call: the receiver in a temporary, then a null-guarded selector.
-fn update_scope(ir: &mut IrFile, facts: &RestartableFunction) -> ExprId {
+fn update_scope(ir: &mut IrFile, runtime: &ComposeRuntime, facts: &RestartableFunction) -> ExprId {
     let composer = ir.add_expr(IrExpr::GetValue(COMPOSER));
-    let ended = runtime::composer_call(ir, composer, runtime::END_RESTART_GROUP, Vec::new());
-    let scope_ty = Ty::nullable(runtime::scope_update_scope());
+    let ended = runtime::call(ir, &runtime.end_restart_group, Some(composer), Vec::new());
+    let scope_ty = runtime.end_restart_group.ret;
     let temporary = next_value_slot(ir, facts.function);
     let variable = ir.add_expr(IrExpr::Variable {
         index: temporary,
@@ -213,7 +215,7 @@ fn update_scope(ir: &mut IrFile, facts: &RestartableFunction) -> ExprId {
     let receiver = ir.add_expr(IrExpr::TypeOp {
         op: IrTypeOp::ImplicitCoercion,
         arg: read,
-        type_operand: runtime::scope_update_scope(),
+        type_operand: scope_ty.non_null(),
     });
     let null = ir.add_expr(IrExpr::Const(IrConst::Null));
     let tested = ir.add_expr(IrExpr::GetValue(temporary));
@@ -222,18 +224,8 @@ fn update_scope(ir: &mut IrFile, facts: &RestartableFunction) -> ExprId {
         lhs: tested,
         rhs: null,
     });
-    let lambda = recompose_lambda(ir, facts.function);
-    let update = ir.add_expr(IrExpr::Call {
-        callee: Box::new(Callee::realized_virtual(
-            runtime::scope_update_scope_name(),
-            "updateScope".to_string(),
-            "(Lkotlin/jvm/functions/Function2;)V".to_string(),
-            None,
-            true,
-        )),
-        dispatch_receiver: Some(receiver),
-        args: vec![lambda],
-    });
+    let lambda = recompose_lambda(ir, runtime, facts);
+    let update = runtime::call(ir, &runtime.update_scope, Some(receiver), vec![lambda]);
     let null_result = ir.add_expr(IrExpr::UnitInstance);
     let guarded = ir.add_expr(IrExpr::When {
         branches: vec![(Some(condition), null_result), (None, update)],
@@ -250,8 +242,13 @@ fn update_scope(ir: &mut IrFile, facts: &RestartableFunction) -> ExprId {
 }
 
 /// `{ $composer, $force -> F($composer, updateChangedFlags($changed or 1)) }`, capturing
-/// `$changed`, lifted to a private static `F$lambda$0`.
-fn recompose_lambda(ir: &mut IrFile, function: FunId) -> ExprId {
+/// `$changed`, and numbered as the only lambda lifted out of `F` (kotlinc's `F$lambda$0`).
+fn recompose_lambda(
+    ir: &mut IrFile,
+    runtime: &ComposeRuntime,
+    facts: &RestartableFunction,
+) -> ExprId {
+    let function = facts.function;
     // The implementation's values: the captured `$changed`, then `$composer` and `$force`.
     let changed = ir.add_expr(IrExpr::GetValue(0));
     let one = ir.add_expr(IrExpr::Const(IrConst::Int(1)));
@@ -260,7 +257,7 @@ fn recompose_lambda(ir: &mut IrFile, function: FunId) -> ExprId {
         lhs: changed,
         rhs: one,
     });
-    let flags = runtime::static_call(ir, runtime::UPDATE_CHANGED_FLAGS, vec![forced]);
+    let flags = runtime::call(ir, &runtime.update_changed_flags, None, vec![forced]);
     let composer = ir.add_expr(IrExpr::GetValue(1));
     let restart = ir.add_expr(IrExpr::Call {
         callee: Box::new(Callee::Local(function)),
@@ -273,7 +270,8 @@ fn recompose_lambda(ir: &mut IrFile, function: FunId) -> ExprId {
         stmts: vec![restart, result],
         value: None,
     });
-    let name = format!("{}$lambda$0", ir.functions[function as usize].name);
+    // The target names the implementation from its lifting site; this one is only provisional.
+    let name = format!("{}$recompose", ir.functions[function as usize].name);
     let implementation = ir.add_fun(IrFunction {
         name,
         params: vec![Ty::Int, runtime::composer(), Ty::Int],
@@ -312,6 +310,13 @@ fn recompose_lambda(ir: &mut IrFile, function: FunId) -> ExprId {
         inline_body: None,
     });
     ir.note_synthesized_lambda(lambda);
+    let (sequence, source_order) = facts.lifting.clone();
+    ir.place_generated_lambda(
+        sequence,
+        source_order,
+        IrEnclosure::Function(function),
+        implementation,
+    );
     lambda
 }
 

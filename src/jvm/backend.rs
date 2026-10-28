@@ -27,6 +27,8 @@ pub enum SkipReason {
     DefaultCalls,
     /// A plugin-generated checked `super` call could not be given a JVM invocation shape.
     SuperCalls,
+    /// A runtime declaration a plugin's generated code calls has no frozen JVM realization.
+    PluginRuntimeCalls(String),
     /// A checked declaration argument no longer matched its selected JVM parameter boundary.
     CallArguments(String),
     /// A selected overridden call could not be joined to its checked dispatch classifier facts.
@@ -169,6 +171,7 @@ pub(crate) fn run_backend_passes(
     lambda_modes: crate::jvm::ir_emit::LambdaModes,
     facts: &mut BackendPassFacts,
 ) -> Result<(), SkipReason> {
+    let lowered_expressions = ir.exprs.len();
     crate::plugins::complete_enabled(
         ir,
         plugins.native_plugins,
@@ -189,6 +192,17 @@ pub(crate) fn run_backend_passes(
     callables
         .freeze_plugin_super_callables(ir, |identity| classpath.external_callable(identity))
         .map_err(|_| SkipReason::SuperCalls)?;
+    // A plugin's generated code calls the runtime declarations it selected at the handoff by their
+    // identities; they become JVM calls here, exactly like the file's own dependency calls did.
+    crate::jvm::external_calls::realize_from(
+        ir,
+        classifiers,
+        classpath,
+        callables,
+        &mut facts.default_call_operands,
+        lowered_expressions,
+    )
+    .map_err(|error| SkipReason::PluginRuntimeCalls(error.to_string()))?;
     run_backend_passes_after_plugins(
         ir,
         facade,
@@ -1210,6 +1224,15 @@ fn report_backend_pass_failure(reason: SkipReason, diags: &mut DiagSink) {
             );
             return;
         }
+        SkipReason::PluginRuntimeCalls(detail) => {
+            diags.error(
+                crate::diag::Span::new(0, 0),
+                format!(
+                    "internal error: missing JVM realization for a plugin runtime call {detail}"
+                ),
+            );
+            return;
+        }
         SkipReason::CallArguments(detail) => {
             diags.error(crate::diag::Span::new(0, 0), detail);
             return;
@@ -1253,6 +1276,7 @@ fn report_backend_pass_failure(reason: SkipReason, diags: &mut DiagSink) {
         SkipReason::Bridges => "bridge-method",
         SkipReason::DefaultCalls
         | SkipReason::SuperCalls
+        | SkipReason::PluginRuntimeCalls(_)
         | SkipReason::CallArguments(_)
         | SkipReason::InlineParameters
         | SkipReason::ReadOnlyCollectionStubs(_)

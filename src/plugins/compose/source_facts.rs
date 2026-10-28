@@ -4,18 +4,21 @@
 //! construct the transform does not implement yet is rejected here, so no file compiles with an
 //! untransformed composable in it.
 
+use crate::diag::kotlinc_offsets::Utf16Offsets;
 use crate::fx_hash::HashMap;
 use crate::ir::{Callee, ExprId, FunId, IrExpr, IrFile};
-use crate::kotlinc_offsets::Utf16Offsets;
+use crate::plugins::runtime_declarations::PluginRuntime;
 use crate::plugins::{PluginRejection, PluginSourceView};
 use crate::types::{Ty, TyKind, TypeName};
 
 use super::durable_keys::{package_hash, radix_string, KeyPath};
+use super::runtime::ComposeRuntime;
 use super::{ComposeOptions, COMPOSABLE};
 
 /// The Compose facts of one file.
 pub struct ComposeFileFacts {
     pub(super) functions: Vec<RestartableFunction>,
+    pub(super) runtime: ComposeRuntime,
 }
 
 /// A composable function the transform turns into a restartable group.
@@ -37,6 +40,9 @@ pub(super) struct RestartableFunction {
     pub(super) closing_line: u32,
     /// The function's direct composable calls, in source order.
     pub(super) calls: Vec<ExprId>,
+    /// The lifting sequence the function's recompose lambda is numbered in, and the function's
+    /// source order among the file's declarations.
+    pub(super) lifting: (crate::ir::IrLiftingSequence, u32),
 }
 
 /// Why a construct is outside what krusty's Compose pass compiles yet.
@@ -50,6 +56,7 @@ fn unsupported(what: &str) -> String {
 pub(super) fn record(
     ir: &mut IrFile,
     source: &PluginSourceView<'_>,
+    runtime: &mut dyn PluginRuntime,
     options: &ComposeOptions,
     rejections: &mut Vec<PluginRejection>,
 ) {
@@ -65,6 +72,7 @@ pub(super) fn record(
         .map(|(&function, _)| function)
         .collect::<crate::fx_hash::HashSet<_>>();
     reject_composable_types(ir, composable, rejections);
+    reject_stability_inferred_classes(ir, source, rejections);
     let calls = composable_calls(ir, source, &composable_functions, composable);
     if composable_functions.is_empty() && calls.is_empty() {
         return;
@@ -83,7 +91,9 @@ pub(super) fn record(
         }
         handled.insert(declaration.function);
         let span = declaration.signature_span;
-        if let Some(what) = unsupported_declaration(declaration) {
+        if let Some(what) = unsupported_group_annotation(ir, declaration.function)
+            .or_else(|| unsupported_declaration(declaration))
+        {
             rejections.push(PluginRejection {
                 span,
                 message: unsupported(what),
@@ -111,6 +121,22 @@ pub(super) fn record(
             });
             continue;
         }
+        // The recompose lambda is the only callable lifted along the function's sequence; one that
+        // also numbers source callables (another overload's) is not placed yet.
+        let lifting = crate::ir::IrLiftingSequence {
+            source: source.source,
+            owner: "file".into(),
+            container: declaration.name.as_str().into(),
+        };
+        if ir.lifts_along(&lifting) {
+            rejections.push(PluginRejection {
+                span,
+                message: unsupported(
+                    "a composable function whose name an overload with lambdas shares",
+                ),
+            });
+            continue;
+        }
         let direct = body
             .statements
             .iter()
@@ -119,7 +145,14 @@ pub(super) fn record(
             .collect::<Vec<_>>();
         let mut locations = Vec::with_capacity(direct.len());
         for &call in &direct {
-            let Some(call_span) = calls[&call] else {
+            if !calls[&call].same_file {
+                rejections.push(PluginRejection {
+                    span: calls[&call].span.unwrap_or(span),
+                    message: unsupported("a call to a composable function from another file"),
+                });
+                continue;
+            }
+            let Some(call_span) = calls[&call].span else {
                 rejections.push(PluginRejection {
                     span,
                     message: unsupported("a composable call without a source position"),
@@ -171,6 +204,7 @@ pub(super) fn record(
             opening_line: positions.line(body_span.lo) + 1,
             closing_line: positions.line(body_span.hi.saturating_sub(1)) + 1,
             calls: direct,
+            lifting: (lifting, declaration.source_order),
         });
     }
     for (&function, _) in ir
@@ -197,16 +231,113 @@ pub(super) fn record(
     let mut stray = calls
         .iter()
         .filter(|(call, _)| !direct.contains(call))
-        .map(|(_, span)| span.unwrap_or(crate::diag::Span::new(0, 0)))
+        .map(|(_, call)| call.span.unwrap_or(crate::diag::Span::new(0, 0)))
         .collect::<Vec<_>>();
     stray.sort_by_key(|span| (span.lo, span.hi));
     rejections.extend(stray.into_iter().map(|span| PluginRejection {
         span,
         message: unsupported("a composable call outside the statements of a composable body"),
     }));
-    if !functions.is_empty() {
-        ir.compose = Some(Box::new(ComposeFileFacts { functions }));
+    let Some(first) = functions.first() else {
+        return;
+    };
+    match ComposeRuntime::bind(runtime) {
+        Ok(runtime) => ir.compose = Some(Box::new(ComposeFileFacts { functions, runtime })),
+        Err(missing) => {
+            let span = ir
+                .package_functions
+                .iter()
+                .find(|declaration| declaration.function == first.function)
+                .map_or(crate::diag::Span::new(0, 0), |declaration| {
+                    declaration.signature_span
+                });
+            rejections.push(PluginRejection {
+                span,
+                message: format!(
+                    "krusty's Compose compiler plugin cannot compile this module: {missing}"
+                ),
+            });
+        }
     }
+}
+
+/// kotlinc's plugin gives every class of a Compose module, composable or not, a `$stable` field
+/// and `@StabilityInferred`; krusty's pass does not infer stability yet. An interface, an
+/// annotation and an enum get neither.
+fn reject_stability_inferred_classes(
+    ir: &IrFile,
+    source: &PluginSourceView<'_>,
+    rejections: &mut Vec<PluginRejection>,
+) {
+    for class in &ir.classes {
+        if !class.is_source_declared
+            || class.is_interface
+            || class.is_annotation
+            || class.is_enum
+            || class.is_enum_entry
+        {
+            continue;
+        }
+        let start = line_start(source.text, class.decl_line);
+        rejections.push(PluginRejection {
+            span: crate::diag::Span::new(start, start),
+            message: unsupported("a class in a Compose module, whose stability kotlinc infers"),
+        });
+    }
+}
+
+/// The byte offset where 1-based `line` of `text` starts.
+fn line_start(text: &str, line: u32) -> u32 {
+    let offset = text
+        .match_indices('\n')
+        .nth(line.saturating_sub(2) as usize)
+        .filter(|_| line > 1)
+        .map_or(0, |(index, _)| index + 1);
+    offset as u32
+}
+
+/// The runtime annotations that change how kotlinc's plugin groups a composable function.
+const GROUP_ANNOTATIONS: [(&str, &str); 4] = [
+    (
+        "androidx/compose/runtime/NonRestartableComposable",
+        "a `@NonRestartableComposable` function",
+    ),
+    (
+        "androidx/compose/runtime/NonSkippableComposable",
+        "a `@NonSkippableComposable` function",
+    ),
+    (
+        "androidx/compose/runtime/ReadOnlyComposable",
+        "a `@ReadOnlyComposable` function",
+    ),
+    (
+        "androidx/compose/runtime/ExplicitGroupsComposable",
+        "an `@ExplicitGroupsComposable` function",
+    ),
+];
+
+/// A runtime annotation on `function` whose grouping the restart-group transform does not apply
+/// yet.
+fn unsupported_group_annotation(ir: &IrFile, function: FunId) -> Option<&'static str> {
+    // Most of them are SOURCE-retained, so they are among the function's checked source facts
+    // rather than its emitted annotations.
+    let retained = ir
+        .function_annotations
+        .get(&function)
+        .into_iter()
+        .flat_map(|annotations| annotations.applications().map(|applied| applied.internal));
+    let source = ir
+        .function_source_annotations
+        .get(&function)
+        .into_iter()
+        .flatten()
+        .copied();
+    let applied = retained.chain(source).collect::<Vec<_>>();
+    GROUP_ANNOTATIONS.iter().find_map(|&(annotation, what)| {
+        applied
+            .contains(&crate::types::type_name(annotation))
+            .then_some(what)
+    })
 }
 
 /// The declaration shapes the restart-group transform does not handle yet.
@@ -265,65 +396,83 @@ pub(super) fn function_body(ir: &IrFile, function: FunId) -> Option<FunctionBody
     })
 }
 
-/// Every call in `ir` whose selected declaration is composable, with its source span.
+/// A call whose selected declaration is composable.
+struct ComposableCall {
+    span: Option<crate::diag::Span>,
+    /// Whether the callee is declared in this file, so the pass gives it its composer parameters.
+    same_file: bool,
+}
+
+/// Every call in `ir` whose selected declaration is composable.
 fn composable_calls(
     ir: &IrFile,
     source: &PluginSourceView<'_>,
     composable_functions: &crate::fx_hash::HashSet<FunId>,
     composable: TypeName,
-) -> HashMap<ExprId, Option<crate::diag::Span>> {
-    let local = |function: &FunId| composable_functions.contains(function);
-    let module = |target: &crate::fir::CallableId| {
-        ir.checked_callable_functions
+) -> HashMap<ExprId, ComposableCall> {
+    let local = |function: &FunId| composable_functions.contains(function).then_some(true);
+    let module = |target: &crate::ir::CallableId| {
+        if ir
+            .checked_callable_functions
             .get(target)
             .is_some_and(|function| composable_functions.contains(function))
-            || ir
-                .referenced_module_callables
-                .get(target)
-                .is_some_and(|callable| {
-                    callable
-                        .annotations
-                        .iter()
-                        .any(|annotation| annotation.identity == composable)
-                })
+        {
+            return Some(true);
+        }
+        ir.referenced_module_callables
+            .get(target)
+            .is_some_and(|callable| {
+                callable
+                    .annotations
+                    .iter()
+                    .any(|annotation| annotation.identity == composable)
+            })
+            .then_some(false)
     };
     ir.exprs
         .iter()
         .enumerate()
-        .filter(|(_, expression)| match expression {
-            IrExpr::Call { callee, .. } => match &**callee {
-                Callee::Local(function)
-                | Callee::LocalDefault(function)
-                | Callee::LocalWithDefaults { function, .. }
-                | Callee::ClassStatic { function, .. }
-                | Callee::ClassStaticWithDefaults { function, .. }
-                | Callee::ClassStaticDefault { function, .. } => local(function),
-                Callee::Module { target, .. } | Callee::ModuleWithDefaults { target, .. } => {
-                    module(target)
-                }
-                Callee::CrossFile {
-                    module_target: Some(target),
-                    ..
-                }
-                | Callee::Virtual {
-                    module_target: Some(target),
-                    ..
-                } => module(target),
-                Callee::External { target, .. } => source
-                    .callables
-                    .callable(*target)
-                    .is_some_and(|fact| fact.annotations.contains(&composable)),
-                _ => false,
-            },
-            IrExpr::Checked(operation) => match &**operation {
-                crate::ir::IrCheckedOperation::Call { target, .. } => module(target),
-                _ => false,
-            },
-            _ => false,
-        })
-        .map(|(index, _)| {
+        .filter_map(|(index, expression)| {
+            let same_file = match expression {
+                IrExpr::Call { callee, .. } => match &**callee {
+                    Callee::Local(function)
+                    | Callee::LocalDefault(function)
+                    | Callee::LocalWithDefaults { function, .. }
+                    | Callee::ClassStatic { function, .. }
+                    | Callee::ClassStaticWithDefaults { function, .. }
+                    | Callee::ClassStaticDefault { function, .. } => local(function),
+                    Callee::Module { target, .. } | Callee::ModuleWithDefaults { target, .. } => {
+                        module(target)
+                    }
+                    Callee::CrossFile {
+                        module_target: Some(target),
+                        ..
+                    }
+                    | Callee::Virtual {
+                        module_target: Some(target),
+                        ..
+                    } => module(target),
+                    Callee::External { target, .. } => source
+                        .checked
+                        .dependency_annotations(*target)
+                        .contains(&composable)
+                        .then_some(false),
+                    _ => None,
+                },
+                IrExpr::Checked(operation) => match &**operation {
+                    crate::ir::IrCheckedOperation::Call { target, .. } => module(target),
+                    _ => None,
+                },
+                _ => None,
+            }?;
             let call = index as ExprId;
-            (call, source.expression_span(ir, call))
+            Some((
+                call,
+                ComposableCall {
+                    span: source.expression_span(ir, call),
+                    same_file,
+                },
+            ))
         })
         .collect()
 }
@@ -335,8 +484,7 @@ fn reject_composable_types(
     composable: TypeName,
     rejections: &mut Vec<PluginRejection>,
 ) {
-    let names_composable =
-        |spelled: &crate::spelling::Spelled| spelled_mentions(spelled, composable);
+    let names_composable = |spelled: &crate::ir::Spelled| spelled_mentions(spelled, composable);
     let declared = ir
         .fn_declared_spellings
         .iter()
@@ -362,12 +510,12 @@ fn reject_composable_types(
     }));
 }
 
-fn spelled_mentions(spelled: &crate::spelling::Spelled, annotation: TypeName) -> bool {
+fn spelled_mentions(spelled: &crate::ir::Spelled, annotation: TypeName) -> bool {
     spelled
         .annotations
         .iter()
         .chain(&spelled.expansion_annotations)
-        .any(|applied| matches!(applied, crate::spelling::TypeUseAnnotation::Checked(checked) if checked.annotation == annotation))
+        .any(|applied| matches!(applied, crate::ir::TypeUseAnnotation::Checked(checked) if checked.annotation == annotation))
         || spelled
             .args
             .iter()

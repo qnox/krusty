@@ -21,7 +21,7 @@ use crate::types::{SemanticCallableOwner, Ty, TyKind, TypeName};
 use super::call_spans::CallSpans;
 use super::types::{class_name, identity, package_name, TypeParameters};
 use super::Refusal;
-use crate::kotlinc_offsets::Utf16Offsets;
+use crate::diag::kotlinc_offsets::Utf16Offsets;
 
 /// The function `declaration` whose checked body `observed` holds.
 pub(super) fn encode_function(
@@ -108,7 +108,7 @@ pub(super) fn encode_function(
             .values
             .insert(parameter.value, encoder.values.len() as u32);
         parameters.push(ParameterIr {
-            span: offsets.span(written.span),
+            span: plugin_span(offsets, written.span),
             name: written.name.clone(),
             ty: encoder.ty(parameter.ty.get(), written.span)?,
         });
@@ -124,13 +124,13 @@ pub(super) fn encode_function(
         FunBody::None => return Err(refuse(syntax.span, format!("`{name}` without a body"))),
     };
     Ok(FunctionIr {
-        span: offsets.span(syntax.span),
+        span: plugin_span(offsets, syntax.span),
         name,
         visibility,
         parameters,
         return_type,
         body: BodyIr {
-            span: offsets.span(body_span),
+            span: plugin_span(offsets, body_span),
             statements,
         },
     })
@@ -234,7 +234,7 @@ impl BodyEncoder<'_, '_> {
                 return Err(self.refuse(body_span, "an expression body that is not an expression"));
             };
             let value = self.expression(*value)?;
-            let end = self.offsets.span(Span::new(body_span.hi, body_span.hi));
+            let end = plugin_span(self.offsets, Span::new(body_span.hi, body_span.hi));
             return Ok(vec![StatementIr::Expression(ExpressionIr {
                 span: end,
                 kind: ExpressionKind::Return(Box::new(value)),
@@ -299,7 +299,7 @@ impl BodyEncoder<'_, '_> {
                 let next = self.values.len() as u32;
                 self.values.insert(*target, next);
                 Ok(StatementIr::Variable(VariableIr {
-                    span: self.offsets.span(span),
+                    span: plugin_span(self.offsets, span),
                     name: name.to_string(),
                     ty: self.ty(ty.get(), span)?,
                     mutable: *mutable,
@@ -370,7 +370,7 @@ impl BodyEncoder<'_, '_> {
                     return Err(self.refuse(span, "a call not written as a call"));
                 };
                 return Ok(ExpressionIr {
-                    span: self.offsets.span(written),
+                    span: plugin_span(self.offsets, written),
                     kind: ExpressionKind::Call(Box::new(call)),
                 });
             }
@@ -379,7 +379,7 @@ impl BodyEncoder<'_, '_> {
             }
         };
         Ok(ExpressionIr {
-            span: self.offsets.span(span),
+            span: plugin_span(self.offsets, span),
             kind,
         })
     }
@@ -667,4 +667,12 @@ fn expression_kind(kind: &FirExprKind) -> String {
         .next()
         .unwrap_or_default();
     format!("`{name}`")
+}
+
+/// `span` of the file as kotlinc's offsets into the text it reads.
+fn plugin_span(offsets: &Utf16Offsets, span: Span) -> krusty_plugin_ir::Span {
+    krusty_plugin_ir::Span {
+        start: offsets.unit(span.lo),
+        end: offsets.unit(span.hi),
+    }
 }

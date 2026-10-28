@@ -726,6 +726,18 @@ impl CheckedBackendCallables {
         self.freeze_callables(references::external_super_callables(ir), provider)
     }
 
+    /// Freeze the runtime declarations native plugins selected at the handoff for the code they
+    /// generate (see [`crate::plugins::runtime_declarations`]).
+    pub(crate) fn freeze_plugin_runtime_callables(
+        &mut self,
+        identities: Vec<ExternalCallableId>,
+        provider: impl FnMut(
+            ExternalCallableId,
+        ) -> Option<crate::libraries::ExternalCallableRealization>,
+    ) -> Result<(), DependencyFactError> {
+        self.freeze_callables(identities, provider)
+    }
+
     fn freeze_callables(
         &mut self,
         identities: impl IntoIterator<Item = ExternalCallableId>,

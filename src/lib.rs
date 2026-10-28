@@ -43,7 +43,6 @@ pub mod klib;
 pub mod klib_libraries;
 pub mod klib_lowering;
 pub mod kotlin_version;
-pub(crate) mod kotlinc_offsets;
 pub mod ksp_round;
 pub mod kt_string;
 pub mod language_settings;

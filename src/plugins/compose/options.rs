@@ -2,9 +2,10 @@
 //! and `ComposePluginRegistrar` defaults them.
 
 use crate::plugins::cli::PluginOption;
+use crate::plugins::registry::OptionSetting;
 
-/// The options krusty's Compose pass honours. Every other declared option is accepted only at the
-/// setting that leaves the generated code as krusty emits it (see [`ComposeOptions::UNIMPLEMENTED`]).
+/// The options krusty's Compose pass honours. Every other declared option is accepted only at a
+/// setting whose output krusty produces as kotlinc does (see [`ComposeOptions::UNIMPLEMENTED`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ComposeOptions {
     /// `sourceInformation`: call `sourceInformation` with each group's source locations. kotlinc
@@ -42,22 +43,39 @@ impl ComposeOptions {
         "targetRuntimeVersion",
     ];
 
-    /// Settings that change the generated code in a way krusty's pass does not implement: live
-    /// literals, function key meta classes, decoys (which kotlinc itself rejects), and turning off
-    /// one of the feature flags kotlinc enables by default.
-    pub const UNIMPLEMENTED: &'static [(&'static str, &'static str)] = &[
-        ("liveLiterals", "true"),
-        ("liveLiteralsEnabled", "true"),
-        ("generateFunctionKeyMetaClasses", "true"),
-        ("generateDecoys", "true"),
-        ("intrinsicRemember", "false"),
-        ("nonSkippingGroupOptimization", "false"),
-        ("strongSkipping", "false"),
-        ("experimentalStrongSkipping", "false"),
-        ("featureFlag", "-StrongSkipping"),
-        ("featureFlag", "-IntrinsicRemember"),
-        ("featureFlag", "-OptimizeNonSkippingGroups"),
-        ("featureFlag", "-PausableComposition"),
+    /// Settings krusty's pass does not implement: live literals, function key meta classes, decoys
+    /// (which kotlinc itself rejects), turning off one of the feature flags kotlinc enables by
+    /// default, and the compiler metrics and reports, which krusty does not write.
+    pub const UNIMPLEMENTED: &'static [(&'static str, OptionSetting)] = &[
+        ("liveLiterals", OptionSetting::Exactly("true")),
+        ("liveLiteralsEnabled", OptionSetting::Exactly("true")),
+        (
+            "generateFunctionKeyMetaClasses",
+            OptionSetting::Exactly("true"),
+        ),
+        ("generateDecoys", OptionSetting::Exactly("true")),
+        ("intrinsicRemember", OptionSetting::Exactly("false")),
+        (
+            "nonSkippingGroupOptimization",
+            OptionSetting::Exactly("false"),
+        ),
+        ("strongSkipping", OptionSetting::Exactly("false")),
+        (
+            "experimentalStrongSkipping",
+            OptionSetting::Exactly("false"),
+        ),
+        ("featureFlag", OptionSetting::Exactly("-StrongSkipping")),
+        ("featureFlag", OptionSetting::Exactly("-IntrinsicRemember")),
+        (
+            "featureFlag",
+            OptionSetting::Exactly("-OptimizeNonSkippingGroups"),
+        ),
+        (
+            "featureFlag",
+            OptionSetting::Exactly("-PausableComposition"),
+        ),
+        ("metricsDestination", OptionSetting::NonEmpty),
+        ("reportsDestination", OptionSetting::NonEmpty),
     ];
 
     /// Configure from the options the compilation gives Compose, in either syntax. A later setting

@@ -22,6 +22,7 @@ pub mod compose;
 pub mod deps;
 pub mod noarg;
 pub mod registry;
+pub mod runtime_declarations;
 pub mod sam_with_receiver;
 pub mod serialization;
 
@@ -794,12 +795,14 @@ pub trait IrPlugin {
     fn generate_declarations(&self, _ir: &mut IrFile, _ctx: &PluginContext) {}
 
     /// Record what the plugin's later phases need from the file's source text, which no target
-    /// phase can read, and reject every construct the plugin does not implement. This runs at the
-    /// frontend/backend handoff, once the dependency declarations the file selected are frozen.
+    /// phase can read, select the runtime declarations its generated code calls, and reject every
+    /// construct the plugin does not implement. This runs at the frontend/backend handoff, once the
+    /// dependency declarations the file selected are frozen.
     fn record_source_facts(
         &self,
         _ir: &mut IrFile,
         _source: &PluginSourceView<'_>,
+        _runtime: &mut dyn runtime_declarations::PluginRuntime,
         _rejections: &mut Vec<PluginRejection>,
     ) {
     }
@@ -833,10 +836,9 @@ pub struct PluginSourceView<'a> {
     pub text: &'a str,
     /// The file's simple name (`Main.kt`).
     pub file_name: &'a str,
-    pub source: crate::fir::SourceFileId,
-    pub origins: &'a crate::fir::OriginStore,
-    /// The frozen dependency declarations the file's IR selected.
-    pub callables: &'a crate::backend::CheckedBackendCallables,
+    pub source: crate::ir::SourceFileId,
+    /// What the handoff answers about the file's checked nodes and selected declarations.
+    pub checked: &'a dyn CheckedSourceFacts,
 }
 
 impl PluginSourceView<'_> {
@@ -846,10 +848,20 @@ impl PluginSourceView<'_> {
         ir: &IrFile,
         expression: crate::ir::ExprId,
     ) -> Option<crate::diag::Span> {
-        let origin = ir.fir_origins.get(&expression)?.fir_origin();
-        let (file, span) = self.origins.source_span(origin)?;
-        (file == self.source).then_some(span)
+        self.checked.expression_span(ir, expression)
     }
+}
+
+/// The checked facts behind a file's common IR that only the frontend/backend handoff holds.
+pub trait CheckedSourceFacts {
+    /// The span in this file that `expression` was lowered from, when it has one.
+    fn expression_span(
+        &self,
+        ir: &IrFile,
+        expression: crate::ir::ExprId,
+    ) -> Option<crate::diag::Span>;
+    /// The checked annotations of the dependency function a call selected by `callable`.
+    fn dependency_annotations(&self, callable: crate::ir::ExternalCallableId) -> &[TypeName];
 }
 
 /// A construct a native plugin does not implement, reported as an error at `span`.
@@ -865,6 +877,7 @@ pub fn record_enabled_source_facts(
     plugins: &registry::NativePlugins,
     module_name: &str,
     source: &PluginSourceView<'_>,
+    runtime: &mut dyn runtime_declarations::PluginRuntime,
 ) -> Vec<PluginRejection> {
     let mut rejections = Vec::new();
     if plugins.is_empty() {
@@ -872,7 +885,7 @@ pub fn record_enabled_source_facts(
     }
     plugins
         .host(module_name)
-        .record_source_facts(ir, source, &mut rejections);
+        .record_source_facts(ir, source, runtime, &mut rejections);
     rejections
 }
 
@@ -1417,10 +1430,11 @@ impl PluginHost {
         &self,
         ir: &mut IrFile,
         source: &PluginSourceView<'_>,
+        runtime: &mut dyn runtime_declarations::PluginRuntime,
         rejections: &mut Vec<PluginRejection>,
     ) {
         for plugin in &self.plugins {
-            plugin.record_source_facts(ir, source, rejections);
+            plugin.record_source_facts(ir, source, runtime, rejections);
         }
     }
 

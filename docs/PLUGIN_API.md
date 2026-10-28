@@ -170,12 +170,28 @@ pass does not cover with `krusty's Compose compiler plugin does not support <con
 this module with kotlinc`. Until the coverage is complete `krusty refusals` reports the plugin, so a
 Gradle build never depends on that rejection. Options that change the generated code beyond what is
 covered (live literals, decoys, strong skipping off, the non-default feature flags) are
-`UnimplementedOption` errors.
+`UnimplementedOption` errors, and so is a nonempty `metricsDestination` or `reportsDestination`,
+since krusty writes neither report yet.
 
 Covered so far: parameterless `Unit` top-level composable functions with a block body, made
-restartable and skippable, and their calls to each other. Durable group keys, `sourceInformation`
-strings, trace markers and `@FunctionKeyMeta` (class file only, never Kotlin metadata, as kotlinc's
-IR plugin adds it after FIR serialization) follow kotlinc's formulas.
+restartable and skippable, and their calls to each other in the same file. Durable group keys,
+`sourceInformation` strings, trace markers and `@FunctionKeyMeta` (class file only, never Kotlin
+metadata, as kotlinc's IR plugin adds it after FIR serialization) follow kotlinc's formulas. Every
+other mode is an explicit decline at its declaration or call: a function with parameters or another
+result, a grouping annotation (`@NonRestartableComposable`, `@NonSkippableComposable`,
+`@ReadOnlyComposable`, `@ExplicitGroupsComposable`), a call to a composable of another file or
+module, a composable whose name an overload with lambdas shares, and any class kotlinc would give
+`$stable` and `@StabilityInferred`.
+
+The runtime functions the generated code calls (`Composer.startRestartGroup`,
+`ScopeUpdateScope.updateScope`, `sourceInformation`, `traceEventStart`, …) cross the handoff as
+authenticated identities. `record_source_facts` names each by its declaring package or classifier
+and Kotlin signature through `plugins::runtime_declarations::PluginRuntime`. The compilation's
+symbol source must select exactly one declaration, or the module is rejected. The selected
+identities are frozen with the file's other dependency declarations. The JVM backend realizes the
+calls after the plugin pass, as it realizes the file's own dependency calls. The recompose lambda
+is placed as the one lambda lifted out of its function, so the JVM lifted-name pass names it
+`<name>$lambda$0`.
 
 ## World 2 — codegen host (`ksp`)
 

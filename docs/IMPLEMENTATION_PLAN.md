@@ -6224,7 +6224,8 @@ implemented, so `krusty refusals` keeps a Compose module on kotlinc until the li
 and the pass rejects every construct it does not cover yet.
 
 - [x] Parameterless `Unit` top-level composables: restart groups, skipping, durable keys,
-  `@FunctionKeyMeta`, source information and trace markers; calls between them.
+  `@FunctionKeyMeta`, source information and trace markers; calls between them in one file.
+- [ ] Calls to composables of other files and modules, and the grouping annotations.
 - [ ] `@Composable` function types and lambdas, and the composable call checker's diagnostics.
 - [ ] Parameters: `$changed` bit sets per parameter, `$default` masks, stability inference.
 - [ ] The full body transform: control-flow groups, `remember`, early returns, inline composables.

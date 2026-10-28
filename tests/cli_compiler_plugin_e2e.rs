@@ -539,15 +539,101 @@ fn refusals_lists_the_arguments_and_plugins_krusty_refuses() {
 /// composable construct it does not cover rather than emit it untransformed.
 #[test]
 fn the_compose_pass_rejects_what_it_does_not_cover() {
+    assert_compose_rejects(
+        "compose-parameters",
+        "@Composable fun Greeting(name: String) {}\n",
+        &[],
+        "3:13: error: krusty's Compose compiler plugin does not support a composable function \
+         with parameters yet",
+    );
+    assert_compose_rejects(
+        "compose-non-skippable",
+        "@Composable @androidx.compose.runtime.NonSkippableComposable fun Greeting() {}\n",
+        &[],
+        "3:62: error: krusty's Compose compiler plugin does not support a \
+         `@NonSkippableComposable` function yet",
+    );
+    assert_compose_rejects(
+        "compose-cross-file",
+        "@Composable fun Greeting() {\nOther()\n}\n",
+        &[(
+            "Other.kt",
+            "package probe\nimport androidx.compose.runtime.Composable\n@Composable fun Other() {}\n",
+        )],
+        "4:1: error: krusty's Compose compiler plugin does not support a call to a composable \
+         function from another file yet",
+    );
+}
+
+/// Compose's metrics and reports name files krusty does not write yet: a nonempty destination fails
+/// the compile, naming each option, and nothing is emitted. An empty one requests no report.
+#[test]
+fn compose_report_destinations_fail_the_compile() {
     let compose = reference_plugin_jar("compose-compiler-plugin.jar");
-    let source = "package probe\n\
-                  import androidx.compose.runtime.Composable\n\
-                  @Composable fun Greeting(name: String) {}\n";
-    let probe = Probe::new("compose-parameters", source);
+    let probe = Probe::new(
+        "compose-reports",
+        "package probe\nimport androidx.compose.runtime.Composable\n@Composable fun Greeting() {}\n",
+    );
+    let option = |key: &str, value: &str| krusty::plugins::cli::PluginOption {
+        id: krusty::plugins::cli::COMPOSE_PLUGIN_ID.to_string(),
+        key: key.to_string(),
+        value: value.to_string(),
+    };
+    let mut switches = vec![format!("-Xplugin={}", compose.display())];
+    for (key, value) in [
+        ("metricsDestination", "build/metrics"),
+        ("reportsDestination", "build/reports"),
+        ("reportsDestination", ""),
+    ] {
+        let option = option(key, value);
+        switches.extend([
+            "-P".to_string(),
+            format!("plugin:{}:{}={}", option.id, option.key, option.value),
+        ]);
+    }
     let mut classpath =
         krusty::toolchain::compose_runtime_jars().expect("the Compose runtime is provisioned");
     classpath.push(common::stdlib_jar());
-    let compiled = probe.krusty(&classpath, &[format!("-Xplugin={}", compose.display())]);
+    let compiled = probe.krusty(&classpath, &switches);
+    let partial = PluginDiagnostic::PartialSubstitution {
+        plugin_id: krusty::plugins::cli::COMPOSE_PLUGIN_ID.to_string(),
+    };
+    let unimplemented = |key: &str, value: &str| {
+        PluginDiagnostic::UnimplementedOption {
+            option: option(key, value),
+        }
+        .message()
+    };
+    assert_eq!(
+        compiled.stderr,
+        format!(
+            "info: {}\nerror: {}\nerror: {}\n",
+            partial.message(),
+            unimplemented("metricsDestination", "build/metrics"),
+            unimplemented("reportsDestination", "build/reports"),
+        )
+    );
+    assert_eq!(compiled.code, Some(1));
+    assert_eq!(compiled.classes, Vec::<String>::new());
+}
+
+/// Compile `declarations` (after a package line and the `Composable` import) and the `others`
+/// files with the Compose plugin, and assert the one error `Probe.kt:<error>` krusty reports.
+fn assert_compose_rejects(name: &str, declarations: &str, others: &[(&str, &str)], error: &str) {
+    let compose = reference_plugin_jar("compose-compiler-plugin.jar");
+    let source =
+        format!("package probe\nimport androidx.compose.runtime.Composable\n{declarations}");
+    let probe = Probe::new(name, &source);
+    let mut switches = vec![format!("-Xplugin={}", compose.display())];
+    for (file, text) in others {
+        let path = probe.dir.join(file);
+        std::fs::write(&path, text).expect("write the other source");
+        switches.push(path.display().to_string());
+    }
+    let mut classpath =
+        krusty::toolchain::compose_runtime_jars().expect("the Compose runtime is provisioned");
+    classpath.push(common::stdlib_jar());
+    let compiled = probe.krusty(&classpath, &switches);
     let partial = PluginDiagnostic::PartialSubstitution {
         plugin_id: krusty::plugins::cli::COMPOSE_PLUGIN_ID.to_string(),
     }
@@ -555,9 +641,7 @@ fn the_compose_pass_rejects_what_it_does_not_cover() {
     assert_eq!(
         compiled.stderr,
         format!(
-            "info: {partial}\n{}:3:13: error: krusty's Compose compiler plugin does not support a \
-             composable function with parameters yet; compile this module with kotlinc\n\
-             krusty: 1 error(s)\n",
+            "info: {partial}\n{}:{error}; compile this module with kotlinc\nkrusty: 1 error(s)\n",
             probe.source.display()
         )
     );

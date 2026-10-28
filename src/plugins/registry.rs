@@ -87,11 +87,29 @@ pub struct RegisteredExtension {
     /// The `-P plugin:<id>:<key>=…` keys the plugin's command-line processor accepts, where krusty
     /// checks them as kotlinc does; `None` where it leaves them to the extension.
     pub option_keys: Option<&'static [&'static str]>,
-    /// `(key, value)` settings of a declared option whose behaviour krusty does not implement. Each
-    /// one fails the compile instead of silently producing other code than kotlinc. Values match
-    /// exactly, as kotlinc's processors compare them (no-arg runs initializers only for
+    /// Settings of a declared option whose behaviour krusty does not implement. Each one fails the
+    /// compile instead of silently producing other code than kotlinc.
+    pub unimplemented_options: &'static [(&'static str, OptionSetting)],
+}
+
+/// Which values of one option an [`RegisteredExtension::unimplemented_options`] entry refuses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OptionSetting {
+    /// This exact value, as kotlinc's processors compare them (no-arg runs initializers only for
     /// `invokeInitializers=true`, not `TRUE`).
-    pub unimplemented_options: &'static [(&'static str, &'static str)],
+    Exactly(&'static str),
+    /// Any nonempty value: the option asks for something krusty does not produce at all (a report
+    /// directory, for example).
+    NonEmpty,
+}
+
+impl OptionSetting {
+    fn matches(self, value: &str) -> bool {
+        match self {
+            Self::Exactly(refused) => value == refused,
+            Self::NonEmpty => !value.is_empty(),
+        }
+    }
 }
 
 /// The service files through which a jar declares a compiler plugin to kotlinc's `ServiceLoader`:
@@ -416,7 +434,7 @@ impl PluginRegistry {
             registrar: "org.jetbrains.kotlin.noarg.NoArgComponentRegistrar",
             kind: ExtensionKind::Native(build_noarg),
             option_keys: Some(&["annotation", "preset", "invokeInitializers"]),
-            unimplemented_options: &[("invokeInitializers", "true")],
+            unimplemented_options: &[("invokeInitializers", OptionSetting::Exactly("true"))],
         });
         r.register(RegisteredExtension {
             plugin_id: SAM_WITH_RECEIVER_PLUGIN_ID,
@@ -549,9 +567,9 @@ impl PluginRegistry {
                 options
                     .iter()
                     .filter(|option| {
-                        ext.unimplemented_options
-                            .iter()
-                            .any(|(key, value)| option.key == *key && option.value == *value)
+                        ext.unimplemented_options.iter().any(|(key, setting)| {
+                            option.key == *key && setting.matches(&option.value)
+                        })
                     })
                     .map(|option| PluginDiagnostic::UnimplementedOption {
                         option: option.clone(),
@@ -760,6 +778,40 @@ mod tests {
             diagnostic,
             PluginDiagnostic::UnimplementedOption { option } if option.key == "liveLiterals"
         )));
+    }
+
+    /// krusty writes no Compose metrics or reports, so a request for either fails the compile; an
+    /// empty destination asks for nothing and is accepted.
+    #[test]
+    fn compose_reports_are_refused_until_krusty_writes_them() {
+        let option = |key: &str, value: &str| PluginOption {
+            id: COMPOSE_PLUGIN_ID.to_string(),
+            key: key.to_string(),
+            value: value.to_string(),
+        };
+        let c = cfg(&[
+            "-P",
+            "plugin:androidx.compose.compiler.plugins.kotlin:metricsDestination=build/metrics",
+            "-P",
+            "plugin:androidx.compose.compiler.plugins.kotlin:reportsDestination=build/reports",
+            "-P",
+            "plugin:androidx.compose.compiler.plugins.kotlin:reportsDestination=",
+        ]);
+        let resolved = PluginRegistry::with_builtins().resolve(&activation(&c, &[]));
+        assert_eq!(
+            resolved.diagnostics,
+            vec![
+                PluginDiagnostic::UnimplementedOption {
+                    option: option("metricsDestination", "build/metrics"),
+                },
+                PluginDiagnostic::UnimplementedOption {
+                    option: option("reportsDestination", "build/reports"),
+                },
+                PluginDiagnostic::PartialSubstitution {
+                    plugin_id: COMPOSE_PLUGIN_ID.to_string(),
+                },
+            ]
+        );
     }
 
     #[test]

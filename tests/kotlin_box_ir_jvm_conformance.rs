@@ -1403,6 +1403,37 @@ fun box(): String = Registry.value()\n";
     );
 }
 
+/// The Compose fixture, JVM-only and so outside the portable box regressions, compiles to exactly the classes the reference compiler and its Compose
+/// plugin emit, byte for byte, and both builds pass its `box()`, which composes and recomposes the
+/// transformed functions through a recording composer.
+#[test]
+fn compose_restartable_functions_are_byte_identical_to_kotlinc() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/compose/restartableFunctions.kt");
+    let source = fs::read_to_string(&path).expect("read the Compose fixture");
+    let source =
+        krusty::conformance::prepare_test_source(&source, krusty::conformance::TestTarget::Jvm);
+    let stem = "restartableFunctions";
+    let reference = box_reference_classes::checked_prepared_box(&source, stem)
+        .expect("the reference compiler compiles the fixture and its box() returns OK");
+    let reference = reference
+        .module(box_reference_classes::MAIN_MODULE)
+        .expect("the reference compiler emits the main module");
+    let classpath = common::classpath_jars_for(&source);
+    let jdk = common::jdk_modules();
+    let classes: Vec<_> = compile_multifile(&source, stem, &classpath, Some(jdk.as_path()))
+        .expect("krusty compiles the fixture")
+        .into_iter()
+        .filter(|(_, bytes)| bytes.starts_with(&[0xCA, 0xFE, 0xBA, 0xBE]))
+        .collect();
+    assert_eq!(compare_class_sets(&classes, reference), Ok(()));
+    let box_class = find_box_class(&classes).expect("the fixture emits box()");
+    assert_eq!(
+        common::run_box(&classes, &box_class, &classpath),
+        Some("OK".to_string())
+    );
+}
+
 /// `(module, internal name)` of every class in one inventory.
 type QualifiedClassNames = BTreeSet<(String, String)>;
 

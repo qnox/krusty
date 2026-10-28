@@ -12997,7 +12997,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   and runs krusty's pass, and `krusty refusals` lists the plugin, so the Gradle integration keeps
   giving a Compose module to kotlinc until the coverage is complete. A composable construct the pass
   does not cover is an error at that construct (`krusty's Compose compiler plugin does not support
-  <construct> yet; compile this module with kotlinc`), never a silent difference. Covered:
+  <construct> yet; compile this module with kotlinc`), never a silent difference: parameters, a
+  grouping annotation, a call to another file's composable, a name an overload with lambdas shares,
+  and a class kotlinc would give `$stable`. A nonempty `metricsDestination`/`reportsDestination` is an
+  `UnimplementedOption` error. The runtime functions the code calls are selected at the handoff by
+  their Kotlin signatures, or the module is rejected. Covered:
   parameterless `Unit` top-level composables with a block body. Each takes a nullable
   `$composer: Composer` and `$changed: Int`, restarts in
   `startRestartGroup(key)`/`endRestartGroup()?.updateScope(…)`, and skips through
@@ -13010,10 +13014,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   in base 36>`) and trace markers (`<fq name> (<file>:<0-based line>)`) follow the plugin's options.
   The recompose lambda `<name>$lambda$0($$changed, $composer, $force)` publishes its locals and no
   line, and the call's line starts at its dispatch, since kotlinc builds both arguments without
-  offsets. Tests: `tests/box_regressions/compose/restartableFunctions.kt` (a box run with the class
-  files compared byte for byte with kotlinc's),
-  `cli_compiler_plugin_e2e::the_compose_pass_rejects_what_it_does_not_cover`, and the
-  `plugins::compose` and `plugins::registry` unit tests.
+  offsets. Tests: `tests/fixtures/compose/restartableFunctions.kt`, whose `box()` composes
+  and recomposes the functions through a recording composer, and
+  `kotlin_box_ir_jvm_conformance::compose_restartable_functions_are_byte_identical_to_kotlinc`, which
+  requires its class set to equal kotlinc's byte for byte;
+  `cli_compiler_plugin_e2e::the_compose_pass_rejects_what_it_does_not_cover` and
+  `compose_report_destinations_fail_the_compile`; and the `plugins::compose` and
+  `plugins::registry` unit tests.
 - **kotlinc's default scripting plugin is accepted and runs nothing; the Gradle plugin forwards
   KGP's compiler-plugin request verbatim.** kotlinc loads its scripting plugin (`kotlin.scripting`,
   registrars `ScriptingK2CompilerPluginRegistrar` and legacy

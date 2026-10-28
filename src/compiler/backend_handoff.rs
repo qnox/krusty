@@ -14,6 +14,7 @@ use crate::fir::SourceFileId;
 use crate::ir::IrFile;
 use crate::resolve::PassTwoSymbols;
 
+mod plugin_handoff;
 #[cfg(test)]
 mod tests;
 
@@ -47,7 +48,7 @@ pub(super) fn checked_ir_file<'a>(
         module_facts.serialization_generated_member_statuses(),
         &classifiers,
     );
-    let callables = match CheckedBackendCallables::freeze(&ir, symbols.semantic_platform()) {
+    let mut callables = match CheckedBackendCallables::freeze(&ir, symbols.semantic_platform()) {
         Ok(callables) => callables,
         Err(error) => {
             diags.error(
@@ -62,6 +63,7 @@ pub(super) fn checked_ir_file<'a>(
         .get(source.raw() as usize)
         .map(|stem| format!("{}.kt", stem.rsplit(['/', '\\']).next().unwrap_or(stem)))
         .unwrap_or_default();
+    let mut runtime = plugin_handoff::HandoffRuntime::new(symbols.semantic_platform());
     let rejections = crate::plugins::record_enabled_source_facts(
         &mut ir,
         symbols.native_plugins(),
@@ -70,14 +72,31 @@ pub(super) fn checked_ir_file<'a>(
             text: module.text,
             file_name: &file_name,
             source,
-            origins: module.origins,
-            callables: &callables,
+            checked: &plugin_handoff::HandoffSourceFacts {
+                source,
+                origins: module.origins,
+                callables: &callables,
+            },
         },
+        &mut runtime,
     );
     if !rejections.is_empty() {
         for rejection in rejections {
             diags.error(rejection.span, rejection.message);
         }
+        return None;
+    }
+    // The runtime declarations the plugins' generated code calls join the file's frozen ones.
+    let provider = symbols.semantic_platform();
+    if let Err(error) = callables
+        .freeze_plugin_runtime_callables(runtime.into_bound(), |identity| {
+            provider.external_callable(identity)
+        })
+    {
+        diags.error(
+            Span::new(0, 0),
+            format!("internal error: cannot freeze plugin runtime declaration facts: {error:?}"),
+        );
         return None;
     }
     // Each class's declarations are recorded here, before any target lowers them.

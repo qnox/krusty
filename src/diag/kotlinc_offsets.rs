@@ -4,8 +4,6 @@
 //! native plugin that writes them into generated code (Compose's source information) computes
 //! them here.
 
-use crate::diag::Span;
-
 /// The text kotlinc reads from a file whose text is `text`.
 pub(crate) fn kotlinc_text(text: &str) -> String {
     text.replace("\r\n", "\n").replace('\r', "\n")
@@ -53,13 +51,6 @@ impl Utf16Offsets {
         let unit = self.unit(byte);
         (self.line_starts.partition_point(|&start| start <= unit) - 1) as u32
     }
-
-    pub(crate) fn span(&self, span: Span) -> krusty_plugin_ir::Span {
-        krusty_plugin_ir::Span {
-            start: self.unit(span.lo),
-            end: self.unit(span.hi),
-        }
-    }
 }
 
 #[cfg(test)]
@@ -71,10 +62,7 @@ mod tests {
         let text = "é😀x";
         let offsets = Utf16Offsets::new(text);
         // `x` is at byte 6: two bytes of `é`, four of the emoji.
-        assert_eq!(
-            offsets.span(Span::new(6, 7)),
-            krusty_plugin_ir::Span { start: 3, end: 4 }
-        );
+        assert_eq!((offsets.unit(6), offsets.unit(7)), (3, 4));
     }
 
     #[test]
@@ -94,13 +82,7 @@ mod tests {
         let text = "a\r\nb\rc";
         let offsets = Utf16Offsets::new(text);
         assert_eq!(kotlinc_text(text), "a\nb\nc");
-        assert_eq!(
-            offsets.span(Span::new(3, 4)),
-            krusty_plugin_ir::Span { start: 2, end: 3 }
-        );
-        assert_eq!(
-            offsets.span(Span::new(5, 6)),
-            krusty_plugin_ir::Span { start: 4, end: 5 }
-        );
+        assert_eq!((offsets.unit(3), offsets.unit(4)), (2, 3));
+        assert_eq!((offsets.unit(5), offsets.unit(6)), (4, 5));
     }
 }
