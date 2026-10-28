@@ -17,7 +17,7 @@ pub struct KlibCalleeFacts<'a> {
     callables: HashMap<&'a KlibDependencyCallable, IndexedKlibCallee<'a>>,
     /// Header evidence is not a checked source call which requires an executable export.
     selected: HashSet<&'a KlibDependencyCallable>,
-    /// Explicit same-compilation hierarchy evidence, used only for constructor bounds.
+    /// Explicit same-compilation hierarchy evidence for authenticated dependency types.
     class_type_oracle: Option<&'a dyn crate::assignable::TypeOracle>,
 }
 
@@ -52,7 +52,16 @@ impl<'a> KlibCalleeFacts<'a> {
         argument: crate::types::Ty,
         bound: crate::types::Ty,
     ) -> bool {
-        super::constructor_bounds::satisfies(self.class_type_oracle, parameters, argument, bound)
+        super::type_evidence::satisfies(self.class_type_oracle, parameters, argument, bound)
+    }
+
+    pub(super) fn is_subtype(
+        &self,
+        parameters: &super::klib_types::KlibTypeParameters,
+        sub: crate::types::Ty,
+        sup: crate::types::Ty,
+    ) -> bool {
+        super::type_evidence::ordinary_subtype(self.class_type_oracle, parameters, sub, sup)
     }
 
     pub(super) fn constructor(

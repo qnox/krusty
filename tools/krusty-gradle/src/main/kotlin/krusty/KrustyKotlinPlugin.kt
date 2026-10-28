@@ -697,17 +697,9 @@ private fun kotlincRequest(task: KotlinJvmCompile, pluginVersion: String, compil
     val freeArguments = options.freeCompilerArgs.getOrElse(emptyList())
     structuredOptInRefusal(structuredOptIns)?.let { return refused(it) }
     freeArgumentRefusal(freeArguments, pluginVersion)?.let { return refused(it) }
-    structuredOptIns.firstOrNull { marker -> "-opt-in=$marker" in freeArguments }?.let { marker ->
-        return refused(
-            "compilerOptions.optIn and freeCompilerArg '-opt-in=$marker' both request marker '$marker'; configure exactly one",
-        )
-    }
-    freeArguments.firstOrNull(::isFreeJvmDefault)?.let { free ->
-        if (options.jvmDefault.orNull != null) {
-            return refused("compilerOptions.jvmDefault and freeCompilerArg '$free' are both set; configure exactly one")
-        }
-    }
-    val arguments = ArrayList(freeArguments)
+    // KGP fills kotlinc's arguments from the structured options and appends the free arguments
+    // after them, so a free argument overrides the structured option it restates.
+    val arguments = ArrayList<String>()
     languageVersion?.let { arguments.addPair("-language-version", it) }
     apiVersion?.let { arguments.addPair("-api-version", it) }
     structuredOptIns.forEach { marker ->
@@ -725,12 +717,9 @@ private fun kotlincRequest(task: KotlinJvmCompile, pluginVersion: String, compil
     if (options.allWarningsAsErrors.getOrElse(false) && "-Werror" !in freeArguments) {
         arguments.add("-Werror")
     }
+    arguments.addAll(freeArguments)
     return KotlincRequest(arguments, emptyList())
 }
-
-private fun isFreeJvmDefault(argument: String): Boolean =
-    argument == "-jvm-default" || argument == "-Xjvm-default" ||
-        argument.startsWith("-jvm-default=") || argument.startsWith("-Xjvm-default=")
 
 private fun structuredOptInRefusal(markers: List<String>): String? {
     val seen = HashSet<String>()

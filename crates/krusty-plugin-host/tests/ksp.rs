@@ -772,6 +772,22 @@ fn class_literal_arguments_are_what_ksp2_reports() {
 
 #[test]
 #[ignore = "downloads symbol-processing-api 2.3.12 and a JDK"]
+fn java_annotation_array_elements_default_to_empty_arrays() {
+    log_with_dependencies_is_what_ksp2_reports(
+        "Annotations",
+        "annotations.AnnotationsProvider",
+        &[fixtures().join("java-array-defaults/Use.kt")],
+        &[
+            fixtures().join("java-array-defaults/dependency/ArrayElements.java"),
+            fixtures().join("java-array-defaults/dependency/Valued.java"),
+        ],
+        "ksp-outputs-java-array-defaults",
+        "java-array-defaults.expected",
+    );
+}
+
+#[test]
+#[ignore = "downloads symbol-processing-api 2.3.12 and a JDK"]
 fn all_functions_and_properties_of_source_classifiers_are_what_ksp2_lists() {
     let (runtime, env) = runtime();
     let processor = processor(&runtime, "AllMembers", "allmembers.AllMembersProvider");

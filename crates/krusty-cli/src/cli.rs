@@ -173,6 +173,9 @@ pub struct Options {
     /// `-Xsuppress-version-warnings`: omit the deprecated and experimental language/API warnings.
     /// Redundant feature arguments stay reported.
     pub suppress_version_warnings: bool,
+    /// `-Xreport-all-warnings`: a failed compilation reports its warnings beside its errors. Without
+    /// it, kotlinc reports only the errors of a compilation that fails.
+    pub report_all_warnings: bool,
 }
 
 impl Default for Options {
@@ -225,6 +228,7 @@ impl Default for Options {
             inline_string_concat: false,
             opt_in: Vec::new(),
             suppress_version_warnings: false,
+            report_all_warnings: false,
         }
     }
 }
