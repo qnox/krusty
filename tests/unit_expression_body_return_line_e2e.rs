@@ -64,9 +64,7 @@ const LIBRARY_INLINE: &str = "package store\n\
                               \n\
                               fun Sink.items(items: List<String>) = items.forEach { add(it) }\n\
                               \n\
-                              fun Sink.declared(items: List<String>): Unit = items.forEach {\n\
-                              \x20   add(it)\n\
-                              }\n";
+                              fun Sink.declared(items: List<String>): Unit = items.forEach { add(it.trim()) }\n";
 
 /// A `Unit` expression body that is a dependency's inline call closes that call's frame on the
 /// declaration's closing line, on a `nop` ahead of the `return`, as a statement of a block body
