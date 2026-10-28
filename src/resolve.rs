@@ -57089,16 +57089,21 @@ impl<'a> Checker<'a> {
                     }
                     _ => None,
                 };
-                let bt = {
+                let (bt, arm_this_narrow) = {
                     let scope = &arm_scope;
                     self.apply_narrowings(scope, &arm_casts, &arm_declined, false);
                     self.with_this_narrow(arm_this_narrow, |c| {
+                        let mut this_narrow = arm_this_narrow;
                         if let Some(guard) = arm.guard {
-                            let (mut casts, mut declined) = c.checked_when_guard(scope, guard);
-                            arm_casts.append(&mut casts);
-                            arm_declined.append(&mut declined);
+                            let mut guarded = c.checked_when_guard(scope, guard);
+                            arm_casts.append(&mut guarded.casts);
+                            arm_declined.append(&mut guarded.declined);
+                            this_narrow = guarded.this_narrow.or(this_narrow);
                         }
-                        c.joined_branch_result(scope, arm.body, branch_wanted, has_else)
+                        let body = c.with_this_narrow(this_narrow, |c| {
+                            c.joined_branch_result(scope, arm.body, branch_wanted, has_else)
+                        });
+                        (body, this_narrow)
                     })
                 };
                 if self.completed_normally(arm.body) {

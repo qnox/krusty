@@ -14,7 +14,18 @@ fun nullable(e: Any, other: String?): String = when (e) {
     else -> "K"
 }
 
+open class Base
+open class Mid : Base()
+class Leaf : Mid() { val n = 7 }
+fun needLeaf(value: Leaf) = value.n
+fun Base.answer() = when (this) {
+    is Mid if this is Leaf -> needLeaf(this) + n
+    is Mid -> 1
+    else -> 0
+}
+
 fun box(): String {
+    if (Leaf().answer() != 14 || Mid().answer() != 1 || Base().answer() != 0) return "receiver"
     if (cast(Literal(Type())) != "plain" || cast("1") != "other") return "fallthrough"
     if (nullable(Literal(Type()), "x") != "x1") return "nullable"
     return cast(Literal(Json())) + nullable("1", null)

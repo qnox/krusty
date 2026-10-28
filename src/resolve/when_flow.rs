@@ -10,6 +10,14 @@ use crate::types::Ty;
 /// by the declined path's spelling.
 type WhenNarrowings = (Vec<(NarrowPath, Ty)>, Vec<(String, Ty)>);
 
+/// The facts a checked `when` guard proves for its arm's body.
+pub(super) struct CheckedWhenGuard {
+    pub(super) casts: Vec<(NarrowPath, Ty)>,
+    pub(super) declined: Vec<(String, Ty)>,
+    /// The implicit receiver's refinement from a guard `this is T`.
+    pub(super) this_narrow: Option<Ty>,
+}
+
 /// The subject facts each condition of a subject `when` was checked against, keyed by the
 /// condition expression.
 #[derive(Default)]
@@ -214,17 +222,22 @@ impl Checker<'_> {
 
     /// Check an arm's `if` guard in the scope its conditions narrowed, and apply its true-branch
     /// facts to the arm body: `is Lit if e.type is Marker -> e.type.binary` reads `e.type` as a
-    /// `Marker`. The facts are returned so a recheck of the body reapplies them.
+    /// `Marker`. A guard `this is T` refines the implicit receiver past the arm's own condition.
+    /// The facts are returned so a recheck of the body reapplies them.
     pub(super) fn checked_when_guard(
         &mut self,
         scope: &CheckerScope<'_>,
         guard: ExprId,
-    ) -> WhenNarrowings {
+    ) -> CheckedWhenGuard {
         let guard_ty = self.expr(scope, guard);
         self.expect_assignable(Ty::Boolean, guard_ty, self.span(guard), "when guard");
         let (casts, declined) = self.condition_narrowings(scope, guard, true);
         self.apply_narrowings(scope, &casts, &declined, false);
-        (casts, declined)
+        CheckedWhenGuard {
+            casts,
+            declined,
+            this_narrow: self.this_is_narrowing(scope, guard, false),
+        }
     }
 
     /// Flow facts established by one `when` condition. Predicate conditions already contain the
