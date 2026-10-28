@@ -7,6 +7,14 @@ or SAM thunk loads. Store the recorded equality receiver as Any? and use the exi
 boundary to restore the body carrier. Preserve checked adapter parameters and ordinary captures;
 the storage repair is independent of serialized callable-reference admission and identity work.
 
+## Shared dependency conversion evidence
+
+Reuse the constructor-bound collaborator for ordinary dependency bodies and prepared templates.
+Pass the active header's complete formal bounds into the same explicit class-model proof and keep
+typed common coercions when a conversion changes nullability or scalar/reference representation.
+Keep the already-landed generic-argument arity guard unchanged. Validate the owning proof and body
+tests and the portable dependency-array-view fixture without backend mutes or new outcome entries.
+
 ## Native source callable-reference markers
 
 Give source-module references a program-scoped marker keyed by the existing module-qualified

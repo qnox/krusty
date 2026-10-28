@@ -12,6 +12,16 @@ The Native storage ABI regression establishes each program's kotlinc result befo
 scalar-backed and reference-backed value-class equality, hashes, typed invocation and mixed capture
 ordering. The runtime reference-equality protocol and KType layout are unchanged.
 
+## Dependency conversion type evidence
+
+Ordinary KLIB bodies and prepared inline templates prove subtype conversions through the calling
+compilation's explicit class model, layered with every authenticated bound of the current dependency
+function's type parameters. Without that model, ordinary lowering proves only identical types.
+Nullability and scalar/reference changes retain typed common coercions for backend representation.
+Constructor-bound proof keeps its existing behavior. Tests: `klib_lowering::type_evidence::tests`,
+the two `klib_` upcast tests in `klib_lowering::tests::body_forms`, and the unchanged shared
+`box_regressions/multimodule/dependencyArrayView.kt` fixture.
+
 ## Native function-reference identity across source files
 
 Two references to the same source-module callable compare equal and hash alike across emitted
@@ -10149,6 +10159,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   remainder resolves to none
   (`crates/krusty-lsp/src/compiler_analysis.rs::source_set_resolves_java_setter_backed_property_write`,
   `java_fluent_setter_e2e::java_setter_is_a_var_whatever_it_returns`).
+  "Matches the getter's type" is type equality, under which a platform type `T!` equals both `T`
+  and `T?`: a `@NotNull` setter parameter (an override narrowing an inherited `setX`, or a class
+  that annotates one accessor only) still pairs with an unannotated getter, while a `@Nullable`
+  setter of a `@NotNull` getter does not, and assigning that property is a `val` reassignment
+  (`tests/java_not_null_setter_pairing_e2e.rs`). The equality holds at every nesting level, so a
+  `setItems(List<Integer>)` is not the setter of `List<String> getItems()`, annotated or not, while
+  `setA(@Nullable List<String>)` pairs with `@Nullable List<String> getA()` and a wildcard setter
+  with the same wildcard getter. Fixed nullability, projections and arguments compare level by
+  level, in both the classpath and the hierarchy accessor lookup.
 
 - **Member types of a Java interface or annotation are implicitly public (JLS §9.5).** The Java
   signature stubs emit `interface Registry { final class Handler {…} }` with `ACC_PUBLIC` on
@@ -16271,6 +16290,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `named_warning_policy_controls_deprecation` in `tests/deprecation_usage_e2e.rs`;
   `warning_level_is_forwarded_to_the_typed_cli_policy` in `crates/krusty-cli/src/worker.rs`;
   `kotlin_compiler_slice_compiles_through_krusty` in `crates/krusty-build/src/gradle.rs`.)
+- **A failed compilation reports only its errors unless `-Xreport-all-warnings` is given.** With
+  the argument, kotlinc keeps the module warnings and the located source warnings of a compilation
+  that fails on an error, in the order a successful compilation reports them. `-nowarn` still removes
+  them; `-Werror` adds no `warnings found` summary, since the
+  compilation has already failed. The Bazel worker forwards `--x_report_all_warnings` as the same
+  argument. (`a_failed_compilation_reports_its_warnings_under_report_all_warnings` in
+  `tests/report_all_warnings_e2e.rs`.)
 - **The command line is parsed by kotlinc's rules, from kotlinc's own argument table.** Each
   supported release's JVM arguments (name, short and deprecated spellings, value type, delimiter,
   deprecation/removal, `@Enables`/`@Disables` features) are read by reflection from that release's
@@ -16306,9 +16332,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   language level under `-progressive` emits kotlinc's unnamed warning; it is deliberately
   unavailable to named `-Xwarning-level` policy and is removed by `-Xsuppress-version-warnings`.
   The Gradle plugin forwards `freeCompilerArgs` verbatim, so a free argument meets the same
-  dispositions as on the command line; it refuses only the arguments it derives from structured
-  task inputs (`-d`, `-classpath`, `-module-name`, …), which a free copy would contradict. It
-  walks the free arguments as the selected kotlinc release does, resolving short and deprecated
+  dispositions as on the command line. As KGP does, it passes the arguments built from the
+  structured compiler options first and the free arguments after them, so a free argument that
+  restates a structured option (`-module-name`, `-jvm-target`, `-progressive`, `-opt-in`,
+  `-jvm-default`, …) is resolved by the compiler's own parser, last value winning or repeated
+  values accumulating as kotlinc's does. It refuses only the arguments the plugin itself owns:
+  sources, destination, libraries (`-d`, `-classpath`, …), the JDK and stdlib policy, and
+  compiler plugins. It walks the free arguments as the selected kotlinc release does, resolving short and deprecated
   spellings (`-cp`, `-Xprogressive`, `-module`) through that release's compiler-owned vendored
   table, and
   refuses `--`, any `@argfile`, and a free source path, since each could reach a plugin-owned
@@ -17457,6 +17487,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   member, and of a compiler-generated function whose `override` modifier says nothing of it (a
   data class's `componentN`), is refused. (`crates/krusty-plugin-host/tests/ksp.rs`,
   `overridees_are_what_ksp2_reports`, `the_overridee_of_an_override_is_refused`.)
+- **A KSP Java annotation's array elements without a default default to an empty array.**
+  `KSAnnotation.defaultArguments` of an application of a Java library annotation lists an empty
+  array for every array-typed element the annotation declares without a default, in declaration
+  order, and `arguments` lists that empty array for such an element the application omits, as
+  KSP2 2.3.12 reports. A Kotlin library annotation keeps the rule for a `vararg` element only.
+  (`crates/krusty-plugin-host/tests/ksp.rs`,
+  `java_annotation_array_elements_default_to_empty_arrays`.)
 - **A KSP source classifier lists its members with the inherited ones as KSP2 does.**
   `getAllFunctions` lists the classifier's own functions in declaration order (a data class's
   `componentN` and `copy` among them), then each direct supertype's functions in written order

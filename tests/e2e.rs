@@ -1300,8 +1300,6 @@ mod java_ctor_sam_conversion_e2e;
 mod java_flexible_collection_e2e;
 #[path = "java_flexible_variable_inference_e2e.rs"]
 mod java_flexible_variable_inference_e2e;
-#[path = "java_fluent_setter_e2e.rs"]
-mod java_fluent_setter_e2e;
 #[path = "java_instance_e2e.rs"]
 mod java_instance_e2e;
 #[path = "java_interface_mutable_collection_face_e2e.rs"]
@@ -1320,14 +1318,10 @@ mod local_class_construction_capture_e2e;
 #[path = "local_function_reference_inference_e2e.rs"]
 mod local_function_reference_inference_e2e;
 java_member_modules::declare!();
+mod java_nullability_modules;
+java_nullability_modules::declare!();
 #[path = "java_nested_static_e2e.rs"]
 mod java_nested_static_e2e;
-#[path = "java_not_null_collection_mutability_e2e.rs"]
-mod java_not_null_collection_mutability_e2e;
-#[path = "java_not_null_null_argument_e2e.rs"]
-mod java_not_null_null_argument_e2e;
-#[path = "java_operator_receiver_null_check_e2e.rs"]
-mod java_operator_receiver_null_check_e2e;
 #[path = "java_parameters_attribute_e2e.rs"]
 mod java_parameters_attribute_e2e;
 #[path = "java_platform_type_publication_e2e.rs"]
@@ -1661,6 +1655,8 @@ mod public_inline_property_access_e2e;
 mod reference_carrier_cast_e2e;
 #[path = "reified_type_arguments_e2e.rs"]
 mod reified_type_arguments_e2e;
+#[path = "report_all_warnings_e2e.rs"]
+mod report_all_warnings_e2e;
 #[path = "result_generic_override_argument_e2e.rs"]
 mod result_generic_override_argument_e2e;
 #[path = "safe_call_null_line_e2e.rs"]
