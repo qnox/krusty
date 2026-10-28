@@ -21,16 +21,20 @@
 //!   - kapt's plugin without options (the Kotlin Gradle plugin passes its jar to every compile of a
 //!     kapt project) → nothing: it acts only once its options configure stubs or processing; with
 //!     options → ERROR, as below;
-//!   - an `-Xplugin` jar krusty neither reimplements nor can host (Compose, any third-party FIR/IR
-//!     plugin) → ERROR. Silently ignoring it would emit wrong bytecode, so a drop-in must fail loudly.
+//!   - a PARTIALLY reimplemented plugin (Compose, assignment) → INFO for a compilation, which runs the native
+//!     pass and fails on any construct the pass does not cover yet, and a REFUSAL for `krusty
+//!     refusals`, so a build still hands such a module to kotlinc;
+//!   - an `-Xplugin` jar krusty neither reimplements nor can host (any third-party FIR/IR plugin)
+//!     → ERROR. Silently ignoring it would emit wrong bytecode, so a drop-in must fail loudly.
 
 use crate::plugins::allopen::AllOpenPlugin;
 use crate::plugins::assignment::AssignmentPlugin;
 use crate::plugins::cli::{
-    PluginConfig, PluginOption, ALLOPEN_PLUGIN_ID, ASSIGNMENT_PLUGIN_ID, KAPT_PLUGIN_ID,
-    KSP_PLUGIN_ID, NOARG_PLUGIN_ID, SAM_WITH_RECEIVER_PLUGIN_ID, SCRIPTING_PLUGIN_ID,
-    SERIALIZATION_PLUGIN_ID,
+    PluginConfig, PluginOption, ALLOPEN_PLUGIN_ID, ASSIGNMENT_PLUGIN_ID, COMPOSE_PLUGIN_ID,
+    KAPT_PLUGIN_ID, KSP_PLUGIN_ID, NOARG_PLUGIN_ID, SAM_WITH_RECEIVER_PLUGIN_ID,
+    SCRIPTING_PLUGIN_ID, SERIALIZATION_PLUGIN_ID,
 };
+use crate::plugins::compose::{ComposeOptions, ComposePlugin};
 use crate::plugins::noarg::NoArgPlugin;
 use crate::plugins::sam_with_receiver::SamWithReceiverPlugin;
 use crate::plugins::serialization::{PluginRelease, SerializationAbi, SerializationPlugin};
@@ -56,6 +60,10 @@ type NativeBuilder = fn(&Activation, Option<&str>, &[PluginOption]) -> Box<dyn I
 pub enum ExtensionKind {
     /// krusty reimplements it natively as an in-process IR pass (FIR/IR plugins it can't run as jars).
     Native(NativeBuilder),
+    /// krusty reimplements part of it natively. A compilation runs the pass, which rejects every
+    /// construct it does not cover yet; a build asking which compilations krusty takes is refused
+    /// one that requests it, so the build compiles it with kotlinc until the coverage is complete.
+    PartialNative(NativeBuilder),
     /// krusty hosts the real plugin out-of-process (codegen-only: KSP/APT).
     CodegenHost,
     /// The plugin acts only on Kotlin script sources, which krusty does not compile, so requesting
@@ -80,11 +88,29 @@ pub struct RegisteredExtension {
     /// The `-P plugin:<id>:<key>=…` keys the plugin's command-line processor accepts, where krusty
     /// checks them as kotlinc does; `None` where it leaves them to the extension.
     pub option_keys: Option<&'static [&'static str]>,
-    /// `(key, value)` settings of a declared option whose behaviour krusty does not implement. Each
-    /// one fails the compile instead of silently producing other code than kotlinc. Values match
-    /// exactly, as kotlinc's processors compare them (no-arg runs initializers only for
+    /// Settings of a declared option whose behaviour krusty does not implement. Each one fails the
+    /// compile instead of silently producing other code than kotlinc.
+    pub unimplemented_options: &'static [(&'static str, OptionSetting)],
+}
+
+/// Which values of one option an [`RegisteredExtension::unimplemented_options`] entry refuses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OptionSetting {
+    /// This exact value, as kotlinc's processors compare them (no-arg runs initializers only for
     /// `invokeInitializers=true`, not `TRUE`).
-    pub unimplemented_options: &'static [(&'static str, &'static str)],
+    Exactly(&'static str),
+    /// Any nonempty value: the option asks for something krusty does not produce at all (a report
+    /// directory, for example).
+    NonEmpty,
+}
+
+impl OptionSetting {
+    fn matches(self, value: &str) -> bool {
+        match self {
+            Self::Exactly(refused) => value == refused,
+            Self::NonEmpty => !value.is_empty(),
+        }
+    }
 }
 
 /// The service files through which a jar declares a compiler plugin to kotlinc's `ServiceLoader`:
@@ -172,6 +198,10 @@ pub enum PluginDiagnostic {
     UnsupportedOption { option: PluginOption },
     /// A declared option setting krusty's native implementation does not honour yet — hard error.
     UnimplementedOption { option: PluginOption },
+    /// krusty substitutes a native pass that covers only part of what the plugin generates. Not an
+    /// error for a compilation, which rejects an uncovered construct itself, but a refusal for a
+    /// build that must choose a compiler before it knows the sources.
+    PartialSubstitution { plugin_id: String },
 }
 
 impl PluginDiagnostic {
@@ -183,6 +213,11 @@ impl PluginDiagnostic {
                 | PluginDiagnostic::UnsupportedOption { .. }
                 | PluginDiagnostic::UnimplementedOption { .. }
         )
+    }
+
+    /// Whether a build asking which compilations krusty takes must give this one to kotlinc.
+    pub fn is_refusal(&self) -> bool {
+        self.is_error() || matches!(self, PluginDiagnostic::PartialSubstitution { .. })
     }
 
     pub fn message(&self) -> String {
@@ -211,6 +246,10 @@ impl PluginDiagnostic {
             PluginDiagnostic::UnsupportedOption { option } => format!(
                 "unsupported plugin option: {}:{}={}",
                 option.id, option.key, option.value
+            ),
+            PluginDiagnostic::PartialSubstitution { plugin_id } => format!(
+                "krusty: '{plugin_id}' is only partly implemented by krusty's built-in \
+                 implementation; a module that uses what it does not cover yet fails to compile."
             ),
             PluginDiagnostic::UnimplementedOption { option } => format!(
                 "krusty: plugin option {}:{}={} is not implemented by krusty's built-in \
@@ -315,6 +354,14 @@ impl Resolved {
 
 /// Build the native serialization plugin, reading its target ABI from the classpath runtime jar and
 /// its diagnostics' wording from the compiler-plugin jar's release.
+fn build_compose(
+    _act: &Activation,
+    _release: Option<&str>,
+    options: &[PluginOption],
+) -> Box<dyn IrPlugin> {
+    Box::new(ComposePlugin::new(ComposeOptions::from_options(options)))
+}
+
 fn build_serialization(
     act: &Activation,
     release: Option<&str>,
@@ -397,7 +444,7 @@ impl PluginRegistry {
             registrar: "org.jetbrains.kotlin.noarg.NoArgComponentRegistrar",
             kind: ExtensionKind::Native(build_noarg),
             option_keys: Some(&["annotation", "preset", "invokeInitializers"]),
-            unimplemented_options: &[("invokeInitializers", "true")],
+            unimplemented_options: &[("invokeInitializers", OptionSetting::Exactly("true"))],
         });
         r.register(RegisteredExtension {
             plugin_id: SAM_WITH_RECEIVER_PLUGIN_ID,
@@ -409,9 +456,16 @@ impl PluginRegistry {
         r.register(RegisteredExtension {
             plugin_id: ASSIGNMENT_PLUGIN_ID,
             registrar: "org.jetbrains.kotlin.assignment.plugin.AssignmentComponentRegistrar",
-            kind: ExtensionKind::Native(build_assignment),
+            kind: ExtensionKind::PartialNative(build_assignment),
             option_keys: Some(&["annotation"]),
             unimplemented_options: &[],
+        });
+        r.register(RegisteredExtension {
+            plugin_id: COMPOSE_PLUGIN_ID,
+            registrar: "androidx.compose.compiler.plugins.kotlin.ComposePluginRegistrar",
+            kind: ExtensionKind::PartialNative(build_compose),
+            option_keys: Some(ComposeOptions::KEYS),
+            unimplemented_options: ComposeOptions::UNIMPLEMENTED,
         });
         r.register(RegisteredExtension {
             plugin_id: KSP_PLUGIN_ID,
@@ -471,7 +525,8 @@ impl PluginRegistry {
                         release: None,
                         options: Vec::new(),
                     }),
-                    ExtensionKind::CodegenHost
+                    ExtensionKind::PartialNative(_)
+                    | ExtensionKind::CodegenHost
                     | ExtensionKind::ScriptsOnly
                     | ExtensionKind::ConfiguredOnly => None,
                 })
@@ -529,9 +584,9 @@ impl PluginRegistry {
                 options
                     .iter()
                     .filter(|option| {
-                        ext.unimplemented_options
-                            .iter()
-                            .any(|(key, value)| option.key == *key && option.value == *value)
+                        ext.unimplemented_options.iter().any(|(key, setting)| {
+                            option.key == *key && setting.matches(&option.value)
+                        })
                     })
                     .map(|option| PluginDiagnostic::UnimplementedOption {
                         option: option.clone(),
@@ -548,6 +603,17 @@ impl PluginRegistry {
                     diagnostics.push(PluginDiagnostic::NativeSubstitution {
                         plugin_id: ext.plugin_id.to_string(),
                         jar,
+                    });
+                }
+                ExtensionKind::PartialNative(build) => {
+                    native.enabled.push(EnabledNative {
+                        plugin_id: ext.plugin_id,
+                        build,
+                        release: jar.as_deref().and_then(declared_release),
+                        options,
+                    });
+                    diagnostics.push(PluginDiagnostic::PartialSubstitution {
+                        plugin_id: ext.plugin_id.to_string(),
                     });
                 }
                 ExtensionKind::CodegenHost if act.codegen_host => {
@@ -586,7 +652,7 @@ impl PluginRegistry {
         }
 
         // ...and a plugin activated purely via `-P plugin:<id>:…` (no jar) for an UNregistered id is
-        // equally unsupported — Compose wired only by id must not slip through silently.
+        // equally unsupported — a plugin wired only by id must not slip through silently.
         let mut flagged_ids: Vec<&str> = Vec::new();
         for opt in &act.config.options {
             let known = self.extensions.iter().any(|e| e.plugin_id == opt.id);
@@ -672,8 +738,7 @@ mod tests {
         jar_declaring(file_name, REGISTRAR_SERVICES[0], registrars)
     }
 
-    /// A plugin no registry entry answers to: a neutral stand-in for all-open, no-arg, Compose or any
-    /// third-party FIR/IR plugin.
+    /// A plugin no registry entry answers to: a neutral stand-in for any third-party FIR/IR plugin.
     const WIDGET_REGISTRAR: &str = "org.example.widget.WidgetComponentRegistrar";
 
     fn activation<'a>(config: &'a PluginConfig, classpath: &'a [String]) -> Activation<'a> {
@@ -686,14 +751,84 @@ mod tests {
     }
 
     #[test]
-    fn builtins_register_serialization_allopen_noarg_sam_with_receiver_and_ksp() {
+    fn builtins_register_serialization_allopen_noarg_sam_with_receiver_compose_and_ksp() {
         let r = PluginRegistry::with_builtins();
         assert!(r.is_registered(SERIALIZATION_PLUGIN_ID));
         assert!(r.is_registered(ALLOPEN_PLUGIN_ID));
         assert!(r.is_registered(NOARG_PLUGIN_ID));
         assert!(r.is_registered(SAM_WITH_RECEIVER_PLUGIN_ID));
+        assert!(r.is_registered(COMPOSE_PLUGIN_ID));
         assert!(r.is_registered(KSP_PLUGIN_ID));
-        assert!(!r.is_registered("androidx.compose.compiler.plugins.kotlin"));
+    }
+
+    #[test]
+    fn compose_runs_natively_but_a_build_is_refused_it_until_coverage_is_complete() {
+        let jar = plugin_jar(
+            "compose-compiler-plugin.jar",
+            &["androidx.compose.compiler.plugins.kotlin.ComposePluginRegistrar"],
+        );
+        let c = cfg(&[
+            &format!("-Xplugin={jar}"),
+            "-P",
+            "plugin:androidx.compose.compiler.plugins.kotlin:sourceInformation=true",
+        ]);
+        let resolved = PluginRegistry::with_builtins().resolve(&activation(&c, &[]));
+        assert_eq!(resolved.native.host("app").plugin_names(), vec!["compose"]);
+        assert!(!resolved.has_errors());
+        assert_eq!(resolved.diagnostics.len(), 1);
+        assert!(matches!(
+            &resolved.diagnostics[0],
+            PluginDiagnostic::PartialSubstitution { plugin_id } if plugin_id == COMPOSE_PLUGIN_ID
+        ));
+        assert!(resolved.diagnostics[0].is_refusal());
+    }
+
+    #[test]
+    fn compose_live_literals_are_refused_as_unimplemented() {
+        let c = cfg(&[
+            "-P",
+            "plugin:androidx.compose.compiler.plugins.kotlin:liveLiterals=true",
+        ]);
+        let resolved = PluginRegistry::with_builtins().resolve(&activation(&c, &[]));
+        assert!(resolved.has_errors());
+        assert!(resolved.diagnostics.iter().any(|diagnostic| matches!(
+            diagnostic,
+            PluginDiagnostic::UnimplementedOption { option } if option.key == "liveLiterals"
+        )));
+    }
+
+    /// krusty writes no Compose metrics or reports, so a request for either fails the compile; an
+    /// empty destination asks for nothing and is accepted.
+    #[test]
+    fn compose_reports_are_refused_until_krusty_writes_them() {
+        let option = |key: &str, value: &str| PluginOption {
+            id: COMPOSE_PLUGIN_ID.to_string(),
+            key: key.to_string(),
+            value: value.to_string(),
+        };
+        let c = cfg(&[
+            "-P",
+            "plugin:androidx.compose.compiler.plugins.kotlin:metricsDestination=build/metrics",
+            "-P",
+            "plugin:androidx.compose.compiler.plugins.kotlin:reportsDestination=build/reports",
+            "-P",
+            "plugin:androidx.compose.compiler.plugins.kotlin:reportsDestination=",
+        ]);
+        let resolved = PluginRegistry::with_builtins().resolve(&activation(&c, &[]));
+        assert_eq!(
+            resolved.diagnostics,
+            vec![
+                PluginDiagnostic::UnimplementedOption {
+                    option: option("metricsDestination", "build/metrics"),
+                },
+                PluginDiagnostic::UnimplementedOption {
+                    option: option("reportsDestination", "build/reports"),
+                },
+                PluginDiagnostic::PartialSubstitution {
+                    plugin_id: COMPOSE_PLUGIN_ID.to_string(),
+                },
+            ]
+        );
     }
 
     #[test]
@@ -1281,8 +1416,7 @@ mod tests {
                 SERIALIZATION_PLUGIN_ID,
                 ALLOPEN_PLUGIN_ID,
                 NOARG_PLUGIN_ID,
-                SAM_WITH_RECEIVER_PLUGIN_ID,
-                ASSIGNMENT_PLUGIN_ID
+                SAM_WITH_RECEIVER_PLUGIN_ID
             ]
         );
         assert_eq!(
@@ -1291,8 +1425,7 @@ mod tests {
                 "kotlinx.serialization",
                 "allopen",
                 "noarg",
-                "sam-with-receiver",
-                "assignment"
+                "sam-with-receiver"
             ]
         );
     }

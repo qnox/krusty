@@ -1241,7 +1241,7 @@ tasks.register<JavaExec>("runJvm") {
             .tasks(["krustyCompile"])
             .run_output()
             .unwrap_or_else(|error| panic!("a compiler plugin applied before krusty: {error}"));
-        assert_lombok_left_to_kotlinc(&output, &fixture.probes, ":model:compileKotlin");
+        assert_assignment_left_to_kotlinc(&output, &fixture.probes, ":model:compileKotlin");
         let text = optional_invocation_log(log);
         assert!(
             invocations(&text)
@@ -1315,7 +1315,7 @@ plugins {
     kotlin("jvm")
     id("dev.krustythecompiler") version "PLUGIN_VERSION" apply false
     kotlin("plugin.sam.with.receiver") version "KGP_VERSION"
-    kotlin("plugin.lombok") version "KGP_VERSION" apply false
+    kotlin("plugin.assignment") version "KGP_VERSION" apply false
     `java-library`
 }
 
@@ -1325,7 +1325,7 @@ samWithReceiver {
 
 // A plugin applied before krusty, as an earlier `plugins` entry or a convention plugin applies it.
 if (providers.gradleProperty("krusty.negative").orNull == "compiler-plugin-before-krusty") {
-    pluginManager.apply("org.jetbrains.kotlin.plugin.lombok")
+    pluginManager.apply("org.jetbrains.kotlin.plugin.assignment")
 }
 pluginManager.apply("dev.krustythecompiler")
 
@@ -1438,11 +1438,11 @@ fun main() {
         clear_invocation_log(&fixture.probes);
         let output = fixture
             .build()
-            .property("krusty.negative", "lombok")
+            .property("krusty.negative", "assignment")
             .tasks([":app:compileKotlin"])
             .run_output()
-            .unwrap_or_else(|error| panic!("the Kotlin Lombok plugin beside KSP: {error}"));
-        assert_lombok_left_to_kotlinc(&output, &fixture.probes, ":app:compileKotlin");
+            .unwrap_or_else(|error| panic!("the assignment plugin beside KSP: {error}"));
+        assert_assignment_left_to_kotlinc(&output, &fixture.probes, ":app:compileKotlin");
         assert!(
             !log.exists(),
             "kotlinc, not krusty, compiles a refused plugin request"
@@ -1787,12 +1787,12 @@ plugins {
     kotlin("jvm")
     id("com.google.devtools.ksp")
     id("dev.krustythecompiler") version "PLUGIN_VERSION"
-    kotlin("plugin.lombok") version "KGP_VERSION" apply false
+    kotlin("plugin.assignment") version "KGP_VERSION" apply false
     application
 }
 
-if (providers.gradleProperty("krusty.negative").orNull == "lombok") {
-    pluginManager.apply("org.jetbrains.kotlin.plugin.lombok")
+if (providers.gradleProperty("krusty.negative").orNull == "assignment") {
+    pluginManager.apply("org.jetbrains.kotlin.plugin.assignment")
 }
 
 dependencies {
@@ -2061,14 +2061,12 @@ fun main() {
             .collect()
     }
 
-    /// Assert that `task` was left to kotlinc because of the Kotlin Lombok compiler plugin, which
-    /// krusty does not implement: the build reports exactly the refusal the krusty binary's support
-    /// check printed for the Lombok jar, once. The Gradle cache prefix and artifact version
-    /// vary by lane, so the exact jar path comes from the recorded check rather than from Gradle's
-    /// output.
-    fn assert_lombok_left_to_kotlinc(output: &str, probes: &Path, task: &str) {
+    /// Assert that `task` was left to kotlinc because of the assignment compiler plugin, which
+    /// krusty implements only partly: the support check saw the assignment jar exactly once, and
+    /// the build reports exactly the partial-substitution refusal it printed for that plugin.
+    fn assert_assignment_left_to_kotlinc(output: &str, probes: &Path, task: &str) {
         let text = read_invocation_log(probes).expect("support check log");
-        let mut lombok_jars = invocations(&text)
+        let mut assignments = invocations(&text)
             .iter()
             .flat_map(|args| {
                 args.iter()
@@ -2078,16 +2076,16 @@ fun main() {
                         Path::new(jar)
                             .file_name()
                             .and_then(|name| name.to_str())
-                            .is_some_and(|name| name.contains("-lombok-"))
+                            .is_some_and(|name| name.split('-').any(|part| part == "assignment"))
                     })
                     .map(str::to_owned)
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
-        lombok_jars.dedup();
-        assert_eq!(lombok_jars.len(), 1, "{text}");
-        let refusal = PluginDiagnostic::Unsupported {
-            plugin: lombok_jars.remove(0),
+        assignments.dedup();
+        assert_eq!(assignments.len(), 1, "{text}");
+        let refusal = PluginDiagnostic::PartialSubstitution {
+            plugin_id: "org.jetbrains.kotlin.assignment".to_string(),
         };
         assert_left_to_kotlinc(output, task, &[refusal.message()]);
     }
@@ -2628,7 +2626,7 @@ import org.gradle.api.tasks.compile.JavaCompile
 plugins {
     kotlin("jvm") version "KGP_VERSION"
     id("dev.krustythecompiler") version "PLUGIN_VERSION"
-    kotlin("plugin.lombok") version "KGP_VERSION" apply false
+    kotlin("plugin.assignment") version "KGP_VERSION" apply false
     `java-library`
 }
 
@@ -2639,7 +2637,7 @@ dependencies {
 val krustyNegative = providers.gradleProperty("krusty.negative").orNull
 
 if (krustyNegative == "compiler-plugin") {
-    pluginManager.apply("org.jetbrains.kotlin.plugin.lombok")
+    pluginManager.apply("org.jetbrains.kotlin.plugin.assignment")
 }
 
 abstract class GenerateKotlin : DefaultTask() {

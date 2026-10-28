@@ -7,6 +7,8 @@ use super::*;
 /// The function an overloaded assignment calls.
 pub(super) const ASSIGNMENT_CONVENTION: &str = "assign";
 
+const NO_APPLICABLE_ASSIGN: &str = "no applicable 'assign' function found for '=' overload.";
+
 const ASSIGNMENT_RESULT_NOT_UNIT: &str =
     "function 'assign' used for '=' overload must return 'Unit'.";
 
@@ -58,9 +60,10 @@ impl Checker<'_> {
 
     /// kotlinc's assignment plugin. `target = value`, where `target` is a non-local `val` property
     /// or a final Java field of type `target_ty` whose class or supertype carries an assignment
-    /// annotation, is the call `target.assign(value)`: `target` is read as in any other position,
-    /// and `assign` is selected among every function of that name. Returns whether the plugin took
-    /// the statement over; a selected call that does not return `Unit` is rejected as kotlinc does.
+    /// annotation, is the call `target.assign(value)` the parser kept beside the statement. It is
+    /// resolved and reported like any other call; when it fails kotlinc adds its own error at the
+    /// `=`, and a selected call that does not return `Unit` is rejected there. Returns whether the
+    /// plugin took the statement over.
     pub(super) fn try_overloaded_assignment(
         &mut self,
         scope: &CheckerScope<'_>,
@@ -71,52 +74,24 @@ impl Checker<'_> {
         if !self.resolver().supports_assignment_overloading(target_ty) {
             return false;
         }
-        let Some(&target) = self.file.assignment_target_reads.get(&statement.0) else {
+        let Some(&call) = self.file.assignment_overload_calls.get(&statement.0) else {
             return false;
         };
-        let target_ty = self.expr(scope, target);
-        if target_ty == Ty::Error {
-            return true;
-        }
         let operator = self.value_operator_span(value);
-        let convention = operator_calls::OperatorConvention {
-            name: ASSIGNMENT_CONVENTION,
-            requires_operator: false,
-        };
-        let expected = self
-            .selected_operator_params(scope, target_ty, convention, &[value])
-            .and_then(|parameters| parameters.first().copied());
-        let value_ty = match expected {
-            Some(expected) => self.expr_expected(scope, value, expected),
-            None => self.expr(scope, value),
-        };
-        let Some((result, call)) = self.assignment_overload_call_ret(
-            scope,
-            target,
-            target_ty,
-            (value_ty, value),
-            operator,
-        ) else {
-            self.diags.error(
-                operator,
-                "no applicable 'assign' function found for '=' overload.",
-            );
-            return true;
-        };
-        if result != Ty::Unit && result != Ty::Error {
+        let checkpoint = self.diags.diags.len();
+        let result = self.expr(scope, call);
+        let failed = result == Ty::Error
+            || self.diags.diags[checkpoint..]
+                .iter()
+                .any(|diagnostic| diagnostic.severity == crate::diag::Severity::Error);
+        if failed {
+            self.diags.error(operator, NO_APPLICABLE_ASSIGN);
+        } else if result != Ty::Unit {
             self.diags.error(operator, ASSIGNMENT_RESULT_NOT_UNIT);
-            return true;
+        } else {
+            self.stmt_lowers
+                .insert(statement, StmtLowering::OverloadedAssignment { call });
         }
-        self.narrow_operator_receiver(target, &call);
-        self.stmt_lowers.insert(
-            statement,
-            StmtLowering::OverloadedAssignment {
-                target,
-                call: CompoundAssignmentTarget {
-                    call: Box::new(call),
-                },
-            },
-        );
         true
     }
 }

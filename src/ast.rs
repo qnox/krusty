@@ -1617,8 +1617,9 @@ pub struct File {
     pub when_subject_variables: crate::fx_hash::HashSet<u32>,
     /// Assignment lvalue spans keyed by statement ID.
     pub assignment_target_spans: crate::fx_hash::HashMap<u32, Span>,
-    /// The lvalue of `name = value` or `receiver.name = value` as a read, keyed by statement ID.
-    pub assignment_target_reads: crate::fx_hash::HashMap<u32, ExprId>,
+    /// `target.assign(value)` for `target = value`, the call kotlinc's assignment plugin makes of
+    /// an assignment to an annotated `val`, keyed by statement ID.
+    pub assignment_overload_calls: crate::fx_hash::HashMap<u32, ExprId>,
     /// Source-name spans keyed by the synthetic read expression made for `target op= value`.
     pub compound_assignment_read_spans: crate::fx_hash::HashMap<u32, Span>,
     /// Source span of the `init` KEYWORD introducing each initializer block, keyed by the block
@@ -2041,7 +2042,7 @@ impl File {
         // Both return-label span tables are keyed by the arenas released here.
         self.return_label_spans.clear();
         self.assignment_target_spans = Default::default();
-        self.assignment_target_reads = Default::default();
+        self.assignment_overload_calls = Default::default();
         self.compound_assignment_read_spans = Default::default();
         self.init_block_keywords = Default::default();
         self.incdec_accesses = Default::default();

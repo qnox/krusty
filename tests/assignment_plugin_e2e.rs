@@ -193,3 +193,120 @@ fn non_unit_assign_is_rejected_like_kotlinc() {
          krusty: 5 error(s)\n"
     );
 }
+
+const NO_APPLICABLE_MAIN: &str = r#"package k
+annotation class Assignable
+@Assignable class Bare
+@Assignable class Member { fun assign(value: String) {} }
+@Assignable class Ext
+fun Ext.assign(value: String) {}
+class Other
+fun Other.assign(value: Int) {}
+class Zed
+fun <T : Zed> T.assign(value: T) {}
+class Holder { val bare = Bare(); val member = Member(); val ext = Ext() }
+fun use(h: Holder) {
+    h.bare = 1
+    h.member = 2
+    h.ext = 3
+}
+"#;
+
+const NO_APPLICABLE_SINGLE: &str = r#"package s
+import k.Assignable
+@Assignable class Lone
+class Other
+fun Other.assign(value: Int) {}
+class Zed
+fun <T : Zed> T.assign(value: T) {}
+class Holder { val lone = Lone() }
+fun use(h: Holder) { h.lone = "s" }
+"#;
+
+const NO_APPLICABLE_UNRESOLVED: &str = r#"package u
+import k.Assignable
+@Assignable class Lone
+class Holder { val lone = Lone() }
+fun use(h: Holder) { h.lone = 1 }
+"#;
+
+/// When `target.assign(value)` does not resolve, kotlinc reports the call's own diagnostics and
+/// adds its error at the `=`: an argument mismatch of a member or extension `assign`; each
+/// same-named extension a receiver type mismatch rejects, in declaration order, or only the one more
+/// specific than the others (a non-generic one over a generic one); and an unresolved reference
+/// when no `assign` is in scope.
+#[test]
+fn inapplicable_assign_is_rejected_like_kotlinc() {
+    let fixture = PluginFixture::new("assignment-no-applicable");
+    let sources = [
+        ("Main.kt", NO_APPLICABLE_MAIN),
+        ("Single.kt", NO_APPLICABLE_SINGLE),
+        ("Unresolved.kt", NO_APPLICABLE_UNRESOLVED),
+    ];
+    let switches = assignment_switches("k.Assignable");
+    assert_eq!(
+        fixture.kotlinc_rejects("main", &sources, &[], &switches),
+        "<fixture>/main/src/Main.kt:13:5: error: none of the following candidates is applicable:\n\
+         \n\
+         fun Ext.assign(value: String): Unit:\n\
+         \x20 Candidate 'fun Ext.assign(value: String): Unit' is inapplicable because of a receiver type mismatch.\n\
+         \n\
+         fun Other.assign(value: Int): Unit:\n\
+         \x20 Candidate 'fun Other.assign(value: Int): Unit' is inapplicable because of a receiver type mismatch.\n\
+         \n\
+         fun <T : Zed> T.assign(value: T): Unit:\n\
+         \x20 Candidate 'fun <T : Zed> T.assign(value: T): Unit' is inapplicable because of a receiver type mismatch.\n\
+         \x20   h.bare = 1\n\
+         \x20   ^^^^^^\n\
+         <fixture>/main/src/Main.kt:13:12: error: no applicable 'assign' function found for '=' overload.\n\
+         \x20   h.bare = 1\n\
+         \x20          ^\n\
+         <fixture>/main/src/Main.kt:14:14: error: no applicable 'assign' function found for '=' overload.\n\
+         \x20   h.member = 2\n\
+         \x20            ^\n\
+         <fixture>/main/src/Main.kt:14:16: error: argument type mismatch: actual type is 'Int', but 'String' was expected.\n\
+         \x20   h.member = 2\n\
+         \x20              ^\n\
+         <fixture>/main/src/Main.kt:15:11: error: no applicable 'assign' function found for '=' overload.\n\
+         \x20   h.ext = 3\n\
+         \x20         ^\n\
+         <fixture>/main/src/Main.kt:15:13: error: argument type mismatch: actual type is 'Int', but 'String' was expected.\n\
+         \x20   h.ext = 3\n\
+         \x20           ^\n\
+         <fixture>/main/src/Single.kt:9:22: error: candidate 'fun Other.assign(value: Int): Unit' is inapplicable because of a receiver type mismatch.\n\
+         fun use(h: Holder) { h.lone = \"s\" }\n\
+         \x20                    ^^^^^^\n\
+         <fixture>/main/src/Single.kt:9:29: error: no applicable 'assign' function found for '=' overload.\n\
+         fun use(h: Holder) { h.lone = \"s\" }\n\
+         \x20                           ^\n\
+         <fixture>/main/src/Unresolved.kt:5:22: error: unresolved reference 'assign' on receiver of type 'Lone'.\n\
+         fun use(h: Holder) { h.lone = 1 }\n\
+         \x20                    ^^^^^^\n\
+         <fixture>/main/src/Unresolved.kt:5:29: error: no applicable 'assign' function found for '=' overload.\n\
+         fun use(h: Holder) { h.lone = 1 }\n\
+         \x20                           ^\n"
+    );
+    assert_eq!(
+        fixture.krusty_rejects("main-krusty", &sources, &[], &switches),
+        "<fixture>/main-krusty/src/Main.kt:13:5: error: none of the following candidates is applicable:\n\
+         \n\
+         fun Ext.assign(value: String): Unit:\n\
+         \x20 Candidate 'fun Ext.assign(value: String): Unit' is inapplicable because of a receiver type mismatch.\n\
+         \n\
+         fun Other.assign(value: Int): Unit:\n\
+         \x20 Candidate 'fun Other.assign(value: Int): Unit' is inapplicable because of a receiver type mismatch.\n\
+         \n\
+         fun <T : Zed> T.assign(value: T): Unit:\n\
+         \x20 Candidate 'fun <T : Zed> T.assign(value: T): Unit' is inapplicable because of a receiver type mismatch.\n\
+         <fixture>/main-krusty/src/Main.kt:13:12: error: no applicable 'assign' function found for '=' overload.\n\
+         <fixture>/main-krusty/src/Main.kt:14:14: error: no applicable 'assign' function found for '=' overload.\n\
+         <fixture>/main-krusty/src/Main.kt:14:16: error: argument type mismatch: actual type is 'Int', but 'String' was expected.\n\
+         <fixture>/main-krusty/src/Main.kt:15:11: error: no applicable 'assign' function found for '=' overload.\n\
+         <fixture>/main-krusty/src/Main.kt:15:13: error: argument type mismatch: actual type is 'Int', but 'String' was expected.\n\
+         <fixture>/main-krusty/src/Single.kt:9:22: error: candidate 'fun Other.assign(value: Int): Unit' is inapplicable because of a receiver type mismatch.\n\
+         <fixture>/main-krusty/src/Single.kt:9:29: error: no applicable 'assign' function found for '=' overload.\n\
+         <fixture>/main-krusty/src/Unresolved.kt:5:22: error: unresolved reference 'assign' on receiver of type 'Lone'.\n\
+         <fixture>/main-krusty/src/Unresolved.kt:5:29: error: no applicable 'assign' function found for '=' overload.\n\
+         krusty: 10 error(s)\n"
+    );
+}

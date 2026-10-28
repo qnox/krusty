@@ -106,30 +106,6 @@ impl BodyFirChecker<'_> {
         }))
     }
 
-    /// `target = value` that kotlinc's assignment plugin made `target.assign(value)`.
-    pub(super) fn overloaded_assignment_statement(
-        &mut self,
-        statement: StmtId,
-        target: ExprId,
-        call: CompoundAssignmentTarget,
-        origin: OriginId,
-    ) -> Result<FirStatementId, BodyCheckFailure> {
-        let value = match self.file.stmt(statement) {
-            Stmt::Assign { value, .. } | Stmt::AssignMember { value, .. } => *value,
-            _ => {
-                return Err(self.failure(
-                    self.file.stmt_spans.get(statement.0 as usize).copied(),
-                    BodyCheckFailureKind::UnsupportedStatement(StatementForm::Assign),
-                ))
-            }
-        };
-        let call = self.in_place_assignment_expression(statement, target, value, call, origin)?;
-        Ok(self.body.add_statement(FirStatement {
-            origin,
-            kind: FirStatementKind::Expression(call),
-        }))
-    }
-
     pub(super) fn in_place_assignment_expression(
         &mut self,
         statement: StmtId,

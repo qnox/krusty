@@ -39,12 +39,7 @@ impl Checker<'_> {
         // lambda without that shape first would irreversibly publish `(Any) -> Any` and make the
         // otherwise-applicable `plusAssign(T)` look inapplicable.
         let selected_parameter = self
-            .selected_operator_params(
-                scope,
-                receiver_ty,
-                super::operator_calls::OperatorConvention::operator(name),
-                &[argument],
-            )
+            .selected_operator_params(scope, receiver_ty, name, &[argument])
             .and_then(|parameters| parameters.first().copied());
         let argument_ty = match selected_parameter {
             Some(expected)

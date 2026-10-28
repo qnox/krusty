@@ -482,10 +482,9 @@ impl Checker<'_> {
         scope: &CheckerScope<'_>,
         call: CallArgs<'_>,
         extension_receiver: Ty,
-        convention: super::operator_calls::OperatorConvention<'_>,
+        name: &str,
         span: Span,
     ) -> Result<Option<(Ty, ResolvedCall)>, ()> {
-        let name = convention.name;
         let CallArgs {
             call: expression,
             args,
@@ -505,11 +504,7 @@ impl Checker<'_> {
         let mut candidate = match self.member_extension_function(
             scope,
             request,
-            if convention.requires_operator {
-                MemberExtensionSelection::Operators
-            } else {
-                MemberExtensionSelection::All
-            },
+            MemberExtensionSelection::Operators,
         ) {
             MemberExtensionFunctionSelection::Selected(candidate) => *candidate,
             MemberExtensionFunctionSelection::None(_) => return Ok(None),

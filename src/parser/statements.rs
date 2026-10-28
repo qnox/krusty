@@ -300,7 +300,7 @@ impl Parser<'_> {
                                 start,
                                 target_span,
                             );
-                            self.file.assignment_target_reads.insert(statement.0, e);
+                            self.record_assignment_overload_call(statement, e, value);
                             return statement;
                         }
                         Expr::Member { receiver, name } => {
@@ -318,7 +318,7 @@ impl Parser<'_> {
                                 start,
                                 target_span,
                             );
-                            self.file.assignment_target_reads.insert(statement.0, e);
+                            self.record_assignment_overload_call(statement, e, value);
                             return statement;
                         }
                         Expr::Index { array, indices } => {
@@ -563,5 +563,37 @@ impl Parser<'_> {
         }
         self.file
             .add_expr(Expr::Block { stmts, trailing }, Span::new(start.lo, end.hi))
+    }
+
+    /// kotlinc's assignment plugin resolves `target = value` on an annotated `val` as the call
+    /// `target.assign(value)`, whose source is the whole target. Keep that call beside the
+    /// statement so the checker resolves and reports it as any other call.
+    fn record_assignment_overload_call(
+        &mut self,
+        statement: StmtId,
+        target: ExprId,
+        value: ExprId,
+    ) {
+        let target_span = self.file.expr_spans[target.0 as usize];
+        let callee = self.file.add_expr(
+            Expr::Member {
+                receiver: target,
+                name: "assign".to_string(),
+            },
+            target_span,
+        );
+        self.file
+            .exact_member_name_spans
+            .insert(callee.0, target_span);
+        let call = self.file.add_expr(
+            Expr::Call {
+                callee,
+                args: vec![value],
+            },
+            target_span,
+        );
+        self.file
+            .assignment_overload_calls
+            .insert(statement.0, call);
     }
 }

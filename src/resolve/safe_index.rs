@@ -195,13 +195,8 @@ impl Checker<'_> {
             None => {
                 let mut arguments = indices.to_vec();
                 arguments.push(value);
-                self.selected_operator_params(
-                    scope,
-                    array_ty,
-                    super::operator_calls::OperatorConvention::operator("set"),
-                    &arguments,
-                )
-                .and_then(|params| params.last().copied())
+                self.selected_operator_params(scope, array_ty, "set", &arguments)
+                    .and_then(|params| params.last().copied())
             }
         };
         if let Some(lhs) = self.compound_index_lhs(array, indices, value) {
@@ -481,12 +476,7 @@ impl Checker<'_> {
                     let mut arguments = indices.clone();
                     arguments.push(value);
                     match self
-                        .selected_operator_params(
-                            scope,
-                            at,
-                            super::operator_calls::OperatorConvention::operator("set"),
-                            &arguments,
-                        )
+                        .selected_operator_params(scope, at, "set", &arguments)
                         .and_then(|params| params.last().copied())
                     {
                         Some(expected) => {

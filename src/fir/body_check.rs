@@ -2224,8 +2224,12 @@ impl BodyFirChecker<'_> {
             Some(StmtLowering::PlusAssign(target)) => {
                 return self.compound_assignment_statement(statement, target, origin);
             }
-            Some(StmtLowering::OverloadedAssignment { target, call }) => {
-                return self.overloaded_assignment_statement(statement, target, call, origin);
+            Some(StmtLowering::OverloadedAssignment { call }) => {
+                let call = self.expression(call)?;
+                return Ok(self.body.add_statement(FirStatement {
+                    origin,
+                    kind: FirStatementKind::Expression(call),
+                }));
             }
             _ => {}
         }

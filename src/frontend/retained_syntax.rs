@@ -75,8 +75,8 @@ impl Reachable {
         for child in expressions {
             self.expression(file, child);
         }
-        if let Some(&target) = file.assignment_target_reads.get(&statement.0) {
-            self.expression(file, target);
+        if let Some(&call) = file.assignment_overload_calls.get(&statement.0) {
+            self.expression(file, call);
         }
         self.use_site_annotation_arguments(file, file.statement_annotations.get(&statement));
         match file.stmt(statement) {
@@ -1200,11 +1200,9 @@ pub(super) fn compact(file: &mut File) {
         .into_iter()
         .filter_map(|(old, span)| statements.get(&StmtId(old)).map(|new| (new.0, span)))
         .collect();
-    file.assignment_target_reads = std::mem::take(&mut file.assignment_target_reads)
+    file.assignment_overload_calls = std::mem::take(&mut file.assignment_overload_calls)
         .into_iter()
-        .filter_map(|(old, target)| {
-            Some((statements.get(&StmtId(old))?.0, *expressions.get(&target)?))
-        })
+        .filter_map(|(old, call)| Some((statements.get(&StmtId(old))?.0, *expressions.get(&call)?)))
         .collect();
     file.compound_assignment_read_spans = remap_u32_map(
         std::mem::take(&mut file.compound_assignment_read_spans),

@@ -9003,12 +9003,9 @@ pub enum StmtLowering {
     LocalFunction(Box<LocalFunInfo>),
     /// A compound assignment (`target op= rhs`) selected as an in-place `opAssign` operator call.
     PlusAssign(CompoundAssignmentTarget),
-    /// `target = value` that kotlinc's assignment plugin selects as `target.assign(value)`, with
-    /// `target` the statement's lvalue read ([`crate::ast::File::assignment_target_reads`]).
-    OverloadedAssignment {
-        target: ExprId,
-        call: CompoundAssignmentTarget,
-    },
+    /// `target = value` that kotlinc's assignment plugin resolves as the checked call
+    /// `target.assign(value)` ([`crate::ast::File::assignment_overload_calls`]).
+    OverloadedAssignment { call: ExprId },
     /// `field = value` selected as the enclosing property's backing-field write. A lexical local
     /// named `field` never receives this target.
     BackingFieldWrite {
@@ -16586,11 +16583,21 @@ impl<'a> Checker<'a> {
                         break 'report;
                     }
                     if inapplicable_candidates.is_empty() {
-                        self.diags.error(
-                            self.call_callee_name_span(call),
-                            self.unresolved_member_diagnostic(scope, Some(receiver), &name, rt),
+                        let constraints = CallConstraints {
+                            type_args: &call_targs,
+                            receiver: rt,
+                            expected,
+                        };
+                        self.report_unresolved_receiver_call(
+                            scope,
+                            CallArgs {
+                                call,
+                                args,
+                                arg_tys: &arg_tys,
+                            },
+                            (receiver, &name),
+                            constraints,
                         );
-                        self.report_unshaped_lambda_diagnostics(scope, args);
                     } else {
                         self.diags.error(
                             self.call_callee_name_span(call),
@@ -35473,37 +35480,7 @@ impl<'a> Checker<'a> {
     ) -> String {
         let mut displays = candidates
             .iter()
-            .map(|candidate| {
-                self.source_callable_display(candidate).unwrap_or_else(|| {
-                    // An extension's `callable.params` prepends the receiver while `call_sig` does
-                    // not; skip it so names and types stay parallel.
-                    let (params, receiver) = match candidate.kind {
-                        crate::libraries::FnKind::Extension => (
-                            &candidate.callable.params[1.min(candidate.callable.params.len())..],
-                            candidate.receiver,
-                        ),
-                        _ => (candidate.callable.params.as_slice(), None),
-                    };
-                    let parameters =
-                        Self::callable_ref_parameters(params, &candidate.call_sig.param_names);
-                    let suspend = if candidate.callable.suspend {
-                        "suspend "
-                    } else {
-                        ""
-                    };
-                    match receiver {
-                        Some(receiver) => format!(
-                            "{suspend}fun {}.{name}({parameters}): {}",
-                            receiver.source_name(),
-                            candidate.callable.ret.source_name()
-                        ),
-                        None => format!(
-                            "{suspend}fun {name}({parameters}): {}",
-                            candidate.callable.ret.source_name()
-                        ),
-                    }
-                })
-            })
+            .map(|candidate| self.member_candidate_display(name, candidate))
             .collect::<Vec<_>>();
         displays.sort_unstable();
         displays.dedup();
@@ -45375,7 +45352,7 @@ impl<'a> Checker<'a> {
         if !self.fragment.is_type_use_annotations() {
             self.check_class_missing_supertypes(cl, d, current_owner, is_anonymous_object);
         }
-        self.validate_class_superclass(d, cl, current_owner);
+        self.validate_class_superclass(d, cl, current_owner, body_local_class);
         if !self.fragment.is_type_use_annotations() {
             self.check_value_class_parameters(scope, cl, current_owner);
         }
@@ -46620,6 +46597,9 @@ impl<'a> Checker<'a> {
                     self.finish_registered_local_method(declaration);
                 }
                 method_check_index += 1;
+            }
+            if body_local_class {
+                self.check_class_abstract_members(d, cl, current_owner);
             }
             // Enum entry bodies (`ENTRY { val y = … ; override fun m() = y }`): each override is
             // checked like a method of the enum — `this` is the enum type, the enum's properties AND
@@ -56116,7 +56096,7 @@ impl<'a> Checker<'a> {
                             arg_tys: &[rt],
                         },
                         lt,
-                        operator_calls::OperatorConvention::operator(fname),
+                        fname,
                         operator_span,
                     ) {
                         Ok(Some((ret, target))) => {
@@ -56232,7 +56212,7 @@ impl<'a> Checker<'a> {
                         arg_tys: &[rt],
                     },
                     lt,
-                    operator_calls::OperatorConvention::operator("compareTo"),
+                    "compareTo",
                     operator_span,
                 ) {
                     Ok(Some((Ty::Int, target))) => {
@@ -60288,7 +60268,7 @@ impl<'a> Checker<'a> {
                         arg_tys: &[],
                     },
                     recv,
-                    operator_calls::OperatorConvention::operator(name),
+                    name,
                     span,
                 )?
                 .map(|(_, target)| target),
