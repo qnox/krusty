@@ -546,12 +546,14 @@ fn an_in_projected_receiver_formal_reads_nothing_from_an_out_projected_argument(
 fun <S> Expr<in S>.sel(): List<S> = emptyList()\n\
 fun f(c: Expr<out Any>): Int = c.sel()\n\
 fun g(c: Expr<*>): Int = c.sel()\n";
-    let expected = [
-        "return type mismatch: expected 'Int', actual 'List<Nothing>'.",
-        "return type mismatch: expected 'Int', actual 'List<Nothing>'.",
-    ];
-    assert_eq!(common::reference_error_messages("Main", source), expected);
-    let diagnostics = common::front_end_diagnostics_with_stdlib(source);
-    assert_eq!(diagnostics.len(), 2);
-    assert_eq!(diagnostics, expected);
+    let sources = [("Main.kt", source)];
+    let reference_args = common::language_directives::kotlinc_args(source);
+    assert_eq!(
+        common::reference_error_blocks(&sources, &reference_args),
+        [
+            "Main.kt:3:32: return type mismatch: expected 'Int', actual 'List<Nothing>'.",
+            "Main.kt:4:26: return type mismatch: expected 'Int', actual 'List<Nothing>'.",
+        ]
+    );
+    common::assert_error_blocks_match_kotlinc(&sources, &reference_args);
 }
