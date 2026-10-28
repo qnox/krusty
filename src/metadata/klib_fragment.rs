@@ -66,6 +66,7 @@ pub(crate) fn package_fragment(
         annotations_in_metadata,
         crate::metadata::MetadataTypeLookups::default().inner_classifiers,
     )
+    .expect("valid metadata fixture declarations")
 }
 
 /// Production KLIB fragment emission with the frozen classifier facts its metadata types require.
@@ -75,7 +76,7 @@ pub(crate) fn package_fragment_with_inner_classifiers(
     classes: &[KlibClass<'_>],
     annotations_in_metadata: bool,
     inner_classifiers: crate::metadata::InnerClassifiers<'_>,
-) -> Vec<u8> {
+) -> Result<Vec<u8>, crate::metadata::class_id::ClassIdError> {
     let mut st = StringTable::klib(inner_classifiers);
     let mut requirements = VersionRequirementTable::default();
     let mut contract_types = ContractTypeTable::default();
@@ -127,8 +128,10 @@ pub(crate) fn package_fragment_with_inner_classifiers(
             source_file: class.in_source_file.then_some(file.file_name.as_str()),
             constants: class.constants,
         };
-        class_messages.push(class_message(&mut st, &class.declaration, &carrier));
-        class_names.push(u64::from(st.class_id(class.declaration.name)));
+        class_messages.push(class_message(&mut st, &class.declaration, &carrier)?);
+        class_names.push(u64::from(
+            st.declaration_class_id(class.declaration.class_id)?,
+        ));
     }
 
     let mut fragment = Pb::new();
@@ -141,7 +144,7 @@ pub(crate) fn package_fragment_with_inner_classifiers(
     fragment.field_varint(172, 0); // isEmpty = 172
     fragment.field_bytes(173, package.join(".").as_bytes()); // fqName = 173
     fragment.field_packed_varints(174, &class_names); // className = 174, packed
-    fragment.canonical().into_bytes()
+    Ok(fragment.canonical().into_bytes())
 }
 
 #[cfg(test)]
@@ -249,7 +252,8 @@ mod tests {
         };
 
         let fragment =
-            package_fragment_with_inner_classifiers(&["fixture"], &members, &[], true, &lookup);
+            package_fragment_with_inner_classifiers(&["fixture"], &members, &[], true, &lookup)
+                .expect("valid declared metadata class names");
         let package = parse_package_fragment_checked(&fragment).expect("a decodable fragment");
         assert_eq!(
             package.functions[0].ret,
@@ -358,8 +362,14 @@ mod tests {
             Ty::Int,
         )];
         let tail = ClassTail::default();
+        let class_id = crate::metadata::class_id::ResolvedClassId::declared(
+            crate::types::type_name("p/q/Point"),
+            crate::types::type_name("p/q"),
+            &["Point"],
+        );
         let point = ClassDeclaration {
             name: crate::types::type_name("p/q/Point"),
+            class_id: &class_id,
             ctor_params: &[("x".to_string(), Ty::Int)],
             props: &[],
             methods: &methods,
