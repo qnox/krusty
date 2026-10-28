@@ -6213,8 +6213,11 @@ supplying nested result context; independently inferred arguments remain intact.
 selection completes untyped lambda inputs from the retained candidate and source argument mapping,
 then rechecks only affected bodies without the rejected expected result. Normal checking and
 recovery share the function input layout, including contexts and anonymous receiver slots. Exact
-source/dependency diagnostics and admitted-context controls cover #2587. Explicit invalid-bound
-lambda diagnostic ordering remains a separate follow-up in #2629.
+source/dependency diagnostics and admitted-context controls cover #2587. For #2629, explicit bound
+rejection retains mapped, substituted postponed-lambda constraints before discarding the candidate.
+Reporting consumes those typed failure facts without redoing selection or assignability; fixed
+inputs and nested-producer isolation remain intact. Callable-reference winner diagnostics remain
+the separate #2776 follow-up.
 
 Late extension admission now uses strict receiver assignability or the existing satisfiable
 postponed-frame trial. The common operation also serves unbound constructor-reference receivers;
