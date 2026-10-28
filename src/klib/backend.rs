@@ -628,24 +628,21 @@ fn record_class_function_exports(
                 exports.record_member_receiver(function, receiver);
             }
         }
-        if source.is_interface {
-            record_interface_property_exports(
-                ir,
-                module_name,
-                source,
-                (record, class),
-                container,
-                exports,
-            )?;
-        }
+        record_class_property_exports(
+            ir,
+            module_name,
+            source,
+            (record, class),
+            container,
+            exports,
+        )?;
     }
     Ok(())
 }
 
-/// Record the getter identity of every property the interface `source` declares, the identity
-/// another module's class implementing the property names it by, and export the accessor bodies
-/// an implementing class inherits as defaults.
-fn record_interface_property_exports(
+/// Publish declared property accessor identities and executable source getter roles. Interfaces
+/// additionally retain the identity another module's implementation names the property by.
+fn record_class_property_exports(
     ir: &IrFile,
     module_name: &str,
     source: &IrClass,
@@ -659,7 +656,7 @@ fn record_interface_property_exports(
     let name = source.fq_name_id();
     if class.properties.len() != record.prop_origins.len() {
         return Err(format!(
-            "interface {} changed property declaration order ({} decoded, {} recorded)",
+            "class {} changed property declaration order ({} decoded, {} recorded)",
             source.fq_name(),
             class.properties.len(),
             record.prop_origins.len()
@@ -668,6 +665,14 @@ fn record_interface_property_exports(
     let extensions = ir.member_ext_props.get(&name);
     for (declaration, origin) in class.properties.iter().zip(&record.prop_origins) {
         if declaration.visibility == crate::types::Visibility::Private {
+            continue;
+        }
+        // These exports invoke a selected implementation directly. Open accessors need external
+        // virtual dispatch; a final enum owner can still have entry-specific overriding bodies.
+        let direct = declaration.modality == crate::metadata::semantic::KotlinModality::Final
+            || (class.modality == crate::metadata::semantic::KotlinModality::Final
+                && !source.is_enum);
+        if !source.is_interface && !direct {
             continue;
         }
         let Some((property, getter, setter)) =
@@ -714,7 +719,19 @@ fn record_interface_property_exports(
                 })
                 .map_err(|error| format!("{}.{}: {error}", source.fq_name(), declaration.name))
         };
-        exports.record_interface_property(property, accessor(MetadataAccessor::Getter)?);
+        if source.is_interface {
+            exports.record_interface_property(property, accessor(MetadataAccessor::Getter)?);
+        } else if getter.is_none()
+            && matches!(
+                ir.local_property_layouts.get(&property),
+                Some(crate::ir::IrLocalPropertyLayout::Member {
+                    backing_field: Some(_),
+                    ..
+                })
+            )
+        {
+            exports.record_field_getter(ir, property, accessor(MetadataAccessor::Getter)?)?;
+        }
         for (function, role) in [
             (getter, MetadataAccessor::Getter),
             (setter, MetadataAccessor::Setter),
@@ -725,7 +742,10 @@ fn record_interface_property_exports(
                 continue;
             };
             exports.record_callable(function, accessor(role)?);
-            exports.record_member_receiver(function, crate::types::Ty::obj_name(name));
+            let receiver = ir
+                .declared_class_self_type(name)
+                .ok_or("a property accessor export has no declared class application")?;
+            exports.record_member_receiver(function, receiver);
         }
     }
     Ok(())

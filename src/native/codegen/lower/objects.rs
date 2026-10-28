@@ -258,7 +258,7 @@ impl<'a> FileLowering<'a> {
             });
         }
 
-        let synthesized: Vec<Slot> = self
+        let mut synthesized: Vec<Slot> = self
             .model
             .layouts
             .iter()
@@ -277,6 +277,18 @@ impl<'a> FileLowering<'a> {
                 )
             })
             .collect();
+        // Final default properties need a real exported accessor without acquiring a virtual slot.
+        let mut exported_fields = self
+            .field_getter_exports
+            .keys()
+            .copied()
+            .collect::<Vec<_>>();
+        exported_fields.sort_unstable();
+        synthesized.extend(
+            exported_fields
+                .into_iter()
+                .map(|(class, field)| Slot::FieldGetter { class, field }),
+        );
         for slot in synthesized {
             if self.accessors.contains_key(&slot) {
                 continue;

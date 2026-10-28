@@ -28,6 +28,8 @@ mod entry;
 mod enums;
 mod exceptions;
 mod expression_types;
+mod field_getter_exports;
+pub(super) use field_getter_exports::FieldGetterExports;
 mod frame_objects;
 mod intrinsic_operations;
 use arithmetic::scalar_bound;
@@ -211,6 +213,7 @@ pub struct FileInput<'a> {
     pub unit_kind: crate::backend::CheckedIrUnitKind,
     /// Stable dependency symbols this file must export, keyed by its common-IR callable identity.
     pub dependency_exports: &'a HashMap<FunId, super::DependencyExportDefinition>,
+    pub field_getter_exports: &'a FieldGetterExports,
     /// The KLIB identities this file publishes, among them those of its interface members.
     pub dependency_signatures: &'a crate::backend::DependencyExportSignatures,
     /// Stable dependency exports already published by preceding source modules, keyed by the exact
@@ -250,6 +253,7 @@ pub fn lower_file(
         unit_kind,
         dependency_exports,
         dependency_signatures,
+        field_getter_exports,
         dependency_symbols,
         value_classes,
         slot_plan,
@@ -335,6 +339,7 @@ pub fn lower_file(
         unit_kind,
         dependency_signatures,
         dependency_symbols,
+        field_getter_exports,
     };
     // Before anything reads a shape: the walking members a class answers for decide both which
     // receivers have a runtime-walkable representation and which shapes still decline; both are read while
@@ -394,6 +399,7 @@ pub fn lower_file(
     };
     lowering.define_c_exports(file_init, &abi)?;
     lowering.define_dependency_exports(file_init, dependency_exports)?;
+    lowering.define_field_getter_exports(file_init)?;
     lowering.define_interface_identities()?;
 
     let comdat_objects = std::mem::take(&mut lowering.comdat_objects);
@@ -529,6 +535,7 @@ struct FileLowering<'a> {
     /// modules.
     dependency_symbols:
         &'a HashMap<crate::backend::KlibDependencyCallable, super::DependencyExport>,
+    field_getter_exports: &'a FieldGetterExports,
 }
 
 impl<'a> FileLowering<'a> {

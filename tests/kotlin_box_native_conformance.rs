@@ -398,3 +398,173 @@ fn native_generic_class_members_instantiate_their_declared_dependency_exports() 
         "class and method formals must instantiate independently without changing the export ABI"
     );
 }
+
+// PLATFORM-SPECIFIC: source getter exports retain the defining module's declared storage ABI.
+#[test]
+fn native_source_getter_exports_read_declared_generic_storage() {
+    // Direct imported construction remains covered by the original graph retained in #2780.
+    // This separate getter graph uses the producer's factories and checks every storage form.
+    let source = format!(
+        "// MODULE: lib\n{}\n// MODULE: main(lib)\n{}",
+        include_str!("fixtures/klib_final_field_reads/Library.kt"),
+        r#"
+fun box(): String {
+    if (fixture.makeStringCell("OK").value != "OK") return "String field"
+    if (fixture.makeIntCell(42).value != 42) return "Int field"
+    if (fixture.makeLongCell(Long.MIN_VALUE).value != Long.MIN_VALUE) return "Long field"
+    if (fixture.makeNullableCell(null).value != null) return "nullable field"
+    val readings = fixture.makeReadings("O", "K")
+    if (readings.first != "O") return "val field ordinal"
+    if (readings.second != "K") return "var field ordinal"
+    if (fixture.makeReadings("O", null).second != null) return "nullable var field"
+    return "OK"
+}
+"#,
+    );
+    let stem = "nativeSourceGetterExports";
+    super::box_reference_classes::checked_box(&source, stem)
+        .expect("the JVM oracle must run the complete source-getter graph");
+    assert_eq!(run_native_abi_case(&source, stem), Outcome::Pass);
+}
+
+// PLATFORM-SPECIFIC: a source-module accessor export and its declared Native receiver ABI.
+#[test]
+fn native_explicit_getter_exports_keep_their_declared_receiver() {
+    let source = r#"// MODULE: lib
+package fixture
+class Computed<T>(private val stored: T) {
+    var reads: Int = 0
+    val value: T get() { reads++; return stored }
+}
+fun stringCell(value: String): Computed<String> = Computed(value)
+fun intCell(value: Int): Computed<Int> = Computed(value)
+// MODULE: main(lib)
+fun box(): String {
+    val string = fixture.stringCell("OK")
+    val number = fixture.intCell(42)
+    if (string.value != "OK" || string.reads != 1) return "String getter"
+    if (number.value != 42 || number.reads != 1) return "Int getter"
+    return "OK"
+}
+"#;
+    let stem = "nativeExplicitGetterExports";
+    super::box_reference_classes::checked_box(source, stem)
+        .expect("the JVM oracle must run the complete explicit-getter graph");
+    assert_eq!(run_native_abi_case(source, stem), Outcome::Pass);
+}
+
+// PLATFORM-SPECIFIC: a source getter's public ABI differs from its Native backing-field storage.
+#[test]
+fn native_getter_exports_preserve_distinct_backing_field_storage() {
+    let source = r#"// LANGUAGE: +ExplicitBackingFields
+// MODULE: lib
+package fixture
+class Backed {
+    val value: Any?
+        field: String = "OK"
+}
+fun backed(): Backed = Backed()
+// MODULE: main(lib)
+fun box(): String {
+    if (fixture.backed().value != "OK") return "backing storage"
+    return "OK"
+}
+"#;
+    let stem = "nativeDistinctBackingFieldExport";
+    super::box_reference_classes::checked_box(source, stem)
+        .expect("the JVM oracle must run the complete backing-field graph");
+    assert_eq!(run_native_abi_case(source, stem), Outcome::Pass);
+}
+
+// PLATFORM-SPECIFIC: explicit accessor entries retain boxed class formals and a void setter ABI.
+#[test]
+fn native_explicit_setter_exports_keep_their_declared_value_parameter() {
+    let source = r#"// MODULE: lib
+package fixture
+class MutableCell<T>(initial: T) {
+    private var stored: T = initial
+    var writes: Int = 0
+    var value: T
+        get() = stored
+        set(value) { stored = value; writes++ }
+}
+fun stringCell(): MutableCell<String> = MutableCell("before")
+fun intCell(): MutableCell<Int> = MutableCell(0)
+// MODULE: main(lib)
+fun box(): String {
+    val string = fixture.stringCell()
+    val number = fixture.intCell()
+    string.value = "OK"
+    number.value = 42
+    if (string.value != "OK" || string.writes != 1) return "String setter"
+    if (number.value != 42 || number.writes != 1) return "Int setter"
+    return "OK"
+}
+"#;
+    let stem = "nativeExplicitSetterExports";
+    super::box_reference_classes::checked_box(source, stem)
+        .expect("the JVM oracle must run the complete explicit-setter graph");
+    assert_eq!(run_native_abi_case(source, stem), Outcome::Pass);
+}
+
+// PLATFORM-SPECIFIC: an external virtual getter must execute its override or decline cleanly.
+#[test]
+fn native_virtual_field_getter_exports_never_select_base_storage_directly() {
+    assert_virtual_getter_export(
+        "open class Base { open val value: String = \"base\" }\n\
+         class Derived : Base() { override val value: String = \"OK\" }",
+        "nativeVirtualFieldGetterExport",
+    );
+}
+
+// PLATFORM-SPECIFIC: explicit virtual accessor bodies have the same dispatch obligation.
+#[test]
+fn native_virtual_explicit_getter_exports_never_select_a_base_body_directly() {
+    assert_virtual_getter_export(
+        "open class Base { open val value: String get() = \"base\" }\n\
+         class Derived : Base() { override val value: String get() = \"OK\" }",
+        "nativeVirtualExplicitGetterExport",
+    );
+}
+
+fn assert_virtual_getter_export(declarations: &str, stem: &str) {
+    let source = format!(
+        "// MODULE: lib\npackage fixture\n{declarations}\n\
+         fun produce(): Base = Derived()\n\
+         // MODULE: main(lib)\nfun box(): String = fixture.produce().value\n"
+    );
+    super::box_reference_classes::checked_box(&source, stem)
+        .expect("the JVM oracle must establish the virtual getter result");
+    match run_native_abi_case(&source, stem) {
+        Outcome::Pass => {}
+        Outcome::Declined(reason) => assert_eq!(
+            reason, "a read of the property `fixture/Base.value`",
+            "unsupported dynamic dispatch must remain an explicit property decline"
+        ),
+        other => panic!("a virtual getter must not call its base entry directly: {other:?}"),
+    }
+}
+
+// PLATFORM-SPECIFIC: effective finality admits safe entries without requiring every class final.
+#[test]
+fn native_source_getter_exports_admit_both_forms_of_static_dispatch() {
+    let source = r#"// MODULE: lib
+package fixture
+open class FinalProperty { val value: String = "OK" }
+class Inherited : FinalProperty()
+open class VirtualProperty { open val value: String = "base" }
+class FinalOverride : VirtualProperty() { override val value: String = "OK" }
+fun inherited(): FinalProperty = Inherited()
+fun overridden(): FinalOverride = FinalOverride()
+// MODULE: main(lib)
+fun box(): String {
+    if (fixture.inherited().value != "OK") return "final property"
+    if (fixture.overridden().value != "OK") return "final owner"
+    return "OK"
+}
+"#;
+    let stem = "nativeStaticallyDispatchedGetterExports";
+    super::box_reference_classes::checked_box(source, stem)
+        .expect("the JVM oracle must establish both static-dispatch results");
+    assert_eq!(run_native_abi_case(source, stem), Outcome::Pass);
+}

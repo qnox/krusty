@@ -1339,3 +1339,11 @@ Provider-normalized function classifiers supply their declared generic supertype
 subtype relation. A typed function signature supplies its canonical classifier application, and
 the hierarchy walk checks the nominal value against that application. Reflective function types
 retain their nominal identity; no new metadata payload or physical JVM descriptor is introduced.
+
+## Ordinary source-class accessor linkage
+
+Property accessor signatures come from the same metadata declaration and retained PropertyOrigin
+as interface accessors. Default getter publication validates the local property layout, exact field,
+and declared class application before target emission. Its Native entry reuses the field getter
+emitter; explicit accessors keep their existing body identities. A specialized read never rewrites
+the declaration's generic export ABI. No complete serialized class-body channel is introduced.
