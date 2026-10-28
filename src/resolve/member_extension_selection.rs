@@ -10,13 +10,17 @@ pub(super) enum MemberExtensionSelection {
 
 /// Where a member-extension call is searched, and what happens when every candidate there rejects
 /// the call.
-#[derive(Clone, Copy)]
 pub(super) struct MemberExtensionSearch<'r> {
     /// The declaration kinds the selection admits.
     pub(super) kinds: MemberExtensionSelection,
     /// The implicit-receiver tower to search when one other than the scope's own applies.
     pub(super) receivers: Option<&'r [ImplicitReceiver]>,
     pub(super) rejections: RejectedMemberExtensions,
+    /// What the call's context expects of the selected result.
+    pub(super) result: CallResultConstraint,
+    /// Solutions of an enclosing call's postponed type variables, when this call is one of its
+    /// lambda's statements.
+    pub(super) inference_bindings: Option<&'r crate::symbol_resolver::GSigBinds>,
 }
 
 /// The outcome of a member-extension level whose candidates all reject the call.

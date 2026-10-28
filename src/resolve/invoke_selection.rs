@@ -1226,9 +1226,9 @@ impl Checker<'_> {
                         kinds: MemberExtensionSelection::Operators,
                         receivers: None,
                         rejections: RejectedMemberExtensions::Report,
+                        result: result_constraint,
+                        inference_bindings: None,
                     },
-                    result_constraint,
-                    None,
                 ) {
                     // A member EXTENSION `operator fun Recv.invoke(...)` on an implicit receiver
                     // (`"case" { … }` inside a receiver-DSL lambda). Keep the selected member-
