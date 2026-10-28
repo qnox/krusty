@@ -12581,10 +12581,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   contextual gets a `$childSerializers` slot holding
   `ContextualSerializer(T::class, <T's own serializer or null>, [<T's type-argument serializers>])`,
   which `write$Self`, `deserialize` and `childSerializers` read, as kotlinc's do; krusty built the
-  one-argument `ContextualSerializer(T::class)` at each use. A contextual collection ELEMENT keeps
-  the one-argument form, and a type that mentions a class type parameter is not cached.
+  one-argument `ContextualSerializer(T::class)` at each use. A collection ELEMENT whose type the
+  file's `@UseContextualSerialization` names is built with the same three-argument constructor
+  (`List<T>`, `List<T?>` made nullable around it); krusty built the one-argument form for it. A
+  type that mentions a class type parameter is not cached.
   Tests: `tests/serializer_property_with_over_contextual_e2e.rs` (the `$serializer` and the class
-  byte for byte against the reference compiler).
+  byte for byte against the reference compiler), and
+  `a_file_contextual_element_uses_the_three_argument_contextual_serializer` in
+  `tests/serialization_companion_byte_parity_e2e.rs`.
 - **`@Serializable(with = S::class)` on a property's TYPE ARGUMENT selects that argument's
   serializer.** `val items: List<@Serializable(with = S::class) Item>` serializes each element with
   `S` whatever serializer `Item` has, including none: kotlinc builds
