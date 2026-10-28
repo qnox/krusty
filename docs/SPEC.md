@@ -9,6 +9,13 @@ source only when the source is a non-null subtype of `S` itself. Sharing `S`'s c
 that proof: under `<T : CharSequence, S : T?>`, `T` is not a subtype of `S & Any`. Test:
 `box_regressions/nullableFormalBoundPropagation.kt`.
 
+## File policies under signature recovery
+
+A file's own annotations (`@file:Suppress`, opt-ins) are published before recovery diagnostics
+even when pass-1 signature finalization fails for some declaration. A genuine signature error
+therefore does not add the diagnostics that file suppresses. Test:
+`editor_failed_signature_recovery_e2e::file_level_suppression_survives_a_failed_signature`.
+
 ## Abstract obligations of body-local classes
 
 A local class or object expression whose superclass is emitted in another file checks its abstract
@@ -54,6 +61,15 @@ object files. Native emission keys their shared marker on the exact source modul
 callable identity, retaining the bound/unbound distinction. Different declarations remain unequal.
 The Native object-linkage regression in `tests/native_cross_file_e2e.rs` establishes the identical
 multi-file program's kotlinc and JVM results before requiring Native equality and hash agreement.
+
+## Explicit callable imports in type positions
+
+Imports share syntax but not namespaces. An explicit import whose path names only a callable or
+property (`import kotlin.metadata.jvm.Metadata`, a factory function) contributes nothing to
+classifier lookup, so a type reference with that simple name continues to the own package, star
+imports and default imports and binds the default-imported `kotlin.Metadata` (kotlinc 2.4.21).
+The signature-collection name universe and the checker's classifier tower apply the same rule.
+`tests/box_regressions/callableImportKeepsDefaultClassifier.kt` covers it.
 
 ## Bound declaration-name evidence
 
@@ -5348,6 +5364,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   property assigned inside the block is marked on the assignment statement, including the receiver
   load; the property's declaration line is only the fallback when that store has no statement line.
   `tests/init_block_lines_e2e.rs`.
+- **An `init` statement restates its line after an inlined call's body.** kotlinc writes the
+  statement's line again once an inlined lambda's lines end, as in `require(cond) { msg }`, and the
+  constructor keeps that entry even though it equals the line before the inlined body. Both the
+  primary constructor and a generated constructor that copies the `init` blocks (the serialization
+  plugin's deserialization constructor) keep it. Tests: `tests/init_block_lines_e2e.rs`,
+  `tests/serializable_init_replay_e2e.rs`.
 - **A static initializer's store opens on its initializer's line.** kotlinc gives a `<clinit>` field
   store the line of the initializer expression, so `val a: String =\n    make()` stores on the
   `make()` line. Every line the initializer marks inside itself stays, including an argument on a
@@ -13064,12 +13086,41 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   so the three phases cannot disagree. The language server and the in-process test helpers select
   every native extension explicitly (`PluginRegistry::every_native_extension`); the Bazel worker and
   `krusty-build` refuse plugin flags, so their compiles now match kotlinc without the plugin.
-  Tests: `tests/cli_compiler_plugin_e2e.rs` (a neutral plugin jar the test builds, and the
-  Compose jar wherever the reference distribution ships it, fail; so does a `-P` for an
+  Tests: `tests/cli_compiler_plugin_e2e.rs` (a neutral plugin jar the test builds fails; so does a `-P` for an
   unknown id; serialization with and without the plugin emits kotlinc's class set; comma lists; a
   missing jar), `plugins::registry` unit tests (`a_jar_is_recognized_by_the_registrar_it_declares_not_its_name`,
   `an_unreadable_plugin_entry_is_an_error`, `a_jar_declaring_no_plugin_loads_nothing`, …),
   `plugins::cli` unit tests, and `krusty-cli`'s `cli` tests.
+- **Compose runs as a partial native pass that compiles a construct exactly as kotlinc or rejects
+  it.** The registry answers to `ComposePluginRegistrar` (`ExtensionKind::PartialNative`): a compile
+  prints `info: krusty: 'androidx.compose.compiler.plugins.kotlin' is only partly implemented …`
+  and runs krusty's pass, and `krusty refusals` lists the plugin, so the Gradle integration keeps
+  giving a Compose module to kotlinc until the coverage is complete. A composable construct the pass
+  does not cover is an error at that construct (`krusty's Compose compiler plugin does not support
+  <construct> yet; compile this module with kotlinc`), never a silent difference: parameters, a
+  grouping annotation, a call to another file's composable, a name an overload with lambdas shares,
+  and a class kotlinc would give `$stable`. A nonempty `metricsDestination`/`reportsDestination` is an
+  `UnimplementedOption` error. The runtime functions the code calls are selected at the handoff by
+  their Kotlin signatures, or the module is rejected. Covered:
+  parameterless `Unit` top-level composables with a block body. Each takes a nullable
+  `$composer: Composer` and `$changed: Int`, restarts in
+  `startRestartGroup(key)`/`endRestartGroup()?.updateScope(…)`, and skips through
+  `shouldExecute($changed != 0, $changed and 1)`/`skipToGroupEnd()`. Its calls to other composables
+  pass `$composer` and `0`. The group key is the Java `hashCode` of
+  `fun-<name>(<parameter types>)<result>/pkg-<package>/file-<file name>`, which `@FunctionKeyMeta`
+  records with the UTF-16 offsets of the `fun` keyword and the body's end. That annotation lives in
+  the class file only, never in Kotlin metadata, because kotlinc's IR plugin adds it after FIR
+  metadata serialization. `sourceInformation` (`C(<name>)<line>@<offset>L<length>,…:<file>#<package hash
+  in base 36>`) and trace markers (`<fq name> (<file>:<0-based line>)`) follow the plugin's options.
+  The recompose lambda `<name>$lambda$0($$changed, $composer, $force)` publishes its locals and no
+  line, and the call's line starts at its dispatch, since kotlinc builds both arguments without
+  offsets. Tests: `tests/fixtures/compose/restartableFunctions.kt`, whose `box()` composes
+  and recomposes the functions through a recording composer, and
+  `kotlin_box_ir_jvm_conformance::compose_restartable_functions_are_byte_identical_to_kotlinc`, which
+  requires its class set to equal kotlinc's byte for byte;
+  `cli_compiler_plugin_e2e::the_compose_pass_rejects_what_it_does_not_cover` and
+  `compose_report_destinations_fail_the_compile`; and the `plugins::compose` and
+  `plugins::registry` unit tests.
 - **kotlinc's default scripting plugin is accepted and runs nothing; the Gradle plugin forwards
   KGP's compiler-plugin request verbatim.** kotlinc loads its scripting plugin (`kotlin.scripting`,
   registrars `ScriptingK2CompilerPluginRegistrar` and legacy
@@ -17506,6 +17557,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   library declaration is refused for that query. A compiler accessor of an interface's property
   without modifiers, or of an `abstract` property, is public and abstract.
   (`crates/krusty-plugin-host/tests/ksp.rs`, `effective_java_modifiers_are_what_ksp2_reports`.)
+- **A header-only analysis keeps every declaration identity beside an inline function.**
+  An analysis that checks no body of a source declaring an `inline` function (a KSP round checks
+  none) has no checked FIR for its inline body. It publishes the module's declaration inventory
+  without inline bodies, so the classifier's other members keep their resolved identities: a KSP
+  round describes them and reads the JVM annotations written on them, as it does with no inline
+  member. (`src/ksp_round.rs`, `an_inline_member_leaves_its_classifiers_members_resolved`;
+  `crates/krusty-plugin-host/tests/ksp.rs`, `effective_java_modifiers_are_what_ksp2_reports`.)
 - **A KSP source declaration written without `override` has no overridee.**
   `findOverridee` of a written (`KOTLIN`) function or property without the `override` modifier,
   and of any constructor, is `null`, as KSP2 2.3.12 reports. The overridee of an `override`
@@ -22931,3 +22989,11 @@ reflective function classifiers and classes inheriting a function interface; an 
 a same-named classifier gains no such subtype relation. Tests: the normalized declaration cases in
 `symbol_resolver::hierarchy_projection` and the JVM nominal-slot round trip in
 `function_reference_invoke_e2e`.
+
+## Extension results specialized to caller variables
+
+An extension's result is its declared return type with the call's bindings substituted. When a
+formal binds to the caller's own type variable (`b + t` for
+`operator fun <A : Number?, B : A> Box<A>.plus(t: B): Pair2<A, B>` inside
+`fun <X : Number?, Y : X>`), the result names that variable (`Pair2<X, Y>`); the declaration's
+formal never survives the call, whatever its bound. Test: `box_regressions/boundedFormalExtensionReturn.kt`.

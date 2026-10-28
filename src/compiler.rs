@@ -420,6 +420,7 @@ fn emit_analyzed_into<B: Backend>(
             &symbols,
             backend_handoff::ModuleEmission {
                 module_name,
+                text: source.text(),
                 stems,
                 origins: source_map.origins(),
             },

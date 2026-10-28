@@ -2,6 +2,8 @@
 
 use crate::types::TypeName;
 
+pub(crate) mod kotlinc_offsets;
+
 /// A byte range into the source file. `u32` offsets keep this 8 bytes (data-oriented).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct Span {

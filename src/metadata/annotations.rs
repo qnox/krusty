@@ -25,7 +25,10 @@ pub static NO_ANNOTATIONS: MetadataAnnotations = MetadataAnnotations {
 impl MetadataAnnotations {
     /// A declaration's checked annotations, recorded in declaration order.
     pub fn of(annotations: &DeclarationAnnotations) -> Self {
-        Self::with_records(annotations, annotations.applications().cloned().collect())
+        Self::with_records(
+            annotations,
+            annotations.checked_applications().cloned().collect(),
+        )
     }
 
     /// [`Self::of`] for a declaration that may carry no annotation table at all.
@@ -35,12 +38,12 @@ impl MetadataAnnotations {
 
     /// A declaration's checked annotations with the records in the order the backend writes them
     /// (the class-file order of a primary constructor's attributes, for example). `records` holds
-    /// exactly the retained applications of `annotations`.
+    /// exactly the checked applications of `annotations`.
     pub fn with_records(
         annotations: &DeclarationAnnotations,
         records: Vec<AppliedAnnotation>,
     ) -> Self {
-        debug_assert_eq!(records.len(), annotations.applications().count());
+        debug_assert_eq!(records.len(), annotations.checked_applications().count());
         Self {
             declared: annotations.declares_metadata_annotations(),
             records,
