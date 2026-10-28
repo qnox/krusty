@@ -122,6 +122,31 @@ impl ClassHeader<'_> {
     }
 }
 
+/// A classifier's callables, written and generated, in KSP2's order: by name, each name where it
+/// first appears, and under one name its functions before its properties, each in `callables`'
+/// order. A file lists its own in source order instead.
+fn grouped_by_name<T>(callables: Vec<(KspDeclaration, T)>) -> Vec<(KspDeclaration, T)> {
+    let mut groups: crate::fx_hash::HashMap<String, usize> = crate::fx_hash::HashMap::default();
+    let mut keyed: Vec<_> = callables
+        .into_iter()
+        .enumerate()
+        .map(|(position, callable)| {
+            let (name, is_property) = match &callable.0 {
+                KspDeclaration::Function(function) => (function.name.as_str(), false),
+                KspDeclaration::Property(property) => (property.name.as_str(), true),
+                KspDeclaration::Class(class) => (class.simple_name.as_str(), false),
+                KspDeclaration::TypeAlias(alias) => (alias.simple_name.as_str(), false),
+                KspDeclaration::LibraryClass(name) => (name.as_str(), false),
+            };
+            let next = groups.len();
+            let group = *groups.entry(name.to_string()).or_insert(next);
+            ((group, is_property, position), callable)
+        })
+        .collect();
+    keyed.sort_by_key(|(key, _)| *key);
+    keyed.into_iter().map(|(_, callable)| callable).collect()
+}
+
 impl Source<'_> {
     /// The classifier's declarations in KSP's order, the resolved declaration of each member
     /// function and property among them, and whether they are all it lists.
@@ -133,17 +158,18 @@ impl Source<'_> {
         let class_declaration = header.signature.stable_declaration;
         // A nested type alias and a member of a companion block are not described yet.
         let complete = class.type_aliases.is_empty() && class.companion_block_members.is_empty();
-        let mut declarations = Vec::new();
-        let mut resolved = Vec::new();
+        let mut callables = Vec::new();
         for (index, parameter) in class.props.iter().enumerate() {
             if parameter.is_property {
-                declarations.push(KspDeclaration::Property(Box::new(
-                    self.constructor_property(index, parameter, header)?,
-                )));
-                resolved.push(class_declaration.and_then(|class| {
-                    self.analysis
-                        .member_property_declaration(class, index as u32, true)
-                }));
+                callables.push((
+                    KspDeclaration::Property(Box::new(
+                        self.constructor_property(index, parameter, header)?,
+                    )),
+                    class_declaration.and_then(|class| {
+                        self.analysis
+                            .member_property_declaration(class, index as u32, true)
+                    }),
+                ));
             }
         }
         let mut members: Vec<(u32, KspDeclaration, Option<FrontendDeclarationId>)> = Vec::new();
@@ -179,13 +205,20 @@ impl Source<'_> {
             ));
         }
         members.sort_by_key(|(start, _, _)| *start);
-        for (_, declaration, member) in members {
-            declarations.push(declaration);
-            resolved.push(member);
-        }
+        callables.extend(
+            members
+                .into_iter()
+                .map(|(_, declaration, member)| (declaration, member)),
+        );
         if class.is_data && header.kind == KspClassKind::Class {
-            declarations.extend(self.data_members(header));
+            callables.extend(
+                self.data_members(header)
+                    .into_iter()
+                    .map(|declaration| (declaration, None)),
+            );
         }
+        let (mut declarations, mut resolved): (Vec<_>, Vec<_>) =
+            grouped_by_name(callables).into_iter().unzip();
         // KSP lists inner classes with the members, before the constructors, and other nested
         // classifiers after the enum entries.
         self.nested_classes(header, true, &mut declarations)?;
