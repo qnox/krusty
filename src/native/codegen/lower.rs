@@ -29,6 +29,7 @@ mod enums;
 mod exceptions;
 mod expression_types;
 mod field_getter_exports;
+pub(super) use field_getter_exports::FieldGetterExports;
 mod frame_objects;
 mod intrinsic_operations;
 use arithmetic::scalar_bound;
@@ -213,7 +214,7 @@ pub struct FileInput<'a> {
     pub unit_kind: crate::backend::CheckedIrUnitKind,
     /// Stable dependency symbols this file must export, keyed by its common-IR callable identity.
     pub dependency_exports: &'a HashMap<FunId, super::DependencyExportDefinition>,
-    pub field_getter_exports: &'a super::FieldGetterExports,
+    pub field_getter_exports: &'a FieldGetterExports,
     /// The KLIB identities this file publishes, among them those of its interface members.
     pub dependency_signatures: &'a crate::backend::DependencyExportSignatures,
     /// Stable dependency exports already published by preceding source modules, keyed by the exact
@@ -535,7 +536,7 @@ struct FileLowering<'a> {
     /// modules.
     dependency_symbols:
         &'a HashMap<crate::backend::KlibDependencyCallable, super::DependencyExport>,
-    field_getter_exports: &'a super::FieldGetterExports,
+    field_getter_exports: &'a FieldGetterExports,
 }
 
 impl<'a> FileLowering<'a> {

@@ -3,6 +3,15 @@
 use super::super::super::captures;
 use super::*;
 
+/// The lowering component owns the source class/field coordinates of its real accessor entries.
+pub(in super::super) type FieldGetterExports = HashMap<
+    (ClassId, u32),
+    (
+        crate::backend::DependencyFieldGetter,
+        super::super::DependencyExportDefinition,
+    ),
+>;
+
 impl FileLowering<'_> {
     pub(super) fn define_field_getter_exports(
         &mut self,
