@@ -17368,13 +17368,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   frontend's resolved spelling of the declared type: a node is empty only when the source writes
   no annotation on it and the frontend records neither an annotation nor an alias expansion's
   annotation there. A type whose spelling carries one, an argument the spelling does not write,
-  an inferred type and a library type are refused for that query. A type that names a source
-  typealias, as a whole or in a type argument (`List<KeptString>` with `typealias KeptString =
-  @Kept String`), is left undescribed: KSP2 resolves it to the alias with the alias's own
-  arguments, which the round does not describe yet, so `KSPropertyDeclaration.type` and its
-  siblings refuse rather than report the expansion. (`crates/krusty-plugin-host/tests/ksp.rs`,
-  `members_and_their_types_are_what_ksp2_reports`, `a_type_naming_an_alias_is_refused`;
+  an inferred type and a library type are refused for that query.
+  (`crates/krusty-plugin-host/tests/ksp.rs`, `members_and_their_types_are_what_ksp2_reports`;
   `src/ksp_round/type_model.rs`.)
+- **A KSP type that names a typealias resolves to the alias.** A property, parameter, receiver
+  or return type, or a type argument, that the source spells as a typealias with no type
+  arguments of its own is the alias, as KSP2 2.3.12 reports: its declaration is the
+  `KSTypeAlias`, it is nullable only where the use site writes `?` (`typealias MaybeText =
+  String?` used as `MaybeText` is non-null), and its annotations are empty even when the
+  alias's right-hand side carries a type-use annotation (`typealias KeptString = @Kept String`).
+  Arguments of the enclosing type stay as written (`List<aliases.KeptString>`). An alias applied
+  to type arguments (`Box<Int>` with `typealias Box<T> = List<T>`) keeps those arguments in
+  KSP2, which the round does not describe yet, so `KSPropertyDeclaration.type` and its siblings
+  refuse rather than report the expansion. (`crates/krusty-plugin-host/tests/ksp.rs`,
+  `types_naming_aliases_are_what_ksp2_reports`,
+  `a_type_naming_an_alias_applied_to_arguments_is_refused`; `src/ksp_round/type_model.rs`.)
 - **A KSP generated file's package is a directory path.** `CodeGenerator.createNewFile` turns
   each `.` of the package into a directory and does not require a Kotlin package name, so a
   processor writes a service descriptor to `META-INF.services` (`resources/META-INF/services/`), as
