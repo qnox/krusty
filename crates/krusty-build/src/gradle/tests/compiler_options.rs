@@ -187,7 +187,7 @@ pub(super) fn check(fixture: &IntegrationFixture, kotlin_classes: &Path, runtime
         .tasks([":compiler:util:compileKotlin"])
         .run_output()
         .unwrap_or_else(|error| panic!("compiler-plugin: {error}"));
-    assert_assignment_left_to_kotlinc(&output, &fixture.probes, ":compiler:util:compileKotlin");
+    assert_power_assert_left_to_kotlinc(&output, &fixture.probes, ":compiler:util:compileKotlin");
     assert!(
         !log.exists(),
         "kotlinc, not krusty, compiles a refused plugin request"

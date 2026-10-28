@@ -1267,19 +1267,20 @@ impl PluginHost {
         self.plugins.iter().map(|p| p.name()).collect()
     }
 
-    /// Every registered plugin's [`IrPlugin::sam_with_receiver_annotations`] and
-    /// [`IrPlugin::assignment_annotations`].
-    pub fn annotation_conventions(&self) -> crate::symbol_source::AnnotationConventions {
-        let annotations = |select: fn(&dyn IrPlugin) -> &[TypeName]| {
-            self.plugins
-                .iter()
-                .flat_map(|plugin| select(plugin.as_ref()).iter().copied())
-                .collect()
-        };
-        crate::symbol_source::AnnotationConventions {
-            sam_with_receiver: annotations(|plugin| plugin.sam_with_receiver_annotations()),
-            assignment: annotations(|plugin| plugin.assignment_annotations()),
-        }
+    /// Every registered plugin's [`IrPlugin::sam_with_receiver_annotations`].
+    pub fn sam_with_receiver_annotations(&self) -> Vec<TypeName> {
+        self.plugins
+            .iter()
+            .flat_map(|plugin| plugin.sam_with_receiver_annotations().iter().copied())
+            .collect()
+    }
+
+    /// Every registered plugin's [`IrPlugin::assignment_annotations`].
+    pub fn assignment_annotations(&self) -> Vec<TypeName> {
+        self.plugins
+            .iter()
+            .flat_map(|plugin| plugin.assignment_annotations().iter().copied())
+            .collect()
     }
 
     /// Every registered plugin's [`IrPlugin::no_arg_constructor_annotations`].

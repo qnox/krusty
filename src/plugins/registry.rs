@@ -861,8 +861,7 @@ mod tests {
         assert!(resolved
             .native
             .host("app")
-            .annotation_conventions()
-            .sam_with_receiver
+            .sam_with_receiver_annotations()
             .contains(&crate::types::type_name("test/WithReceiver")));
     }
 
@@ -1282,7 +1281,8 @@ mod tests {
                 SERIALIZATION_PLUGIN_ID,
                 ALLOPEN_PLUGIN_ID,
                 NOARG_PLUGIN_ID,
-                SAM_WITH_RECEIVER_PLUGIN_ID
+                SAM_WITH_RECEIVER_PLUGIN_ID,
+                ASSIGNMENT_PLUGIN_ID
             ]
         );
         assert_eq!(
@@ -1291,7 +1291,8 @@ mod tests {
                 "kotlinx.serialization",
                 "allopen",
                 "noarg",
-                "sam-with-receiver"
+                "sam-with-receiver",
+                "assignment"
             ]
         );
     }
