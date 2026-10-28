@@ -1,5 +1,14 @@
 # krusty — a memory-lean Kotlin→JVM compiler PoC
 
+## Contravariant receiver formals against out-projected arguments
+
+An extension on `Expr<in S>` applies to an `Expr<out Any>` or `Expr<*>` receiver. The projected
+argument is a captured type whose lower bound is `Nothing`, so it gives `S` only the solution
+`S = Nothing`, never its upper bound `Any`. `fun <T, S : T?> Expr<in S>.wrap(value: T)` therefore
+applies to `Expr<out Any>`, and `fun <S> Expr<in S>.sel(): List<S>` on it returns `List<Nothing>`,
+as kotlinc reports. Tests: `box_regressions/inProjectedReceiverOutArgument.kt` and
+`projected_receiver_extension_e2e::an_in_projected_receiver_formal_reads_nothing_from_an_out_projected_argument`.
+
 ## File policies under signature recovery
 
 A file's own annotations (`@file:Suppress`, opt-ins) are published before recovery diagnostics
