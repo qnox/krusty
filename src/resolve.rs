@@ -46629,7 +46629,7 @@ impl<'a> Checker<'a> {
                 method_check_index += 1;
             }
             if body_local_class {
-                self.check_class_abstract_members(cl, current_owner);
+                self.check_class_abstract_members(d, cl, current_owner);
             }
             // Enum entry bodies (`ENTRY { val y = … ; override fun m() = y }`): each override is
             // checked like a method of the enum — `this` is the enum type, the enum's properties AND

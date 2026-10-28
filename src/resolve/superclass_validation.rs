@@ -1,8 +1,8 @@
 //! Class-supertype validity after the frontend has selected the exact superclass identity.
 
 use super::abstract_obligations::UnimplementedDeclaration;
-use super::{declaration_rendering, Checker};
-use crate::ast::{ClassDecl, DeclId};
+use super::{class_declaration_label, declaration_rendering, Checker};
+use crate::ast::{ClassDecl, Decl, DeclId};
 use crate::types::TypeName;
 
 impl Checker<'_> {
@@ -84,7 +84,7 @@ impl Checker<'_> {
             self.diags.error(span, message);
         }
         if !abstract_members_later {
-            self.check_class_abstract_members(class, current_owner);
+            self.check_class_abstract_members(declaration, class, current_owner);
         }
     }
 
@@ -92,6 +92,7 @@ impl Checker<'_> {
     /// does not implement.
     pub(super) fn check_class_abstract_members(
         &mut self,
+        declaration: DeclId,
         class: &ClassDecl,
         current_owner: Option<TypeName>,
     ) {
@@ -135,12 +136,12 @@ impl Checker<'_> {
             })
             .collect::<Vec<_>>();
         drop(source);
+        let label = self.abstract_obligation_label(declaration, class);
         for (kind, members) in rendered {
             self.diags.error(
                 class.span,
                 format!(
-                    "class '{}' is not abstract and does not implement {kind}{}:\n{}",
-                    class.name,
+                    "class '{label}' is not abstract and does not implement {kind}{}:\n{}",
                     if members.len() == 1 {
                         "member"
                     } else {
@@ -150,5 +151,52 @@ impl Checker<'_> {
                 ),
             );
         }
+    }
+
+    /// The class as kotlinc names it in an abstract-obligation diagnostic: a body-local classifier
+    /// is named from its outermost body-local container (`L.M`, `<anonymous>.M`), an object
+    /// expression is `<anonymous>`, and any other class keeps its nested source name.
+    fn abstract_obligation_label(&self, declaration: DeclId, class: &ClassDecl) -> String {
+        let body_local = |id: DeclId| {
+            self.file.is_local_declaration(id) || self.file.is_anonymous_object_class(id)
+        };
+        // Innermost first, up to the outermost body-local container.
+        let mut chain = Vec::new();
+        let mut current = Some(declaration);
+        let mut outermost_body_local = None;
+        while let Some(id) = current {
+            let Decl::Class(classifier) = self.file.decl(id) else {
+                break;
+            };
+            chain.push((id, classifier));
+            if body_local(id) {
+                outermost_body_local = Some(chain.len());
+            }
+            // A classifier nested in a local class is hoisted with that class's statement rather
+            // than adopted by it.
+            current = self.file.hoisted_classifier_owner(id).or_else(|| {
+                self.file
+                    .local_class_nested
+                    .iter()
+                    .find(|(_, nested)| nested.contains(&id))
+                    .and_then(|(statement, _)| self.file.local_class_decls.get(statement))
+                    .copied()
+            });
+        }
+        let Some(length) = outermost_body_local else {
+            return class.name.clone();
+        };
+        chain[..length]
+            .iter()
+            .rev()
+            .map(|&(id, classifier)| {
+                if self.file.is_anonymous_object_class(id) {
+                    "<anonymous>"
+                } else {
+                    class_declaration_label(&classifier.name)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(".")
     }
 }
