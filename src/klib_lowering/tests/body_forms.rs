@@ -740,6 +740,67 @@ fn an_assignment_to_a_val_declines() {
 // --- Implicit casts -----------------------------------------------------------------------------
 
 #[test]
+fn klib_ordinary_upcast_uses_explicit_class_evidence() {
+    struct Classes;
+    impl crate::assignable::TypeOracle for Classes {
+        fn direct_supertypes(&self, ty: Ty) -> Vec<Ty> {
+            if ty == Ty::String {
+                vec![Ty::obj("kotlin/Any")]
+            } else {
+                Vec::new()
+            }
+        }
+    }
+    let demo = demo(&[("f", &[T::String], T::Any)], |_, body| {
+        let value = body.param(0);
+        let cast = body.type_operator(KlibIrTypeOperator::ImplicitCast, value, T::Any);
+        Some(vec![body.ret(cast)])
+    });
+    let mut unsupported = DependencyBodyUnit::default();
+    let decline = demo.lower(&mut unsupported, "f", &[]).unwrap_err();
+    assert_eq!(decline.reason(), &KlibBodyDeclineReason::ImplicitConversion);
+    assert_unit_is_empty(&unsupported);
+
+    let classes = Classes;
+    let facts = KlibCalleeFacts::default().with_type_oracle(&classes);
+    let mut supported = DependencyBodyUnit::default();
+    let function = supported
+        .lower_function(demo.callable("f"), &demo.bodies, &facts)
+        .expect("the explicit semantic model proves the reference upcast");
+    validated(supported.ir());
+    assert_eq!(
+        lowered_body(&supported, function),
+        source_body("fun f(a: String): Any { return a }", "f", 1)
+    );
+}
+
+#[test]
+fn klib_primitive_upcast_retains_the_common_representation_coercion() {
+    struct Classes;
+    impl crate::assignable::TypeOracle for Classes {
+        fn direct_supertypes(&self, _: Ty) -> Vec<Ty> {
+            Vec::new()
+        }
+    }
+    let demo = demo(&[("f", &[T::Int], T::Any)], |_, body| {
+        let value = body.param(0);
+        let cast = body.type_operator(KlibIrTypeOperator::ImplicitCast, value, T::Any);
+        Some(vec![body.ret(cast)])
+    });
+    let classes = Classes;
+    let facts = KlibCalleeFacts::default().with_type_oracle(&classes);
+    let mut unit = DependencyBodyUnit::default();
+    let function = unit
+        .lower_function(demo.callable("f"), &demo.bodies, &facts)
+        .unwrap();
+    validated(unit.ir());
+    assert_eq!(
+        lowered_body(&unit, function),
+        source_body("fun f(a: Int): Any { return a }", "f", 1)
+    );
+}
+
+#[test]
 fn an_implicit_cast_to_the_value_type_adds_nothing() {
     let demo = demo(&[("f", &[T::Int], T::Int)], |_, body| {
         let a = body.param(0);
