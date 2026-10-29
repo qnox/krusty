@@ -446,6 +446,56 @@ impl<'a> StringTable<'a> {
         self.class_literal(encoded.literal, false)
     }
 
+    /// A declaration's class ID, using its retained segments in either metadata carrier.
+    pub(crate) fn declaration_class_id(
+        &mut self,
+        class: &crate::metadata::class_id::ResolvedClassId,
+    ) -> Result<u32, crate::metadata::class_id::ClassIdError> {
+        let Some((package, names)) = class.declaration() else {
+            if self.klib.is_some() {
+                return Err(crate::metadata::class_id::ClassIdError::LocalInKlib(
+                    class.classifier(),
+                ));
+            }
+            assert!(
+                self.local_classifiers.contains(&class.classifier()),
+                "a raw class ID requires local provenance"
+            );
+            return Ok(self.class_id(class.classifier()));
+        };
+        let package = package.render();
+        if self.klib.is_some() {
+            let parts = package
+                .split('/')
+                .filter(|part| !part.is_empty())
+                .collect::<Vec<_>>();
+            let mut parent = self.klib_package(&parts);
+            for name in names {
+                parent = Some(self.klib_qualified_name(parent, name, QualifiedNameKind::Class));
+            }
+            return Ok(parent.expect("a resolved class ID has a declaration segment"));
+        }
+        let prefix = if package.is_empty() {
+            String::new()
+        } else {
+            format!("{package}/")
+        };
+        let relative = names.iter().map(AsRef::as_ref).collect::<Vec<&str>>();
+        let literal = format!("{prefix}{}", relative.join("."));
+        if let Some(predefined) = PREDEFINED_STRINGS.iter().position(|name| *name == literal) {
+            return Ok(self.builtin(predefined));
+        }
+        if let Some(index) = self.non_local_name(&literal) {
+            return Ok(index);
+        }
+        if !package.contains('$') && names.iter().all(|name| !name.contains('$')) {
+            let mut record = Pb::new();
+            record.field_varint(3, 2);
+            return Ok(self.push(literal, format!("L{prefix}{};", relative.join("$")), record));
+        }
+        Ok(self.class_literal(literal, false))
+    }
+
     /// A local classifier's id: the raw internal name of the classifier declared in executable
     /// code, then `.`-separated segments for the classes nested in it (`app/AKt$make$Local.In`).
     /// An enum entry body keeps its ordinary class id instead (`app/Coded.A.In`).

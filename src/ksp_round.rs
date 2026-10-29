@@ -919,6 +919,24 @@ mod tests {
     }
 
     #[test]
+    fn an_inline_member_leaves_its_classifiers_members_resolved() {
+        let round = round(&[(
+            "/src/Members.kt",
+            "package members\n\nclass Holder {\n    inline fun twice(x: Int): Int = x * 2\n    fun named(label: String): String = label\n}\n",
+        )])
+        .expect("every declaration is readable");
+        assert_eq!(
+            dumped(&round),
+            [
+                "CLASS members.Holder modifiers= typeParameters= supertypes=kotlin.Any",
+                "  fun twice kind=MEMBER abstract=false modifiers=INLINE typeParameters= receiver=null (x: kotlin.Int vararg=false default=false): kotlin.Int",
+                "  fun named kind=MEMBER abstract=false modifiers= typeParameters= receiver=null (label: kotlin.String vararg=false default=false): kotlin.String",
+                "  fun <init> kind=MEMBER abstract=false modifiers=FINAL,PUBLIC typeParameters= receiver=null (): members.Holder",
+            ]
+        );
+    }
+
+    #[test]
     fn an_unresolved_annotation_is_refused_where_it_is_applied() {
         assert_eq!(
             round(&[("/src/Missing.kt", "package missing\n\n@Absent\nclass Annotated\n")]),

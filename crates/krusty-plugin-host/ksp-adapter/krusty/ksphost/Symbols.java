@@ -7,6 +7,7 @@ import com.google.devtools.ksp.symbol.KSAnnotation;
 import com.google.devtools.ksp.symbol.KSClassDeclaration;
 import com.google.devtools.ksp.symbol.KSDeclaration;
 import com.google.devtools.ksp.symbol.KSNode;
+import com.google.devtools.ksp.symbol.KSTypeAlias;
 import com.google.devtools.ksp.symbol.KSTypeArgument;
 import com.google.devtools.ksp.symbol.KSTypeParameter;
 import com.google.devtools.ksp.symbol.KSTypeReference;
@@ -32,6 +33,7 @@ final class Symbols {
     final List<SourceFile> files = new ArrayList<>();
     private final Classpath classpath;
     private final Map<String, SourceClass> sourceClasses = new HashMap<>();
+    private final Map<String, SourceTypeAlias> sourceTypeAliases = new HashMap<>();
     private final Map<Integer, KSTypeParameter> typeParameters = new HashMap<>();
     // Each intersection member with the path of the file it takes, placed once every file is read.
     private final Map<KSDeclaration, String> intersectionFiles = new IdentityHashMap<>();
@@ -82,7 +84,9 @@ final class Symbols {
                 return readProperty(in, file, owner);
             case 3:
                 String simpleName = Wire.readString(in);
-                return new SourceTypeAlias(file, simpleName, Wire.readString(in));
+                SourceTypeAlias alias = new SourceTypeAlias(file, simpleName, Wire.readString(in));
+                sourceTypeAliases.put(alias.getQualifiedName().asString(), alias);
+                return alias;
             case 4:
                 return resolvedClass(Wire.readString(in));
             default:
@@ -495,15 +499,17 @@ final class Symbols {
         SourceTypeReference reference = new SourceTypeReference(parent);
         String name;
         int parameter = -1;
-        LibraryTypeAlias alias = null;
+        Supplier<KSTypeAlias> alias = null;
         byte declaration = in.readByte();
         if (declaration == 1) {
             parameter = in.readInt();
             Wire.readString(in); // the owner, which the id already names
             name = Wire.readString(in);
         } else if (declaration == 2) {
-            name = Wire.readString(in);
-            alias = new LibraryTypeAlias(name, Wire.readString(in));
+            String aliasName = Wire.readString(in);
+            String packageName = Wire.readString(in);
+            name = aliasName;
+            alias = () -> typeAliasNamed(aliasName, packageName);
         } else {
             name = Wire.readString(in);
         }
@@ -584,6 +590,16 @@ final class Symbols {
             return source;
         }
         return classpath.classNamed(qualifiedName);
+    }
+
+    // The type alias named `qualifiedName` in the package `packageName`: the module's own when it
+    // declares one, else the classpath's.
+    KSTypeAlias typeAliasNamed(String qualifiedName, String packageName) {
+        SourceTypeAlias source = sourceTypeAliases.get(qualifiedName);
+        if (source != null) {
+            return source;
+        }
+        return new LibraryTypeAlias(qualifiedName, packageName);
     }
 
     // The module's classpath.

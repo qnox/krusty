@@ -609,7 +609,17 @@ fn library_annotation_members_are_what_ksp2_reports() {
 /// does not describe a source alias type yet, so it refuses rather than report the expansion.
 #[test]
 #[ignore = "downloads symbol-processing-api 2.3.12 and a JDK"]
-fn a_type_naming_an_alias_is_refused() {
+fn types_naming_aliases_are_what_ksp2_reports() {
+    members_log_is_what_ksp2_reports(
+        &[fixtures().join("aliases/Aliases.kt")],
+        "ksp-outputs-aliases",
+        "aliases.expected",
+    );
+}
+
+#[test]
+#[ignore = "downloads symbol-processing-api 2.3.12 and a JDK"]
+fn a_type_naming_an_alias_applied_to_arguments_is_refused() {
     let (runtime, env) = runtime();
     let processor = processor_in(
         &runtime,
@@ -617,34 +627,27 @@ fn a_type_naming_an_alias_is_refused() {
         "members.MembersProvider",
         "ksp-processor-members-alias-refusals",
     );
-    for (case, source) in [
-        ("annotated", "members-refused/AnnotatedAlias.kt"),
-        ("plain", "members-refused/PlainAlias.kt"),
-        ("nested", "members-refused/NestedAlias.kt"),
-    ] {
-        let out = scratch(&format!("ksp-outputs-alias-annotations-{case}"));
-        let outputs = KspOutputs {
-            kotlin: out.join("kotlin"),
-            java: out.join("java"),
-            classes: out.join("classes"),
-            resources: out.join("resources"),
-        };
-        let error = run(
-            &runtime,
-            &env,
-            &processor,
-            &[fixtures().join(source)],
-            &[],
-            &outputs,
-        )
-        .err()
-        .unwrap_or_else(|| panic!("the host refuses the {case} alias"));
-        assert_eq!(
-            error.to_string(),
-            "krusty's KSP host does not implement KSPropertyDeclaration.type of a type it cannot describe yet, which a processor uses",
-            "{case}"
-        );
-    }
+    let out = scratch("ksp-outputs-alias-refusals");
+    let outputs = KspOutputs {
+        kotlin: out.join("kotlin"),
+        java: out.join("java"),
+        classes: out.join("classes"),
+        resources: out.join("resources"),
+    };
+    let error = run(
+        &runtime,
+        &env,
+        &processor,
+        &[fixtures().join("members-refused/GenericAlias.kt")],
+        &[],
+        &outputs,
+    )
+    .err()
+    .expect("the host refuses a type naming an alias applied to arguments");
+    assert_eq!(
+        error.to_string(),
+        "krusty's KSP host does not implement KSPropertyDeclaration.type of a type it cannot describe yet, which a processor uses"
+    );
 }
 
 #[test]
