@@ -1,5 +1,15 @@
 # krusty — implementation plan
 
+## Classpath declaration annotation query ownership
+
+Extract selected-method and all-method annotation queries into `classpath/declaration_annotations`.
+The borrowing `class_entry_bytes` collaborator owns mapped and physical class-file acquisition shared
+with compiled bodies and class locations. Keep class/field annotation records, snapshot ownership,
+entry caches, classreader parsing and JVM provider interpretation unchanged. This scoped #2647
+migration reduces the classpath facade from 6,317 to 6,277 lines; unrelated facade responsibilities
+remain separate work. Validate unchanged annotation and serialization inventories, class bytes,
+JSON comparisons and refusal controls before and after extraction.
+
 ## Consume declaration names in metadata class headers
 
 Resolve selected declaration keys against the frozen name inventory and pass mandatory resolved

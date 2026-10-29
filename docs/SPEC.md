@@ -1,5 +1,14 @@
 # krusty — a memory-lean Kotlin→JVM compiler PoC
 
+## Classpath declaration annotation queries
+
+Method annotation queries read the selected classpath definition and retain the exact method
+name, descriptor, resolved annotation identities and arguments. Classpath entry order, Kotlin/JVM
+class mapping and directory class-name authentication are unchanged. Classreader owns decoding;
+JVM providers own interpretation. Existing class and field annotation records remain in their
+cached class declarations. Covered by the classreader/classpath/provider unit tests and the
+serialization-parent, Java annotation-element and annotation-emission differential E2Es.
+
 ## Nullable formal bounds in inference
 
 A declared bound `S : T?` admits null itself, so a lower bound `X` of `S` contributes only
