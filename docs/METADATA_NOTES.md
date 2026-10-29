@@ -1319,6 +1319,14 @@ subtype relation. A typed function signature supplies its canonical classifier a
 the hierarchy walk checks the nominal value against that application. Reflective function types
 retain their nominal identity; no new metadata payload or physical JVM descriptor is introduced.
 
+## Superclass-argument receiver availability
+
+An inherited property declaration remains evidence for a name even while its dispatch instance is
+unavailable. The checker probes the normalized property model on that exact declared receiver to
+report the initialization diagnostic, without publishing a getter, field read, or capture. Inferred
+property result demand follows receiver selection; it cannot turn an instance member into a local
+value. No metadata shape or backend ABI changes accompany this frontend correction (#2658).
+
 ## Rejected constructor lambda constraints
 
 Normalized constructor signatures and the canonical source-argument mapping retain postponed
