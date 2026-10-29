@@ -2636,3 +2636,20 @@ fun several(): Two = Two(1.0)
 "#;
     assert_rejection_same_as_kotlinc("RejectedConstructorFamily", source);
 }
+
+#[test]
+fn a_rejected_constructor_family_filtered_to_one_is_reported_not_committed() {
+    // Only `constructor(f)` takes one argument, so kotlinc reports that candidate's mismatch
+    // alone; the call is still rejected, and its type is that candidate's result.
+    let source = r#"
+interface Factory<K, E>
+class StrFactory : Factory<String, Char>
+class Two<K, E> {
+    constructor(f: Factory<K, E>)
+    constructor(s: String, n: Int)
+}
+val x: Two<Char, Char> = Two<Char, Char>(StrFactory())
+val y: String = Two<Char, Char>(StrFactory())
+"#;
+    assert_rejection_same_as_kotlinc("RejectedConstructorFilteredToOne", source);
+}

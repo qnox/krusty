@@ -23,9 +23,9 @@ enum ScopeConstructorSelection {
     /// Several constructors are equally specific. The provider path reports the ambiguity, but
     /// never commits a constructor of its own choosing.
     Ambiguous,
-    /// No constructor of this priority tier applies. The provider path reports why, and commits
-    /// only a sole declaration, the inapplicable candidate kotlinc reports against.
-    Inapplicable,
+    /// No constructor of this priority tier applies. The provider path reports why, but never
+    /// commits; what it leaves unreported is reported over these candidates, as for a function.
+    Inapplicable(Vec<crate::libraries::FunctionInfo>),
 }
 
 impl ScopeConstructorSelection {
@@ -33,7 +33,7 @@ impl ScopeConstructorSelection {
         match self {
             Self::Selected(selected) => ConstructorPreselection::Selected(selected),
             Self::Ambiguous => ConstructorPreselection::Ambiguous,
-            Self::Inapplicable => ConstructorPreselection::Rejected,
+            Self::Inapplicable(_) => ConstructorPreselection::Rejected,
         }
     }
 }
@@ -65,7 +65,8 @@ impl Checker<'_> {
                     (call.expected, priority),
                 )
             });
-        self.record_library_constructor(
+        let checkpoint = self.diags.diags.len();
+        let recorded = self.record_library_constructor(
             scope,
             call_args.call,
             internal,
@@ -82,7 +83,37 @@ impl Checker<'_> {
                     ScopeConstructorSelection::preselection,
                 ),
             },
-        )
+        );
+        let Some(ScopeConstructorSelection::Inapplicable(candidates)) = shared else {
+            return recorded;
+        };
+        if !matches!(recorded, Ok(LibraryConstructorSelection::NoMatch))
+            || self.diags.diags.len() != checkpoint
+        {
+            return recorded;
+        }
+        // The provider path found nothing to report: the candidates the shared selector rejected
+        // are reported as a function family's are, the one the arguments map onto typing the call.
+        let rejected = self.report_single_mapped_candidate_type_errors(
+            scope,
+            call_args.call,
+            internal.nested_segment_ref(),
+            call_args.args,
+            call_args.arg_tys,
+            CallConstraints {
+                type_args: call.explicit_type_args,
+                receiver: Ty::Error,
+                expected: call.expected,
+            },
+            &candidates,
+        );
+        match rejected {
+            Some(result) => {
+                self.diags.sort_source_order_from(checkpoint);
+                Ok(LibraryConstructorSelection::Rejected(result))
+            }
+            None => recorded,
+        }
     }
 
     /// Select among `internal`'s constructors of one priority tier as ordinary callable
@@ -149,14 +180,14 @@ impl Checker<'_> {
             explicit_type_args,
             None,
             CallResultConstraint::direct(expected),
-            candidates,
+            candidates.clone(),
         ) {
             Some(CallableCandidateSelection::Selected(selected)) => {
                 ScopeConstructorSelection::Selected(Box::new(selected.info))
             }
             Some(CallableCandidateSelection::Ambiguous(_)) => ScopeConstructorSelection::Ambiguous,
             Some(CallableCandidateSelection::MissingContext(_)) | None => {
-                ScopeConstructorSelection::Inapplicable
+                ScopeConstructorSelection::Inapplicable(candidates)
             }
         }
     }

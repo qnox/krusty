@@ -359,7 +359,7 @@ impl Checker<'_> {
                     Some(receiver),
                 ))
             }
-            Ok(LibraryConstructorSelection::Rejected) => Some(Ty::Error),
+            Ok(LibraryConstructorSelection::Rejected(result)) => Some(result),
             Ok(LibraryConstructorSelection::NoMatch) => {
                 crate::trace_compiler!(
                     "resolve",

@@ -7926,7 +7926,8 @@ struct ConstructorArgumentMismatch {
 
 enum LibraryConstructorSelection {
     Selected,
-    Rejected,
+    /// Reported; the call has the given type.
+    Rejected(Ty),
     NoMatch,
 }
 
@@ -15083,7 +15084,7 @@ impl<'a> Checker<'a> {
                                     qualified_alias_target,
                                 );
                             }
-                            Ok(LibraryConstructorSelection::Rejected) => return Ty::Error,
+                            Ok(LibraryConstructorSelection::Rejected(result)) => return result,
                             Ok(LibraryConstructorSelection::NoMatch) => {}
                             Err(error) => {
                                 constructor_mapping_error = Some(error);
@@ -19201,7 +19202,7 @@ impl<'a> Checker<'a> {
                                         bare_alias_target,
                                     );
                                 }
-                                Ok(LibraryConstructorSelection::Rejected) => return Ty::Error,
+                                Ok(LibraryConstructorSelection::Rejected(result)) => return result,
                                 Ok(LibraryConstructorSelection::NoMatch) => {
                                     had_inapplicable_constructor |=
                                         !classifier.constructors.is_empty();
@@ -19343,7 +19344,7 @@ impl<'a> Checker<'a> {
                                         bare_alias_target,
                                     );
                                 }
-                                Ok(LibraryConstructorSelection::Rejected) => return Ty::Error,
+                                Ok(LibraryConstructorSelection::Rejected(result)) => return result,
                                 Ok(LibraryConstructorSelection::NoMatch) => {
                                     had_inapplicable_constructor |=
                                         !classifier.constructors.is_empty();
@@ -19996,7 +19997,7 @@ impl<'a> Checker<'a> {
                                 bare_alias_target,
                             );
                         }
-                        Ok(LibraryConstructorSelection::Rejected) => return Ty::Error,
+                        Ok(LibraryConstructorSelection::Rejected(result)) => return result,
                         Ok(LibraryConstructorSelection::NoMatch) => {
                             had_inapplicable_constructor |= !classifier.constructors.is_empty();
                         }
