@@ -71,6 +71,14 @@ imports and default imports and binds the default-imported `kotlin.Metadata` (ko
 The signature-collection name universe and the checker's classifier tower apply the same rule.
 `tests/box_regressions/callableImportKeepsDefaultClassifier.kt` covers it.
 
+## Conditional arguments as inference inputs
+
+Each branch of an `if` expression passed directly to a generic parameter is its own lower bound
+on the formal. `widen(if (c) long else int)` against `fun <T : Number> widen(x: T)` solves `T`
+from `Long` and `Int` and satisfies the bound, where the branches' approximated join `Any` would
+violate it (kotlinc 2.4.21 accepts the call). Function and constructor selection apply the same
+rule. `tests/box_regressions/conditionalArgumentGenericBound.kt` covers it.
+
 ## Bound declaration-name evidence
 
 A query for an already-bound classifier or alias key projects the selected declaration's own

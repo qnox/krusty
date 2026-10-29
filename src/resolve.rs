@@ -36761,7 +36761,7 @@ impl<'a> Checker<'a> {
                 .zip(&argument_kinds)
                 .zip(&whole_arrays)
                 .enumerate()
-                .filter_map(
+                .flat_map(
                     |(argument, (((parameter, _raw_actual), kind), named_whole_array))| {
                         if self
                             .unbound_contextual_result_signature(args[argument])
@@ -36819,9 +36819,27 @@ impl<'a> Checker<'a> {
                                 }
                             }
                         }
-                        Some((argument, declaration_parameter, actual, whole_array))
+                        // Each branch of a conditional argument is its own lower bound on the
+                        // formal, as kotlinc's constraint system sees it: `mk(if (c) 1L else 2)`
+                        // against `<T : Number>` solves `T` from `Long` and `Int` rather than from
+                        // the branches' approximated join `Any`.
+                        let branches = if whole_array {
+                            vec![actual]
+                        } else {
+                            match self.file.expr(args[argument]) {
+                                Expr::If {
+                                    else_branch: Some(_),
+                                    ..
+                                } => self.conditional_inference_inputs(args[argument]),
+                                _ => vec![actual],
+                            }
+                        };
+                        Some(branches.into_iter().map(move |actual| {
+                            (argument, declaration_parameter, actual, whole_array)
+                        }))
                     },
                 )
+                .flatten()
                 .collect::<Vec<_>>();
             for &(_, parameter, actual, whole_array) in &inference_actuals {
                 let mut declared = signature.params[parameter];
