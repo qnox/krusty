@@ -34,6 +34,7 @@ use scope::{ContextReceiver, ContextReceiverKind, FlowExclusion, NarrowPath, Ns}
 
 mod abstract_obligations;
 mod constructor_references;
+mod implicit_source_member_lambda;
 use constructor_references::ReferenceReceiver;
 mod access_control;
 mod accessor_annotations;
@@ -197,6 +198,7 @@ pub(crate) use member_extension_instantiation::MemberExtensionProbes;
 use member_extension_instantiation::{
     instantiate_member_extension_with, InstantiatedMemberExtension, MemberExtensionCall,
 };
+mod member_extension_calls;
 mod member_extension_properties;
 mod member_extension_selection;
 pub use member_extension_properties::MemberExtPropSig;
@@ -380,7 +382,10 @@ use lambda_returns::{call_implicit_lambda_label, LambdaResultConstraint, LambdaR
 use local_class_scope::EnclosingTypeParameterDeclaration;
 pub(crate) use local_class_scope::{pass_one_local_class_context, PassOneLocalClassContext};
 use loop_flow::collect_all_reassigned;
-use member_extension_selection::{MemberExtensionFunctionSelection, MemberExtensionSelection};
+use member_extension_selection::{
+    MemberExtensionFunctionSelection, MemberExtensionSearch, MemberExtensionSelection,
+    RejectedMemberExtensions,
+};
 pub(crate) use named_class_constructors::publish_named_class_constructors;
 pub(crate) use override_plans::publish_override_plans;
 use postponed_constraints::PostponedCallConstraints;
@@ -10749,172 +10754,6 @@ impl<'a> Checker<'a> {
         })
     }
 
-    fn check_member_extension_function_call(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        call: ExprId,
-        extension_receiver: Ty,
-        name: &str,
-        args: &[ExprId],
-        arg_tys: &[Ty],
-        inference_bindings: Option<&crate::symbol_resolver::GSigBinds>,
-    ) -> Option<Ty> {
-        self.check_member_extension_function_call_mode(
-            scope,
-            CallArgs {
-                call,
-                args,
-                arg_tys,
-            },
-            extension_receiver,
-            name,
-            (MemberExtensionSelection::All, None),
-            CallResultConstraint::direct(None),
-            inference_bindings,
-        )
-    }
-
-    /// Select a zero-value-argument member extension for compact signature evaluation.
-    ///
-    /// The compact graph has semantic argument types but deliberately no parser `ExprId`s. A
-    /// zero-argument call needs none, so it can use the complete ordinary member-extension
-    /// candidate collector, context binding, priority, and overload selector without retaining or
-    /// fabricating syntax identities.
-    fn check_member_extension_function_call_mode(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        call_args: CallArgs<'_>,
-        extension_receiver: Ty,
-        name: &str,
-        // Which candidates this selection may consider: the declaration kinds it admits, and the
-        // implicit-receiver tower to search when one other than the scope's own applies.
-        selection: (MemberExtensionSelection, Option<&[ImplicitReceiver]>),
-        result_constraint: CallResultConstraint,
-        inference_bindings: Option<&crate::symbol_resolver::GSigBinds>,
-    ) -> Option<Ty> {
-        let (selection, receivers) = selection;
-        let CallArgs {
-            call,
-            args,
-            arg_tys,
-        } = call_args;
-        let arg_names = self.file.call_arg_names.get(&call.0).cloned();
-        let explicit_type_args = self
-            .file
-            .call_type_args
-            .get(&call.0)
-            .map(|syntax| syntax.arguments.clone())
-            .unwrap_or_default()
-            .iter()
-            .map(|argument| self.type_ref_ty(scope, argument))
-            .collect::<Vec<_>>();
-        let request = MemberExtensionFunctionCall {
-            extension_receiver,
-            result_constraint,
-            name,
-            args,
-            arg_tys,
-            arg_names: arg_names.as_deref(),
-            explicit_type_args: &explicit_type_args,
-            trailing_lambda: self.file.call_has_trailing_lambda.contains(&call.0),
-            inference_bindings,
-        };
-        // `recv(args)` is the `invoke` convention and therefore admits only `operator`
-        // declarations. Keep that language rule at the invoke boundary instead of storing a mode
-        // in the general member-extension request: explicit `recv.invoke(args)` and every other
-        // member-extension consumer must continue to see ordinary declarations.
-        let selected = match receivers {
-            Some(receivers) => {
-                self.member_extension_function_with_receivers(scope, receivers, request, selection)
-            }
-            None => self.member_extension_function(scope, request, selection),
-        };
-        match selected {
-            MemberExtensionFunctionSelection::Selected(candidate) => {
-                let mut candidate = *candidate;
-                for &(parameter, source) in &candidate.argument_parameters {
-                    let (Some(&expected), Some(&actual)) =
-                        (candidate.visible_params.get(parameter), arg_tys.get(source))
-                    else {
-                        continue;
-                    };
-                    if let Some(coerced) =
-                        self.unit_coerced_lambda_type(args[source], expected, actual)
-                    {
-                        self.set(args[source], coerced);
-                    }
-                }
-                if candidate.visibility != Visibility::Public {
-                    self.reject_function_if_inaccessible(
-                        &candidate.diagnostic_candidate,
-                        candidate.owner,
-                        self.call_callee_name_span(call),
-                    );
-                }
-                let mut validation_params = candidate.visible_params.clone();
-                if let Some(vararg) = candidate.call_sig.vararg_index {
-                    if let Some(element) = validation_params.get_mut(vararg) {
-                        *element = Ty::array(*element);
-                    }
-                }
-                if !self.expect_selected_call_args(
-                    scope,
-                    CallArgs {
-                        call,
-                        args,
-                        arg_tys,
-                    },
-                    &validation_params,
-                    &validation_params,
-                    &candidate.call_sig,
-                    None,
-                ) {
-                    return Some(Ty::Error);
-                }
-                // Dispatch opcode is a fact of the selected OWNER, not of where its declaration was
-                // loaded from. Query the same federated type shape used during selection so a member
-                // extension inherited from a dependency interface cannot silently become invokevirtual.
-                let interface = self
-                    .resolver()
-                    .classifier(candidate.owner)
-                    .is_some_and(|shape| shape.is_interface());
-                let dispatch_receiver =
-                    self.implicit_receiver_selection(candidate.dispatch_receiver);
-                let result = self.commit_member_extension_type_arguments(
-                    call,
-                    &explicit_type_args,
-                    &mut candidate,
-                );
-                self.narrow_member_extension_receiver(call, &candidate);
-                self.resolved_calls
-                    .insert(call, candidate.resolved_call(dispatch_receiver, interface));
-                self.mark_extension_receiver_used(call, candidate.dispatch_receiver);
-                Some(result)
-            }
-            MemberExtensionFunctionSelection::None(rejections) => self
-                .report_single_mapped_candidate_type_errors(
-                    scope,
-                    call,
-                    name,
-                    args,
-                    arg_tys,
-                    CallConstraints {
-                        type_args: &explicit_type_args,
-                        receiver: extension_receiver,
-                        expected: result_constraint.expected(),
-                    },
-                    &rejections.call_candidates,
-                ),
-            MemberExtensionFunctionSelection::Ambiguous(_) => {
-                self.diags.error(
-                    self.call_callee_name_span(call),
-                    format!("overload resolution ambiguity for member '{name}'"),
-                );
-                Some(Ty::Error)
-            }
-        }
-    }
-
     fn select_property_read(
         &self,
         scope: &CheckerScope<'_>,
@@ -17868,36 +17707,18 @@ impl<'a> Checker<'a> {
                     .lexical_value_claims_call_with_arguments(scope, &fname, args)
                     && known_sig.is_none()
                     && has_lambda_argument;
-                let ordinary_this_member_lambda_shape: Option<MemberLambdaShape> =
-                    if implicit_member_lambda_enabled {
-                        let partial = this_member_partial.as_deref().unwrap_or_default();
-                        self.implicit_member_receiver_types(scope)
-                            .into_iter()
-                            .find_map(|receiver| {
-                                let (member, generic_member) = self.module_member_lambda_plan(
-                                    scope, call, receiver, &fname, args, partial, expected,
-                                );
-                                let member = member?;
-                                let contextual = self.contextual_call_shape(
-                                    scope,
-                                    &member.params,
-                                    &member.call_sig,
-                                    member.context_count,
-                                    arg_names.as_deref(),
-                                )?;
-                                module_member_lambda_shape(
-                                    &self.fed_source(),
-                                    &member,
-                                    generic_member.as_ref(),
-                                    &contextual,
-                                    args,
-                                    arg_names.as_deref(),
-                                    self.file.call_has_trailing_lambda.contains(&call.0),
-                                )
-                            })
-                    } else {
-                        None
-                    };
+                let ordinary_this_member_lambda_shape = implicit_member_lambda_enabled
+                    .then(|| {
+                        self.implicit_source_member_lambda_shape(
+                            scope,
+                            call,
+                            &fname,
+                            args,
+                            this_member_partial.as_deref().unwrap_or_default(),
+                            expected,
+                        )
+                    })
+                    .flatten();
                 // An implicit receiver's call shapes its lambdas through the same one decision an
                 // explicit receiver does: each receiver of the tower is asked for a whole decision —
                 // classpath member, then extension — and the innermost one that can shape a lambda
@@ -17906,13 +17727,16 @@ impl<'a> Checker<'a> {
                 // because extensions were swept first, which is backwards: the tower is innermost
                 // first, and within a receiver a member outranks an extension.
                 //
-                // This closes that inversion between those two sources only. Source members are not
-                // part of this decision — they are found by their own whole-tower sweep just above,
-                // which still wins outright wherever it answers, so an outer receiver's SOURCE
-                // member still beats an inner receiver's classpath member. That inversion is older
-                // than this decision point and is not addressed here.
+                // Source members come from their own sweep just above. Its answer bounds this one:
+                // only receivers strictly inside the receiver that answered there are asked, so an
+                // inner receiver's classpath member or (member) extension beats an outer receiver's
+                // source member, while the answering receiver's own source member still outranks
+                // its extensions.
+                let source_member_depth = ordinary_this_member_lambda_shape
+                    .as_ref()
+                    .map(|(depth, _)| *depth);
                 let this_member_shaping = (implicit_member_lambda_enabled
-                    && ordinary_this_member_lambda_shape.is_none())
+                    && source_member_depth != Some(0))
                 .then(|| {
                     let type_args = self
                         .file
@@ -17926,6 +17750,7 @@ impl<'a> Checker<'a> {
                     let partial = this_member_partial.clone().unwrap_or_default();
                     self.implicit_member_receiver_types(scope)
                         .into_iter()
+                        .take(source_member_depth.unwrap_or(usize::MAX))
                         .find_map(|receiver| {
                             let shaping = self.call_lambda_shaping(
                                 scope,
@@ -17960,6 +17785,9 @@ impl<'a> Checker<'a> {
                         })
                 })
                 .flatten();
+                let ordinary_this_member_lambda_shape = ordinary_this_member_lambda_shape
+                    .filter(|_| this_member_shaping.is_none())
+                    .map(|(_, shape)| shape);
                 let this_member_ext_lambda_plan =
                     this_member_shaping.as_ref().and_then(|shaping| {
                         shaping
@@ -19598,11 +19426,13 @@ impl<'a> Checker<'a> {
                     // receiver-less declaration and are evaluated by the later shared rung.
                     if let Some(ret) = self.check_member_extension_function_call(
                         scope,
-                        call,
+                        CallArgs {
+                            call,
+                            args,
+                            arg_tys: &arg_tys,
+                        },
                         receiver,
                         &fname,
-                        args,
-                        &arg_tys,
                         Some(&postponed_solutions),
                     ) {
                         self.mark_implicit_receiver_selection(call, implicit_receiver);
@@ -19731,9 +19561,13 @@ impl<'a> Checker<'a> {
                                 },
                                 bt,
                                 &fname,
-                                (MemberExtensionSelection::All, Some(&receivers)),
-                                CallResultConstraint::direct(expected),
-                                Some(&postponed_solutions),
+                                MemberExtensionSearch {
+                                    kinds: MemberExtensionSelection::All,
+                                    receivers: Some(&receivers),
+                                    rejections: RejectedMemberExtensions::Report,
+                                    result: CallResultConstraint::direct(expected),
+                                    inference_bindings: Some(&postponed_solutions),
+                                },
                             ) {
                                 self.narrowed_this_member.insert(call, bi);
                                 if let Some(receiver) = receivers.into_iter().find(|receiver| {
@@ -51881,7 +51715,7 @@ impl<'a> Checker<'a> {
         // family the symbol query cannot rebuild; select over exactly that family.
         let joined_constructors = mapped
             .iter()
-            .any(|(candidate, _)| candidate.bound_inner_constructor.is_some());
+            .any(|(candidate, _)| candidate.constructor.is_some());
         let candidate = match receiver {
             crate::symbol_resolver::SymRecv::Value(receiver) if joined_constructors => {
                 let family =
@@ -53698,12 +53532,16 @@ impl<'a> Checker<'a> {
                     },
                     at,
                     "get",
-                    (MemberExtensionSelection::Operators, None),
-                    // A subscript's expectation describes the ELEMENT the `get` yields, which is
-                    // this selection's result; it is threadable, but `get` seeding is its own
-                    // change with its own fixtures.
-                    CallResultConstraint::direct(None),
-                    None,
+                    MemberExtensionSearch {
+                        kinds: MemberExtensionSelection::Operators,
+                        receivers: None,
+                        rejections: RejectedMemberExtensions::Report,
+                        // A subscript's expectation describes the ELEMENT the `get` yields, which
+                        // is this selection's result; it is threadable, but `get` seeding is its
+                        // own change with its own fixtures.
+                        result: CallResultConstraint::direct(None),
+                        inference_bindings: None,
+                    },
                 ) {
                     return self.set(e, ret);
                 }

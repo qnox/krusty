@@ -154,7 +154,7 @@ pub use local_property_references::IrLocalPropertyReference;
 pub use module_records::{
     IrCallableTypeParameter, IrClassifierKind, IrHeaderAnnotation, IrModuleCallable,
     IrModuleClassifier, IrModuleConstructions, IrModuleConstructor, IrModuleMemberAccess,
-    IrModuleSource,
+    IrModuleSource, IrOverriddenFunction,
 };
 pub use null_checks::NullCheck;
 pub use operators::{IrBinOp, IrTypeOp};

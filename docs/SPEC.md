@@ -1,5 +1,14 @@
 # krusty — a memory-lean Kotlin→JVM compiler PoC
 
+## Native callable-reference identity at module exports
+
+A reference created by a source module and a reference selected through that module's KLIB export
+compare equal and hash alike. Native export records retain the source declaration's marker key
+independently of the emitted call-entry alias. Authenticated KLIB declarations retain their complete
+module-qualified signature for identity; provider-local callable numbers never become global keys.
+The shared conformance target checks the identical module graph with JVM and Native reference
+compilers before requiring Native identity, hash and different-declaration agreement.
+
 ## Nullable formal bounds in inference
 
 A declared bound `S : T?` admits null itself, so a lower bound `X` of `S` contributes only
@@ -8384,6 +8393,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `tests/renamed_builtin_bridge_owner_e2e.rs`.
 - **A Kotlin class whose immediate superclass is a Java collection declares the special bridges for the members that class inherits.** `class Bare : java.util.LinkedHashMap<String, Int>()` publishes `get(String)Integer` (`ACC_PUBLIC|ACC_BRIDGE`, an `invokespecial` of `LinkedHashMap.get` plus `checkcast` to `Integer`), the synthetic final `get(Object)Object`, and the final `get(Object)Integer`, and the same shape for every other special map member, even though the class overrides nothing. The `invokespecial` owner is the immediate superclass. A renamed member (`size`, `keySet`, `entrySet`, `remove(int)` as `removeAt`) keeps the Kotlin name on the non-final delegate and the JVM name on the final bridge. Members whose JVM name differs from the Kotlin name (`keys`, `entries`, `removeAt`) follow the others. `get`, `getOrDefault`, and `MutableMap.remove` also get the erased synthetic bridge; a failed check returns null, the default argument, or false. `keys`/`values`/`entries` carry a generic signature: the Kotlin getter erases a class type parameter to its bound, and the JVM-name bridge keeps it (`Collection<Object>` versus `Collection<T>`). A member the class itself declares is left to that override. A subclass of the Kotlin class inherits the final bridges and does not declare them again. Tests: `tests/inherited_collection_bridge_e2e.rs`.
 - **An override of a collection member keeps kotlinc's special bridge flags.** The type-checked bridge a class override of `contains`, `remove`, `indexOf`, `lastIndexOf`, `containsKey`, `containsValue` or `get` gets under the member's erased root signature is kotlinc's `BRIDGE_SPECIAL`: `ACC_PUBLIC|ACC_FINAL|ACC_BRIDGE`. A map lookup whose foreign key fails the type check (`get`, `MutableMap.remove`) returns `null` from that non-synthetic bridge. A source interface keeps its bridge non-final so another declaration can implement it. A subclass inherits an identical final bridge from a superclass in the same module or a dependency instead of declaring it, as kotlinc's bridge blacklist does; declaring it would override a final method. An inherited `getOrDefault(Object, Object)` bridge keeps the class-owned value variable in its generic signature (`(Object, V): V`) even though its JVM descriptor erases both occurrences to `Object`. Tests: `tests/special_collection_bridge_e2e.rs`.
+- **A call to an override of a type-safe collection member goes through that member's erased signature.** kotlinc's JVM signature mapper (`getOverriddenBuiltinReflectingJvmDescriptor`) calls a declaration that overrides `Collection.contains`, `MutableCollection.remove`, `List.indexOf`/`lastIndexOf`, `Map.containsKey`/`containsValue`/`get`/`getOrDefault` or either `MutableMap.remove` with the overridden member's erased descriptor, so `map["k"]` on a class with `override fun get(key: String): Int?` is `invokevirtual Owner.get(Ljava/lang/Object;)Ljava/lang/Object;` followed by `checkcast java/lang/Integer`, and reaches the override through its special bridge. The owner stays the receiver's class. This holds for a source override, a dependency override and a delegated member alike; a `super` call keeps the override's own descriptor. The overridden declaration is identified by its complete declared signature, erased and checked against the type-safe collection policy, never by owner, name and arity. Each module callable record carries every declaration it overrides with that declaration's unapplied signature, through other module overrides, so a call from another file of the module is realized the same way. Test: `tests/type_safe_override_call_e2e.rs` (single-file, cross-file and dependency-module callers).
 - **A bridge erases the overridden declaration's own signature, which the override edge carries.**
   The supertype side of an erasure bridge is the overridden declaration as declared, before the
   implementing class's type arguments are applied: `Echo<T>.echo(x: T): T` bridges as
@@ -10197,10 +10207,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   argument is `List<Int>`; rebinding `T` so the same call also satisfies
   `Collection<String>` left the two constructors tied. A parameter that still mentions a
   type variable, and a result-only producer, may still be completed from the expectation.
+  A constructor is an ordinary callable here: `Pair(1, 2)` fixes `A` and `B` from its own
+  value parameters, so it is `Pair<Int, Int>` evidence and an overloaded callee selects
+  `Any?` over `Int`. Recording the constructor's result template without its parameters
+  made every inferred constructor look result-only, so it fit any parameter and
+  `println(Pair("x", 2))` found no applicable candidate.
   Tests: `tests/chained_plus_element_join_e2e.rs`,
   `tests/operator_expected_result_seeding_e2e.rs`,
   `tests/classpath_collection_and_nested_named_e2e.rs`
-  (`classpath_collection_ctor_overload_prefers_exact`).
+  (`classpath_collection_ctor_overload_prefers_exact`), box
+  `regressions/inferredConstructorArgumentOverload.kt`,
+  `tests/inferred_constructor_argument_overload_e2e.rs`.
 
 - **A plain constructor initializer types a capturable local.** `val sb = StringBuilder()` is
   capturable by an anonymous object exactly like an annotated local — the capture list infers the
@@ -17688,18 +17705,31 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the class, take the place
   of the member each overrides: `kotlin.Any`'s, or a superclass's that overrides it, so with no
   superclass they follow `kotlin.Any`'s order. A classifier with no written supertype inherits
-  `kotlin.Any`'s functions and no property. Members inherited along two supertypes as different
-  declarations (a superclass's `toString` and an interface's `kotlin.Any.toString`, two unrelated
-  interfaces' `fun shared(): Int` or `val label: String`, or two interfaces' overrides of one
-  ancestor's member) are one intersection override KSP2 declares on the classifier (`SYNTHETIC`,
-  parent the classifier). The frontend publishes no relation between inherited members, so the
-  round treats two different inherited members of one name from different supertypes as such a
-  pair, which also refuses an inherited overload pair. A member
-  of a supertype applied to type arguments a substituted copy; neither is described yet, so the
-  lists of such a classifier, of one with another library supertype, of an enum class, an
-  annotation class and an enum entry are refused. (`crates/krusty-plugin-host/tests/ksp.rs`,
+  `kotlin.Any`'s functions and no property. A member of a supertype applied to type arguments is
+  a substituted copy, which is not described yet, so the lists of such a classifier, of one with
+  another library supertype, of an enum class, an annotation class and an enum entry are refused.
+  (`crates/krusty-plugin-host/tests/ksp.rs`,
   `all_functions_and_properties_of_source_classifiers_are_what_ksp2_lists`,
   `all_functions_whose_order_krusty_cannot_say_are_refused`.)
+- **Members of two KSP supertypes with one signature meet in one intersection member.** Different
+  declarations two direct supertypes list with one signature (same name and parameter types; a
+  property by name), such as a superclass's `toString` and an interface's `kotlin.Any.toString`,
+  two unrelated interfaces' `fun shared(x: Int): Int`, or an interface's override of an ancestor's
+  member and the ancestor's member another interface inherits, are one member KSP2 makes for the
+  classifier, in the place of the first, as KSP2 2.3.12 reports. It is a `SYNTHETIC` copy of the
+  first in supertype order, whose parent is the classifier: that member's parameters (their
+  origin `SYNTHETIC`), annotations, file and line, and it overrides that member. It is
+  `ABSTRACT` when every member it is made from is, otherwise `FINAL` or `OPEN` as the one that is
+  not, and `PUBLIC`; a property's modifiers also carry `OVERRIDE`, it has no backing field, and
+  its accessors are `SYNTHETIC`, unannotated, and `ABSTRACT PUBLIC` or `PUBLIC`. A subclass lists
+  the member as the classifier it was made for. A member of one name and other parameter types
+  is an overload, listed as it is. The round refuses the list where KSP2 picks the copy by more
+  than order: members of different return types, property types or mutability, and generic,
+  extension, non-public or final-property members. (`crates/krusty-plugin-host/tests/ksp.rs`,
+  `members_meeting_in_an_intersection_are_listed_as_ksp2_lists_them`,
+  `intersection_members_are_what_ksp2_makes`,
+  `all_functions_whose_order_krusty_cannot_say_are_refused`;
+  `src/ksp_round/all_members/intersections.rs`.)
 - **KSP maps names between Kotlin and the JVM by kotlinc's class map.** `mapKotlinNameToJava` and
   `mapJavaNameToKotlin` answer what kotlinc's `JavaToKotlinClassMap` does for the classifier the
   name resolves to on the module's classpath. A mapped builtin, a read-only or mutable collection
@@ -22478,6 +22508,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `tests/context_parameters_e2e.rs::ordinary_delegate_operator_beats_a_nearer_context_receiver`.
   Corpus: `contextParameters/sameExtensionContextAndDispatchReceiver.kt`.
 
+- **A member extension that rejects an explicit-receiver call gives way to an applicable top-level
+  extension.** In `with(Builder()) { items.appendTo(this, prefix = "SET ") { ... } }`, the
+  implicit receiver's member extension `List<T>.appendTo(separator: String, ...)` maps `this` to
+  `separator` and rejects it, while the top-level `List<T>.appendTo(builder: Builder, ...)` accepts
+  the call. kotlinc selects the top-level extension: an inapplicable tower level does not end
+  resolution. Krusty reported the member extension's argument mismatch instead. The member
+  extension's rejection is still the diagnostic when the receiver's top-level extensions have no
+  applicable candidate, for example when the only one is declared on `Set<T>`.
+  Tests: `tests/box_regressions/memberExtensionRejectionYieldsToTopLevel.kt` (a portable
+  `String.tag` control) and `tests/resolver_regression_e2e.rs`
+  (`a_rejected_member_extension_gives_way_to_a_top_level_builder_extension` with the builder
+  shape and kotlinc's classes, and
+  `a_rejected_member_extension_without_an_applicable_top_level_extension_reports_its_mismatch`).
+
 - **A super-constructor argument's captures come from the constructor's synthetic prefix
   parameters, however deeply the argument nests them.** A local class lifts each captured local
   into a constructor prefix parameter and stores it into a field, but the super-constructor call
@@ -23103,6 +23147,25 @@ a same-named classifier gains no such subtype relation. Tests: the normalized de
 `symbol_resolver::hierarchy_projection` and the JVM nominal-slot round trip in
 `function_reference_invoke_e2e`.
 
+## Lambda shapes follow the implicit receiver tower
+
+An unqualified call's lambda arguments are shaped by the innermost implicit receiver that offers a
+candidate. Inside `Column<Byte>(name).apply { check("n") { it.describe() } }` in a class that
+declares both `fun <T> Column<T>.check(name: String, op: (Column<T>) -> Op)` and
+`fun check(name: String, op: () -> Op)`, the inner `Column` receiver's member extension shapes the
+lambda, so `it` is the column. The outer `Table` receiver's member is not considered first. A
+receiver's own source member still outranks its extensions. Tests:
+`implicit_receiver_tower_lambda_shape_e2e`.
+
+## Extension receivers bound to caller variables
+
+An extension receiver is applicable when its declared receiver, specialized by the bindings the
+receiver itself supplies, is a supertype of the actual receiver. Type variables of the caller
+that remain in the specialized receiver are fixed types there: `Column<EntityID<X>>` fits
+`Column<out E?>` for `<T : Any, E : EntityID<T>>` once `E := EntityID<X>`. A callee formal that
+the receiver leaves unbound stays rigid in this check, so it cannot make the receiver fit. Test:
+`box_regressions/extensionReceiverBindsCallerVariable.kt`.
+
 ## Extension results specialized to caller variables
 
 An extension's result is its declared return type with the call's bindings substituted. When a
@@ -23110,3 +23173,16 @@ formal binds to the caller's own type variable (`b + t` for
 `operator fun <A : Number?, B : A> Box<A>.plus(t: B): Pair2<A, B>` inside
 `fun <X : Number?, Y : X>`), the result names that variable (`Pair2<X, Y>`); the declaration's
 formal never survives the call, whatever its bound. Test: `box_regressions/boundedFormalExtensionReturn.kt`.
+
+## Runtime-owned dependency getter leaves
+
+An ordinary serialized KLIB body may read a property through a getter the target implements.
+The provider retains the exact property identity, declared accessor role and normalized property
+name. Preparation and linking authenticate the accessor's class/property group, complete receiver
+signature and own-formal application, parameters and declared result. A positive target capability
+stops traversal of that getter's serialized body; retained exports and existing primitive/intrinsic
+decisions retain priority. Native reuses its existing runtime accessor tables, and common lowering
+publishes the checked property read with its applied result and source receiver separately from
+the declared ABI. No dependency class layout is materialized for this operation. Owning tests:
+`klib_lowering::tests::accessor_calls` and the official-producer runtime accessor programs in
+`klib_closure_frames_e2e`. Compiler-introduced dependency blocks remain tracked in #2811.
