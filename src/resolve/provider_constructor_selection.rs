@@ -185,7 +185,7 @@ impl Checker<'_> {
                                     signature.clone(),
                                 )
                             }),
-                            self.rejected_constructor_lambdas(
+                            self.rejected_constructor_function_arguments(
                                 args,
                                 &argument_slots,
                                 signature,
@@ -658,7 +658,7 @@ impl Checker<'_> {
                             (expected, actual),
                             constructor,
                             bound_constructor,
-                            postponed_lambdas,
+                            postponed_arguments,
                         )) = type_argument_bound_failure
                         {
                             return Err(LibraryConstructorFailure::TypeArgumentMismatch {
@@ -668,7 +668,7 @@ impl Checker<'_> {
                                 explicit: explicit_type_arguments,
                                 constructor,
                                 bound_constructor,
-                                postponed_lambdas,
+                                postponed_arguments,
                             });
                         }
                         if let Some((failure, (params, call_sig))) =

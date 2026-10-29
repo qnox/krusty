@@ -81,6 +81,7 @@ mod call_result_constraint;
 mod call_result_templates;
 mod callable_reference_lhs;
 mod callable_reference_prefilter;
+mod callable_reference_publication;
 mod callable_reference_selection;
 mod candidate_display;
 mod class_literal_array_of_nothing;
@@ -31168,6 +31169,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         field_ty: None,
         field_receiver_identity: None,
         expr_lowers: HashMap::default(),
+        selected_callable_reference_diagnostics: HashMap::default(),
         resolved_sam_conversions: HashMap::default(),
         inferred_fun_rets: HashMap::default(),
         inferred_ext_fun_rets: HashMap::default(),
@@ -33661,6 +33663,8 @@ struct Checker<'a> {
     field_receiver_identity: Option<(usize, usize)>,
     /// Accumulated output maps (moved into TypeInfo at the end of `check_file`).
     expr_lowers: HashMap<ExprId, ExprLowering>,
+    selected_callable_reference_diagnostics:
+        HashMap<ExprId, callable_reference_publication::SelectedReferenceDiagnostic>,
     resolved_sam_conversions: HashMap<ExprId, ResolvedSamConversion>,
     inferred_fun_rets: HashMap<(u32, u32), Ty>,
     inferred_ext_fun_rets: HashMap<(u32, u32, String), Ty>,
@@ -35253,6 +35257,7 @@ impl<'a> Checker<'a> {
                 return Ty::Error;
             }
         }
+        self.record_function_reference_diagnostic(expression, &function);
         let target = CallableReferenceTarget::Extension {
             callable: Box::new(target),
             stable_declaration: function.stable_declaration,
@@ -35826,99 +35831,6 @@ impl<'a> Checker<'a> {
             declaration,
             function.callable.ret,
         ))
-    }
-
-    fn record_top_level_function_ref(
-        &mut self,
-        expression: ExprId,
-        name: &str,
-        selected: &crate::libraries::FunctionInfo,
-        ty: Ty,
-    ) -> Ty {
-        let target = selected.callable.clone();
-        if let Some(source_key) = selected.source_key {
-            self.resolved_source_calls.insert(expression, source_key);
-        }
-        match (
-            selected.stable_declaration,
-            selected.source_key,
-            &target.origin,
-        ) {
-            (Some(_), _, Origin::Module { .. }) => {}
-            (None, Some(_), Origin::Module { .. }) => {}
-            (None, None, Origin::Library) if target.external_identity.is_some() => {}
-            _ => {
-                self.diags.error(
-                    self.member_name_span(expression, name),
-                    format!(
-                        "cannot reference '{name}': the selected callable has no stable identity"
-                    ),
-                );
-                return Ty::Error;
-            }
-        }
-        self.expr_lowers.insert(
-            expression,
-            ExprLowering::TopLevelFunctionRef(Box::new(ResolvedTopLevelFunctionRef {
-                target,
-                stable_declaration: selected.stable_declaration,
-            })),
-        );
-        ty
-    }
-
-    fn record_adapted_top_level_function_ref(
-        &mut self,
-        expression: ExprId,
-        name: &str,
-        selected: &crate::libraries::FunctionInfo,
-        expected: &'static crate::types::FnSig,
-        vararg_collect: Option<usize>,
-        argument_mapping: Option<Vec<AdaptedRefArgument>>,
-    ) -> Ty {
-        let resolved_argument_mapping = self
-            .callable_ref_argument_plan(selected, expected)
-            .expect("a selected adapted reference must retain its complete argument plan");
-        let target = selected.callable.clone();
-        if let Some(source_key) = selected.source_key {
-            self.resolved_source_calls.insert(expression, source_key);
-        }
-        let target_default_values = match (
-            selected.stable_declaration,
-            selected.source_key,
-            &target.origin,
-        ) {
-            (Some(_), _, Origin::Module { .. }) => selected.default_values.clone(),
-            (None, Some(_), Origin::Module { .. }) => selected.default_values.clone(),
-            (None, None, Origin::Library) if target.external_identity.is_some() => Vec::new(),
-            _ => {
-                self.diags.error(
-                    self.member_name_span(expression, name),
-                    format!(
-                        "cannot reference '{name}': the selected callable has no stable identity"
-                    ),
-                );
-                return Ty::Error;
-            }
-        };
-        self.expr_lowers.insert(
-            expression,
-            ExprLowering::AdaptedRef {
-                target: Box::new(target),
-                stable_declaration: selected.stable_declaration,
-                target_default_values,
-                adapted_params: expected.params.clone(),
-                ret: expected.ret,
-                vararg_tail: selected.call_sig.vararg
-                    && expected.params.len() + 1 == selected.callable.params.len(),
-                target_vararg: selected.call_sig.vararg,
-                vararg_collect,
-                argument_mapping,
-                resolved_argument_mapping,
-                suspend_conversion: expected.suspend && !selected.callable.suspend,
-            },
-        );
-        Ty::from(TyKind::Fun(expected))
     }
 
     /// Map an expected function value's parameters onto one declaration. Each target parameter is
@@ -38545,6 +38457,10 @@ impl<'a> Checker<'a> {
             && resolved_signature.params == natural_params
             && resolved_signature.ret == member.ret
             && resolved_signature.suspend == member.suspend();
+        self.record_reference_diagnostic(
+            expression,
+            Self::library_member_candidate_display(&member.name, &member),
+        );
         crate::trace_compiler!(
             "callable_reference",
             "expression={expression:?} binding={binding:?} member={}.{} expected={:?} natural_params={natural_params:?} natural_ret={:?} mapping={argument_mapping:?} exact={exact_shape}",
@@ -38596,6 +38512,10 @@ impl<'a> Checker<'a> {
         if member.ret == Ty::Nothing {
             return None;
         }
+        self.record_reference_diagnostic(
+            expression,
+            Self::library_member_candidate_display(&member.name, &member),
+        );
         let mut params = member.params.clone();
         if matches!(binding, CallableReferenceBinding::Unbound) {
             params.insert(0, receiver);
@@ -57373,6 +57293,8 @@ impl<'a> Checker<'a> {
         receiver: Option<ExprId>,
         name: String,
     ) -> Ty {
+        self.selected_callable_reference_diagnostics.remove(&e);
+        self.callable_reference_types.remove(&e);
         // Reflection classifiers inherit one callable
         // signature in metadata. Overload selection consumes that semantic signature; the original
         // nominal expectation remains below to determine the expression's reflection API type.
@@ -57385,6 +57307,9 @@ impl<'a> Checker<'a> {
         let previous_callable_reference = self.active_callable_reference.replace(e);
         let nominal = self.callable_ref_function_type(scope, e, selection_expected, receiver, name);
         self.active_callable_reference = previous_callable_reference;
+        if nominal.mentions_error() || nominal.mentions_pending() {
+            self.selected_callable_reference_diagnostics.remove(&e);
+        }
         let function_type = nominal
             .is_fun()
             .then_some(nominal)
@@ -57794,6 +57719,11 @@ impl<'a> Checker<'a> {
                 Err(error) => return Some(error),
             };
             if let Some(candidate) = candidate {
+                self.record_local_reference_diagnostic(
+                    expression,
+                    candidate.statement,
+                    candidate.signature.ret,
+                );
                 if let Some((plan, suspend_conversion)) = &candidate.adaptation {
                     if Self::adapted_ref_plan_is_identity(plan) && !suspend_conversion {
                         self.mark_local_function_ref(expression, candidate.statement, false);
@@ -58533,6 +58463,11 @@ impl<'a> Checker<'a> {
                     Err(error) => return self.set(e, error),
                 };
                 if let Some(candidate) = candidate {
+                    self.record_local_reference_diagnostic(
+                        e,
+                        candidate.statement,
+                        candidate.signature.ret,
+                    );
                     if let Some((plan, suspend_conversion)) = &candidate.adaptation {
                         if Self::adapted_ref_plan_is_identity(plan) && !suspend_conversion {
                             self.mark_local_function_ref(e, candidate.statement, true);

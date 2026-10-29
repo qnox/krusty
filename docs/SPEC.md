@@ -23015,8 +23015,21 @@ and the checked lambda or anonymous-function type, even when both render identic
 function parameter independent of the rejected type variable participates in the same candidate
 constraint system. Argument-owned failures replace the constructor-wide inapplicable message;
 ordinary typed values retain that message and the explicit bound error. Fixed lambda inputs remain
-available, and rejected result context still cannot complete a nested producer. Callable-reference
-completion requires separate selected-declaration diagnostic provenance, tracked in #2776.
+available, and rejected result context still cannot complete a nested producer.
+
+A callable reference in that rejected constraint system retains the diagnostic projection of its
+already-selected declaration. Its inapplicable-candidate error follows the constructor-wide heading
+and bound error, at the reference's name span. Top-level, member, extension, adapted, local and
+constructor references use their selected declaration rather than another lookup or overload trial.
+Each reference visit replaces its previous diagnostic evidence. The mapped functional expectation
+and actual invocation shape remain typed checker facts; diagnostic rendering never supplies a
+semantic target. Tests: `dependent_constructor_bounds_e2e` source and dependency reference cases.
+Extension declarations retain the receiver-constraint diagnostic, including bound and local
+extensions. Constructor diagnostics use the declared generic signature and logical classifier
+result, independently of the physical constructor return or the adapted invocation result.
+Receiver-constraint wording follows the selected reference release through `diagnostic_wording`:
+the older unresolved-reference heading and newer candidate-specific message share the same selected
+declaration evidence.
 
 When a receiver-bound alias constructor is rejected before argument checking, retained declaration
 and receiver bindings still describe its lambda inputs. Missing callable formals are diagnosed at

@@ -56,7 +56,9 @@ pub(crate) use call_realization::{KlibBodyCallableShape, KlibBodyCompanionReceiv
 pub use call_sig::required_arity;
 pub use callable_scope_rung::CallableScopeRung;
 pub use classifier_callables::BoundInnerConstructor;
-pub(crate) use classifier_callables::{constructor_generic_signature, ConstructorAlias};
+pub(crate) use classifier_callables::{
+    constructor_declaration_signature, constructor_generic_signature, ConstructorAlias,
+};
 pub(crate) use classifier_declaration::type_alias_target_classifier;
 pub use classifier_declaration::{
     AliasExpansion, ClassifierDeclaration, ClassifierDeclarationKey, TypeAliasTemplate,

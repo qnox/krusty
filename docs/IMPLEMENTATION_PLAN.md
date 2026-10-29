@@ -6240,8 +6240,13 @@ recovery share the function input layout, including contexts and anonymous recei
 source/dependency diagnostics and admitted-context controls cover #2587. For #2629, explicit bound
 rejection retains mapped, substituted postponed-lambda constraints before discarding the candidate.
 Reporting consumes those typed failure facts without redoing selection or assignability; fixed
-inputs and nested-producer isolation remain intact. Callable-reference winner diagnostics remain
-the separate #2776 follow-up.
+inputs and nested-producer isolation remain intact. For #2776, successful callable-reference
+publication also retains a checker-only diagnostic projection from the same selected declaration.
+Mapped rejected function arguments distinguish lambda assignability from reference-candidate
+diagnostics, preserving the reference's constructor heading and name span. Revisited references
+replace their evidence. Top-level publication helpers live in a dedicated owner; selection and
+backend targets are unchanged. Source, dependency, member, extension, adapted, local and constructor
+reference controls compare complete ordered reference diagnostics.
 
 Late extension admission now uses strict receiver assignability or the existing satisfiable
 postponed-frame trial. The common operation also serves unbound constructor-reference receivers;
