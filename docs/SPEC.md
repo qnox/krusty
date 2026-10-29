@@ -12,6 +12,15 @@ The Native storage ABI regression establishes each program's kotlinc result befo
 scalar-backed and reference-backed value-class equality, hashes, typed invocation and mixed capture
 ordering. The runtime reference-equality protocol and KType layout are unchanged.
 
+## Native callable-reference identity at module exports
+
+A reference created by a source module and a reference selected through that module's KLIB export
+compare equal and hash alike. Native export records retain the source declaration's marker key
+independently of the emitted call-entry alias. Authenticated KLIB declarations retain their complete
+module-qualified signature for identity; provider-local callable numbers never become global keys.
+The shared conformance target checks the identical module graph with JVM and Native reference
+compilers before requiring Native identity, hash and different-declaration agreement.
+
 ## Nullable formal bounds in inference
 
 A declared bound `S : T?` admits null itself, so a lower bound `X` of `S` contributes only
@@ -13137,27 +13146,41 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   and runs krusty's pass, and `krusty refusals` lists the plugin, so the Gradle integration keeps
   giving a Compose module to kotlinc until the coverage is complete. A composable construct the pass
   does not cover is an error at that construct (`krusty's Compose compiler plugin does not support
-  <construct> yet; compile this module with kotlinc`), never a silent difference: parameters, a
+  <construct> yet; compile this module with kotlinc`), never a silent difference: a receiver, a
+  default argument, a vararg, more than ten parameters, a parameter type other than a primitive or
+  `String`, a call argument that is not a constant, a parameter, or computed from a parameter, a
   grouping annotation, a call to another file's composable, a name an overload with lambdas shares,
   and a class kotlinc would give `$stable`. A nonempty `metricsDestination`/`reportsDestination` is an
   `UnimplementedOption` error. The runtime functions the code calls are selected at the handoff by
   their Kotlin signatures, or the module is rejected. Covered:
-  parameterless `Unit` top-level composables with a block body. Each takes a nullable
-  `$composer: Composer` and `$changed: Int`, restarts in
+  `Unit` top-level composables with a block body whose parameters are primitives or `String`. Each
+  takes a nullable `$composer: Composer` and `$changed: Int` after its own parameters, restarts in
   `startRestartGroup(key)`/`endRestartGroup()?.updateScope(…)`, and skips through
-  `shouldExecute($changed != 0, $changed and 1)`/`skipToGroupEnd()`. Its calls to other composables
-  pass `$composer` and `0`. The group key is the Java `hashCode` of
+  `shouldExecute(…)`/`skipToGroupEnd()`. `$changed` holds a force bit, then three bits per
+  parameter (two of state: uncertain, same, different, static; one of stability). A function that
+  reads a parameter copies `$changed` into `$dirty` and, for each parameter it reads whose state is
+  uncertain, ors in `different` or `same` from the `Composer.changed` overload for its type; it then
+  runs when `$dirty and (1 | 0b001 per read slot) != 0b001 per read slot` (strong skipping). One
+  that reads none has no `$dirty` and runs when `$changed and 1 != 0`, or `$changed != 0` without
+  parameters. A call passes `$composer` and a `$changed` built as kotlinc's
+  `buildChangedArgumentForCall` builds it: `static` bits for a constant argument, the caller's
+  `$dirty` slot (masked, shifted to the callee's slot) for a parameter passed on, and `uncertain`
+  for anything computed. Source information names the parameters (`N(a,b)`) when the runtime
+  declares `androidx.compose.runtime.tooling.SourceInformation`, and is rejected otherwise. The
+  group key is the Java `hashCode` of
   `fun-<name>(<parameter types>)<result>/pkg-<package>/file-<file name>`, which `@FunctionKeyMeta`
   records with the UTF-16 offsets of the `fun` keyword and the body's end. That annotation lives in
   the class file only, never in Kotlin metadata, because kotlinc's IR plugin adds it after FIR
   metadata serialization. `sourceInformation` (`C(<name>)<line>@<offset>L<length>,…:<file>#<package hash
   in base 36>`) and trace markers (`<fq name> (<file>:<0-based line>)`) follow the plugin's options.
-  The recompose lambda `<name>$lambda$0($$changed, $composer, $force)` publishes its locals and no
+  The recompose lambda `<name>$lambda$0(<parameters>, $$changed, $composer, $force)` publishes its
+  locals and no
   line, and the call's line starts at its dispatch, since kotlinc builds both arguments without
-  offsets. Tests: `tests/fixtures/compose/restartableFunctions.kt`, whose `box()` composes
-  and recomposes the functions through a recording composer, and
-  `kotlin_box_ir_jvm_conformance::compose_restartable_functions_are_byte_identical_to_kotlinc`, which
-  requires its class set to equal kotlinc's byte for byte;
+  offsets. Tests: `tests/fixtures/compose/restartableFunctions.kt` and `trackedParameters.kt`,
+  whose `box()` composes and recomposes the functions through a recording composer, and
+  `kotlin_box_ir_jvm_conformance::compose_restartable_functions_are_byte_identical_to_kotlinc` and
+  `compose_tracked_parameters_are_byte_identical_to_kotlinc`, which require their class sets to
+  equal kotlinc's byte for byte;
   `cli_compiler_plugin_e2e::the_compose_pass_rejects_what_it_does_not_cover` and
   `compose_report_destinations_fail_the_compile`; and the `plugins::compose` and
   `plugins::registry` unit tests.
@@ -17612,12 +17635,22 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   round describes them and reads the JVM annotations written on them, as it does with no inline
   member. (`src/ksp_round.rs`, `an_inline_member_leaves_its_classifiers_members_resolved`;
   `crates/krusty-plugin-host/tests/ksp.rs`, `effective_java_modifiers_are_what_ksp2_reports`.)
-- **A KSP source declaration written without `override` has no overridee.**
-  `findOverridee` of a written (`KOTLIN`) function or property without the `override` modifier,
-  and of any constructor, is `null`, as KSP2 2.3.12 reports. The overridee of an `override`
-  member, and of a compiler-generated function whose `override` modifier says nothing of it (a
-  data class's `componentN`), is refused. (`crates/krusty-plugin-host/tests/ksp.rs`,
-  `overridees_are_what_ksp2_reports`, `the_overridee_of_an_override_is_refused`.)
+- **A KSP source member's overridee is the first member it directly overrides.**
+  `findOverridee` of a written (`KOTLIN`) `override` function or property is the first member it
+  directly overrides, in the order the classifier's supertypes are written, and a member only a
+  fake override inherits along the way is the declaration that fake override stands for: `C.f`
+  overrides `A.f` when `B` between them does not override it; `kotlin.Any`'s `toString` is
+  `KOTLIN_LIB`, declared by `kotlin.Any`. A data class's or data object's generated `equals`,
+  `hashCode` and `toString`, as `getAllFunctions` lists them, override the member each takes the
+  place of: `kotlin.Any`'s, or a superclass's override. A member written without `override`, any
+  constructor, a top-level declaration, a data class's `componentN` and `copy`, and a member of
+  `kotlin.Any` itself have none, as KSP2 2.3.12 reports. A library overridee
+  the round does not describe on its own is refused: a member of a Java classifier other than an
+  annotation (`Runnable.run`), one of a classifier with type parameters, which KSP2 reports
+  unsubstituted (`Comparable<F>.compareTo` takes a `T`), and one sharing its name with another of
+  its classifier's members. (`crates/krusty-plugin-host/tests/ksp.rs`,
+  `overridees_are_what_ksp2_reports`, `overridees_of_listed_members_are_what_ksp2_reports`,
+  `an_overridee_the_round_cannot_describe_is_refused`.)
 - **A KSP Java annotation's array elements without a default default to an empty array.**
   `KSAnnotation.defaultArguments` of an application of a Java library annotation lists an empty
   array for every array-typed element the annotation declares without a default, in declaration
@@ -17625,6 +17658,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   KSP2 2.3.12 reports. A Kotlin library annotation keeps the rule for a `vararg` element only.
   (`crates/krusty-plugin-host/tests/ksp.rs`,
   `java_annotation_array_elements_default_to_empty_arrays`.)
+- **A Java `@Target` reads as Kotlin targets in `AnnotationTarget` order.** A Java annotation
+  class's `@java.lang.annotation.Target` reads as `kotlin.annotation.Target` whose
+  `allowedTargets` are the Kotlin targets each `ElementType` maps to (kotlinc's
+  `JavaAnnotationTargetMapper`), once each and in `AnnotationTarget` declaration order whatever
+  order the Java annotation writes its element types in, as kotlinc collects them into an enum set:
+  `{PARAMETER, TYPE, METHOD, FIELD}` reads as `CLASS, FIELD, VALUE_PARAMETER, FUNCTION,
+  PROPERTY_GETTER, PROPERTY_SETTER, FILE`, as KSP2 2.3.12 reports.
+  (`crates/krusty-plugin-host/tests/ksp.rs`, `library_annotation_members_are_what_ksp2_reports`;
+  `src/jvm/jvm_libraries/declaration_headers.rs`.)
 - **A KSP source classifier lists members sharing a name together.**
   `KSClassDeclaration.declarations` lists a classifier's functions and properties, written and
   generated, by name: each name where it first appears, and under one name its functions before its
@@ -17640,8 +17682,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   as that supertype lists them, then the classifier's constructors; `getAllProperties` lists the
   own properties, then each supertype's. A supertype's member is left out when it is private,
   already listed, or overridden by a member listed before, as the frontend selected the override.
-  A data class's generated `equals` (`open operator override public`, parameter `other: Any?`),
-  `hashCode` and `toString` (`open public`), `SYNTHETIC` and declared by the class, take the place
+  A data class's or data object's generated `equals` (`open operator override public`,
+  parameter `other: Any?`), `hashCode` and `toString` (`open public`), `SYNTHETIC` and declared by
+  the class, take the place
   of the member each overrides: `kotlin.Any`'s, or a superclass's that overrides it, so with no
   superclass they follow `kotlin.Any`'s order. A classifier with no written supertype inherits
   `kotlin.Any`'s functions and no property. Members inherited along two supertypes as different
@@ -22434,6 +22477,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `tests/context_parameters_e2e.rs::ordinary_delegate_operator_beats_a_nearer_context_receiver`.
   Corpus: `contextParameters/sameExtensionContextAndDispatchReceiver.kt`.
 
+- **A member extension that rejects an explicit-receiver call gives way to an applicable top-level
+  extension.** In `with(Builder()) { items.appendTo(this, prefix = "SET ") { ... } }`, the
+  implicit receiver's member extension `List<T>.appendTo(separator: String, ...)` maps `this` to
+  `separator` and rejects it, while the top-level `List<T>.appendTo(builder: Builder, ...)` accepts
+  the call. kotlinc selects the top-level extension: an inapplicable tower level does not end
+  resolution. Krusty reported the member extension's argument mismatch instead. The member
+  extension's rejection is still the diagnostic when the receiver's top-level extensions have no
+  applicable candidate, for example when the only one is declared on `Set<T>`.
+  Tests: `tests/box_regressions/memberExtensionRejectionYieldsToTopLevel.kt` (a portable
+  `String.tag` control) and `tests/resolver_regression_e2e.rs`
+  (`a_rejected_member_extension_gives_way_to_a_top_level_builder_extension` with the builder
+  shape and kotlinc's classes, and
+  `a_rejected_member_extension_without_an_applicable_top_level_extension_reports_its_mismatch`).
+
 - **A super-constructor argument's captures come from the constructor's synthetic prefix
   parameters, however deeply the argument nests them.** A local class lifts each captured local
   into a constructor prefix parameter and stores it into a field, but the super-constructor call
@@ -22468,8 +22525,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   An unavailable dispatch rung reserves the constructor-prefix receiver coordinate without adding
   instance-property bindings, so enclosing receiver captures retain their checked identities.
   Tests: `tests/typealias_constructor_inference_e2e.rs` compares complete JVM ABI and runtime
-  behavior with kotlinc. Separate existing gaps in deferred-lambda capture transport and the exact
-  unavailable-member diagnostic retain their full controls in #2657 and #2658.
+  behavior with kotlinc. When no enclosing value or available receiver supplies the name, a
+  member of the unavailable instance reports `cannot access '<this>' before the instance has
+  been initialized.` at the property reference. The diagnostic probe uses the same declared
+  receiver identity that the usable tower excludes; it never records a property read or capture.
+  Inferred property types cannot bypass this receiver requirement through declaration demand.
+  Named and anonymous subclasses share this rule. Complete ordered diagnostic comparisons and
+  enclosing/local/top-level positive controls live in `tests/super_argument_outer_receiver_e2e.rs`.
+  Deferred-lambda capture transport remains separate in #2657.
   An anonymous object moves every super-constructor argument that is not a compile-time constant
   and not a lexical capture out to the construction site, stores it in a temporary, and forwards
   it as a constructor parameter that is not a field (`object : Base(n + 1)`, `object :
@@ -23053,6 +23116,15 @@ a same-named classifier gains no such subtype relation. Tests: the normalized de
 `symbol_resolver::hierarchy_projection` and the JVM nominal-slot round trip in
 `function_reference_invoke_e2e`.
 
+## Extension receivers bound to caller variables
+
+An extension receiver is applicable when its declared receiver, specialized by the bindings the
+receiver itself supplies, is a supertype of the actual receiver. Type variables of the caller
+that remain in the specialized receiver are fixed types there: `Column<EntityID<X>>` fits
+`Column<out E?>` for `<T : Any, E : EntityID<T>>` once `E := EntityID<X>`. A callee formal that
+the receiver leaves unbound stays rigid in this check, so it cannot make the receiver fit. Test:
+`box_regressions/extensionReceiverBindsCallerVariable.kt`.
+
 ## Extension results specialized to caller variables
 
 An extension's result is its declared return type with the call's bindings substituted. When a
@@ -23060,3 +23132,16 @@ formal binds to the caller's own type variable (`b + t` for
 `operator fun <A : Number?, B : A> Box<A>.plus(t: B): Pair2<A, B>` inside
 `fun <X : Number?, Y : X>`), the result names that variable (`Pair2<X, Y>`); the declaration's
 formal never survives the call, whatever its bound. Test: `box_regressions/boundedFormalExtensionReturn.kt`.
+
+## Runtime-owned dependency getter leaves
+
+An ordinary serialized KLIB body may read a property through a getter the target implements.
+The provider retains the exact property identity, declared accessor role and normalized property
+name. Preparation and linking authenticate the accessor's class/property group, complete receiver
+signature and own-formal application, parameters and declared result. A positive target capability
+stops traversal of that getter's serialized body; retained exports and existing primitive/intrinsic
+decisions retain priority. Native reuses its existing runtime accessor tables, and common lowering
+publishes the checked property read with its applied result and source receiver separately from
+the declared ABI. No dependency class layout is materialized for this operation. Owning tests:
+`klib_lowering::tests::accessor_calls` and the official-producer runtime accessor programs in
+`klib_closure_frames_e2e`. Compiler-introduced dependency blocks remain tracked in #2811.

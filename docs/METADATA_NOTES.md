@@ -8,6 +8,14 @@ an unboxed invocation carrier. Stored types and offsets jointly own the GC map a
 This representation choice changes no declaration identity, metadata or source-level type, and
 does not reconstruct receiver roles from a capture's spelling or machine carrier.
 
+## Native reference identities and exported entry points
+
+A KLIB export's physical invocation alias is independent of its declaration marker. The Native
+export handoff carries the source key so a dependent module agrees with references created in the
+declaring source module. Dependency-support keys encode the exact module and Public/Accessor
+signature through the existing declaration-identity encoder, retaining every segment, member ID and
+mask. This changes target symbol publication without changing Kotlin metadata or runtime layout.
+
 ## Declaration-owned Class header IDs
 
 The common Class schema takes a mandatory resolved class ID. Its package and exact lexical
@@ -1327,6 +1335,14 @@ subtype relation. A typed function signature supplies its canonical classifier a
 the hierarchy walk checks the nominal value against that application. Reflective function types
 retain their nominal identity; no new metadata payload or physical JVM descriptor is introduced.
 
+## Superclass-argument receiver availability
+
+An inherited property declaration remains evidence for a name even while its dispatch instance is
+unavailable. The checker probes the normalized property model on that exact declared receiver to
+report the initialization diagnostic, without publishing a getter, field read, or capture. Inferred
+property result demand follows receiver selection; it cannot turn an instance member into a local
+value. No metadata shape or backend ABI changes accompany this frontend correction (#2658).
+
 ## Rejected constructor lambda constraints
 
 Normalized constructor signatures and the canonical source-argument mapping retain postponed
@@ -1334,3 +1350,14 @@ function-expression expectations when an explicit class argument violates its bo
 uses the same typed failure evidence for source and reference-produced dependency declarations;
 it does not reconstruct parameter types from constructor text. Metadata encoding and callable ABI
 are unchanged. Callable-reference selected-declaration diagnostic retention is tracked in #2776.
+
+## Serialized getter declaration contracts
+
+KLIB normalization tags a getter or setter from its actual property slot, retaining the property's
+opaque identity and decoded name. This KLIB-only facet survives both declaration projections and
+participates in declaration-contract equality; it grants no execution capability by itself.
+Ordinary getter linking authenticates the serialized property group and class header, including
+the raw dispatch classifier's signature mask and complete own-formal receiver application.
+Declared getter results remain distinct from the checked read's applied result. Native's runtime
+leaf capability reuses its existing accessor signature plans and does not import property bodies
+or reconstruct class storage. No metadata wire format changes.

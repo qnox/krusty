@@ -21,6 +21,7 @@
 //! one-field object here, with the field traced when it holds a reference.
 
 use super::super::super::captures::carried_parameters;
+use super::super::ReferenceDeclaration;
 use super::*;
 
 /// The vtable slot a function value's body occupies: right after `kotlin.Any`'s three, so a
@@ -57,7 +58,7 @@ struct Site {
 }
 
 /// The site an expression creates, or `None` when it creates none.
-fn closure_site(expr: &IrExpr, module_name: &str) -> Option<Result<Site, Unsupported>> {
+fn closure_site(file: &FileLowering<'_>, expr: &IrExpr) -> Option<Result<Site, Unsupported>> {
     match expr {
         // The declared arity is deliberately not read here: the implementation function's own
         // parameters are the source of truth, and a suspend lambda's body carries a continuation
@@ -76,9 +77,10 @@ fn closure_site(expr: &IrExpr, module_name: &str) -> Option<Result<Site, Unsuppo
             identity: None,
             receiver_capture: None,
         })),
-        IrExpr::CallableReference(reference) => Some(if reference.declaration_suspend {
-            Err("a suspend callable reference".into())
-        } else {
+        IrExpr::CallableReference(reference) => Some((|| {
+            if reference.declaration_suspend {
+                return Err("a suspend callable reference".into());
+            }
             Ok(Site {
                 impl_fn: reference.adapter,
                 // The adapter's frame is the referenced declaration's captures, then the bound
@@ -95,13 +97,13 @@ fn closure_site(expr: &IrExpr, module_name: &str) -> Option<Result<Site, Unsuppo
                 // A callable reference converted to a `fun interface` arrives as a lambda with a
                 // SAM target, not as a reference, so there is none to carry here.
                 sam: None,
-                identity: Some(reference_identity(reference, module_name)),
+                identity: Some(reference_identity(file, reference)?),
                 receiver_capture: reference
                     .bound_receiver
                     .is_some()
                     .then_some(reference.captures.len()),
             })
-        }),
+        })()),
         _ => None,
     }
 }
@@ -114,9 +116,9 @@ fn closure_site(expr: &IrExpr, module_name: &str) -> Option<Result<Site, Unsuppo
 /// one from `Foo::bar` for the opposite reason: those must not be equal. Derived from the IR's
 /// `target`, which is the declaration's own identity rather than anything about the site.
 fn reference_identity(
+    file: &FileLowering<'_>,
     reference: &crate::ir::IrCallableReference,
-    module_name: &str,
-) -> ReferenceIdentity {
+) -> Result<ReferenceIdentity, Unsupported> {
     use crate::ir::IrCallableReferenceTarget as Target;
     let bound = if reference.bound_receiver.is_some() {
         "b"
@@ -125,9 +127,10 @@ fn reference_identity(
     };
     let named = match &reference.target {
         Target::Module(callable) => {
-            let declaration =
-                super::super::super::symbols::module_function_symbol(module_name, *callable);
-            return ReferenceIdentity::Program(format!("kt_refid_{bound}_{declaration}"));
+            let declaration = ReferenceDeclaration::source(file.module_name, *callable);
+            return Ok(ReferenceIdentity::Program(
+                declaration.marker(reference.bound_receiver.is_some()),
+            ));
         }
         Target::Constructor { classifier } => {
             format!(
@@ -149,7 +152,25 @@ fn reference_identity(
         ),
         // The provider's own identity for the declaration, which is what two `Boolean::not`
         // written in two files share — and the only thing about it this side is entitled to read.
-        Target::External { declaration, .. } => format!("e{}", declaration.raw()),
+        Target::External { declaration, .. } => {
+            let fact = file.callables.callable(*declaration).ok_or_else(|| {
+                Unsupported::from("a callable reference without frozen declaration facts")
+            })?;
+            if let Some(identity) = &fact.dependency_callable {
+                let declaration = match file.dependency_symbols.get(identity) {
+                    Some(export) => export.reference_declaration.clone().ok_or_else(|| {
+                        Unsupported::from("an emitted dependency reference without its declaration marker identity")
+                    })?,
+                    // An authenticated KLIB declaration without a retained source export owns
+                    // its module-qualified serialized identity, including runtime declarations.
+                    None => ReferenceDeclaration::dependency(identity),
+                };
+                return Ok(ReferenceIdentity::Program(
+                    declaration.marker(reference.bound_receiver.is_some()),
+                ));
+            }
+            format!("e{}", declaration.raw())
+        }
         Target::FunctionValueConversion { ordinal } => format!("conversion_{ordinal}"),
         Target::FunctionInvoke => format!(
             "function_invoke_{}_{}",
@@ -168,7 +189,9 @@ fn reference_identity(
             }
         ),
     };
-    ReferenceIdentity::Local(format!("kt_refid_{bound}_{named}"))
+    Ok(ReferenceIdentity::Local(format!(
+        "kt_refid_{bound}_{named}"
+    )))
 }
 
 /// Physical fields of a closure. A reference's equality receiver is always a semantic object,
@@ -244,7 +267,7 @@ impl<'a> FileLowering<'a> {
     /// Declare a type and a thunk for every lambda in the file, before any body is compiled.
     pub(super) fn declare_lambdas(&mut self) -> Result<(), Unsupported> {
         for index in 0..self.ir.exprs.len() {
-            let Some(site) = closure_site(&self.ir.exprs[index], self.module_name) else {
+            let Some(site) = closure_site(self, &self.ir.exprs[index]) else {
                 continue;
             };
             let Site {
@@ -832,9 +855,8 @@ impl<'a> FileLowering<'a> {
 impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
     /// Allocate a function value and fill in what it captured.
     pub(super) fn lambda(&mut self, site: u32) -> Result<Option<Value>, Unsupported> {
-        let Site { captures, sam, .. } =
-            closure_site(self.file.ir.expr(site), self.file.module_name)
-                .expect("only a closure site reaches here")?;
+        let Site { captures, sam, .. } = closure_site(self.file, self.file.ir.expr(site))
+            .expect("only a closure site reaches here")?;
         // Converting a NULLABLE function value to a `fun interface` yields null when the value is
         // null — `isNull(nullableFun(true))` must answer true, not call `invoke` on a wrapper
         // around nothing. The checked lowering expresses such a conversion as a lambda whose one
@@ -851,7 +873,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
 
     /// Build the object a closure site makes: its captures, then the allocation that holds them.
     fn wrap_closure(&mut self, site: u32) -> Result<Option<Value>, Unsupported> {
-        let Site { captures, .. } = closure_site(self.file.ir.expr(site), self.file.module_name)
+        let Site { captures, .. } = closure_site(self.file, self.file.ir.expr(site))
             .expect("only a closure site reaches here")?;
         let items = self
             .file

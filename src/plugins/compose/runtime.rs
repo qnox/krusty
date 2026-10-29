@@ -34,6 +34,9 @@ pub(super) struct ComposeRuntime {
     pub(super) trace_event_start: BoundRuntimeFunction,
     pub(super) trace_event_end: BoundRuntimeFunction,
     pub(super) update_changed_flags: BoundRuntimeFunction,
+    /// `Composer.changed`, by the declared parameter type each overload compares: `Any?` and one
+    /// for each primitive.
+    pub(super) changed: Vec<(Ty, BoundRuntimeFunction)>,
 }
 
 impl ComposeRuntime {
@@ -86,9 +89,48 @@ impl ComposeRuntime {
             )?,
             trace_event_end: function(package, "traceEventEnd", Vec::new(), Ty::Unit)?,
             update_changed_flags: function(package, "updateChangedFlags", vec![Ty::Int], Ty::Int)?,
+            changed: std::iter::once(nullable_any())
+                .chain(PRIMITIVES)
+                .map(|compared| {
+                    function(member, "changed", vec![compared], Ty::Boolean)
+                        .map(|bound| (compared, bound))
+                })
+                .collect::<Result<_, _>>()?,
         })
     }
+
+    /// The `changed` overload kotlinc's `irChanged` calls for a value of the stable type `ty`: the
+    /// primitive one that type has, or the one taking `Any?`.
+    pub(super) fn changed_for(&self, ty: Ty) -> &BoundRuntimeFunction {
+        let compared = if PRIMITIVES.contains(&ty) {
+            ty
+        } else {
+            nullable_any()
+        };
+        &self
+            .changed
+            .iter()
+            .find(|(declared, _)| *declared == compared)
+            .expect("every compared type has a bound `changed` overload")
+            .1
+    }
 }
+
+fn nullable_any() -> Ty {
+    Ty::nullable(Ty::obj("kotlin/Any"))
+}
+
+/// The primitive types `Composer.changed` has an overload for, beside its `Any?` one.
+pub(super) const PRIMITIVES: [Ty; 8] = [
+    Ty::Boolean,
+    Ty::Char,
+    Ty::Byte,
+    Ty::Short,
+    Ty::Int,
+    Ty::Float,
+    Ty::Long,
+    Ty::Double,
+];
 
 /// A call of the selected runtime function `function` on `receiver`, or of a top-level one.
 pub(super) fn call(
