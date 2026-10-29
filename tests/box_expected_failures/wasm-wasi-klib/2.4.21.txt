@@ -5669,6 +5669,7 @@ regressions/functionLiteralAsLastExpressionInBlock.kt
 regressions/generic.kt
 regressions/genericDependencyAbi.kt
 regressions/hashCodeNPE.kt
+regressions/inferredLibraryConstructorArgumentOverload.kt
 regressions/inlineCallsInInitializerLambda.kt
 regressions/kt10143.kt
 regressions/kt10934.kt
