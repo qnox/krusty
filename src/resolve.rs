@@ -14701,6 +14701,11 @@ impl<'a> Checker<'a> {
                         .insert(declaration, captures);
                 }
                 self.refresh_anonymous_receiver_capture_fields(declaration, &candidates);
+                self.publish_anonymous_class_capture_layout(
+                    scope,
+                    declaration,
+                    Some(&storage_field_remap),
+                );
                 if self.discover_anonymous_captures {
                     return self.anonymous_object_type(scope, declaration);
                 }
@@ -14770,6 +14775,9 @@ impl<'a> Checker<'a> {
                     self.set_anonymous_lexical_class_context(declaration);
                     self.check_class(scope, &class, declaration);
                     self.restore_body_state(saved);
+                    if !self.discovers_captures_at_construction {
+                        self.publish_anonymous_class_capture_layout(scope, declaration, None);
+                    }
                 }
                 return self.anonymous_object_type(scope, declaration);
             }
@@ -32909,7 +32917,7 @@ pub(crate) fn check_preinferred_inline_declarations_at_with_index(
             syms,
             Some(resolved_index),
             diags,
-            CaptureDiscovery::Published,
+            CaptureDiscovery::AtConstruction,
             Some(selected_declarations),
             Some(selected_body_declarations),
             Some(active_declarations),
@@ -32974,7 +32982,7 @@ pub(crate) fn check_signature_default_declarations_at_with_index(
             syms,
             Some(index),
             diags,
-            CaptureDiscovery::Published,
+            CaptureDiscovery::AtConstruction,
             None,
             None,
             Some(active_declarations),

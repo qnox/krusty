@@ -6168,6 +6168,12 @@ inference and shared with classifier publication; parent diagnostics retain thei
 File-facade metadata now carries the existing local/enum-body classifier inventories into both
 package class-ID encoding and JVM signature-record decisions. The original three #2654 complete
 metadata oracles are restored, with an additional complete property-storage ABI/metadata control.
+Retained capture storage now has an explicit declaration flag and IR property origin, so class
+metadata omits storage without dropping genuine source or plugin properties. Anonymous classes
+reuse local-class capture-use classification, retaining capture order and construction-read
+identities. Inline/default bodies discover those captures at construction; inspection publishes
+the plan after its class check. Four complete ABI/metadata/runtime controls and two FIR owner tests
+cover retained inline/default captures, a real same-spelled property and ordinary captures.
 Own versus lexical-capture metadata applications stay in #2653 with their full retained oracles.
 Parameterized alias superclass constructor argument inference remains a separate repair in #2655.
 

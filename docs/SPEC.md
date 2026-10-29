@@ -9,6 +9,14 @@ reconstruct from those local IDs. This changes serialization evidence rather tha
 arguments or declaration-result approximation. Tests compare the complete facade payload and
 class ABI with kotlinc in `tests/facade_local_classifier_metadata_e2e.rs`.
 
+Internal capture storage is not a Kotlin property declaration. Retained bodies carry that explicit
+role into common IR, and metadata omits only storage records while retaining source and plugin
+properties. Anonymous classes share the checked storage-use plan of local classes: a direct
+initializer read can use its constructor parameter, while a member or closure read retains a field.
+Retained inline and default bodies discover captures in their live construction scope. Complete
+class ABI, metadata and runtime comparisons cover these boundaries in
+`tests/capture_storage_metadata_e2e.rs`.
+
 ## Native callable-reference identity at module exports
 
 A reference created by a source module and a reference selected through that module's KLIB export

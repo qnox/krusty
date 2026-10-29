@@ -136,14 +136,18 @@ fn anonymous_property_initializer_reads_same_named_lexical_capture() {
             .then_some((classifier, body))
         })
         .expect("anonymous value initializer FIR");
+    let read = initializer
+        .expr(root_expression(initializer))
+        .expect("checked capture initializer read");
+    assert_eq!(read.ty, ResolvedTy::new(Ty::Int).unwrap());
     assert!(matches!(
-        initializer
-            .expr(root_expression(initializer))
-            .map(|expression| &expression.kind),
-        Some(FirExprKind::ClassStorageRead {
+        &read.kind,
+        FirExprKind::ConstructorCaptureRead {
             owner: selected,
             field: 0,
-        }) if *selected == owner
+            shared_cell: false,
+            site: crate::fir::FirConstructorCaptureSite::Parameter,
+        } if *selected == owner
     ));
 }
 

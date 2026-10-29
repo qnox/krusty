@@ -76,6 +76,71 @@ fn production_frontend_ok(source: &str) {
 }
 
 #[test]
+fn anonymous_initializer_capture_uses_its_constructor_parameter_without_storage() {
+    let (body, _) = checked_function_body(
+        "fun create(value: Int): Any = object { val value: Int = value }",
+        "create",
+    );
+    let object = (0..body.expression_count())
+        .find_map(
+            |raw| match &body.expr(FirExprId::from_raw(raw as u32))?.kind {
+                FirExprKind::AnonymousObject(object) => Some(object),
+                _ => None,
+            },
+        )
+        .expect("anonymous constructor plan");
+    let [capture] = object.captures.as_ref() else {
+        panic!("one constructor capture expected: {:?}", object.captures)
+    };
+    assert!(!capture.stored);
+    assert_eq!(capture.ty.get(), Ty::Int);
+    assert_eq!(
+        capture.source,
+        FirLocalClassCaptureSource::Value(body.parameters()[0].value)
+    );
+}
+
+#[test]
+fn retained_default_capture_keeps_the_earlier_parameter_and_stored_field() {
+    let source = "interface Token { fun value(): Int }\n\
+        fun copy(value: Int, token: Token = object : Token {\n\
+            override fun value(): Int = value\n\
+        }): Token = token\n";
+    let inputs = [crate::source::SourceInput::kotlin(source).with_file_stem("DefaultCapture")];
+    let mut diagnostics = crate::diag::DiagSink::new();
+    let mut analysis = crate::frontend::analyze_source_set_with_features(
+        &inputs,
+        crate::frontend::PlatformProvider::jvm(Box::new(crate::libraries::EmptySymbolSource)),
+        &crate::features::LangFeatures::new(),
+        &mut diagnostics,
+    );
+    assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
+    let streamed = analysis.streamed.take().expect("Pass 1 must finalize");
+    let (index, _, mut defaults, _) = streamed.module.into_parts();
+    let defaults = defaults.take_for_source(&index, SourceFileId::from_raw(0));
+    assert_eq!(defaults.len(), 1);
+    let body = &defaults[0].1;
+    assert_eq!(body.default_values().len(), 1);
+    assert_eq!(body.default_values()[0].parameter, 1);
+    let FirExprKind::AnonymousObject(object) = &body
+        .expr(body.default_values()[0].value)
+        .expect("checked default value")
+        .kind
+    else {
+        panic!("default value must retain its anonymous constructor")
+    };
+    let [capture] = object.captures.as_ref() else {
+        panic!("one retained capture expected: {:?}", object.captures)
+    };
+    assert!(capture.stored);
+    assert_eq!(capture.ty.get(), Ty::Int);
+    assert_eq!(
+        capture.source,
+        FirLocalClassCaptureSource::Value(body.parameters()[0].value)
+    );
+}
+
+#[test]
 fn anonymous_interface_delegate_is_a_checked_constructor_argument() {
     let (body, index) = checked_function_body(
         "interface A { fun value(): String }\n\
