@@ -3814,6 +3814,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   line.
   Tests: `tests/for_loop_iterable_slot_e2e.rs`,
   `tests/classpath_inline_plan_parity_e2e.rs` (`an_indexed_iteration_reads_the_frames_receiver_local`).
+- **A range loop in a lambda re-reads a captured stable bound.** A captured binding no code can
+  reassign is published with the same stable read fact as the local it copies, so `{ for (item in 0
+  until size) println(item) }` compares the loop variable against the lambda's `size` parameter on
+  each iteration instead of copying it into a fresh local, as kotlinc does. A captured `var` (a
+  shared cell) is still snapshotted when the loop starts. A capture an anonymous object stores in a
+  field is not covered yet. Test: `tests/captured_stable_binding_e2e.rs`.
 - A `for` loop using the iterator convention evaluates its subject once as the direct receiver of the
   checker-selected `iterator()` call. The resulting iterator is the loop state reused by `hasNext()`
   and `next()`; common IR does not invent a separate local for the subject.

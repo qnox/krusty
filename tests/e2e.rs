@@ -282,6 +282,8 @@ mod caller_type_param_receiver_e2e;
 mod cannot_infer_cascade_e2e;
 #[path = "capture_first_use_order_e2e.rs"]
 mod capture_first_use_order_e2e;
+#[path = "captured_stable_binding_e2e.rs"]
+mod captured_stable_binding_e2e;
 #[path = "cast_evaluation_order_e2e.rs"]
 mod cast_evaluation_order_e2e;
 #[path = "catch_annotation_comma_e2e.rs"]
