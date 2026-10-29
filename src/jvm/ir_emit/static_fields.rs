@@ -396,7 +396,15 @@ pub(super) fn emit_default_static_accessor(
     }
     let fref = cw.fieldref(owner, field_name, &desc);
     g.getstatic(fref, slot_words(jt) as i32);
-    if s.is_lateinit {
+    // kotlinc emits no guard in the getter of a property another class probes with
+    // `isInitialized`: that getter returns the raw field.
+    let guarded = s.is_lateinit
+        && !env
+            .run
+            .static_accessor_plan
+            .borrow()
+            .probed_from_another_class(static_index);
+    if guarded {
         // kotlinc's getter: return the value, or throw and then `aconst_null; areturn` so the
         // null path has a reference for the verifier.
         g.dup();

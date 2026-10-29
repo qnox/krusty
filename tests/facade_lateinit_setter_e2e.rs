@@ -2,7 +2,8 @@
 //! inside the facade that owns the field (a private property, or one with a `private set`, writes
 //! its private field), and the property's annotations, `@get:`/`@set:JvmName` among them, reach
 //! its declaration although it has no body. Another class probes `isInitialized` of a private
-//! field through the facade's `access$get<X>$p`.
+//! field through the facade's `access$get<X>$p`, and the getter of a property another class
+//! probes has no guard.
 
 use crate::common;
 
@@ -25,6 +26,10 @@ fun local(): String {
     named = "e"
     renamed = "f"
     return shared + module + hidden + guarded + named + renamed
+}
+
+object Probe {
+    fun ready() = ::shared.isInitialized && ::hidden.isInitialized && ::guarded.isInitialized
 }
 "#;
 
@@ -72,21 +77,29 @@ fun assign() {
 }
 
 object Probe {
-    fun ready() = ::shared.isInitialized && ::hidden.isInitialized && ::guarded.isInitialized
+    fun sharedReady() = ::shared.isInitialized
+    fun hiddenReady() = ::hidden.isInitialized
+    fun guardedReady() = ::guarded.isInitialized
 }
 
 fun box(): String {
-    if (Probe.ready()) return "early"
+    if (Probe.sharedReady()) return "shared early"
+    if (Probe.hiddenReady()) return "hidden early"
+    if (Probe.guardedReady()) return "guarded early"
     assign()
-    return if (Probe.ready()) "OK" else "late"
+    if (!Probe.sharedReady()) return "shared late"
+    if (!Probe.hiddenReady()) return "hidden late"
+    if (!Probe.guardedReady()) return "guarded late"
+    return "OK"
 }
 "#;
 
-/// The probe of a private field from `Probe` goes through the facade's bridge. Only `Probe` is
-/// compared: kotlinc also drops the guard from the getter of a property probed from another
-/// class, which krusty does not reproduce yet (a `docs/SPEC.md` known gap).
 #[test]
-fn another_class_probes_a_private_lateinit_field_through_its_bridge() {
-    common::assert_classes_identical_to_kotlinc("ProbedLateinit", PROBED, &["Probe"]);
-    common::expect_box_ok_with_stdlib(PROBED, "ProbedLateinit");
+fn another_class_probes_each_lateinit_field_like_kotlinc() {
+    common::assert_classes_identical_to_kotlinc(
+        "ProbedLateinit",
+        PROBED,
+        &["ProbedLateinitKt", "Probe"],
+    );
+    common::expect_box_same_as_kotlinc(PROBED, "ProbedLateinit");
 }
