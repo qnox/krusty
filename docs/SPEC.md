@@ -1,5 +1,14 @@
 # krusty — a memory-lean Kotlin→JVM compiler PoC
 
+## Nullable formal bounds in inference
+
+A declared bound `S : T?` admits null itself, so a lower bound `X` of `S` contributes only
+`X & Any` as a lower bound of `T`. A caller's `<T, S : T?>` therefore solves the callee's `T` as the
+caller's `T` rather than widening it to `Any`. A definitely-non-null target `S & Any` accepts a
+source only when the source is a non-null subtype of `S` itself. Sharing `S`'s classifier bound is not
+that proof: under `<T : CharSequence, S : T?>`, `T` is not a subtype of `S & Any`. Test:
+`box_regressions/nullableFormalBoundPropagation.kt`.
+
 ## File policies under signature recovery
 
 A file's own annotations (`@file:Suppress`, opt-ins) are published before recovery diagnostics
@@ -7495,6 +7504,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   effect gets the same mark. An inline call is that trailing expression itself; the lambda body
   blocks around it are looked through.
   Tests: `tests/nested_inline_lambda_line_e2e.rs`.
+- **A `Unit` lambda in a dependency's inline iteration closes on its `}` first.** For
+  `items.forEach {⏎ add(it)⏎ }` kotlinc marks the lambda's closing brace on a `nop` while the
+  lambda's locals are open (the lambda's own fall-off `return`), then closes the inlined frame on
+  the dependency's invocation line with a second `nop` once those locals end. A one-line lambda's
+  brace shares its body's line, so that first `nop` is cleaned up. The lowered lambda frame ends in
+  the lambda's `Unit` value and carries the brace line, the same shape a same-file inline call's
+  lambda frame has. Tests: `tests/library_inline_lambda_brace_line_e2e.rs`.
 - **A same-file inline call's result is adapted after its copied frame ends.** kotlinc ends the
   `$i$f$` marker and the inlined parameter locals at the copied body's end label before its caller
   adapts the result. An erased type-parameter result is narrowed after those locals end, a
@@ -18976,6 +18992,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`IrFile::implicit_return_end_line`); a lambda keeps `UnitReturnLine::ClosingBrace`. A body on one line
   already has that line in effect, so no entry is added. Test:
   `tests/unit_expression_body_return_line_e2e.rs`.
+- **A `Unit` expression body that is a dependency's inline call still closes that call's frame.**
+  `fun f(items: List<String>) = items.forEach { … }` ends the inlined `forEach` on the
+  declaration's closing line with a `nop`, then marks the body's line on the `return`, exactly as
+  the same call written as a statement of a block body. Discarding the body's trailing `Unit`
+  keeps the expansion's block, which owns that frame close, rather than rebuilding it without
+  its value. Test: `tests/unit_expression_body_return_line_e2e.rs`.
 
 - **A setter's `return` carries a line, as a declared `Unit` function's does.** A block-bodied
   setter falls off its closing `}`, which kotlinc marks on the `return`
@@ -22458,8 +22480,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   An unavailable dispatch rung reserves the constructor-prefix receiver coordinate without adding
   instance-property bindings, so enclosing receiver captures retain their checked identities.
   Tests: `tests/typealias_constructor_inference_e2e.rs` compares complete JVM ABI and runtime
-  behavior with kotlinc. Separate existing gaps in deferred-lambda capture transport and the exact
-  unavailable-member diagnostic retain their full controls in #2657 and #2658.
+  behavior with kotlinc. When no enclosing value or available receiver supplies the name, a
+  member of the unavailable instance reports `cannot access '<this>' before the instance has
+  been initialized.` at the property reference. The diagnostic probe uses the same declared
+  receiver identity that the usable tower excludes; it never records a property read or capture.
+  Inferred property types cannot bypass this receiver requirement through declaration demand.
+  Named and anonymous subclasses share this rule. Complete ordered diagnostic comparisons and
+  enclosing/local/top-level positive controls live in `tests/super_argument_outer_receiver_e2e.rs`.
+  Deferred-lambda capture transport remains separate in #2657.
   An anonymous object moves every super-constructor argument that is not a compile-time constant
   and not a lexical capture out to the construction site, stores it in a temporary, and forwards
   it as a constructor parameter that is not a field (`object : Base(n + 1)`, `object :
