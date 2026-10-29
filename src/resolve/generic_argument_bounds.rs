@@ -208,25 +208,33 @@ impl ArgumentContradictions {
                 (formal.clone(), uninferred)
             })
             .collect();
+        // kotlinc reports a rejected argument once, against its parameter with every formal the
+        // argument contradicts substituted or left uninferred.
         let mismatches = violations
-            .iter()
-            .filter_map(|violation| {
-                let (argument, parameter) = parameter_of(violation.argument)?;
-                let formal = &signature.formals[violation.formal];
-                let bare = parameter
-                    .non_null()
-                    .ty_param_name()
-                    .is_some_and(|name| name == formal);
-                let expected = if bare {
-                    parameter.rewrap_nullability(violation.expected)
-                } else if violation.uninferred {
-                    parameter
-                } else {
-                    let mut binding = GSigBinds::default();
-                    binding.insert(formal.clone(), violation.expected);
-                    crate::symbol_resolver::ty_subst_keep_unbound(parameter, &binding)
-                };
-                Some((argument, expected))
+            .chunk_by(|left, right| left.argument == right.argument)
+            .filter_map(|rejected| {
+                let (argument, parameter) = parameter_of(rejected[0].argument)?;
+                let bare = parameter.non_null().ty_param_name();
+                if let Some(violation) = rejected
+                    .iter()
+                    .find(|violation| bare == Some(signature.formals[violation.formal].as_str()))
+                {
+                    return Some((argument, parameter.rewrap_nullability(violation.expected)));
+                }
+                let mut binding = GSigBinds::default();
+                for violation in rejected.iter().filter(|violation| !violation.uninferred) {
+                    binding.insert(
+                        signature.formals[violation.formal].clone(),
+                        violation.expected,
+                    );
+                }
+                if binding.is_empty() {
+                    return Some((argument, parameter));
+                }
+                Some((
+                    argument,
+                    crate::symbol_resolver::ty_subst_keep_unbound(parameter, &binding),
+                ))
             })
             .collect();
         Some(Self {
