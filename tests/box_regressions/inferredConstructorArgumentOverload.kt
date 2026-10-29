@@ -1,7 +1,8 @@
 // A generic constructor call whose type arguments are inferred from its own value arguments has a
 // result fixed by those inputs, exactly like a generic function call. Passed to an overloaded
 // callee, `Cell("x")` is `Cell<String>` evidence: it selects `pick(Any?)` and never fits
-// `pick(Int)` or `pick(String)`. The library form is `inferredLibraryConstructorArgumentOverload.kt`.
+// `pick(Int)` or `pick(String)`. The library form is
+// `tests/inferred_constructor_argument_overload_e2e.rs`.
 class Cell<T>(val value: T)
 
 class Labeled<K, V>(val key: K, val value: V)

@@ -489,20 +489,16 @@ impl Checker<'_> {
 /// tell which classifier formals the call's own value arguments determine, so a constructor's
 /// result template is input-constrained exactly when a function's would be.
 fn constructor_parameter_shapes(constructor: &ResolvedConstructor) -> &[Ty] {
-    let member = match constructor {
+    match constructor {
         ResolvedConstructor::Source {
             declaration_params, ..
-        } => return declaration_params,
+        } => declaration_params,
         ResolvedConstructor::Plain { member, .. }
-        | ResolvedConstructor::PlainSlots { member, .. } => member,
-        ResolvedConstructor::Synthetic { ctor, .. } => &ctor.declaration,
-    };
-    member
-        .generic_sig
-        .as_ref()
-        .map(|signature| signature.params.as_slice())
-        .or(member.declared_params.as_deref())
-        .unwrap_or_default()
+        | ResolvedConstructor::PlainSlots { member, .. } => member.constructor_declaration_params(),
+        ResolvedConstructor::Synthetic { ctor, .. } => {
+            ctor.declaration.constructor_declaration_params()
+        }
+    }
 }
 
 #[cfg(test)]

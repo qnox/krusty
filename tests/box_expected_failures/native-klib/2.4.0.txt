@@ -2461,7 +2461,6 @@ reflection/types/useSiteVariance.kt
 regressions/collectionSizeOrDefault.kt
 regressions/floatingRangeContainsMixedWidths.kt
 regressions/generic.kt
-regressions/inferredLibraryConstructorArgumentOverload.kt
 regressions/kt10143.kt
 regressions/kt15196.kt
 regressions/kt1779.kt
