@@ -72,3 +72,68 @@ fun use(b: B): String = b + 1\n";
         control
     );
 }
+
+#[test]
+fn an_inapplicable_index_extension_leaves_the_hidden_get_an_access_error() {
+    const SRC: &str = "open class B { protected operator fun get(i: Int): String = \"g\" }\n\
+operator fun B.get(i: String): String = i\n\
+fun bad(b: B) = b[0]\n";
+    let sources = [("Main.kt", SRC)];
+    let reference_args = common::language_directives::kotlinc_args(SRC);
+    assert_eq!(
+        common::reference_error_blocks(&sources, &reference_args),
+        ["Main.kt:3:17: cannot access 'fun get(i: Int): String': it is protected in 'B'."]
+    );
+    common::assert_error_blocks_match_kotlinc(&sources, &reference_args);
+}
+
+#[test]
+fn a_wrong_arity_extension_leaves_the_hidden_member_an_access_error() {
+    const SRC: &str = "open class B { protected fun f(i: Int): String = \"f\" }\n\
+fun B.f(i: Int, j: Int): String = \"e\"\n\
+fun arity(b: B) = b.f(1)\n";
+    let sources = [("Main.kt", SRC)];
+    let reference_args = common::language_directives::kotlinc_args(SRC);
+    assert_eq!(
+        common::reference_error_blocks(&sources, &reference_args),
+        ["Main.kt:3:21: cannot access 'fun f(i: Int): String': it is protected in 'B'."]
+    );
+    common::assert_error_blocks_match_kotlinc(&sources, &reference_args);
+}
+
+#[test]
+fn a_reference_names_the_visible_extension_whatever_the_expected_shape() {
+    const SRC: &str = "open class B { protected fun f(i: Int): String = \"f\" }\n\
+fun B.f(i: Int, j: Int): String = \"e\"\n\
+val ref: (B, Int) -> String = B::f\n";
+    const WITHOUT_MEMBER: &str = "open class B\n\
+fun B.f(i: Int, j: Int): String = \"e\"\n\
+val ref: (B, Int) -> String = B::f\n";
+    let sources = [("Main.kt", SRC)];
+    let reference_args = common::language_directives::kotlinc_args(SRC);
+    // kotlinc resolves `B::f` to the extension even though its shape does not fit, so the
+    // diagnostic is the extension's type mismatch rather than the member's visibility.
+    assert_eq!(
+        common::reference_error_blocks(&sources, &reference_args),
+        [
+            "Main.kt:3:29: initializer type mismatch: expected '(B, Int) -> String', actual 'KFunction3<B, Int, Int, String>'."
+        ]
+    );
+    assert_eq!(
+        common::reference_error_blocks(&[("Main.kt", WITHOUT_MEMBER)], &reference_args),
+        common::reference_error_blocks(&sources, &reference_args)
+    );
+    // krusty reports a reference shape mismatch as an unresolved reference (a separate gap), and
+    // the hidden member does not change that report.
+    let control =
+        common::krusty_error_blocks_with_args(&[("Main.kt", WITHOUT_MEMBER)], &reference_args);
+    assert_ne!(
+        control,
+        Vec::<String>::new(),
+        "the shape mismatch must be rejected"
+    );
+    assert_eq!(
+        common::krusty_error_blocks_with_args(&sources, &reference_args),
+        control
+    );
+}

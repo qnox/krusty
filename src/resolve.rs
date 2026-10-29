@@ -53777,6 +53777,11 @@ impl<'a> Checker<'a> {
                             .to_vec(),
                     })
                 };
+                if let ResolvedCall::Member(member) = &target {
+                    if self.reject_inaccessible_selected_member(self.span(e), member) {
+                        return self.set(e, Ty::Error);
+                    }
+                }
                 self.mark_source_call(e, selected.source_key);
                 self.resolved_calls.insert(e, target);
                 return self.set(e, ret);
@@ -59732,26 +59737,8 @@ impl<'a> Checker<'a> {
         args: &[ExprId],
         mut selected: crate::symbol_resolver::ResolvedMember,
     ) -> Option<Ty> {
-        let owner = selected.member.owner?;
-        if !self.selected_member_accessible(&selected, owner)
-            && !self.suppresses_diagnostic("INVISIBLE_REFERENCE")
-        {
-            let visibility = match selected.member.visibility {
-                Visibility::Private => "private",
-                Visibility::Internal => "internal",
-                Visibility::PackagePrivate => "package-private",
-                Visibility::Protected => "protected",
-                Visibility::Public => "public",
-            };
-            let source = self.fed_source();
-            let message = access_control::member_callable_message(
-                &source,
-                self.resolved_index,
-                &selected.member,
-                owner,
-                visibility,
-            );
-            self.diags.error(self.call_callee_name_span(call), message);
+        selected.member.owner?;
+        if self.reject_inaccessible_selected_member(self.call_callee_name_span(call), &selected) {
             return Some(Ty::Error);
         }
         self.check_data_class_copy_usage(self.call_callee_name_span(call), &selected.member);

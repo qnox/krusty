@@ -436,6 +436,44 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Report a selected member the site cannot see with kotlinc's complete declaration message
+    /// (`cannot access 'fun get(i: Int): String': it is protected in 'B'.`). Returns whether the
+    /// member was rejected.
+    pub(super) fn reject_inaccessible_selected_member(
+        &mut self,
+        span: Span,
+        selected: &crate::symbol_resolver::ResolvedMember,
+    ) -> bool {
+        let Some(owner) = selected.member.owner else {
+            return false;
+        };
+        if self.receiver_callable_accessible(
+            selected.member.visibility,
+            owner,
+            selected.receiver,
+            selected.member.external_identity,
+        ) || self.suppresses_diagnostic("INVISIBLE_REFERENCE")
+        {
+            return false;
+        }
+        let visibility = match selected.member.visibility {
+            Visibility::Private => "private",
+            Visibility::Internal => "internal",
+            Visibility::PackagePrivate => "package-private",
+            Visibility::Protected => "protected",
+            Visibility::Public => "public",
+        };
+        let message = member_callable_message(
+            &self.fed_source(),
+            self.resolved_index,
+            &selected.member,
+            owner,
+            visibility,
+        );
+        self.diags.error(span, message);
+        true
+    }
+
     /// Emit an access rejection for one already-selected semantic function declaration.
     pub(super) fn reject_function_if_inaccessible(
         &mut self,

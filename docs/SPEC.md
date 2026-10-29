@@ -6,8 +6,11 @@ A private, protected, or package-private member the call site cannot see does no
 applicable extension with the same name. kotlinc ranks the invisible member below every visible
 candidate, so `c.clone()` with `fun Col.clone()` in scope calls the extension instead of the
 protected `Object.clone`. This holds for plain, safe, implicit-receiver, operator, and
-callable-reference uses. With no applicable extension the member stays selected and a call reports
-its visibility. Tests: `box_regressions/hiddenMemberYieldsToExtension.kt` and
+callable-reference uses. An extension of the same name that does not apply to the arguments
+(`b[0]` against `B.get(String)`, or the wrong arity) leaves the member selected, and the call
+reports its visibility, an indexed `get` included. A callable reference names the visible
+extension whatever the expected shape, as kotlinc does, so a misfit is the extension's type
+mismatch. Tests: `box_regressions/hiddenMemberYieldsToExtension.kt` and
 `hidden_member_extension_e2e`.
 
 ## Nullable formal bounds in inference
