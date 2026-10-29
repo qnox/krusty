@@ -1146,6 +1146,64 @@ pub(crate) fn formal_variance_in_type(
     }
 }
 
+/// Whether every occurrence of `formal` in `shape` sits on an invariant path, so an argument at
+/// this parameter fixes the formal exactly. [`formal_variance_in_type`] also answers `Invariant`
+/// for mixed occurrences such as `(T) -> T`, which keep independent lower and upper bounds.
+pub(crate) fn formal_fixed_exactly_by(source: &dyn SymbolSource, shape: Ty, formal: &str) -> bool {
+    use crate::types::TypeVariance;
+
+    fn occurrences(
+        source: &dyn SymbolSource,
+        shape: Ty,
+        formal: &str,
+        invariant_path: bool,
+        found: &mut Vec<bool>,
+    ) {
+        if matches!(shape.non_null().kind(), TyKind::TyParam(name, _) if name == formal) {
+            found.push(invariant_path);
+            return;
+        }
+        match shape.non_null().kind() {
+            TyKind::InProjection(inner) | TyKind::OutProjection(inner) => {
+                occurrences(source, inner, formal, invariant_path, found)
+            }
+            TyKind::Obj(owner, arguments) => {
+                let classifier = source.classifier(owner);
+                for (index, argument) in arguments.iter().enumerate() {
+                    let invariant = !matches!(
+                        argument.kind(),
+                        TyKind::InProjection(_)
+                            | TyKind::OutProjection(_)
+                            | TyKind::StarProjection(_)
+                    ) && classifier
+                        .as_ref()
+                        .and_then(|classifier| classifier.type_param_variances.get(index).copied())
+                        .unwrap_or(TypeVariance::Invariant)
+                        == TypeVariance::Invariant;
+                    occurrences(
+                        source,
+                        *argument,
+                        formal,
+                        invariant_path || invariant,
+                        found,
+                    );
+                }
+            }
+            TyKind::Fun(function) => {
+                for parameter in &function.params {
+                    occurrences(source, *parameter, formal, invariant_path, found);
+                }
+                occurrences(source, function.ret, formal, invariant_path, found);
+            }
+            _ => {}
+        }
+    }
+
+    let mut found = Vec::new();
+    occurrences(source, shape, formal, false, &mut found);
+    !found.is_empty() && found.iter().all(|invariant| *invariant)
+}
+
 pub(super) fn unify_inferred_ty_impl(
     source: Option<&dyn SymbolSource>,
     sig: Ty,

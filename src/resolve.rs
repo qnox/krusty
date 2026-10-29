@@ -39853,11 +39853,13 @@ impl<'a> Checker<'a> {
                             (source, parameter + context_count, actual, whole_array)
                         })
                         .collect::<Vec<_>>();
-                    argument_contradiction = self.bare_formal_argument_contradiction(
+                    argument_contradiction = self.argument_contradictions(
                         signature,
                         &actuals,
                         &explicit_type_args,
                         candidate.call_sig.vararg_index,
+                        args,
+                        Self::generic_callable_header(name, candidate),
                     );
                     let inferred = crate::symbol_resolver::infer_generic_call_bindings_from_symbols(
                         &source,
@@ -39967,7 +39969,7 @@ impl<'a> Checker<'a> {
                                 explicit_type_args: &explicit_type_args,
                                 signature,
                                 bindings,
-                                contradiction: argument_contradiction,
+                                contradictions: argument_contradiction.take(),
                             },
                         ) {
                             return true;
