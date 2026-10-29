@@ -8,9 +8,11 @@ candidate, so `c.clone()` with `fun Col.clone()` in scope calls the extension in
 protected `Object.clone`. This holds for plain, safe, implicit-receiver, operator, and
 callable-reference uses. An extension of the same name that does not apply to the arguments
 (`b[0]` against `B.get(String)`, or the wrong arity) leaves the member selected, and the call
-reports its visibility, an indexed `get` included. A callable reference names the visible
-extension whatever the expected shape, as kotlinc does, so a misfit is the extension's type
-mismatch. Tests: `box_regressions/hiddenMemberYieldsToExtension.kt` and
+reports its visibility, an indexed `get` included. An applicable but ambiguous family of visible
+extensions still takes the call, so `b + Both()` reports the extensions' ambiguity rather than the
+member's visibility. A binary operator reports either diagnostic at its operator token, with
+kotlinc's complete declaration rendering. A callable reference `B::f` names the visible extension.
+Tests: `box_regressions/hiddenMemberYieldsToExtension.kt` and
 `hidden_member_extension_e2e`.
 
 ## Nullable formal bounds in inference

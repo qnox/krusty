@@ -49,28 +49,35 @@ fn an_inapplicable_extension_leaves_the_hidden_operator_member_an_access_error()
     const SRC: &str = "class B { private operator fun plus(x: Int): String = \"m\" }\n\
 fun use(b: B): String = b + 1\n\
 operator fun B.plus(x: String): String = x\n";
-    const WITHOUT_EXTENSION: &str =
-        "class B { private operator fun plus(x: Int): String = \"m\" }\n\
-fun use(b: B): String = b + 1\n";
     let sources = [("Main.kt", SRC)];
     let reference_args = common::language_directives::kotlinc_args(SRC);
     assert_eq!(
         common::reference_error_blocks(&sources, &reference_args),
         ["Main.kt:2:27: cannot access 'fun plus(x: Int): String': it is private in 'B'."]
     );
-    // The extension does not apply, so the call reports the hidden member exactly as it does
-    // with no extension at all. (Operator access diagnostics themselves are a separate gap.)
-    let control =
-        common::krusty_error_blocks_with_args(&[("Main.kt", WITHOUT_EXTENSION)], &reference_args);
-    assert_ne!(
-        control,
-        Vec::<String>::new(),
-        "the hidden member must be rejected"
-    );
+    common::assert_error_blocks_match_kotlinc(&sources, &reference_args);
+}
+
+#[test]
+fn an_ambiguous_visible_extension_family_hides_the_member() {
+    const SRC: &str = "interface X\n\
+interface Y\n\
+class Both : X, Y\n\
+open class B { protected operator fun plus(b: Both): String = \"m\" }\n\
+operator fun B.plus(x: X): String = \"x\"\n\
+operator fun B.plus(y: Y): String = \"y\"\n\
+fun use(b: B) = b + Both()\n";
+    let sources = [("Main.kt", SRC)];
+    let reference_args = common::language_directives::kotlinc_args(SRC);
     assert_eq!(
-        common::krusty_error_blocks_with_args(&sources, &reference_args),
-        control
+        common::reference_error_blocks(&sources, &reference_args),
+        [
+            "Main.kt:7:19: overload resolution ambiguity between candidates:",
+            "| fun B.plus(x: X): String",
+            "| fun B.plus(y: Y): String",
+        ]
     );
+    common::assert_error_blocks_match_kotlinc(&sources, &reference_args);
 }
 
 #[test]
@@ -102,38 +109,12 @@ fun arity(b: B) = b.f(1)\n";
 }
 
 #[test]
-fn a_reference_names_the_visible_extension_whatever_the_expected_shape() {
-    const SRC: &str = "open class B { protected fun f(i: Int): String = \"f\" }\n\
-fun B.f(i: Int, j: Int): String = \"e\"\n\
-val ref: (B, Int) -> String = B::f\n";
-    const WITHOUT_MEMBER: &str = "open class B\n\
-fun B.f(i: Int, j: Int): String = \"e\"\n\
-val ref: (B, Int) -> String = B::f\n";
-    let sources = [("Main.kt", SRC)];
-    let reference_args = common::language_directives::kotlinc_args(SRC);
-    // kotlinc resolves `B::f` to the extension even though its shape does not fit, so the
-    // diagnostic is the extension's type mismatch rather than the member's visibility.
-    assert_eq!(
-        common::reference_error_blocks(&sources, &reference_args),
-        [
-            "Main.kt:3:29: initializer type mismatch: expected '(B, Int) -> String', actual 'KFunction3<B, Int, Int, String>'."
-        ]
-    );
-    assert_eq!(
-        common::reference_error_blocks(&[("Main.kt", WITHOUT_MEMBER)], &reference_args),
-        common::reference_error_blocks(&sources, &reference_args)
-    );
-    // krusty reports a reference shape mismatch as an unresolved reference (a separate gap), and
-    // the hidden member does not change that report.
-    let control =
-        common::krusty_error_blocks_with_args(&[("Main.kt", WITHOUT_MEMBER)], &reference_args);
-    assert_ne!(
-        control,
-        Vec::<String>::new(),
-        "the shape mismatch must be rejected"
-    );
-    assert_eq!(
-        common::krusty_error_blocks_with_args(&sources, &reference_args),
-        control
-    );
+fn a_reference_names_the_visible_extension_over_the_hidden_member() {
+    // kotlinc selects the visible extension for `B::f`, not the protected member, so the
+    // reference has the extension's shape and calls it.
+    const MAIN: &str = "open class B { protected fun f(i: Int): String = \"m\" }\n\
+fun B.f(i: Int, j: Int): String = \"O\" + (i + j)\n\
+val ref: (B, Int, Int) -> String = B::f\n\
+fun box(): String = if (ref(B(), 1, 1) == \"O2\") \"OK\" else ref(B(), 1, 1)\n";
+    common::expect_box_same_as_kotlinc(MAIN, "HiddenMemberReference");
 }

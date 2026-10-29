@@ -31232,6 +31232,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         resolved_stmt_builtin_operator_accesses: HashMap::default(),
         resolved_stmt_operator_arg_slots: HashMap::default(),
         indexed_operator_ambiguous: false,
+        binary_operator_reported: false,
         resolved_inc_dec: HashMap::default(),
         resolved_index_store_get_returns: HashMap::default(),
         resolved_destructure_components: HashMap::default(),
@@ -33822,6 +33823,8 @@ struct Checker<'a> {
     resolved_stmt_operator_arg_slots: HashMap<(StmtId, SyntheticOperatorCall), Vec<Option<ExprId>>>,
     /// Set by indexed operator selection so assignment never retries `put` after an ambiguous `set`.
     indexed_operator_ambiguous: bool,
+    /// Set when binary operator selection already reported its access or ambiguity diagnostic.
+    binary_operator_reported: bool,
     resolved_inc_dec: HashMap<IncDecSite, ResolvedIncDec>,
     resolved_index_store_get_returns: HashMap<StmtId, Ty>,
     resolved_destructure_components: HashMap<(StmtId, usize), DestructureComponentTarget>,

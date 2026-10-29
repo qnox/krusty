@@ -254,7 +254,8 @@ impl<'a> Checker<'a> {
 
     /// Drop the hidden members of `receiver` only when one of the visible extensions applies to
     /// this operator call. An extension of the same name that does not apply (`b + 1` against
-    /// `B.plus(String)`) leaves the hidden member to report its visibility.
+    /// `B.plus(String)`) leaves the hidden member to report its visibility; an applicable but
+    /// ambiguous extension family still takes the call, so the ambiguity is what is reported.
     pub(super) fn drop_members_hidden_by_applicable_extensions(
         &self,
         receiver: Ty,
@@ -274,10 +275,18 @@ impl<'a> Checker<'a> {
         });
         let resolver = self.resolver();
         let applies = match call {
-            OperatorCallShape::Call { name, args } => resolver
-                .select_receiver_function_with_params(receiver, name, args, &[], &extensions)
-                .is_some(),
-            OperatorCallShape::IndexedGet { args } => matches!(
+            OperatorCallShape::Call { name, args } => !matches!(
+                resolver.select_receiver_function_with_params_tracking(
+                    receiver,
+                    name,
+                    args,
+                    &[],
+                    &extensions,
+                    None,
+                ),
+                crate::symbol_resolver::CandidateSelection::None
+            ),
+            OperatorCallShape::IndexedGet { args } => !matches!(
                 resolver.select_receiver_indexed_get_function_with_params(
                     receiver,
                     "get",
@@ -285,9 +294,9 @@ impl<'a> Checker<'a> {
                     &[],
                     &extensions,
                 ),
-                crate::symbol_resolver::CandidateSelection::Selected(_)
+                crate::symbol_resolver::CandidateSelection::None
             ),
-            OperatorCallShape::IndexedSet { args } => matches!(
+            OperatorCallShape::IndexedSet { args } => !matches!(
                 resolver.select_receiver_indexed_set_function_with_params(
                     receiver,
                     "set",
@@ -295,7 +304,7 @@ impl<'a> Checker<'a> {
                     &[],
                     &extensions,
                 ),
-                crate::symbol_resolver::CandidateSelection::Selected(_)
+                crate::symbol_resolver::CandidateSelection::None
             ),
         };
         if applies {

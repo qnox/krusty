@@ -157,14 +157,19 @@ impl<'a> Checker<'a> {
     ) -> Option<Ty> {
         let key = SyntheticOperatorCall::from_name(name)
             .expect("a binary operator expression names a synthetic operator");
-        let (ret, call) = self.operator_expression_call_ret(
+        self.binary_operator_reported = false;
+        let Some((ret, call)) = self.operator_expression_call_ret(
             scope,
             expression,
             receiver,
             name,
             operand,
             expected_result,
-        )?;
+        ) else {
+            // An inaccessible or ambiguous selection already carries kotlinc's diagnostic; the
+            // expression must not add a second "operator cannot be applied" for it.
+            return std::mem::take(&mut self.binary_operator_reported).then_some(Ty::Error);
+        };
         if let Expr::Binary { lhs, .. } = self.file.expr(expression) {
             self.narrow_operator_receiver(*lhs, &call);
         }
@@ -552,6 +557,14 @@ impl<'a> Checker<'a> {
             expected_result,
         ) {
             crate::symbol_resolver::ReceiverFunctionSelection::Selected(selected) => selected,
+            crate::symbol_resolver::ReceiverFunctionSelection::Ambiguous(candidates)
+                if matches!(self.file.expr(site), Expr::Binary { .. }) =>
+            {
+                drop(resolver);
+                self.report_callable_ambiguity(site, name, &candidates);
+                self.binary_operator_reported = true;
+                return None;
+            }
             crate::symbol_resolver::ReceiverFunctionSelection::None
             | crate::symbol_resolver::ReceiverFunctionSelection::Ambiguous(_) => return None,
         };
@@ -570,6 +583,17 @@ impl<'a> Checker<'a> {
             );
             return None;
         };
+        if selected.kind == crate::libraries::FnKind::Member
+            && matches!(self.file.expr(site), Expr::Binary { .. })
+            && self.reject_function_if_inaccessible(
+                &selected,
+                selected.callable.owner,
+                self.call_callee_name_span(site),
+            )
+        {
+            self.binary_operator_reported = true;
+            return None;
+        }
         if selected.kind == crate::libraries::FnKind::Member
             && !self.callable_accessible(
                 selected.visibility,
