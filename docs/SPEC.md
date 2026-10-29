@@ -1,5 +1,14 @@
 # krusty — a memory-lean Kotlin→JVM compiler PoC
 
+## Native callable-reference identity at module exports
+
+A reference created by a source module and a reference selected through that module's KLIB export
+compare equal and hash alike. Native export records retain the source declaration's marker key
+independently of the emitted call-entry alias. Authenticated KLIB declarations retain their complete
+module-qualified signature for identity; provider-local callable numbers never become global keys.
+The shared conformance target checks the identical module graph with JVM and Native reference
+compilers before requiring Native identity, hash and different-declaration agreement.
+
 ## Nullable formal bounds in inference
 
 A declared bound `S : T?` admits null itself, so a lower bound `X` of `S` contributes only
@@ -22456,6 +22465,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `tests/context_parameters_e2e.rs::ordinary_delegate_operator_beats_a_nearer_context_receiver`.
   Corpus: `contextParameters/sameExtensionContextAndDispatchReceiver.kt`.
 
+- **A member extension that rejects an explicit-receiver call gives way to an applicable top-level
+  extension.** In `with(Builder()) { items.appendTo(this, prefix = "SET ") { ... } }`, the
+  implicit receiver's member extension `List<T>.appendTo(separator: String, ...)` maps `this` to
+  `separator` and rejects it, while the top-level `List<T>.appendTo(builder: Builder, ...)` accepts
+  the call. kotlinc selects the top-level extension: an inapplicable tower level does not end
+  resolution. Krusty reported the member extension's argument mismatch instead. The member
+  extension's rejection is still the diagnostic when the receiver's top-level extensions have no
+  applicable candidate, for example when the only one is declared on `Set<T>`.
+  Tests: `tests/box_regressions/memberExtensionRejectionYieldsToTopLevel.kt` (a portable
+  `String.tag` control) and `tests/resolver_regression_e2e.rs`
+  (`a_rejected_member_extension_gives_way_to_a_top_level_builder_extension` with the builder
+  shape and kotlinc's classes, and
+  `a_rejected_member_extension_without_an_applicable_top_level_extension_reports_its_mismatch`).
+
 - **A super-constructor argument's captures come from the constructor's synthetic prefix
   parameters, however deeply the argument nests them.** A local class lifts each captured local
   into a constructor prefix parameter and stores it into a field, but the super-constructor call
@@ -23113,3 +23136,16 @@ Forwarding preserves declared extension/context receiver identity across the una
 header rung, including nested receiver lambdas and mixed forwarded/constructor-resident closures.
 A receiver used only by a forwarded argument adds no anonymous-class storage. A receiver also read
 by a class-body method still has the ordinary capture field; both uses preserve the original value.
+
+## Runtime-owned dependency getter leaves
+
+An ordinary serialized KLIB body may read a property through a getter the target implements.
+The provider retains the exact property identity, declared accessor role and normalized property
+name. Preparation and linking authenticate the accessor's class/property group, complete receiver
+signature and own-formal application, parameters and declared result. A positive target capability
+stops traversal of that getter's serialized body; retained exports and existing primitive/intrinsic
+decisions retain priority. Native reuses its existing runtime accessor tables, and common lowering
+publishes the checked property read with its applied result and source receiver separately from
+the declared ABI. No dependency class layout is materialized for this operation. Owning tests:
+`klib_lowering::tests::accessor_calls` and the official-producer runtime accessor programs in
+`klib_closure_frames_e2e`. Compiler-introduced dependency blocks remain tracked in #2811.
