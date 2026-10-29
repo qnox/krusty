@@ -38,12 +38,43 @@ pub(super) struct RestartableFunction {
     pub(super) opening_line: u32,
     /// The 1-based line of the body's closing brace, where the group ends.
     pub(super) closing_line: u32,
+    /// The function's value parameters, which its `$changed` bits track slot by slot.
+    pub(super) parameters: Vec<TrackedParameter>,
     /// The function's direct composable calls, in source order.
-    pub(super) calls: Vec<ExprId>,
+    pub(super) calls: Vec<ComposableCallSite>,
     /// The lifting sequence the function's recompose lambda is numbered in, and the function's
     /// source order among the file's declarations.
     pub(super) lifting: (crate::ir::IrLiftingSequence, u32),
 }
+
+/// One value parameter of a restartable function.
+pub(super) struct TrackedParameter {
+    pub(super) name: String,
+    pub(super) ty: Ty,
+    /// Whether the body reads it, which is when the function compares it to decide on skipping.
+    pub(super) used: bool,
+}
+
+/// A composable call directly in a restartable body, and what the caller knows about each argument
+/// it passes, which becomes the call's `$changed` bits.
+pub(super) struct ComposableCallSite {
+    pub(super) call: ExprId,
+    pub(super) arguments: Vec<ArgumentState>,
+}
+
+/// What kotlinc's `argumentMetaOf` finds about one argument of a composable call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ArgumentState {
+    /// A constant, the same in every execution.
+    Static,
+    /// The caller's own parameter in this slot, whose state the caller's `$dirty` holds.
+    Forwarded(u32),
+    /// Anything else the caller computes, which the callee compares itself.
+    Uncertain,
+}
+
+/// The most value parameters one `$changed` int tracks; a function with more takes several.
+const SLOTS_PER_INT: usize = 10;
 
 /// Why a construct is outside what krusty's Compose pass compiles yet.
 fn unsupported(what: &str) -> String {
@@ -85,6 +116,9 @@ pub(super) fn record(
     };
     let mut functions = Vec::new();
     let mut handled = crate::fx_hash::HashSet::default();
+    // Every call directly in a restartable body, a rejected one included, which needs no second
+    // rejection as a stray call.
+    let mut direct_calls = crate::fx_hash::HashSet::default();
     for declaration in &ir.package_functions {
         if !composable_functions.contains(&declaration.function) {
             continue;
@@ -93,6 +127,15 @@ pub(super) fn record(
         let span = declaration.signature_span;
         if let Some(what) = unsupported_group_annotation(ir, declaration.function)
             .or_else(|| unsupported_declaration(declaration))
+            .or_else(|| {
+                (options.source_information
+                    && !declaration.params.is_empty()
+                    && !runtime.declares_classifier(crate::types::type_name(SOURCE_INFORMATION)))
+                .then_some(
+                    "the source information of a composable function with parameters for a \
+                     runtime that predates parameter names in it",
+                )
+            })
         {
             rejections.push(PluginRejection {
                 span,
@@ -143,6 +186,9 @@ pub(super) fn record(
             .copied()
             .filter(|statement| calls.contains_key(statement))
             .collect::<Vec<_>>();
+        direct_calls.extend(direct.iter().copied());
+        let parameter_count = declaration.params.len() as u32;
+        let mut sites = Vec::with_capacity(direct.len());
         let mut locations = Vec::with_capacity(direct.len());
         for &call in &direct {
             if !calls[&call].same_file {
@@ -159,6 +205,24 @@ pub(super) fn record(
                 });
                 continue;
             };
+            let IrExpr::Call { args, .. } = &ir.exprs[call as usize] else {
+                unreachable!("a composable call is a call");
+            };
+            let arguments = args
+                .iter()
+                .map(|&argument| argument_state(ir, argument, parameter_count))
+                .collect::<Option<Vec<_>>>();
+            let Some(arguments) = arguments else {
+                rejections.push(PluginRejection {
+                    span: call_span,
+                    message: unsupported(
+                        "a composable call argument that is not a constant, a parameter, or \
+                         computed from a parameter",
+                    ),
+                });
+                continue;
+            };
+            sites.push(ComposableCallSite { call, arguments });
             let start = positions.unit(call_span.lo);
             let end = positions.unit(call_span.hi);
             locations.push(format!(
@@ -177,7 +241,40 @@ pub(super) fn record(
         } else {
             format!("{package}.{name}")
         };
-        let signature = format!("{name}(){}", simple_type_name(declaration.ret));
+        let used = used_parameters(ir, body.block, parameter_count);
+        let parameters = declaration
+            .params
+            .iter()
+            .zip(used)
+            .map(|((name, ty), used)| TrackedParameter {
+                name: name.clone(),
+                ty: *ty,
+                used,
+            })
+            .collect::<Vec<_>>();
+        let signature = format!(
+            "{name}({}){}",
+            parameters
+                .iter()
+                .map(|parameter| simple_type_name(parameter.ty))
+                .collect::<Vec<_>>()
+                .join(","),
+            simple_type_name(declaration.ret)
+        );
+        // `parameterNameInformation`: the source parameters' names, which the runtime's tooling
+        // maps the tracked slots back to.
+        let names = if parameters.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "N({})",
+                parameters
+                    .iter()
+                    .map(|parameter| parameter.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
+        };
         functions.push(RestartableFunction {
             function: declaration.function,
             key: KeyPath {
@@ -192,7 +289,7 @@ pub(super) fn record(
             ),
             source_information: options
                 .source_information
-                .then(|| format!("C({name}){}:{file_reference}", locations.join(","))),
+                .then(|| format!("C({name}){names}{}:{file_reference}", locations.join(","))),
             trace: options.trace_markers.then(|| {
                 format!(
                     "{qualified} ({}:{})",
@@ -203,7 +300,8 @@ pub(super) fn record(
             key_meta: options.function_key_meta,
             opening_line: positions.line(body_span.lo) + 1,
             closing_line: positions.line(body_span.hi.saturating_sub(1)) + 1,
-            calls: direct,
+            parameters,
+            calls: sites,
             lifting: (lifting, declaration.source_order),
         });
     }
@@ -224,13 +322,9 @@ pub(super) fn record(
     }
     // A composable call anywhere but directly in a restartable body needs a group of its own
     // (a branch, a loop, a lambda) or is kotlinc's own error (a non-composable caller).
-    let direct = functions
-        .iter()
-        .flat_map(|function| function.calls.iter().copied())
-        .collect::<crate::fx_hash::HashSet<_>>();
     let mut stray = calls
         .iter()
-        .filter(|(call, _)| !direct.contains(call))
+        .filter(|(call, _)| !direct_calls.contains(call))
         .map(|(_, call)| call.span.unwrap_or(crate::diag::Span::new(0, 0)))
         .collect::<Vec<_>>();
     stray.sort_by_key(|span| (span.lo, span.hi));
@@ -340,10 +434,26 @@ fn unsupported_group_annotation(ir: &IrFile, function: FunId) -> Option<&'static
     })
 }
 
+/// The runtime class whose presence tells kotlinc's plugin that source information may name
+/// parameters (`ComposeRuntimeFeature.SourceInfoParameterNames`).
+const SOURCE_INFORMATION: &str = "androidx/compose/runtime/tooling/SourceInformation";
+
 /// The declaration shapes the restart-group transform does not handle yet.
 fn unsupported_declaration(declaration: &crate::ir::IrPackageFunction) -> Option<&'static str> {
-    if !declaration.params.is_empty() || declaration.receiver.is_some() {
-        Some("a composable function with parameters")
+    if declaration.receiver.is_some() || declaration.context_count != 0 {
+        Some("a composable function with a receiver")
+    } else if declaration.param_defaults.iter().any(|&default| default) {
+        Some("a composable function with a default argument")
+    } else if declaration.vararg_index.is_some() {
+        Some("a composable function with a vararg parameter")
+    } else if declaration.params.len() > SLOTS_PER_INT {
+        Some("a composable function with more than ten parameters")
+    } else if declaration
+        .params
+        .iter()
+        .any(|(_, ty)| !is_known_stable(*ty))
+    {
+        Some("a composable function parameter whose stability kotlinc infers")
     } else if !matches!(declaration.ret.kind(), TyKind::Unit) {
         Some("a composable function with a result")
     } else if declaration.inline {
@@ -369,6 +479,60 @@ fn unsupported_body_expression(ir: &IrFile, block: ExprId) -> Option<&'static st
         }
     }
     None
+}
+
+/// The parameter types the stability inferencer knows are stable without looking further: the
+/// primitives and `String`.
+fn is_known_stable(ty: Ty) -> bool {
+    ty == Ty::String || super::runtime::PRIMITIVES.contains(&ty)
+}
+
+/// Which of the first `count` values — the function's parameters — `block` reads.
+fn used_parameters(ir: &IrFile, block: ExprId, count: u32) -> Vec<bool> {
+    let mut used = vec![false; count as usize];
+    let mut pending = vec![block];
+    while let Some(expression) = pending.pop() {
+        if let IrExpr::GetValue(index) = ir.exprs[expression as usize] {
+            if index < count {
+                used[index as usize] = true;
+            }
+        }
+        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+    }
+    used
+}
+
+/// kotlinc's `argumentMetaOf` for an argument of a call in a function with `parameters` value
+/// parameters, or `None` when its answer depends on more than krusty classifies yet.
+fn argument_state(ir: &IrFile, argument: ExprId, parameters: u32) -> Option<ArgumentState> {
+    match ir.exprs[argument as usize] {
+        IrExpr::Const(_) => Some(ArgumentState::Static),
+        IrExpr::GetValue(index) if index < parameters => Some(ArgumentState::Forwarded(index)),
+        _ => reads_parameter(ir, argument, parameters).then_some(ArgumentState::Uncertain),
+    }
+}
+
+/// Whether `expression` is an operation over a value parameter. `isStatic` asks every operand of
+/// a call, an operator or a conversion to be static, and a parameter never is, so such an
+/// expression is never static whatever the operation.
+fn reads_parameter(ir: &IrFile, expression: ExprId, parameters: u32) -> bool {
+    match &ir.exprs[expression as usize] {
+        IrExpr::GetValue(index) => *index < parameters,
+        IrExpr::Call { .. }
+        | IrExpr::MethodCall { .. }
+        | IrExpr::PrimitiveBinOp { .. }
+        | IrExpr::PrimitiveNeg { .. }
+        | IrExpr::Equality { .. }
+        | IrExpr::StringConcat(_)
+        | IrExpr::TypeOp { .. } => {
+            let mut reads = false;
+            crate::ir::for_each_child(&ir.exprs, expression, &mut |child| {
+                reads |= reads_parameter(ir, child, parameters);
+            });
+            reads
+        }
+        _ => false,
+    }
 }
 
 /// A function's source block and its statements, the value-less last expression included.
