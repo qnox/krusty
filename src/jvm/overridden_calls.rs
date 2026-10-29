@@ -64,22 +64,25 @@ fn function_candidates(
                     ));
                 }
             }
-            ResolvedFunctionOverrideTarget::Module(_) => {
-                for edge in ir
-                    .function_overrides
-                    .values()
-                    .flatten()
-                    .filter(|edge| edge.implementation == current)
-                {
-                    pending.push(edge.overridden);
-                    // A module edge records any extension receiver among its parameters, so the policy
-                    // signature never matches one.
+            // The module declaration's record lists everything it overrides, through other module
+            // overrides, wherever in the module either is declared.
+            ResolvedFunctionOverrideTarget::Module(target) => {
+                let overridden = ir
+                    .referenced_module_callables
+                    .get(&target)
+                    .map_or(&[][..], |callable| &callable.overridden_declarations);
+                for declaration in overridden {
+                    if let ResolvedFunctionOverrideTarget::External(_) = declaration.target {
+                        pending.push(declaration.target);
+                    }
+                    // A module record keeps any extension receiver among its parameters, so the
+                    // policy signature never matches one.
                     candidates.extend(type_safe_override_realization(OverriddenSignature {
-                        owner: edge.overridden_owner,
-                        name: &edge.name,
+                        owner: declaration.owner,
+                        name: &declaration.name,
                         receiver: None,
-                        parameters: &edge.declared_parameters,
-                        result: edge.declared_result,
+                        parameters: &declaration.parameters,
+                        result: declaration.result,
                     }));
                 }
             }

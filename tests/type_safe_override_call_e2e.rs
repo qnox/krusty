@@ -9,9 +9,10 @@ const DECLARATIONS: &str = "abstract class Base : AbstractMap<String, Int>() {\n
     \x20   override val entries: Set<Map.Entry<String, Int>> get() = emptySet()\n\
     \x20   override fun get(key: String): Int? = key.length\n\
     \x20   override fun containsKey(key: String): Boolean = key == \"k\"\n\
+    }\n\
+    class Sub : Base() {\n\
     \x20   fun own(): Int? = get(\"own\")\n\
     }\n\
-    class Sub : Base()\n\
     class Words : AbstractCollection<String>() {\n\
     \x20   override val size: Int get() = 1\n\
     \x20   override fun iterator(): Iterator<String> = listOf(\"w\").iterator()\n\
@@ -64,7 +65,7 @@ const CONSUMER: &str = "fun read(values: Values): Int? = values[\"one\"]\n\
     }\n";
 
 /// The classes whose code calls a narrowed override.
-const AFFECTED: [&str; 2] = ["Calls", "Base"];
+const AFFECTED: [&str; 2] = ["Calls", "Sub"];
 
 fn single_file() -> String {
     format!("{DECLARATIONS}{CALLS}")
@@ -100,7 +101,7 @@ fn a_call_to_a_narrowed_collection_override_uses_the_erased_signature_like_kotli
     ] {
         assert_same_method("Calls", method);
     }
-    assert_same_method("Base", "java.lang.Integer own()");
+    assert_same_method("Sub", "java.lang.Integer own()");
 }
 
 #[test]
