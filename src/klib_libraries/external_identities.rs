@@ -153,14 +153,27 @@ impl ExternalIdentities {
         let identity = self.intern_property(signed, property);
         // Each accessor's realization names its property, as the published accessor does.
         let mut realizations = self.realizations.borrow_mut();
-        for accessor in std::iter::once(&mut property.getter).chain(property.setter.as_deref_mut())
-        {
+        for (accessor, role) in std::iter::once((
+            &mut property.getter,
+            crate::libraries::KlibAccessorRole::Getter,
+        ))
+        .chain(
+            property
+                .setter
+                .as_deref_mut()
+                .map(|setter| (setter, crate::libraries::KlibAccessorRole::Setter)),
+        ) {
             accessor.external_property_identity = Some(identity);
             if let Some(realization) = accessor
                 .external_identity
                 .and_then(|accessor| realizations.get_mut(accessor.raw() as usize))
             {
                 realization.callable.external_property_identity = Some(identity);
+                realization.klib_body_accessor = Some(crate::libraries::KlibBodyAccessor {
+                    property: identity,
+                    role,
+                    name: property.name.clone().into_boxed_str(),
+                });
             }
         }
     }
@@ -310,6 +323,7 @@ impl ExternalIdentities {
             klib_body_type_parameters: body.type_parameters,
             klib_body_declaration_modifiers: body.declaration_modifiers,
             klib_body_class_contract: None,
+            klib_body_accessor: None,
             klib_body_vararg_index: body.vararg_index,
             klib_body_parameter_defaults: body.parameter_defaults,
         });

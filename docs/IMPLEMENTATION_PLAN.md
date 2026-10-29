@@ -1,5 +1,15 @@
 # krusty — implementation plan
 
+## Native dependency reference identity handoff
+
+Retain the canonical declaration marker in the existing Native dependency export registry. Source
+exports join their exact checked callable ID to the module-function key; dependency-support exports
+use the existing injective module-qualified KLIB identity encoding. Selected external references
+consume this retained key, while authenticated declarations without source exports use their KLIB
+key. Missing required identity on a known export declines explicitly. Invocation aliases, marker
+ownership and provider-local IDs remain distinct. Serialized rich-reference admission stays in its
+separate follow-up.
+
 ## Consume declaration names in metadata class headers
 
 Resolve selected declaration keys against the frozen name inventory and pass mandatory resolved
@@ -6292,7 +6302,19 @@ and the pass rejects every construct it does not cover yet.
   `@FunctionKeyMeta`, source information and trace markers; calls between them in one file.
 - [ ] Calls to composables of other files and modules, and the grouping annotations.
 - [ ] `@Composable` function types and lambdas, and the composable call checker's diagnostics.
-- [ ] Parameters: `$changed` bit sets per parameter, `$default` masks, stability inference.
+- [x] Primitive and `String` parameters: `$changed`/`$dirty` slot tracking with strong skipping,
+  `Composer.changed` comparisons, and each call's argument bits (static, passed on, uncertain).
+- [ ] More parameters: `$default` masks, receivers, varargs, more than ten, stability inference.
 - [ ] The full body transform: control-flow groups, `remember`, early returns, inline composables.
 - [ ] `ComposableSingletons` lambda holders and the `$stable` field of classes.
 - [ ] Remove the partial marker and rerun the corpus for the Compose projects.
+
+## Link target-owned serialized getter leaves
+
+Retain normalized KLIB accessor identity and role through declaration and backend handoffs.
+Authenticate exact property membership and the raw/applied declaring-class receiver before
+admitting a target getter capability. Share that positive decision across closure planning,
+bodyless edge preparation and ordinary accessor linking; preserve retained exports and existing
+primitive/intrinsic priority. Native consumes its existing runtime getter plans. Prove real
+official-producer/JVM-oracle programs and malformed header/facet controls. Keep compiler-introduced
+block lowering as the independent #2811 follow-up.

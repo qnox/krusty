@@ -121,6 +121,7 @@ pub struct KlibBodyCallable<'a> {
     range_construction: Option<crate::fir::FirRangeOperation>,
     declaration_modifiers: Option<super::KlibBodyDeclarationModifiers>,
     class_contract: Option<&'a super::KlibBodyClassContract>,
+    accessor: Option<&'a super::KlibBodyAccessor>,
     /// Exact singleton dispatch receiver selected for this call edge. Common KLIB body lowering
     /// uses its semantic type to validate and consume the serialized receiver; target storage
     /// remains outside this target-free contract.
@@ -154,6 +155,7 @@ pub(crate) struct KlibBodyCallableShape<'a> {
     pub(crate) range_construction: Option<crate::fir::FirRangeOperation>,
     pub(crate) declaration_modifiers: Option<super::KlibBodyDeclarationModifiers>,
     pub(crate) class_contract: Option<&'a super::KlibBodyClassContract>,
+    pub(crate) accessor: Option<&'a super::KlibBodyAccessor>,
 }
 
 impl<'a> KlibBodyCallable<'a> {
@@ -182,6 +184,7 @@ impl<'a> KlibBodyCallable<'a> {
             range_construction,
             declaration_modifiers,
             class_contract,
+            accessor,
         } = shape;
         Some(Self {
             name,
@@ -201,6 +204,7 @@ impl<'a> KlibBodyCallable<'a> {
             range_construction,
             declaration_modifiers,
             class_contract,
+            accessor,
             singleton_dispatch: singleton.map(SingletonDispatch::ty),
             singleton_classifier: singleton.map(|dispatch| dispatch.classifier),
             companion_receiver,
@@ -292,6 +296,10 @@ impl<'a> KlibBodyCallable<'a> {
         self.class_contract
     }
 
+    pub(crate) fn accessor(self) -> Option<&'a super::KlibBodyAccessor> {
+        self.accessor
+    }
+
     pub(crate) fn singleton_classifier(self) -> Option<TypeName> {
         self.singleton_classifier
     }
@@ -300,7 +308,8 @@ impl<'a> KlibBodyCallable<'a> {
     /// call-site singleton dispatch is applied. A KLIB identity names one declaration, while
     /// inherited object selections may legitimately contribute several receiver variants.
     pub(crate) fn same_declaration_contract(self, other: Self) -> bool {
-        self.name == other.name
+        self.accessor == other.accessor
+            && self.name == other.name
             && self.kind == other.kind
             && self.visibility == other.visibility
             && self.semantic_role == other.semantic_role
@@ -371,6 +380,7 @@ pub struct ExternalCallableRealization {
     /// Known declaration implementation modifiers; absent for providers without KLIB body facts.
     pub(crate) klib_body_declaration_modifiers: Option<super::KlibBodyDeclarationModifiers>,
     pub(crate) klib_body_class_contract: Option<super::KlibBodyClassContract>,
+    pub(crate) klib_body_accessor: Option<super::KlibBodyAccessor>,
     pub(crate) klib_body_vararg_index: Option<usize>,
     pub(crate) klib_body_parameter_defaults: Option<crate::libraries::ParamFlags>,
 }
@@ -403,6 +413,7 @@ impl ExternalCallableRealization {
                 range_construction: self.callable.member_realization.range_construction(),
                 declaration_modifiers: self.klib_body_declaration_modifiers,
                 class_contract: self.klib_body_class_contract.as_ref(),
+                accessor: self.klib_body_accessor.as_ref(),
             },
             singleton,
             self.klib_body_companion_receiver.as_ref(),

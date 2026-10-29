@@ -43,6 +43,7 @@ mod interface_records;
 pub(super) use defaults::exports_default_entry;
 pub(super) use imported_functions::ImportedAbis;
 mod lists;
+pub(super) use lists::realizes_dependency_getter;
 mod local_delegates;
 mod maps;
 mod module_abi;

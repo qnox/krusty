@@ -155,6 +155,27 @@ impl<'a> KlibCalleeFacts<'a> {
         facts
     }
 
+    pub(crate) fn target_getter(
+        &self,
+        identity: &KlibDependencyCallable,
+        bodies: &crate::klib_libraries::KlibDeclarationBodies,
+        supports: &dyn Fn(crate::libraries::DependencyGetterSignature<'_>) -> bool,
+    ) -> Result<bool, super::decline::KlibBodyDeclineReason> {
+        let selected = match self.get(identity) {
+            Some(KlibCalleeFact::Ambiguous) => {
+                return Err(super::decline::KlibBodyDeclineReason::SignatureMismatch(
+                    "conflicting provider contracts for a getter declaration".to_owned(),
+                ));
+            }
+            Some(KlibCalleeFact::Selected(callables)) => callables[0],
+            None => return Ok(false),
+        };
+        if !super::accessor_calls::signature(selected).is_some_and(supports) {
+            return Ok(false);
+        }
+        super::accessor_calls::authenticate(selected, bodies).map(|getter| getter.is_some())
+    }
+
     pub(crate) fn common_primitive(
         &self,
         identity: &KlibDependencyCallable,
