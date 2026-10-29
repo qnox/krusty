@@ -3,6 +3,8 @@
 //! External corpus/reference-toolchain suites live in `conformance.rs`.
 
 mod constructor_boxing_casts_e2e;
+#[path = "constructor_type_argument_publication_e2e.rs"]
+mod constructor_type_argument_publication_e2e;
 #[path = "dependent_constructor_bounds_e2e.rs"]
 mod dependent_constructor_bounds_e2e;
 mod enclosing_formal_signatures_e2e;
