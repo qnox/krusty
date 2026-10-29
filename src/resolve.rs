@@ -51725,7 +51725,7 @@ impl<'a> Checker<'a> {
         // family the symbol query cannot rebuild; select over exactly that family.
         let joined_constructors = mapped
             .iter()
-            .any(|(candidate, _)| candidate.bound_inner_constructor.is_some());
+            .any(|(candidate, _)| candidate.constructor.is_some());
         let candidate = match receiver {
             crate::symbol_resolver::SymRecv::Value(receiver) if joined_constructors => {
                 let family =
