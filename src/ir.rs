@@ -1753,6 +1753,10 @@ pub struct IrFile {
     /// left value). Recorded where they are lowered, so a backend lays the guard out as its platform
     /// compiler does without recognizing the shape again.
     pub null_guards: crate::fx_hash::HashSet<ExprId>,
+    /// The temporary `value as? T` evaluates its operand into, keyed by its `Variable`. Only the
+    /// `is T` test and the matching branch's cast read it, so a backend may store the operand's
+    /// physical value without first converting it to the operand's semantic type.
+    pub safe_cast_temporaries: crate::fx_hash::HashSet<ExprId>,
     /// `::prop.isInitialized`, recorded when lowering `LateinitFieldRead`. The probe compares the
     /// property with null and does not throw. A backend chooses the raw field, getter, or bridge.
     pub lateinit_initialization_probes: crate::fx_hash::HashSet<ExprId>,

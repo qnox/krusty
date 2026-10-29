@@ -131,7 +131,83 @@ pub(super) fn realize_call_result_boundaries(ir: &mut IrFile) {
     }
     fold_nullable_widenings(ir, &boundaries);
     fold_asserted_number_unbox(ir);
+    test_erased_result_directly(ir);
     check_enhanced_result_before_unbox(ir);
+}
+
+/// `m["k"] as? String`, `m["k"] is String` and `m["k"] as String`, where the call leaves an erased
+/// reference slot, test or cast that slot directly. kotlinc evaluates a type operator's operand,
+/// and the temporary of a safe cast, as a plain reference, so the substituted result's own
+/// `checkcast` (`CharSequence` for a `Map<String, CharSequence>`) is never written there. A named
+/// binding (`when (val v = m["k"])`) still converts to its declared type, and so does the operand
+/// of a cast whose substituted result is non-null or an array.
+fn test_erased_result_directly(ir: &mut IrFile) {
+    let folds = (0..ir.exprs.len())
+        .filter_map(|index| {
+            let (coercion, cast) = match &ir.exprs[index] {
+                IrExpr::TypeOp {
+                    op: IrTypeOp::InstanceOf | IrTypeOp::NotInstanceOf | IrTypeOp::SafeCast,
+                    arg,
+                    type_operand,
+                } if type_operand.is_reference() => (*arg, false),
+                IrExpr::TypeOp {
+                    op: IrTypeOp::Cast | IrTypeOp::CastNonNull,
+                    arg,
+                    type_operand,
+                } if type_operand.is_reference() => (*arg, true),
+                IrExpr::Variable {
+                    init: Some(init), ..
+                } if ir.safe_cast_temporaries.contains(&(index as ExprId)) => (*init, false),
+                _ => return None,
+            };
+            let (produced, slot) = erased_reference_operand(ir, coercion)?;
+            // A cast still reads its operand's semantic type: whether it needs a null check, and
+            // whether an array cast is only a covariant view. Only a nullable, non-array result
+            // leaves both decisions unchanged when the cast reads the erased slot.
+            if cast {
+                let IrExpr::TypeOp {
+                    type_operand: substituted,
+                    ..
+                } = &ir.exprs[coercion as usize]
+                else {
+                    return None;
+                };
+                if !substituted.is_nullable() || substituted.non_null().is_reference_array() {
+                    return None;
+                }
+            }
+            Some((index, produced, coercion, slot))
+        })
+        .collect::<Vec<_>>();
+    for (index, produced, coercion, slot) in folds {
+        match &mut ir.exprs[index] {
+            IrExpr::TypeOp { arg, .. } => *arg = produced,
+            IrExpr::Variable { init, ty, .. } => {
+                *init = Some(produced);
+                *ty = slot;
+            }
+            _ => continue,
+        }
+        ir.declaration_result_coercions.remove(&coercion);
+    }
+}
+
+/// The call result a reference coercion converts and the erased reference slot that call leaves.
+fn erased_reference_operand(ir: &IrFile, coercion: ExprId) -> Option<(ExprId, Ty)> {
+    let IrExpr::TypeOp {
+        op: IrTypeOp::ImplicitCoercion,
+        arg: produced,
+        type_operand: substituted,
+    } = ir.exprs.get(coercion as usize)?
+    else {
+        return None;
+    };
+    let slot = match ir.physical_types.get(produced) {
+        Some(slot) => *slot,
+        None => checked_result_slot(ir, declaration_result_call(ir, *produced)?)?,
+    };
+    let physical = crate::jvm::physical_type::ir_ty_to_jvm(&slot);
+    (substituted.is_reference() && physical.is_reference()).then_some((*produced, slot))
 }
 
 /// An erased reference slot read as a primitive and then widened to that primitive's nullable type

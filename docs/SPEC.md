@@ -18318,6 +18318,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   descriptor, then bridges the erased result to the logical type with a `checkcast`
   (`computed_prop_generic_return_e2e::cross_file_generic_member_read_uses_erased_accessor`).
 
+- **A type operator tests an erased call result directly.** `m["k"] as? String`, `m["k"] is String`
+  and `m["k"] as String` on a `Map<String, CharSequence>` evaluate `Map.get`'s erased `Object` and
+  test or cast it; kotlinc writes no `checkcast CharSequence` for the substituted result first. A
+  safe cast's temporary stores the same erased value. Common lowering records that temporary
+  (`safe_cast_temporaries`), since only the test and the matching cast read it; the JVM
+  call-result boundary then retargets the operator, or the temporary, to the call's erased slot.
+  A named binding (`when (val v = m["k"])`) still converts to its declared type, and so does a
+  cast whose substituted result is non-null or an array: that cast's null check and covariant
+  array view read the substituted type (`erased_result_type_operator_e2e`,
+  `local_function_signature_e2e::local_generic_vararg_arrays_are_byte_identical_to_kotlinc`).
+
 - **Member computed getters retry to a bounded fixpoint.** An unannotated member expression getter
   (`val a get() = holder.a`) infers during its class's collection, so a referenced class collected
   later — another file, or a later class in this one — left the property typed `Error` (and the

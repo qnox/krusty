@@ -704,6 +704,9 @@ fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId) {
     if ir.null_guards.contains(&source) {
         ir.null_guards.insert(target);
     }
+    if ir.safe_cast_temporaries.contains(&source) {
+        ir.safe_cast_temporaries.insert(target);
+    }
     if ir.plain_updates.contains(&source) {
         ir.plain_updates.insert(target);
     }
