@@ -11,6 +11,7 @@
 //! into the same unit. Nothing here names a target: Native and Wasm share it. A body using a form
 //! this lowering does not model declines by the form's name.
 
+mod accessor_calls;
 mod body_lowering;
 mod body_unit;
 mod callee_facts;

@@ -20,6 +20,7 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.HashMap;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -34,6 +35,8 @@ final class Symbols {
     private final Map<String, SourceClass> sourceClasses = new HashMap<>();
     private final Map<String, SourceTypeAlias> sourceTypeAliases = new HashMap<>();
     private final Map<Integer, KSTypeParameter> typeParameters = new HashMap<>();
+    // Each intersection member with the path of the file it takes, placed once every file is read.
+    private final Map<KSDeclaration, String> intersectionFiles = new IdentityHashMap<>();
 
     private Symbols(Classpath classpath) {
         this.classpath = classpath;
@@ -50,6 +53,7 @@ final class Symbols {
             symbols.readDeclarations(in, file, null, file.declarations);
             symbols.files.add(file);
         }
+        symbols.placeIntersections();
         return symbols;
     }
 
@@ -156,36 +160,98 @@ final class Symbols {
 
     // The members a classifier lists (`put_members` in `src/ksp/protocol.rs`): its own
     // declarations by index, ones described with the list together with the classifier that
-    // declares them, and declarations of other source classifiers by index.
+    // declares them, declarations of other source classifiers by index, intersection members
+    // described with the list, and members other source classifiers list, by position.
     private Members readMembers(DataInputStream in, List<KSDeclaration> declarations)
             throws IOException {
         int count = in.readInt();
         List<Supplier<KSDeclaration>> members = new ArrayList<>(count);
         for (int i = 0; i < count; i++) {
-            byte tag = in.readByte();
-            switch (tag) {
-                case 0: {
-                    KSDeclaration declared = declarations.get(in.readInt());
-                    members.add(() -> declared);
-                    break;
-                }
-                case 1: {
-                    KSDeclaration owner = resolvedClass(Wire.readString(in));
-                    KSDeclaration described = readDeclaration(in, null, owner);
-                    members.add(() -> described);
-                    break;
-                }
-                case 2: {
-                    String owner = Wire.readString(in);
-                    int index = in.readInt();
-                    members.add(() -> sourceClasses.get(owner).declarations.get(index));
-                    break;
-                }
-                default:
-                    throw new IOException("unknown member " + tag);
-            }
+            members.add(readMember(in, declarations));
         }
         return new Members(members);
+    }
+
+    // One member (`put_member` in `src/ksp/protocol.rs`); `declarations` is null where no member
+    // names one of the classifier's own declarations.
+    private Supplier<KSDeclaration> readMember(DataInputStream in, List<KSDeclaration> declarations)
+            throws IOException {
+        byte tag = in.readByte();
+        switch (tag) {
+            case 0: {
+                if (declarations == null) {
+                    throw new IOException("a member of no classifier's own declarations");
+                }
+                KSDeclaration declared = declarations.get(in.readInt());
+                return () -> declared;
+            }
+            case 1: {
+                KSDeclaration owner = resolvedClass(Wire.readString(in));
+                KSDeclaration described = readDeclaration(in, null, owner);
+                return () -> described;
+            }
+            case 2: {
+                String owner = Wire.readString(in);
+                int index = in.readInt();
+                return () -> sourceClasses.get(owner).declarations.get(index);
+            }
+            case 3: {
+                KSDeclaration owner = resolvedClass(Wire.readString(in));
+                String path = readOptionalString(in);
+                KSDeclaration described = readDeclaration(in, null, owner);
+                if (path != null) {
+                    intersectionFiles.put(described, path);
+                }
+                return () -> described;
+            }
+            case 4: {
+                String owner = Wire.readString(in);
+                boolean property = Wire.readBoolean(in);
+                int position = in.readInt();
+                return () -> {
+                    SourceClass listing = sourceClasses.get(owner);
+                    return (property ? listing.allProperties : listing.allFunctions).get(position);
+                };
+            }
+            default:
+                throw new IOException("unknown member " + tag);
+        }
+    }
+
+    // Gives each intersection member the file of the member it is made from.
+    private void placeIntersections() throws IOException {
+        Map<String, SourceFile> byPath = new HashMap<>();
+        for (SourceFile file : files) {
+            byPath.put(file.getFilePath(), file);
+        }
+        for (Map.Entry<KSDeclaration, String> entry : intersectionFiles.entrySet()) {
+            SourceFile file = byPath.get(entry.getValue());
+            if (file == null) {
+                throw new IOException("an intersection member of no file " + entry.getValue());
+            }
+            KSDeclaration member = entry.getKey();
+            if (member instanceof SourceFunction) {
+                ((SourceFunction) member).file = file;
+            } else {
+                ((SourceProperty) member).file = file;
+            }
+        }
+    }
+
+    // What `findOverridee` answers (`put_overridee` in `src/ksp/protocol.rs`): null when the round
+    // cannot say, otherwise the member, which supplies null when there is none.
+    private Supplier<KSDeclaration> readOverridee(DataInputStream in) throws IOException {
+        byte tag = in.readByte();
+        switch (tag) {
+            case 0:
+                return null;
+            case 1:
+                return () -> null;
+            case 2:
+                return readMember(in, null);
+            default:
+                throw new IOException("unknown overridee " + tag);
+        }
     }
 
     // A function (`put_function` in `src/ksp/protocol.rs`).
@@ -238,6 +304,7 @@ final class Symbols {
         function.returnType = Wire.readBoolean(in) ? readReference(in, function) : null;
         function.jvmSignature = readOptionalString(in);
         function.jvmName = readOptionalString(in);
+        function.overridee = readOverridee(in);
         if (kind == 3 && owner instanceof SourceClass) {
             ((SourceClass) owner).primaryConstructor = function;
         } else if (kind == 3 && owner instanceof LibraryClass) {
@@ -286,6 +353,7 @@ final class Symbols {
             property.hasBackingField = Wire.readBoolean(in);
         }
         property.jvmSignature = readOptionalString(in);
+        property.overridee = readOverridee(in);
         return property;
     }
 

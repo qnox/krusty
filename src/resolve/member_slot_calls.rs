@@ -152,9 +152,9 @@ impl Checker<'_> {
                     );
                     let internal = selected
                         .info
-                        .bound_inner_constructor
+                        .constructor
                         .expect("an alias constructor retains its target declaration")
-                        .inner;
+                        .classifier;
                     return self.commit_selected_inner_constructor(
                         scope,
                         construction,
@@ -173,7 +173,7 @@ impl Checker<'_> {
                     };
                 }
                 if let Some((internal, alias_target)) =
-                    inner_classifier.filter(|_| selected.info.bound_inner_constructor.is_some())
+                    inner_classifier.filter(|_| selected.info.bound_inner_constructor().is_some())
                 {
                     return self.commit_selected_inner_constructor(
                         scope,

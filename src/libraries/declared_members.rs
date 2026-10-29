@@ -27,6 +27,10 @@ pub struct DeclaredFunction {
     pub modality: KotlinModality,
     pub is_operator: bool,
     pub is_infix: bool,
+    /// Whether it declares type parameters of its own, which this view does not carry yet.
+    pub is_generic: bool,
+    /// Whether it is an extension, whose receiver this view does not carry yet.
+    pub is_extension: bool,
     /// Whether the declaration states annotations, which this view does not carry yet.
     pub annotated: bool,
 }

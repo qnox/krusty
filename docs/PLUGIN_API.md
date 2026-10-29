@@ -173,12 +173,16 @@ covered (live literals, decoys, strong skipping off, the non-default feature fla
 `UnimplementedOption` errors, and so is a nonempty `metricsDestination` or `reportsDestination`,
 since krusty writes neither report yet.
 
-Covered so far: parameterless `Unit` top-level composable functions with a block body, made
-restartable and skippable, and their calls to each other in the same file. Durable group keys,
+Covered so far: `Unit` top-level composable functions with a block body whose parameters are
+primitives or `String`, made restartable and skippable with kotlinc's `$changed`/`$dirty`
+parameter tracking, and their calls to each other in the same file, which pass on what the caller
+knows of each argument. Constant default arguments are assigned inside the group from a `$default`
+mask, as kotlinc does, instead of in a `$default` synthetic. Durable group keys,
 `sourceInformation` strings, trace markers and `@FunctionKeyMeta` (class file only, never Kotlin
 metadata, as kotlinc's IR plugin adds it after FIR serialization) follow kotlinc's formulas. Every
-other mode is an explicit decline at its declaration or call: a function with parameters or another
-result, a grouping annotation (`@NonRestartableComposable`, `@NonSkippableComposable`,
+other mode is an explicit decline at its declaration or call: a function with a receiver, a default
+argument that is not a constant, a vararg, more than ten parameters, a parameter whose stability kotlinc infers, or another
+result, a call argument the pass cannot classify as constant, passed on or computed, a grouping annotation (`@NonRestartableComposable`, `@NonSkippableComposable`,
 `@ReadOnlyComposable`, `@ExplicitGroupsComposable`), a call to a composable of another file or
 module, a composable whose name an overload with lambdas shares, and any class kotlinc would give
 `$stable` and `@StabilityInferred`.
@@ -187,7 +191,9 @@ The runtime functions the generated code calls (`Composer.startRestartGroup`,
 `ScopeUpdateScope.updateScope`, `sourceInformation`, `traceEventStart`, …) cross the handoff as
 authenticated identities. `record_source_facts` names each by its declaring package or classifier
 and Kotlin signature through `plugins::runtime_declarations::PluginRuntime`. The compilation's
-symbol source must select exactly one declaration, or the module is rejected. The selected
+symbol source must select exactly one declaration, or the module is rejected. A plugin also asks
+whether the compilation declares a classifier, which is how Compose detects the runtime version
+(parameter names in source information). The selected
 identities are frozen with the file's other dependency declarations. The JVM backend realizes the
 calls after the plugin pass, as it realizes the file's own dependency calls. The recompose lambda
 is placed as the one lambda lifted out of its function, so the JVM lifted-name pass names it

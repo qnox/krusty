@@ -8,8 +8,9 @@
 //! Until the coverage is complete the registry reports the plugin as only partly implemented, and
 //! a build gives a Compose module to kotlinc.
 //!
-//! Covered: parameterless `Unit` top-level composable functions with a block body, made
-//! restartable and skippable, and their calls to one another in the same file. Source
+//! Covered: `Unit` top-level composable functions with a block body whose parameters are
+//! primitives or `String`, with constant default arguments, made restartable and skippable with
+//! per-parameter change tracking, and their calls to one another in the same file. Source
 //! information, trace markers and `@FunctionKeyMeta` follow the plugin's options.
 
 mod durable_keys;
