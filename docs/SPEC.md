@@ -3501,6 +3501,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   declaration-owned contract without reopening the source expression.
   Tests: `tests/java_platform_type_publication_e2e.rs` (byte-identical vs kotlinc),
   `metadata::type_encoder::tests::platform_type_encodes_a_nullable_flexible_upper_bound`.
+- **A Java constructor with explicit type arguments yields a rigid type.** A constructor call's
+  type is its classifier's own type, whose arguments are the class type parameters, not Java
+  occurrences of them. kotlinc therefore types `ArrayList<String>()`, `HashSet<String>()` and
+  `java.util.ArrayList<String>()` as `ArrayList<String>`, through a type alias or not, and an
+  inferred declaration publishes no `kotlin.jvm.PlatformType` for them. Constructor publication
+  makes a class type parameter flexible only for an inferred argument (`ArrayList(listOf("a"))`
+  is `ArrayList<String!>`). Tests: `tests/constructor_type_argument_publication_e2e.rs`
+  (byte-identical vs kotlinc).
 - **A nullable argument fixes a flexible Java type variable to its nullable type.** kotlinc reduces
   `Foo? <: T!` to `Foo? <: T` (`simplifyLowerConstraint`), so `fun <E> a(x: E?): List<E> =
   Collections.singletonList(x)` infers `T := E?` and the result `(Mutable)List<E?>!` no longer fits
