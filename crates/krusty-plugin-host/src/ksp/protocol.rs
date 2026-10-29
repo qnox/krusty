@@ -7,15 +7,15 @@ use std::io::{self, Read, Write};
 use krusty_plugin_ir::{
     KspAccessor, KspAnnotation, KspArgument, KspClass, KspClassKind, KspDeclaration,
     KspDeclarationOrigin, KspFunction, KspFunctionKind, KspLibraryClass, KspMember, KspModifier,
-    KspNameMapping, KspOrigin, KspParameter, KspProperty, KspRound, KspType, KspTypeArgument,
-    KspTypeDeclaration, KspTypeParameter, KspTypeSlot, KspValue, KspVariance,
+    KspNameMapping, KspOrigin, KspOverridee, KspParameter, KspProperty, KspRound, KspType,
+    KspTypeArgument, KspTypeDeclaration, KspTypeParameter, KspTypeSlot, KspValue, KspVariance,
 };
 
 use crate::protocol::{malformed, put_list, put_str, read_frame, utf8, write_frame, Payload};
 
 use super::{GeneratedKind, KspGenerated, KspLoad, KspOutcome};
 
-pub(crate) const PROTOCOL: u32 = 13;
+pub(crate) const PROTOCOL: u32 = 14;
 
 const HELLO: u8 = 0;
 const LOAD: u8 = 1;
@@ -203,7 +203,11 @@ fn put_library_class(payload: &mut Vec<u8>, library: &KspLibraryClass) {
 /// name of the classifier that declares one described here, and that declaration; or 2, the
 /// qualified name of a source classifier and the index of one of its declarations.
 fn put_members(payload: &mut Vec<u8>, members: &[KspMember]) {
-    put_list(payload, members, |payload, member| match member {
+    put_list(payload, members, put_member);
+}
+
+fn put_member(payload: &mut Vec<u8>, member: &KspMember) {
+    match member {
         KspMember::Declared(index) => {
             payload.push(0);
             payload.extend_from_slice(&index.to_be_bytes());
@@ -218,7 +222,19 @@ fn put_members(payload: &mut Vec<u8>, members: &[KspMember]) {
             put_str(payload, owner);
             payload.extend_from_slice(&index.to_be_bytes());
         }
-    });
+    }
+}
+
+/// What `findOverridee` answers: 0 the round cannot say, 1 nothing, 2 the member that follows.
+fn put_overridee(payload: &mut Vec<u8>, overridee: &KspOverridee) {
+    match overridee {
+        KspOverridee::Undescribed => payload.push(0),
+        KspOverridee::Nothing => payload.push(1),
+        KspOverridee::Member(member) => {
+            payload.push(2);
+            put_member(payload, member);
+        }
+    }
 }
 
 /// Where a declaration comes from: 0 the source, 1 the compiler, 2 a Kotlin library, 3 a Java
@@ -234,7 +250,7 @@ fn put_origin(payload: &mut Vec<u8>, origin: KspDeclarationOrigin) {
 
 /// A function: its name, kind (0 top-level, 1 member, 2 static, 3 primary constructor,
 /// 4 secondary constructor), whether it is abstract, its origin, line, annotations, modifiers, type
-/// parameters, extension receiver, parameters, return type, JVM signature and JVM name.
+/// parameters, extension receiver, parameters, return type, JVM signature, JVM name and overridee.
 fn put_function(payload: &mut Vec<u8>, function: &KspFunction) {
     put_str(payload, &function.name);
     payload.push(match function.kind {
@@ -261,6 +277,7 @@ fn put_function(payload: &mut Vec<u8>, function: &KspFunction) {
     put_option(payload, &function.jvm_name, |payload, text| {
         put_str(payload, text)
     });
+    put_overridee(payload, &function.overridee);
 }
 
 fn put_property(payload: &mut Vec<u8>, property: &KspProperty) {
@@ -283,6 +300,7 @@ fn put_property(payload: &mut Vec<u8>, property: &KspProperty) {
     put_option(payload, &property.jvm_signature, |payload, text| {
         put_str(payload, text)
     });
+    put_overridee(payload, &property.overridee);
 }
 
 /// An accessor: its origin, its modifiers and annotations, a setter's parameter name and
@@ -601,6 +619,7 @@ mod tests {
             return_type: None,
             jvm_signature: Some("(I)V".into()),
             jvm_name: None,
+            overridee: KspOverridee::Nothing,
         };
         let round = KspRound {
             files: vec![KspFile {
@@ -707,11 +726,12 @@ mod tests {
         expected.extend(b"FINAL");
         expected.extend([0, 0, 0, 0, 0, 1, 0, 0, 0, 1, b'x', 1]);
         expected.extend(&t);
-        // Its flags, no annotations, no return type, its JVM signature and no JVM name.
+        // Its flags, no annotations, no return type, its JVM signature, no JVM name, and that it
+        // overrides nothing.
         expected.extend([0b1001, 0, 0, 0, 0, 0]);
         expected.extend([1, 0, 0, 0, 4]);
         expected.extend(b"(I)V");
-        expected.push(0);
+        expected.extend([0, 1]);
         // The classifier's JVM signature.
         expected.extend([1, 0, 0, 0, 5]);
         expected.extend(b"Lp/A;");

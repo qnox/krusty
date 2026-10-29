@@ -540,11 +540,25 @@ fn refusals_lists_the_arguments_and_plugins_krusty_refuses() {
 #[test]
 fn the_compose_pass_rejects_what_it_does_not_cover() {
     assert_compose_rejects(
-        "compose-parameters",
-        "@Composable fun Greeting(name: String) {}\n",
+        "compose-default-argument",
+        "@Composable fun Greeting(name: String = \"\") {}\n",
         &[],
         "3:13: error: krusty's Compose compiler plugin does not support a composable function \
-         with parameters yet",
+         with a default argument yet",
+    );
+    assert_compose_rejects(
+        "compose-inferred-stability",
+        "@Composable fun Greeting(names: List<String>) {}\n",
+        &[],
+        "3:13: error: krusty's Compose compiler plugin does not support a composable function \
+         parameter whose stability kotlinc infers yet",
+    );
+    assert_compose_rejects(
+        "compose-local-argument",
+        "@Composable fun Show(text: String) {}\n@Composable fun Greeting() {\nval text = \"a\"\nShow(text)\n}\n",
+        &[],
+        "6:1: error: krusty's Compose compiler plugin does not support a composable call argument \
+         that is not a constant, a parameter, or computed from a parameter yet",
     );
     assert_compose_rejects(
         "compose-non-skippable",

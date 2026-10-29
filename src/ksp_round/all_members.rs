@@ -22,7 +22,7 @@ use std::cell::RefCell;
 
 use krusty_plugin_ir::{
     KspClass, KspClassKind, KspClasspath, KspDeclaration, KspDeclarationOrigin, KspFile,
-    KspFunction, KspFunctionKind, KspMember, KspModifier, KspTypeDeclaration,
+    KspFunction, KspFunctionKind, KspMember, KspModifier, KspOverridee, KspTypeDeclaration,
 };
 
 use super::KspLibraries;
@@ -49,11 +49,18 @@ impl Ledger {
     pub(super) fn record(&self, qualified_name: String, class: ClassLedger) {
         self.0.borrow_mut().insert(qualified_name, class);
     }
+
+    pub(super) fn into_classes(self) -> HashMap<String, ClassLedger> {
+        self.0.into_inner()
+    }
 }
 
 /// Fills in the member lists of every source classifier of `files` that the round can order.
-pub(super) fn order(files: &mut [KspFile], ledger: Ledger, analysis: &SourceSetAnalysis) {
-    let ledger = ledger.0.into_inner();
+pub(super) fn order(
+    files: &mut [KspFile],
+    ledger: &HashMap<String, ClassLedger>,
+    analysis: &SourceSetAnalysis,
+) {
     let lists = {
         let mut classes = HashMap::default();
         for file in files.iter() {
@@ -61,7 +68,7 @@ pub(super) fn order(files: &mut [KspFile], ledger: Ledger, analysis: &SourceSetA
         }
         let mut order = Order {
             classes,
-            ledger: &ledger,
+            ledger,
             analysis,
             any: any_functions(analysis),
             closures: HashMap::default(),
@@ -325,7 +332,9 @@ impl Order<'_> {
                     .iter()
                     .position(|function| entry.is_any_slot(&function.name))
                 {
-                    let function = generated.remove(position);
+                    // The generated member overrides the one it takes the place of.
+                    let mut function = generated.remove(position).clone();
+                    function.overridee = KspOverridee::Member(entry.member(name));
                     let mut closure = vec![entry.identity.clone()];
                     closure.extend(entry.closure.iter().cloned());
                     overridden.extend(closure.iter().cloned());
@@ -337,7 +346,7 @@ impl Order<'_> {
                         closure,
                         place: Place::Described {
                             owner: name.to_string(),
-                            declaration: Box::new(KspDeclaration::Function(function.clone())),
+                            declaration: Box::new(KspDeclaration::Function(function)),
                         },
                     });
                     continue;
