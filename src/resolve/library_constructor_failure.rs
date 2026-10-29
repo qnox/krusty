@@ -37,6 +37,9 @@ pub(super) enum LibraryConstructorFailure {
         source_argument: usize,
         expected: Ty,
         actual: Ty,
+        /// The constructor formal this argument was the only evidence for. Rejecting the
+        /// argument's constraint leaves it uninferred, which kotlinc reports first.
+        uninferred: Option<String>,
         /// The invalid expression still has its explicit/specialized construction type. Retaining
         /// it after reporting the argument error lets the enclosing expectation diagnose an
         /// independent result-type contradiction; no constructor target is committed to FIR.
@@ -169,11 +172,21 @@ impl Checker<'_> {
                 source_argument,
                 expected,
                 actual,
+                uninferred,
                 ..
             } => {
                 let Some(&argument) = args.get(source_argument) else {
                     return;
                 };
+                if let Some(formal) = uninferred {
+                    self.diags.error(
+                        self.call_callee_name_span(call),
+                        format!(
+                            "cannot infer type for type parameter '{}'. Specify it explicitly.",
+                            crate::types::type_parameter_source_name(&formal)
+                        ),
+                    );
+                }
                 // A context-sensitive lambda deliberately carries `Ty::Error` until a callable
                 // candidate supplies a function/SAM shape. When the only mapped constructor
                 // parameter is non-functional, materialize the lambda's natural source type solely

@@ -2623,3 +2623,49 @@ fun render(items: List<String>): Unit = with(Builder()) {
     );
     common::assert_error_blocks_match_kotlinc(&sources, &reference_args);
 }
+
+#[test]
+fn a_bound_violating_only_argument_leaves_the_formal_uninferred() {
+    // kotlinc rejects the argument's constraint at the argument; with no other evidence left, it
+    // first reports that `T` cannot be inferred.
+    let source = r#"
+open class Shape
+class Square : Shape()
+class Keep<T : Square>(item: T)
+fun <T : Square> keep(item: T): Int = 1
+fun shape(): Shape = Shape()
+fun call(): Int = keep(shape())
+fun construct(): Keep<*> = Keep(shape())
+"#;
+    assert_rejection_same_as_kotlinc("BoundViolatingOnlyArgument", source);
+}
+
+#[test]
+fn a_bound_violation_after_valid_evidence_blames_the_later_argument() {
+    let source = r#"
+open class Shape
+class Square : Shape()
+class KeepTwo<T : Square>(first: T, second: T)
+fun <T : Square> keepTwo(first: T, second: T): Int = 1
+fun shape(): Shape = Shape()
+fun call(): Int = keepTwo(Square(), shape())
+fun construct(): KeepTwo<*> = KeepTwo(Square(), shape())
+"#;
+    assert_rejection_same_as_kotlinc("BoundViolationAfterValidEvidence", source);
+}
+
+#[test]
+fn an_invariant_argument_fixes_the_formal_before_a_later_argument() {
+    // `MutableList<Square>` fixes `T` to `Square`, so the `Shape` argument is the contradiction;
+    // joining both inputs to `Shape` would blame the list instead.
+    let source = r#"
+open class Shape
+class Square : Shape()
+class Same<T>(items: MutableList<T>, item: T)
+fun <T> same(items: MutableList<T>, item: T): Int = items.size
+fun shape(): Shape = Shape()
+fun call(): Int = same(mutableListOf<Square>(), shape())
+fun construct(): Same<*> = Same(mutableListOf<Square>(), shape())
+"#;
+    assert_rejection_same_as_kotlinc("InvariantArgumentFixesFormal", source);
+}

@@ -357,6 +357,9 @@ impl Checker<'_> {
                         source_argument,
                         expected: violation.expected,
                         actual: violation.actual,
+                        uninferred: violation
+                            .uninferred
+                            .then(|| signature.formals[violation.formal].clone()),
                         result: None,
                     });
                     continue;
@@ -632,6 +635,7 @@ impl Checker<'_> {
                             source_argument: mismatch.source_argument,
                             expected: mismatch.expected,
                             actual: mismatch.actual,
+                            uninferred: None,
                             result: members.first().map(|member| member.ret),
                         });
                     }

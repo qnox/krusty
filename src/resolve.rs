@@ -39853,6 +39853,7 @@ impl<'a> Checker<'a> {
                 return true;
             }
             let mut generic_binding = None;
+            let mut argument_contradiction = None;
             let semantic_params = if let Some(signature) = candidate.generic_sig.as_ref() {
                 let mut bindings =
                     crate::symbol_resolver::seeded_gsig_binds(signature, &explicit_type_args);
@@ -39860,20 +39861,48 @@ impl<'a> Checker<'a> {
                     let whole_arrays =
                         named_whole_array_varargs(parameters, argument_names, &value_signature);
                     let source = self.fed_source();
+                    let actuals = parameters
+                        .iter()
+                        .copied()
+                        .zip(args.iter().copied())
+                        .zip(whole_arrays)
+                        .enumerate()
+                        .map(|(source, ((parameter, argument), named_whole_array))| {
+                            let actual = self.expr_types[argument.0 as usize];
+                            let whole_array =
+                                named_whole_array || self.file.is_spread_arg(args[source]);
+                            (source, parameter + context_count, actual, whole_array)
+                        })
+                        .collect::<Vec<_>>();
+                    argument_contradiction =
+                        crate::symbol_resolver::infer_generic_call_constraints_with_argument_ordinals(
+                            &source,
+                            signature,
+                            actuals.iter().copied(),
+                            candidate.call_sig.vararg_index,
+                        )
+                        .bound_violation
+                        .filter(|violation| explicit_type_args.get(violation.formal).is_none())
+                        .filter(|violation| {
+                            // Only a bare-formal parameter receives the contradiction as its own
+                            // mismatch; a structural parameter (`List<T>`) is reported against
+                            // its substituted type below.
+                            let formal = &signature.formals[violation.formal];
+                            parameters.get(violation.argument).is_some_and(|parameter| {
+                                signature
+                                    .params
+                                    .get(parameter + context_count)
+                                    .and_then(|parameter| parameter.non_null().ty_param_name())
+                                    .is_some_and(|name| name == formal)
+                            })
+                        });
                     let inferred = crate::symbol_resolver::infer_generic_call_bindings_from_symbols(
                         &source,
                         signature,
-                        parameters
-                            .iter()
-                            .copied()
-                            .zip(args.iter().copied())
-                            .zip(whole_arrays)
-                            .enumerate()
-                            .map(|(source, ((parameter, argument), named_whole_array))| {
-                                let actual = self.expr_types[argument.0 as usize];
-                                let whole_array =
-                                    named_whole_array || self.file.is_spread_arg(args[source]);
-                                (parameter + context_count, actual, whole_array)
+                        actuals
+                            .into_iter()
+                            .map(|(_, parameter, actual, whole_array)| {
+                                (parameter, actual, whole_array)
                             }),
                         candidate.call_sig.vararg_index,
                     );
@@ -39964,6 +39993,32 @@ impl<'a> Checker<'a> {
                 }
                 Ok(_) => {
                     let before = self.diags.diags.len();
+                    if let (Some((signature, _)), Some(violation)) =
+                        (&generic_binding, argument_contradiction)
+                    {
+                        // kotlinc rejects the contradicting argument's constraint at that
+                        // argument. When it was the formal's only evidence, nothing is left to
+                        // infer the formal from, and that is reported first, at the callee.
+                        if violation.uninferred {
+                            self.diags.error(
+                                self.call_callee_name_span(call),
+                                format!(
+                                    "cannot infer type for type parameter '{}'. Specify it explicitly.",
+                                    crate::types::type_parameter_source_name(
+                                        &signature.formals[violation.formal]
+                                    )
+                                ),
+                            );
+                        }
+                        let argument = args[violation.argument];
+                        self.expect_assignable(
+                            violation.expected,
+                            self.expr_types[argument.0 as usize],
+                            self.span(argument),
+                            "argument",
+                        );
+                        return true;
+                    }
                     if let Some((signature, bindings)) = &generic_binding {
                         for (formal_index, formal) in signature.formals.iter().enumerate() {
                             let Some(actual) = bindings.get(formal).copied() else {

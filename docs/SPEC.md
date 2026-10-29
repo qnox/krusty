@@ -9,6 +9,18 @@ source only when the source is a non-null subtype of `S` itself. Sharing `S`'s c
 that proof: under `<T : CharSequence, S : T?>`, `T` is not a subtype of `S & Any`. Test:
 `box_regressions/nullableFormalBoundPropagation.kt`.
 
+## Contradicting generic arguments
+
+kotlinc adds argument constraints in argument order and rejects the one that contradicts the
+constraints already present, at that argument. An argument at an invariant position fixes the
+formal exactly: `same(mutableListOf<Square>(), shape)` against `fun <T> same(MutableList<T>, T)`
+reports the `Shape` argument against `Square`, rather than joining both inputs to `Shape` and
+reporting the list. Against a declared bound, the first input outside it is reported. When that
+argument was the formal's only evidence, nothing is left to infer the formal from, and `cannot
+infer type for type parameter` is reported first, at the callee (kotlinc 2.4.21). Function and
+constructor calls report it alike. The three `resolver_regression_e2e` tests named for bound
+violations and invariant fixation cover it.
+
 ## File policies under signature recovery
 
 A file's own annotations (`@file:Suppress`, opt-ins) are published before recovery diagnostics

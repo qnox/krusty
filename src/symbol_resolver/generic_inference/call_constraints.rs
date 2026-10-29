@@ -135,6 +135,11 @@ fn infer_generic_call_constraints_with_receiver_and_argument_ordinals(
                     == Some(crate::types::TypeVariance::Invariant)
             {
                 invariantly_fixed.insert(formal.clone());
+                constraints
+                    .invariant_arguments
+                    .entry(formal.clone())
+                    .or_default()
+                    .push(argument);
             }
         }
     }
@@ -189,6 +194,9 @@ struct CallInferenceConstraints {
     lower: GSigBinds,
     lower_inputs: crate::fx_hash::HashMap<String, Vec<(Ty, ConstraintOrigin)>>,
     upper: crate::fx_hash::HashMap<String, Vec<Ty>>,
+    /// Arguments whose parameter mentions the formal invariantly. Their inputs fix the formal
+    /// exactly, so a later argument's input must fit inside them.
+    invariant_arguments: crate::fx_hash::HashMap<String, Vec<usize>>,
     /// Java root-flexible variables fixed by a nullable value argument. Both interval faces become
     /// that nullable type, so a later invariant expected result must not widen the variable back to
     /// a non-null type whose flexible parameter would merely accept the original argument.
@@ -353,6 +361,11 @@ pub(crate) struct GenericBoundViolation {
     pub argument: usize,
     pub expected: Ty,
     pub actual: Ty,
+    /// Index of the violated formal in the signature's formals.
+    pub formal: usize,
+    /// Whether the rejected argument was the formal's only evidence. kotlinc then also reports
+    /// that the formal cannot be inferred: rejecting the contradicting constraint leaves none.
+    pub uninferred: bool,
 }
 
 impl InferredCallBindings {
@@ -557,6 +570,46 @@ impl CallInferenceConstraints {
         }
     }
 
+    /// The first argument input that contradicts an earlier invariant fixation of `formal`, as
+    /// kotlinc's constraint system adds them in argument order: `same(mutableListOf<Square>(),
+    /// shape)` fixes `T` to `Square` and then rejects the `Shape` argument, rather than joining
+    /// both inputs to `Shape` and rejecting the list. An invariant input after the fixation must
+    /// equal it; any other input must fit inside it.
+    fn invariant_contradiction(
+        &self,
+        source: &dyn SymbolSource,
+        formal: &str,
+        index: usize,
+    ) -> Option<GenericBoundViolation> {
+        let fixing = self.invariant_arguments.get(formal)?;
+        let mut fixed: Option<(Ty, usize)> = None;
+        for &(actual, origin) in self.lower_inputs.get(formal)? {
+            let ConstraintOrigin::Argument(argument) = origin else {
+                continue;
+            };
+            let invariant = fixing.contains(&argument);
+            match fixed {
+                Some((expected, fixed_by)) if fixed_by != argument => {
+                    let fits = resolution_subtype(source, actual, expected)
+                        && (!invariant || resolution_subtype(source, expected, actual));
+                    if !fits {
+                        return Some(GenericBoundViolation {
+                            argument,
+                            expected,
+                            actual,
+                            formal: index,
+                            uninferred: false,
+                        });
+                    }
+                }
+                Some(_) => {}
+                None if invariant => fixed = Some((actual, argument)),
+                None => {}
+            }
+        }
+        None
+    }
+
     fn solve(mut self, source: &dyn SymbolSource, signature: &GenericSig) -> InferredCallBindings {
         self.propagate_declaration_bounds(source, signature);
         let mut bound_violation = None;
@@ -569,6 +622,14 @@ impl CallInferenceConstraints {
             let Some(mut current) = self.lower.get(formal).copied() else {
                 continue;
             };
+            if let Some(violation) = self.invariant_contradiction(source, formal, index) {
+                if bound_violation
+                    .is_none_or(|known: GenericBoundViolation| violation.argument < known.argument)
+                {
+                    bound_violation = Some(violation);
+                }
+                continue;
+            }
             let declared_bounds = signature
                 .formal_bounds
                 .get(index)
@@ -688,6 +749,10 @@ impl CallInferenceConstraints {
                         argument,
                         expected,
                         actual,
+                        formal: index,
+                        uninferred: lowers
+                            .iter()
+                            .all(|(_, origin)| *origin == ConstraintOrigin::Argument(argument)),
                     };
                     if bound_violation
                         .is_none_or(|known: GenericBoundViolation| argument < known.argument)
