@@ -2623,3 +2623,16 @@ fun render(items: List<String>): Unit = with(Builder()) {
     );
     common::assert_error_blocks_match_kotlinc(&sources, &reference_args);
 }
+
+#[test]
+fn a_rejected_constructor_family_commits_none_of_its_declarations() {
+    // kotlinc reports every inapplicable constructor of the family and selects none of them.
+    let source = r#"
+class Two {
+    constructor(a: Int)
+    constructor(b: String)
+}
+fun several(): Two = Two(1.0)
+"#;
+    assert_rejection_same_as_kotlinc("RejectedConstructorFamily", source);
+}

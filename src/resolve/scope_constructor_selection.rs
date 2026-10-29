@@ -23,8 +23,8 @@ enum ScopeConstructorSelection {
     /// Several constructors are equally specific. The provider path reports the ambiguity, but
     /// never commits a constructor of its own choosing.
     Ambiguous,
-    /// No constructor of this priority tier applies. The provider path reports why, against the
-    /// inapplicable candidate kotlinc reports.
+    /// No constructor of this priority tier applies. The provider path reports why, and commits
+    /// only a sole declaration, the inapplicable candidate kotlinc reports against.
     Inapplicable,
 }
 
@@ -33,7 +33,7 @@ impl ScopeConstructorSelection {
         match self {
             Self::Selected(selected) => ConstructorPreselection::Selected(selected),
             Self::Ambiguous => ConstructorPreselection::Ambiguous,
-            Self::Inapplicable => ConstructorPreselection::Open,
+            Self::Inapplicable => ConstructorPreselection::Rejected,
         }
     }
 }

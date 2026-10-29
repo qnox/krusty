@@ -11,6 +11,9 @@ pub(super) enum ConstructorPreselection<'a> {
     Selected(&'a crate::libraries::FunctionInfo),
     /// The candidates are equally specific: report why, but commit none.
     Ambiguous,
+    /// No candidate applies: report why. Only a sole declaration is committed, as the candidate
+    /// kotlinc reports the mismatches against; among several, none is chosen here.
+    Rejected,
 }
 
 impl Checker<'_> {
@@ -699,7 +702,9 @@ impl Checker<'_> {
                     return Ok(LibraryConstructorSelection::NoMatch);
                 }
             };
-        if matches!(preselection, ConstructorPreselection::Ambiguous) {
+        let rejected_among_several =
+            matches!(preselection, ConstructorPreselection::Rejected) && members.len() > 1;
+        if matches!(preselection, ConstructorPreselection::Ambiguous) || rejected_among_several {
             return Ok(LibraryConstructorSelection::NoMatch);
         }
         let Some(member) = members.get(candidate_index).cloned() else {
