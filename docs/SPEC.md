@@ -23100,10 +23100,16 @@ formal never survives the call, whatever its bound. Test: `box_regressions/bound
 
 ## Lexical captures in anonymous superclass lambdas
 
-A lambda retained in an anonymous object's superclass-constructor argument carries its enclosing
-lexical values through that object's constructor prefix before forming the closure. Nested lambdas
-preserve the same binding, mutable locals retain their shared cell, and a lambda parameter shadows
-an outer value without creating a capture of it. Type aliases and a same-named inherited property
-do not change this contract. The differential runtime controls live in
-`typealias_constructor_inference_e2e`. The pre-existing captureless lambda placement/constructor
-ABI difference is preserved separately with its complete oracle in #2833.
+An anonymous object's superclass lambda argument is created in the lexical construction body and
+passed as the selected constructor parameter. Its implementation retains that body's owner and
+source lifting site. Captured generic values, nested closures, enclosing instances and extension
+receivers preserve their identities; mutable locals retain their shared cell. A lambda parameter
+shadows an outer value without creating a capture of it. Type aliases and a same-named inherited
+property do not change these rules. Named-class constructor lambdas retain their constructor
+context. The existing vararg packing path still creates vararg-contribution closures in that
+constructor; forwarding a packed array is separate work. Runtime and complete ordinary-slot class
+ABI controls live in `typealias_constructor_inference_e2e` and its anonymous-super-lambda child.
+Forwarding preserves declared extension/context receiver identity across the unavailable anonymous
+header rung, including nested receiver lambdas and mixed forwarded/constructor-resident closures.
+A receiver used only by a forwarded argument adds no anonymous-class storage. A receiver also read
+by a class-body method still has the ordinary capture field; both uses preserve the original value.

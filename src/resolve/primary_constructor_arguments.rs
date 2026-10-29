@@ -72,6 +72,15 @@ impl Checker<'_> {
                     }),
             );
             let header_scope = &header_scope;
+            if is_anonymous_object {
+                self.constructor_receiver_frames.push(
+                    super::constructor_receiver_frames::ConstructorReceiverFrame::new(
+                        d,
+                        header_scope,
+                        lexical_scope,
+                    ),
+                );
+            }
             let previous_static_this =
                 std::mem::replace(&mut self.static_companion_this, static_this);
             let previous_singleton_this =
@@ -130,7 +139,7 @@ impl Checker<'_> {
                     {
                         let selected = *selected;
                         if let Some(receiver) = &selected.outer_receiver {
-                            c.mark_selected_implicit_receiver_used(header_scope, receiver);
+                            c.mark_selected_implicit_receiver_used(header_scope, receiver, d);
                         }
                         crate::trace_compiler!(
                             "fir",
@@ -203,6 +212,11 @@ impl Checker<'_> {
             });
             self.static_companion_this = previous_static_this;
             self.static_singleton_this = previous_singleton_this;
+        }
+        if is_anonymous_object {
+            self.constructor_receiver_frames
+                .pop()
+                .expect("anonymous constructor receiver frame");
         }
     }
 }
