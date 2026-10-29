@@ -6316,3 +6316,11 @@ bodyless edge preparation and ordinary accessor linking; preserve retained expor
 primitive/intrinsic priority. Native consumes its existing runtime getter plans. Prove real
 official-producer/JVM-oracle programs and malformed header/facet controls. Keep compiler-introduced
 block lowering as the independent #2811 follow-up.
+## Preserve closed annotation defaults in metadata (#2609)
+
+Publish the already normalized annotation element values into the declaration-owned primary
+constructor record and serialize supported physical metadata versions through the shared value
+encoder. Preserve classifier remapping, default-before-annotation interning and ascending wire
+order. Keep the complete original nested annotation fixture and dependency runtime oracle, and
+compare every emitted class and complete metadata payload. Cover all value kinds, annotated
+parameters, ordinary defaults, version boundaries and missing normalized evidence separately.

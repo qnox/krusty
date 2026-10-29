@@ -97,6 +97,8 @@ pub(crate) struct ClassDeclarationRecord {
     /// `secondary_ctors` describes.
     pub(crate) secondary_ordinals: Vec<usize>,
     ctor_param_defaults: Vec<bool>,
+    /// Closed annotation element values, aligned to the declared primary parameters.
+    annotation_param_defaults: Option<Vec<Option<crate::ir::AnnoValue>>>,
     ctor_param_tparams: Vec<Option<u32>>,
     ctor_param_annotations: Vec<MetadataAnnotations>,
     inline_underlying: Option<(String, Option<(Ty, crate::spelling::Spelled)>)>,
@@ -126,6 +128,7 @@ pub(crate) trait ClassifierRenaming {
     fn spelled(&self, spelled: &mut crate::spelling::Spelled);
     fn spellings(&self, spellings: &mut crate::spelling::DeclaredSpellings);
     fn annotation(&self, annotation: &mut crate::ir::AppliedAnnotation);
+    fn annotation_value(&self, value: &mut crate::ir::AnnoValue);
     fn type_parameters(&self, parameters: &mut [crate::ir::IrTypeParameter]);
 }
 
@@ -143,6 +146,11 @@ impl ClassDeclarationRecord {
         };
         self.class = renaming.name(self.class);
         named_types(&mut self.ctor_params);
+        if let Some(defaults) = &mut self.annotation_param_defaults {
+            for value in defaults.iter_mut().flatten() {
+                renaming.annotation_value(value);
+            }
+        }
         for property in &mut self.props {
             property.ty = renaming.ty(property.ty);
             property
@@ -342,6 +350,7 @@ enum CapturedParameters {
 pub(crate) struct ClassTailOptions<'a> {
     pub(crate) param_assertions: bool,
     pub(crate) annotations_in_metadata: bool,
+    pub(crate) annotation_defaults_in_metadata: bool,
     pub(crate) compiler_version_requirement:
         Option<crate::metadata::version_requirements::VersionRequirement>,
     pub(crate) intersection: Option<&'a dyn Fn(Ty) -> Option<Ty>>,
@@ -352,6 +361,18 @@ pub(crate) struct ClassTailOptions<'a> {
 }
 
 impl ClassDeclarationRecord {
+    /// A declared annotation default must have its normalized value before serialization.
+    pub(crate) fn missing_annotation_default(&self) -> Option<&str> {
+        let values = self.annotation_param_defaults.as_ref()?;
+        self.ctor_params
+            .iter()
+            .zip(&self.ctor_param_defaults)
+            .zip(values)
+            .find_map(|(((name, _), required), value)| {
+                (*required && value.is_none()).then_some(name.as_str())
+            })
+    }
+
     /// The record's class-level inputs.
     pub(crate) fn tail<'a>(
         &'a self,
@@ -379,6 +400,10 @@ impl ClassDeclarationRecord {
             flags: self.flags,
             primary_ctor_flags: self.primary_ctor_flags,
             ctor_param_defaults: &self.ctor_param_defaults,
+            annotation_param_defaults: options
+                .annotation_defaults_in_metadata
+                .then_some(self.annotation_param_defaults.as_deref())
+                .flatten(),
             inline_underlying: self.inline_underlying.as_ref().map(|(name, ty)| {
                 (
                     name.as_str(),
@@ -867,6 +892,17 @@ pub(crate) fn build(ir: &IrFile, c: &IrClass) -> Option<ClassDeclarationRecord> 
         .iter()
         .map(|(_, _, has_default, _)| *has_default)
         .collect();
+    let annotation_param_defaults = c.is_annotation.then(|| {
+        let published = ir.annotation_element_defaults.get(&c.fq_name_id());
+        ctor_params
+            .iter()
+            .map(|(name, _)| {
+                published
+                    .and_then(|values| values.iter().find(|(element, _)| element == name))
+                    .map(|(_, value)| value.clone())
+            })
+            .collect()
+    });
     let ctor_param_tparams: Vec<Option<u32>> = ctor_params_with_defaults
         .iter()
         .map(|(_, _, _, type_param)| *type_param)
@@ -1060,6 +1096,7 @@ pub(crate) fn build(ir: &IrFile, c: &IrClass) -> Option<ClassDeclarationRecord> 
         secondary_ctors,
         secondary_ordinals,
         ctor_param_defaults,
+        annotation_param_defaults,
         ctor_param_tparams,
         ctor_param_annotations,
         inline_underlying,
@@ -1729,6 +1766,10 @@ fn secondary_constructor_flags(visibility: Visibility) -> u64 {
     const IS_SECONDARY: u64 = 16;
     IS_SECONDARY | (declaration_visibility_bits(visibility) << 1)
 }
+
+#[cfg(test)]
+#[path = "class_declarations/annotation_defaults_tests.rs"]
+mod annotation_defaults_tests;
 
 #[cfg(test)]
 mod tests {

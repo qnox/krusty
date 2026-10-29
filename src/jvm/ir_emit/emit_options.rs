@@ -49,6 +49,10 @@ impl EmitOptions {
         self.metadata_version.unwrap_or(DEFAULT_METADATA_VERSION)
     }
 
+    pub(crate) fn annotation_defaults_in_metadata(&self) -> bool {
+        crate::metadata::annotation_defaults::supported(self.metadata_version())
+    }
+
     pub fn metadata_stamp(&self) -> crate::jvm::classfile::MetadataStamp {
         crate::jvm::classfile::MetadataStamp {
             version: self.metadata_version(),
@@ -116,6 +120,23 @@ impl Default for EmitOptions {
             annotations_in_metadata: true,
             pre_release_metadata: false,
             plugins: std::rc::Rc::default(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod annotation_default_tests {
+    use super::EmitOptions;
+
+    #[test]
+    fn annotation_default_payload_uses_the_metadata_override_independently_of_annotations() {
+        for annotations in [false, true] {
+            for (version, expected) in [([2, 1, 0], false), ([2, 2, 0], true)] {
+                let options = EmitOptions::default()
+                    .with_metadata_version(Some(version))
+                    .with_annotations_in_metadata(annotations);
+                assert_eq!(options.annotation_defaults_in_metadata(), expected);
+            }
         }
     }
 }

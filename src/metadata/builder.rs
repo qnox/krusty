@@ -386,7 +386,7 @@ pub(crate) fn constant_value_pb(st: &mut StringTable<'_>, constant: &crate::ir::
     annotation_value_pb(st, &crate::ir::AnnoValue::Const(constant.clone()))
 }
 
-fn annotation_value_pb(st: &mut StringTable<'_>, value: &crate::ir::AnnoValue) -> Pb {
+pub(super) fn annotation_value_pb(st: &mut StringTable<'_>, value: &crate::ir::AnnoValue) -> Pb {
     use crate::ir::{AnnoValue, IrConst};
     let mut out = Pb::new();
     match value {

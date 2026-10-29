@@ -2,6 +2,9 @@
 
 use super::common;
 
+#[path = "generic_annotation_construction_e2e/default_expression_metadata.rs"]
+mod default_expression_metadata;
+
 const NESTED_CLASS_ARGUMENTS: &str = r#"import kotlin.reflect.KClass
 annotation class Anno(val k: KClass<*>, val e: C.NestedEnum, val a: C.NestedAnno)
 annotation class AnnoWithDefault(val k: KClass<*> = Nested0::class) {

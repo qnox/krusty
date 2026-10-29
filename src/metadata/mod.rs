@@ -3,6 +3,7 @@
 use crate::types::TyKind;
 use protobuf::Pb;
 
+pub(crate) mod annotation_defaults;
 pub mod annotations;
 pub use annotations::{AccessorMetadataAnnotations, MetadataAnnotations, NO_ANNOTATIONS};
 pub mod builder;
