@@ -14591,6 +14591,7 @@ impl<'a> Checker<'a> {
                             &self.anonymous_lexical_scope,
                             name,
                             function_local,
+                            capture_storage::ConstructorArgumentUses::Candidates,
                         );
                     let shared_cell = capture_storage::CapturedBinding {
                         delegated: local.delegate_storage_ty.is_some(),
@@ -14752,6 +14753,7 @@ impl<'a> Checker<'a> {
                         calls: &self.resolved_calls,
                         expressions: &self.expr_lowers,
                         statements: &self.stmt_lowers,
+                        constructor_arguments: capture_storage::ConstructorArgumentUses::Candidates,
                     },
                     &mut self.discovered_anonymous_captures,
                 );
@@ -14835,6 +14837,10 @@ impl<'a> Checker<'a> {
                         calls: &self.resolved_calls,
                         expressions: &self.expr_lowers,
                         statements: &self.stmt_lowers,
+                        constructor_arguments: capture_storage::ConstructorArgumentUses::Checked {
+                            expressions: &self.expr_lowers,
+                            types: &self.expr_types,
+                        },
                     },
                     &mut self.discovered_anonymous_captures,
                 );

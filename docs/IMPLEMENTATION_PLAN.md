@@ -6293,3 +6293,13 @@ and the pass rejects every construct it does not cover yet.
 - [ ] The full body transform: control-flow groups, `remember`, early returns, inline composables.
 - [ ] `ComposableSingletons` lambda holders and the `$stable` field of classes.
 - [ ] Remove the partial marker and rerun the corpus for the Compose projects.
+
+## Anonymous superclass closure captures
+
+Align shared constructor-use discovery with the checked retained-closure decision for #2657.
+Early read/write discovery provisions candidate lexical dependencies from lambda syntax; final
+publication admits closure roots from the checked lowering and non-error type. Preserve existing
+binding identities, forwarding rules and field reconciliation. Feed the existing FIR constructor-
+prefix and nested-capture operations rather than adding a new capture ABI or lookup in lowering.
+Validate both original issue programs, direct/nested generic lambdas, shared mutable storage and
+parameter shadowing against Kotlin, together with the existing constructor capture regressions.

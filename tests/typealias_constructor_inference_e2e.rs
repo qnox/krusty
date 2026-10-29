@@ -153,3 +153,80 @@ fun box(): String = Named("OK").value.single()
 "#;
     common::expect_box_same_as_kotlinc(source, "named_superclass_constructor_parameter");
 }
+
+#[test]
+fn an_aliased_superclass_lambda_keeps_the_enclosing_value() {
+    let source = r#"
+open class Carrier<T>(val value: () -> T)
+typealias Nested<T> = Carrier<List<T>>
+private fun <T> copy(value: T) = object : Nested<T>({ listOf(value) }) {}
+fun box(): String = copy("OK").value().single()
+"#;
+    common::expect_box_same_as_kotlinc(source, "aliased_superclass_lexical_lambda");
+}
+
+#[test]
+fn constructor_edge_baseline_lambda_capture_without_a_property_collision() {
+    let source = r#"
+open class Carrier<T>(val stored: () -> T)
+typealias Nested<T> = Carrier<List<T>>
+private fun <T> copy(value: T) = object : Nested<T>({ listOf(value) }) {}
+fun box(): String = copy("OK").stored().single()
+"#;
+    common::expect_box_same_as_kotlinc(source, "anonymous_super_argument_lambda_capture_baseline");
+}
+
+#[test]
+fn a_direct_superclass_lambda_keeps_the_enclosing_generic_value() {
+    let source = r#"
+open class Carrier<T>(val stored: () -> T)
+private fun <T> copy(value: T) = object : Carrier<T>({ value }) {}
+fun box(): String = copy("OK").stored()
+"#;
+    common::expect_box_same_as_kotlinc(source, "direct_superclass_generic_lambda_capture");
+}
+
+#[test]
+fn a_nested_aliased_superclass_lambda_keeps_the_enclosing_generic_value() {
+    let source = r#"
+open class Carrier<T>(val stored: () -> T)
+typealias Nested<T> = Carrier<List<T>>
+private fun <T> copy(value: T) = object : Nested<T>({ { listOf(value) }() }) {}
+fun box(): String = copy("OK").stored().single()
+"#;
+    common::expect_box_same_as_kotlinc(source, "nested_aliased_superclass_generic_lambda_capture");
+}
+
+#[test]
+fn an_anonymous_superclass_lambda_retains_the_enclosing_mutable_cell() {
+    let source = r#"
+open class Carrier(val stored: () -> String)
+fun box(): String {
+    var value = "before"
+    val copy = object : Carrier({ value }) {}
+    value = "OK"
+    return copy.stored()
+}
+"#;
+    common::expect_box_same_as_kotlinc(source, "anonymous_superclass_lambda_shared_cell");
+}
+
+const SHADOWED_SUPERCLASS_LAMBDA: &str = r#"
+open class Carrier(val stored: (String) -> String)
+fun box(): String {
+    val value = "unselected"
+    val copy = object : Carrier({ value -> value }) {}
+    return copy.stored("OK")
+}
+"#;
+
+#[test]
+fn a_superclass_lambda_parameter_shadows_the_enclosing_value() {
+    common::expect_box_same_as_kotlinc(
+        SHADOWED_SUPERCLASS_LAMBDA,
+        "anonymous_superclass_lambda_parameter_shadow",
+    );
+}
+
+// The unchanged complete-ABI oracle for this program is preserved in #2833: baseline and this
+// capture fix emit identical class bytes, while construction-site lambda placement still differs.

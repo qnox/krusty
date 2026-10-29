@@ -23097,3 +23097,13 @@ formal binds to the caller's own type variable (`b + t` for
 `operator fun <A : Number?, B : A> Box<A>.plus(t: B): Pair2<A, B>` inside
 `fun <X : Number?, Y : X>`), the result names that variable (`Pair2<X, Y>`); the declaration's
 formal never survives the call, whatever its bound. Test: `box_regressions/boundedFormalExtensionReturn.kt`.
+
+## Lexical captures in anonymous superclass lambdas
+
+A lambda retained in an anonymous object's superclass-constructor argument carries its enclosing
+lexical values through that object's constructor prefix before forming the closure. Nested lambdas
+preserve the same binding, mutable locals retain their shared cell, and a lambda parameter shadows
+an outer value without creating a capture of it. Type aliases and a same-named inherited property
+do not change this contract. The differential runtime controls live in
+`typealias_constructor_inference_e2e`. The pre-existing captureless lambda placement/constructor
+ABI difference is preserved separately with its complete oracle in #2833.
