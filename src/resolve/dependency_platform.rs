@@ -382,8 +382,8 @@ impl SymbolSource for DependencyPlatform {
             .or_else(|| self.platform.serializable_class_elements(classifier))
     }
 
-    fn sam_with_receiver_annotations(&self) -> &[TypeName] {
-        &self.symbols.sam_with_receiver_annotations
+    fn annotation_conventions(&self) -> &crate::symbol_source::AnnotationConventions {
+        &self.symbols.annotation_conventions
     }
 
     fn symbols(&self, namespace: SymbolNamespace, name: &str) -> Rc<ResolvedSymbols> {

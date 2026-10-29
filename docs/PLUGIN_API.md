@@ -176,11 +176,12 @@ since krusty writes neither report yet.
 Covered so far: `Unit` top-level composable functions with a block body whose parameters are
 primitives or `String`, made restartable and skippable with kotlinc's `$changed`/`$dirty`
 parameter tracking, and their calls to each other in the same file, which pass on what the caller
-knows of each argument. Durable group keys,
+knows of each argument. Constant default arguments are assigned inside the group from a `$default`
+mask, as kotlinc does, instead of in a `$default` synthetic. Durable group keys,
 `sourceInformation` strings, trace markers and `@FunctionKeyMeta` (class file only, never Kotlin
 metadata, as kotlinc's IR plugin adds it after FIR serialization) follow kotlinc's formulas. Every
 other mode is an explicit decline at its declaration or call: a function with a receiver, a default
-argument, a vararg, more than ten parameters, a parameter whose stability kotlinc infers, or another
+argument that is not a constant, a vararg, more than ten parameters, a parameter whose stability kotlinc infers, or another
 result, a call argument the pass cannot classify as constant, passed on or computed, a grouping annotation (`@NonRestartableComposable`, `@NonSkippableComposable`,
 `@ReadOnlyComposable`, `@ExplicitGroupsComposable`), a call to a composable of another file or
 module, a composable whose name an overload with lambdas shares, and any class kotlinc would give
