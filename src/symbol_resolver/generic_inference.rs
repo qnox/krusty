@@ -20,13 +20,11 @@ pub(crate) use bound_relations::{
     generic_bindings_admit_expected_return_intersection, generic_bindings_satisfy_bounds,
     resolve_bound_violating_bindings, unsolved_formal_bound,
 };
-#[cfg(test)]
-use call_constraints::GenericBoundViolation;
 pub(crate) use call_constraints::{
     collect_assignability_constraints_from_symbols, infer_generic_call_constraints_from_symbols,
     infer_generic_call_constraints_with_argument_ordinals,
     infer_generic_call_constraints_with_receiver_from_symbols, publish_denotable_upper_bindings,
-    seed_denotable_upper_placeholders, AssignabilityConstraints,
+    seed_denotable_upper_placeholders, AssignabilityConstraints, GenericBoundViolation,
 };
 pub(crate) use call_site_variables::{CallSiteVariableMap, CallSiteVariables};
 pub(crate) use conditional_result::generic_return_expectation_from_sibling;

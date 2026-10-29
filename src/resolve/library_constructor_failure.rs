@@ -179,13 +179,7 @@ impl Checker<'_> {
                     return;
                 };
                 if let Some(formal) = uninferred {
-                    self.diags.error(
-                        self.call_callee_name_span(call),
-                        format!(
-                            "cannot infer type for type parameter '{}'. Specify it explicitly.",
-                            crate::types::type_parameter_source_name(&formal)
-                        ),
-                    );
+                    self.report_uninferred_formal(call, &formal);
                 }
                 // A context-sensitive lambda deliberately carries `Ty::Error` until a callable
                 // candidate supplies a function/SAM shape. When the only mapped constructor
