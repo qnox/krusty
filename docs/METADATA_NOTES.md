@@ -1,5 +1,13 @@
 # `@kotlin.Metadata` — reverse-engineering notes (Phase 4b)
 
+## Native reference identities and exported entry points
+
+A KLIB export's physical invocation alias is independent of its declaration marker. The Native
+export handoff carries the source key so a dependent module agrees with references created in the
+declaring source module. Dependency-support keys encode the exact module and Public/Accessor
+signature through the existing declaration-identity encoder, retaining every segment, member ID and
+mask. This changes target symbol publication without changing Kotlin metadata or runtime layout.
+
 ## Declaration-owned Class header IDs
 
 The common Class schema takes a mandatory resolved class ID. Its package and exact lexical
@@ -1334,3 +1342,14 @@ function-expression expectations when an explicit class argument violates its bo
 uses the same typed failure evidence for source and reference-produced dependency declarations;
 it does not reconstruct parameter types from constructor text. Metadata encoding and callable ABI
 are unchanged. Callable-reference selected-declaration diagnostic retention is tracked in #2776.
+
+## Serialized getter declaration contracts
+
+KLIB normalization tags a getter or setter from its actual property slot, retaining the property's
+opaque identity and decoded name. This KLIB-only facet survives both declaration projections and
+participates in declaration-contract equality; it grants no execution capability by itself.
+Ordinary getter linking authenticates the serialized property group and class header, including
+the raw dispatch classifier's signature mask and complete own-formal receiver application.
+Declared getter results remain distinct from the checked read's applied result. Native's runtime
+leaf capability reuses its existing accessor signature plans and does not import property bodies
+or reconstruct class storage. No metadata wire format changes.

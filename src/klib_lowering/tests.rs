@@ -3,6 +3,7 @@
 
 use std::path::PathBuf;
 
+mod accessor_calls;
 mod body_forms;
 mod callee_headers;
 mod closure_frames;
