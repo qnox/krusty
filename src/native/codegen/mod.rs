@@ -37,6 +37,9 @@ struct DependencyExport {
     member_receiver: Option<crate::backend::DependencyMemberReceiver>,
     singleton_member_receiver: Option<crate::backend::SingletonMemberReceiver>,
     singleton_extension_receiver: Option<crate::backend::SingletonExtensionUnreadReceiver>,
+    /// The entry filling this declaration's omitted defaults, when it declares any: every operand
+    /// of [`Self::signature`], then one `Int` mask per 32 of them with a bit per omitted operand.
+    default_entry: Option<String>,
 }
 
 /// One source function this target must publish for dependent source modules.
@@ -45,6 +48,7 @@ struct DependencyExportDefinition {
     symbol: String,
     signature: crate::backend::DependencyFunctionSignature,
     member_receiver: Option<crate::backend::DependencyMemberReceiver>,
+    default_entry: Option<String>,
 }
 
 /// The symbol every program object must define for the runtime's `_start` to call.
@@ -290,6 +294,10 @@ impl Backend for CraneliftBackend {
             };
             let symbol = format!("kt_klib_export_{}", state.next_dependency_symbol);
             state.next_dependency_symbol += 1;
+            // A later module calling this declaration with arguments left out reaches the
+            // declaring file's default entry through an export of its own.
+            let default_entry = lower::exports_default_entry(&file.ir, callable)
+                .then(|| format!("{symbol}__defaults"));
             let export = DependencyExport {
                 symbol: symbol.clone(),
                 signature: signature.clone(),
@@ -300,6 +308,7 @@ impl Backend for CraneliftBackend {
                 singleton_extension_receiver: file
                     .dependency_exports
                     .singleton_extension_unread_receiver(callable),
+                default_entry: default_entry.clone(),
             };
             if state
                 .dependency_symbols
@@ -318,6 +327,7 @@ impl Backend for CraneliftBackend {
                     symbol,
                     signature,
                     member_receiver: file.dependency_exports.member_receiver(callable),
+                    default_entry,
                 },
             );
         }

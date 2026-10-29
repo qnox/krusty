@@ -994,6 +994,12 @@ pub struct LibraryCallable {
     /// placeholders for the omitted trailing ones, an `int` bit-mask (a bit set per omitted parameter),
     /// and a `null` marker — the JVM realization of default arguments. `false` for an ordinary call.
     pub default_call: bool,
+    /// The declaration fills its own omitted arguments: a dependency declaration whose defaults
+    /// are part of its declaring module, where that module's compilation realizes them as one
+    /// entry taking every operand and a mask of the omitted ones. A call omitting a computed
+    /// default to such a declaration keeps the declaration's identity, with
+    /// [`Self::default_call`] set; no platform `$default` symbol is named.
+    pub defaults_from_declaration: bool,
     /// For a generic `vararg` callable resolved with a bound element type (`listOf<Long>(…)` →
     /// `Long`): the *logical* element type the trailing arguments adapt to. `None` for a non-vararg
     /// call or when the element type is not recovered. The backend uses it to coerce each packed

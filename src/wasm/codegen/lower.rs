@@ -331,7 +331,7 @@ pub(super) fn lower_file(
     } else {
         None
     };
-    callable_registry.publish(ir, dependency_exports, &indices)?;
+    callable_registry.publish(ir, dependency_exports, &indices, &default_indices)?;
     Ok(LoweredFile {
         functions: indices,
         initializer,

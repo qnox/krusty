@@ -518,6 +518,7 @@ impl LibraryCallable {
             member_realization: MemberRealization::Dispatch,
             inline: InlineKind::None,
             default_call: false,
+            defaults_from_declaration: false,
             vararg_elem: None,
             vararg_index: None,
             signature: None,
