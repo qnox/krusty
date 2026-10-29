@@ -125,7 +125,7 @@
    "dir": "moshi/build/classes/kotlin/main",
    "built": false,
    "fallback": null,
-   "error": "moshi/src/main/java/com/squareup/moshi/-MoshiKotlinTypesExtensions.kt:80:61: error: unresolved reference 'asArrayType'.",
+   "error": "moshi/src/main/java/com/squareup/moshi/JsonReader.kt:237:15: error: assignment type mismatch: actual type is 'Array<String>', but 'Array<String?>' was expected.",
    "classes": 102,
    "identical": 0,
    "only_kotlinc": null,
@@ -171,8 +171,8 @@
   }
  ],
  "measured": {
-  "date": "2026-10-28",
-  "commit": "bf115cc9cfdcc4fa9ac248cb776a31507f4133f6",
-  "run": "https://github.com/qnox/krusty/actions/runs/40648260963"
+  "date": "2026-10-29",
+  "commit": "c08730becd6a8d1749d99fc3b3cfd86edbc0cddb",
+  "run": "https://github.com/qnox/krusty/actions/runs/40835862021"
  }
 }

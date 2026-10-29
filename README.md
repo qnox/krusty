@@ -7,20 +7,20 @@ on master); `projects/` holds each project's latest result and `history.tsv` eve
 
 | Project | Stars | Kotlin LOC | Java LOC | Reference build | Compilations built by krusty | Identical classes | Measured |
 | --- | ---: | ---: | ---: | --- | ---: | ---: | --- |
-| Exposed | 9,302 | 138,105 | 0 | ok | 0 / 43 | 0 / 8,100 (0.0%) | [2026-10-28, krusty bf115cc](https://github.com/qnox/krusty/actions/runs/40648260963) |
-| koin | 10,024 | 33,677 | 123 | ok | 4 / 19 | 79 / 3,705 (2.1%) | [2026-10-28, krusty bf115cc](https://github.com/qnox/krusty/actions/runs/40648260963) |
-| kotlinx.coroutines | 13,822 | 102,096 | 897 | ok | 0 / 34 | 0 / 9,482 (0.0%) | [2026-10-28, krusty bf115cc](https://github.com/qnox/krusty/actions/runs/40648260963) |
-| ktor | 14,557 | 259,026 | 85 | ok | 0 / 220 | 0 / 15,418 (0.0%) | [2026-10-28, krusty bf115cc](https://github.com/qnox/krusty/actions/runs/40648260963) |
-| leakcanary | 30,004 | 100,627 | 172 | ok | 6 / 34 | 23 / 1,798 (1.3%) | [2026-10-28, krusty bf115cc](https://github.com/qnox/krusty/actions/runs/40648260963) |
-| Maestro | 16,241 | 65,644 | 0 | ok | 1 / 19 | 26 / 2,156 (1.2%) | [2026-10-28, krusty bf115cc](https://github.com/qnox/krusty/actions/runs/40648260963) |
-| mirai | 14,792 | 156,078 | 559 | ok | 3 / 56 | 7 / 11,399 (0.1%) | [2026-10-28, krusty bf115cc](https://github.com/qnox/krusty/actions/runs/40648260963) |
-| moshi | 10,166 | 16,749 | 13,212 | ok | 0 / 12 | 0 / 512 (0.0%) | [2026-10-28, krusty bf115cc](https://github.com/qnox/krusty/actions/runs/40648260963) |
-| nowinandroid | 21,975 | 26,596 | 0 | ok | 16 / 58 | 144 / 1,110 (13.0%) | [2026-10-28, krusty bf115cc](https://github.com/qnox/krusty/actions/runs/40648260963) |
-| okhttp | 47,100 | 126,665 | 3,816 | ok | 9 / 38 | 40 / 1,483 (2.7%) | [2026-10-28, krusty bf115cc](https://github.com/qnox/krusty/actions/runs/40648260963) |
-| okio | 9,054 | 46,812 | 2,398 | failed (exit 1) | 0 / 6 | 0 / 343 (0.0%) | [2026-10-28, krusty bf115cc](https://github.com/qnox/krusty/actions/runs/40648260963) |
-| quarkdown | 16,339 | 87,771 | 23 | ok | 5 / 37 | 28 / 2,345 (1.2%) | [2026-10-28, krusty bf115cc](https://github.com/qnox/krusty/actions/runs/40648260963) |
-| Unciv | 11,496 | 139,231 | 1,184 | ok | 0 / 4 | 0 / 3,341 (0.0%) | [2026-10-28, krusty bf115cc](https://github.com/qnox/krusty/actions/runs/40648260963) |
-| **Measured total** | | | | | **44 / 574** | **347 / 60,849 (0.6%)** | |
+| Exposed | 9,303 | 138,105 | 0 | ok | 0 / 43 | 0 / 8,100 (0.0%) | [2026-10-29, krusty c08730b](https://github.com/qnox/krusty/actions/runs/40835862021) |
+| koin | 10,025 | 33,677 | 123 | ok | 4 / 19 | 79 / 3,705 (2.1%) | [2026-10-29, krusty c08730b](https://github.com/qnox/krusty/actions/runs/40835862021) |
+| kotlinx.coroutines | 13,822 | 102,096 | 897 | ok | 0 / 34 | 0 / 9,482 (0.0%) | [2026-10-29, krusty c08730b](https://github.com/qnox/krusty/actions/runs/40835862021) |
+| ktor | 14,558 | 259,026 | 85 | ok | 0 / 220 | 0 / 15,418 (0.0%) | [2026-10-29, krusty c08730b](https://github.com/qnox/krusty/actions/runs/40835862021) |
+| leakcanary | 30,002 | 100,627 | 172 | ok | 6 / 34 | 23 / 1,798 (1.3%) | [2026-10-29, krusty c08730b](https://github.com/qnox/krusty/actions/runs/40835862021) |
+| Maestro | 16,257 | 65,644 | 0 | ok | 1 / 19 | 27 / 2,156 (1.3%) | [2026-10-29, krusty c08730b](https://github.com/qnox/krusty/actions/runs/40835862021) |
+| mirai | 14,792 | 156,078 | 559 | ok | 3 / 56 | 7 / 11,399 (0.1%) | [2026-10-29, krusty c08730b](https://github.com/qnox/krusty/actions/runs/40835862021) |
+| moshi | 10,167 | 16,749 | 13,212 | ok | 0 / 12 | 0 / 512 (0.0%) | [2026-10-29, krusty c08730b](https://github.com/qnox/krusty/actions/runs/40835862021) |
+| nowinandroid | 21,981 | 26,596 | 0 | ok | 16 / 58 | 144 / 1,110 (13.0%) | [2026-10-29, krusty c08730b](https://github.com/qnox/krusty/actions/runs/40835862021) |
+| okhttp | 47,100 | 126,665 | 3,816 | ok | 9 / 38 | 40 / 1,483 (2.7%) | [2026-10-29, krusty c08730b](https://github.com/qnox/krusty/actions/runs/40835862021) |
+| okio | 9,054 | 46,812 | 2,398 | failed (exit 1) | 0 / 6 | 0 / 343 (0.0%) | [2026-10-29, krusty c08730b](https://github.com/qnox/krusty/actions/runs/40835862021) |
+| quarkdown | 16,338 | 87,771 | 23 | ok | 5 / 37 | 28 / 2,345 (1.2%) | [2026-10-29, krusty c08730b](https://github.com/qnox/krusty/actions/runs/40835862021) |
+| Unciv | 11,498 | 139,231 | 1,184 | ok | 0 / 4 | 0 / 3,341 (0.0%) | [2026-10-29, krusty c08730b](https://github.com/qnox/krusty/actions/runs/40835862021) |
+| **Measured total** | | | | | **44 / 574** | **348 / 60,849 (0.6%)** | |
 
 ## Missed compilations
 
@@ -56,14 +56,14 @@ on master); `projects/` holds each project's latest result and `history.tsv` eve
   - 1 × mirai-console/tools/gradle-plugin/src/main/kotlin/IGNORED_DEPENDENCIES_IN_SHADOW.kt:10:7: error: @file:JvmMultifileClass is not supported for JVM compilation yet; its part classes and delegating facade require distinct physical owners
   - 1 × left to kotlinc: krusty does not implement everything it requests (compilerOptions.optIn contains duplicate marker 'kotlin.contracts.ExperimentalContracts')
   - 1 × left to kotlinc: krusty does not implement everything it requests (compilerOptions.optIn contains duplicate marker 'net.mamoe.mirai.utils.MiraiInternalApi')
-  - 1 × mirai-core-utils/src/commonMain/kotlin/AtomicInteger.kt:21:28: error: overload resolution ambiguity between candidates:
+  - 1 × mirai-core-utils/src/commonMain/kotlin/Arrays.kt:10:7: error: @file:JvmMultifileClass is not supported for JVM compilation yet; its part classes and delegating facade require distinct physical owners
   - 1 × mirai-deps-test/test/CoreDependencyResolutionTest.kt:27:6: error: annotation argument is not a supported compile-time constant
 - **moshi**
   - 11 × not run: a task it depends on failed
-  - 1 × moshi/src/main/java/com/squareup/moshi/-MoshiKotlinTypesExtensions.kt:80:61: error: unresolved reference 'asArrayType'.
+  - 1 × moshi/src/main/java/com/squareup/moshi/JsonReader.kt:237:15: error: assignment type mismatch: actual type is 'Array<String>', but 'Array<String?>' was expected.
 - **nowinandroid**
-  - 21 × left to kotlinc: compiler plugin androidx.compose.compiler.plugins.kotlin, argument -Xallow-unstable-dependencies
-  - 9 × left to kotlinc: compiler plugin androidx.compose.compiler.plugins.kotlin, argument -Xuse-inline-scopes-numbers, argument -Xallow-unstable-dependencies
+  - 21 × left to kotlinc: argument -Xallow-unstable-dependencies
+  - 9 × left to kotlinc: argument -Xuse-inline-scopes-numbers, argument -Xallow-unstable-dependencies
   - 8 × not run: a task it depends on failed
   - 2 × left to kotlinc: argument -Xuse-inline-scopes-numbers
   - 1 × core/data/src/main/kotlin/com/google/samples/apps/nowinandroid/core/data/repository/DefaultSearchContentsRepository.kt:1:1: error: the compiled inline body of `flatMapLatest` cannot be inlined: Regeneration(Unsupported("a $$forInline method without a continuation"))

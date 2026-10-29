@@ -534,11 +534,11 @@
     }
    ],
    "measured": {
-    "date": "2026-10-28",
-    "commit": "bf115cc9cfdcc4fa9ac248cb776a31507f4133f6",
-    "run": "https://github.com/qnox/krusty/actions/runs/40648260963"
+    "date": "2026-10-29",
+    "commit": "c08730becd6a8d1749d99fc3b3cfd86edbc0cddb",
+    "run": "https://github.com/qnox/krusty/actions/runs/40835862021"
    },
-   "stars": 9302,
+   "stars": 9303,
    "misses": [
     [
      "not run: a task it depends on failed",
@@ -819,11 +819,11 @@
     }
    ],
    "measured": {
-    "date": "2026-10-28",
-    "commit": "bf115cc9cfdcc4fa9ac248cb776a31507f4133f6",
-    "run": "https://github.com/qnox/krusty/actions/runs/40648260963"
+    "date": "2026-10-29",
+    "commit": "c08730becd6a8d1749d99fc3b3cfd86edbc0cddb",
+    "run": "https://github.com/qnox/krusty/actions/runs/40835862021"
    },
-   "stars": 10024,
+   "stars": 10025,
    "misses": [
     [
      "not run: a task it depends on failed",
@@ -1283,9 +1283,9 @@
     }
    ],
    "measured": {
-    "date": "2026-10-28",
-    "commit": "bf115cc9cfdcc4fa9ac248cb776a31507f4133f6",
-    "run": "https://github.com/qnox/krusty/actions/runs/40648260963"
+    "date": "2026-10-29",
+    "commit": "c08730becd6a8d1749d99fc3b3cfd86edbc0cddb",
+    "run": "https://github.com/qnox/krusty/actions/runs/40835862021"
    },
    "stars": 13822,
    "misses": [
@@ -1828,7 +1828,7 @@
      "task": ":ktor-client-webrtc:compileKotlinJvm",
      "dir": "ktor-client/ktor-client-webrtc/build/classes/kotlin/jvm/main",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
      "error": null,
      "classes": 129,
      "identical": 0,
@@ -1872,7 +1872,7 @@
      "task": ":ktor-compiler-plugin:compileKotlin",
      "dir": "ktor-compiler-plugin/build/classes/kotlin/main",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
      "error": null,
      "classes": 111,
      "identical": 0,
@@ -1938,7 +1938,7 @@
      "task": ":ktor-events:compileKotlinJvm",
      "dir": "ktor-shared/ktor-events/build/classes/atomicfu-orig/jvm/main",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
      "error": null,
      "classes": 4,
      "identical": 0,
@@ -1982,7 +1982,7 @@
      "task": ":ktor-http-cio:compileKotlinJvm",
      "dir": "ktor-http/ktor-http-cio/build/classes/atomicfu-orig/jvm/main",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
      "error": null,
      "classes": 68,
      "identical": 0,
@@ -2059,7 +2059,7 @@
      "task": ":ktor-network-tls-certificates:compileTestKotlinJvm",
      "dir": "ktor-network/ktor-network-tls/ktor-network-tls-certificates/build/classes/atomicfu-orig/jvm/test",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
      "error": null,
      "classes": 4,
      "identical": 0,
@@ -2147,7 +2147,7 @@
      "task": ":ktor-openapi-schema:compileTestKotlinJvm",
      "dir": "ktor-shared/ktor-openapi-schema/build/classes/atomicfu-orig/jvm/test",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
      "error": null,
      "classes": 14,
      "identical": 0,
@@ -2191,7 +2191,7 @@
      "task": ":ktor-serialization-gson:compileTestKotlinJvm",
      "dir": "ktor-shared/ktor-serialization/ktor-serialization-gson/build/classes/atomicfu-orig/jvm/test",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
      "error": null,
      "classes": 14,
      "identical": 0,
@@ -2444,7 +2444,7 @@
      "task": ":ktor-server-auth-ldap:compileTestKotlinJvm",
      "dir": "ktor-server/ktor-server-plugins/ktor-server-auth-ldap/build/classes/atomicfu-orig/jvm/test",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
      "error": null,
      "classes": 10,
      "identical": 0,
@@ -2455,7 +2455,7 @@
      "task": ":ktor-server-auth-oidc:compileKotlinJvm",
      "dir": "ktor-server/ktor-server-plugins/ktor-server-auth-oidc/build/classes/atomicfu-orig/jvm/main",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
      "error": null,
      "classes": 135,
      "identical": 0,
@@ -2488,7 +2488,7 @@
      "task": ":ktor-server-auth:compileTestKotlinJvm",
      "dir": "ktor-server/ktor-server-plugins/ktor-server-auth/build/classes/atomicfu-orig/jvm/test",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
      "error": null,
      "classes": 702,
      "identical": 0,
@@ -2675,7 +2675,7 @@
      "task": ":ktor-server-content-negotiation:compileTestKotlinJvm",
      "dir": "ktor-server/ktor-server-plugins/ktor-server-content-negotiation/build/classes/atomicfu-orig/jvm/test",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
      "error": null,
      "classes": 97,
      "identical": 0,
@@ -2763,7 +2763,7 @@
      "task": ":ktor-server-default-headers:compileTestKotlinJvm",
      "dir": "ktor-server/ktor-server-plugins/ktor-server-default-headers/build/classes/atomicfu-orig/jvm/test",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
      "error": null,
      "classes": 16,
      "identical": 0,
@@ -2785,7 +2785,7 @@
      "task": ":ktor-server-di:compileTestKotlinJvm",
      "dir": "ktor-server/ktor-server-plugins/ktor-server-di/build/classes/atomicfu-orig/jvm/test",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
      "error": null,
      "classes": 371,
      "identical": 0,
@@ -2829,7 +2829,7 @@
      "task": ":ktor-server-freemarker:compileKotlinJvm",
      "dir": "ktor-server/ktor-server-plugins/ktor-server-freemarker/build/classes/atomicfu-orig/jvm/main",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
      "error": null,
      "classes": 4,
      "identical": 0,
@@ -2873,7 +2873,7 @@
      "task": ":ktor-server-html-builder:compileKotlinJvm",
      "dir": "ktor-server/ktor-server-plugins/ktor-server-html-builder/build/classes/atomicfu-orig/jvm/main",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
      "error": null,
      "classes": 10,
      "identical": 0,
@@ -2950,7 +2950,7 @@
      "task": ":ktor-server-jetty-jakarta:compileKotlinJvm",
      "dir": "ktor-server/ktor-server-jetty-jakarta/build/classes/atomicfu-orig/jvm/main",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
      "error": null,
      "classes": 51,
      "identical": 0,
@@ -2994,7 +2994,7 @@
      "task": ":ktor-server-jetty:compileKotlinJvm",
      "dir": "ktor-server/ktor-server-jetty/build/classes/atomicfu-orig/jvm/main",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
      "error": null,
      "classes": 24,
      "identical": 0,
@@ -3027,7 +3027,7 @@
      "task": ":ktor-server-jte:compileTestKotlinJvm",
      "dir": "ktor-server/ktor-server-plugins/ktor-server-jte/build/classes/atomicfu-orig/jvm/test",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
      "error": null,
      "classes": 26,
      "identical": 0,
@@ -3071,7 +3071,7 @@
      "task": ":ktor-server-metrics:compileKotlinJvm",
      "dir": "ktor-server/ktor-server-plugins/ktor-server-metrics/build/classes/atomicfu-orig/jvm/main",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
      "error": null,
      "classes": 13,
      "identical": 0,
@@ -3104,7 +3104,7 @@
      "task": ":ktor-server-mustache:compileTestKotlinJvm",
      "dir": "ktor-server/ktor-server-plugins/ktor-server-mustache/build/classes/atomicfu-orig/jvm/test",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
      "error": null,
      "classes": 17,
      "identical": 0,
@@ -3181,7 +3181,7 @@
      "task": ":ktor-server-pebble:compileKotlinJvm",
      "dir": "ktor-server/ktor-server-plugins/ktor-server-pebble/build/classes/atomicfu-orig/jvm/main",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
      "error": null,
      "classes": 6,
      "identical": 0,
@@ -3247,7 +3247,7 @@
      "task": ":ktor-server-resources:compileKotlinJvm",
      "dir": "ktor-server/ktor-server-plugins/ktor-server-resources/build/classes/atomicfu-orig/jvm/main",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
      "error": null,
      "classes": 30,
      "identical": 0,
@@ -3258,7 +3258,7 @@
      "task": ":ktor-server-resources:compileTestKotlinJvm",
      "dir": "ktor-server/ktor-server-plugins/ktor-server-resources/build/classes/atomicfu-orig/jvm/test",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
      "error": null,
      "classes": 278,
      "identical": 0,
@@ -3643,7 +3643,7 @@
      "task": ":ktor-server-websockets:compileTestKotlinJvm",
      "dir": "ktor-server/ktor-server-plugins/ktor-server-websockets/build/classes/atomicfu-orig/jvm/test",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
      "error": null,
      "classes": 104,
      "identical": 0,
@@ -3687,7 +3687,7 @@
      "task": ":ktor-test-base:compileTestKotlinJvm",
      "dir": "ktor-shared/ktor-test-base/build/classes/atomicfu-orig/jvm/test",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
      "error": null,
      "classes": 16,
      "identical": 0,
@@ -3731,7 +3731,7 @@
      "task": ":ktor-websocket-serialization:compileKotlinJvm",
      "dir": "ktor-shared/ktor-websocket-serialization/build/classes/atomicfu-orig/jvm/main",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
      "error": null,
      "classes": 3,
      "identical": 0,
@@ -3934,11 +3934,11 @@
     }
    ],
    "measured": {
-    "date": "2026-10-28",
-    "commit": "bf115cc9cfdcc4fa9ac248cb776a31507f4133f6",
-    "run": "https://github.com/qnox/krusty/actions/runs/40648260963"
+    "date": "2026-10-29",
+    "commit": "c08730becd6a8d1749d99fc3b3cfd86edbc0cddb",
+    "run": "https://github.com/qnox/krusty/actions/runs/40835862021"
    },
-   "stars": 14557,
+   "stars": 14558,
    "misses": [
     [
      "left to kotlinc: argument -Xrender-internal-diagnostic-names",
@@ -4399,11 +4399,11 @@
     }
    ],
    "measured": {
-    "date": "2026-10-28",
-    "commit": "bf115cc9cfdcc4fa9ac248cb776a31507f4133f6",
-    "run": "https://github.com/qnox/krusty/actions/runs/40648260963"
+    "date": "2026-10-29",
+    "commit": "c08730becd6a8d1749d99fc3b3cfd86edbc0cddb",
+    "run": "https://github.com/qnox/krusty/actions/runs/40835862021"
    },
-   "stars": 30004,
+   "stars": 30002,
    "misses": [
     [
      "not run: a task it depends on failed",
@@ -4465,7 +4465,7 @@
    "compilations": 19,
    "built": 1,
    "classes": 2156,
-   "identical": 26,
+   "identical": 27,
    "rows": [
     {
      "task": ":maestro-ai:compileKotlin",
@@ -4639,7 +4639,7 @@
      "fallback": null,
      "error": null,
      "classes": 37,
-     "identical": 26,
+     "identical": 27,
      "only_kotlinc": 0,
      "only_krusty": 0
     },
@@ -4695,11 +4695,11 @@
     }
    ],
    "measured": {
-    "date": "2026-10-28",
-    "commit": "bf115cc9cfdcc4fa9ac248cb776a31507f4133f6",
-    "run": "https://github.com/qnox/krusty/actions/runs/40648260963"
+    "date": "2026-10-29",
+    "commit": "c08730becd6a8d1749d99fc3b3cfd86edbc0cddb",
+    "run": "https://github.com/qnox/krusty/actions/runs/40835862021"
    },
-   "stars": 16241,
+   "stars": 16257,
    "misses": [
     [
      "not run: a task it depends on failed",
@@ -5252,7 +5252,7 @@
      "dir": "mirai-core-utils/build/classes/atomicfu-orig/jvm/main",
      "built": false,
      "fallback": null,
-     "error": "mirai-core-utils/src/commonMain/kotlin/AtomicInteger.kt:21:28: error: overload resolution ambiguity between candidates:",
+     "error": "mirai-core-utils/src/commonMain/kotlin/Arrays.kt:10:7: error: @file:JvmMultifileClass is not supported for JVM compilation yet; its part classes and delegating facade require distinct physical owners",
      "classes": 169,
      "identical": 0,
      "only_kotlinc": null,
@@ -5577,9 +5577,9 @@
     }
    ],
    "measured": {
-    "date": "2026-10-28",
-    "commit": "bf115cc9cfdcc4fa9ac248cb776a31507f4133f6",
-    "run": "https://github.com/qnox/krusty/actions/runs/40648260963"
+    "date": "2026-10-29",
+    "commit": "c08730becd6a8d1749d99fc3b3cfd86edbc0cddb",
+    "run": "https://github.com/qnox/krusty/actions/runs/40835862021"
    },
    "stars": 14792,
    "misses": [
@@ -5612,7 +5612,7 @@
      1
     ],
     [
-     "mirai-core-utils/src/commonMain/kotlin/AtomicInteger.kt:21:28: error: overload resolution ambiguity between candidates:",
+     "mirai-core-utils/src/commonMain/kotlin/Arrays.kt:10:7: error: @file:JvmMultifileClass is not supported for JVM compilation yet; its part classes and delegating facade require distinct physical owners",
      1
     ],
     [
@@ -5765,7 +5765,7 @@
      "dir": "moshi/build/classes/kotlin/main",
      "built": false,
      "fallback": null,
-     "error": "moshi/src/main/java/com/squareup/moshi/-MoshiKotlinTypesExtensions.kt:80:61: error: unresolved reference 'asArrayType'.",
+     "error": "moshi/src/main/java/com/squareup/moshi/JsonReader.kt:237:15: error: assignment type mismatch: actual type is 'Array<String>', but 'Array<String?>' was expected.",
      "classes": 102,
      "identical": 0,
      "only_kotlinc": null,
@@ -5811,18 +5811,18 @@
     }
    ],
    "measured": {
-    "date": "2026-10-28",
-    "commit": "bf115cc9cfdcc4fa9ac248cb776a31507f4133f6",
-    "run": "https://github.com/qnox/krusty/actions/runs/40648260963"
+    "date": "2026-10-29",
+    "commit": "c08730becd6a8d1749d99fc3b3cfd86edbc0cddb",
+    "run": "https://github.com/qnox/krusty/actions/runs/40835862021"
    },
-   "stars": 10166,
+   "stars": 10167,
    "misses": [
     [
      "not run: a task it depends on failed",
      11
     ],
     [
-     "moshi/src/main/java/com/squareup/moshi/-MoshiKotlinTypesExtensions.kt:80:61: error: unresolved reference 'asArrayType'.",
+     "moshi/src/main/java/com/squareup/moshi/JsonReader.kt:237:15: error: assignment type mismatch: actual type is 'Array<String>', but 'Array<String?>' was expected.",
      1
     ]
    ],
@@ -5858,7 +5858,7 @@
      "task": ":app:compileDemoDebugAndroidTestKotlin",
      "dir": "app/build/intermediates/built_in_kotlinc/demoDebugAndroidTest/compileDemoDebugAndroidTestKotlin/classes",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xuse-inline-scopes-numbers'; krusty does not implement the kotlinc argument '-Xallow-unstable-dependencies'; krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-compose-compiler-plugin-embeddable/2.4.21/dd3cf05b1c6bfaf6c82869e1a0e5cf00df6b26b1/kotlin-compose-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.; krusty: unsupported compiler plugin 'plugin id 'androidx.compose.compiler.plugins.kotlin'': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xuse-inline-scopes-numbers'; krusty does not implement the kotlinc argument '-Xallow-unstable-dependencies'; krusty: 'androidx.compose.compiler.plugins.kotlin' is only partly implemented by krusty's built-in implementation; a module that uses what it does not cover yet fails to compile.)",
      "error": null,
      "classes": 5,
      "identical": 0,
@@ -5869,7 +5869,7 @@
      "task": ":app:compileDemoDebugKotlin",
      "dir": "app/build/intermediates/built_in_kotlinc/demoDebug/compileDemoDebugKotlin/classes",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xuse-inline-scopes-numbers'; krusty does not implement the kotlinc argument '-Xallow-unstable-dependencies'; krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-compose-compiler-plugin-embeddable/2.4.21/dd3cf05b1c6bfaf6c82869e1a0e5cf00df6b26b1/kotlin-compose-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.; krusty: unsupported compiler plugin 'plugin id 'androidx.compose.compiler.plugins.kotlin'': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xuse-inline-scopes-numbers'; krusty does not implement the kotlinc argument '-Xallow-unstable-dependencies'; krusty: 'androidx.compose.compiler.plugins.kotlin' is only partly implemented by krusty's built-in implementation; a module that uses what it does not cover yet fails to compile.)",
      "error": null,
      "classes": 45,
      "identical": 0,
@@ -5880,7 +5880,7 @@
      "task": ":app:compileDemoDebugUnitTestKotlin",
      "dir": "app/build/intermediates/built_in_kotlinc/demoDebugUnitTest/compileDemoDebugUnitTestKotlin/classes",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xallow-unstable-dependencies'; krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-compose-compiler-plugin-embeddable/2.4.21/dd3cf05b1c6bfaf6c82869e1a0e5cf00df6b26b1/kotlin-compose-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.; krusty: unsupported compiler plugin 'plugin id 'androidx.compose.compiler.plugins.kotlin'': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xallow-unstable-dependencies'; krusty: 'androidx.compose.compiler.plugins.kotlin' is only partly implemented by krusty's built-in implementation; a module that uses what it does not cover yet fails to compile.)",
      "error": null,
      "classes": 28,
      "identical": 0,
@@ -5891,7 +5891,7 @@
      "task": ":core:analytics:compileDemoDebugKotlin",
      "dir": "core/analytics/build/intermediates/built_in_kotlinc/demoDebug/compileDemoDebugKotlin/classes",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xallow-unstable-dependencies'; krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-compose-compiler-plugin-embeddable/2.4.21/dd3cf05b1c6bfaf6c82869e1a0e5cf00df6b26b1/kotlin-compose-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.; krusty: unsupported compiler plugin 'plugin id 'androidx.compose.compiler.plugins.kotlin'': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xallow-unstable-dependencies'; krusty: 'androidx.compose.compiler.plugins.kotlin' is only partly implemented by krusty's built-in implementation; a module that uses what it does not cover yet fails to compile.)",
      "error": null,
      "classes": 12,
      "identical": 0,
@@ -6023,7 +6023,7 @@
      "task": ":core:designsystem:compileDemoDebugKotlin",
      "dir": "core/designsystem/build/intermediates/built_in_kotlinc/demoDebug/compileDemoDebugKotlin/classes",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xallow-unstable-dependencies'; krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-compose-compiler-plugin-embeddable/2.4.21/dd3cf05b1c6bfaf6c82869e1a0e5cf00df6b26b1/kotlin-compose-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.; krusty: unsupported compiler plugin 'plugin id 'androidx.compose.compiler.plugins.kotlin'': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xallow-unstable-dependencies'; krusty: 'androidx.compose.compiler.plugins.kotlin' is only partly implemented by krusty's built-in implementation; a module that uses what it does not cover yet fails to compile.)",
      "error": null,
      "classes": 83,
      "identical": 0,
@@ -6034,7 +6034,7 @@
      "task": ":core:designsystem:compileDemoDebugUnitTestKotlin",
      "dir": "core/designsystem/build/intermediates/built_in_kotlinc/demoDebugUnitTest/compileDemoDebugUnitTestKotlin/classes",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xallow-unstable-dependencies'; krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-compose-compiler-plugin-embeddable/2.4.21/dd3cf05b1c6bfaf6c82869e1a0e5cf00df6b26b1/kotlin-compose-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.; krusty: unsupported compiler plugin 'plugin id 'androidx.compose.compiler.plugins.kotlin'': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xallow-unstable-dependencies'; krusty: 'androidx.compose.compiler.plugins.kotlin' is only partly implemented by krusty's built-in implementation; a module that uses what it does not cover yet fails to compile.)",
      "error": null,
      "classes": 17,
      "identical": 0,
@@ -6078,7 +6078,7 @@
      "task": ":core:navigation:compileDemoDebugKotlin",
      "dir": "core/navigation/build/intermediates/built_in_kotlinc/demoDebug/compileDemoDebugKotlin/classes",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xallow-unstable-dependencies'; krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-compose-compiler-plugin-embeddable/2.4.21/dd3cf05b1c6bfaf6c82869e1a0e5cf00df6b26b1/kotlin-compose-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.; krusty: unsupported compiler plugin 'plugin id 'androidx.compose.compiler.plugins.kotlin'': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xallow-unstable-dependencies'; krusty: 'androidx.compose.compiler.plugins.kotlin' is only partly implemented by krusty's built-in implementation; a module that uses what it does not cover yet fails to compile.)",
      "error": null,
      "classes": 3,
      "identical": 0,
@@ -6089,7 +6089,7 @@
      "task": ":core:navigation:compileDemoDebugUnitTestKotlin",
      "dir": "core/navigation/build/intermediates/built_in_kotlinc/demoDebugUnitTest/compileDemoDebugUnitTestKotlin/classes",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xallow-unstable-dependencies'; krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-compose-compiler-plugin-embeddable/2.4.21/dd3cf05b1c6bfaf6c82869e1a0e5cf00df6b26b1/kotlin-compose-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.; krusty: unsupported compiler plugin 'plugin id 'androidx.compose.compiler.plugins.kotlin'': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xallow-unstable-dependencies'; krusty: 'androidx.compose.compiler.plugins.kotlin' is only partly implemented by krusty's built-in implementation; a module that uses what it does not cover yet fails to compile.)",
      "error": null,
      "classes": 6,
      "identical": 0,
@@ -6133,7 +6133,7 @@
      "task": ":core:screenshot-testing:compileDemoDebugKotlin",
      "dir": "core/screenshot-testing/build/intermediates/built_in_kotlinc/demoDebug/compileDemoDebugKotlin/classes",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xallow-unstable-dependencies'; krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-compose-compiler-plugin-embeddable/2.4.21/dd3cf05b1c6bfaf6c82869e1a0e5cf00df6b26b1/kotlin-compose-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.; krusty: unsupported compiler plugin 'plugin id 'androidx.compose.compiler.plugins.kotlin'': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xallow-unstable-dependencies'; krusty: 'androidx.compose.compiler.plugins.kotlin' is only partly implemented by krusty's built-in implementation; a module that uses what it does not cover yet fails to compile.)",
      "error": null,
      "classes": 3,
      "identical": 0,
@@ -6155,7 +6155,7 @@
      "task": ":core:ui:compileDemoDebugAndroidTestKotlin",
      "dir": "core/ui/build/intermediates/built_in_kotlinc/demoDebugAndroidTest/compileDemoDebugAndroidTestKotlin/classes",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xuse-inline-scopes-numbers'; krusty does not implement the kotlinc argument '-Xallow-unstable-dependencies'; krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-compose-compiler-plugin-embeddable/2.4.21/dd3cf05b1c6bfaf6c82869e1a0e5cf00df6b26b1/kotlin-compose-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.; krusty: unsupported compiler plugin 'plugin id 'androidx.compose.compiler.plugins.kotlin'': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xuse-inline-scopes-numbers'; krusty does not implement the kotlinc argument '-Xallow-unstable-dependencies'; krusty: 'androidx.compose.compiler.plugins.kotlin' is only partly implemented by krusty's built-in implementation; a module that uses what it does not cover yet fails to compile.)",
      "error": null,
      "classes": 2,
      "identical": 0,
@@ -6166,7 +6166,7 @@
      "task": ":core:ui:compileDemoDebugKotlin",
      "dir": "core/ui/build/intermediates/built_in_kotlinc/demoDebug/compileDemoDebugKotlin/classes",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xallow-unstable-dependencies'; krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-compose-compiler-plugin-embeddable/2.4.21/dd3cf05b1c6bfaf6c82869e1a0e5cf00df6b26b1/kotlin-compose-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.; krusty: unsupported compiler plugin 'plugin id 'androidx.compose.compiler.plugins.kotlin'': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xallow-unstable-dependencies'; krusty: 'androidx.compose.compiler.plugins.kotlin' is only partly implemented by krusty's built-in implementation; a module that uses what it does not cover yet fails to compile.)",
      "error": null,
      "classes": 33,
      "identical": 0,
@@ -6188,7 +6188,7 @@
      "task": ":feature:bookmarks:impl:compileDemoDebugAndroidTestKotlin",
      "dir": "feature/bookmarks/impl/build/intermediates/built_in_kotlinc/demoDebugAndroidTest/compileDemoDebugAndroidTestKotlin/classes",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xuse-inline-scopes-numbers'; krusty does not implement the kotlinc argument '-Xallow-unstable-dependencies'; krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-compose-compiler-plugin-embeddable/2.4.21/dd3cf05b1c6bfaf6c82869e1a0e5cf00df6b26b1/kotlin-compose-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.; krusty: unsupported compiler plugin 'plugin id 'androidx.compose.compiler.plugins.kotlin'': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xuse-inline-scopes-numbers'; krusty does not implement the kotlinc argument '-Xallow-unstable-dependencies'; krusty: 'androidx.compose.compiler.plugins.kotlin' is only partly implemented by krusty's built-in implementation; a module that uses what it does not cover yet fails to compile.)",
      "error": null,
      "classes": 8,
      "identical": 0,
@@ -6199,7 +6199,7 @@
      "task": ":feature:bookmarks:impl:compileDemoDebugKotlin",
      "dir": "feature/bookmarks/impl/build/intermediates/built_in_kotlinc/demoDebug/compileDemoDebugKotlin/classes",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xallow-unstable-dependencies'; krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-compose-compiler-plugin-embeddable/2.4.21/dd3cf05b1c6bfaf6c82869e1a0e5cf00df6b26b1/kotlin-compose-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.; krusty: unsupported compiler plugin 'plugin id 'androidx.compose.compiler.plugins.kotlin'': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xallow-unstable-dependencies'; krusty: 'androidx.compose.compiler.plugins.kotlin' is only partly implemented by krusty's built-in implementation; a module that uses what it does not cover yet fails to compile.)",
      "error": null,
      "classes": 20,
      "identical": 0,
@@ -6210,7 +6210,7 @@
      "task": ":feature:bookmarks:impl:compileDemoDebugUnitTestKotlin",
      "dir": "feature/bookmarks/impl/build/intermediates/built_in_kotlinc/demoDebugUnitTest/compileDemoDebugUnitTestKotlin/classes",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xallow-unstable-dependencies'; krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-compose-compiler-plugin-embeddable/2.4.21/dd3cf05b1c6bfaf6c82869e1a0e5cf00df6b26b1/kotlin-compose-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.; krusty: unsupported compiler plugin 'plugin id 'androidx.compose.compiler.plugins.kotlin'': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xallow-unstable-dependencies'; krusty: 'androidx.compose.compiler.plugins.kotlin' is only partly implemented by krusty's built-in implementation; a module that uses what it does not cover yet fails to compile.)",
      "error": null,
      "classes": 10,
      "identical": 0,
@@ -6232,7 +6232,7 @@
      "task": ":feature:foryou:impl:compileDemoDebugAndroidTestKotlin",
      "dir": "feature/foryou/impl/build/intermediates/built_in_kotlinc/demoDebugAndroidTest/compileDemoDebugAndroidTestKotlin/classes",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xuse-inline-scopes-numbers'; krusty does not implement the kotlinc argument '-Xallow-unstable-dependencies'; krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-compose-compiler-plugin-embeddable/2.4.21/dd3cf05b1c6bfaf6c82869e1a0e5cf00df6b26b1/kotlin-compose-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.; krusty: unsupported compiler plugin 'plugin id 'androidx.compose.compiler.plugins.kotlin'': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xuse-inline-scopes-numbers'; krusty does not implement the kotlinc argument '-Xallow-unstable-dependencies'; krusty: 'androidx.compose.compiler.plugins.kotlin' is only partly implemented by krusty's built-in implementation; a module that uses what it does not cover yet fails to compile.)",
      "error": null,
      "classes": 2,
      "identical": 0,
@@ -6243,7 +6243,7 @@
      "task": ":feature:foryou:impl:compileDemoDebugKotlin",
      "dir": "feature/foryou/impl/build/intermediates/built_in_kotlinc/demoDebug/compileDemoDebugKotlin/classes",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xallow-unstable-dependencies'; krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-compose-compiler-plugin-embeddable/2.4.21/dd3cf05b1c6bfaf6c82869e1a0e5cf00df6b26b1/kotlin-compose-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.; krusty: unsupported compiler plugin 'plugin id 'androidx.compose.compiler.plugins.kotlin'': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xallow-unstable-dependencies'; krusty: 'androidx.compose.compiler.plugins.kotlin' is only partly implemented by krusty's built-in implementation; a module that uses what it does not cover yet fails to compile.)",
      "error": null,
      "classes": 44,
      "identical": 0,
@@ -6254,7 +6254,7 @@
      "task": ":feature:foryou:impl:compileDemoDebugUnitTestKotlin",
      "dir": "feature/foryou/impl/build/intermediates/built_in_kotlinc/demoDebugUnitTest/compileDemoDebugUnitTestKotlin/classes",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xallow-unstable-dependencies'; krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-compose-compiler-plugin-embeddable/2.4.21/dd3cf05b1c6bfaf6c82869e1a0e5cf00df6b26b1/kotlin-compose-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.; krusty: unsupported compiler plugin 'plugin id 'androidx.compose.compiler.plugins.kotlin'': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xallow-unstable-dependencies'; krusty: 'androidx.compose.compiler.plugins.kotlin' is only partly implemented by krusty's built-in implementation; a module that uses what it does not cover yet fails to compile.)",
      "error": null,
      "classes": 34,
      "identical": 0,
@@ -6276,7 +6276,7 @@
      "task": ":feature:interests:impl:compileDemoDebugAndroidTestKotlin",
      "dir": "feature/interests/impl/build/intermediates/built_in_kotlinc/demoDebugAndroidTest/compileDemoDebugAndroidTestKotlin/classes",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xuse-inline-scopes-numbers'; krusty does not implement the kotlinc argument '-Xallow-unstable-dependencies'; krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-compose-compiler-plugin-embeddable/2.4.21/dd3cf05b1c6bfaf6c82869e1a0e5cf00df6b26b1/kotlin-compose-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.; krusty: unsupported compiler plugin 'plugin id 'androidx.compose.compiler.plugins.kotlin'': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xuse-inline-scopes-numbers'; krusty does not implement the kotlinc argument '-Xallow-unstable-dependencies'; krusty: 'androidx.compose.compiler.plugins.kotlin' is only partly implemented by krusty's built-in implementation; a module that uses what it does not cover yet fails to compile.)",
      "error": null,
      "classes": 2,
      "identical": 0,
@@ -6287,7 +6287,7 @@
      "task": ":feature:interests:impl:compileDemoDebugKotlin",
      "dir": "feature/interests/impl/build/intermediates/built_in_kotlinc/demoDebug/compileDemoDebugKotlin/classes",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xallow-unstable-dependencies'; krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-compose-compiler-plugin-embeddable/2.4.21/dd3cf05b1c6bfaf6c82869e1a0e5cf00df6b26b1/kotlin-compose-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.; krusty: unsupported compiler plugin 'plugin id 'androidx.compose.compiler.plugins.kotlin'': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xallow-unstable-dependencies'; krusty: 'androidx.compose.compiler.plugins.kotlin' is only partly implemented by krusty's built-in implementation; a module that uses what it does not cover yet fails to compile.)",
      "error": null,
      "classes": 20,
      "identical": 0,
@@ -6298,7 +6298,7 @@
      "task": ":feature:interests:impl:compileDemoDebugUnitTestKotlin",
      "dir": "feature/interests/impl/build/intermediates/built_in_kotlinc/demoDebugUnitTest/compileDemoDebugUnitTestKotlin/classes",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xallow-unstable-dependencies'; krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-compose-compiler-plugin-embeddable/2.4.21/dd3cf05b1c6bfaf6c82869e1a0e5cf00df6b26b1/kotlin-compose-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.; krusty: unsupported compiler plugin 'plugin id 'androidx.compose.compiler.plugins.kotlin'': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xallow-unstable-dependencies'; krusty: 'androidx.compose.compiler.plugins.kotlin' is only partly implemented by krusty's built-in implementation; a module that uses what it does not cover yet fails to compile.)",
      "error": null,
      "classes": 14,
      "identical": 0,
@@ -6320,7 +6320,7 @@
      "task": ":feature:search:impl:compileDemoDebugAndroidTestKotlin",
      "dir": "feature/search/impl/build/intermediates/built_in_kotlinc/demoDebugAndroidTest/compileDemoDebugAndroidTestKotlin/classes",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xuse-inline-scopes-numbers'; krusty does not implement the kotlinc argument '-Xallow-unstable-dependencies'; krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-compose-compiler-plugin-embeddable/2.4.21/dd3cf05b1c6bfaf6c82869e1a0e5cf00df6b26b1/kotlin-compose-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.; krusty: unsupported compiler plugin 'plugin id 'androidx.compose.compiler.plugins.kotlin'': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xuse-inline-scopes-numbers'; krusty does not implement the kotlinc argument '-Xallow-unstable-dependencies'; krusty: 'androidx.compose.compiler.plugins.kotlin' is only partly implemented by krusty's built-in implementation; a module that uses what it does not cover yet fails to compile.)",
      "error": null,
      "classes": 2,
      "identical": 0,
@@ -6331,7 +6331,7 @@
      "task": ":feature:search:impl:compileDemoDebugKotlin",
      "dir": "feature/search/impl/build/intermediates/built_in_kotlinc/demoDebug/compileDemoDebugKotlin/classes",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xallow-unstable-dependencies'; krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-compose-compiler-plugin-embeddable/2.4.21/dd3cf05b1c6bfaf6c82869e1a0e5cf00df6b26b1/kotlin-compose-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.; krusty: unsupported compiler plugin 'plugin id 'androidx.compose.compiler.plugins.kotlin'': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xallow-unstable-dependencies'; krusty: 'androidx.compose.compiler.plugins.kotlin' is only partly implemented by krusty's built-in implementation; a module that uses what it does not cover yet fails to compile.)",
      "error": null,
      "classes": 46,
      "identical": 0,
@@ -6342,7 +6342,7 @@
      "task": ":feature:search:impl:compileDemoDebugUnitTestKotlin",
      "dir": "feature/search/impl/build/intermediates/built_in_kotlinc/demoDebugUnitTest/compileDemoDebugUnitTestKotlin/classes",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xallow-unstable-dependencies'; krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-compose-compiler-plugin-embeddable/2.4.21/dd3cf05b1c6bfaf6c82869e1a0e5cf00df6b26b1/kotlin-compose-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.; krusty: unsupported compiler plugin 'plugin id 'androidx.compose.compiler.plugins.kotlin'': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xallow-unstable-dependencies'; krusty: 'androidx.compose.compiler.plugins.kotlin' is only partly implemented by krusty's built-in implementation; a module that uses what it does not cover yet fails to compile.)",
      "error": null,
      "classes": 16,
      "identical": 0,
@@ -6353,7 +6353,7 @@
      "task": ":feature:settings:impl:compileDemoDebugAndroidTestKotlin",
      "dir": "feature/settings/impl/build/intermediates/built_in_kotlinc/demoDebugAndroidTest/compileDemoDebugAndroidTestKotlin/classes",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xuse-inline-scopes-numbers'; krusty does not implement the kotlinc argument '-Xallow-unstable-dependencies'; krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-compose-compiler-plugin-embeddable/2.4.21/dd3cf05b1c6bfaf6c82869e1a0e5cf00df6b26b1/kotlin-compose-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.; krusty: unsupported compiler plugin 'plugin id 'androidx.compose.compiler.plugins.kotlin'': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xuse-inline-scopes-numbers'; krusty does not implement the kotlinc argument '-Xallow-unstable-dependencies'; krusty: 'androidx.compose.compiler.plugins.kotlin' is only partly implemented by krusty's built-in implementation; a module that uses what it does not cover yet fails to compile.)",
      "error": null,
      "classes": 2,
      "identical": 0,
@@ -6364,7 +6364,7 @@
      "task": ":feature:settings:impl:compileDemoDebugKotlin",
      "dir": "feature/settings/impl/build/intermediates/built_in_kotlinc/demoDebug/compileDemoDebugKotlin/classes",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xallow-unstable-dependencies'; krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-compose-compiler-plugin-embeddable/2.4.21/dd3cf05b1c6bfaf6c82869e1a0e5cf00df6b26b1/kotlin-compose-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.; krusty: unsupported compiler plugin 'plugin id 'androidx.compose.compiler.plugins.kotlin'': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xallow-unstable-dependencies'; krusty: 'androidx.compose.compiler.plugins.kotlin' is only partly implemented by krusty's built-in implementation; a module that uses what it does not cover yet fails to compile.)",
      "error": null,
      "classes": 17,
      "identical": 0,
@@ -6375,7 +6375,7 @@
      "task": ":feature:settings:impl:compileDemoDebugUnitTestKotlin",
      "dir": "feature/settings/impl/build/intermediates/built_in_kotlinc/demoDebugUnitTest/compileDemoDebugUnitTestKotlin/classes",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xallow-unstable-dependencies'; krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-compose-compiler-plugin-embeddable/2.4.21/dd3cf05b1c6bfaf6c82869e1a0e5cf00df6b26b1/kotlin-compose-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.; krusty: unsupported compiler plugin 'plugin id 'androidx.compose.compiler.plugins.kotlin'': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xallow-unstable-dependencies'; krusty: 'androidx.compose.compiler.plugins.kotlin' is only partly implemented by krusty's built-in implementation; a module that uses what it does not cover yet fails to compile.)",
      "error": null,
      "classes": 4,
      "identical": 0,
@@ -6386,7 +6386,7 @@
      "task": ":feature:topic:api:compileDemoDebugKotlin",
      "dir": "feature/topic/api/build/intermediates/built_in_kotlinc/demoDebug/compileDemoDebugKotlin/classes",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xallow-unstable-dependencies'; krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-compose-compiler-plugin-embeddable/2.4.21/dd3cf05b1c6bfaf6c82869e1a0e5cf00df6b26b1/kotlin-compose-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.; krusty: unsupported compiler plugin 'plugin id 'androidx.compose.compiler.plugins.kotlin'': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xallow-unstable-dependencies'; krusty: 'androidx.compose.compiler.plugins.kotlin' is only partly implemented by krusty's built-in implementation; a module that uses what it does not cover yet fails to compile.)",
      "error": null,
      "classes": 4,
      "identical": 0,
@@ -6397,7 +6397,7 @@
      "task": ":feature:topic:impl:compileDemoDebugAndroidTestKotlin",
      "dir": "feature/topic/impl/build/intermediates/built_in_kotlinc/demoDebugAndroidTest/compileDemoDebugAndroidTestKotlin/classes",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xuse-inline-scopes-numbers'; krusty does not implement the kotlinc argument '-Xallow-unstable-dependencies'; krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-compose-compiler-plugin-embeddable/2.4.21/dd3cf05b1c6bfaf6c82869e1a0e5cf00df6b26b1/kotlin-compose-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.; krusty: unsupported compiler plugin 'plugin id 'androidx.compose.compiler.plugins.kotlin'': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xuse-inline-scopes-numbers'; krusty does not implement the kotlinc argument '-Xallow-unstable-dependencies'; krusty: 'androidx.compose.compiler.plugins.kotlin' is only partly implemented by krusty's built-in implementation; a module that uses what it does not cover yet fails to compile.)",
      "error": null,
      "classes": 2,
      "identical": 0,
@@ -6408,7 +6408,7 @@
      "task": ":feature:topic:impl:compileDemoDebugKotlin",
      "dir": "feature/topic/impl/build/intermediates/built_in_kotlinc/demoDebug/compileDemoDebugKotlin/classes",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xallow-unstable-dependencies'; krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-compose-compiler-plugin-embeddable/2.4.21/dd3cf05b1c6bfaf6c82869e1a0e5cf00df6b26b1/kotlin-compose-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.; krusty: unsupported compiler plugin 'plugin id 'androidx.compose.compiler.plugins.kotlin'': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xallow-unstable-dependencies'; krusty: 'androidx.compose.compiler.plugins.kotlin' is only partly implemented by krusty's built-in implementation; a module that uses what it does not cover yet fails to compile.)",
      "error": null,
      "classes": 40,
      "identical": 0,
@@ -6419,7 +6419,7 @@
      "task": ":feature:topic:impl:compileDemoDebugUnitTestKotlin",
      "dir": "feature/topic/impl/build/intermediates/built_in_kotlinc/demoDebugUnitTest/compileDemoDebugUnitTestKotlin/classes",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xallow-unstable-dependencies'; krusty: unsupported compiler plugin '/home/runner/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-compose-compiler-plugin-embeddable/2.4.21/dd3cf05b1c6bfaf6c82869e1a0e5cf00df6b26b1/kotlin-compose-compiler-plugin-embeddable-2.4.21.jar': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.; krusty: unsupported compiler plugin 'plugin id 'androidx.compose.compiler.plugins.kotlin'': krusty has no native implementation for it and cannot host FIR/IR compiler plugins (only codegen processors via KSP). Ignoring it would silently produce wrong output, so this is an error \u2014 remove the plugin or compile this module with kotlinc.)",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xallow-unstable-dependencies'; krusty: 'androidx.compose.compiler.plugins.kotlin' is only partly implemented by krusty's built-in implementation; a module that uses what it does not cover yet fails to compile.)",
      "error": null,
      "classes": 15,
      "identical": 0,
@@ -6586,18 +6586,18 @@
     }
    ],
    "measured": {
-    "date": "2026-10-28",
-    "commit": "bf115cc9cfdcc4fa9ac248cb776a31507f4133f6",
-    "run": "https://github.com/qnox/krusty/actions/runs/40648260963"
+    "date": "2026-10-29",
+    "commit": "c08730becd6a8d1749d99fc3b3cfd86edbc0cddb",
+    "run": "https://github.com/qnox/krusty/actions/runs/40835862021"
    },
-   "stars": 21975,
+   "stars": 21981,
    "misses": [
     [
-     "left to kotlinc: compiler plugin androidx.compose.compiler.plugins.kotlin, argument -Xallow-unstable-dependencies",
+     "left to kotlinc: argument -Xallow-unstable-dependencies",
      21
     ],
     [
-     "left to kotlinc: compiler plugin androidx.compose.compiler.plugins.kotlin, argument -Xuse-inline-scopes-numbers, argument -Xallow-unstable-dependencies",
+     "left to kotlinc: argument -Xuse-inline-scopes-numbers, argument -Xallow-unstable-dependencies",
      9
     ],
     [
@@ -7346,9 +7346,9 @@
     }
    ],
    "measured": {
-    "date": "2026-10-28",
-    "commit": "bf115cc9cfdcc4fa9ac248cb776a31507f4133f6",
-    "run": "https://github.com/qnox/krusty/actions/runs/40648260963"
+    "date": "2026-10-29",
+    "commit": "c08730becd6a8d1749d99fc3b3cfd86edbc0cddb",
+    "run": "https://github.com/qnox/krusty/actions/runs/40835862021"
    },
    "stars": 47100,
    "misses": [
@@ -7508,9 +7508,9 @@
     }
    ],
    "measured": {
-    "date": "2026-10-28",
-    "commit": "bf115cc9cfdcc4fa9ac248cb776a31507f4133f6",
-    "run": "https://github.com/qnox/krusty/actions/runs/40648260963"
+    "date": "2026-10-29",
+    "commit": "c08730becd6a8d1749d99fc3b3cfd86edbc0cddb",
+    "run": "https://github.com/qnox/krusty/actions/runs/40835862021"
    },
    "stars": 9054,
    "misses": [
@@ -8014,11 +8014,11 @@
     }
    ],
    "measured": {
-    "date": "2026-10-28",
-    "commit": "bf115cc9cfdcc4fa9ac248cb776a31507f4133f6",
-    "run": "https://github.com/qnox/krusty/actions/runs/40648260963"
+    "date": "2026-10-29",
+    "commit": "c08730becd6a8d1749d99fc3b3cfd86edbc0cddb",
+    "run": "https://github.com/qnox/krusty/actions/runs/40835862021"
    },
-   "stars": 16339,
+   "stars": 16338,
    "misses": [
     [
      "not run: a task it depends on failed",
@@ -8151,11 +8151,11 @@
     }
    ],
    "measured": {
-    "date": "2026-10-28",
-    "commit": "bf115cc9cfdcc4fa9ac248cb776a31507f4133f6",
-    "run": "https://github.com/qnox/krusty/actions/runs/40648260963"
+    "date": "2026-10-29",
+    "commit": "c08730becd6a8d1749d99fc3b3cfd86edbc0cddb",
+    "run": "https://github.com/qnox/krusty/actions/runs/40835862021"
    },
-   "stars": 11496,
+   "stars": 11498,
    "misses": [
     [
      "left to kotlinc: compiler plugin purityPlugin",
