@@ -1,5 +1,15 @@
 # krusty — implementation plan
 
+## Native dependency reference identity handoff
+
+Retain the canonical declaration marker in the existing Native dependency export registry. Source
+exports join their exact checked callable ID to the module-function key; dependency-support exports
+use the existing injective module-qualified KLIB identity encoding. Selected external references
+consume this retained key, while authenticated declarations without source exports use their KLIB
+key. Missing required identity on a known export declines explicitly. Invocation aliases, marker
+ownership and provider-local IDs remain distinct. Serialized rich-reference admission stays in its
+separate follow-up.
+
 ## Consume declaration names in metadata class headers
 
 Resolve selected declaration keys against the frozen name inventory and pass mandatory resolved

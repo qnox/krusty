@@ -1,5 +1,13 @@
 # `@kotlin.Metadata` — reverse-engineering notes (Phase 4b)
 
+## Native reference identities and exported entry points
+
+A KLIB export's physical invocation alias is independent of its declaration marker. The Native
+export handoff carries the source key so a dependent module agrees with references created in the
+declaring source module. Dependency-support keys encode the exact module and Public/Accessor
+signature through the existing declaration-identity encoder, retaining every segment, member ID and
+mask. This changes target symbol publication without changing Kotlin metadata or runtime layout.
+
 ## Declaration-owned Class header IDs
 
 The common Class schema takes a mandatory resolved class ID. Its package and exact lexical

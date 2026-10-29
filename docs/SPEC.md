@@ -1,5 +1,14 @@
 # krusty — a memory-lean Kotlin→JVM compiler PoC
 
+## Native callable-reference identity at module exports
+
+A reference created by a source module and a reference selected through that module's KLIB export
+compare equal and hash alike. Native export records retain the source declaration's marker key
+independently of the emitted call-entry alias. Authenticated KLIB declarations retain their complete
+module-qualified signature for identity; provider-local callable numbers never become global keys.
+The shared conformance target checks the identical module graph with JVM and Native reference
+compilers before requiring Native identity, hash and different-declaration agreement.
+
 ## Nullable formal bounds in inference
 
 A declared bound `S : T?` admits null itself, so a lower bound `X` of `S` contributes only
