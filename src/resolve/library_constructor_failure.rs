@@ -33,6 +33,8 @@ pub(super) struct RejectedConstructorLambda {
 
 pub(super) enum LibraryConstructorFailure {
     Mapping(Box<LibraryConstructorMappingFailure>),
+    /// The constructor's constraint system rejected these arguments.
+    ArgumentContradictions(Box<super::generic_argument_bounds::ArgumentContradictions>),
     TypeMismatch {
         source_argument: usize,
         expected: Ty,
@@ -73,7 +75,9 @@ impl LibraryConstructorFailure {
     pub(super) fn result_type(&self) -> Option<Ty> {
         match self {
             Self::TypeMismatch { result, .. } => *result,
-            Self::Mapping(_) | Self::TypeArgumentMismatch { .. } => None,
+            Self::Mapping(_)
+            | Self::ArgumentContradictions(_)
+            | Self::TypeArgumentMismatch { .. } => None,
         }
     }
 }
@@ -164,6 +168,9 @@ impl Checker<'_> {
                 ) {
                     self.report_call_arg_mapping_error(call, args, failure);
                 }
+            }
+            LibraryConstructorFailure::ArgumentContradictions(contradictions) => {
+                self.report_argument_contradictions(call, *contradictions);
             }
             LibraryConstructorFailure::TypeMismatch {
                 source_argument,

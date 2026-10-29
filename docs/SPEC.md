@@ -26,6 +26,26 @@ source only when the source is a non-null subtype of `S` itself. Sharing `S`'s c
 that proof: under `<T : CharSequence, S : T?>`, `T` is not a subtype of `S & Any`. Test:
 `box_regressions/nullableFormalBoundPropagation.kt`.
 
+## Contradicting generic arguments
+
+kotlinc adds argument constraints in argument order and rejects every argument whose constraint
+contradicts those already accepted, each at that argument. A rejected argument contributes
+nothing. An argument whose parameter mentions the formal only at invariant positions fixes it
+exactly: `same(mutableListOf<Square>(), shape)` against `fun <T> same(MutableList<T>, T)`
+reports the `Shape` argument against `Square`, rather than joining both inputs to `Shape` and
+reporting the list. A mixed occurrence such as `(T) -> T` fixes nothing. Against a declared bound,
+each input outside it is reported: in `keep(mutableListOf<Circle>(), shape)` against
+`fun <T : Square> keep(MutableList<T>, T)` both arguments are rejected, so the list's `Circle`
+never fixes `T`. When every argument for a formal is rejected, nothing is left to infer it from:
+`cannot infer type for type parameter` is reported first, at the callee, and a structural
+parameter renders the formal as `uninferred T (of fun <T : Square> keep)` (kotlinc 2.4.21).
+One argument can contradict several formals: `take(value)` with `Duo<String, Int>` against
+`fun <A : Number, B : CharSequence> take(Duo<A, B>)` reports `cannot infer` for `A`, then for `B`,
+then the argument once against `Duo<uninferred A (…), uninferred B (…)>`. Function and constructor
+calls report it alike. The `resolver_regression_e2e` tests for bound violations, invariant
+fixation, their combination, structural parameters, a multi-formal structural argument and mixed
+variance cover it.
+
 ## File policies under signature recovery
 
 A file's own annotations (`@file:Suppress`, opt-ins) are published before recovery diagnostics
