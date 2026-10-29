@@ -10207,10 +10207,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   argument is `List<Int>`; rebinding `T` so the same call also satisfies
   `Collection<String>` left the two constructors tied. A parameter that still mentions a
   type variable, and a result-only producer, may still be completed from the expectation.
+  A constructor is an ordinary callable here: `Pair(1, 2)` fixes `A` and `B` from its own
+  value parameters, so it is `Pair<Int, Int>` evidence and an overloaded callee selects
+  `Any?` over `Int`. Recording the constructor's result template without its parameters
+  made every inferred constructor look result-only, so it fit any parameter and
+  `println(Pair("x", 2))` found no applicable candidate.
   Tests: `tests/chained_plus_element_join_e2e.rs`,
   `tests/operator_expected_result_seeding_e2e.rs`,
   `tests/classpath_collection_and_nested_named_e2e.rs`
-  (`classpath_collection_ctor_overload_prefers_exact`).
+  (`classpath_collection_ctor_overload_prefers_exact`), box
+  `regressions/inferredConstructorArgumentOverload.kt`,
+  `tests/inferred_constructor_argument_overload_e2e.rs`.
 
 - **A plain constructor initializer types a capturable local.** `val sb = StringBuilder()` is
   capturable by an anonymous object exactly like an annotated local — the capture list infers the

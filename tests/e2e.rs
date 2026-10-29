@@ -1176,6 +1176,8 @@ mod inert_kotlinc_arguments_e2e;
 mod inferred_alias_abbreviation_e2e;
 #[path = "inferred_computed_prop_e2e.rs"]
 mod inferred_computed_prop_e2e;
+#[path = "inferred_constructor_argument_overload_e2e.rs"]
+mod inferred_constructor_argument_overload_e2e;
 #[path = "inferred_property_type_args_e2e.rs"]
 mod inferred_property_type_args_e2e;
 #[path = "inheritance_e2e.rs"]
