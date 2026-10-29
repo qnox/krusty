@@ -26,6 +26,18 @@ fn first_body_line(ir: &crate::ir::IrFile, body: ExprId) -> Option<u32> {
     }
 }
 
+/// Whether a lambda body ends in the `Unit` its implicit return yields: the value itself, or the
+/// coercion `{ effects; Unit }`.
+fn ends_in_unit(ir: &crate::ir::IrFile, body: ExprId) -> bool {
+    match ir.expr(body) {
+        IrExpr::UnitInstance => true,
+        IrExpr::Block {
+            value: Some(value), ..
+        } => matches!(ir.expr(*value), IrExpr::UnitInstance),
+        _ => false,
+    }
+}
+
 /// The IR record of one mapped body line of an external inline declaration: the dependency's
 /// line and the call-site line it answers to.
 fn external_frame_line(
@@ -896,10 +908,29 @@ impl BodyLowering<'_> {
                         depth: 0,
                     },
                 );
-                let lambda_frame = self.ir.add_expr(IrExpr::Block {
-                    stmts: vec![parameter_declaration, marker, inline_body],
-                    value: None,
-                });
+                // A `Unit` lambda falls off its closing brace, which kotlinc marks on a `nop` while
+                // the lambda's locals are still open, ahead of the frame's own closing `nop`. The
+                // frame carries that brace as the `Unit` value it ends in.
+                let brace = self
+                    .ir
+                    .expr_end_lines
+                    .get(&inline_body)
+                    .copied()
+                    .filter(|line| *line != 0 && ends_in_unit(self.ir, inline_body));
+                let lambda_frame = match brace {
+                    Some(brace) => {
+                        let frame = self.ir.add_expr(IrExpr::Block {
+                            stmts: vec![parameter_declaration, marker],
+                            value: Some(inline_body),
+                        });
+                        self.ir.expr_end_lines.insert(frame, brace);
+                        frame
+                    }
+                    None => self.ir.add_expr(IrExpr::Block {
+                        stmts: vec![parameter_declaration, marker, inline_body],
+                        value: None,
+                    }),
+                };
                 if let Some(call_line) = call_line {
                     // The lambda frame closes on the body's invocation line, mapped under the
                     // call; the mark drives the frame's closing `nop`.

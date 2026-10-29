@@ -501,7 +501,8 @@ impl CallInferenceConstraints {
 
     /// Propagate the declaration's direct variable bounds as constraints before collapsing them to
     /// one denotable solution. For `T : R` (`T <: R`), every lower bound of `T` is a lower bound of
-    /// `R`, while every upper bound of `R` is an upper bound of `T`.
+    /// `R`, while every upper bound of `R` is an upper bound of `T`. A nullable bound `T : R?`
+    /// admits null itself, so a lower bound `X` of `T` says only `X & Any <: R`.
     fn propagate_declaration_bounds(&mut self, source: &dyn SymbolSource, signature: &GenericSig) {
         loop {
             let mut changed = false;
@@ -522,6 +523,11 @@ impl CallInferenceConstraints {
                     for &(actual, origin) in
                         lower.get(formal).map(Vec::as_slice).unwrap_or_default()
                     {
+                        let actual = if bound.is_nullable() {
+                            actual.contributed_through_nullable_formal()
+                        } else {
+                            actual
+                        };
                         changed |= self.insert(
                             source,
                             bound_formal.as_str(),
