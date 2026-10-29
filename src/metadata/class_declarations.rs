@@ -345,7 +345,7 @@ pub(crate) struct ClassTailOptions<'a> {
     pub(crate) compiler_version_requirement:
         Option<crate::metadata::version_requirements::VersionRequirement>,
     pub(crate) intersection: Option<&'a dyn Fn(Ty) -> Option<Ty>>,
-    pub(crate) inner_classifiers: crate::metadata::InnerClassifiers<'a>,
+    pub(crate) classifier_applications: crate::metadata::ClassifierApplications<'a>,
     /// The primary constructor's annotations in the order the target lists them; the record's own
     /// (source) order when `None`.
     pub(crate) primary_ctor_annotations: Option<&'a MetadataAnnotations>,
@@ -361,7 +361,7 @@ impl ClassDeclarationRecord {
     ) -> ClassTail<'a> {
         ClassTail {
             intersection_approximation: options.intersection,
-            inner_classifiers: options.inner_classifiers,
+            classifier_applications: options.classifier_applications,
             spellings: self.spellings.clone(),
             supertype_spellings: &self.supertype_spellings,
             type_params: &self.type_params,

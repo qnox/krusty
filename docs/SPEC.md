@@ -17,6 +17,13 @@ Retained inline and default bodies discover captures in their live construction 
 class ABI, metadata and runtime comparisons cover these boundaries in
 `tests/capture_storage_metadata_e2e.rs`.
 
+A local classifier's JVM metadata application lists only its own type arguments. The checked
+application still carries its enclosing method's lexical arguments; they remain available to
+captured formal references but are not declarations of the local class. An actual inner instance
+keeps the existing outer-type encoding. Tests preserve complete ABI and metadata comparisons for
+generic anonymous results, bounds, variance and projected nested captures in
+`tests/local_metadata_applications_e2e.rs`.
+
 ## Native callable-reference identity at module exports
 
 A reference created by a source module and a reference selected through that module's KLIB export

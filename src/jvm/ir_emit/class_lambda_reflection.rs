@@ -77,7 +77,7 @@ pub(super) fn reflect_source(
         &local_classifiers,
     );
     let approximate_intersection = |ty| formatter.declaration_approximation(ty);
-    let inner_classifier = |classifier| formatter.inner_classifier(classifier);
+    let classifier_application = |classifier| formatter.classifier_application(classifier);
     let (bytes, strings) = crate::metadata::lambda_function::build(
         &crate::metadata::lambda_function::LambdaFunction {
             function_name: crate::metadata::lambda_function::function_name(origin.form),
@@ -93,7 +93,7 @@ pub(super) fn reflect_source(
             local_classifiers: &local_classifiers,
             enum_entry_bodies: &enum_entry_bodies,
             intersection_approximation: &approximate_intersection,
-            inner_classifiers: &inner_classifier,
+            classifier_applications: &classifier_application,
         },
     )?;
     Ok(ClassLambdaReflection {

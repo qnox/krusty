@@ -111,7 +111,8 @@ pub(super) fn build_class_metadata_with_facts(
     };
     let signatures = realization.signatures(record, opts, locals);
     let approximate_intersection = |ty| signature_formatter.declaration_approximation(ty);
-    let inner_classifier = |classifier| signature_formatter.inner_classifier(classifier);
+    let classifier_application =
+        |classifier| signature_formatter.classifier_application(classifier);
     // The JVM lists the primary constructor's annotations in its classfile order: the runtime-
     // visible ones first.
     let primary_ctor_annotations = crate::metadata::MetadataAnnotations::with_records(
@@ -140,7 +141,7 @@ pub(super) fn build_class_metadata_with_facts(
                     crate::metadata::version_requirements::VersionRequirement::compiler(1, 4, 0),
                 ),
             intersection: Some(&approximate_intersection),
-            inner_classifiers: &inner_classifier,
+            classifier_applications: &classifier_application,
             primary_ctor_annotations: Some(&primary_ctor_annotations),
         },
         &secondary_ctors,
