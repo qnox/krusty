@@ -6283,3 +6283,13 @@ and the pass rejects every construct it does not cover yet.
 - [ ] The full body transform: control-flow groups, `remember`, early returns, inline composables.
 - [ ] `ComposableSingletons` lambda holders and the `$stable` field of classes.
 - [ ] Remove the partial marker and rerun the corpus for the Compose projects.
+
+## Link target-owned serialized getter leaves
+
+Retain normalized KLIB accessor identity and role through declaration and backend handoffs.
+Authenticate exact property membership and the raw/applied declaring-class receiver before
+admitting a target getter capability. Share that positive decision across closure planning,
+bodyless edge preparation and ordinary accessor linking; preserve retained exports and existing
+primitive/intrinsic priority. Native consumes its existing runtime getter plans. Prove real
+official-producer/JVM-oracle programs and malformed header/facet controls. Keep compiler-introduced
+block lowering as the independent #2811 follow-up.
