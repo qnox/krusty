@@ -156,6 +156,7 @@ mod function_declaration_check;
 mod function_exit;
 pub(crate) mod function_type_parameters;
 mod function_value_conversions;
+mod generic_argument_bounds;
 mod generic_call_bindings;
 mod if_expression;
 mod implicit_receiver_calls;
@@ -34706,46 +34707,6 @@ impl<'a> Checker<'a> {
         semantic_common_supertype(&self.fed_source(), self, a, b)
     }
 
-    /// Exact branch lower bounds for a conditional used as a generic-call argument. The ordinary
-    /// expression slot keeps Kotlin's denotable common-type approximation, while inference consumes
-    /// the branch constraints that produced it. Nested conditionals flatten into the same
-    /// source-argument ordinal so a later bound failure is still reported on that argument.
-    fn conditional_inference_inputs(&self, expression: ExprId) -> Vec<Ty> {
-        let Expr::If {
-            then_branch,
-            else_branch: Some(else_branch),
-            ..
-        } = self.file.expr(expression)
-        else {
-            return self
-                .expr_types
-                .get(expression.0 as usize)
-                .copied()
-                .into_iter()
-                .collect();
-        };
-        [*then_branch, *else_branch]
-            .into_iter()
-            .flat_map(|branch| self.conditional_inference_inputs(branch))
-            .collect()
-    }
-
-    fn conditional_branches_admit_expected(&self, expression: ExprId, expected: Ty) -> bool {
-        matches!(
-            self.file.expr(expression),
-            Expr::If {
-                else_branch: Some(_),
-                ..
-            }
-        ) && self
-            .conditional_inference_inputs(expression)
-            .into_iter()
-            .all(|branch| {
-                branch == Ty::Nothing
-                    || (branch != Ty::Error && self.receiver_is_assignable(branch, expected))
-            })
-    }
-
     /// The checker's own binary-operator result: shared algebra, the checker's lookup context, and
     /// the checker's exact diagnostics for each refusal.
     fn check_binary(&mut self, op: BinOp, lt: Ty, rt: Ty, span: Span) -> Ty {
@@ -36602,7 +36563,7 @@ impl<'a> Checker<'a> {
                 .zip(&argument_kinds)
                 .zip(&whole_arrays)
                 .enumerate()
-                .filter_map(
+                .flat_map(
                     |(argument, (((parameter, _raw_actual), kind), named_whole_array))| {
                         if self
                             .unbound_contextual_result_signature(args[argument])
@@ -36660,9 +36621,27 @@ impl<'a> Checker<'a> {
                                 }
                             }
                         }
-                        Some((argument, declaration_parameter, actual, whole_array))
+                        // Each conditional branch passes through the same argument view as a
+                        // whole argument: integer-literal adaptation, SAM/function shape.
+                        let branches = match conditional_branch::conditional_argument_branches(
+                            self.file,
+                            args[argument],
+                        ) {
+                            Some(branches) if !whole_array => branches
+                                .into_iter()
+                                .map(|branch| {
+                                    self.call_arg_kind(scope, branch)
+                                        .inference_type(&source, declared)
+                                })
+                                .collect(),
+                            _ => vec![actual],
+                        };
+                        Some(branches.into_iter().map(move |actual| {
+                            (argument, declaration_parameter, actual, whole_array)
+                        }))
                     },
                 )
+                .flatten()
                 .collect::<Vec<_>>();
             for &(_, parameter, actual, whole_array) in &inference_actuals {
                 let mut declared = signature.params[parameter];
@@ -39853,6 +39832,7 @@ impl<'a> Checker<'a> {
                 return true;
             }
             let mut generic_binding = None;
+            let mut argument_contradiction = None;
             let semantic_params = if let Some(signature) = candidate.generic_sig.as_ref() {
                 let mut bindings =
                     crate::symbol_resolver::seeded_gsig_binds(signature, &explicit_type_args);
@@ -39860,20 +39840,34 @@ impl<'a> Checker<'a> {
                     let whole_arrays =
                         named_whole_array_varargs(parameters, argument_names, &value_signature);
                     let source = self.fed_source();
+                    let actuals = parameters
+                        .iter()
+                        .copied()
+                        .zip(args.iter().copied())
+                        .zip(whole_arrays)
+                        .enumerate()
+                        .map(|(source, ((parameter, argument), named_whole_array))| {
+                            let actual = self.expr_types[argument.0 as usize];
+                            let whole_array =
+                                named_whole_array || self.file.is_spread_arg(args[source]);
+                            (source, parameter + context_count, actual, whole_array)
+                        })
+                        .collect::<Vec<_>>();
+                    argument_contradiction = self.argument_contradictions(
+                        signature,
+                        &actuals,
+                        &explicit_type_args,
+                        candidate.call_sig.vararg_index,
+                        args,
+                        Self::generic_callable_header(name, candidate),
+                    );
                     let inferred = crate::symbol_resolver::infer_generic_call_bindings_from_symbols(
                         &source,
                         signature,
-                        parameters
-                            .iter()
-                            .copied()
-                            .zip(args.iter().copied())
-                            .zip(whole_arrays)
-                            .enumerate()
-                            .map(|(source, ((parameter, argument), named_whole_array))| {
-                                let actual = self.expr_types[argument.0 as usize];
-                                let whole_array =
-                                    named_whole_array || self.file.is_spread_arg(args[source]);
-                                (parameter + context_count, actual, whole_array)
+                        actuals
+                            .into_iter()
+                            .map(|(_, parameter, actual, whole_array)| {
+                                (parameter, actual, whole_array)
                             }),
                         candidate.call_sig.vararg_index,
                     );
@@ -39965,72 +39959,20 @@ impl<'a> Checker<'a> {
                 Ok(_) => {
                     let before = self.diags.diags.len();
                     if let Some((signature, bindings)) = &generic_binding {
-                        for (formal_index, formal) in signature.formals.iter().enumerate() {
-                            let Some(actual) = bindings.get(formal).copied() else {
-                                continue;
-                            };
-                            for &bound in signature
-                                .formal_bounds
-                                .get(formal_index)
-                                .into_iter()
-                                .flatten()
-                            {
-                                let expected = crate::symbol_resolver::ty_subst(bound, bindings);
-                                let inferred_from_callable_reference = explicit_type_args
-                                    .get(formal_index)
-                                    .is_none()
-                                    && argument_parameters.as_ref().is_some_and(|parameters| {
-                                        parameters.iter().enumerate().any(|(source, parameter)| {
-                                            matches!(
-                                                self.file.expr(args[source]),
-                                                Expr::CallableRef { .. }
-                                            ) && signature
-                                                .params
-                                                .get(parameter + context_count)
-                                                .is_some_and(|parameter| {
-                                                    ty_mentions_param(
-                                                        *parameter,
-                                                        std::slice::from_ref(formal),
-                                                    )
-                                                })
-                                        })
-                                    });
-                                crate::trace_compiler!(
-                                    "resolve",
-                                    "call={call:?} function={name} parameter={formal} binding={actual:?} bound={expected:?} callable_reference={inferred_from_callable_reference}",
-                                );
-                                if self.receiver_is_assignable(actual, expected) {
-                                    continue;
-                                }
-                                if inferred_from_callable_reference {
-                                    self.diags.error(
-                                        self.span(call),
-                                        format!(
-                                            "cannot infer type for type parameter '{}'. Specify it explicitly.",
-                                            crate::types::type_parameter_source_name(formal)
-                                        ),
-                                    );
-                                    return true;
-                                }
-                                let span = argument_parameters
-                                    .as_ref()
-                                    .and_then(|parameters| {
-                                        parameters.iter().enumerate().find_map(
-                                            |(source, parameter)| {
-                                                signature
-                                                    .params
-                                                    .get(parameter + context_count)
-                                                    .and_then(|parameter| {
-                                                        parameter.non_null().ty_param_name()
-                                                    })
-                                                    .is_some_and(|name| name == formal)
-                                                    .then(|| self.span(args[source]))
-                                            },
-                                        )
-                                    })
-                                    .unwrap_or_else(|| self.span(call));
-                                self.expect_assignable(expected, actual, span, "type argument");
-                            }
+                        if self.report_generic_argument_bounds(
+                            generic_argument_bounds::GenericArgumentBounds {
+                                call,
+                                name,
+                                args,
+                                parameters: argument_parameters.as_deref(),
+                                context_count,
+                                explicit_type_args: &explicit_type_args,
+                                signature,
+                                bindings,
+                                contradictions: argument_contradiction.take(),
+                            },
+                        ) {
+                            return true;
                         }
                     }
                     for (source, &parameter) in argument_parameters.iter().flatten().enumerate() {
