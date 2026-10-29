@@ -1403,17 +1403,27 @@ fun box(): String = Registry.value()\n";
     );
 }
 
-/// The Compose fixture, JVM-only and so outside the portable box regressions, compiles to exactly the classes the reference compiler and its Compose
-/// plugin emit, byte for byte, and both builds pass its `box()`, which composes and recomposes the
-/// transformed functions through a recording composer.
+/// Each Compose fixture, JVM-only and so outside the portable box regressions, compiles to exactly
+/// the classes the reference compiler and its Compose plugin emit, byte for byte, and both builds
+/// pass its `box()`, which composes and recomposes the transformed functions through a recording
+/// composer.
 #[test]
 fn compose_restartable_functions_are_byte_identical_to_kotlinc() {
+    assert_compose_fixture_matches_kotlinc("restartableFunctions");
+}
+
+#[test]
+fn compose_tracked_parameters_are_byte_identical_to_kotlinc() {
+    assert_compose_fixture_matches_kotlinc("trackedParameters");
+}
+
+fn assert_compose_fixture_matches_kotlinc(stem: &str) {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/compose/restartableFunctions.kt");
+        .join("tests/fixtures/compose")
+        .join(format!("{stem}.kt"));
     let source = fs::read_to_string(&path).expect("read the Compose fixture");
     let source =
         krusty::conformance::prepare_test_source(&source, krusty::conformance::TestTarget::Jvm);
-    let stem = "restartableFunctions";
     let reference = box_reference_classes::checked_prepared_box(&source, stem)
         .expect("the reference compiler compiles the fixture and its box() returns OK");
     let reference = reference

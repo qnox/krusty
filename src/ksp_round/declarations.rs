@@ -3,8 +3,8 @@
 
 use krusty_plugin_ir::{
     KspClass, KspClassKind, KspDeclaration, KspDeclarationOrigin, KspFunction, KspFunctionKind,
-    KspModifier, KspParameter, KspProperty, KspType, KspTypeArgument, KspTypeParameter,
-    KspTypeSlot,
+    KspModifier, KspOverridee, KspParameter, KspProperty, KspType, KspTypeArgument,
+    KspTypeParameter, KspTypeSlot,
 };
 
 use super::annotations::Placement;
@@ -440,6 +440,7 @@ impl Source<'_> {
             return_type,
             jvm_signature,
             jvm_name,
+            overridee: KspOverridee::Undescribed,
         })
     }
 
@@ -688,6 +689,7 @@ impl Source<'_> {
                 in_interface,
             ),
             jvm_signature: None,
+            overridee: KspOverridee::Undescribed,
         };
         self.add_jvm_names(
             &mut described,
@@ -757,6 +759,7 @@ impl Source<'_> {
             setter,
             has_backing_field: Some(true),
             jvm_signature: None,
+            overridee: KspOverridee::Undescribed,
         };
         self.add_jvm_names(
             &mut described,
@@ -1062,11 +1065,13 @@ impl Source<'_> {
         members
     }
 
-    /// The `equals`, `hashCode` and `toString` the compiler generates for a data class, each one
-    /// the resolved class has: a superclass's final one is inherited instead. KSP2 lists them
-    /// among the inherited members rather than the declarations.
+    /// The `equals`, `hashCode` and `toString` the compiler generates for a data class or data
+    /// object, each one the resolved class has: a superclass's final one is inherited instead.
+    /// KSP2 lists them among the inherited members rather than the declarations.
     pub(super) fn data_object_members(&self, header: &ClassHeader<'_>) -> Vec<KspFunction> {
-        if !header.class.is_data || header.kind != KspClassKind::Class {
+        if !header.class.is_data
+            || !matches!(header.kind, KspClassKind::Class | KspClassKind::Object)
+        {
             return Vec::new();
         }
         let generated = |name: &str| {
@@ -1194,6 +1199,7 @@ impl Source<'_> {
                 setter: None,
                 has_backing_field: Some(false),
                 jvm_signature: None,
+                overridee: KspOverridee::Undescribed,
             };
             let entries_ty = Ty::obj_args_name(
                 crate::types::type_name("kotlin/enums/EnumEntries"),
@@ -1330,6 +1336,7 @@ fn constructor(
         return_type: Some(header.star_projected()),
         jvm_signature: None,
         jvm_name: None,
+        overridee: KspOverridee::Undescribed,
     }
 }
 
@@ -1355,5 +1362,6 @@ fn synthetic_function(
         return_type,
         jvm_signature: None,
         jvm_name: None,
+        overridee: KspOverridee::Undescribed,
     }
 }

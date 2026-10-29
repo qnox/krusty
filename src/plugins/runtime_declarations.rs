@@ -41,6 +41,10 @@ pub struct BoundRuntimeFunction {
 pub trait PluginRuntime {
     /// Select `function` among the declarations the compilation sees, or say why none is selected.
     fn function(&mut self, function: &RuntimeFunction) -> Result<BoundRuntimeFunction, String>;
+
+    /// Whether the compilation sees a declaration of `classifier`, which is how a plugin detects
+    /// the runtime version it generates code for.
+    fn declares_classifier(&self, classifier: TypeName) -> bool;
 }
 
 impl RuntimeFunction {
