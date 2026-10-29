@@ -22544,7 +22544,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   An unavailable dispatch rung reserves the constructor-prefix receiver coordinate without adding
   instance-property bindings, so enclosing receiver captures retain their checked identities.
   Tests: `tests/typealias_constructor_inference_e2e.rs` compares complete JVM ABI and runtime
-  behavior with kotlinc. When no enclosing value or available receiver supplies the name, a
+  behavior with kotlinc. Its `parameterized_parent_aliases` child retains the original expanded
+  #2655 fixture and both complete controls, including nested aliases and a covariant interface.
+  When no enclosing value or available receiver supplies the name, a
   member of the unavailable instance reports `cannot access '<this>' before the instance has
   been initialized.` at the property reference. The diagnostic probe uses the same declared
   receiver identity that the usable tower excludes; it never records a property read or capture.

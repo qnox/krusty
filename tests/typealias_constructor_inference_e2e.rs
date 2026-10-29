@@ -6,6 +6,9 @@
 //! same call resolved inside a function body and declined at the top level.
 use super::common;
 
+#[path = "typealias_constructor_inference_e2e/parameterized_parent_aliases.rs"]
+mod parameterized_parent_aliases;
+
 #[test]
 fn a_generic_typealias_constructor_types_an_inferred_declaration() {
     const SRC: &str = "class Cell<T>(val x: T)\n\
