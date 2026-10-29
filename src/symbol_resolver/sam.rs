@@ -88,7 +88,7 @@ pub(crate) fn semantic_sam_signature(
         return None;
     }
     let kotlin_interface = target_classifier.is_kotlin;
-    let receiver_annotations = source.sam_with_receiver_annotations();
+    let receiver_annotations = &source.annotation_conventions().sam_with_receiver;
 
     let mut declarations: Vec<OverrideSlot> = Vec::new();
     for (applied, depth) in receiver_hierarchy(source, target) {

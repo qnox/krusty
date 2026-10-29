@@ -72,10 +72,6 @@ pub(super) fn check(fixture: &IntegrationFixture, kotlin_classes: &Path, runtime
                     "empty-opt-in",
                     "compilerOptions.optIn contains an empty marker",
                 ),
-                (
-                    "duplicate-opt-in",
-                    "compilerOptions.optIn contains duplicate marker 'krusty.fixture.ExperimentalFirstApi'",
-                ),
             ] {
                 clear_invocation_log(log);
                 clear_invocation_log(&fixture.probes);
@@ -210,6 +206,24 @@ pub(super) fn check(fixture: &IntegrationFixture, kotlin_classes: &Path, runtime
             .count(),
         1,
         "progressive-mode: {invocation:?}"
+    );
+
+    // kotlinc accepts a repeated opt-in marker, so krusty compiles the module with the marker
+    // passed as often as the structured option lists it.
+    clear_invocation_log(log);
+    build()
+        .property("krusty.negative", "duplicate-opt-in")
+        .tasks([":compiler:util:compileKotlin"])
+        .run()
+        .unwrap_or_else(|error| panic!("duplicate-opt-in: {error}"));
+    let invocation = single_module_invocation(log, "kotlin-compiler-util");
+    assert_eq!(
+        invocation
+            .iter()
+            .filter(|argument| argument.as_str() == "-opt-in=krusty.fixture.ExperimentalFirstApi")
+            .count(),
+        2,
+        "duplicate-opt-in: {invocation:?}"
     );
 
     // Free arguments reach krusty verbatim: the plugin keeps no copy of kotlinc's argument
