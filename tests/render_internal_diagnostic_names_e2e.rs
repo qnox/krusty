@@ -116,9 +116,55 @@ fn named_diagnostics_render_their_names_like_kotlinc() {
             code: 1,
             diagnostics: vec![
                 "error: warnings found and -Werror specified".to_string(),
-                named_visibility,
-                named_return,
+                named_visibility.clone(),
+                named_return.clone(),
             ],
+            krusty_summary: None,
+        },
+        Case {
+            tag: "named-level-disables-a-source-warning",
+            arguments: &[
+                "-Xexplicit-api=warning",
+                "-Xwarning-level=NO_EXPLICIT_VISIBILITY_IN_API_MODE_WARNING:disabled",
+                "-Xrender-internal-diagnostic-names",
+            ],
+            code: 0,
+            diagnostics: vec![named_return],
+            krusty_summary: None,
+        },
+        Case {
+            tag: "named-level-promotes-the-module-warning",
+            arguments: &[
+                "-Xexplicit-api=warning",
+                "-opt-in=does.not.Exist",
+                "-Xwarning-level=OPT_IN_REQUIREMENT_MARKER_IS_UNRESOLVED:error",
+                "-Xrender-internal-diagnostic-names",
+            ],
+            code: 1,
+            diagnostics: vec![
+                "error: [OPT_IN_REQUIREMENT_MARKER_IS_UNRESOLVED] Opt-in requirement marker 'does.not.Exist' is unresolved. Make sure it's present in the module dependencies.".to_string(),
+            ],
+            krusty_summary: Some("krusty: 1 error(s)"),
+        },
+        Case {
+            tag: "no-level-reaches-the-pre-release-warning",
+            arguments: &[
+                "-XXLanguage:+CompanionBlocksAndExtensions",
+                "-Xwarning-level=COMPILER_ARGUMENTS_WARNING:disabled",
+                "-Xrender-internal-diagnostic-names",
+            ],
+            code: 0,
+            diagnostics: [
+                "warning: ATTENTION!",
+                "This build uses unsafe internal compiler arguments:",
+                "-XXLanguage:+CompanionBlocksAndExtensions",
+                "This mode is not recommended for production use,",
+                "as no stability/compatibility guarantees are given on",
+                "compiler or generated code. Use it at your own risk!",
+                "warning: [COMPILER_ARGUMENTS_WARNING] Following manually enabled features will force generation of pre-release binaries: CompanionBlocksAndExtensions",
+            ]
+            .map(str::to_string)
+            .to_vec(),
             krusty_summary: None,
         },
     ];

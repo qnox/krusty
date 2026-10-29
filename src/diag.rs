@@ -125,15 +125,17 @@ impl Diagnostic {
     }
 }
 
-/// A warning about the compilation's configuration rather than a source position.
+/// A diagnostic about the compilation's configuration rather than a source position. It is reported
+/// as a warning; `-Xwarning-level` may promote it to an error.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ModuleWarning {
+pub struct ModuleDiagnostic {
     pub name: DiagnosticName,
+    pub severity: Severity,
     /// kotlinc's `renderMessage()`.
     pub message: String,
 }
 
-impl ModuleWarning {
+impl ModuleDiagnostic {
     pub fn message(&self, names: DiagnosticNames) -> Cow<'_, str> {
         render_message(Some(self.name), &self.message, names)
     }
@@ -149,9 +151,9 @@ pub struct DiagSink {
     /// Pass-1 retained-fragment preparation uses this while traversing lexical containers whose
     /// ordinary expressions are authoritative only in Pass 2.
     authoritative_ranges: Option<Vec<Span>>,
-    /// Warnings about the compilation's configuration rather than a source position, such as an
-    /// unresolved `-opt-in` marker. Each message is kept once, in first-report order.
-    pub module_warnings: Vec<ModuleWarning>,
+    /// Diagnostics about the compilation's configuration rather than a source position, such as
+    /// an unresolved `-opt-in` marker. Each message is kept once, in first-report order.
+    pub module_diagnostics: Vec<ModuleDiagnostic>,
 }
 
 impl DiagSink {
@@ -160,18 +162,19 @@ impl DiagSink {
             diags: Vec::new(),
             current_file: 0,
             authoritative_ranges: None,
-            module_warnings: Vec::new(),
+            module_diagnostics: Vec::new(),
         }
     }
 
     /// Report a warning about the module's configuration, once however many units report it.
     pub fn module_warning(&mut self, name: DiagnosticName, message: impl Into<String>) {
-        let warning = ModuleWarning {
+        let warning = ModuleDiagnostic {
             name,
+            severity: Severity::Warning,
             message: message.into(),
         };
-        if !self.module_warnings.contains(&warning) {
-            self.module_warnings.push(warning);
+        if !self.module_diagnostics.contains(&warning) {
+            self.module_diagnostics.push(warning);
         }
     }
 
@@ -404,6 +407,10 @@ impl DiagSink {
 
     pub fn has_errors(&self) -> bool {
         self.diags.iter().any(|d| d.severity == Severity::Error)
+            || self
+                .module_diagnostics
+                .iter()
+                .any(|d| d.severity == Severity::Error)
     }
 
     /// Render `path:line:col: severity: msg` lines against the original source. Single-file callers:
@@ -421,9 +428,10 @@ impl DiagSink {
     /// (defensive) falls back to the first file. This is the multi-file-correct renderer.
     pub fn render_all(&self, files: &[(&str, &str)], names: DiagnosticNames) -> String {
         let mut out = String::new();
-        for warning in &self.module_warnings {
-            out.push_str("warning: ");
-            out.push_str(&warning.message(names));
+        for diagnostic in &self.module_diagnostics {
+            out.push_str(severity_word(diagnostic.severity));
+            out.push_str(": ");
+            out.push_str(&diagnostic.message(names));
             out.push('\n');
         }
         for d in &self.diags {
@@ -440,11 +448,15 @@ impl DiagSink {
 
 fn render_one(d: &Diagnostic, path: &str, src: &str, names: DiagnosticNames) -> String {
     let (line, col) = line_col(src, d.span.lo);
-    let sev = match d.severity {
+    let sev = severity_word(d.severity);
+    format!("{path}:{line}:{col}: {sev}: {}\n", d.message(names))
+}
+
+fn severity_word(severity: Severity) -> &'static str {
+    match severity {
         Severity::Error => "error",
         Severity::Warning => "warning",
-    };
-    format!("{path}:{line}:{col}: {sev}: {}\n", d.message(names))
+    }
 }
 
 /// 1-based line and column for a byte offset.

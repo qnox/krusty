@@ -670,15 +670,15 @@ pub fn compile(opts: &cli::Options) -> Result<usize, String> {
     // promoted by `-Xwarning-level=<NAME>:error` is an ordinary source error; an explicit
     // `warning` level exempts that diagnostic from global `-Werror`, and `disabled` removes it.
     let mut compiler_warning_under_werror = false;
-    diags.diags.retain_mut(|diagnostic| {
-        if diagnostic.severity != krusty::diag::Severity::Warning {
+    let mut keep = |name, severity: &mut krusty::diag::Severity| {
+        if *severity != krusty::diag::Severity::Warning {
             return true;
         }
-        match opts.warning_policy.compiler_disposition(diagnostic.name) {
+        match opts.warning_policy.compiler_disposition(name) {
             cli::WarningDisposition::Disabled => false,
             cli::WarningDisposition::Warning => true,
             cli::WarningDisposition::Error => {
-                diagnostic.severity = krusty::diag::Severity::Error;
+                *severity = krusty::diag::Severity::Error;
                 true
             }
             cli::WarningDisposition::WarningAndFail => {
@@ -686,27 +686,26 @@ pub fn compile(opts: &cli::Options) -> Result<usize, String> {
                 true
             }
         }
-    });
-    match opts.warning_policy.compiler_disposition(None) {
-        cli::WarningDisposition::Disabled => diags.module_warnings.clear(),
-        cli::WarningDisposition::WarningAndFail if !diags.module_warnings.is_empty() => {
-            compiler_warning_under_werror = true;
-        }
-        cli::WarningDisposition::Warning
-        | cli::WarningDisposition::WarningAndFail
-        | cli::WarningDisposition::Error => {}
-    }
+    };
+    diags
+        .diags
+        .retain_mut(|diagnostic| keep(diagnostic.name, &mut diagnostic.severity));
+    diags
+        .module_diagnostics
+        .retain_mut(|diagnostic| keep(Some(diagnostic.name), &mut diagnostic.severity));
 
     if diags.has_errors() {
         // Like kotlinc, a failed compilation reports its errors only.
         diags
             .diags
             .retain(|diagnostic| diagnostic.severity == krusty::diag::Severity::Error);
-        diags.module_warnings.clear();
+        diags
+            .module_diagnostics
+            .retain(|diagnostic| diagnostic.severity == krusty::diag::Severity::Error);
         return Err(format!(
             "{}krusty: {} error(s)\n",
             diags.render_all(&rendered, opts.diagnostic_names),
-            diags.diags.len()
+            diags.diags.len() + diags.module_diagnostics.len()
         ));
     }
     // The same typed policy owns ordinary compiler and module warnings. Unlike command-line
@@ -717,7 +716,7 @@ pub fn compile(opts: &cli::Options) -> Result<usize, String> {
         // source warnings. Keep those three ledger segments distinct instead of prepending the
         // summary to the generic renderer (which owns module-before-source order for an ordinary
         // successful compilation).
-        let module_warnings = std::mem::take(&mut diags.module_warnings);
+        let module_warnings = std::mem::take(&mut diags.module_diagnostics);
         let mut report = String::new();
         for warning in module_warnings {
             report.push_str("warning: ");
