@@ -15,7 +15,9 @@ pub(crate) mod interface_identity;
 pub(crate) mod local_properties;
 mod module_facts;
 
-pub(crate) use dependency_call_shape::{DependencyCallShape, DependencyExportCall};
+pub(crate) use dependency_call_shape::{
+    DeclaredOperandRoles, DependencyCallShape, DependencyExportCall,
+};
 #[cfg(test)]
 pub(crate) use dependency_facts::referenced_dependencies;
 pub use dependency_facts::{

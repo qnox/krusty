@@ -117,10 +117,19 @@ impl BodyLowering<'_, '_, '_> {
                 "a dependency export whose declared operand count disagrees with its call".into(),
             );
         }
-        // The operands the call supplies, at their declared positions. An omitted parameter is
-        // a value parameter, so it follows an inserted receiver.
+        // The operands the call supplies, at their declared positions. Only a value parameter
+        // whose declaration owns a default is omitted, so it follows the contexts and receiver.
         let omitted = call
-            .omitted_operands(defaults, declared.len())
+            .omitted_operands(
+                defaults,
+                crate::backend::DeclaredOperandRoles {
+                    context_count: realization.context_count,
+                    defaults: realization
+                        .klib_body_parameter_defaults
+                        .map(|defaults| defaults.as_slice()),
+                    declared: declared.len(),
+                },
+            )
             .map_err(Unsupported::from)?;
         let supplied = declared
             .iter()
