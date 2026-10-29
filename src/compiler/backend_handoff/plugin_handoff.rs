@@ -95,4 +95,8 @@ impl PluginRuntime for HandoffRuntime<'_> {
             ret: function.ret,
         })
     }
+
+    fn declares_classifier(&self, classifier: TypeName) -> bool {
+        self.source.classifier(classifier).is_some()
+    }
 }

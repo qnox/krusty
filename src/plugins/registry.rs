@@ -814,6 +814,33 @@ mod tests {
         );
     }
 
+    /// A named runtime version replaces the runtime features the pass detects on the classpath
+    /// (such as parameter names in source information), so the pass refuses it; none is the
+    /// default.
+    #[test]
+    fn a_compose_target_runtime_version_is_refused() {
+        let c = cfg(&[
+            "-P",
+            "plugin:androidx.compose.compiler.plugins.kotlin:targetRuntimeVersion=1.8",
+        ]);
+        let resolved = PluginRegistry::with_builtins().resolve(&activation(&c, &[]));
+        assert_eq!(
+            resolved.diagnostics,
+            vec![
+                PluginDiagnostic::UnimplementedOption {
+                    option: PluginOption {
+                        id: COMPOSE_PLUGIN_ID.to_string(),
+                        key: "targetRuntimeVersion".to_string(),
+                        value: "1.8".to_string(),
+                    },
+                },
+                PluginDiagnostic::PartialSubstitution {
+                    plugin_id: COMPOSE_PLUGIN_ID.to_string(),
+                },
+            ]
+        );
+    }
+
     #[test]
     fn allopen_resolves_to_native_and_reads_its_options() {
         let jar = plugin_jar(

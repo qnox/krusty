@@ -414,6 +414,9 @@ fn kotlin_annotation(annotation: &ResolvedAnnotation) -> ResolvedAnnotation {
                 }
             }
         }
+        // kotlinc collects the targets into an enum set, so they follow `AnnotationTarget`'s order
+        // rather than the order the Java annotation writes its element types in.
+        targets.sort();
         let target_class = type_name("kotlin/annotation/AnnotationTarget");
         (
             "kotlin/annotation/Target",
