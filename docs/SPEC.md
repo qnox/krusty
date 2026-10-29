@@ -8,8 +8,9 @@ resolves, and its position decides the diagnostic, as in kotlinc 2.4.21. As a ca
 candidates are reported at the name: one as `inapplicable candidate(s): fun B.g(i: Int, j: Int):
 String`, several as `none of the following candidates is applicable:` with each candidate followed
 by its own `Inapplicable candidate(s)` reason, members before extensions. The checker knows the
-position from the argument it is checking against its selected parameter, so a superclass
-constructor's reference argument waits for that parameter as a lambda does. Anywhere else (an
+position from the call whose arguments it is checking, or from the argument it commits to a
+selected parameter; a superclass constructor's reference argument waits for that parameter as a
+lambda does. Anywhere else (an
 initializer, a parameter default, a return, an assignment) the nearest tower level with candidates
 decides: a single candidate gives the reference its reflection type, so `val ref: (B, Int) ->
 String = B::g` reports `initializer type mismatch: expected '(B, Int) -> String', actual
