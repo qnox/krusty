@@ -17,6 +17,28 @@ declaring source module. Dependency-support keys encode the exact module and Pub
 signature through the existing declaration-identity encoder, retaining every segment, member ID and
 mask. This changes target symbol publication without changing Kotlin metadata or runtime layout.
 
+## Declaration-owned Class header IDs
+
+The common Class schema takes a mandatory resolved class ID. Its package and exact lexical
+segments determine JVM `pkg/Outer.Inner` spelling, predefined records and descriptor compression;
+compression is unavailable when a retained segment contains a literal dollar. KLIB writes those
+same segments into its qualified-name table and reuses the Class header ID for field 174's class
+inventory. Its root/child declaration traversal uses retained ownership too, so literal-dollar
+classes cannot disappear before serialization. Explicit local JVM names retain the existing
+local-name record and enum-body handling. `companionObjectName` and the companion's `nestedClassName`
+retain the same exact owner-relative segment, including a dollar inside a named companion.
+Unknown declaration facts never activate a spelling-derived fallback. Other type/class-ID fields
+remain separate consumer migrations.
+
+## Dependency conversion proof
+
+Ordinary body conversions and prepared-inline templates consume the same explicit semantic class
+model with the dependency declaration's complete formal bounds layered over it. Known empty bounds
+remain declaration evidence; they do not fall through to another provider. No class model means
+identity-only ordinary proof. Value/reference conversions retain typed common IR operations rather
+than changing metadata or runtime layouts. Tests: `klib_lowering::type_evidence::tests` and
+`klib_lowering::tests::body_forms`.
+
 ## Native source callable-reference identity
 
 The checked source-module callable ID and source-module identity own the Native reflection marker's
@@ -25,6 +47,16 @@ which the existing reference equality and hash runtime reads. The invocation ada
 remain separate from declaration identity. KLIB references need their retained module-qualified
 signature before receiving the same program scope; a raw provider-local callable number is
 insufficient across independently analyzed modules.
+
+## Identity-keyed declaration-name projection
+
+Providers project name evidence directly from their selected classifier and alias records. Typed
+ordinary/alias keys retain both declarations when their flattened identity is the same. The
+outer option distinguishes an absent declaration from a selected declaration whose name is unknown.
+Federation stops at the first present record; source-unit caches retain all three states. Frozen
+backend module facts keep source class and alias names independently of alias targets, and forward
+only absent identities to the dependency inventory. Literal-dollar ownership stays snapshot-owned.
+The metadata encoder callback and class-ID sinks remain a separate consumer change.
 
 ## Alias declaration-name evidence
 
@@ -43,6 +75,24 @@ segments rather than splitting lookup names on dots and dollars. This avoids cre
 prefix identities before later consumers run. Metadata class-ID encoding still needs its separate
 snapshot ownership lookup; publication alone does not supply authoritative negative nesting facts
 for every cached or cross-module identity.
+
+## Wasm reference-array representation
+
+Reference-array reads consume the selected callable's frozen ArrayGet operation and the checked
+array element type; no classifier/member spelling lookup is added. Physical elements share nullable
+reference storage, with ordinary backend coercion restoring the checked result carrier. Bounds
+failures consume the platform exception storage evidence already retained beside classifiers.
+Array range-check defaults and overrides are Wasm representation policy and change no metadata,
+provider identity or frontend overload decision.
+
+## Platform exception storage authority
+
+Only the explicitly selected platform stdlib may publish an admitted runtime-exception storage
+role. Class shape, generic/outer-instance state and metadata supertypes constrain that role;
+subclasses with additional declared instance state are not admitted. The frozen classifier record
+retains the role and exact parent identity. Wasm's physical registry consumes those records rather
+than selected constructor inventory or classifier spelling, and validates the complete chain even
+when its leaf already has a GC type. Ordinary source and JVM classifier records retain no role.
 
 ## Companion fields and class metadata
 
@@ -1285,3 +1335,30 @@ Provider-normalized function classifiers supply their declared generic supertype
 subtype relation. A typed function signature supplies its canonical classifier application, and
 the hierarchy walk checks the nominal value against that application. Reflective function types
 retain their nominal identity; no new metadata payload or physical JVM descriptor is introduced.
+
+## Superclass-argument receiver availability
+
+An inherited property declaration remains evidence for a name even while its dispatch instance is
+unavailable. The checker probes the normalized property model on that exact declared receiver to
+report the initialization diagnostic, without publishing a getter, field read, or capture. Inferred
+property result demand follows receiver selection; it cannot turn an instance member into a local
+value. No metadata shape or backend ABI changes accompany this frontend correction (#2658).
+
+## Rejected constructor lambda constraints
+
+Normalized constructor signatures and the canonical source-argument mapping retain postponed
+function-expression expectations when an explicit class argument violates its bound. Reporting
+uses the same typed failure evidence for source and reference-produced dependency declarations;
+it does not reconstruct parameter types from constructor text. Metadata encoding and callable ABI
+are unchanged. Callable-reference selected-declaration diagnostic retention is tracked in #2776.
+
+## Serialized getter declaration contracts
+
+KLIB normalization tags a getter or setter from its actual property slot, retaining the property's
+opaque identity and decoded name. This KLIB-only facet survives both declaration projections and
+participates in declaration-contract equality; it grants no execution capability by itself.
+Ordinary getter linking authenticates the serialized property group and class header, including
+the raw dispatch classifier's signature mask and complete own-formal receiver application.
+Declared getter results remain distinct from the checked read's applied result. Native's runtime
+leaf capability reuses its existing accessor signature plans and does not import property bodies
+or reconstruct class storage. No metadata wire format changes.

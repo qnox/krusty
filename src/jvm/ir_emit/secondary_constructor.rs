@@ -545,6 +545,10 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
             cw.reserve_method_lvt(locals);
         }
         let body_line_marks = sctor.line_marks().to_vec();
+        let restated_pcs = sctor
+            .inlined_line_marks()
+            .map(|(pc, _)| pc)
+            .collect::<Vec<_>>();
         cw.add_method_sig(
             sc_access,
             "<init>",
@@ -584,14 +588,18 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
                 .map(|line| (0u16, line));
             // Consecutive entries for the SAME line collapse, exactly as `CodeBuilder::mark_line`
             // collapses them within one body: the opening entry and the body's first mark are both
-            // the declaration's line, and kotlinc writes it once.
+            // the declaration's line, and kotlinc writes it once. An inlined line, or the caller's
+            // line restated after an inlined body, keeps its entry beside an equal one, as it does in
+            // any other body.
             let mut entries: Vec<(u16, u32)> = Vec::new();
             for (pc, line) in opening.into_iter().chain(
                 body_line_marks
                     .iter()
                     .map(|&(pc, line)| (pc, u32::from(line))),
             ) {
-                if entries.last().is_some_and(|&(_, last)| last == line) {
+                if entries.last().is_some_and(|&(_, last)| last == line)
+                    && !restated_pcs.contains(&pc)
+                {
                     continue;
                 }
                 entries.push((pc, line));
@@ -621,7 +629,7 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
                 cw.set_method_synthetic("<init>", &sc_desc);
             }
         }
-        if sc.defaults.iter().any(Option::is_some) {
+        if let Some(defaults) = crate::jvm::default_wrappers::secondary_constructor(sc) {
             // The stub's physical prefix is everything ahead of the declared parameters — the
             // owner's synthetic entries included, which is what makes an enum's stub
             // `(String, int, …declared, mask, marker)` as kotlinc writes it. Only the capture
@@ -648,7 +656,7 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
                         .collect::<Vec<_>>(),
                     logical_prefix_count: sc_prefix_tys.len(),
                     real_params: &sc_source_tys,
-                    defaults: &sc.defaults,
+                    defaults,
                     secondary_lines: Some((sc.lines.decl_line, sc.lines.decl_end_line)),
                     target_uses_marker_accessor: sc.vc_params
                         || super::constructor_accessors::hides_secondary(ir, c, secondary_ordinal),

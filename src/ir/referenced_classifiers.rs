@@ -16,9 +16,9 @@ pub(crate) fn collect_classifier_names(ty: Ty, out: &mut Vec<TypeName>) {
                 collect_classifier_names(*argument, out);
             }
         }
-        TyKind::Nullable(inner) | TyKind::PlatformNullable(inner) => {
-            collect_classifier_names(inner, out)
-        }
+        TyKind::Nullable(inner)
+        | TyKind::PlatformNullable(inner)
+        | TyKind::MutabilityFlexible(inner) => collect_classifier_names(inner, out),
         TyKind::InProjection(inner)
         | TyKind::OutProjection(inner)
         | TyKind::StarProjection(inner) => collect_classifier_names(inner, out),

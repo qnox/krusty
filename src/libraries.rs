@@ -26,6 +26,7 @@ pub(crate) mod function_classifiers;
 mod generic_signature;
 mod inline_body;
 mod inline_kind;
+mod klib_body_accessor;
 mod klib_body_class;
 mod member_flags;
 mod member_records;
@@ -37,6 +38,7 @@ mod platform_contract;
 mod property_producer;
 mod provider_override;
 mod result_nullability;
+mod runtime_exception;
 mod scalar_instruction;
 mod singleton_dispatch;
 mod stdlib_klib_intrinsics;
@@ -57,7 +59,9 @@ pub use callable_scope_rung::CallableScopeRung;
 pub use classifier_callables::BoundInnerConstructor;
 pub(crate) use classifier_callables::{constructor_generic_signature, ConstructorAlias};
 pub(crate) use classifier_declaration::type_alias_target_classifier;
-pub use classifier_declaration::{AliasExpansion, ClassifierDeclaration, TypeAliasTemplate};
+pub use classifier_declaration::{
+    AliasExpansion, ClassifierDeclaration, ClassifierDeclarationKey, TypeAliasTemplate,
+};
 pub use classifier_kind::TypeKind;
 pub use declaration_header::{
     DeclarationHeader, DeclarationLanguage, HeaderSignature, HeaderSupertype, HeaderTypeParameter,
@@ -75,6 +79,8 @@ pub(crate) use dependency_body_contract::{
 pub(crate) use dependency_body_modifiers::KlibBodyDeclarationModifiers;
 pub use enhanced_nullability::{enhance_from_overridden, EnhancedResult, TypeEnhancement};
 pub use inline_kind::InlineKind;
+pub use klib_body_accessor::DependencyGetterSignature;
+pub(crate) use klib_body_accessor::{KlibAccessorRole, KlibBodyAccessor};
 pub use param_flags::ParamFlags;
 pub use physical_parameter_plan::PhysicalParameterSlot;
 pub use platform_abi::PlatformAbi;
@@ -84,6 +90,7 @@ pub use platform_contract::{
 pub use property_producer::PropertyProducer;
 pub use provider_override::ProviderOverrideSlot;
 pub use result_nullability::{ResultEnhancement, ReturnInfo};
+pub use runtime_exception::{RuntimeExceptionKind, RuntimeExceptionLayout};
 pub use singleton_dispatch::SingletonDispatch;
 pub(crate) use stdlib_klib_intrinsics::{stdlib_klib_intrinsic, StdlibKlibIntrinsic};
 
@@ -1578,6 +1585,9 @@ impl FunctionInfo {
                 (TyKind::PlatformNullable(inner), TyKind::PlatformNullable(selected_inner)) => {
                     Ty::platform_nullable(merge_method_arguments(inner, selected_inner, formals))
                 }
+                (TyKind::MutabilityFlexible(inner), TyKind::MutabilityFlexible(selected_inner)) => {
+                    Ty::mutability_flexible(merge_method_arguments(inner, selected_inner, formals))
+                }
                 (TyKind::InProjection(inner), TyKind::InProjection(selected_inner)) => {
                     Ty::in_projection(merge_method_arguments(inner, selected_inner, formals))
                 }
@@ -2106,6 +2116,8 @@ impl ResolvedSymbols {
 /// knowing the target ABI.
 #[derive(Clone)]
 pub struct LibraryType {
+    /// Authenticated platform-runtime storage, independently of any selected constructor.
+    pub runtime_exception: Option<RuntimeExceptionLayout>,
     /// Exact lexical declaration ownership, independent of captured outer instances. `None` is
     /// unavailable evidence; a recorded top-level declaration is an authoritative negative owner.
     pub declaration_name: Option<crate::types::ClassifierDeclarationName>,
@@ -2307,6 +2319,7 @@ impl LibraryType {
     /// query whose answer could disagree with the record.
     pub fn declaration_header() -> Self {
         Self {
+            runtime_exception: None,
             declaration_name: None,
             // The header commits existence only; the provider's full record supplies the real
             // declaration facts, this one included.
@@ -2604,6 +2617,7 @@ mod tests {
 
     fn ty_with<F: FnOnce(&mut super::LibraryType)>(f: F) -> super::LibraryType {
         let mut t = super::LibraryType {
+            runtime_exception: None,
             declaration_name: None,
             is_kotlin: true,
             is_data: false,

@@ -122,6 +122,65 @@ fun box(): String {
     );
 }
 
+#[test]
+fn serialized_runtime_accessor_leaves_preserve_pair_members() {
+    let library = r#"package fixture
+fun pickPair(pair: Pair<String, String>): String = pair.first + pair.second
+"#;
+    let consumer = r#"
+fun box(): String = pickPair(Pair("O", "K"))
+"#;
+    assert_eq!(
+        common::kotlinc_box_files_result_with_classpath(
+            &[
+                ("Library.kt", library),
+                ("Consumer.kt", &format!("package fixture\n{consumer}")),
+            ],
+            "fixture.ConsumerKt",
+            &[],
+        ),
+        "OK",
+    );
+    assert_official_dependency_closures(
+        library,
+        consumer,
+        "SerializedPairAccessor",
+        DependencyConsumer::Native,
+    );
+}
+
+#[test]
+fn serialized_runtime_accessor_leaves_preserve_applied_scalar_and_nullable_results() {
+    let library = r#"package fixture
+fun pickPairIndex(pair: Pair<Int, String?>): Int = pair.first
+fun pickPairValue(pair: Pair<Int, String?>): String? = pair.second
+"#;
+    let consumer = r#"
+fun box(): String {
+    if (pickPairIndex(Pair(7, null)) != 7) return "scalar first"
+    if (pickPairValue(Pair(7, null)) != null) return "nullable second"
+    return pickPairValue(Pair(7, "OK")) ?: "missing second"
+}
+"#;
+    assert_eq!(
+        common::kotlinc_box_files_result_with_classpath(
+            &[
+                ("Library.kt", library),
+                ("Consumer.kt", &format!("package fixture\n{consumer}")),
+            ],
+            "fixture.ConsumerKt",
+            &[],
+        ),
+        "OK",
+    );
+    assert_official_dependency_closures(
+        library,
+        consumer,
+        "SerializedAppliedPairAccessor",
+        DependencyConsumer::Native,
+    );
+}
+
 enum DependencyConsumer {
     Native,
     ConstructorIdentity,
@@ -161,6 +220,13 @@ impl Backend for ConstructorIdentityProbe {
         operation: krusty::backend::BackendCompilerIntrinsic,
     ) -> bool {
         self.native.realizes_dependency_intrinsic(operation)
+    }
+
+    fn realizes_dependency_getter(
+        &self,
+        signature: krusty::backend::DependencyGetterSignature<'_>,
+    ) -> bool {
+        self.native.realizes_dependency_getter(signature)
     }
 
     fn same_module_inlining(&self) -> krusty::ir::SameModuleInlining {

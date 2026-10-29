@@ -90,6 +90,10 @@ class Pin(unittest.TestCase):
             write(f'{work}/gradle.properties', 'kotlin_version=2.1.0\nother=1\n')
             pin.rewrite(f'{work}/gradle.properties', 'kotlin_version', '2.4.21')
             self.assertEqual(read(f'{work}/gradle.properties'), 'kotlin_version=2.4.21\nother=1\n')
+            write(f'{work}/Versions.kt', 'object Versions {\n    const val kotlin = "1.8.10"\n    const val kotlinStdlib = kotlin\n}\n')
+            pin.rewrite(f'{work}/Versions.kt', 'kotlin', '2.4.21')
+            self.assertEqual(read(f'{work}/Versions.kt'),
+                             'object Versions {\n    const val kotlin = "2.4.21"\n    const val kotlinStdlib = kotlin\n}\n')
 
     def test_an_unmatched_or_repeated_key_fails_and_leaves_the_file(self):
         for text in ('[versions]\nkotlinVersion = "2.1.0"\n', 'kotlin = "1"\nkotlin = "2"\n'):

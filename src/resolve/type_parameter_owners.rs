@@ -159,6 +159,7 @@ pub(super) fn mentioned_type_parameters(ty: Ty, mentioned: &mut Vec<&'static str
         TyKind::TyParam(parameter, _) => mentioned.push(parameter.as_str()),
         TyKind::Nullable(inner)
         | TyKind::PlatformNullable(inner)
+        | TyKind::MutabilityFlexible(inner)
         | TyKind::InProjection(inner)
         | TyKind::OutProjection(inner)
         | TyKind::DefinitelyNotNull(inner) => mentioned_type_parameters(inner, mentioned),
@@ -172,6 +173,35 @@ pub(super) fn mentioned_type_parameters(ty: Ty, mentioned: &mut Vec<&'static str
                 mentioned_type_parameters(*parameter, mentioned);
             }
             mentioned_type_parameters(signature.ret, mentioned);
+        }
+        _ => {}
+    }
+}
+
+/// Every type-parameter identity `ty` explicitly mentions in source position order.
+pub(super) fn ty_param_names_into(ty: Ty, out: &mut Vec<&'static str>) {
+    match ty.kind() {
+        TyKind::TyParam(name, _) => out.push(name.as_str()),
+        TyKind::Nullable(inner)
+        | TyKind::PlatformNullable(inner)
+        | TyKind::MutabilityFlexible(inner)
+        | TyKind::InProjection(inner)
+        | TyKind::OutProjection(inner) => ty_param_names_into(inner, out),
+        // A source star has a computed upper bound for frontend reads, but that
+        // bound is not an explicit use of its type parameters in the source
+        // declaration. In particular, `C<*>` must not publish `C`'s own
+        // recursive parameter as a parameter of the enclosing declaration.
+        TyKind::StarProjection(_) => {}
+        TyKind::Obj(_, args) => {
+            for &argument in args {
+                ty_param_names_into(argument, out);
+            }
+        }
+        TyKind::Fun(signature) => {
+            for &parameter in &signature.params {
+                ty_param_names_into(parameter, out);
+            }
+            ty_param_names_into(signature.ret, out);
         }
         _ => {}
     }
@@ -266,10 +296,11 @@ impl Checker<'_> {
             &function.type_param_bounds,
             &[],
         );
+        let receiver = owner_receiver_prefix(function.receiver.as_ref());
         self.publish_type_parameter_owner(
             scope,
             &function.type_params,
-            format!("fun <{formals}> {}", function.name),
+            format!("fun <{formals}> {receiver}{}", function.name),
         )
     }
 
@@ -289,19 +320,7 @@ impl Checker<'_> {
             &property.type_param_bounds,
             &[],
         );
-        let receiver = property
-            .receiver
-            .as_ref()
-            .map_or_else(String::new, |receiver| {
-                let mut display = super::BoundedSourceDisplay::new(usize::MAX);
-                super::write_source_type_display_with(
-                    &mut display,
-                    receiver,
-                    &mut super::write_source_type_leaf,
-                )
-                .expect("unbounded type display");
-                format!("{}.", display.finish())
-            });
+        let receiver = owner_receiver_prefix(property.receiver.as_ref());
         let keyword = if property.is_var { "var" } else { "val" };
         self.publish_type_parameter_owner(
             scope,
@@ -705,4 +724,19 @@ fn owner_formal(name: &str, variance: TypeVariance, bounds: &[Ty]) -> String {
     } else {
         format!("{variance}{name} : {}", bounds.join(", "))
     }
+}
+
+/// An extension declaration's receiver as its owner wording spells it (`List<T>.`), or nothing for
+/// a declaration without one.
+fn owner_receiver_prefix(receiver: Option<&TypeRef>) -> String {
+    receiver.map_or_else(String::new, |receiver| {
+        let mut display = super::BoundedSourceDisplay::new(usize::MAX);
+        super::write_source_type_display_with(
+            &mut display,
+            receiver,
+            &mut super::write_source_type_leaf,
+        )
+        .expect("unbounded type display");
+        format!("{}.", display.finish())
+    })
 }

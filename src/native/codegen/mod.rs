@@ -182,6 +182,13 @@ impl Backend for CraneliftBackend {
         dependency_intrinsics::operation_plan(operation).is_some()
     }
 
+    fn realizes_dependency_getter(
+        &self,
+        signature: crate::backend::DependencyGetterSignature<'_>,
+    ) -> bool {
+        lower::realizes_dependency_getter(signature)
+    }
+
     fn lower_ir_file(
         &self,
         mut file: CheckedIrFile<'_>,

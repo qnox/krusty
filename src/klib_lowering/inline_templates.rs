@@ -309,10 +309,15 @@ impl CallLinker for TemplateCalls<'_> {
         )
     }
 
-    fn is_subtype(&self, sub: Ty, sup: Ty) -> bool {
-        crate::assignable::is_subtype(
-            &crate::assignable::TyCtx::new(),
-            &crate::symbol_resolver::SourceOracle(self.callees.source),
+    fn is_subtype(
+        &self,
+        parameters: &super::klib_types::KlibTypeParameters,
+        sub: Ty,
+        sup: Ty,
+    ) -> bool {
+        super::type_evidence::ordinary_subtype(
+            Some(&crate::symbol_resolver::SourceOracle(self.callees.source)),
+            parameters,
             sub,
             sup,
         )
@@ -358,7 +363,7 @@ impl CallLinker for TemplateCalls<'_> {
 
     fn constructor_bound(&self, parameters: &KlibTypeParameters, argument: Ty, bound: Ty) -> bool {
         let oracle = crate::symbol_resolver::SourceOracle(self.callees.source);
-        super::constructor_bounds::satisfies(Some(&oracle), parameters, argument, bound)
+        super::type_evidence::satisfies(Some(&oracle), parameters, argument, bound)
     }
 
     fn link_accessor(

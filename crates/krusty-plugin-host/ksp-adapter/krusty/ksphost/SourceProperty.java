@@ -19,6 +19,7 @@ import com.google.devtools.ksp.symbol.Origin;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
+import java.util.function.Supplier;
 import kotlin.sequences.Sequence;
 
 // A source property, one a primary-constructor parameter declares, one the language contributes
@@ -40,6 +41,8 @@ final class SourceProperty implements KSPropertyDeclaration {
     List<KSTypeParameter> typeParameters;
     KSTypeReference type;
     String jvmSignature;
+    // What `findOverridee` answers, or null when the round cannot say.
+    Supplier<KSDeclaration> overridee;
     Boolean hasBackingField;
     // The extension receiver; `receiverUndescribed` when it has one krusty could not describe.
     KSTypeReference extensionReceiver;
@@ -115,7 +118,10 @@ final class SourceProperty implements KSPropertyDeclaration {
 
     @Override
     public KSPropertyDeclaration findOverridee() {
-        throw Nodes.notImplemented("KSPropertyDeclaration.findOverridee");
+        if (overridee == null) {
+            throw Nodes.notImplemented("KSPropertyDeclaration.findOverridee");
+        }
+        return (KSPropertyDeclaration) overridee.get();
     }
 
     @Override

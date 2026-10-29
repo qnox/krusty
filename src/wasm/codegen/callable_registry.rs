@@ -246,7 +246,7 @@ impl CallableRegistry {
                         "a dependency call without frozen callable facts".to_string()
                     })?;
                     if callable
-                        .compiler_intrinsic
+                        .compiler_operation()
                         .is_some_and(super::lower::is_direct_operation)
                         && !callable
                             .dependency_callable
@@ -640,8 +640,10 @@ mod tests {
             klib_body_type_parameters: Box::new([]),
             klib_body_declaration_modifiers: None,
             klib_body_class_contract: None,
+            klib_body_accessor: None,
             klib_body_vararg_index: None,
             klib_body_parameter_defaults: None,
+            annotations: Box::new([]),
         }
     }
 

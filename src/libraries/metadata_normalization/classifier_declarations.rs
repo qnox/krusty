@@ -229,6 +229,7 @@ pub(crate) fn classifier_shape(
         .transpose()?;
     let is_interface = matches!(kind, TypeKind::Interface | TypeKind::Annotation);
     Ok(LibraryType {
+        runtime_exception: None,
         declaration_name: Some(metadata_declaration_name(metadata_name)),
         access: class.visibility.into(),
         is_kotlin: true,

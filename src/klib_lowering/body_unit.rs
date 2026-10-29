@@ -50,6 +50,8 @@ enum DependencyExternalRealization {
     EmittedBody,
     TargetIntrinsic(crate::libraries::CompilerIntrinsic),
     Constructor,
+    PropertyGetter,
+    ProviderLeaf,
 }
 
 impl EmittedDependencyCallable {
@@ -85,6 +87,28 @@ impl EmittedDependencyCallable {
             realization: DependencyExternalRealization::Constructor,
             ..Self::new(target, None, None)
         }
+    }
+
+    pub(crate) fn property_getter(target: ExternalCallableId) -> Self {
+        Self {
+            realization: DependencyExternalRealization::PropertyGetter,
+            ..Self::new(target, None, None)
+        }
+    }
+
+    pub(crate) fn provider_leaf(target: ExternalCallableId) -> Self {
+        Self {
+            realization: DependencyExternalRealization::ProviderLeaf,
+            ..Self::new(target, None, None)
+        }
+    }
+
+    fn realizes_getter(self) -> bool {
+        matches!(
+            self.realization,
+            DependencyExternalRealization::EmittedBody
+                | DependencyExternalRealization::PropertyGetter
+        )
     }
 
     fn target_intrinsic(self) -> Option<crate::libraries::CompilerIntrinsic> {
@@ -529,7 +553,13 @@ impl CallLinker for Linker<'_, '_> {
             .callee_origin(&self.active_module, &signature)
         {
             KlibCalleeOrigin::Exact(identity) => identity,
-            KlibCalleeOrigin::Missing => return Ok(None),
+            // Dependency preparation omitted this declaration's edge, so a membership this unit
+            // does not fold has no declaration to call: the body declines.
+            KlibCalleeOrigin::Missing => {
+                return Err(KlibBodyDeclineReason::UnsupportedCallee(Box::new(
+                    callee.clone(),
+                )))
+            }
             KlibCalleeOrigin::Ambiguous => {
                 return Err(KlibBodyDeclineReason::AmbiguousCalleeOrigin(Box::new(
                     callee.clone(),
@@ -537,12 +567,18 @@ impl CallLinker for Linker<'_, '_> {
             }
         };
         let Some((arena, declaration)) = self.sources.bodies.function(&identity) else {
-            return Ok(None);
+            return Err(KlibBodyDeclineReason::UnsupportedCallee(Box::new(
+                callee.clone(),
+            )));
         };
         let header = raw_function_header(None, HeaderPurpose::External, arena, declaration)?;
         let (params, ret, context_count, extension_receiver, receiver) = header.linked_signature();
+        // The stdlib declares mixed-element `contains` extensions (`LongRange.contains(Int)`), a
+        // valid declaration this fold does not model rather than inconsistent evidence.
         if context_count != 0 || extension_receiver {
-            return Ok(None);
+            return Err(KlibBodyDeclineReason::UnsupportedOperation(
+                "a membership through a `contains` that is not a member of the range",
+            ));
         }
         Ok(Some(super::body_lowering::RangeMembershipHeader {
             receiver,
@@ -551,10 +587,14 @@ impl CallLinker for Linker<'_, '_> {
         }))
     }
 
-    fn is_subtype(&self, sub: Ty, sup: Ty) -> bool {
-        // Other class conversions still require a semantic model. The function family's exact
-        // reflective-to-callable projection is stated by the shared builtins declaration.
-        sub == sup || super::callable_references::function_supertype(sub, sup)
+    fn is_subtype(
+        &self,
+        parameters: &super::klib_types::KlibTypeParameters,
+        sub: Ty,
+        sup: Ty,
+    ) -> bool {
+        self.sources.callees.is_subtype(parameters, sub, sup)
+            || super::callable_references::function_supertype(sub, sup)
     }
 
     fn link_reference(
@@ -650,11 +690,51 @@ impl CallLinker for Linker<'_, '_> {
 
     fn link_accessor(
         &mut self,
-        _callee: &KlibAccessorIdSignature,
+        callee: &KlibAccessorIdSignature,
     ) -> Result<LinkedAccessor, KlibBodyDeclineReason> {
-        Err(KlibBodyDeclineReason::UnsupportedOperation(
-            "a call through a property accessor signature",
-        ))
+        let unsupported = || {
+            KlibBodyDeclineReason::UnsupportedOperation(
+                "a call through a property accessor signature",
+            )
+        };
+        let signature = KlibDeclarationSignature::Accessor(callee.clone());
+        let identity = match self
+            .sources
+            .bodies
+            .callee_origin(&self.active_module, &signature)
+        {
+            KlibCalleeOrigin::Exact(identity) => identity,
+            KlibCalleeOrigin::Missing => return Err(unsupported()),
+            KlibCalleeOrigin::Ambiguous => {
+                return Err(KlibBodyDeclineReason::AmbiguousCalleeOrigin(Box::new(
+                    callee.property().clone(),
+                )))
+            }
+        };
+        // A complete retained export or positive target plan owns this edge. Other accessors
+        // retain the explicit unsupported boundary instead of acquiring a header-only body path.
+        if !self
+            .sources
+            .externals
+            .get(&identity)
+            .is_some_and(|external| external.realizes_getter())
+        {
+            return Err(unsupported());
+        }
+        let selected = match self.sources.callees.get(&identity) {
+            Some(KlibCalleeFact::Selected(callables)) => callables[0],
+            Some(KlibCalleeFact::Ambiguous) => {
+                return Err(KlibBodyDeclineReason::SignatureMismatch(
+                    "conflicting provider contracts for a getter declaration".to_owned(),
+                ))
+            }
+            None => return Err(KlibBodyDeclineReason::Unjoined),
+        };
+        super::accessor_calls::authenticate(selected, self.sources.bodies)?.ok_or(
+            KlibBodyDeclineReason::UnsupportedOperation(
+                "a dependency property accessor without a getter contract",
+            ),
+        )
     }
 
     fn requires_declaration(

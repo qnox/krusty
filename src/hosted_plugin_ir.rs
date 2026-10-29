@@ -9,7 +9,6 @@
 mod call_spans;
 mod encoder;
 mod function;
-mod offsets;
 mod types;
 
 use crate::diag::{DiagSink, Span};

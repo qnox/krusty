@@ -20,6 +20,24 @@ key. Missing required identity on a known export declines explicitly. Invocation
 ownership and provider-local IDs remain distinct. Serialized rich-reference admission stays in its
 separate follow-up.
 
+## Consume declaration names in metadata class headers
+
+Resolve selected declaration keys against the frozen name inventory and pass mandatory resolved
+class IDs into the common Class schema. JVM and KLIB headers share that writer; KLIB's class-name
+inventory reuses it. Select nested children and top-level KLIB roots from retained declaration
+ownership. Retain generated classifier names from the existing typed plugin facts.
+Keep explicit local provenance separate from unknown evidence. Other class-ID consumers in types,
+aliases, annotations and sealed-class inventories remain separate follow-ups; this step does not
+claim to replace their legacy encoding or callable-reference adapter naming.
+
+## Shared dependency conversion evidence
+
+Reuse the constructor-bound collaborator for ordinary dependency bodies and prepared templates.
+Pass the active header's complete formal bounds into the same explicit class-model proof and keep
+typed common coercions when a conversion changes nullability or scalar/reference representation.
+Keep the already-landed generic-argument arity guard unchanged. Validate the owning proof and body
+tests and the portable dependency-array-view fixture without backend mutes or new outcome entries.
+
 ## Native source callable-reference markers
 
 Give source-module references a program-scoped marker keyed by the existing module-qualified
@@ -28,6 +46,13 @@ to one marker address. Keep identity scope explicit in the cache; local declarat
 dependency identities retain their existing file scope. A separate KLIB follow-up must derive
 program identity from authenticated module-qualified declarations, since opaque provider IDs are
 rebound between modules.
+
+## Bound declaration-name inventory
+
+Expose selected declaration-name evidence by typed resolved key across source, JVM, KLIB and their
+federated views. Preserve absent, selected-unknown and selected-known records in caches and frozen
+backend facts, including aliases without target shapes. This supplies the metadata consumer seam;
+the full class-ID encoder and callable-reference adapter regressions remain separate follow-ups.
 
 ## Alias declaration-name producers
 
@@ -43,6 +68,23 @@ Replace lookup-spelling splitting in the foreign-source classifier inventory wit
 declaration-owned name operation. Preserve exact segments, owner edges, visibility, order and
 non-local exclusions without interning undeclared prefixes. This producer correction is separate
 from the remaining metadata class-ID encoder and dependency/alias-name fact handoff.
+
+## Wasm reference-array reads
+
+Realize reference-element literals and reads in the Wasm storage boundary, using the checked array
+element type and authenticated ArrayGet operation. Stage receiver/index operands once and share
+the existing runtime exception registry for checked bounds failures. ReleaseRecords owns the bounds
+default; the backend option is per compilation. Keep scalar boxing, primitive arrays, writes and
+spread/initializer construction as follow-ups rather than extending this slice of #2531.
+
+## Wasm runtime-exception declarations
+
+Normalize admitted platform exception storage roles at the KLIB provider boundary, freeze them
+beside classifier facts, and realize their metadata-owned parent chains in the Wasm GC registry.
+The registry authenticates every ancestor on every request, including cached leaves, before
+mutating module state. The shared Throwable hierarchy case starts from exact JVM/reference and
+Native results and exercises both Wasm hosts. Reference-array storage and checked array reads
+consume this registry in a separate slice of #2531.
 
 ## JVM companion field ABI
 
@@ -5066,6 +5108,20 @@ their declarations into an index-based model (`declarations`, `model`), lays rec
 - **Next.** Pointer, struct and callback crossings in direct C calls, and the cgo-mode thread
   start that lifts the linker's refusal of a program that imports and can start threads.
 
+## Native compiler command  ◐
+
+- **Programs (done for linux_x64).** `krusty kotlinc-native` takes Kotlin/Native's
+  `kotlinc-native` options, compiles the sources against the Native stdlib KLIB and the
+  `-library` KLIBs, and links a static `.kexe` (`native::compile_native`). Options krusty cannot
+  honor are refused by name (`crates/krusty-cli/src/kotlinc_native.rs` unit tests).
+  `tests/native_compiler_command_e2e.rs` checks the answer on the JVM lane, then compiles a
+  two-file program with the command, runs it, and asserts the complete diagnostics of a broken
+  source.
+- **Next.** `-produce library`, which needs the KLIB writer to serialize ordinary function and
+  class bodies into `default/ir`; until then a first-party library's sources are compiled into the
+  program. Programs reach further as dependency body emission grows (library member bodies, then
+  non-constant parameter defaults of third-party KLIBs).
+
 ## Byte-identical box conformance, item 1 — local-class naming  ◐
 
 Goal: every box test passes AND writes the same class files as kotlinc. The first mechanism is how
@@ -5593,8 +5649,9 @@ regress.
     and FixStack saves the stack around it, and the lambda's lines are mapped into the copy's SMAP from
     the caller's. The call site passes the captured values instead of the lambda; code compiled only
     for the object is rolled back from the caller's constant pool (`ClassWriter::checkpoint`). The
-    route is probed with the lambdas' shapes before any code is emitted, so a shape not ported yet
-    keeps the bridge, as does a lambda that reaches a private member of the caller (a backing
+    route is decided from the callee's facts before any code is emitted, never by inlining the body
+    on trial: an object whose suspend method lacks the `$$forInline` copy keeps the bridge
+    (`SpliceReason::SuspendMethodWithoutForInlineCopy`), as does a lambda that reaches a private member of the caller (a backing
     field, a private function, `invokespecial`, a materialized lambda) until kotlinc's synthetic
     accessors are ported. ✅ Lambdas taking or returning a value class (`Continuation.resumeWith`'s
     `Result`): the inline body takes the parameter unboxed (`value_classes::inline_body_slots`) and
@@ -6200,8 +6257,11 @@ supplying nested result context; independently inferred arguments remain intact.
 selection completes untyped lambda inputs from the retained candidate and source argument mapping,
 then rechecks only affected bodies without the rejected expected result. Normal checking and
 recovery share the function input layout, including contexts and anonymous receiver slots. Exact
-source/dependency diagnostics and admitted-context controls cover #2587. Explicit invalid-bound
-lambda diagnostic ordering remains a separate follow-up in #2629.
+source/dependency diagnostics and admitted-context controls cover #2587. For #2629, explicit bound
+rejection retains mapped, substituted postponed-lambda constraints before discarding the candidate.
+Reporting consumes those typed failure facts without redoing selection or assignability; fixed
+inputs and nested-producer isolation remain intact. Callable-reference winner diagnostics remain
+the separate #2776 follow-up.
 
 Late extension admission now uses strict receiver assignability or the existing satisfiable
 postponed-frame trial. The common operation also serves unbound constructor-reference receivers;
@@ -6227,3 +6287,39 @@ Nominal function values use the shared subtype relation to reach the canonical f
 of the expected signature. Applied hierarchy traversal retains declared variance, nullability,
 arity and suspend kind. Owning semantic tests cover reflective and inherited function declarations
 and unrelated-callable rejection; the JVM round trip covers nominal and reflection interface slots.
+
+Superclass-argument name reads retain the unavailable dispatch receiver as diagnostic evidence,
+separate from the usable receiver tower. Both paths share its declared scope identity. After
+lexical values and available receivers fail, a pure member-selection probe diagnoses the missing
+initialized instance before inferred-type demand or checked-body construction. Pending dispatch
+properties demand through their selected available receiver instead of a bare declaration name.
+The name-demand operation is extracted from the resolver facade; receiver and capture coordinates
+are unchanged. Ordered kotlinc diagnostics and positive enclosing-value controls cover #2658.
+
+## Compose compiler plugin  🚧
+
+krusty reimplements the Compose compiler plugin as a native pass (`src/plugins/compose`), one
+construct at a time, each byte-identical to kotlinc's output. The registry marks it partly
+implemented, so `krusty refusals` keeps a Compose module on kotlinc until the list below is done,
+and the pass rejects every construct it does not cover yet.
+
+- [x] Parameterless `Unit` top-level composables: restart groups, skipping, durable keys,
+  `@FunctionKeyMeta`, source information and trace markers; calls between them in one file.
+- [ ] Calls to composables of other files and modules, and the grouping annotations.
+- [ ] `@Composable` function types and lambdas, and the composable call checker's diagnostics.
+- [x] Primitive and `String` parameters: `$changed`/`$dirty` slot tracking with strong skipping,
+  `Composer.changed` comparisons, and each call's argument bits (static, passed on, uncertain).
+- [ ] More parameters: `$default` masks, receivers, varargs, more than ten, stability inference.
+- [ ] The full body transform: control-flow groups, `remember`, early returns, inline composables.
+- [ ] `ComposableSingletons` lambda holders and the `$stable` field of classes.
+- [ ] Remove the partial marker and rerun the corpus for the Compose projects.
+
+## Link target-owned serialized getter leaves
+
+Retain normalized KLIB accessor identity and role through declaration and backend handoffs.
+Authenticate exact property membership and the raw/applied declaring-class receiver before
+admitting a target getter capability. Share that positive decision across closure planning,
+bodyless edge preparation and ordinary accessor linking; preserve retained exports and existing
+primitive/intrinsic priority. Native consumes its existing runtime getter plans. Prove real
+official-producer/JVM-oracle programs and malformed header/facet controls. Keep compiler-introduced
+block lowering as the independent #2811 follow-up.

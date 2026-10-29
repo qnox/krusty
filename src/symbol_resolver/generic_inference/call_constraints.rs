@@ -232,6 +232,9 @@ pub(crate) fn collect_assignability_constraints_from_symbols(
             TyKind::Nullable(inner) | TyKind::PlatformNullable(inner) => {
                 actual_side(source, expected.non_null(), inner, position, constraints)
             }
+            TyKind::MutabilityFlexible(inner) => {
+                actual_side(source, expected, inner, position, constraints)
+            }
             TyKind::Fun(actual) => {
                 let TyKind::Fun(expected) = expected.non_null().kind() else {
                     return;
@@ -498,7 +501,8 @@ impl CallInferenceConstraints {
 
     /// Propagate the declaration's direct variable bounds as constraints before collapsing them to
     /// one denotable solution. For `T : R` (`T <: R`), every lower bound of `T` is a lower bound of
-    /// `R`, while every upper bound of `R` is an upper bound of `T`.
+    /// `R`, while every upper bound of `R` is an upper bound of `T`. A nullable bound `T : R?`
+    /// admits null itself, so a lower bound `X` of `T` says only `X & Any <: R`.
     fn propagate_declaration_bounds(&mut self, source: &dyn SymbolSource, signature: &GenericSig) {
         loop {
             let mut changed = false;
@@ -519,6 +523,11 @@ impl CallInferenceConstraints {
                     for &(actual, origin) in
                         lower.get(formal).map(Vec::as_slice).unwrap_or_default()
                     {
+                        let actual = if bound.is_nullable() {
+                            actual.contributed_through_nullable_formal()
+                        } else {
+                            actual
+                        };
                         changed |= self.insert(
                             source,
                             bound_formal.as_str(),
@@ -746,6 +755,18 @@ fn collect_call_inference_constraints(
             // A Java `List<T>!` is published as `MutableList<T>!`. `listOf("x")` reaches `List`,
             // not `MutableList`, so the element variable has to be read from the provider's
             // read-only face. A value that already reaches the mutable face keeps that face.
+            let inner = super::choose_platform_lower_face(source, inner, actual);
+            collect_call_inference_constraints(
+                source,
+                inner,
+                actual,
+                position,
+                origin,
+                constraints,
+            );
+        }
+        TyKind::MutabilityFlexible(inner) => {
+            // `(Mutable)List<T>` reads its variables from whichever face the value reaches.
             let inner = super::choose_platform_lower_face(source, inner, actual);
             collect_call_inference_constraints(
                 source,

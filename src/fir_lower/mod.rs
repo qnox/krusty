@@ -16,6 +16,7 @@ mod body_local_ownership;
 mod body_trace;
 #[cfg(test)]
 mod bottom_value_tests;
+mod builtin_calls;
 #[cfg(test)]
 mod builtin_operation_tests;
 #[cfg(test)]
@@ -1208,6 +1209,11 @@ fn consume_trailing_unit_result(ir: &mut IrFile, roots: &mut Vec<ExprId>) {
             // intact: flattening it would also flatten its lexical scope and extend the inlined
             // locals through the caller's return.
             if ir.retains_inline_unit_line(*value) {
+                return;
+            }
+            // A dependency's inline expansion closes its frame on the block itself, which writes
+            // the declaration's closing line on a `nop`. A replacement block would not own it.
+            if ir.external_frame_closes.contains_key(&trailing) {
                 return;
             }
             let effects = stmts.clone();

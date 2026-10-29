@@ -27,6 +27,8 @@ pub enum SkipReason {
     DefaultCalls,
     /// A plugin-generated checked `super` call could not be given a JVM invocation shape.
     SuperCalls,
+    /// A runtime declaration a plugin's generated code calls has no frozen JVM realization.
+    PluginRuntimeCalls(String),
     /// A checked declaration argument no longer matched its selected JVM parameter boundary.
     CallArguments(String),
     /// A selected overridden call could not be joined to its checked dispatch classifier facts.
@@ -169,6 +171,7 @@ pub(crate) fn run_backend_passes(
     lambda_modes: crate::jvm::ir_emit::LambdaModes,
     facts: &mut BackendPassFacts,
 ) -> Result<(), SkipReason> {
+    let lowered_expressions = ir.exprs.len();
     crate::plugins::complete_enabled(
         ir,
         plugins.native_plugins,
@@ -176,6 +179,10 @@ pub(crate) fn run_backend_passes(
         jvm_plugin_type_descriptor,
         classifiers,
     );
+    crate::jvm::local_class_names::realize_copied_lambda_class_names(ir, |source| {
+        crate::jvm::module_calls::facade_for(source, facades)
+            .expect("a local classifier's declaring source has a file stem")
+    });
     // The JVM publishes members kotlinc's plugins generate only in IR (serialization's
     // `write$Self`); they join each class's record before any lowering rewrites one.
     crate::metadata::class_declarations::add_target_generated_functions(ir);
@@ -185,6 +192,17 @@ pub(crate) fn run_backend_passes(
     callables
         .freeze_plugin_super_callables(ir, |identity| classpath.external_callable(identity))
         .map_err(|_| SkipReason::SuperCalls)?;
+    // A plugin's generated code calls the runtime declarations it selected at the handoff by their
+    // identities; they become JVM calls here, exactly like the file's own dependency calls did.
+    crate::jvm::external_calls::realize_plugin_runtime_calls(
+        ir,
+        classifiers,
+        classpath,
+        callables,
+        &mut facts.default_call_operands,
+        lowered_expressions,
+    )
+    .map_err(|error| SkipReason::PluginRuntimeCalls(error.to_string()))?;
     run_backend_passes_after_plugins(
         ir,
         facade,
@@ -1206,6 +1224,15 @@ fn report_backend_pass_failure(reason: SkipReason, diags: &mut DiagSink) {
             );
             return;
         }
+        SkipReason::PluginRuntimeCalls(detail) => {
+            diags.error(
+                crate::diag::Span::new(0, 0),
+                format!(
+                    "internal error: missing JVM realization for a plugin runtime call {detail}"
+                ),
+            );
+            return;
+        }
         SkipReason::CallArguments(detail) => {
             diags.error(crate::diag::Span::new(0, 0), detail);
             return;
@@ -1249,6 +1276,7 @@ fn report_backend_pass_failure(reason: SkipReason, diags: &mut DiagSink) {
         SkipReason::Bridges => "bridge-method",
         SkipReason::DefaultCalls
         | SkipReason::SuperCalls
+        | SkipReason::PluginRuntimeCalls(_)
         | SkipReason::CallArguments(_)
         | SkipReason::InlineParameters
         | SkipReason::ReadOnlyCollectionStubs(_)
@@ -1470,12 +1498,16 @@ pub fn facade_package_metadata_from_ir(
             let jvm_name = physical
                 .filter(|function| function.name != declaration.name)
                 .map(|function| function.name.clone());
-            let physical_descriptor = if ir.vc_declared_sigs.contains_key(&declaration.function) {
+            let physical_descriptor = if ir.vc_declared_sigs.contains_key(&declaration.function)
+                || ir
+                    .plugin_extended_signatures
+                    .contains(&declaration.function)
+            {
                 physical
                     .map(|function| {
                         crate::jvm::names::method_descriptor(&function.params, function.ret)
                     })
-                    .expect("a value-class-rewritten package function has its IR realization")
+                    .expect("a rewritten package function has its IR realization")
             } else {
                 declared_method_descriptor(declaration)
             };
@@ -1576,7 +1608,8 @@ pub fn facade_package_metadata_from_ir(
                         Some(storage) => storage.default_getter_jvm_name(),
                         None => crate::jvm::names::property_getter_name(&declaration.name),
                     }),
-                    format!("({descriptor_parameters}){value_descriptor}"),
+                    value_class_accessor_descriptor(ir, getter_function)
+                        .unwrap_or_else(|| format!("({descriptor_parameters}){value_descriptor}")),
                 )
             });
             let setter = has_setter.then(|| {
@@ -1587,7 +1620,8 @@ pub fn facade_package_metadata_from_ir(
                         Some(storage) => storage.default_setter_jvm_name(),
                         None => crate::jvm::names::property_setter_name(&declaration.name),
                     }),
-                    format!("({parameters})V"),
+                    value_class_accessor_descriptor(ir, setter_function)
+                        .unwrap_or_else(|| format!("({parameters})V")),
                 )
             });
             // A delegate evaluated in place has no storage; its `get<X>$delegate` stands in.
@@ -1658,6 +1692,21 @@ pub fn facade_package_metadata_from_ir(
         metadata_stamp,
         annotations_in_metadata,
     )
+}
+
+/// The physical descriptor of an accessor the value-class pass rewrote: a receiver or value typed
+/// by a value class is its erased carrier there (`getXx-IQRRRT4(I)I` over `val Z.xx`), as the
+/// method itself declares it.
+fn value_class_accessor_descriptor(
+    ir: &crate::ir::IrFile,
+    accessor: Option<u32>,
+) -> Option<String> {
+    let accessor = accessor.filter(|accessor| ir.vc_declared_sigs.contains_key(accessor))?;
+    let function = &ir.functions[accessor as usize];
+    Some(crate::jvm::names::method_descriptor(
+        &function.params,
+        function.ret,
+    ))
 }
 
 /// The physical name and descriptor of the static field holding a delegated package property's
