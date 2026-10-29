@@ -2990,3 +2990,6 @@ mod written_default_accessor_e2e;
 mod intersection_bound_metadata_order_e2e;
 #[path = "where_bound_arguments_e2e.rs"]
 mod where_bound_arguments_e2e;
+
+#[path = "facade_local_classifier_metadata_e2e.rs"]
+mod facade_local_classifier_metadata_e2e;

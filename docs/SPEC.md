@@ -1,5 +1,14 @@
 # krusty — a memory-lean Kotlin→JVM compiler PoC
 
+## Local classifiers in file-facade metadata
+
+A file facade records local classifier IDs using the same declaration-owned locality facts as class
+metadata, including anonymous objects and classifiers nested in local or enum-entry bodies. JVM
+function and backing-field signature records retain descriptors that a metadata reader cannot
+reconstruct from those local IDs. This changes serialization evidence rather than checked type
+arguments or declaration-result approximation. Tests compare the complete facade payload and
+class ABI with kotlinc in `tests/facade_local_classifier_metadata_e2e.rs`.
+
 ## Native callable-reference identity at module exports
 
 A reference created by a source module and a reference selected through that module's KLIB export
