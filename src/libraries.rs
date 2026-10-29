@@ -26,6 +26,7 @@ pub(crate) mod function_classifiers;
 mod generic_signature;
 mod inline_body;
 mod inline_kind;
+mod klib_body_accessor;
 mod klib_body_class;
 mod member_flags;
 mod member_records;
@@ -55,8 +56,8 @@ pub use call_realization::{
 pub(crate) use call_realization::{KlibBodyCallableShape, KlibBodyCompanionReceiver};
 pub use call_sig::required_arity;
 pub use callable_scope_rung::CallableScopeRung;
-pub use classifier_callables::BoundInnerConstructor;
 pub(crate) use classifier_callables::{constructor_generic_signature, ConstructorAlias};
+pub use classifier_callables::{BoundInnerConstructor, ConstructorCandidate};
 pub(crate) use classifier_declaration::type_alias_target_classifier;
 pub use classifier_declaration::{
     AliasExpansion, ClassifierDeclaration, ClassifierDeclarationKey, TypeAliasTemplate,
@@ -78,6 +79,8 @@ pub(crate) use dependency_body_contract::{
 pub(crate) use dependency_body_modifiers::KlibBodyDeclarationModifiers;
 pub use enhanced_nullability::{enhance_from_overridden, EnhancedResult, TypeEnhancement};
 pub use inline_kind::InlineKind;
+pub use klib_body_accessor::DependencyGetterSignature;
+pub(crate) use klib_body_accessor::{KlibAccessorRole, KlibBodyAccessor};
 pub use param_flags::ParamFlags;
 pub use physical_parameter_plan::PhysicalParameterSlot;
 pub use platform_abi::PlatformAbi;
@@ -1428,11 +1431,12 @@ pub struct FunctionInfo {
     /// value. It travels on the same candidate structure so the checker can combine both facets and
     /// run overload selection once.
     pub implicit_classifier_callable: Option<ImplicitClassifierCallable>,
-    /// The `inner` classifier this candidate constructs when it is a constructor reached through a
-    /// value of the outer class (`outer.Inner(args)`). Kotlin places such a constructor in the
+    /// The classifier this candidate constructs when it is a constructor. A constructor travels on
+    /// the same candidate structure as the functions it competes with: Kotlin places an `inner`
+    /// constructor reached through a value of the outer class (`outer.Inner(args)`) in the
     /// receiver's member level beside same-named member functions; selection runs once over both
     /// and the constructor path then materializes the selected declaration.
-    pub bound_inner_constructor: Option<BoundInnerConstructor>,
+    pub constructor: Option<ConstructorCandidate>,
     /// The alias selected on the caller's scope tower for this constructor candidate.
     pub(crate) constructor_alias: Option<Box<ConstructorAlias>>,
 }
@@ -1661,7 +1665,7 @@ impl FunctionInfo {
             stable_declaration: None,
             source_member: None,
             implicit_classifier_callable: None,
-            bound_inner_constructor: None,
+            constructor: None,
             constructor_alias: None,
         }
     }

@@ -385,3 +385,36 @@ fn native_module_abi_symbols_keep_same_named_internal_classifiers_distinct() {
         "Native ABI identities must remain distinct across the exact module graph"
     );
 }
+
+// PLATFORM-SPECIFIC: Native object markers join source declarations to their KLIB export records.
+// Both pinned reference compilers run the same module graph before Native linkage is checked.
+#[test]
+fn native_callable_reference_identity_survives_a_source_module_export() {
+    let source = r#"// MODULE: library
+// FILE: Library.kt
+package referenceidentity
+fun step(value: Int): Int = value + 1
+fun different(value: Int): Int = value + 2
+fun fromLibrary(): Any = ::step
+
+// MODULE: main(library)
+// FILE: Box.kt
+import referenceidentity.*
+fun box(): String {
+    val original = fromLibrary()
+    val imported: Any = ::step
+    if (original != imported || imported != original) return "declaration identity"
+    if (original.hashCode() != imported.hashCode()) return "declaration hash"
+    if (original == ::different || ::different == imported) return "different declaration"
+    return "OK"
+}
+"#;
+    let stem = "sourceModuleReferenceIdentity";
+    super::box_reference_classes::checked_box(source, stem)
+        .expect("pinned kotlinc must run the exact reference-identity module graph");
+    assert_eq!(
+        run_native_abi_case(source, stem),
+        Outcome::Pass,
+        "Native reference identity must use the source declaration across its KLIB export"
+    );
+}
