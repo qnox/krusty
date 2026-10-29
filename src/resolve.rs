@@ -34,6 +34,7 @@ use scope::{ContextReceiver, ContextReceiverKind, FlowExclusion, NarrowPath, Ns}
 
 mod abstract_obligations;
 mod constructor_references;
+mod implicit_source_member_lambda;
 use constructor_references::ReferenceReceiver;
 mod access_control;
 mod accessor_annotations;
@@ -156,6 +157,7 @@ mod function_declaration_check;
 mod function_exit;
 pub(crate) mod function_type_parameters;
 mod function_value_conversions;
+mod generic_argument_bounds;
 mod generic_call_bindings;
 mod if_expression;
 mod implicit_receiver_calls;
@@ -202,6 +204,7 @@ mod member_extension_properties;
 mod member_extension_selection;
 pub use member_extension_properties::MemberExtPropSig;
 use member_extension_properties::MemberExtensionProperty;
+mod assignment_targets;
 mod member_overload_clash;
 mod missing_dependency_supertypes;
 mod name_read_demand;
@@ -2714,9 +2717,9 @@ pub struct SymbolTable {
     pub libraries: Box<dyn SemanticPlatform>,
     /// The native compiler plugins this compilation runs (none unless the driver selects them).
     native_plugins: crate::plugins::registry::NativePlugins,
-    /// The annotations of kotlinc's sam-with-receiver plugin, from the native plugins this
-    /// compilation runs ([`crate::symbol_source::SymbolSource::sam_with_receiver_annotations`]).
-    pub(crate) sam_with_receiver_annotations: Vec<TypeName>,
+    /// The annotation-configured conventions of the native plugins this compilation runs
+    /// ([`crate::symbol_source::SymbolSource::annotation_conventions`]).
+    pub(crate) annotation_conventions: crate::symbol_source::AnnotationConventions,
     /// Top-level extension overloads keyed by name and semantic receiver.
     pub ext_funs: HashMap<String, HashMap<Ty, Vec<Signature>>>,
     source_ext_funs: HashMap<(u32, u32), (String, Ty, usize)>,
@@ -2850,7 +2853,7 @@ impl Default for SymbolTable {
             enums: HashMap::default(),
             libraries: Box::new(EmptySymbolSource),
             native_plugins: Default::default(),
-            sam_with_receiver_annotations: Vec::new(),
+            annotation_conventions: Default::default(),
             ext_funs: HashMap::default(),
             source_ext_funs: HashMap::default(),
             ext_props: HashMap::default(),
@@ -9007,6 +9010,9 @@ pub enum StmtLowering {
     LocalFunction(Box<LocalFunInfo>),
     /// A compound assignment (`target op= rhs`) selected as an in-place `opAssign` operator call.
     PlusAssign(CompoundAssignmentTarget),
+    /// `target = value` that kotlinc's assignment plugin resolves as the checked call
+    /// `target.assign(value)` ([`crate::ast::File::assignment_overload_calls`]).
+    OverloadedAssignment { call: ExprId },
     /// `field = value` selected as the enclosing property's backing-field write. A lexical local
     /// named `field` never receives this target.
     BackingFieldWrite {
@@ -16418,11 +16424,21 @@ impl<'a> Checker<'a> {
                         break 'report;
                     }
                     if inapplicable_candidates.is_empty() {
-                        self.diags.error(
-                            self.call_callee_name_span(call),
-                            self.unresolved_member_diagnostic(scope, Some(receiver), &name, rt),
+                        let constraints = CallConstraints {
+                            type_args: &call_targs,
+                            receiver: rt,
+                            expected,
+                        };
+                        self.report_unresolved_receiver_call(
+                            scope,
+                            CallArgs {
+                                call,
+                                args,
+                                arg_tys: &arg_tys,
+                            },
+                            (receiver, &name),
+                            constraints,
                         );
-                        self.report_unshaped_lambda_diagnostics(scope, args);
                     } else {
                         self.diags.error(
                             self.call_callee_name_span(call),
@@ -17706,36 +17722,18 @@ impl<'a> Checker<'a> {
                     .lexical_value_claims_call_with_arguments(scope, &fname, args)
                     && known_sig.is_none()
                     && has_lambda_argument;
-                let ordinary_this_member_lambda_shape: Option<MemberLambdaShape> =
-                    if implicit_member_lambda_enabled {
-                        let partial = this_member_partial.as_deref().unwrap_or_default();
-                        self.implicit_member_receiver_types(scope)
-                            .into_iter()
-                            .find_map(|receiver| {
-                                let (member, generic_member) = self.module_member_lambda_plan(
-                                    scope, call, receiver, &fname, args, partial, expected,
-                                );
-                                let member = member?;
-                                let contextual = self.contextual_call_shape(
-                                    scope,
-                                    &member.params,
-                                    &member.call_sig,
-                                    member.context_count,
-                                    arg_names.as_deref(),
-                                )?;
-                                module_member_lambda_shape(
-                                    &self.fed_source(),
-                                    &member,
-                                    generic_member.as_ref(),
-                                    &contextual,
-                                    args,
-                                    arg_names.as_deref(),
-                                    self.file.call_has_trailing_lambda.contains(&call.0),
-                                )
-                            })
-                    } else {
-                        None
-                    };
+                let ordinary_this_member_lambda_shape = implicit_member_lambda_enabled
+                    .then(|| {
+                        self.implicit_source_member_lambda_shape(
+                            scope,
+                            call,
+                            &fname,
+                            args,
+                            this_member_partial.as_deref().unwrap_or_default(),
+                            expected,
+                        )
+                    })
+                    .flatten();
                 // An implicit receiver's call shapes its lambdas through the same one decision an
                 // explicit receiver does: each receiver of the tower is asked for a whole decision —
                 // classpath member, then extension — and the innermost one that can shape a lambda
@@ -17744,13 +17742,16 @@ impl<'a> Checker<'a> {
                 // because extensions were swept first, which is backwards: the tower is innermost
                 // first, and within a receiver a member outranks an extension.
                 //
-                // This closes that inversion between those two sources only. Source members are not
-                // part of this decision — they are found by their own whole-tower sweep just above,
-                // which still wins outright wherever it answers, so an outer receiver's SOURCE
-                // member still beats an inner receiver's classpath member. That inversion is older
-                // than this decision point and is not addressed here.
+                // Source members come from their own sweep just above. Its answer bounds this one:
+                // only receivers strictly inside the receiver that answered there are asked, so an
+                // inner receiver's classpath member or (member) extension beats an outer receiver's
+                // source member, while the answering receiver's own source member still outranks
+                // its extensions.
+                let source_member_depth = ordinary_this_member_lambda_shape
+                    .as_ref()
+                    .map(|(depth, _)| *depth);
                 let this_member_shaping = (implicit_member_lambda_enabled
-                    && ordinary_this_member_lambda_shape.is_none())
+                    && source_member_depth != Some(0))
                 .then(|| {
                     let type_args = self
                         .file
@@ -17764,6 +17765,7 @@ impl<'a> Checker<'a> {
                     let partial = this_member_partial.clone().unwrap_or_default();
                     self.implicit_member_receiver_types(scope)
                         .into_iter()
+                        .take(source_member_depth.unwrap_or(usize::MAX))
                         .find_map(|receiver| {
                             let shaping = self.call_lambda_shaping(
                                 scope,
@@ -17798,6 +17800,9 @@ impl<'a> Checker<'a> {
                         })
                 })
                 .flatten();
+                let ordinary_this_member_lambda_shape = ordinary_this_member_lambda_shape
+                    .filter(|_| this_member_shaping.is_none())
+                    .map(|(_, shape)| shape);
                 let this_member_ext_lambda_plan =
                     this_member_shaping.as_ref().and_then(|shaping| {
                         shaping
@@ -20965,6 +20970,11 @@ impl<'a> Checker<'a> {
         } else {
             PropertyWriteSelection::None
         };
+        if let Some((target_ty, false)) = property.storage() {
+            if self.try_overloaded_assignment(scope, s, target_ty, value) {
+                return;
+            }
+        }
         crate::trace_compiler!(
             "resolve",
             "assign name={name} local={:?} property={} deferred={}",
@@ -21441,7 +21451,9 @@ impl<'a> Checker<'a> {
             let deferred_constructor_write = property.setter.is_none()
                 && self.is_deferred_constructor_property_write(scope, receiver, &name, owner);
             if property.setter.is_none() && !deferred_constructor_write {
-                self.report_val_reassignment(target_span, "'val' cannot be reassigned.");
+                if !self.try_overloaded_assignment(scope, s, property.ty, value) {
+                    self.report_val_reassignment(target_span, "'val' cannot be reassigned.");
+                }
                 return;
             }
             let context_args = if deferred_constructor_write || property.context_count == 0 {
@@ -21881,7 +21893,7 @@ impl<'a> Checker<'a> {
         self.check_operator_declaration(
             f,
             semantic_ret_ty,
-            operator_declarations::OperatorDeclarationSite::NonMember,
+            operator_declarations::OperatorDeclarationSite::NonMember(semantic_receiver),
         );
 
         let generic_sig = (!f.type_params.is_empty()).then(|| {
@@ -35304,37 +35316,7 @@ impl<'a> Checker<'a> {
     ) -> String {
         let mut displays = candidates
             .iter()
-            .map(|candidate| {
-                self.source_callable_display(candidate).unwrap_or_else(|| {
-                    // An extension's `callable.params` prepends the receiver while `call_sig` does
-                    // not; skip it so names and types stay parallel.
-                    let (params, receiver) = match candidate.kind {
-                        crate::libraries::FnKind::Extension => (
-                            &candidate.callable.params[1.min(candidate.callable.params.len())..],
-                            candidate.receiver,
-                        ),
-                        _ => (candidate.callable.params.as_slice(), None),
-                    };
-                    let parameters =
-                        Self::callable_ref_parameters(params, &candidate.call_sig.param_names);
-                    let suspend = if candidate.callable.suspend {
-                        "suspend "
-                    } else {
-                        ""
-                    };
-                    match receiver {
-                        Some(receiver) => format!(
-                            "{suspend}fun {}.{name}({parameters}): {}",
-                            receiver.source_name(),
-                            candidate.callable.ret.source_name()
-                        ),
-                        None => format!(
-                            "{suspend}fun {name}({parameters}): {}",
-                            candidate.callable.ret.source_name()
-                        ),
-                    }
-                })
-            })
+            .map(|candidate| self.member_candidate_display(name, candidate))
             .collect::<Vec<_>>();
         displays.sort_unstable();
         displays.dedup();
@@ -38988,19 +38970,6 @@ impl<'a> Checker<'a> {
         self.file.expr_spans[e.0 as usize]
     }
 
-    fn assignment_target_span(&self, statement: StmtId) -> Span {
-        self.file
-            .assignment_target_spans
-            .get(&statement.0)
-            .copied()
-            .unwrap_or(self.file.stmt_spans[statement.0 as usize])
-    }
-
-    fn assignment_member_name_span(&self, statement: StmtId, name: &str) -> Span {
-        let span = self.assignment_target_span(statement);
-        Span::new(span.hi.saturating_sub(name.len() as u32), span.hi)
-    }
-
     fn value_operator_span(&self, value: ExprId) -> Span {
         self.file
             .value_operator_spans
@@ -39853,6 +39822,7 @@ impl<'a> Checker<'a> {
                 return true;
             }
             let mut generic_binding = None;
+            let mut argument_contradiction = None;
             let semantic_params = if let Some(signature) = candidate.generic_sig.as_ref() {
                 let mut bindings =
                     crate::symbol_resolver::seeded_gsig_binds(signature, &explicit_type_args);
@@ -39860,20 +39830,34 @@ impl<'a> Checker<'a> {
                     let whole_arrays =
                         named_whole_array_varargs(parameters, argument_names, &value_signature);
                     let source = self.fed_source();
+                    let actuals = parameters
+                        .iter()
+                        .copied()
+                        .zip(args.iter().copied())
+                        .zip(whole_arrays)
+                        .enumerate()
+                        .map(|(source, ((parameter, argument), named_whole_array))| {
+                            let actual = self.expr_types[argument.0 as usize];
+                            let whole_array =
+                                named_whole_array || self.file.is_spread_arg(args[source]);
+                            (source, parameter + context_count, actual, whole_array)
+                        })
+                        .collect::<Vec<_>>();
+                    argument_contradiction = self.argument_contradictions(
+                        signature,
+                        &actuals,
+                        &explicit_type_args,
+                        candidate.call_sig.vararg_index,
+                        args,
+                        Self::generic_callable_header(name, candidate),
+                    );
                     let inferred = crate::symbol_resolver::infer_generic_call_bindings_from_symbols(
                         &source,
                         signature,
-                        parameters
-                            .iter()
-                            .copied()
-                            .zip(args.iter().copied())
-                            .zip(whole_arrays)
-                            .enumerate()
-                            .map(|(source, ((parameter, argument), named_whole_array))| {
-                                let actual = self.expr_types[argument.0 as usize];
-                                let whole_array =
-                                    named_whole_array || self.file.is_spread_arg(args[source]);
-                                (parameter + context_count, actual, whole_array)
+                        actuals
+                            .into_iter()
+                            .map(|(_, parameter, actual, whole_array)| {
+                                (parameter, actual, whole_array)
                             }),
                         candidate.call_sig.vararg_index,
                     );
@@ -39965,72 +39949,20 @@ impl<'a> Checker<'a> {
                 Ok(_) => {
                     let before = self.diags.diags.len();
                     if let Some((signature, bindings)) = &generic_binding {
-                        for (formal_index, formal) in signature.formals.iter().enumerate() {
-                            let Some(actual) = bindings.get(formal).copied() else {
-                                continue;
-                            };
-                            for &bound in signature
-                                .formal_bounds
-                                .get(formal_index)
-                                .into_iter()
-                                .flatten()
-                            {
-                                let expected = crate::symbol_resolver::ty_subst(bound, bindings);
-                                let inferred_from_callable_reference = explicit_type_args
-                                    .get(formal_index)
-                                    .is_none()
-                                    && argument_parameters.as_ref().is_some_and(|parameters| {
-                                        parameters.iter().enumerate().any(|(source, parameter)| {
-                                            matches!(
-                                                self.file.expr(args[source]),
-                                                Expr::CallableRef { .. }
-                                            ) && signature
-                                                .params
-                                                .get(parameter + context_count)
-                                                .is_some_and(|parameter| {
-                                                    ty_mentions_param(
-                                                        *parameter,
-                                                        std::slice::from_ref(formal),
-                                                    )
-                                                })
-                                        })
-                                    });
-                                crate::trace_compiler!(
-                                    "resolve",
-                                    "call={call:?} function={name} parameter={formal} binding={actual:?} bound={expected:?} callable_reference={inferred_from_callable_reference}",
-                                );
-                                if self.receiver_is_assignable(actual, expected) {
-                                    continue;
-                                }
-                                if inferred_from_callable_reference {
-                                    self.diags.error(
-                                        self.span(call),
-                                        format!(
-                                            "cannot infer type for type parameter '{}'. Specify it explicitly.",
-                                            crate::types::type_parameter_source_name(formal)
-                                        ),
-                                    );
-                                    return true;
-                                }
-                                let span = argument_parameters
-                                    .as_ref()
-                                    .and_then(|parameters| {
-                                        parameters.iter().enumerate().find_map(
-                                            |(source, parameter)| {
-                                                signature
-                                                    .params
-                                                    .get(parameter + context_count)
-                                                    .and_then(|parameter| {
-                                                        parameter.non_null().ty_param_name()
-                                                    })
-                                                    .is_some_and(|name| name == formal)
-                                                    .then(|| self.span(args[source]))
-                                            },
-                                        )
-                                    })
-                                    .unwrap_or_else(|| self.span(call));
-                                self.expect_assignable(expected, actual, span, "type argument");
-                            }
+                        if self.report_generic_argument_bounds(
+                            generic_argument_bounds::GenericArgumentBounds {
+                                call,
+                                name,
+                                args,
+                                parameters: argument_parameters.as_deref(),
+                                context_count,
+                                explicit_type_args: &explicit_type_args,
+                                signature,
+                                bindings,
+                                contradictions: argument_contradiction.take(),
+                            },
+                        ) {
+                            return true;
                         }
                     }
                     for (source, &parameter) in argument_parameters.iter().flatten().enumerate() {
@@ -43714,14 +43646,6 @@ impl<'a> Checker<'a> {
                 .insert((reference.span.lo, reference.span.hi), resolved);
         }
         resolved
-    }
-
-    fn report_val_reassignment(&mut self, span: Span, message: impl Into<String>) {
-        if self.unreachable_statement_depth != 0 {
-            return;
-        }
-        self.diags
-            .error_kind(span, crate::diag::DiagnosticKind::ValReassignment, message);
     }
 
     /// Resolve a type without emitting diagnostics (used for speculative smart-cast narrowing).
@@ -51725,7 +51649,7 @@ impl<'a> Checker<'a> {
         // family the symbol query cannot rebuild; select over exactly that family.
         let joined_constructors = mapped
             .iter()
-            .any(|(candidate, _)| candidate.bound_inner_constructor.is_some());
+            .any(|(candidate, _)| candidate.constructor.is_some());
         let candidate = match receiver {
             crate::symbol_resolver::SymRecv::Value(receiver) if joined_constructors => {
                 let family =
