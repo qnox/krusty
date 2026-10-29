@@ -733,14 +733,10 @@ private fun kotlincRequest(task: KotlinJvmCompile, pluginVersion: String, compil
     return KotlincRequest(arguments, emptyList())
 }
 
-private fun structuredOptInRefusal(markers: List<String>): String? {
-    val seen = HashSet<String>()
-    for (marker in markers) {
-        if (marker.isBlank()) return "compilerOptions.optIn contains an empty marker"
-        if (!seen.add(marker)) return "compilerOptions.optIn contains duplicate marker '$marker'"
-    }
-    return null
-}
+// kotlinc accepts a repeated `-opt-in` marker, so a repeated structured marker reaches krusty as
+// KGP passes it.
+private fun structuredOptInRefusal(markers: List<String>): String? =
+    if (markers.any(String::isBlank)) "compilerOptions.optIn contains an empty marker" else null
 
 private fun supportedKotlinPluginVersion(version: String): String =
     if (version in supportedKotlinVersions) {
