@@ -1211,6 +1211,11 @@ fn consume_trailing_unit_result(ir: &mut IrFile, roots: &mut Vec<ExprId>) {
             if ir.retains_inline_unit_line(*value) {
                 return;
             }
+            // A dependency's inline expansion closes its frame on the block itself, which writes
+            // the declaration's closing line on a `nop`. A replacement block would not own it.
+            if ir.external_frame_closes.contains_key(&trailing) {
+                return;
+            }
             let effects = stmts.clone();
             if effects.is_empty() {
                 roots.pop();

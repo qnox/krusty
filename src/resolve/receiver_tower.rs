@@ -2,6 +2,58 @@
 
 use super::*;
 
+#[derive(Clone, Copy)]
+struct UnavailableDispatchReceiver {
+    identity: (usize, usize),
+    ty: Ty,
+}
+
+fn unavailable_dispatch_receiver(
+    checker: &Checker<'_>,
+    scope: &CheckerScope<'_>,
+) -> Option<UnavailableDispatchReceiver> {
+    if !checker.this_unavailable
+        || checker.static_companion_this.is_some()
+        || checker.static_singleton_this.is_some()
+        || !checker.this_labels.iter().any(|(_, _, class, _)| *class)
+    {
+        return None;
+    }
+    let identity = scope
+        .innermost_class_receiver_identity()
+        .expect("an unavailable class receiver must have a class scope rung");
+    let ty = scope
+        .implicit_receivers_with_declarations()
+        .into_iter()
+        .find_map(|(ty, _, candidate, _)| (candidate == identity).then_some(ty))
+        .expect("the unavailable class rung retains its declared type");
+    Some(UnavailableDispatchReceiver { identity, ty })
+}
+
+/// Recognize an otherwise selected instance property without publishing a read or a capture.
+/// Ordinary lexical values and available receivers must have had their turn before this probe.
+pub(super) fn reject_unavailable_member(
+    checker: &mut Checker<'_>,
+    scope: &CheckerScope<'_>,
+    expression: ExprId,
+    name: &str,
+) -> bool {
+    let Some(receiver) = unavailable_dispatch_receiver(checker, scope) else {
+        return false;
+    };
+    if !matches!(
+        checker.select_property_read(scope, receiver.ty, name),
+        Ok(Some(PropertyReadSelection::Member(_)))
+    ) {
+        return false;
+    }
+    checker.diags.error(
+        checker.span(expression),
+        "cannot access '<this>' before the instance has been initialized.",
+    );
+    true
+}
+
 fn enclosing_class_role(ty: Ty) -> ReceiverDeclarationRole {
     ReceiverDeclarationRole::EnclosingClass(
         ty.kotlin_class_internal()
@@ -103,26 +155,12 @@ pub(super) fn declared_receivers(
             },
         )
         .collect::<Vec<_>>();
-    let unavailable_class_receiver = (checker.this_unavailable
-        && checker.static_companion_this.is_none()
-        && checker.static_singleton_this.is_none())
-    .then(|| {
-        checker
-            .this_labels
-            .iter()
-            .rev()
-            .find(|(_, _, is_class, _)| *is_class)
-            .map(|(_, ty, _, _)| *ty)
-    })
-    .flatten();
+    let unavailable_class_receiver = unavailable_dispatch_receiver(checker, scope);
     // A superclass-constructor argument is evaluated before the current class instance exists.
     // Remove that exact class-rung identity, not the first same-typed receiver: a receiver lambda
     // may introduce another `Outer.Inner` immediately above it, and that value remains valid.
-    if unavailable_class_receiver.is_some() {
-        let identity = scope
-            .innermost_class_receiver_identity()
-            .expect("an unavailable class receiver must have a class scope rung");
-        receivers.retain(|receiver| receiver.identity != identity);
+    if let Some(unavailable) = unavailable_class_receiver {
+        receivers.retain(|receiver| receiver.identity != unavailable.identity);
     }
     // A retained local/anonymous classifier can be checked independently from the expression
     // that introduced it. Its captured receiver labels carry the already-selected semantic

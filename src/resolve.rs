@@ -203,6 +203,7 @@ pub use member_extension_properties::MemberExtPropSig;
 use member_extension_properties::MemberExtensionProperty;
 mod member_overload_clash;
 mod missing_dependency_supertypes;
+mod name_read_demand;
 mod named_class_constructors;
 pub(crate) mod operator_calls;
 mod operator_declarations;
@@ -55382,7 +55383,9 @@ impl<'a> Checker<'a> {
         // sibling and turns a cycle among them into a decline for members that are individually
         // fine.
         if let Some(local) = lookup.as_mut() {
-            if local.ty == Ty::Pending {
+            if local.ty == Ty::Pending
+                && !matches!(local.origin, ReceiverFnValueOrigin::DispatchProperty { .. })
+            {
                 if let Some(resolved) = self.demand_name.and_then(|demand| demand(&n)) {
                     local.ty = resolved;
                     if local.write_ty == Some(Ty::Pending) {
@@ -55432,31 +55435,10 @@ impl<'a> Checker<'a> {
                 // arguments on this selected value are therefore the generic property-access
                 // error; they must not be reinterpreted as a classifier qualifier later.
                 self.check_selected_property_type_arguments(e);
-                // The binding's recorded type is the marker while that declaration's own type is
-                // being determined. Ask for it BEFORE the origin-specific paths below: each of them
-                // reads the binding or re-selects the member from the symbol table, and both hold
-                // the marker at this point. The receiver tower names the owner, innermost first,
-                // exactly as name resolution walked it.
-                if l.ty.mentions_pending() {
-                    if let Some(demand) = self.demand_member {
-                        let tower: Vec<Ty> = self
-                            .this_labels
-                            .iter()
-                            .rev()
-                            .map(|(_, ty, _, _)| *ty)
-                            .collect();
-                        let answered = tower.into_iter().find_map(|receiver| {
-                            (receiver != Ty::Error && !receiver.mentions_pending())
-                                .then(|| demand(receiver.non_null(), &n, &[]))
-                                .flatten()
-                                .filter(|answered| {
-                                    *answered != Ty::Error && !answered.mentions_pending()
-                                })
-                        });
-                        if let Some(answered) = answered {
-                            return self.set(e, answered);
-                        }
-                    }
+                if let Some(answered) =
+                    name_read_demand::inferred_receiver_member(self, scope, &l, &n)
+                {
+                    return self.set(e, answered);
                 }
                 crate::trace_compiler!("resolve", "name read {n} origin={:?}", l.origin);
                 self.record_enhanced_local_read(e, &l);
@@ -55596,6 +55578,11 @@ impl<'a> Checker<'a> {
                             return self.set(e, ty);
                         }
                     }
+                }
+                if matches!(l.origin, ReceiverFnValueOrigin::DispatchProperty { .. })
+                    && receiver_tower::reject_unavailable_member(self, scope, e, &n)
+                {
+                    return self.set(e, Ty::Error);
                 }
                 let ty = self.local_narrowing(scope, &n).unwrap_or(l.ty);
                 self.record_flexible_local_read(e, &l, ty);
@@ -55787,10 +55774,7 @@ impl<'a> Checker<'a> {
                     .demand_rejects
                     .is_some_and(|rejects| rejects(&n, self.span(e)))
                 {
-                    let _ = self.demand_name.and_then(|demand| demand(&n));
-                    self.diags
-                        .error(self.span(e), format!("unresolved reference '{n}'."));
-                    Ty::Error
+                    name_read_demand::rejected_name(self, scope, e, &n)
                 } else if self.module_declares_top_level_property(&n) {
                     match self.select_top_level_property(scope, &n) {
                         // A module property is REGISTERED before its type is known, as a placeholder
@@ -55937,7 +55921,7 @@ impl<'a> Checker<'a> {
                     ty
                 } else if let Some(ty) = self.context_sensitive_name_ty(scope, e, &n, expected) {
                     ty
-                } else if let Some(ty) = self.demand_name.and_then(|demand| demand(&n)) {
+                } else if let Some(ty) = name_read_demand::unresolved_name(self, scope, e, &n) {
                     // Every ordinary rung has been tried and none knew the name. When this checker
                     // is typing one declaration for the resolution engine, that can simply mean the
                     // declaration it names has not been typed YET — ask for it rather than reporting
