@@ -1325,6 +1325,8 @@ mod local_class_capture_order_e2e;
 mod local_class_construction_capture_e2e;
 #[path = "local_function_reference_inference_e2e.rs"]
 mod local_function_reference_inference_e2e;
+#[path = "mutable_field_signature_e2e.rs"]
+mod mutable_field_signature_e2e;
 java_member_modules::declare!();
 mod java_nullability_modules;
 java_nullability_modules::declare!();
