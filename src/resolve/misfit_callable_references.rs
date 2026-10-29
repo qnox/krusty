@@ -103,11 +103,39 @@ impl Checker<'_> {
         MisfitReference::Reported
     }
 
-    /// Whether `expression` is written directly as a value argument of a call. Only a failed
-    /// reference asks, so the file is scanned instead of indexing every argument up front.
+    /// Whether `expression` is written directly as a value argument of a call: an ordinary or safe
+    /// call, an enum entry's constructor call, a supertype constructor call or a constructor
+    /// delegation. Only a failed reference asks, so the file is scanned instead of indexing every
+    /// argument up front.
     fn is_call_value_argument(&self, expression: ExprId) -> bool {
-        self.file.expr_arena.iter().any(
-            |candidate| matches!(candidate, Expr::Call { args, .. } if args.contains(&expression)),
-        )
+        let in_expression = self
+            .file
+            .expr_arena
+            .iter()
+            .any(|candidate| match candidate {
+                Expr::Call { args, .. } => args.contains(&expression),
+                Expr::SafeCall {
+                    args: Some(args), ..
+                } => args.contains(&expression),
+                _ => false,
+            });
+        in_expression
+            || self.file.decl_arena.iter().any(|declaration| {
+                let Decl::Class(class) = declaration else {
+                    return false;
+                };
+                class.base_args.contains(&expression)
+                    || class
+                        .enum_entries
+                        .iter()
+                        .any(|entry| entry.args.contains(&expression))
+                    || class.secondary_ctors.iter().any(|constructor| {
+                        matches!(
+                            &constructor.delegation,
+                            CtorDelegation::This(call) | CtorDelegation::Super(call)
+                                if call.args.contains(&expression)
+                        )
+                    })
+            })
     }
 }

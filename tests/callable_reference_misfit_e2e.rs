@@ -94,3 +94,18 @@ fun f() { var ref: (B, Int) -> String = { _, _ -> \"\" }; ref = B::g }\n",
         ],
     );
 }
+
+#[test]
+fn safe_call_and_enum_entry_arguments_report_their_inapplicable_candidate() {
+    assert_kotlinc_errors(
+        "class B\n\
+fun B.g(i: Int, j: Int): String = \"e\"\n\
+class T { fun take(f: (B, Int) -> String) = f }\n\
+fun use(t: T?) { t?.take(B::g) }\n\
+enum class E(f: (B, Int) -> String) { X(B::g) }\n",
+        &[
+            "Main.kt:4:29: inapplicable candidate(s): fun B.g(i: Int, j: Int): String",
+            "Main.kt:5:44: inapplicable candidate(s): fun B.g(i: Int, j: Int): String",
+        ],
+    );
+}
