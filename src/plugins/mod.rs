@@ -16,6 +16,7 @@
 //! generated symbols resolve. Body and expression rewriting belongs at the IR level.
 
 pub mod allopen;
+pub mod assignment;
 pub mod class_metadata;
 pub mod cli;
 pub mod compose;
@@ -785,6 +786,13 @@ pub trait IrPlugin {
         &[]
     }
 
+    /// Annotations whose classes an assignment to a `val` property calls `assign` on, as kotlinc's
+    /// assignment plugin does: `target.p = v` becomes `target.p.assign(v)` when the class of `p`'s
+    /// type, or one of its supertypes, carries one.
+    fn assignment_annotations(&self) -> &[TypeName] {
+        &[]
+    }
+
     /// Add interfaces or superclasses to existing classes.
     fn generate_supertypes(&self, _ir: &mut IrFile, _ctx: &PluginContext) {}
 
@@ -1339,6 +1347,14 @@ impl PluginHost {
         self.plugins
             .iter()
             .flat_map(|plugin| plugin.sam_with_receiver_annotations().iter().copied())
+            .collect()
+    }
+
+    /// Every registered plugin's [`IrPlugin::assignment_annotations`].
+    pub fn assignment_annotations(&self) -> Vec<TypeName> {
+        self.plugins
+            .iter()
+            .flat_map(|plugin| plugin.assignment_annotations().iter().copied())
             .collect()
     }
 
