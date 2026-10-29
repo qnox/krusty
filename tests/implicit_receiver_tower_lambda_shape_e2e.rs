@@ -62,8 +62,7 @@ fn an_inner_receiver_member_extension_beats_an_outer_source_member() {
     // Inside `apply` on a column, the class's member extension on `Column<T>` belongs to the inner
     // receiver's level, so it shapes the lambda (`it` is the column) before the outer `Table`
     // receiver's own zero-parameter `check`.
-    const MAIN: &str = "package repro\n\
-        class Op(val s: String)\n\
+    const MAIN: &str = "class Op(val s: String)\n\
         class Column<T>(val name: String)\n\
         fun Column<Byte>.describe(): Op = Op(name)\n\
         open class Table {\n\
@@ -84,14 +83,14 @@ fn an_inner_receiver_member_extension_beats_an_outer_source_member() {
         \x20   return table.last\n\
         }\n";
     common::expect_box_ok_files_with_stdlib(&[("Main.kt", MAIN)], "inner member extension");
+    common::expect_box_same_as_kotlinc(MAIN, "InnerMemberExtension");
 }
 
 #[test]
 fn an_outer_source_member_still_shapes_a_name_the_inner_receiver_lacks() {
     // The control: without the member extension, the outer receiver's source member shapes the
     // zero-parameter lambda.
-    const MAIN: &str = "package repro\n\
-        class Op(val s: String)\n\
+    const MAIN: &str = "class Op(val s: String)\n\
         class Column<T>(val name: String)\n\
         open class Table {\n\
         \x20   var last = \"\"\n\
@@ -108,4 +107,5 @@ fn an_outer_source_member_still_shapes_a_name_the_inner_receiver_lacks() {
         \x20   return table.last\n\
         }\n";
     common::expect_box_ok_files_with_stdlib(&[("Main.kt", MAIN)], "outer source member");
+    common::expect_box_same_as_kotlinc(MAIN, "OuterSourceMember");
 }
