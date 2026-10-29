@@ -6,6 +6,8 @@ mod constructor_boxing_casts_e2e;
 #[path = "dependent_constructor_bounds_e2e.rs"]
 mod dependent_constructor_bounds_e2e;
 mod enclosing_formal_signatures_e2e;
+#[path = "inferred_alias_constructor_abbreviation_e2e.rs"]
+mod inferred_alias_constructor_abbreviation_e2e;
 #[path = "nested_signature_argument_layout_e2e.rs"]
 mod nested_signature_argument_layout_e2e;
 
