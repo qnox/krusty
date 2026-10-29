@@ -1,5 +1,15 @@
 # krusty — implementation plan
 
+## Native dependency reference identity handoff
+
+Retain the canonical declaration marker in the existing Native dependency export registry. Source
+exports join their exact checked callable ID to the module-function key; dependency-support exports
+use the existing injective module-qualified KLIB identity encoding. Selected external references
+consume this retained key, while authenticated declarations without source exports use their KLIB
+key. Missing required identity on a known export declines explicitly. Invocation aliases, marker
+ownership and provider-local IDs remain distinct. Serialized rich-reference admission stays in its
+separate follow-up.
+
 ## Consume declaration names in metadata class headers
 
 Resolve selected declaration keys against the frozen name inventory and pass mandatory resolved
@@ -6303,3 +6313,13 @@ binding identities, forwarding rules and field reconciliation. Feed the existing
 prefix and nested-capture operations rather than adding a new capture ABI or lookup in lowering.
 Validate both original issue programs, direct/nested generic lambdas, shared mutable storage and
 parameter shadowing against Kotlin, together with the existing constructor capture regressions.
+
+## Link target-owned serialized getter leaves
+
+Retain normalized KLIB accessor identity and role through declaration and backend handoffs.
+Authenticate exact property membership and the raw/applied declaring-class receiver before
+admitting a target getter capability. Share that positive decision across closure planning,
+bodyless edge preparation and ordinary accessor linking; preserve retained exports and existing
+primitive/intrinsic priority. Native consumes its existing runtime getter plans. Prove real
+official-producer/JVM-oracle programs and malformed header/facet controls. Keep compiler-introduced
+block lowering as the independent #2811 follow-up.

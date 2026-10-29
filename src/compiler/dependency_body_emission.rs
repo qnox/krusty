@@ -102,6 +102,9 @@ pub(super) fn emit_dependencies<B: Backend>(
         }
     }
     let target_realizes_intrinsic = |operation| backend.realizes_dependency_intrinsic(operation);
+    let target_realizes_getter = |signature: crate::backend::DependencyGetterSignature<'_>| {
+        backend.realizes_dependency_getter(signature)
+    };
     let mut ordinary = match emitted_roots::ordinary_roots(
         source,
         bodies,
@@ -145,6 +148,7 @@ pub(super) fn emit_dependencies<B: Backend>(
             callees: &callees,
             target_realizes_bodyless: backend.realizes_bodyless_dependency_support(),
             target_realizes_intrinsic: &target_realizes_intrinsic,
+            target_realizes_getter: &target_realizes_getter,
         };
         let declarations = match emitted_roots::declarations(
             platform,
@@ -176,6 +180,7 @@ pub(super) fn emit_dependencies<B: Backend>(
             callees: &callees,
             target_realizes_bodyless: backend.realizes_bodyless_dependency_support(),
             target_realizes_intrinsic: &target_realizes_intrinsic,
+            target_realizes_getter: &target_realizes_getter,
         };
         if !prepare_bodyless_externals(
             platform,
@@ -410,6 +415,7 @@ struct DependencyLeafCapabilities<'a> {
     callees: &'a KlibCalleeFacts<'a>,
     target_realizes_bodyless: bool,
     target_realizes_intrinsic: &'a dyn Fn(crate::libraries::CompilerIntrinsic) -> bool,
+    target_realizes_getter: &'a dyn Fn(crate::backend::DependencyGetterSignature<'_>) -> bool,
 }
 
 impl DependencyLeafCapabilities<'_> {
@@ -535,13 +541,36 @@ fn prepare_bodyless_externals(
                 }
             }
             if intrinsics.get(&callee).is_some() {
-                // A target intrinsic is called through its provider handle like a bodyless
-                // declaration; the target's emitter realizes that call.
+                // An authenticated intrinsic retains its existing provider-handle realization.
                 let Some(external) = provider_external(platform, &callee, diags) else {
                     return false;
                 };
                 externals.insert(callee, external);
                 continue;
+            }
+            match capabilities.callees.target_getter(
+                &callee,
+                bodies,
+                capabilities.target_realizes_getter,
+            ) {
+                Ok(true) => {
+                    let Some(external) = provider_external(platform, &callee, diags) else {
+                        return false;
+                    };
+                    externals.insert(
+                        callee,
+                        EmittedDependencyCallable::property_getter(external.target()),
+                    );
+                    continue;
+                }
+                Ok(false) => {}
+                Err(reason) => {
+                    diags.error(
+                        Span::new(0, 0),
+                        format!("invalid target KLIB getter: {reason:?}"),
+                    );
+                    return false;
+                }
             }
             let Some(has_body) = bodies.function_has_body(&callee) else {
                 continue;
@@ -588,7 +617,7 @@ fn provider_external(
         );
         return None;
     }
-    Some(EmittedDependencyCallable::new(external, None, None))
+    Some(EmittedDependencyCallable::provider_leaf(external))
 }
 
 fn links_emitted_support(
