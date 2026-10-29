@@ -576,13 +576,22 @@ fn the_compose_pass_rejects_what_it_does_not_cover() {
     );
     let frame = "@Composable fun Frame(content: @Composable () -> Unit) {\ncontent()\n}\n";
     assert_compose_rejects(
-        "compose-capturing-lambda",
+        "compose-lambda-capturing-local",
         &format!(
-            "{frame}@Composable fun Greeting(text: String) {{\nFrame {{ println(text) }}\n}}\n"
+            "{frame}@Composable fun Greeting(text: String) {{\nval shown = text\nFrame {{ println(shown) }}\n}}\n"
         ),
         &[],
         "6:13: error: krusty's Compose compiler plugin does not support a composable lambda that \
-         captures a value yet",
+         captures a local value yet",
+    );
+    assert_compose_rejects(
+        "compose-lambda-capturing-lambda-parameter",
+        &format!(
+            "{frame}@Composable fun Greeting(inner: @Composable () -> Unit) {{\nFrame {{ inner() }}\n}}\n"
+        ),
+        &[],
+        "6:13: error: krusty's Compose compiler plugin does not support a composable lambda that \
+         captures a composable lambda parameter yet",
     );
     assert_compose_rejects(
         "compose-nested-lambda",

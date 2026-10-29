@@ -13133,20 +13133,30 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   of `fun-$anonymous$()Unit/arg-<parameter>/call-<callee>[:<n>]/fun-<caller signature>/pkg-…/file-…`,
   where `n` counts the caller's earlier calls of the same name; its source information has no
   name (`C<calls>:<file>#<hash>`) and its trace names
-  `<object>.lambda$<key>.<anonymous> (<file>:<first statement's 0-based line>)`. A capturing,
-  nested or empty composable lambda is declined.
+  `<object>.lambda$<key>.<anonymous> (<file>:<first statement's 0-based line>)`. A composable
+  lambda that captures value parameters of its function is remembered instead: the call passes
+  `(Function2) rememberComposableLambda(<key>, true, <lambda>, $composer, 54)` (both slots
+  static), whose key, call and cast start the lambda's opening line. Its body stays in the file
+  class as `private static final Unit <caller>$lambda$<n>(<captures>, Composer $composer, int
+  $changed)`, captures named `$<parameter>` and passed on to its calls with uncertain bits; its
+  source information is listed in the caller's before the call it is passed to, and its trace names
+  `<fq caller>.<anonymous> (<file>:<first statement's 0-based line>)`. The caller's recompose lambda
+  is numbered after these lambdas and is emitted after them. A lambda that captures a local value
+  or a composable lambda parameter, or is nested or empty, is declined.
   The recompose lambda `<name>$lambda$0(<parameters>, $$changed, [$$default,] $composer, $force)`
   publishes its
   locals and no
   line, and the call's line starts at its dispatch, since kotlinc builds both arguments without
   offsets. Tests: `tests/fixtures/compose/restartableFunctions.kt`, `trackedParameters.kt`,
-  `defaultArguments.kt`, `lambdaParameters.kt` and `singletonLambdas.kt`,
+  `defaultArguments.kt`, `lambdaParameters.kt`, `singletonLambdas.kt` and
+  `rememberedLambdas.kt`,
   whose `box()` composes and recomposes the functions through a recording composer, and
   `kotlin_box_ir_jvm_conformance::compose_restartable_functions_are_byte_identical_to_kotlinc` and
   `compose_tracked_parameters_are_byte_identical_to_kotlinc`,
   `compose_default_arguments_are_byte_identical_to_kotlinc`,
-  `compose_lambda_parameters_are_byte_identical_to_kotlinc` and
-  `compose_singleton_lambdas_are_byte_identical_to_kotlinc`, which require their class sets to
+  `compose_lambda_parameters_are_byte_identical_to_kotlinc`,
+  `compose_singleton_lambdas_are_byte_identical_to_kotlinc` and
+  `compose_remembered_lambdas_are_byte_identical_to_kotlinc`, which require their class sets to
   equal kotlinc's byte for byte;
   `cli_compiler_plugin_e2e::the_compose_pass_rejects_what_it_does_not_cover` and
   `compose_report_destinations_fail_the_compile`; and the `plugins::compose` and
