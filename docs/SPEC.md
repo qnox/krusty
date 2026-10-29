@@ -4,9 +4,10 @@
 
 `x as Auto` and `x as? Auto` with a generic `Auto` and no type arguments take the arguments from the
 operand's type, as a type test does: `Gen<String>` casts to `Auto<String>`, and `Gen<*>` to
-`Auto<*>`. The result is never the raw classifier. A type-parameter target (`x as T`) is already
-complete and is left as written. Tests: `box_regressions/bareCastTargetArguments.kt`
-and the last case of `diagnostics_classifier_cast_cases_e2e::classifier_cycle_and_cast_errors_match_kotlinc_exactly`.
+`Auto<*>`. The result is never the raw classifier. The decision is made on the resolved target, not
+its spelling: an alias with a fixed application (`typealias IntAuto = Auto<Int>`) stays `Auto<Int>`,
+and a type-parameter target (`x as T`) is left as written. Tests:
+`box_regressions/bareCastTargetArguments.kt` and `bare_cast_target_e2e`.
 
 ## Nullable formal bounds in inference
 

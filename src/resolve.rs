@@ -54243,7 +54243,7 @@ impl<'a> Checker<'a> {
             // must fail in lowering instead of making the frontend reject Kotlin (`42 as T`).
             // A safe cast `x as? T` has type `T?` — `null` on a runtime mismatch. For a primitive `T`
             // (`as? Int`) that nullable form is the boxed wrapper (`Int?`). A plain `x as T` keeps `T`.
-            let tt = self.cast_target_with_operand_arguments(operand_ty, &ty, tt);
+            let tt = self.cast_target_with_operand_arguments(operand_ty, tt);
             if nullable {
                 Ty::nullable(tt)
             } else {

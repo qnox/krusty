@@ -24,16 +24,17 @@ impl Checker<'_> {
         bare
     }
 
-    /// A cast target spelled without type arguments (`g as? Auto`) takes them from the operand's
-    /// type, as a type test does: `Gen<*>` casts to `Auto<*>`, `Gen<String>` to `Auto<String>`.
-    /// A type parameter target (`x as T`) is already complete.
-    pub(super) fn cast_target_with_operand_arguments(
-        &self,
-        operand: Ty,
-        ty: &crate::ast::TypeRef,
-        target: Ty,
-    ) -> Ty {
-        if !ty.targs.is_empty() || target.non_null().is_ty_param() || operand.contains_error() {
+    /// A cast target that resolves to a generic classifier with no arguments (`g as? Auto`) takes
+    /// them from the operand's type, as a type test does: `Gen<*>` casts to `Auto<*>`,
+    /// `Gen<String>` to `Auto<String>`. The decision is made on the resolved target, so an alias
+    /// with a fixed application (`typealias IntAuto = Auto<Int>`) stays `Auto<Int>`, and a type
+    /// parameter target (`x as T`) is already complete.
+    pub(super) fn cast_target_with_operand_arguments(&self, operand: Ty, target: Ty) -> Ty {
+        let classifier = target.non_null();
+        if !classifier.type_args().is_empty()
+            || classifier.is_ty_param()
+            || operand.contains_error()
+        {
             return target;
         }
         let applied = crate::symbol_resolver::apply_subtype_arguments_from_supertype(

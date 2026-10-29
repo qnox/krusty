@@ -45,9 +45,6 @@ fn classifier_cycle_and_cast_errors_match_kotlinc_exactly() {
         // Casts permit an erased function shape, so an unresolved parameter remains the primary
         // diagnostic. (`is` is different and is pinned by the unsupported-shape test below.)
         "fun f(p: Any) = p as (DefinitelyAbsentClassifier) -> String",
-        // A cast target spelled without type arguments takes them from the operand, so the
-        // result is `Auto<String>?` and `Auto<*>`, never a raw `Auto`.
-        "open class Gen<T>(val v: T)\nclass Auto<T>(v: T) : Gen<T>(v)\nfun b(g: Gen<String>): Auto<Int>? = g as? Auto\nfun c(g: Gen<*>): Auto<String> = g as Auto",
     ];
 
     assert_error_parity(&cases);
