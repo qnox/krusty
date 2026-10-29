@@ -1276,6 +1276,13 @@ impl Emitter<'_> {
             return;
         }
         super::debug_lines::restore_initializer_store_line(initializer_line, code);
+        // An inlined value leaves its own line in effect; kotlinc marks the statement's line
+        // again at the store, as an instance field store does.
+        if self.ir.expr_source_lines.contains_key(&value) {
+            if let Some(&statement_line) = self.ir.expr_lines.get(&statement) {
+                self.mark_expression_line(statement, statement_line, code);
+            }
+        }
         // A PRIVATE property's field, or the backing field of a source-declared setter, written
         // from another class, goes through its owner's accessor.
         if let Some(storage) = crate::jvm::private_static_access::bridged_setter(self.ir, index)

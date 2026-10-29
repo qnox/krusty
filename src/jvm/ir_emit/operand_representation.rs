@@ -557,16 +557,6 @@ impl Emitter<'_> {
         if self.materialize_unit(source, ir_ty_to_jvm(&target), code) {
             return;
         }
-        let physical = ir_ty_to_jvm(&target);
-        if ir_ty_to_jvm(&source).is_reference() && physical.scalar_value_repr() == Some(physical) {
-            super::scalar_coercion::unbox_erased_scalar(
-                self.cw,
-                code,
-                ir_ty_to_jvm(&source),
-                physical,
-            );
-            return;
-        }
         match self.reference_coercion(source, target) {
             ReferenceCoercion::Unchanged => {}
             ReferenceCoercion::Cast(internal) => {

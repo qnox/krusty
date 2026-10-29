@@ -449,7 +449,6 @@ pub(super) fn emit_default_param_overwrites(
             emitter.emit_value(*expression, code);
             let produced = ir_ty_to_jvm(&emitter.value_ty(*expression));
             emit_primitive_box_if_needed(emitter.cw, produced, ty, code);
-            super::scalar_coercion::unbox_erased_scalar(emitter.cw, code, produced, ty);
             // A lambda class, or a `String` stored into `CharSequence`, is narrower than the
             // slot. kotlinc `checkcast`s to the slot's class; `Object` needs none, and `null`
             // is already that type.

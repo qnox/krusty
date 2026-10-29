@@ -175,8 +175,6 @@ pub(super) fn emit_ctor_default_stub_with_prefix(
             code.ifeq(skip);
             super::method_defaults::mark_default_fill(&mut e, *def_expr, &mut code);
             e.emit_value(*def_expr, &mut code);
-            let produced = crate::jvm::physical_type::ir_ty_to_jvm(&e.value_ty(*def_expr));
-            super::scalar_coercion::unbox_erased_scalar(e.cw, &mut code, produced, pty);
             store(pty, pslot, &mut code);
             code.bind(skip);
         }

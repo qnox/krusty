@@ -57,6 +57,14 @@ fn erased_inline_parameter_slot(ir: &IrFile, declaration: ExprId, semantic: Ty) 
     }
 }
 
+/// The built-in primitive a declaration holds boxed in its erased inline type-parameter slot.
+pub(super) fn boxed_scalar_slot(ir: &IrFile, declaration: ExprId, semantic: Ty) -> Option<Ty> {
+    let primitive = ir_ty_to_jvm(&stored_value_ty(semantic));
+    (primitive.scalar_value_repr() == Some(primitive)
+        && slot_type(ir, declaration, semantic).is_reference())
+    .then_some(primitive)
+}
+
 fn emit_deferred_zero(
     ir: &IrFile,
     declaration: ExprId,
@@ -372,6 +380,28 @@ impl Emitter<'_> {
                     self.mark_expression_line(declaration, line, code);
                 }
             }
+        }
+    }
+}
+
+impl Emitter<'_> {
+    /// The primitive a read of a boxed value unboxes to, unless its consumer takes the box.
+    pub(super) fn unboxed_scalar_read(&self, read: ExprId, index: u32) -> Option<Ty> {
+        if self.boxed_scalar_reads.contains(&read) {
+            return None;
+        }
+        self.boxed_scalar_values.get(&index).copied()
+    }
+
+    /// The read that produces `value`'s result, through the values of nested blocks, when it reads
+    /// a local. A reference consumer of an inlined frame's boxed result takes it unchanged.
+    pub(super) fn trailing_value_read(&self, value: ExprId) -> Option<ExprId> {
+        match self.ir.expr(value) {
+            IrExpr::GetValue(_) => Some(value),
+            IrExpr::Block {
+                value: Some(inner), ..
+            } => self.trailing_value_read(*inner),
+            _ => None,
         }
     }
 }
