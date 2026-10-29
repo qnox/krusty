@@ -1124,6 +1124,10 @@ impl crate::metadata::class_declarations::ClassifierRenaming for RecordRenaming<
         annotation_application(value, self.0);
     }
 
+    fn annotation_value(&self, value: &mut super::AnnoValue) {
+        annotation_value(value, self.0);
+    }
+
     fn type_parameters(&self, value: &mut [super::IrTypeParameter]) {
         type_parameters(value, self.0);
     }

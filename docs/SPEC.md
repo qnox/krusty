@@ -23258,6 +23258,15 @@ the declared ABI. No dependency class layout is materialized for this operation.
 `klib_lowering::tests::accessor_calls` and the official-producer runtime accessor programs in
 `klib_closure_frames_e2e`. Compiler-introduced dependency blocks remain tracked in #2811.
 
+## Annotation constructor default metadata values
+
+An annotation constructor's declared default retains its normalized constant, enum, class literal,
+nested annotation or array value in Kotlin metadata when the physical metadata version is at least
+2.2. This format rule is independent of declaration-annotation placement and source-language
+annotation-record settings. Ordinary constructor and function defaults retain their existing flags
+without an annotation-default payload. Tests: `generic_annotation_construction_e2e` preserves the
+complete #2609 fixture, dependency round trip and full-artifact comparisons.
+
 ## Serialized Elvis expression blocks
 
 A serialized Elvis expression retains its immutable compiler temporary and exact null proof.

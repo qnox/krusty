@@ -101,6 +101,15 @@ pub(super) fn build_class_metadata_with_facts(
     if mentions_undescribed_value_class(ir, c, record) {
         return None;
     }
+    if opts.annotation_defaults_in_metadata() {
+        if let Some(parameter) = record.missing_annotation_default() {
+            run.set_emit_error(format!(
+                "cannot encode annotation default metadata for {}.{parameter}: missing normalized element value",
+                c.fq_name_id().render()
+            ));
+            return None;
+        }
+    }
     let signature_formatter = JvmSignatureFormatter::with_symbols(ir, signature_symbols, run);
     let realization = JvmClassRealization {
         ir,
@@ -131,6 +140,7 @@ pub(super) fn build_class_metadata_with_facts(
             // older source-language level keeps the HAS_ANNOTATIONS flags but writes no records.
             // The physical metadata stamp is deliberately not consulted here.
             annotations_in_metadata: opts.annotations_in_metadata,
+            annotation_defaults_in_metadata: opts.annotation_defaults_in_metadata(),
             // Kotlin 1.4 introduced JVM default methods without compatibility holders. Older
             // consumers must reject this metadata instead of assuming the legacy `$DefaultImpls`
             // realization, so kotlinc attaches a compiler-version requirement to every interface.

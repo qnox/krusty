@@ -1361,6 +1361,19 @@ Declared getter results remain distinct from the checked read's applied result. 
 leaf capability reuses its existing accessor signature plans and does not import property bodies
 or reconstruct class storage. No metadata wire format changes.
 
+## Annotation parameter default expressions
+
+`ValueParameter.annotation_parameter_default_value` is field 8, encoded as the existing
+`Annotation.Argument.Value`. Class declaration records retain closed annotation element defaults
+from common lowering, aligned to primary constructor parameters, and remap their classifier
+identities with the rest of the record. JVM and KLIB select support from their physical metadata
+version (at least 2.2); a required value missing from that record produces an emission error.
+The default value interns strings before parameter annotations, while protobuf writes annotation
+field 7 before default field 8. Secondary constructors and ordinary defaults carry no such value.
+JVM `AnnotationDefault` attribute names join the existing per-method first-use sequence, after
+parameter annotations and before `MethodParameters`, so an earlier primitive default can precede
+a later method's generic `Signature` in the constant pool.
+
 ## Serialized Elvis provenance
 
 An `ELVIS` block supplies an immutable compiler variable followed by a two-branch conditional
