@@ -25,8 +25,9 @@ import kotlin.sequences.Sequence;
 // A source property, one a primary-constructor parameter declares, one the language contributes
 // to a classifier, or a library classifier's.
 final class SourceProperty implements KSPropertyDeclaration {
-    // Null for a library classifier's.
-    private final SourceFile file;
+    // Null for a library classifier's. An intersection member's is set once the round's files are
+    // read, as the member it is made from may be declared in a later one.
+    SourceFile file;
     // The classifier that declares it, or null for a top-level property.
     private final KSDeclaration owner;
     private final Name simpleName;

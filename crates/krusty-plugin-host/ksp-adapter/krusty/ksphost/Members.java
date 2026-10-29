@@ -15,6 +15,11 @@ final class Members {
         this.entries = entries;
     }
 
+    // The member at `position`.
+    KSDeclaration get(int position) {
+        return entries.get(position).get();
+    }
+
     // The members, each cast to the kind the query lists.
     <T> List<T> as(Class<T> kind) {
         List<T> members = new ArrayList<>(entries.size());

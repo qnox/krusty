@@ -4695,8 +4695,8 @@ mod tests {
         exact_members.sort_unstable();
         assert_eq!(
             exact_members,
-            vec!["`missing name`", "`missing safe`", "missing"],
-            "rebuilt safe calls must each have one live exact-name entry"
+            vec!["`missing name`", "`missing safe`", "missing", "y"],
+            "each rebuilt safe call and `y = 1`'s kept `y.assign(1)` has one exact-name entry"
         );
     }
 

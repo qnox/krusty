@@ -34,8 +34,10 @@ pub(super) struct RestartableFunction {
     pub(super) trace: Option<String>,
     /// Whether the function is annotated with its key.
     pub(super) key_meta: bool,
-    /// The 1-based line of the body's opening brace, where the group starts and is skipped.
+    /// The 1-based line of the body's opening brace, where the group starts.
     pub(super) opening_line: u32,
+    /// The 1-based line of the `fun` keyword, where the group is skipped.
+    pub(super) declaration_line: u32,
     /// The 1-based line of the body's closing brace, where the group ends.
     pub(super) closing_line: u32,
     /// The function's value parameters, which its `$changed` bits track slot by slot.
@@ -53,12 +55,15 @@ pub(super) struct TrackedParameter {
     pub(super) ty: Ty,
     /// Whether the body reads it, which is when the function compares it to decide on skipping.
     pub(super) used: bool,
+    /// Its default value, a constant the group assigns when the caller omits the argument.
+    pub(super) default: Option<ExprId>,
 }
 
 /// A composable call directly in a restartable body, and what the caller knows about each argument
 /// it passes, which becomes the call's `$changed` bits.
 pub(super) struct ComposableCallSite {
     pub(super) call: ExprId,
+    /// The callee's parameters in order, the omitted ones included.
     pub(super) arguments: Vec<ArgumentState>,
 }
 
@@ -71,6 +76,8 @@ pub(super) enum ArgumentState {
     Forwarded(u32),
     /// Anything else the caller computes, which the callee compares itself.
     Uncertain,
+    /// An argument the call omits, which the callee's default supplies.
+    Omitted,
 }
 
 /// The most value parameters one `$changed` int tracks; a function with more takes several.
@@ -127,6 +134,7 @@ pub(super) fn record(
         let span = declaration.signature_span;
         if let Some(what) = unsupported_group_annotation(ir, declaration.function)
             .or_else(|| unsupported_declaration(declaration))
+            .or_else(|| unsupported_defaults(ir, declaration.function))
             .or_else(|| {
                 (options.source_information
                     && !declaration.params.is_empty()
@@ -205,12 +213,22 @@ pub(super) fn record(
                 });
                 continue;
             };
-            let IrExpr::Call { args, .. } = &ir.exprs[call as usize] else {
+            let IrExpr::Call { callee, args, .. } = &ir.exprs[call as usize] else {
                 unreachable!("a composable call is a call");
             };
-            let arguments = args
-                .iter()
-                .map(|&argument| argument_state(ir, argument, parameter_count))
+            let omitted: &[u32] = match &**callee {
+                Callee::LocalWithDefaults { defaults, .. } => defaults,
+                _ => &[],
+            };
+            let mut supplied = args.iter();
+            let arguments = (0..(args.len() + omitted.len()) as u32)
+                .map(|ordinal| {
+                    if omitted.contains(&ordinal) {
+                        return Some(ArgumentState::Omitted);
+                    }
+                    let argument = *supplied.next()?;
+                    argument_state(ir, argument, parameter_count)
+                })
                 .collect::<Option<Vec<_>>>();
             let Some(arguments) = arguments else {
                 rejections.push(PluginRejection {
@@ -242,14 +260,18 @@ pub(super) fn record(
             format!("{package}.{name}")
         };
         let used = used_parameters(ir, body.block, parameter_count);
-        let parameters = declaration
-            .params
-            .iter()
+        let defaults = ir
+            .param_defaults(declaration.function)
+            .cloned()
+            .unwrap_or_default();
+        let parameters = (0..)
+            .zip(&declaration.params)
             .zip(used)
-            .map(|((name, ty), used)| TrackedParameter {
+            .map(|((index, (name, ty)), used)| TrackedParameter {
                 name: name.clone(),
                 ty: *ty,
                 used,
+                default: defaults.get(index).copied().flatten(),
             })
             .collect::<Vec<_>>();
         let signature = format!(
@@ -299,6 +321,7 @@ pub(super) fn record(
             }),
             key_meta: options.function_key_meta,
             opening_line: positions.line(body_span.lo) + 1,
+            declaration_line: positions.line(span.lo) + 1,
             closing_line: positions.line(body_span.hi.saturating_sub(1)) + 1,
             parameters,
             calls: sites,
@@ -442,8 +465,6 @@ const SOURCE_INFORMATION: &str = "androidx/compose/runtime/tooling/SourceInforma
 fn unsupported_declaration(declaration: &crate::ir::IrPackageFunction) -> Option<&'static str> {
     if declaration.receiver.is_some() || declaration.context_count != 0 {
         Some("a composable function with a receiver")
-    } else if declaration.param_defaults.iter().any(|&default| default) {
-        Some("a composable function with a default argument")
     } else if declaration.vararg_index.is_some() {
         Some("a composable function with a vararg parameter")
     } else if declaration.params.len() > SLOTS_PER_INT {
@@ -479,6 +500,18 @@ fn unsupported_body_expression(ir: &IrFile, block: ExprId) -> Option<&'static st
         }
     }
     None
+}
+
+/// A default argument the pass does not apply yet: one that is not a constant, which kotlinc
+/// evaluates in a defaults group of its own.
+fn unsupported_defaults(ir: &IrFile, function: FunId) -> Option<&'static str> {
+    let defaults = ir.param_defaults(function)?;
+    (ir.param_defaults_stub_only(function)
+        || defaults
+            .iter()
+            .flatten()
+            .any(|&default| !matches!(ir.exprs[default as usize], IrExpr::Const(_))))
+    .then_some("a composable function with a default argument that is not a constant")
 }
 
 /// The parameter types the stability inferencer knows are stable without looking further: the
