@@ -2550,3 +2550,15 @@ fun <T : CharSequence> plainName(): T = 1
     );
     common::assert_error_blocks_match_kotlinc(&sources, &reference_args);
 }
+
+#[test]
+fn conditional_argument_branches_leave_bounded_overloads_ambiguous() {
+    // Each branch is a lower bound on `T`, and `Long` and `Int` satisfy both bounds, so neither
+    // overload is more specific.
+    let source = r#"
+fun <T : Number> pick(x: T): String = "number"
+fun <T : Comparable<*>> pick(x: T): String = "comparable"
+fun use(c: Boolean): String = pick(if (c) 1L else 2)
+"#;
+    assert_rejection_same_as_kotlinc("ConditionalArgumentOverloadAmbiguity", source);
+}

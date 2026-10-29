@@ -36779,10 +36779,20 @@ impl<'a> Checker<'a> {
                                 }
                             }
                         }
-                        let branches = if whole_array {
-                            vec![actual]
-                        } else {
-                            self.argument_inference_inputs(args[argument], actual)
+                        // Each conditional branch passes through the same argument view as a
+                        // whole argument: integer-literal adaptation, SAM/function shape.
+                        let branches = match conditional_branch::conditional_argument_branches(
+                            self.file,
+                            args[argument],
+                        ) {
+                            Some(branches) if !whole_array => branches
+                                .into_iter()
+                                .map(|branch| {
+                                    self.call_arg_kind(scope, branch)
+                                        .inference_type(&source, declared)
+                                })
+                                .collect(),
+                            _ => vec![actual],
                         };
                         Some(branches.into_iter().map(move |actual| {
                             (argument, declaration_parameter, actual, whole_array)

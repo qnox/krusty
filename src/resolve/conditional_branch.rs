@@ -261,42 +261,41 @@ pub(super) fn terminal_value_expressions(file: &File, expression: ExprId, out: &
     }
 }
 
-impl Checker<'_> {
-    /// Inference inputs for one source argument. Each branch of a conditional argument is its own
-    /// lower bound on the formal, as kotlinc's constraint system sees it: `mk(if (c) 1L else 2)`
-    /// against `<T : Number>` solves `T` from `Long` and `Int` rather than from the branches'
-    /// approximated join `Any`. Any other argument contributes its checked type `actual`.
-    pub(super) fn argument_inference_inputs(&self, argument: ExprId, actual: Ty) -> Vec<Ty> {
-        match self.file.expr(argument) {
-            Expr::If {
-                else_branch: Some(_),
-                ..
-            } => self.conditional_inference_inputs(argument),
-            _ => vec![actual],
-        }
-    }
-
-    /// Exact branch lower bounds for a conditional used as a generic-call argument. The ordinary
-    /// expression slot keeps Kotlin's denotable common-type approximation, while inference consumes
-    /// the branch constraints that produced it. Nested conditionals flatten into the same
-    /// source-argument ordinal so a later bound failure is still reported on that argument.
-    pub(super) fn conditional_inference_inputs(&self, expression: ExprId) -> Vec<Ty> {
-        let Expr::If {
-            then_branch,
-            else_branch: Some(else_branch),
-            ..
-        } = self.file.expr(expression)
-        else {
-            return self
-                .expr_types
-                .get(expression.0 as usize)
-                .copied()
-                .into_iter()
-                .collect();
-        };
+/// The branch value expressions of a conditional used as a call argument, or `None` when
+/// `argument` is not an `if` with an `else`. Each branch is its own lower bound on the formal, as
+/// kotlinc's constraint system sees it: `mk(if (c) 1L else 2)` against `<T : Number>` solves `T`
+/// from `Long` and `Int` rather than from the branches' approximated join `Any`. Nested
+/// conditionals flatten in source order into the same source-argument ordinal, so a later bound
+/// failure is still reported on that argument.
+pub(super) fn conditional_argument_branches(file: &File, argument: ExprId) -> Option<Vec<ExprId>> {
+    let Expr::If {
+        then_branch,
+        else_branch: Some(else_branch),
+        ..
+    } = file.expr(argument)
+    else {
+        return None;
+    };
+    Some(
         [*then_branch, *else_branch]
             .into_iter()
-            .flat_map(|branch| self.conditional_inference_inputs(branch))
+            .flat_map(|branch| {
+                let value = branch_value_expression(file, branch);
+                conditional_argument_branches(file, value).unwrap_or_else(|| vec![value])
+            })
+            .collect(),
+    )
+}
+
+impl Checker<'_> {
+    /// Nominal branch types of a conditional, flattened like [`conditional_argument_branches`];
+    /// any other expression contributes its own type. Expected-type admission reads these, while
+    /// call inference normalizes each branch through its own argument view.
+    pub(super) fn conditional_inference_inputs(&self, expression: ExprId) -> Vec<Ty> {
+        conditional_argument_branches(self.file, expression)
+            .unwrap_or_else(|| vec![expression])
+            .into_iter()
+            .filter_map(|branch| self.expr_types.get(branch.0 as usize).copied())
             .collect()
     }
 

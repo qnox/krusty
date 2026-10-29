@@ -77,7 +77,12 @@ Each branch of an `if` expression passed directly to a generic parameter is its 
 on the formal. `widen(if (c) long else int)` against `fun <T : Number> widen(x: T)` solves `T`
 from `Long` and `Int` and satisfies the bound, where the branches' approximated join `Any` would
 violate it (kotlinc 2.4.21 accepts the call). Function and constructor selection apply the same
-rule. `tests/box_regressions/conditionalArgumentGenericBound.kt` covers it.
+rule, and each branch receives the argument view a whole argument would: an integer literal still
+adapts (`sameAs(mutableListOf<Long>(), if (c) long else 2)` fixes `T` to `Long`), and a callable
+reference still converts to a fun interface (`read(if (c) ::one else ::two)`). When both bounded
+overloads accept every branch, the call stays ambiguous, as in kotlinc.
+`tests/box_regressions/conditionalArgumentGenericBound.kt`, `conditionalArgumentBranchView.kt`, and
+`conditional_argument_branches_leave_bounded_overloads_ambiguous` cover it.
 
 ## Bound declaration-name evidence
 

@@ -3,6 +3,32 @@
 use super::*;
 
 impl Checker<'_> {
+    /// The constructor path's view of one checked argument expression: its call-argument kind,
+    /// with an integer literal typed by its semantic (not runtime) type.
+    fn constructor_argument_kind(&self, argument: ExprId) -> CallArgKind {
+        let nominal = self.expr_types[argument.0 as usize];
+        match call_arg_kind(self.file, argument, nominal) {
+            CallArgKind::IntegerLiteral { ty, constant } => {
+                CallArgKind::integer_constant(self.integer_literal_semantic_type(ty), constant)
+            }
+            kind => kind,
+        }
+    }
+
+    /// The inference input `kind` contributes to `declared`: an integer literal adapts to the
+    /// first scalar bound along the declared type-parameter chain that can hold it.
+    fn constructor_inference_input(&self, kind: &CallArgKind, declared: Ty) -> Ty {
+        let mut bounded = declared.non_null();
+        while let TyKind::TyParam(_, bound) = bounded.kind() {
+            let value_bound = self.integer_literal_semantic_type(bound);
+            if kind.adapts_integer_literal_to(value_bound) {
+                return value_bound;
+            }
+            bounded = bound.non_null();
+        }
+        kind.ty()
+    }
+
     /// Select one provider constructor tier through the same argument mapper and specificity
     /// operation used by source primary/secondary constructors. Every provider declaration already
     /// owns its source call shape in `LibraryMember::call_sig`; no detached parameter inventory or
@@ -260,16 +286,7 @@ impl Checker<'_> {
                         {
                             return None;
                         }
-                        let nominal = self.expr_types[argument.0 as usize];
-                        let kind = match call_arg_kind(self.file, argument, nominal) {
-                            CallArgKind::IntegerLiteral { ty, constant } => {
-                                CallArgKind::integer_constant(
-                                    self.integer_literal_semantic_type(ty),
-                                    constant,
-                                )
-                            }
-                            kind => kind,
-                        };
+                        let kind = self.constructor_argument_kind(argument);
                         let mut declared = symbolic;
                         if call_sig.vararg_index == Some(parameter) && !whole_array {
                             declared = declared.array_read_elem().unwrap_or(declared);
@@ -296,16 +313,7 @@ impl Checker<'_> {
                                 return None;
                             }
                         }
-                        let mut actual = kind.ty();
-                        let mut bounded = declared.non_null();
-                        while let TyKind::TyParam(_, bound) = bounded.kind() {
-                            let value_bound = self.integer_literal_semantic_type(bound);
-                            if kind.adapts_integer_literal_to(value_bound) {
-                                actual = value_bound;
-                                break;
-                            }
-                            bounded = bound.non_null();
-                        }
+                        let actual = self.constructor_inference_input(&kind, declared);
                         Some((source, parameter, actual, whole_array))
                     })
                     .collect::<Vec<_>>();
@@ -316,20 +324,30 @@ impl Checker<'_> {
                 let inference_actuals = actuals
                     .iter()
                     .flat_map(|&(source_argument, parameter, actual, whole_array)| {
-                        let expression = args[source_argument];
-                        let inputs = if matches!(
-                            self.file.expr(expression),
-                            Expr::If {
-                                else_branch: Some(_),
-                                ..
-                            }
+                        // `actual` has already applied source argument semantics such as
+                        // integer-literal adaptation to a final scalar bound. A conditional's
+                        // branches get the same view one by one, so re-reading their nominal
+                        // expression slots cannot undo that decision (`R<T: Long>(if (c) 0 else 1)`).
+                        let inputs = match conditional_branch::conditional_argument_branches(
+                            self.file,
+                            args[source_argument],
                         ) {
-                            self.conditional_inference_inputs(expression)
-                        } else {
-                            // `actual` has already applied source argument semantics such as
-                            // integer-literal adaptation to a final scalar bound. Re-reading the
-                            // nominal expression slot here would undo that decision (`R<T: Long>(0)`).
-                            vec![actual]
+                            Some(branches) if !whole_array => {
+                                let mut declared = signature.params[parameter];
+                                if call_sig.vararg_index == Some(parameter) {
+                                    declared = declared.array_read_elem().unwrap_or(declared);
+                                }
+                                branches
+                                    .into_iter()
+                                    .map(|branch| {
+                                        self.constructor_inference_input(
+                                            &self.constructor_argument_kind(branch),
+                                            declared,
+                                        )
+                                    })
+                                    .collect()
+                            }
+                            _ => vec![actual],
                         };
                         inputs
                             .into_iter()
