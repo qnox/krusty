@@ -6299,7 +6299,10 @@ and the pass rejects every construct it does not cover yet.
 - [ ] `@Composable` function types and lambdas, and the composable call checker's diagnostics.
 - [x] Primitive and `String` parameters: `$changed`/`$dirty` slot tracking with strong skipping,
   `Composer.changed` comparisons, and each call's argument bits (static, passed on, uncertain).
-- [ ] More parameters: `$default` masks, receivers, varargs, more than ten, stability inference.
+- [x] Constant default arguments: the `$default` mask, defaults assigned in the group, placeholders
+  and masks at calls, no `$default` synthetic.
+- [ ] More parameters: non-constant defaults (defaults groups), receivers, varargs, more than ten,
+  stability inference.
 - [ ] The full body transform: control-flow groups, `remember`, early returns, inline composables.
 - [ ] `ComposableSingletons` lambda holders and the `$stable` field of classes.
 - [ ] Remove the partial marker and rerun the corpus for the Compose projects.

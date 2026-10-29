@@ -27,8 +27,9 @@ import kotlin.sequences.Sequence;
 // A source function or constructor, a function the language contributes to a classifier, or a
 // library classifier's.
 final class SourceFunction implements KSFunctionDeclaration {
-    // Null for a library classifier's.
-    private final SourceFile file;
+    // Null for a library classifier's. An intersection member's is set once the round's files are
+    // read, as the member it is made from may be declared in a later one.
+    SourceFile file;
     // The classifier that declares it, or null for a top-level function.
     private final KSDeclaration owner;
     private final Name simpleName;
