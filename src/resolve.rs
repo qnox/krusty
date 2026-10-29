@@ -34865,46 +34865,6 @@ impl<'a> Checker<'a> {
         semantic_common_supertype(&self.fed_source(), self, a, b)
     }
 
-    /// Exact branch lower bounds for a conditional used as a generic-call argument. The ordinary
-    /// expression slot keeps Kotlin's denotable common-type approximation, while inference consumes
-    /// the branch constraints that produced it. Nested conditionals flatten into the same
-    /// source-argument ordinal so a later bound failure is still reported on that argument.
-    fn conditional_inference_inputs(&self, expression: ExprId) -> Vec<Ty> {
-        let Expr::If {
-            then_branch,
-            else_branch: Some(else_branch),
-            ..
-        } = self.file.expr(expression)
-        else {
-            return self
-                .expr_types
-                .get(expression.0 as usize)
-                .copied()
-                .into_iter()
-                .collect();
-        };
-        [*then_branch, *else_branch]
-            .into_iter()
-            .flat_map(|branch| self.conditional_inference_inputs(branch))
-            .collect()
-    }
-
-    fn conditional_branches_admit_expected(&self, expression: ExprId, expected: Ty) -> bool {
-        matches!(
-            self.file.expr(expression),
-            Expr::If {
-                else_branch: Some(_),
-                ..
-            }
-        ) && self
-            .conditional_inference_inputs(expression)
-            .into_iter()
-            .all(|branch| {
-                branch == Ty::Nothing
-                    || (branch != Ty::Error && self.receiver_is_assignable(branch, expected))
-            })
-    }
-
     /// The checker's own binary-operator result: shared algebra, the checker's lookup context, and
     /// the checker's exact diagnostics for each refusal.
     fn check_binary(&mut self, op: BinOp, lt: Ty, rt: Ty, span: Span) -> Ty {
@@ -36819,20 +36779,10 @@ impl<'a> Checker<'a> {
                                 }
                             }
                         }
-                        // Each branch of a conditional argument is its own lower bound on the
-                        // formal, as kotlinc's constraint system sees it: `mk(if (c) 1L else 2)`
-                        // against `<T : Number>` solves `T` from `Long` and `Int` rather than from
-                        // the branches' approximated join `Any`.
                         let branches = if whole_array {
                             vec![actual]
                         } else {
-                            match self.file.expr(args[argument]) {
-                                Expr::If {
-                                    else_branch: Some(_),
-                                    ..
-                                } => self.conditional_inference_inputs(args[argument]),
-                                _ => vec![actual],
-                            }
+                            self.argument_inference_inputs(args[argument], actual)
                         };
                         Some(branches.into_iter().map(move |actual| {
                             (argument, declaration_parameter, actual, whole_array)
