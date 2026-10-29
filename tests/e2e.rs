@@ -2992,11 +2992,11 @@ mod written_default_accessor_e2e;
 
 #[path = "erased_result_type_operator_e2e.rs"]
 mod erased_result_type_operator_e2e;
+#[path = "inline_primitive_receiver_e2e.rs"]
+mod inline_primitive_receiver_e2e;
 #[path = "intersection_bound_metadata_order_e2e.rs"]
 mod intersection_bound_metadata_order_e2e;
 #[path = "type_safe_override_call_e2e.rs"]
 mod type_safe_override_call_e2e;
 #[path = "where_bound_arguments_e2e.rs"]
 mod where_bound_arguments_e2e;
-#[path = "inline_primitive_receiver_e2e.rs"]
-mod inline_primitive_receiver_e2e;

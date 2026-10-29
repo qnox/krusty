@@ -42,7 +42,10 @@ fn erased_inline_parameter_slot(ir: &IrFile, declaration: ExprId, semantic: Ty) 
         return None;
     }
     if !specialized.is_reference() {
-        return Some(erased);
+        // Only a built-in primitive boxes to its wrapper; an unsigned or value class specialization
+        // has its own box class.
+        let primitive = stored_value_ty(semantic);
+        return (primitive.scalar_value_repr() == Some(primitive)).then_some(erased);
     }
     let top = erased
         .obj_internal()
