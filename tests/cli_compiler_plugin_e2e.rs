@@ -541,10 +541,10 @@ fn refusals_lists_the_arguments_and_plugins_krusty_refuses() {
 fn the_compose_pass_rejects_what_it_does_not_cover() {
     assert_compose_rejects(
         "compose-default-argument",
-        "@Composable fun Greeting(name: String = \"\") {}\n",
+        "@Composable fun Greeting(name: String = \"a\".repeat(2)) {}\n",
         &[],
         "3:13: error: krusty's Compose compiler plugin does not support a composable function \
-         with a default argument yet",
+         with a default argument that is not a constant yet",
     );
     assert_compose_rejects(
         "compose-inferred-stability",
