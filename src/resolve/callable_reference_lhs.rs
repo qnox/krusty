@@ -82,15 +82,17 @@ impl Checker<'_> {
         // reference parser. A nullable type here therefore comes from semantic alias expansion
         // (`typealias Maybe<T> = Box<T>?`), which does not denote a class-literal left side.
         if ty.is_nullable() {
-            self.diags.error(
+            self.diags.error_named(
                 self.span(expression),
-                "type in a class literal cannot be nullable.".to_string(),
+                crate::diag::names::NULLABLE_TYPE_IN_CLASS_LITERAL_LHS,
+                "Type in a class literal cannot be nullable.",
             );
             Ty::Error
         } else if has_type_arguments && !ty.is_reference_array() {
-            self.diags.error(
+            self.diags.error_named(
                 self.span(expression),
-                "only classes are allowed on the left-hand side of a class literal.".to_string(),
+                crate::diag::names::CLASS_LITERAL_LHS_NOT_A_CLASS,
+                "Only classes are allowed on the left-hand side of a class literal.",
             );
             Ty::Error
         } else {

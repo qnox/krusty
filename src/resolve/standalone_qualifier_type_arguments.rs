@@ -41,11 +41,18 @@ impl Checker<'_> {
                 self.file
                     .explicit_type_arguments_in_property_access_warning
                     .as_deref(),
-                crate::diag::names::EXPLICIT_TYPE_ARGUMENTS_IN_PROPERTY_ACCESS_WARNING,
+                DeprecationNames {
+                    error: crate::diag::names::EXPLICIT_TYPE_ARGUMENTS_IN_PROPERTY_ACCESS,
+                    warning: crate::diag::names::EXPLICIT_TYPE_ARGUMENTS_IN_PROPERTY_ACCESS_WARNING,
+                },
                 MESSAGE,
             );
         } else {
-            self.diags.error(arguments.span, MESSAGE.to_string());
+            self.diags.error_named(
+                arguments.span,
+                crate::diag::names::EXPLICIT_TYPE_ARGUMENTS_IN_PROPERTY_ACCESS,
+                MESSAGE,
+            );
         }
     }
 }

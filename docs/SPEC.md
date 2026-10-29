@@ -15981,14 +15981,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   and pre-release warnings are kotlinc's generic `COMPILER_ARGUMENTS_WARNING`; `-Xwarning-level`
   reaches the first and not the second, which kotlinc reports before reading the levels. Every
   warning krusty names accepts a `-Xwarning-level`, the opt-in module warning included, which an
-  `error` level reports as `error:` before the source diagnostics. A krusty
-  error that does not carry its kotlinc name yet prints without one, a known gap. The Bazel worker
+  `error` level reports as `error:` before the source diagnostics. A krusty error that does not
+  carry its kotlinc name yet prints without one, a known gap. A deprecation-cycle diagnostic names
+  both halves at its site, since kotlinc's error names follow no single rule
+  (`TYPE_ARGUMENTS_NOT_ALLOWED`, `DATA_CLASS_COPY_VISIBILITY_WILL_BE_CHANGED_ERROR`, and
+  `TYPE_PARAMETER_AS_REIFIED` for `TYPE_PARAMETER_AS_REIFIED_DEPRECATION_WARNING`). The Bazel worker
   forwards `--x_render_internal_diagnostic_names` as the same argument.
   (`named_diagnostics_render_their_names_like_kotlinc` in
-  `tests/render_internal_diagnostic_names_e2e.rs`;
-  `compiler_arguments_warning_levels_reach_only_the_progressive_warning` and
+  `tests/render_internal_diagnostic_names_e2e.rs`, with `named_errors_render_their_names_like_kotlinc`
+  for errors; `compiler_arguments_warning_levels_reach_only_the_progressive_warning` and
   `every_named_warning_accepts_a_level` in `crates/krusty-cli/src/cli.rs`;
-  `the_progressive_warning_follows_its_named_level` in `crates/krusty-cli/src/main.rs`; `decapitalizes_like_kotlincs_plain_renderer` in
+  `the_progressive_warning_follows_its_named_level` in `crates/krusty-cli/src/main.rs`;
+  `decapitalizes_like_kotlincs_plain_renderer` in
   `src/diag.rs`.)
 - **The command line is parsed by kotlinc's rules, from kotlinc's own argument table.** Each
   supported release's JVM arguments (name, short and deprecated spellings, value type, delimiter,

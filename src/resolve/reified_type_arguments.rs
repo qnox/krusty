@@ -315,27 +315,38 @@ impl Checker<'_> {
                         span,
                         false,
                         warning.as_deref(),
-                        crate::diag::names::TYPE_PARAMETER_AS_REIFIED_DEPRECATION_WARNING,
+                        DeprecationNames {
+                            error: crate::diag::names::TYPE_PARAMETER_AS_REIFIED,
+                            warning:
+                                crate::diag::names::TYPE_PARAMETER_AS_REIFIED_DEPRECATION_WARNING,
+                        },
                         &message,
                     );
                 } else if in_array {
-                    self.diags.error(
+                    self.diags.error_named(
                         span,
+                        crate::diag::names::TYPE_PARAMETER_AS_REIFIED_ARRAY_ERROR,
                         format!(
                             "Cannot use '{name}' as reified type parameter, since the array type \
                              parameter is not reified."
                         ),
                     );
                 } else {
-                    self.diags.error(span, type_parameter_as_reified(name));
+                    self.diags.error_named(
+                        span,
+                        crate::diag::names::TYPE_PARAMETER_AS_REIFIED,
+                        type_parameter_as_reified(name),
+                    );
                 }
             }
-            ReifiedProblem::ForbiddenSubstitution(rendered) => self.diags.error(
+            ReifiedProblem::ForbiddenSubstitution(rendered) => self.diags.error_named(
                 span,
+                crate::diag::names::REIFIED_TYPE_FORBIDDEN_SUBSTITUTION,
                 format!("Cannot use '{rendered}' as reified type parameter."),
             ),
-            ReifiedProblem::DefinitelyNonNullable => self.diags.error(
+            ReifiedProblem::DefinitelyNonNullable => self.diags.error_named(
                 span,
+                crate::diag::names::DEFINITELY_NON_NULLABLE_AS_REIFIED,
                 "Cannot use definitely-non-nullable type as a reified type argument.",
             ),
             ReifiedProblem::Intersection {
@@ -352,7 +363,10 @@ impl Checker<'_> {
                         span,
                         false,
                         warning.as_deref(),
-                        crate::diag::names::TYPE_INTERSECTION_AS_REIFIED_DEPRECATION_WARNING,
+                        DeprecationNames {
+                            error: crate::diag::names::TYPE_INTERSECTION_AS_REIFIED_ERROR,
+                            warning: crate::diag::names::TYPE_INTERSECTION_AS_REIFIED_DEPRECATION_WARNING,
+                        },
                         &message,
                     );
                 } else {
@@ -364,7 +378,10 @@ impl Checker<'_> {
                         span,
                         features.prohibit_intersection,
                         warning.as_deref(),
-                        crate::diag::names::TYPE_INTERSECTION_AS_REIFIED_WARNING,
+                        DeprecationNames {
+                            error: crate::diag::names::TYPE_INTERSECTION_AS_REIFIED_ERROR,
+                            warning: crate::diag::names::TYPE_INTERSECTION_AS_REIFIED_WARNING,
+                        },
                         &message,
                     );
                 }
