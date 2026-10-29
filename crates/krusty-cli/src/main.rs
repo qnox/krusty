@@ -520,17 +520,22 @@ fn configuration_report(opts: &cli::Options) -> Result<String, String> {
         failed = true;
     }
     for warning in &opts.warnings {
-        match opts.warning_policy.command_line_disposition(warning.name) {
+        let message =
+            krusty::diag::render_message(warning.name, &warning.message, opts.diagnostic_names);
+        match opts
+            .warning_policy
+            .command_line_disposition(warning.level_name())
+        {
             cli::WarningDisposition::Warning => {
-                report.push_str(&format!("warning: {}\n", warning.message));
+                report.push_str(&format!("warning: {message}\n"));
             }
             cli::WarningDisposition::Error => {
-                report.push_str(&format!("error: {}\n", warning.message));
+                report.push_str(&format!("error: {message}\n"));
                 failed = true;
             }
             cli::WarningDisposition::Disabled => {}
             cli::WarningDisposition::WarningAndFail => {
-                report.push_str(&format!("warning: {}\n", warning.message));
+                report.push_str(&format!("warning: {message}\n"));
                 unconfigured_warning_under_werror = true;
             }
         }
@@ -700,7 +705,7 @@ pub fn compile(opts: &cli::Options) -> Result<usize, String> {
         diags.module_warnings.clear();
         return Err(format!(
             "{}krusty: {} error(s)\n",
-            diags.render_all(&rendered),
+            diags.render_all(&rendered, opts.diagnostic_names),
             diags.diags.len()
         ));
     }
@@ -716,14 +721,14 @@ pub fn compile(opts: &cli::Options) -> Result<usize, String> {
         let mut report = String::new();
         for warning in module_warnings {
             report.push_str("warning: ");
-            report.push_str(&warning);
+            report.push_str(&warning.message(opts.diagnostic_names));
             report.push('\n');
         }
         report.push_str("error: warnings found and -Werror specified\n");
-        report.push_str(&diags.render_all(&rendered));
+        report.push_str(&diags.render_all(&rendered, opts.diagnostic_names));
         return Err(report);
     }
-    eprint!("{}", diags.render_all(&rendered));
+    eprint!("{}", diags.render_all(&rendered, opts.diagnostic_names));
 
     output.commit().map_err(|error| {
         format!(

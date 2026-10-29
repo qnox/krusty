@@ -104,20 +104,22 @@ impl Checker<'_> {
             let supertype = access_control::owner_display(*supertype);
             if warning {
                 if !self.suppresses_diagnostic("MISSING_DEPENDENCY_SUPERCLASS_WARNING") {
-                    self.diags.warning(
+                    self.diags.warning_named(
                         span,
+                        crate::diag::names::MISSING_DEPENDENCY_SUPERCLASS_WARNING,
                         format!(
-                            "cannot access '{supertype}' which is a supertype of '{label}'. This \
+                            "Cannot access '{supertype}' which is a supertype of '{label}'. This \
                              may be forbidden soon. Check the module classpath for missing or \
                              conflicting dependencies."
                         ),
                     );
                 }
             } else {
-                self.diags.error(
+                self.diags.error_named(
                     span,
+                    crate::diag::names::MISSING_DEPENDENCY_SUPERCLASS,
                     format!(
-                        "cannot access '{supertype}' which is a supertype of '{label}'. Check your \
+                        "Cannot access '{supertype}' which is a supertype of '{label}'. Check your \
                          module classpath for missing or conflicting dependencies."
                     ),
                 );

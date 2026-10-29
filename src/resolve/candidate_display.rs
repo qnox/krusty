@@ -303,8 +303,8 @@ pub(super) fn ambiguous_classifier_message<
 /// kotlinc's wording for `expected` type arguments: `no type arguments expected`.
 pub(super) fn type_argument_count_wording(expected: usize) -> String {
     match expected {
-        0 => "no type arguments expected".to_string(),
-        1 => "one type argument expected".to_string(),
+        0 => "No type arguments expected".to_string(),
+        1 => "One type argument expected".to_string(),
         count => format!("{count} type arguments expected"),
     }
 }

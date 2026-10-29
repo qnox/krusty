@@ -7,7 +7,7 @@
 //! the modifier list as written, which the parser keeps in [`File::declaration_prefixes`].
 
 use crate::ast::{ClassDecl, Decl, DeclId, File, FunBody, FunDecl, PropDecl};
-use crate::diag::{DiagSink, Span};
+use crate::diag::{names, DiagSink, DiagnosticName, Span};
 use crate::features::LangFeatures;
 use crate::types::Visibility;
 
@@ -17,8 +17,35 @@ enum Mode {
     Warning,
 }
 
-const VISIBILITY_MESSAGE: &str = "visibility must be specified in explicit API mode.";
-const RETURN_TYPE_MESSAGE: &str = "return type must be specified in explicit API mode.";
+/// What a public API declaration fails to write.
+#[derive(Clone, Copy)]
+enum Finding {
+    Visibility,
+    ReturnType,
+}
+
+impl Finding {
+    /// kotlinc's factory: the error of strict mode, or the `_WARNING` one of warning mode.
+    fn name(self, mode: Mode) -> DiagnosticName {
+        match (self, mode) {
+            (Finding::Visibility, Mode::Strict) => names::NO_EXPLICIT_VISIBILITY_IN_API_MODE,
+            (Finding::Visibility, Mode::Warning) => {
+                names::NO_EXPLICIT_VISIBILITY_IN_API_MODE_WARNING
+            }
+            (Finding::ReturnType, Mode::Strict) => names::NO_EXPLICIT_RETURN_TYPE_IN_API_MODE,
+            (Finding::ReturnType, Mode::Warning) => {
+                names::NO_EXPLICIT_RETURN_TYPE_IN_API_MODE_WARNING
+            }
+        }
+    }
+
+    fn message(self) -> &'static str {
+        match self {
+            Finding::Visibility => "Visibility must be specified in explicit API mode.",
+            Finding::ReturnType => "Return type must be specified in explicit API mode.",
+        }
+    }
+}
 
 /// Report every explicit API violation in `file`, in source order.
 pub(super) fn check(file: &File, features: &LangFeatures, diagnostics: &mut DiagSink) {
@@ -47,10 +74,11 @@ pub(super) fn check(file: &File, features: &LangFeatures, diagnostics: &mut Diag
         findings.type_alias(alias.span, alias.name_span);
     }
     findings.reports.sort_by_key(|(span, _)| span.lo);
-    for (span, message) in findings.reports {
+    for (span, finding) in findings.reports {
+        let name = finding.name(mode);
         match mode {
-            Mode::Strict => diagnostics.error(span, message),
-            Mode::Warning => diagnostics.warning(span, message),
+            Mode::Strict => diagnostics.error_named(span, name, finding.message()),
+            Mode::Warning => diagnostics.warning_named(span, name, finding.message()),
         }
     }
 }
@@ -79,7 +107,7 @@ fn is_public_api(visibility: Visibility) -> bool {
 
 struct Findings<'f> {
     file: &'f File,
-    reports: Vec<(Span, &'static str)>,
+    reports: Vec<(Span, Finding)>,
 }
 
 impl Findings<'_> {
@@ -92,7 +120,7 @@ impl Findings<'_> {
         }
         let start = prefix.map_or(anchor.lo, |prefix| prefix.start.lo);
         self.reports
-            .push((Span::new(start, end.hi), VISIBILITY_MESSAGE));
+            .push((Span::new(start, end.hi), Finding::Visibility));
     }
 
     fn classifier(&mut self, class: &ClassDecl) {
@@ -128,7 +156,7 @@ impl Findings<'_> {
             self.visibility(function.span, function.name_span);
         }
         if function.ret.is_none() && matches!(function.body, FunBody::Expr(_)) {
-            self.reports.push((function.name_span, RETURN_TYPE_MESSAGE));
+            self.reports.push((function.name_span, Finding::ReturnType));
         }
     }
 
@@ -140,7 +168,7 @@ impl Findings<'_> {
             self.visibility(property.span, property.name_span);
         }
         if property.ty.is_none() {
-            self.reports.push((property.name_span, RETURN_TYPE_MESSAGE));
+            self.reports.push((property.name_span, Finding::ReturnType));
         }
     }
 

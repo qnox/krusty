@@ -62,9 +62,10 @@ impl DataCopyAnnotations {
                 );
             }
         } else if let Some(consistent) = self.consistent.filter(|_| respects_ctor_visibility) {
-            diags.warning(
+            diags.warning_named(
                 consistent,
-                "annotation 'kotlin.ConsistentCopyVisibility' is redundant.",
+                crate::diag::names::REDUNDANT_ANNOTATION,
+                "Annotation 'kotlin.ConsistentCopyVisibility' is redundant.",
             );
         }
     }

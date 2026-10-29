@@ -37,7 +37,14 @@ fn fallback_diagnostics(checked: &str, dependency: &str) -> Vec<String> {
         &krusty::features::LangFeatures::new(),
         &mut diags,
     );
-    diags.diags.iter().map(|d| d.msg.clone()).collect()
+    diags
+        .diags
+        .iter()
+        .map(|d| {
+            d.message(krusty::diag::DiagnosticNames::Hidden)
+                .into_owned()
+        })
+        .collect()
 }
 
 fn assert_resolves(d: &[String], what: &str) {

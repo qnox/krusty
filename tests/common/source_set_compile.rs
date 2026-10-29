@@ -204,7 +204,10 @@ pub fn source_set_diagnostics(sources: &[(&str, &str)], common: usize) -> Vec<St
                 krusty::diag::Severity::Error => "error",
                 krusty::diag::Severity::Warning => "warning",
             };
-            format!("{name}:{line}:{column}: {severity}: {}", diagnostic.msg)
+            format!(
+                "{name}:{line}:{column}: {severity}: {}",
+                diagnostic.message(krusty::diag::DiagnosticNames::Hidden)
+            )
         })
         .collect()
 }

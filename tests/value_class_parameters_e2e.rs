@@ -194,7 +194,7 @@ fn recursion_warning_keeps_its_typed_policy_identity() {
     );
     assert_eq!(diagnostic.kind, krusty::diag::DiagnosticKind::Compiler);
     assert_eq!(
-        diagnostic.msg,
+        diagnostic.message(krusty::diag::DiagnosticNames::Hidden),
         "value class cannot be recursive. This will become an error in language version 2.5. \
          See https://youtrack.jetbrains.com/issue/KT-85848."
     );

@@ -1697,6 +1697,8 @@ mod receiver_type_line_break_e2e;
 mod reference_carrier_cast_e2e;
 #[path = "reified_type_arguments_e2e.rs"]
 mod reified_type_arguments_e2e;
+#[path = "render_internal_diagnostic_names_e2e.rs"]
+mod render_internal_diagnostic_names_e2e;
 #[path = "result_generic_override_argument_e2e.rs"]
 mod result_generic_override_argument_e2e;
 #[path = "safe_call_null_line_e2e.rs"]

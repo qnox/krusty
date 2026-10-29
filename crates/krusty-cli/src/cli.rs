@@ -33,10 +33,19 @@ pub use warning_policy::{WarningDisposition, WarningLevel, WarningPolicy};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CliWarning {
-    /// The diagnostic `-Xwarning-level` addresses; `None` for a warning kotlinc reports without a
-    /// name, which no level changes.
+    /// kotlinc's diagnostic name, printed under `-Xrender-internal-diagnostic-names`.
     pub name: Option<krusty::diag::DiagnosticName>,
+    /// Whether `-Xwarning-level` addresses the warning by its name.
+    pub leveled: bool,
+    /// kotlinc's message before rendering ([`krusty::diag::render_message`]).
     pub message: String,
+}
+
+impl CliWarning {
+    /// The name `-Xwarning-level` addresses, if any.
+    pub fn level_name(&self) -> Option<krusty::diag::DiagnosticName> {
+        self.name.filter(|_| self.leveled)
+    }
 }
 
 /// A problem kotlinc reports while reading its arguments, after the syntax warnings: a
@@ -106,6 +115,8 @@ pub struct Options {
     /// an `error` level fails the invocation and `disabled` removes the diagnostic entirely.
     pub warning_policy: WarningPolicy,
     pub warnings: Vec<CliWarning>,
+    /// `-Xrender-internal-diagnostic-names`: print each named diagnostic as `[NAME] message`.
+    pub diagnostic_names: krusty::diag::DiagnosticNames,
     /// Invalid or explicitly requested-but-unemittable options. The driver reports these and exits
     /// before compilation rather than silently producing a different artifact.
     pub errors: Vec<String>,
@@ -201,6 +212,7 @@ impl Default for Options {
             language_feature_problems: Vec::new(),
             configuration_errors: Vec::new(),
             warning_policy: WarningPolicy::default(),
+            diagnostic_names: krusty::diag::DiagnosticNames::Hidden,
             warnings: Vec::new(),
             errors: Vec::new(),
             refusals: Vec::new(),
@@ -396,7 +408,8 @@ fn read(argv: impl IntoIterator<Item = String>, reading: Reading) -> Options {
                 Lifecycle::Deprecated => krusty::diag::names::DEPRECATED_CLI_ARG,
                 Lifecycle::Removed => krusty::diag::names::REMOVED_CLI_ARG,
             }),
-            message: kotlinc_arguments::render(&message),
+            leveled: true,
+            message,
         })
         .collect();
     finish_warning_policy(&mut opts, &parsed);
@@ -1504,7 +1517,8 @@ mod tests {
             parse_args(&["-language-version", "2.0", "f.kt"]).warnings,
             [CliWarning {
                 name: Some(krusty::diag::names::DEPRECATED_LANGUAGE_VERSION),
-                message: "language version 2.0 is deprecated and its support will be removed in a future version of Kotlin. Update the version to 2.2.".to_owned(),
+                leveled: true,
+                message: "Language version 2.0 is deprecated and its support will be removed in a future version of Kotlin. Update the version to 2.2.".to_owned(),
             }]
         );
         assert_eq!(
@@ -1519,11 +1533,13 @@ mod tests {
             [
                 CliWarning {
                     name: Some(krusty::diag::names::DEPRECATED_LANGUAGE_VERSION),
+                    leveled: true,
                     message: "API version 2.0 is deprecated and its support will be removed in a future version of Kotlin. Update the version to 2.2.".to_owned(),
                 },
                 CliWarning {
                     name: Some(krusty::diag::names::EXPERIMENTAL_LANGUAGE_VERSION),
-                    message: "language version 2.5 is experimental, there are no backwards compatibility guarantees for new language and library features. Use the stable version 2.4 instead.".to_owned(),
+                    leveled: true,
+                    message: "Language version 2.5 is experimental, there are no backwards compatibility guarantees for new language and library features. Use the stable version 2.4 instead.".to_owned(),
                 },
             ]
         );
@@ -1567,7 +1583,8 @@ mod tests {
             redundant.warnings,
             [CliWarning {
                 name: Some(krusty::diag::names::REDUNDANT_CLI_ARG),
-                message: "the argument '-Xcontext-parameters' is redundant for the current language version 2.4.".to_string(),
+                leveled: true,
+                message: "The argument '-Xcontext-parameters' is redundant for the current language version 2.4.".to_string(),
             }]
         );
     }
@@ -1727,7 +1744,8 @@ mod tests {
             parsed.warnings,
             [CliWarning {
                 name: Some(krusty::diag::names::REDUNDANT_CLI_ARG),
-                message: "the argument '-Xcontext-parameters' is redundant for the current language version 2.4.".to_string(),
+                leveled: true,
+                message: "The argument '-Xcontext-parameters' is redundant for the current language version 2.4.".to_string(),
             }]
         );
     }
@@ -1741,7 +1759,8 @@ mod tests {
             parsed.warnings,
             [CliWarning {
                 name: Some(krusty::diag::names::REDUNDANT_CLI_ARG),
-                message: "the argument '-Xnested-type-aliases' is redundant for the current language version 2.4.".to_string(),
+                leveled: true,
+                message: "The argument '-Xnested-type-aliases' is redundant for the current language version 2.4.".to_string(),
             }]
         );
     }

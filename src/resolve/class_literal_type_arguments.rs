@@ -3,14 +3,14 @@
 //!
 //! A reified type parameter has no type parameters of its own: "type arguments are not allowed for
 //! type parameters." on the `<…>` list. A typealias the arguments do not fit reports kotlinc's
-//! arity message on the list, and one they fit is not a class: "only classes are allowed on the
+//! arity message on the list, and one they fit is not a class: "Only classes are allowed on the
 //! left-hand side of a class literal." on the literal. kotlinc accepted the useless forms (an alias
 //! whose expansion has no type arguments, and an alias to a reference array) with a deprecation
 //! warning until `ForbidUselessTypeArgumentsIn25`; any other alias was always the error.
 
 use super::*;
 
-const NOT_A_CLASS: &str = "only classes are allowed on the left-hand side of a class literal.";
+const NOT_A_CLASS: &str = "Only classes are allowed on the left-hand side of a class literal.";
 
 /// The typealias a class literal's left-hand side names.
 struct WrittenAlias {
@@ -146,7 +146,7 @@ impl Checker<'_> {
             return None;
         }
         if let Some(reified) = scope.reified_tparam(name) {
-            let message = "type arguments are not allowed for type parameters.";
+            let message = "Type arguments are not allowed for type parameters.";
             let warning = self
                 .file
                 .useless_type_arguments_warning_format

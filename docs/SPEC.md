@@ -15973,6 +15973,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `named_warning_policy_controls_deprecation` in `tests/deprecation_usage_e2e.rs`;
   `warning_level_is_forwarded_to_the_typed_cli_policy` in `crates/krusty-cli/src/worker.rs`;
   `kotlin_compiler_slice_compiles_through_krusty` in `crates/krusty-build/src/gradle.rs`.)
+- **`-Xrender-internal-diagnostic-names` prefixes each named diagnostic with `[NAME] `.** Like
+  kotlinc's plain renderer, a message without the name is decapitalized unless it starts with `Java`,
+  `Kotlin`, or two capitals, while a named one keeps the message's own first letter. Source warnings
+  and errors, module warnings, and command-line warnings are named; kotlinc's argument syntax
+  warnings, the `-XXLanguage` notice, and the `-Werror` summary stay unnamed. The `-progressive`
+  and pre-release warnings are kotlinc's generic `COMPILER_ARGUMENTS_WARNING`; `-Xwarning-level`
+  reaches the first and not the second, which kotlinc reports before reading the levels. A krusty
+  error that does not carry its kotlinc name yet prints without one, a known gap. The Bazel worker
+  forwards `--x_render_internal_diagnostic_names` as the same argument.
+  (`named_diagnostics_render_their_names_like_kotlinc` in
+  `tests/render_internal_diagnostic_names_e2e.rs`; `decapitalizes_like_kotlincs_plain_renderer` in
+  `src/diag.rs`.)
 - **The command line is parsed by kotlinc's rules, from kotlinc's own argument table.** Each
   supported release's JVM arguments (name, short and deprecated spellings, value type, delimiter,
   deprecation/removal, `@Enables`/`@Disables` features) are read by reflection from that release's

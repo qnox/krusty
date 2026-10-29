@@ -965,7 +965,10 @@ fn klib_outcome(
     .filter(|diagnostic| diagnostic.severity == krusty::diag::Severity::Error)
     .map(|diagnostic| {
         let (line, column) = krusty::diag::line_col(PROGRESSIVE_QUALIFIERS, diagnostic.span.lo);
-        format!("Q.kt:{line}:{column}: {}", diagnostic.msg)
+        format!(
+            "Q.kt:{line}:{column}: {}",
+            diagnostic.message(krusty::diag::DiagnosticNames::Hidden)
+        )
     })
     .collect::<Vec<_>>();
     common::CompilerOutcome {

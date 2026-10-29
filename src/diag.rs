@@ -1,5 +1,7 @@
 //! Diagnostics: spans plus messages, with line/column rendering.
 
+use std::borrow::Cow;
+
 use crate::types::TypeName;
 
 pub mod names;
@@ -61,6 +63,9 @@ pub struct Diagnostic {
     /// whose report does not name its kotlinc factory yet carry `None`.
     pub name: Option<DiagnosticName>,
     pub kind: DiagnosticKind,
+    /// kotlinc's `renderMessage()`, which its renderers print as is beside the name and
+    /// decapitalized without it ([`Diagnostic::message`]). Decapitalizing is idempotent, so a
+    /// message written in its printed, lowercase form renders the same.
     pub msg: String,
     pub identity: Option<DiagnosticIdentity>,
     /// Index of the source file this diagnostic belongs to (into the driver's `files`/`sources`
@@ -68,6 +73,70 @@ pub struct Diagnostic {
     /// currently being processed — without it, a multi-file compile renders every error against the
     /// wrong file's source (bogus line numbers, foreign types). Single-file callers leave it 0.
     pub file: u32,
+}
+
+/// How a named diagnostic is printed: by kotlinc's plain renderer, or with its name in front, as
+/// `-Xrender-internal-diagnostic-names` asks.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum DiagnosticNames {
+    #[default]
+    Hidden,
+    Rendered,
+}
+
+/// The text kotlinc prints for a diagnostic message: `[NAME] message` when names are rendered,
+/// otherwise the message decapitalized as its `PlainTextMessageRenderer` does. A diagnostic krusty
+/// does not name yet prints decapitalized either way.
+pub fn render_message<'m>(
+    name: Option<DiagnosticName>,
+    message: &'m str,
+    names: DiagnosticNames,
+) -> Cow<'m, str> {
+    match (name, names) {
+        (Some(name), DiagnosticNames::Rendered) => Cow::Owned(format!("[{name}] {message}")),
+        _ => decapitalize_if_needed(message),
+    }
+}
+
+/// kotlinc's `PlainTextMessageRenderer.decapitalizeIfNeeded`: lowercase the first ASCII letter,
+/// unless the message starts with `Java` or `Kotlin` or with two uppercase letters.
+pub fn decapitalize_if_needed(message: &str) -> Cow<'_, str> {
+    let mut chars = message.chars();
+    let (Some(first), second) = (chars.next(), chars.next()) else {
+        return Cow::Borrowed(message);
+    };
+    if message.starts_with("Java")
+        || message.starts_with("Kotlin")
+        || (first.is_uppercase() && second.is_some_and(char::is_uppercase))
+        || !first.is_ascii_uppercase()
+    {
+        return Cow::Borrowed(message);
+    }
+    let mut decapitalized = String::with_capacity(message.len());
+    decapitalized.push(first.to_ascii_lowercase());
+    decapitalized.push_str(&message[first.len_utf8()..]);
+    Cow::Owned(decapitalized)
+}
+
+impl Diagnostic {
+    /// The message as kotlinc prints it, with or without the diagnostic's name.
+    pub fn message(&self, names: DiagnosticNames) -> Cow<'_, str> {
+        render_message(self.name, &self.msg, names)
+    }
+}
+
+/// A warning about the compilation's configuration rather than a source position.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModuleWarning {
+    pub name: DiagnosticName,
+    /// kotlinc's `renderMessage()`.
+    pub message: String,
+}
+
+impl ModuleWarning {
+    pub fn message(&self, names: DiagnosticNames) -> Cow<'_, str> {
+        render_message(Some(self.name), &self.message, names)
+    }
 }
 
 #[derive(Default)]
@@ -82,7 +151,7 @@ pub struct DiagSink {
     authoritative_ranges: Option<Vec<Span>>,
     /// Warnings about the compilation's configuration rather than a source position, such as an
     /// unresolved `-opt-in` marker. Each message is kept once, in first-report order.
-    pub module_warnings: Vec<String>,
+    pub module_warnings: Vec<ModuleWarning>,
 }
 
 impl DiagSink {
@@ -96,10 +165,13 @@ impl DiagSink {
     }
 
     /// Report a warning about the module's configuration, once however many units report it.
-    pub fn module_warning(&mut self, message: impl Into<String>) {
-        let message = message.into();
-        if !self.module_warnings.contains(&message) {
-            self.module_warnings.push(message);
+    pub fn module_warning(&mut self, name: DiagnosticName, message: impl Into<String>) {
+        let warning = ModuleWarning {
+            name,
+            message: message.into(),
+        };
+        if !self.module_warnings.contains(&warning) {
+            self.module_warnings.push(warning);
         }
     }
 
@@ -160,7 +232,8 @@ impl DiagSink {
         self.push_warning(span, None, msg.into());
     }
 
-    /// Report a warning under its kotlinc name, which `-Xwarning-level` can configure.
+    /// Report a warning under its kotlinc name, which `-Xwarning-level` can configure. `msg` is
+    /// kotlinc's `renderMessage()`.
     pub fn warning_named(&mut self, span: Span, name: DiagnosticName, msg: impl Into<String>) {
         self.push_warning(span, Some(name), msg.into());
     }
@@ -176,6 +249,23 @@ impl DiagSink {
             name,
             kind: DiagnosticKind::Compiler,
             msg,
+            identity: None,
+            file: self.current_file,
+        });
+    }
+
+    /// Report an error under its kotlinc name. `msg` is kotlinc's `renderMessage()`.
+    pub fn error_named(&mut self, span: Span, name: DiagnosticName, msg: impl Into<String>) {
+        if !self.accepts(span) {
+            return;
+        }
+        self.diags.push(Diagnostic {
+            span,
+            editor_span: None,
+            severity: Severity::Error,
+            name: Some(name),
+            kind: DiagnosticKind::Compiler,
+            msg: msg.into(),
             identity: None,
             file: self.current_file,
         });
@@ -321,7 +411,7 @@ impl DiagSink {
     pub fn render(&self, path: &str, src: &str) -> String {
         let mut out = String::new();
         for d in &self.diags {
-            out.push_str(&self.render_one(d, path, src));
+            out.push_str(&render_one(d, path, src, DiagnosticNames::Hidden));
         }
         out
     }
@@ -329,11 +419,11 @@ impl DiagSink {
     /// Render every diagnostic against ITS OWN source file (by `Diagnostic::file`), once. `files` is
     /// the driver's parallel `(path, source)` list. A diagnostic whose file index is out of range
     /// (defensive) falls back to the first file. This is the multi-file-correct renderer.
-    pub fn render_all(&self, files: &[(&str, &str)]) -> String {
+    pub fn render_all(&self, files: &[(&str, &str)], names: DiagnosticNames) -> String {
         let mut out = String::new();
         for warning in &self.module_warnings {
             out.push_str("warning: ");
-            out.push_str(warning);
+            out.push_str(&warning.message(names));
             out.push('\n');
         }
         for d in &self.diags {
@@ -342,19 +432,19 @@ impl DiagSink {
                 .copied()
                 .or_else(|| files.first().copied())
                 .unwrap_or(("<unknown>", ""));
-            out.push_str(&self.render_one(d, path, src));
+            out.push_str(&render_one(d, path, src, names));
         }
         out
     }
+}
 
-    fn render_one(&self, d: &Diagnostic, path: &str, src: &str) -> String {
-        let (line, col) = line_col(src, d.span.lo);
-        let sev = match d.severity {
-            Severity::Error => "error",
-            Severity::Warning => "warning",
-        };
-        format!("{path}:{line}:{col}: {sev}: {}\n", d.msg)
-    }
+fn render_one(d: &Diagnostic, path: &str, src: &str, names: DiagnosticNames) -> String {
+    let (line, col) = line_col(src, d.span.lo);
+    let sev = match d.severity {
+        Severity::Error => "error",
+        Severity::Warning => "warning",
+    };
+    format!("{path}:{line}:{col}: {sev}: {}\n", d.message(names))
 }
 
 /// 1-based line and column for a byte offset.
@@ -480,10 +570,50 @@ mod tests {
         s.set_file(1);
         s.error(Span::new(4, 5), "in B"); // offset 4 → line 2 of B's source
         let files = [("A.kt", "xyz"), ("B.kt", "ab\ncde")];
-        let r = s.render_all(&files);
+        let r = s.render_all(&files, DiagnosticNames::Hidden);
         assert!(r.contains("A.kt:1:1: error: in A"), "got: {r}");
         assert!(r.contains("B.kt:2:2: error: in B"), "got: {r}");
         // Exactly two lines — no duplication across files.
         assert_eq!(r.lines().count(), 2, "got: {r}");
+    }
+
+    #[test]
+    fn decapitalizes_like_kotlincs_plain_renderer() {
+        assert_eq!(
+            decapitalize_if_needed("Return type mismatch."),
+            "return type mismatch."
+        );
+        assert_eq!(decapitalize_if_needed("Kotlin home"), "Kotlin home");
+        assert_eq!(decapitalize_if_needed("Java class"), "Java class");
+        assert_eq!(decapitalize_if_needed("API version 2.0"), "API version 2.0");
+        assert_eq!(
+            decapitalize_if_needed("'-progressive' is"),
+            "'-progressive' is"
+        );
+        assert_eq!(
+            decapitalize_if_needed("already lowercase"),
+            "already lowercase"
+        );
+        assert_eq!(decapitalize_if_needed(""), "");
+        assert_eq!(
+            render_message(
+                Some(names::REDUNDANT_ANNOTATION),
+                "Annotation",
+                DiagnosticNames::Rendered
+            ),
+            "[REDUNDANT_ANNOTATION] Annotation"
+        );
+        assert_eq!(
+            render_message(
+                Some(names::REDUNDANT_ANNOTATION),
+                "Annotation",
+                DiagnosticNames::Hidden
+            ),
+            "annotation"
+        );
+        assert_eq!(
+            render_message(None, "Unnamed", DiagnosticNames::Rendered),
+            "unnamed"
+        );
     }
 }

@@ -391,7 +391,7 @@ fn krusty_cli_diagnostics_in_process(
             String::new(),
             format!(
                 "{}krusty: {count} error(s)\n",
-                diags.render_all(&rendered_files)
+                diags.render_all(&rendered_files, krusty::diag::DiagnosticNames::Hidden)
             ),
         );
     }
@@ -405,7 +405,7 @@ fn krusty_cli_diagnostics_in_process(
             "ok: emitted {emitted} class file(s) to {}\n",
             dest.display()
         ),
-        diags.render_all(&rendered_files),
+        diags.render_all(&rendered_files, krusty::diag::DiagnosticNames::Hidden),
     )
 }
 
@@ -613,7 +613,11 @@ pub fn front_end_diagnostics_inputs(
     diagnostics
         .diags
         .iter()
-        .map(|diagnostic| diagnostic.msg.clone())
+        .map(|diagnostic| {
+            diagnostic
+                .message(krusty::diag::DiagnosticNames::Hidden)
+                .into_owned()
+        })
         .collect()
 }
 
@@ -640,7 +644,10 @@ pub fn front_end_named_input_result(
     );
     let _ = krusty::compiler::check_frontend_only(analysis, &mut diagnostics);
     let code = if diagnostics.has_errors() { 1 } else { 0 };
-    (code, diagnostics.render_all(&[(filename, source)]))
+    (
+        code,
+        diagnostics.render_all(&[(filename, source)], krusty::diag::DiagnosticNames::Hidden),
+    )
 }
 
 /// Assert one Kotlin language feature's gate against the reference compiler.

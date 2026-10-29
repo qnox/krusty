@@ -13,7 +13,7 @@ impl Checker<'_> {
         let messages = [
             (
                 Ty::Nothing,
-                "expression cannot have a type of 'Array<Nothing>'.",
+                "Expression cannot have a type of 'Array<Nothing>'.",
             ),
             (
                 Ty::nullable(Ty::Nothing),
@@ -26,11 +26,16 @@ impl Checker<'_> {
             }
             let span = self.span(lhs);
             if self.file.forbid_array_of_nothing_in_lhs_of_class_literal {
-                self.diags.error(span, message.to_string());
+                self.diags
+                    .error_named(span, crate::diag::names::UNSUPPORTED, message);
             } else if !self
                 .suppresses_diagnostic("UNSUPPORTED_ARRAY_OF_NOTHING_IN_CLASS_LITERAL_LHS")
             {
-                self.diags.warning(span, message.to_string());
+                self.diags.warning_named(
+                    span,
+                    crate::diag::names::UNSUPPORTED_ARRAY_OF_NOTHING_IN_CLASS_LITERAL_LHS,
+                    message,
+                );
             }
         }
     }
