@@ -348,20 +348,24 @@ impl Checker<'_> {
                         )
                     },
                 );
-                if let Some(violation) = constraints.bound_violation {
-                    let source_argument = violation.argument;
-                    if args.get(source_argument).is_none() {
-                        continue;
-                    }
-                    bound_failures.push(LibraryConstructorFailure::TypeMismatch {
-                        source_argument,
-                        expected: violation.expected,
-                        actual: violation.actual,
-                        uninferred: violation
-                            .uninferred
-                            .then(|| signature.formals[violation.formal].clone()),
-                        result: None,
-                    });
+                let owner = super::type_parameter_owners::classifier_type_parameter_owner(
+                    &source, internal, classifier,
+                );
+                if let Some(contradictions) =
+                    super::generic_argument_bounds::ArgumentContradictions::new(
+                        signature,
+                        &constraints.bound_violations,
+                        owner,
+                        |source_argument| {
+                            let argument = *args.get(source_argument)?;
+                            let parameter = *argument_slots.get(source_argument)?;
+                            Some((argument, *signature.params.get(parameter)?))
+                        },
+                    )
+                {
+                    bound_failures.push(LibraryConstructorFailure::ArgumentContradictions(
+                        Box::new(contradictions),
+                    ));
                     continue;
                 }
                 let tightest_upper = constraints.tightest_upper_bindings(&source);
@@ -635,7 +639,6 @@ impl Checker<'_> {
                             source_argument: mismatch.source_argument,
                             expected: mismatch.expected,
                             actual: mismatch.actual,
-                            uninferred: None,
                             result: members.first().map(|member| member.ret),
                         });
                     }
@@ -649,6 +652,9 @@ impl Checker<'_> {
                                             source_argument,
                                             ..
                                         } => *source_argument,
+                                        LibraryConstructorFailure::ArgumentContradictions(
+                                            contradictions,
+                                        ) => contradictions.first_argument(),
                                         LibraryConstructorFailure::Mapping(_)
                                         | LibraryConstructorFailure::TypeArgumentMismatch {
                                             ..

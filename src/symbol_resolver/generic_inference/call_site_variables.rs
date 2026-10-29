@@ -188,12 +188,19 @@ impl CallSiteVariables {
             bound_violation: inferred
                 .bound_violation
                 .map(|violation| GenericBoundViolation {
-                    argument: violation.argument,
                     expected: ty(violation.expected),
                     actual: ty(violation.actual),
-                    formal: violation.formal,
-                    uninferred: violation.uninferred,
+                    ..violation
                 }),
+            bound_violations: inferred
+                .bound_violations
+                .into_iter()
+                .map(|violation| GenericBoundViolation {
+                    expected: ty(violation.expected),
+                    actual: ty(violation.actual),
+                    ..violation
+                })
+                .collect(),
         }
     }
 }

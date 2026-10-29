@@ -33,13 +33,12 @@ pub(super) struct RejectedConstructorLambda {
 
 pub(super) enum LibraryConstructorFailure {
     Mapping(Box<LibraryConstructorMappingFailure>),
+    /// The constructor's constraint system rejected these arguments.
+    ArgumentContradictions(Box<super::generic_argument_bounds::ArgumentContradictions>),
     TypeMismatch {
         source_argument: usize,
         expected: Ty,
         actual: Ty,
-        /// The constructor formal this argument was the only evidence for. Rejecting the
-        /// argument's constraint leaves it uninferred, which kotlinc reports first.
-        uninferred: Option<String>,
         /// The invalid expression still has its explicit/specialized construction type. Retaining
         /// it after reporting the argument error lets the enclosing expectation diagnose an
         /// independent result-type contradiction; no constructor target is committed to FIR.
@@ -76,7 +75,9 @@ impl LibraryConstructorFailure {
     pub(super) fn result_type(&self) -> Option<Ty> {
         match self {
             Self::TypeMismatch { result, .. } => *result,
-            Self::Mapping(_) | Self::TypeArgumentMismatch { .. } => None,
+            Self::Mapping(_)
+            | Self::ArgumentContradictions(_)
+            | Self::TypeArgumentMismatch { .. } => None,
         }
     }
 }
@@ -168,19 +169,18 @@ impl Checker<'_> {
                     self.report_call_arg_mapping_error(call, args, failure);
                 }
             }
+            LibraryConstructorFailure::ArgumentContradictions(contradictions) => {
+                self.report_argument_contradictions(call, *contradictions);
+            }
             LibraryConstructorFailure::TypeMismatch {
                 source_argument,
                 expected,
                 actual,
-                uninferred,
                 ..
             } => {
                 let Some(&argument) = args.get(source_argument) else {
                     return;
                 };
-                if let Some(formal) = uninferred {
-                    self.report_uninferred_formal(call, &formal);
-                }
                 // A context-sensitive lambda deliberately carries `Ty::Error` until a callable
                 // candidate supplies a function/SAM shape. When the only mapped constructor
                 // parameter is non-functional, materialize the lambda's natural source type solely

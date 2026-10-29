@@ -2669,3 +2669,52 @@ fun construct(): Same<*> = Same(mutableListOf<Square>(), shape())
 "#;
     assert_rejection_same_as_kotlinc("InvariantArgumentFixesFormal", source);
 }
+
+#[test]
+fn a_mixed_variance_parameter_does_not_fix_its_formal() {
+    // `(T) -> T` mentions `T` in both directions, which is not an equality constraint: `T` solves
+    // to `Any` from the function's `Any` input bound together with the `Int` argument.
+    let src = r#"
+class Apply<T>(val f: (T) -> T, val value: T)
+fun <T> apply(f: (T) -> T, value: T): T = f(value)
+fun box(): String {
+    val f: (Any) -> String = { "OK" }
+    val constructed = Apply(f, 1)
+    return if (apply(f, 1) == "OK" && constructed.f(constructed.value) == "OK") "OK" else "FAIL"
+}
+"#;
+    assert_accepted_and_runs(src, "MixedVarianceParameter");
+}
+
+#[test]
+fn a_bound_and_an_invariant_contradiction_reject_every_argument() {
+    // The list's `Circle` leaves `T : Square`, so it fixes nothing; `shape` is then checked
+    // against the bound alone and rejected too. With no evidence left, `T` is uninferred and the
+    // list parameter renders it so.
+    let source = r#"
+open class Shape
+class Square : Shape()
+class Circle : Shape()
+class Keep<T : Square>(items: MutableList<T>, item: T)
+fun <T : Square> keep(items: MutableList<T>, item: T) {}
+fun call(shape: Shape) {
+    keep(mutableListOf<Circle>(), shape)
+}
+fun construct(shape: Shape): Keep<*> = Keep(mutableListOf<Circle>(), shape)
+"#;
+    assert_rejection_same_as_kotlinc("BoundAndInvariantContradictions", source);
+}
+
+#[test]
+fn a_rejected_structural_argument_renders_its_uninferred_formal() {
+    let source = r#"
+open class Shape
+class Square : Shape()
+class KeepAll<T : Square>(items: List<T>)
+fun <T : Square> keepAll(items: List<T>): Int = 1
+fun shape(): Shape = Shape()
+fun call(): Int = keepAll(listOf(shape()))
+fun construct(): KeepAll<*> = KeepAll(listOf(shape()))
+"#;
+    assert_rejection_same_as_kotlinc("RejectedStructuralArgument", source);
+}

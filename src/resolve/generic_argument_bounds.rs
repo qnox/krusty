@@ -15,49 +15,84 @@ pub(super) struct GenericArgumentBounds<'a> {
     pub(super) explicit_type_args: &'a [Ty],
     pub(super) signature: &'a GenericSig,
     pub(super) bindings: &'a GSigBinds,
-    pub(super) contradiction: Option<GenericBoundViolation>,
+    pub(super) contradictions: Option<ArgumentContradictions>,
+}
+
+/// The arguments a generic call's constraint system rejected, ready to report in kotlinc's
+/// order: `cannot infer type for type parameter` at the callee for each formal the rejections
+/// leave without evidence, then one mismatch per rejected argument, in argument order.
+pub(super) struct ArgumentContradictions {
+    /// The signature's formals, each marked whether it is left uninferred.
+    formals: Vec<(String, bool)>,
+    /// kotlinc's owner wording of the formals: `fun <T : Square> keep`, `class Keep<T : Square>`.
+    owner: String,
+    /// Each rejected argument with the type it is reported against. A structural parameter keeps
+    /// an uninferred formal unbound, which renders as `uninferred T (of ...)`.
+    mismatches: Vec<(ExprId, Ty)>,
+    /// The source ordinal of the first rejected argument.
+    first_argument: usize,
 }
 
 impl Checker<'_> {
-    /// The solver's argument contradiction, when it lands on a parameter that is the bare
-    /// contradicted formal. Such a parameter receives the contradiction as its own mismatch; a
-    /// structural parameter (`List<T>`) is reported against its substituted type instead.
-    /// `actuals` are `(source argument, parameter, type, whole array)` in source order.
-    pub(super) fn bare_formal_argument_contradiction(
+    /// The arguments the solver rejects for this call, with the parameter types they are reported
+    /// against. `actuals` are `(source argument, parameter, type, whole array)` in source order,
+    /// `parameter` indexing the signature's parameters. A formal fixed by an explicit type
+    /// argument is not inferred, so its contradictions are reported by the explicit-bound path.
+    pub(super) fn argument_contradictions(
         &self,
         signature: &GenericSig,
         actuals: &[(usize, usize, Ty, bool)],
         explicit_type_args: &[Ty],
         vararg_index: Option<usize>,
-    ) -> Option<GenericBoundViolation> {
-        crate::symbol_resolver::infer_generic_call_constraints_with_argument_ordinals(
-            &self.fed_source(),
-            signature,
-            actuals.iter().copied(),
-            vararg_index,
-        )
-        .bound_violation
-        .filter(|violation| explicit_type_args.get(violation.formal).is_none())
-        .filter(|violation| {
-            let formal = &signature.formals[violation.formal];
-            actuals
-                .get(violation.argument)
-                .is_some_and(|&(_, parameter, ..)| {
-                    signature
-                        .params
-                        .get(parameter)
-                        .and_then(|parameter| parameter.non_null().ty_param_name())
-                        .is_some_and(|name| name == formal)
-                })
+        args: &[ExprId],
+        owner: String,
+    ) -> Option<ArgumentContradictions> {
+        let violations =
+            crate::symbol_resolver::infer_generic_call_constraints_with_argument_ordinals(
+                &self.fed_source(),
+                signature,
+                actuals.iter().copied(),
+                vararg_index,
+            )
+            .bound_violations
+            .into_iter()
+            .filter(|violation| explicit_type_args.get(violation.formal).is_none())
+            .collect::<Vec<_>>();
+        ArgumentContradictions::new(signature, &violations, owner, |source| {
+            let &(_, parameter, ..) = actuals.iter().find(|actual| actual.0 == source)?;
+            Some((*args.get(source)?, *signature.params.get(parameter)?))
         })
+    }
+
+    pub(super) fn report_argument_contradictions(
+        &mut self,
+        call: ExprId,
+        contradictions: ArgumentContradictions,
+    ) {
+        let ArgumentContradictions {
+            formals,
+            owner,
+            mismatches,
+            ..
+        } = contradictions;
+        for (formal, _) in formals.iter().filter(|(_, uninferred)| *uninferred) {
+            self.report_uninferred_formal(call, formal);
+        }
+        let owners = self.publish_formal_identity_owners(
+            formals
+                .iter()
+                .map(|(formal, uninferred)| (formal.as_str(), uninferred.then_some(false))),
+            owner,
+        );
+        for (argument, expected) in mismatches {
+            let actual = self.expr_types[argument.0 as usize];
+            self.report_assignability_error(expected, actual, self.span(argument), "argument");
+        }
+        self.restore_type_parameter_owners(owners);
     }
 
     /// Report the candidate's bound failures. Returns whether they decide the call's diagnostics,
     /// so the per-argument assignability checks must not run.
-    ///
-    /// kotlinc rejects a contradicting argument's constraint at that argument. When it was the
-    /// formal's only evidence, nothing is left to infer the formal from, and that is reported
-    /// first, at the callee.
     pub(super) fn report_generic_argument_bounds(
         &mut self,
         site: GenericArgumentBounds<'_>,
@@ -71,19 +106,10 @@ impl Checker<'_> {
             explicit_type_args,
             signature,
             bindings,
-            contradiction,
+            contradictions,
         } = site;
-        if let Some(violation) = contradiction {
-            if violation.uninferred {
-                self.report_uninferred_formal(call, &signature.formals[violation.formal]);
-            }
-            let argument = args[violation.argument];
-            self.expect_assignable(
-                violation.expected,
-                self.expr_types[argument.0 as usize],
-                self.span(argument),
-                "argument",
-            );
+        if let Some(contradictions) = contradictions {
+            self.report_argument_contradictions(call, contradictions);
             return true;
         }
         for (formal_index, formal) in signature.formals.iter().enumerate() {
@@ -157,5 +183,61 @@ impl Checker<'_> {
                 crate::types::type_parameter_source_name(formal)
             ),
         );
+    }
+}
+
+impl ArgumentContradictions {
+    /// `parameter_of` maps a rejected source argument to its expression and declared parameter.
+    pub(super) fn new(
+        signature: &GenericSig,
+        violations: &[GenericBoundViolation],
+        owner: String,
+        parameter_of: impl Fn(usize) -> Option<(ExprId, Ty)>,
+    ) -> Option<Self> {
+        if violations.is_empty() {
+            return None;
+        }
+        let formals = signature
+            .formals
+            .iter()
+            .enumerate()
+            .map(|(index, formal)| {
+                let uninferred = violations
+                    .iter()
+                    .any(|violation| violation.formal == index && violation.uninferred);
+                (formal.clone(), uninferred)
+            })
+            .collect();
+        let mismatches = violations
+            .iter()
+            .filter_map(|violation| {
+                let (argument, parameter) = parameter_of(violation.argument)?;
+                let formal = &signature.formals[violation.formal];
+                let bare = parameter
+                    .non_null()
+                    .ty_param_name()
+                    .is_some_and(|name| name == formal);
+                let expected = if bare {
+                    parameter.rewrap_nullability(violation.expected)
+                } else if violation.uninferred {
+                    parameter
+                } else {
+                    let mut binding = GSigBinds::default();
+                    binding.insert(formal.clone(), violation.expected);
+                    crate::symbol_resolver::ty_subst_keep_unbound(parameter, &binding)
+                };
+                Some((argument, expected))
+            })
+            .collect();
+        Some(Self {
+            formals,
+            owner,
+            mismatches,
+            first_argument: violations[0].argument,
+        })
+    }
+
+    pub(super) fn first_argument(&self) -> usize {
+        self.first_argument
     }
 }

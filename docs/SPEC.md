@@ -11,15 +11,20 @@ that proof: under `<T : CharSequence, S : T?>`, `T` is not a subtype of `S & Any
 
 ## Contradicting generic arguments
 
-kotlinc adds argument constraints in argument order and rejects the one that contradicts the
-constraints already present, at that argument. An argument at an invariant position fixes the
-formal exactly: `same(mutableListOf<Square>(), shape)` against `fun <T> same(MutableList<T>, T)`
+kotlinc adds argument constraints in argument order and rejects every argument whose constraint
+contradicts those already accepted, each at that argument. A rejected argument contributes
+nothing. An argument whose parameter mentions the formal only at invariant positions fixes it
+exactly: `same(mutableListOf<Square>(), shape)` against `fun <T> same(MutableList<T>, T)`
 reports the `Shape` argument against `Square`, rather than joining both inputs to `Shape` and
-reporting the list. Against a declared bound, the first input outside it is reported. When that
-argument was the formal's only evidence, nothing is left to infer the formal from, and `cannot
-infer type for type parameter` is reported first, at the callee (kotlinc 2.4.21). Function and
-constructor calls report it alike. The three `resolver_regression_e2e` tests named for bound
-violations and invariant fixation cover it.
+reporting the list. A mixed occurrence such as `(T) -> T` fixes nothing. Against a declared bound,
+each input outside it is reported: in `keep(mutableListOf<Circle>(), shape)` against
+`fun <T : Square> keep(MutableList<T>, T)` both arguments are rejected, so the list's `Circle`
+never fixes `T`. When every argument for a formal is rejected, nothing is left to infer it from:
+`cannot infer type for type parameter` is reported first, at the callee, and a structural
+parameter renders the formal as `uninferred T (of fun <T : Square> keep)` (kotlinc 2.4.21).
+Function and constructor calls report it alike. The `resolver_regression_e2e` tests for bound
+violations, invariant fixation, their combination, structural parameters and mixed variance
+cover it.
 
 ## File policies under signature recovery
 
