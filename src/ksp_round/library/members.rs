@@ -11,8 +11,8 @@
 
 use krusty_plugin_ir::{
     KspAccessor, KspAnnotation, KspDeclaration, KspDeclarationOrigin, KspFunction, KspFunctionKind,
-    KspMember, KspModifier, KspOrigin, KspParameter, KspProperty, KspType, KspTypeArgument,
-    KspTypeSlot,
+    KspMember, KspModifier, KspOrigin, KspOverridee, KspParameter, KspProperty, KspType,
+    KspTypeArgument, KspTypeSlot,
 };
 
 use super::super::annotations::Annotations;
@@ -102,6 +102,47 @@ impl KspLibraries<'_> {
                     .chain(constructors)
                     .collect()
             }),
+        }
+    }
+
+    /// The member function (or property) named `name` that the library classifier `class`
+    /// declares, described on its own. `None` unless exactly one is named so, or when `class` has
+    /// type parameters: a member described apart from its classifier cannot refer to them.
+    pub(in super::super) fn named_member(
+        &self,
+        class: TypeName,
+        name: &str,
+        property: bool,
+    ) -> Option<KspDeclaration> {
+        let header = self.analysis.symbols.libraries.declaration_header(class)?;
+        if !header.signature.as_ref()?.type_parameters.is_empty() {
+            return None;
+        }
+        let declared = self.described_members(class)?;
+        let annotations = Annotations::new(self.analysis);
+        let view = MemberView {
+            class,
+            origin: origin(&header),
+            scope: &TypeParameterScope::default(),
+            annotations: &annotations,
+        };
+        let mut named = match property {
+            false => declared
+                .functions
+                .iter()
+                .filter(|function| function.name == name)
+                .map(|function| KspDeclaration::Function(view.function(function)))
+                .collect::<Vec<_>>(),
+            true => declared
+                .properties
+                .iter()
+                .filter(|candidate| candidate.name == name)
+                .map(|candidate| KspDeclaration::Property(Box::new(view.property(candidate))))
+                .collect(),
+        };
+        match named.len() {
+            1 => named.pop(),
+            _ => None,
         }
     }
 
@@ -263,6 +304,11 @@ impl MemberView<'_> {
             return_type: self.scope.ty(function.ret),
             jvm_signature: None,
             jvm_name: None,
+            // `kotlin.Any` has no supertype, so its members override nothing.
+            overridee: match self.class == wk::any() {
+                true => KspOverridee::Nothing,
+                false => KspOverridee::Undescribed,
+            },
         }
     }
 
@@ -331,6 +377,7 @@ impl MemberView<'_> {
             // property's answer depends on what its metadata records, which is not read yet.
             has_backing_field: property.from_java_method.then_some(true),
             jvm_signature: None,
+            overridee: KspOverridee::Undescribed,
         }
     }
 
@@ -352,6 +399,7 @@ impl MemberView<'_> {
             setter: None,
             has_backing_field: Some(true),
             jvm_signature: None,
+            overridee: KspOverridee::Undescribed,
         }
     }
 
@@ -386,6 +434,7 @@ impl MemberView<'_> {
             return_type: Some(returned),
             jvm_signature: None,
             jvm_name: None,
+            overridee: KspOverridee::Nothing,
         }
     }
 

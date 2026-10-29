@@ -49,6 +49,8 @@ enum DependencyExternalRealization {
     EmittedBody,
     TargetIntrinsic(crate::libraries::CompilerIntrinsic),
     Constructor,
+    PropertyGetter,
+    ProviderLeaf,
 }
 
 impl EmittedDependencyCallable {
@@ -84,6 +86,28 @@ impl EmittedDependencyCallable {
             realization: DependencyExternalRealization::Constructor,
             ..Self::new(target, None, None)
         }
+    }
+
+    pub(crate) fn property_getter(target: ExternalCallableId) -> Self {
+        Self {
+            realization: DependencyExternalRealization::PropertyGetter,
+            ..Self::new(target, None, None)
+        }
+    }
+
+    pub(crate) fn provider_leaf(target: ExternalCallableId) -> Self {
+        Self {
+            realization: DependencyExternalRealization::ProviderLeaf,
+            ..Self::new(target, None, None)
+        }
+    }
+
+    fn realizes_getter(self) -> bool {
+        matches!(
+            self.realization,
+            DependencyExternalRealization::EmittedBody
+                | DependencyExternalRealization::PropertyGetter
+        )
     }
 
     fn target_intrinsic(self) -> Option<crate::libraries::CompilerIntrinsic> {
@@ -649,11 +673,51 @@ impl CallLinker for Linker<'_, '_> {
 
     fn link_accessor(
         &mut self,
-        _callee: &KlibAccessorIdSignature,
+        callee: &KlibAccessorIdSignature,
     ) -> Result<LinkedAccessor, KlibBodyDeclineReason> {
-        Err(KlibBodyDeclineReason::UnsupportedOperation(
-            "a call through a property accessor signature",
-        ))
+        let unsupported = || {
+            KlibBodyDeclineReason::UnsupportedOperation(
+                "a call through a property accessor signature",
+            )
+        };
+        let signature = KlibDeclarationSignature::Accessor(callee.clone());
+        let identity = match self
+            .sources
+            .bodies
+            .callee_origin(&self.active_module, &signature)
+        {
+            KlibCalleeOrigin::Exact(identity) => identity,
+            KlibCalleeOrigin::Missing => return Err(unsupported()),
+            KlibCalleeOrigin::Ambiguous => {
+                return Err(KlibBodyDeclineReason::AmbiguousCalleeOrigin(Box::new(
+                    callee.property().clone(),
+                )))
+            }
+        };
+        // A complete retained export or positive target plan owns this edge. Other accessors
+        // retain the explicit unsupported boundary instead of acquiring a header-only body path.
+        if !self
+            .sources
+            .externals
+            .get(&identity)
+            .is_some_and(|external| external.realizes_getter())
+        {
+            return Err(unsupported());
+        }
+        let selected = match self.sources.callees.get(&identity) {
+            Some(KlibCalleeFact::Selected(callables)) => callables[0],
+            Some(KlibCalleeFact::Ambiguous) => {
+                return Err(KlibBodyDeclineReason::SignatureMismatch(
+                    "conflicting provider contracts for a getter declaration".to_owned(),
+                ))
+            }
+            None => return Err(KlibBodyDeclineReason::Unjoined),
+        };
+        super::accessor_calls::authenticate(selected, self.sources.bodies)?.ok_or(
+            KlibBodyDeclineReason::UnsupportedOperation(
+                "a dependency property accessor without a getter contract",
+            ),
+        )
     }
 
     fn requires_declaration(

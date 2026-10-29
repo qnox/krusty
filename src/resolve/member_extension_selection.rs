@@ -8,6 +8,32 @@ pub(super) enum MemberExtensionSelection {
     DelegateConventions,
 }
 
+/// Where a member-extension call is searched, and what happens when every candidate there rejects
+/// the call.
+pub(super) struct MemberExtensionSearch<'r> {
+    /// The declaration kinds the selection admits.
+    pub(super) kinds: MemberExtensionSelection,
+    /// The implicit-receiver tower to search when one other than the scope's own applies.
+    pub(super) receivers: Option<&'r [ImplicitReceiver]>,
+    pub(super) rejections: RejectedMemberExtensions,
+    /// What the call's context expects of the selected result.
+    pub(super) result: CallResultConstraint,
+    /// Solutions of an enclosing call's postponed type variables, when this call is one of its
+    /// lambda's statements.
+    pub(super) inference_bindings: Option<&'r crate::symbol_resolver::GSigBinds>,
+}
+
+/// The outcome of a member-extension level whose candidates all reject the call.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum RejectedMemberExtensions {
+    /// No later level can answer the call, so the rejections are its diagnostics.
+    Report,
+    /// The receiver's top-level extensions follow this level in the tower. Like any inapplicable
+    /// tower level, the rejected member extensions give way to an applicable extension there and
+    /// are reported only when that level has none.
+    YieldToApplicableExtension,
+}
+
 /// Declaration-owned facts retained when a member extension is not selected as a delegate
 /// convention. These are captured before contextual instantiation: an unsatisfied context or an
 /// inapplicable generated-accessor argument is itself one reason the declaration must still appear

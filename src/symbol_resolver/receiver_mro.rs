@@ -50,8 +50,14 @@ fn receiver_type_args_match(
         if specialized == recv {
             return true;
         }
+        // The caller's own variables left in the specialized receiver are fixed types there, so
+        // `Column<EntityID<X>>` fits `Column<out E?>` once `E := EntityID<X>`. A callee formal the
+        // receiver did not bind is rigid in this check and never makes it pass.
+        if crate::assignable::is_assignable(&cx, &oracle, recv, specialized) {
+            return true;
+        }
         if !specialized.mentions_ty_param() {
-            return crate::assignable::is_assignable(&cx, &oracle, recv, specialized);
+            return false;
         }
     }
     let erased_top = |t: Ty| {
