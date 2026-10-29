@@ -15987,7 +15987,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`named_diagnostics_render_their_names_like_kotlinc` in
   `tests/render_internal_diagnostic_names_e2e.rs`;
   `compiler_arguments_warning_levels_reach_only_the_progressive_warning` and
-  `every_named_warning_accepts_a_level` in `crates/krusty-cli/src/cli.rs`; `decapitalizes_like_kotlincs_plain_renderer` in
+  `every_named_warning_accepts_a_level` in `crates/krusty-cli/src/cli.rs`;
+  `the_progressive_warning_follows_its_named_level` in `crates/krusty-cli/src/main.rs`; `decapitalizes_like_kotlincs_plain_renderer` in
   `src/diag.rs`.)
 - **The command line is parsed by kotlinc's rules, from kotlinc's own argument table.** Each
   supported release's JVM arguments (name, short and deprecated spellings, value type, delimiter,

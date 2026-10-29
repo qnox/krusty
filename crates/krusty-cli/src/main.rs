@@ -745,3 +745,74 @@ fn file_stem(path: &str) -> String {
         .unwrap_or("File")
         .to_string()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const PROGRESSIVE: &str = "'-progressive' is meaningful only for the latest language version \
+                               (2.4), while this build uses 2.3\nCompiler behavior in such mode \
+                               is undefined; consider moving to the latest stable version or \
+                               turning off progressive mode.";
+
+    fn report(arguments: &[&str]) -> Result<String, String> {
+        let mut argv = vec!["-progressive", "-language-version", "2.3"];
+        argv.extend(arguments);
+        argv.push("f.kt");
+        let opts = cli::parse(argv.into_iter().map(str::to_string));
+        // The boundary: krusty refuses the compilation itself.
+        assert_eq!(
+            opts.refusals,
+            ["krusty does not implement the language feature \
+              'ForbidExposingLessVisibleTypesInInline' selected by '-progressive'"],
+            "{arguments:?}"
+        );
+        configuration_report(&opts)
+    }
+
+    /// The `-progressive` warning goes through the command-line warning policy under its kotlinc
+    /// name. Each expected report is kotlinc 2.4.21's complete stderr for `fun main() {}` with the
+    /// same arguments, and an `Err` is kotlinc's exit status 1 (measured). krusty itself refuses a
+    /// `-progressive` build below the latest language version (it does not model every progressive
+    /// feature), so this proves the policy over the report, not a compilation.
+    #[test]
+    fn the_progressive_warning_follows_its_named_level() {
+        let warning = format!("warning: {PROGRESSIVE}\n");
+        for (arguments, expected) in [
+            (vec![], Ok(warning.clone())),
+            (
+                vec!["-Xwarning-level=COMPILER_ARGUMENTS_WARNING:disabled"],
+                Ok(String::new()),
+            ),
+            (
+                vec!["-Xwarning-level=COMPILER_ARGUMENTS_WARNING:warning"],
+                Ok(warning.clone()),
+            ),
+            (
+                vec!["-Xwarning-level=COMPILER_ARGUMENTS_WARNING:error"],
+                Err(format!("error: {PROGRESSIVE}\n")),
+            ),
+            (
+                vec!["-Werror"],
+                Err(format!(
+                    "{warning}error: warnings found and -Werror specified\n"
+                )),
+            ),
+            (
+                vec![
+                    "-Werror",
+                    "-Xwarning-level=COMPILER_ARGUMENTS_WARNING:warning",
+                ],
+                Ok(warning.clone()),
+            ),
+            (
+                vec!["-Xrender-internal-diagnostic-names"],
+                Ok(format!(
+                    "warning: [COMPILER_ARGUMENTS_WARNING] {PROGRESSIVE}\n"
+                )),
+            ),
+        ] {
+            assert_eq!(report(&arguments), expected, "{arguments:?}");
+        }
+    }
+}
