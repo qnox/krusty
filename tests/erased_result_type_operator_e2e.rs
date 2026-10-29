@@ -17,6 +17,11 @@ const SRC: &str = "class Ops {\n\
     \x20   fun cast(m: Map<String, CharSequence>): String = m[\"x\"] as String\n\
     \x20   fun element(m: List<CharSequence>): String? = m[0] as? String\n\
     \x20   fun picked(value: CharSequence?): String? = pick(value) as? String\n\
+    \x20   inline fun <T> pickInline(value: T, after: () -> Unit): T {\n\
+    \x20       after()\n\
+    \x20       return value\n\
+    \x20   }\n\
+    \x20   fun inlined(value: CharSequence?): String? = pickInline(value) { picks++ } as? String\n\
     \x20   fun subject(m: Map<String, CharSequence>): Int = when (val v = m[\"x\"]) { is String -> v.length; else -> 2 }\n\
     }\n\
     fun box(): String {\n\
@@ -41,6 +46,7 @@ const SRC: &str = "class Ops {\n\
     \x20   }\n\
     \x20   if (ops.element(listOf(StringBuilder())) != null) return \"fail element\"\n\
     \x20   if (ops.picked(\"p\") != \"p\" || ops.picked(null) != null || ops.picks != 2) return \"fail picked\"\n\
+    \x20   if (ops.inlined(\"i\") != \"i\" || ops.inlined(StringBuilder()) != null || ops.picks != 4) return \"fail inlined\"\n\
     \x20   return if (ops.subject(text) == 3 && ops.subject(builder) == 2) \"OK\" else \"fail subject\"\n\
     }\n";
 
@@ -62,6 +68,7 @@ fn a_type_operator_tests_an_erased_call_result_directly_like_kotlinc() {
         " cast(",
         " element(",
         " picked(",
+        " inlined(",
         " subject(",
     ] {
         let reference = common::method_instructions(&built.reference, method);

@@ -38,6 +38,17 @@ pub(super) fn declaration_result_call(ir: &IrFile, mut expression: ExprId) -> Op
     }
 }
 
+/// Whether emission evaluates `call` as that call. A statically inlined call and a compiled inline
+/// module call keep their expression ID while emission replaces them with the inlined body, which
+/// owns its own result value.
+pub(super) fn emits_as_call(ir: &IrFile, call: ExprId) -> bool {
+    !matches!(
+        ir.exprs.get(call as usize),
+        Some(IrExpr::Call { callee, .. })
+            if matches!(&**callee, Callee::Static { inline, .. } if inline.can_inline())
+    ) && ir.compiled_inline_call(call).is_none()
+}
+
 fn realized_call_result(ir: &IrFile, call: ExprId) -> Option<Ty> {
     let expression = ir.exprs.get(call as usize)?;
     let IrExpr::Call { callee, .. } = expression else {
@@ -213,7 +224,7 @@ fn erased_reference_operand(ir: &IrFile, coercion: ExprId) -> Option<(ExprId, Ty
     else {
         return None;
     };
-    if declaration_result_call(ir, *produced) != Some(*produced) {
+    if declaration_result_call(ir, *produced) != Some(*produced) || !emits_as_call(ir, *produced) {
         return None;
     }
     let slot = *ir.physical_types.get(produced)?;
@@ -517,6 +528,22 @@ mod tests {
             });
             ir.physical_types.insert(asserted, Ty::obj("kotlin/Any"));
             asserted
+        });
+        assert_eq!(tested_operand(&ir, test), coercion);
+    }
+
+    #[test]
+    fn a_compiled_inline_call_keeps_its_semantic_conversion() {
+        let (ir, _, coercion, test) = instance_test(true, |ir, call| {
+            let IrExpr::Call { callee, .. } = ir.expr(call) else {
+                panic!("the producer is a call");
+            };
+            let Callee::Local(function) = **callee else {
+                panic!("the producer calls a local declaration");
+            };
+            ir.set_same_module_inlining(crate::ir::SameModuleInlining::CompiledBodies);
+            ir.record_compiled_inline_call(call, function);
+            call
         });
         assert_eq!(tested_operand(&ir, test), coercion);
     }

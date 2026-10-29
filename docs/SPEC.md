@@ -18323,8 +18323,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   test or cast it; kotlinc writes no `checkcast CharSequence` for the substituted result first. A
   safe cast's temporary stores the same erased value. Only a coercion that owns the call boundary
   qualifies (common lowering's declaration-result mark, or the one dependency realization places
-  over a provider's physical result), and only while its operand is still that call; any other
-  coercion keeps its conversion. Common lowering records that temporary
+  over a provider's physical result), and only while its operand is still that call and emission
+  evaluates it as that call. A statically inlined or compiled inline call keeps its expression but
+  is replaced by the inlined body, so its coercion, like any other, keeps its conversion. Common lowering records that temporary
   (`safe_cast_temporaries`), since only the test and the matching cast read it; the JVM
   call-result boundary then retargets the operator, or the temporary, to the call's erased slot.
   A named binding (`when (val v = m["k"])`) still converts to its declared type, and so does a
