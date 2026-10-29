@@ -371,10 +371,24 @@ impl Checker<'_> {
                     if args.get(source_argument).is_none() {
                         continue;
                     }
+                    // A conditional is rejected as the one argument kotlinc sees, with its
+                    // joined type, rather than as the branch that put it outside the bound.
+                    let argument = args[source_argument];
+                    let actual =
+                        if conditional_branch::conditional_argument_branches(self.file, argument)
+                            .is_some()
+                        {
+                            self.expr_types[argument.0 as usize]
+                        } else {
+                            violation.actual
+                        };
                     bound_failures.push(LibraryConstructorFailure::TypeMismatch {
                         source_argument,
                         expected: violation.expected,
-                        actual: violation.actual,
+                        actual,
+                        uninferred: violation
+                            .uninferred
+                            .then(|| signature.formals[violation.formal].clone()),
                         result: None,
                     });
                     continue;
@@ -650,6 +664,7 @@ impl Checker<'_> {
                             source_argument: mismatch.source_argument,
                             expected: mismatch.expected,
                             actual: mismatch.actual,
+                            uninferred: None,
                             result: members.first().map(|member| member.ret),
                         });
                     }

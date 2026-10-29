@@ -9,6 +9,18 @@ source only when the source is a non-null subtype of `S` itself. Sharing `S`'s c
 that proof: under `<T : CharSequence, S : T?>`, `T` is not a subtype of `S & Any`. Test:
 `box_regressions/nullableFormalBoundPropagation.kt`.
 
+## Contradicting generic arguments
+
+kotlinc adds argument constraints in argument order and rejects the one that contradicts the
+constraints already present, at that argument. An argument at an invariant position fixes the
+formal exactly: `same(mutableListOf<Square>(), shape)` against `fun <T> same(MutableList<T>, T)`
+reports the `Shape` argument against `Square`, rather than joining both inputs to `Shape` and
+reporting the list. Against a declared bound, the first input outside it is reported. When that
+argument was the formal's only evidence, nothing is left to infer the formal from, and `cannot
+infer type for type parameter` is reported first, at the callee (kotlinc 2.4.21). Function and
+constructor calls report it alike. The three `resolver_regression_e2e` tests named for bound
+violations and invariant fixation cover it.
+
 ## File policies under signature recovery
 
 A file's own annotations (`@file:Suppress`, opt-ins) are published before recovery diagnostics
@@ -80,9 +92,12 @@ violate it (kotlinc 2.4.21 accepts the call). Function and constructor selection
 rule, and each branch receives the argument view a whole argument would: an integer literal still
 adapts (`sameAs(mutableListOf<Long>(), if (c) long else 2)` fixes `T` to `Long`), and a callable
 reference still converts to a fun interface (`read(if (c) ::one else ::two)`). When both bounded
-overloads accept every branch, the call stays ambiguous, as in kotlinc.
-`tests/box_regressions/conditionalArgumentGenericBound.kt`, `conditionalArgumentBranchView.kt`, and
-`conditional_argument_branches_leave_bounded_overloads_ambiguous` cover it.
+overloads accept every branch, the call stays ambiguous, as in kotlinc. A branch that contradicts
+a declared bound or an earlier invariant fixation rejects the conditional as one argument, reported
+with the conditional's joined type, under the rules of "Contradicting generic arguments".
+The box fixtures `conditionalArgumentGenericBound.kt` and `conditionalArgumentBranchView.kt` cover
+it, with the `resolver_regression_e2e` controls for overload ambiguity, a bound-violating branch,
+and invariant fixation before a conditional.
 
 ## Bound declaration-name evidence
 
@@ -22468,6 +22483,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `tests/context_parameters_e2e.rs::same_type_context_dispatch_and_extension_stay_distinct` and
   `tests/context_parameters_e2e.rs::ordinary_delegate_operator_beats_a_nearer_context_receiver`.
   Corpus: `contextParameters/sameExtensionContextAndDispatchReceiver.kt`.
+
+- **A member extension that rejects an explicit-receiver call gives way to an applicable top-level
+  extension.** In `with(Builder()) { items.appendTo(this, prefix = "SET ") { ... } }`, the
+  implicit receiver's member extension `List<T>.appendTo(separator: String, ...)` maps `this` to
+  `separator` and rejects it, while the top-level `List<T>.appendTo(builder: Builder, ...)` accepts
+  the call. kotlinc selects the top-level extension: an inapplicable tower level does not end
+  resolution. Krusty reported the member extension's argument mismatch instead. The member
+  extension's rejection is still the diagnostic when the receiver's top-level extensions have no
+  applicable candidate, for example when the only one is declared on `Set<T>`.
+  Tests: `tests/box_regressions/memberExtensionRejectionYieldsToTopLevel.kt` (a portable
+  `String.tag` control) and `tests/resolver_regression_e2e.rs`
+  (`a_rejected_member_extension_gives_way_to_a_top_level_builder_extension` with the builder
+  shape and kotlinc's classes, and
+  `a_rejected_member_extension_without_an_applicable_top_level_extension_reports_its_mismatch`).
 
 - **A super-constructor argument's captures come from the constructor's synthetic prefix
   parameters, however deeply the argument nests them.** A local class lifts each captured local

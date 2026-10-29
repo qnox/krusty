@@ -191,6 +191,8 @@ impl CallSiteVariables {
                     argument: violation.argument,
                     expected: ty(violation.expected),
                     actual: ty(violation.actual),
+                    formal: violation.formal,
+                    uninferred: violation.uninferred,
                 }),
         }
     }
