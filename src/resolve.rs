@@ -31127,6 +31127,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         callable_reference_types: HashMap::default(),
         reflective_callable_references: crate::fx_hash::HashSet::default(),
         misfit_callable_references: crate::fx_hash::HashSet::default(),
+        checked_calls: Vec::new(),
         checked_call_argument: None,
         exhaustive_whens: crate::fx_hash::HashSet::default(),
         when_subject_plans: when_flow::WhenSubjectPlans::default(),
@@ -33549,8 +33550,10 @@ struct Checker<'a> {
     /// nearest candidate for the enclosing check (see `misfit_callable_references`). Selection
     /// records one and the same visit consumes it, so a later fitting revisit is unaffected.
     misfit_callable_references: crate::fx_hash::HashSet<ExprId>,
-    /// The call value argument [`Self::check_argument_expected`] is checking against its
-    /// parameter, so a misfit reference knows whether it is postponed into a call.
+    /// The calls whose value arguments are being checked and the argument
+    /// [`Self::check_argument_expected`] is committing to its parameter, so a misfit reference
+    /// knows whether it is postponed into a call.
+    checked_calls: Vec<ExprId>,
     checked_call_argument: Option<ExprId>,
     exhaustive_whens: crate::fx_hash::HashSet<ExprId>,
     /// See [`TypeInfo::when_subject_plans`].
@@ -53118,7 +53121,9 @@ impl<'a> Checker<'a> {
                     .is_some_and(|arguments| !arguments.is_empty());
                 self.record_flexible_call_inputs(e, Some(receiver), explicit);
                 self.record_flexible_nullable_result(e);
-                return self.expr_inner_safe_call(scope, e, expected, receiver, name, args);
+                return self.checking_call(e, |c| {
+                    c.expr_inner_safe_call(scope, e, expected, receiver, name, args)
+                });
             }
             Expr::Name(n) if n == "this" => {
                 // A smart-cast narrowing (`this != null` in a nullable-prim-receiver extension)
@@ -53356,7 +53361,9 @@ impl<'a> Checker<'a> {
                     .get(&e.0)
                     .is_some_and(|arguments| !arguments.is_empty());
                 self.record_flexible_call_inputs(e, receiver, explicit);
-                let called = self.check_call(scope, e, callee, &args, self.span(e), expected);
+                let span = self.span(e);
+                let called = self
+                    .checking_call(e, |c| c.check_call(scope, e, callee, &args, span, expected));
                 // The callee's own return may not be determined yet — its body is an expression the
                 // walk could not type. Ask for that declaration rather than taking the marker as
                 // the call's type, which would publish it into whatever this call initializes.

@@ -20,8 +20,31 @@ impl Checker<'_> {
         ty
     }
 
-    /// Whether `expression` is the call value argument being checked against its parameter.
+    /// Check the call or safe call `call`, its value arguments included.
+    pub(super) fn checking_call<T>(
+        &mut self,
+        call: ExprId,
+        check: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        self.checked_calls.push(call);
+        let checked = check(self);
+        self.checked_calls.pop();
+        checked
+    }
+
+    /// Whether `expression` is a value argument of a call being checked, or the argument being
+    /// committed to its parameter (a constructor delegation's or an enum entry's).
     pub(super) fn is_call_value_argument(&self, expression: ExprId) -> bool {
         self.checked_call_argument == Some(expression)
+            || self
+                .checked_calls
+                .iter()
+                .any(|&call| match self.file.expr(call) {
+                    Expr::Call { args, .. }
+                    | Expr::SafeCall {
+                        args: Some(args), ..
+                    } => args.contains(&expression),
+                    _ => false,
+                })
     }
 }

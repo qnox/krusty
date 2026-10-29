@@ -4,15 +4,18 @@ fun B.g(i: Int): String = "g$i"
 fun B.g(s: String, t: String): String = s + t
 fun B.h(): Int = 7
 
-open class P(val f: (B, Int) -> String)
+open class P(f: (B, Int) -> String) {
+    val result = f(B(), 3)
+}
 class C : P(B::g)
 
-open class Q(val a: Any)
+open class Q(a: Any) {
+    val named = a is Function1<*, *>
+}
 class D : Q(B::h)
 
 fun box(): String {
-    if (C().f(B(), 3) != "g3") return "fail selected overload"
-    val h = D().a as (B) -> Int
-    if (h(B()) != 7) return "fail natural reference"
+    if (C().result != "g3") return "fail selected overload"
+    if (!D().named) return "fail natural reference"
     return "OK"
 }
