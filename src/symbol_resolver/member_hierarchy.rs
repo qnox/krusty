@@ -233,9 +233,11 @@ fn specialize_declared_callables(
     callables: Callables,
 ) -> Callables {
     let base_bindings = classifier_bindings(classifier, receiver);
+    let input_bounds =
+        crate::libraries::ReceiverInputBounds::from_parameters(&classifier.type_parameters);
     let (mut functions, mut properties) = callables.into_parts();
     for function in &mut functions.overloads {
-        specialize_member_function(source, receiver, function, &base_bindings);
+        specialize_member_function(source, receiver, function, &base_bindings, &input_bounds);
     }
     for property in &mut properties.overloads {
         let raw_owner_property = !classifier.type_params.is_empty()
@@ -322,6 +324,7 @@ pub(crate) fn specialize_member_function(
     receiver: Ty,
     function: &mut FunctionInfo,
     classifier_bindings: &super::GSigBinds,
+    input_bounds: &crate::libraries::ReceiverInputBounds,
 ) {
     let mut bindings = classifier_bindings.clone();
     if let Some(signature) = &function.generic_sig {
@@ -335,6 +338,24 @@ pub(crate) fn specialize_member_function(
     let raw_receiver = super::raw_member_view::is_raw_receiver(receiver);
     if let (true, Some(signature)) = (raw_receiver, &function.generic_sig) {
         super::raw_member_view::bind_method_formals(signature, &mut bindings);
+    }
+    if !bindings.is_empty() {
+        if function.source_inputs.is_none() {
+            let mut signature = function.semantic_signature().into_owned();
+            if function.generic_sig.is_some() {
+                normalize_suspend_member_signature(&mut signature, function.flags.suspend);
+            }
+            function.source_inputs = Some(Box::new(crate::libraries::SourceInputDeclaration {
+                signature,
+                receiver_bindings: super::GSigBinds::default(),
+                receiver_bounds: crate::libraries::ReceiverInputBounds::default(),
+            }));
+        }
+        function
+            .source_inputs
+            .as_mut()
+            .expect("receiver application retains the declaration input contract")
+            .apply_receiver(&bindings, input_bounds);
     }
     match function.kind {
         FnKind::Member => function.receiver = Some(receiver),
@@ -371,25 +392,7 @@ pub(crate) fn specialize_member_function(
         .map(|ty| ty_subst_keep_unbound(ty, &bindings));
     specialize_call_sig(source, &mut function.call_sig, &bindings);
     if let Some(signature) = &mut function.generic_sig {
-        let suspend_ret = function
-            .flags
-            .suspend
-            .then(|| {
-                let continuation = *signature.params.last()?;
-                match continuation.kind() {
-                    TyKind::Obj(name, args)
-                        if crate::types::same(name, crate::types::wk::continuation()) =>
-                    {
-                        args.first().copied()
-                    }
-                    _ => None,
-                }
-            })
-            .flatten();
-        if let Some(suspend_ret) = suspend_ret {
-            signature.params.pop();
-            signature.ret = suspend_ret;
-        }
+        normalize_suspend_member_signature(signature, function.flags.suspend);
         let declared_ret = signature.ret;
         signature.receiver = signature
             .receiver
@@ -411,6 +414,27 @@ pub(crate) fn specialize_member_function(
     }
     if raw_receiver {
         super::raw_member_view::erase_function(source, function);
+    }
+}
+
+/// The existing logical suspend-member view, shared with the retained declaration snapshot.
+fn normalize_suspend_member_signature(signature: &mut crate::libraries::GenericSig, suspend: bool) {
+    let suspend_ret = suspend
+        .then(|| {
+            let continuation = *signature.params.last()?;
+            match continuation.kind() {
+                TyKind::Obj(name, args)
+                    if crate::types::same(name, crate::types::wk::continuation()) =>
+                {
+                    args.first().copied()
+                }
+                _ => None,
+            }
+        })
+        .flatten();
+    if let Some(suspend_ret) = suspend_ret {
+        signature.params.pop();
+        signature.ret = suspend_ret;
     }
 }
 

@@ -23237,3 +23237,13 @@ publishes the checked property read with its applied result and source receiver 
 the declared ABI. No dependency class layout is materialized for this operation. Owning tests:
 `klib_lowering::tests::accessor_calls` and the official-producer runtime accessor programs in
 `klib_closure_frames_e2e`. Compiler-introduced dependency blocks remain tracked in #2811.
+
+## Declared inputs of applied nominal members
+
+Applying a classifier receiver preserves the member declaration's original logical input slots
+and receiver bindings. Applicability and argument diagnostics inspect the declared vararg element
+before its array carrier is specialized. An out/star projection reports the receiver prohibition
+for every written scalar or expanded element; an inapplicable member permits the ordinary scope
+tower to consider an applicable extension. Diagnostics render the original declaration inputs.
+A method-owned formal remains separate from class formals.
+Tests: `nominal_projected_input_e2e`.

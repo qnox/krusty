@@ -6323,3 +6323,7 @@ bodyless edge preparation and ordinary accessor linking; preserve retained expor
 primitive/intrinsic priority. Native consumes its existing runtime getter plans. Prove real
 official-producer/JVM-oracle programs and malformed header/facet controls. Keep compiler-introduced
 block lowering as the independent #2811 follow-up.
+
+- [x] Retain nominal member declaration inputs and full owner bounds before receiver application;
+  use them for scalar and expanded-vararg admission and diagnostics with complete kotlinc ledgers.
+  Preserve invariant/in-projected inputs, named/default/non-last varargs and method-formal shadows.

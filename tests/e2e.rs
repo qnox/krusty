@@ -2263,6 +2263,7 @@ mod loop_backedge_narrowing_e2e;
 mod nested_data_class_tostring_recipe_e2e;
 #[path = "nested_inline_delegate_e2e.rs"]
 mod nested_inline_delegate_e2e;
+mod nominal_projected_input_e2e;
 #[path = "nullable_sam_e2e.rs"]
 mod nullable_sam_e2e;
 #[path = "open_serializable_write_self_e2e.rs"]

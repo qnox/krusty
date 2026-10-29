@@ -41,6 +41,7 @@ mod result_nullability;
 mod runtime_exception;
 mod scalar_instruction;
 mod singleton_dispatch;
+mod source_inputs;
 mod stdlib_klib_intrinsics;
 pub use annotation_application::{
     AnnotationApplication, AnnotationElementDefault, AnnotationParameterPolicy,
@@ -92,6 +93,7 @@ pub use provider_override::ProviderOverrideSlot;
 pub use result_nullability::{ResultEnhancement, ReturnInfo};
 pub use runtime_exception::{RuntimeExceptionKind, RuntimeExceptionLayout};
 pub use singleton_dispatch::SingletonDispatch;
+pub(crate) use source_inputs::{ReceiverInputBounds, SourceInputDeclaration};
 pub(crate) use stdlib_klib_intrinsics::{stdlib_klib_intrinsic, StdlibKlibIntrinsic};
 
 use crate::fx_hash::{HashMap, HashSet};
@@ -1369,6 +1371,9 @@ pub fn map_call_args<T: Copy>(
 #[derive(Clone)]
 pub struct FunctionInfo {
     pub kind: FnKind,
+    /// Declaration input slots and receiver bindings retained before classifier application.
+    /// An unapplied candidate still carries its declaration directly in `semantic_signature`.
+    pub(crate) source_inputs: Option<Box<SourceInputDeclaration>>,
     /// Provider-owned override-slot identity for declarations whose platform compatibility differs
     /// from their source-language signature. This is distinct from the physical emit handle.
     pub(crate) provider_override_slot: Option<ProviderOverrideSlot>,
@@ -1642,6 +1647,7 @@ impl FunctionInfo {
             .saturating_sub(usize::from(kind == FnKind::Extension));
         FunctionInfo {
             kind,
+            source_inputs: None,
             provider_override_slot: None,
             classifier_static: false,
             associated_classifier: None,

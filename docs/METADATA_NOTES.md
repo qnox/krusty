@@ -1360,3 +1360,11 @@ the raw dispatch classifier's signature mask and complete own-formal receiver ap
 Declared getter results remain distinct from the checked read's applied result. Native's runtime
 leaf capability reuses its existing accessor signature plans and does not import property bodies
 or reconstruct class storage. No metadata wire format changes.
+
+## Applied member input declarations
+
+`FunctionInfo` retains a common declaration-input facet before nominal specialization: the raw
+logical signature, exact receiver bindings, and complete owner-bound lists. Member extensions,
+inner constructors and checked body-local methods preserve the same evidence. Suspend inputs use
+the existing logical continuation normalization. Applied callable/physical parameter vectors keep
+their existing ABI and packing roles; the facet does not add class formals to callable arity.
