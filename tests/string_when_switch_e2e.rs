@@ -55,6 +55,27 @@ const HASH_BINS_SOURCE: &str = "package store\n\
     \x20   else -> -1\n\
     }\n";
 
+/// A platform `String!` subject may be `null`, so kotlinc tests it with `ifnull` before
+/// `hashCode()`: in a plain function, in a SAM lambda, and with an explicit `null` case.
+const PLATFORM_SOURCE: &str = "package store\n\
+    import java.lang.reflect.InvocationHandler\n\
+    import java.lang.reflect.Method\n\
+    fun member(method: Method): String = when (method.name) {\n\
+    \x20   \"toString\" -> \"a\"; \"hashCode\" -> \"b\"; \"equals\" -> \"c\"; else -> \"d\"\n\
+    }\n\
+    fun handler(): InvocationHandler = InvocationHandler { _, method, _ ->\n\
+    \x20   when (method.name) {\n\
+    \x20       \"toString\" -> \"proxy\"; \"hashCode\" -> 7; \"equals\" -> false; else -> null\n\
+    \x20   }\n\
+    }\n\
+    fun property(key: String): Int = when (System.getProperty(key)) {\n\
+    \x20   \"a\" -> 1; \"b\" -> 2; null -> 3; else -> 4\n\
+    }\n\
+    fun declared(method: Method): Int {\n\
+    \x20   val name: String = method.name\n\
+    \x20   return when (name) { \"a\" -> 1; \"b\" -> 2; \"c\" -> 3; else -> 4 }\n\
+    }\n";
+
 fn assert_identical(stem: &str, source: &str, class: &str) {
     common::byte_diff_against_kotlinc_cp(stem, source, class, &[common::stdlib_jar()])
         .expect("reference kotlinc is provisioned")
@@ -73,6 +94,36 @@ fn string_hash_buckets_follow_hash_map_tree_bins_like_kotlinc() {
         HASH_BINS_SOURCE,
         "store/StringWhenHashBinsKt",
     );
+}
+
+#[test]
+fn platform_string_switches_test_null_like_kotlinc() {
+    assert_identical(
+        "PlatformStringWhenSwitch",
+        PLATFORM_SOURCE,
+        "store/PlatformStringWhenSwitchKt",
+    );
+}
+
+#[test]
+fn platform_string_switches_execute() {
+    let out = common::compile_and_run_with_stdlib(
+        &format!(
+            "{PLATFORM_SOURCE}\nfun box(): String {{\n\
+             \x20   val proxy = java.lang.reflect.Proxy.newProxyInstance(\n\
+             \x20       Runnable::class.java.classLoader, arrayOf(Runnable::class.java), handler()\n\
+             \x20   )\n\
+             \x20   val any = Any::class.java\n\
+             \x20   return listOf(\n\
+             \x20       proxy.toString(), proxy.hashCode(), proxy.equals(proxy),\n\
+             \x20       member(any.getMethod(\"hashCode\")), member(any.getMethod(\"getClass\")),\n\
+             \x20       property(\"krusty.unset.property\"), declared(any.getMethod(\"toString\"))\n\
+             \x20   ).toString()\n\
+             }}\n"
+        ),
+        "PlatformStringWhenSwitchRun",
+    );
+    assert_eq!(out.as_deref(), Some("[proxy, 7, false, b, d, 3, 4]"));
 }
 
 #[test]
