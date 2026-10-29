@@ -142,3 +142,45 @@ fun h(f: (B, Int) -> String = B::g) = f\n",
         &["Main.kt:3:29: initializer type mismatch: expected '(B, Int) -> String', actual 'KFunction3<B, Int, Int, String>'."],
     );
 }
+
+/// The fitting forms of a superclass constructor's reference argument: the selected parameter picks
+/// the overload, and a parameter that is not a function type takes the natural reference.
+const SUPERCLASS_REFERENCE_ARGUMENTS: &str = r#"class B
+
+fun B.g(i: Int): String = "g$i"
+fun B.g(s: String, t: String): String = s + t
+fun B.h(): Int = 7
+
+open class P(f: (B, Int) -> String) {
+    val selected = f is Function2<*, *, *>
+}
+class C : P(B::g)
+
+open class Q(a: Any) {
+    val named = a is Function1<*, *>
+}
+class D : Q(B::h)
+
+fun box(): String {
+    if (!C().selected) return "fail selected overload"
+    if (!D().named) return "fail natural reference"
+    return "OK"
+}
+"#;
+
+#[test]
+fn superclass_constructor_reference_arguments_run_and_match_kotlinc() {
+    let src = SUPERCLASS_REFERENCE_ARGUMENTS;
+    common::expect_box_ok_with_stdlib(src, "SuperclassReferenceArguments");
+    for class in ["C", "D"] {
+        match common::byte_diff_against_kotlinc_cp(
+            "SuperclassReferenceArguments",
+            src,
+            class,
+            &[common::stdlib_jar()],
+        ) {
+            None => panic!("reference toolchain unavailable"),
+            Some(result) => result.unwrap_or_else(|diff| panic!("{class}: {diff}")),
+        }
+    }
+}

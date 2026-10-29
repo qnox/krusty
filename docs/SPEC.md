@@ -16,7 +16,7 @@ decides: a single candidate gives the reference its reflection type, so `val ref
 String = B::g` reports `initializer type mismatch: expected '(B, Int) -> String', actual
 'KFunction3<B, Int, Int, String>'`, and several are listed after `none of the following candidates
 is applicable:`. A member the site cannot see is not a candidate. Tests:
-`callable_reference_misfit_e2e`, `box_regressions/superclassCallableReferenceArguments.kt`.
+`callable_reference_misfit_e2e`.
 
 ## Invisible members yield to extensions
 
