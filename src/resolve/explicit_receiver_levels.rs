@@ -64,15 +64,9 @@ impl Checker<'_> {
         ) {
             return Some(ret);
         }
-        if let Some(ret) = self.check_member_extension_function_call(
-            scope,
-            call_args.call,
-            receiver,
-            name,
-            call_args.args,
-            call_args.arg_tys,
-            None,
-        ) {
+        if let Some(ret) =
+            self.check_member_extension_function_call(scope, call_args, receiver, name, None)
+        {
             return Some(ret);
         }
         if function_values == FunctionValueRungs::AlreadyTried {

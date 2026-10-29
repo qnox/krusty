@@ -45,7 +45,8 @@ impl ComposeOptions {
 
     /// Settings krusty's pass does not implement: live literals, function key meta classes, decoys
     /// (which kotlinc itself rejects), turning off one of the feature flags kotlinc enables by
-    /// default, and the compiler metrics and reports, which krusty does not write.
+    /// default, the compiler metrics and reports, which krusty does not write, and a named target
+    /// runtime version, which replaces the runtime features the pass detects on the classpath.
     pub const UNIMPLEMENTED: &'static [(&'static str, OptionSetting)] = &[
         ("liveLiterals", OptionSetting::Exactly("true")),
         ("liveLiteralsEnabled", OptionSetting::Exactly("true")),
@@ -76,6 +77,7 @@ impl ComposeOptions {
         ),
         ("metricsDestination", OptionSetting::NonEmpty),
         ("reportsDestination", OptionSetting::NonEmpty),
+        ("targetRuntimeVersion", OptionSetting::NonEmpty),
     ];
 
     /// Configure from the options the compilation gives Compose, in either syntax. A later setting
