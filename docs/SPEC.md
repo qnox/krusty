@@ -1,5 +1,13 @@
 # krusty — a memory-lean Kotlin→JVM compiler PoC
 
+## Wasm reference not-null assertions
+
+A failed reference `!!` throws the platform declaration's `NullPointerException` through the
+Kotlin exception tag. Its message and cause are null. The assertion evaluates its input once and
+preserves the input's reference carrier on success, including String's distinct heap type.
+`referenceNotNullException.kt` checks nullable String and hidden nullable generic locals against
+the JVM reference and every backend. Nullable scalar unboxing remains separately unsupported.
+
 ## Native callable-reference identity at module exports
 
 A reference created by a source module and a reference selected through that module's KLIB export
@@ -17,6 +25,26 @@ caller's `T` rather than widening it to `Any`. A definitely-non-null target `S &
 source only when the source is a non-null subtype of `S` itself. Sharing `S`'s classifier bound is not
 that proof: under `<T : CharSequence, S : T?>`, `T` is not a subtype of `S & Any`. Test:
 `box_regressions/nullableFormalBoundPropagation.kt`.
+
+## Contradicting generic arguments
+
+kotlinc adds argument constraints in argument order and rejects every argument whose constraint
+contradicts those already accepted, each at that argument. A rejected argument contributes
+nothing. An argument whose parameter mentions the formal only at invariant positions fixes it
+exactly: `same(mutableListOf<Square>(), shape)` against `fun <T> same(MutableList<T>, T)`
+reports the `Shape` argument against `Square`, rather than joining both inputs to `Shape` and
+reporting the list. A mixed occurrence such as `(T) -> T` fixes nothing. Against a declared bound,
+each input outside it is reported: in `keep(mutableListOf<Circle>(), shape)` against
+`fun <T : Square> keep(MutableList<T>, T)` both arguments are rejected, so the list's `Circle`
+never fixes `T`. When every argument for a formal is rejected, nothing is left to infer it from:
+`cannot infer type for type parameter` is reported first, at the callee, and a structural
+parameter renders the formal as `uninferred T (of fun <T : Square> keep)` (kotlinc 2.4.21).
+One argument can contradict several formals: `take(value)` with `Duo<String, Int>` against
+`fun <A : Number, B : CharSequence> take(Duo<A, B>)` reports `cannot infer` for `A`, then for `B`,
+then the argument once against `Duo<uninferred A (…), uninferred B (…)>`. Function and constructor
+calls report it alike. The `resolver_regression_e2e` tests for bound violations, invariant
+fixation, their combination, structural parameters, a multi-formal structural argument and mixed
+variance cover it.
 
 ## File policies under signature recovery
 
@@ -3823,6 +3851,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   line.
   Tests: `tests/for_loop_iterable_slot_e2e.rs`,
   `tests/classpath_inline_plan_parity_e2e.rs` (`an_indexed_iteration_reads_the_frames_receiver_local`).
+- **A range loop in a lambda re-reads a captured stable bound.** A captured binding no code can
+  reassign is published with the same stable read fact as the local it copies, so `{ for (item in 0
+  until size) println(item) }` compares the loop variable against the lambda's `size` parameter on
+  each iteration instead of copying it into a fresh local, as kotlinc does. A captured `var` (a
+  shared cell) is still snapshotted when the loop starts. A capture an anonymous object stores in a
+  field is not covered yet. Test: `tests/captured_stable_binding_e2e.rs`.
 - A `for` loop using the iterator convention evaluates its subject once as the direct receiver of the
   checker-selected `iterator()` call. The resulting iterator is the loop state reused by `hasNext()`
   and `next()`; common IR does not invent a separate local for the subject.
@@ -8579,6 +8613,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   reference) and before the next method's name. A primitive setter has no `checkNotNullParameter`
   that would intern it earlier, and the name had gone to the end of the pool. Test:
   `tests/top_level_setter_pool_e2e.rs`.
+- **A non-final backing field signs declaration-site variance as wildcards.** kotlinc's
+  `mapFieldSignature` maps a final field's type in its return-type mode and any other field's in its
+  value-parameter mode. A `val xs: List<CharSequence>` signs `Ljava/util/List<Ljava/lang/CharSequence;>;`,
+  while a `var` (plain, private, `lateinit` or `@JvmField`, at top level, in a class, an object, a
+  companion or an enum) signs `Ljava/util/List<+Ljava/lang/CharSequence;>;`, and a
+  `var recompose: (String, Int) -> Unit` signs
+  `Lkotlin/jvm/functions/Function2<-Ljava/lang/String;-Ljava/lang/Integer;Lkotlin/Unit;>;`. A
+  redundant wildcard is dropped as in a parameter (`var plain: List<String>` keeps
+  `Ljava/util/List<Ljava/lang/String;>;`). The mode follows the field's emitted `ACC_FINAL` flag.
+  Test: `tests/mutable_field_signature_e2e.rs`.
 - **A top-level property's backing field carries its generic `Signature`.** A top-level `val xs:
   List<String>` becomes a static field of the FILE FACADE, whose field table is built by
   `emit_statics` rather than the class-field path — so it dropped the `Signature` the same property
@@ -18425,6 +18469,21 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   descriptor, then bridges the erased result to the logical type with a `checkcast`
   (`computed_prop_generic_return_e2e::cross_file_generic_member_read_uses_erased_accessor`).
 
+- **A type operator tests an erased call result directly.** `m["k"] as? String`, `m["k"] is String`
+  and `m["k"] as String` on a `Map<String, CharSequence>` evaluate `Map.get`'s erased `Object` and
+  test or cast it; kotlinc writes no `checkcast CharSequence` for the substituted result first. A
+  safe cast's temporary stores the same erased value. Only a coercion that owns the call boundary
+  qualifies (common lowering's declaration-result mark, or the one dependency realization places
+  over a provider's physical result), and only while its operand is still that call and emission
+  evaluates it as that call. A statically inlined or compiled inline call keeps its expression but
+  is replaced by the inlined body, so its coercion, like any other, keeps its conversion. Common lowering records that temporary
+  (`safe_cast_temporaries`), since only the test and the matching cast read it; the JVM
+  call-result boundary then retargets the operator, or the temporary, to the call's erased slot.
+  A named binding (`when (val v = m["k"])`) still converts to its declared type, and so does a
+  cast whose substituted result is non-null or an array: that cast's null check and covariant
+  array view read the substituted type (`erased_result_type_operator_e2e`,
+  `local_function_signature_e2e::local_generic_vararg_arrays_are_byte_identical_to_kotlinc`).
+
 - **Member computed getters retry to a bounded fixpoint.** An unannotated member expression getter
   (`val a get() = holder.a`) infers during its class's collection, so a referenced class collected
   later — another file, or a later class in this one — left the property typed `Error` (and the
@@ -23198,6 +23257,7 @@ publishes the checked property read with its applied result and source receiver 
 the declared ABI. No dependency class layout is materialized for this operation. Owning tests:
 `klib_lowering::tests::accessor_calls` and the official-producer runtime accessor programs in
 `klib_closure_frames_e2e`. Compiler-introduced dependency blocks remain tracked in #2811.
+
 ## Annotation constructor default metadata values
 
 An annotation constructor's declared default retains its normalized constant, enum, class literal,
@@ -23206,3 +23266,15 @@ nested annotation or array value in Kotlin metadata when the physical metadata v
 annotation-record settings. Ordinary constructor and function defaults retain their existing flags
 without an annotation-default payload. Tests: `generic_annotation_construction_e2e` preserves the
 complete #2609 fixture, dependency round trip and full-artifact comparisons.
+
+## Serialized Elvis expression blocks
+
+A serialized Elvis expression retains its immutable compiler temporary and exact null proof.
+Lowering authenticates the temporary identity, signed compiler equality operation, null operand,
+two conditional branches and declared/applied types before publishing the common snapshot and
+Elvis conditional. It evaluates the left operand once, evaluates the fallback only for null, and
+preserves nested evaluation order and function return targets. Only the authenticated present
+read receives the non-null proof. Unrelated origin-less conditionals and unmodelled block origins
+still decline. Owning tests compare String, Int and Any IR with checked FIR, exercise malformed
+contracts, and execute the unchanged #2811 Pair program plus official-producer controls after JVM
+oracles in `klib_closure_frames_e2e::elvis_blocks`.

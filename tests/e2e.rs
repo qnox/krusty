@@ -284,6 +284,8 @@ mod caller_type_param_receiver_e2e;
 mod cannot_infer_cascade_e2e;
 #[path = "capture_first_use_order_e2e.rs"]
 mod capture_first_use_order_e2e;
+#[path = "captured_stable_binding_e2e.rs"]
+mod captured_stable_binding_e2e;
 #[path = "cast_evaluation_order_e2e.rs"]
 mod cast_evaluation_order_e2e;
 #[path = "catch_annotation_comma_e2e.rs"]
@@ -1323,6 +1325,8 @@ mod local_class_capture_order_e2e;
 mod local_class_construction_capture_e2e;
 #[path = "local_function_reference_inference_e2e.rs"]
 mod local_function_reference_inference_e2e;
+#[path = "mutable_field_signature_e2e.rs"]
+mod mutable_field_signature_e2e;
 java_member_modules::declare!();
 mod java_nullability_modules;
 java_nullability_modules::declare!();
@@ -2990,6 +2994,8 @@ mod field_store_lines_e2e;
 #[path = "written_default_accessor_e2e.rs"]
 mod written_default_accessor_e2e;
 
+#[path = "erased_result_type_operator_e2e.rs"]
+mod erased_result_type_operator_e2e;
 #[path = "intersection_bound_metadata_order_e2e.rs"]
 mod intersection_bound_metadata_order_e2e;
 #[path = "type_safe_override_call_e2e.rs"]
