@@ -117,8 +117,12 @@ pub(super) fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, env:
             visibility | 0x0018 // [PRIVATE | PUBLIC] | STATIC | FINAL
         } else if s.is_var {
             // A public or internal `lateinit var` is `public static`: `isInitialized` and other
-            // raw reads `getstatic` it. A private one, and every plain `var`, stays private.
-            if s.is_lateinit && !s.visibility.is_private() {
+            // raw reads `getstatic` it. Its field follows the setter, so a private one, one with a
+            // `private set` (no setter method), and every plain `var` stay private.
+            if s.is_lateinit
+                && !s.visibility.is_private()
+                && s.accessors.setter != crate::ir::IrStaticAccessor::Absent
+            {
                 0x0009 // PUBLIC | STATIC
             } else {
                 0x000A // PRIVATE | STATIC
@@ -1190,7 +1194,7 @@ impl Emitter<'_> {
         } else {
             let m = self.cw.methodref(
                 &facade,
-                &property_getter_name(&name),
+                &self.ir.statics[i as usize].default_getter_jvm_name(),
                 &format!("(){}", type_descriptor(jt)),
             );
             code.invokestatic(m, 0, slot_words(jt) as i32);
@@ -1330,7 +1334,9 @@ impl Emitter<'_> {
                 );
                 code.invokestatic(m, slot_words(jt) as i32, 0);
             }
-        } else if self.static_owner == Some(StaticOwner::Facade) || is_const {
+        } else if (self.static_owner == Some(StaticOwner::Facade) || is_const)
+            && !self.calls_facade_lateinit_setter(index)
+        {
             let fref = self.cw.fieldref(
                 &facade,
                 self.ir.static_field_jvm_name(index),
@@ -1340,11 +1346,18 @@ impl Emitter<'_> {
         } else {
             let m = self.cw.methodref(
                 &facade,
-                &property_setter_name(&name),
+                &self.ir.statics[index as usize].default_setter_jvm_name(),
                 &format!("({})V", type_descriptor(jt)),
             );
             code.invokestatic(m, slot_words(jt) as i32, 0);
         }
+    }
+
+    /// kotlinc keeps a `lateinit` property's default accessors even inside the facade that owns
+    /// its field (`JvmPropertiesLowering` never replaces them with field access), so a write in
+    /// that facade calls `setX` just as a read calls `getX`.
+    fn calls_facade_lateinit_setter(&self, index: u32) -> bool {
+        self.ir.statics[index as usize].is_lateinit && self.ir.has_jvm_default_static_setter(index)
     }
 
     /// Emit one checked static initializer through its declared JVM storage boundary. Facade,
