@@ -26,6 +26,7 @@ pub(crate) mod function_classifiers;
 mod generic_signature;
 mod inline_body;
 mod inline_kind;
+mod klib_body_accessor;
 mod klib_body_class;
 mod member_flags;
 mod member_records;
@@ -80,6 +81,8 @@ pub(crate) use dependency_body_contract::{
 pub(crate) use dependency_body_modifiers::KlibBodyDeclarationModifiers;
 pub use enhanced_nullability::{enhance_from_overridden, EnhancedResult, TypeEnhancement};
 pub use inline_kind::InlineKind;
+pub use klib_body_accessor::DependencyGetterSignature;
+pub(crate) use klib_body_accessor::{KlibAccessorRole, KlibBodyAccessor};
 pub use param_flags::ParamFlags;
 pub use physical_parameter_plan::PhysicalParameterSlot;
 pub use platform_abi::PlatformAbi;
