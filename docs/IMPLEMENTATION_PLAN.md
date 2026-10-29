@@ -6268,6 +6268,14 @@ of the expected signature. Applied hierarchy traversal retains declared variance
 arity and suspend kind. Owning semantic tests cover reflective and inherited function declarations
 and unrelated-callable rejection; the JVM round trip covers nominal and reflection interface slots.
 
+Superclass-argument name reads retain the unavailable dispatch receiver as diagnostic evidence,
+separate from the usable receiver tower. Both paths share its declared scope identity. After
+lexical values and available receivers fail, a pure member-selection probe diagnoses the missing
+initialized instance before inferred-type demand or checked-body construction. Pending dispatch
+properties demand through their selected available receiver instead of a bare declaration name.
+The name-demand operation is extracted from the resolver facade; receiver and capture coordinates
+are unchanged. Ordered kotlinc diagnostics and positive enclosing-value controls cover #2658.
+
 ## Compose compiler plugin  🚧
 
 krusty reimplements the Compose compiler plugin as a native pass (`src/plugins/compose`), one
