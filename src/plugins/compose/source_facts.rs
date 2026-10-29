@@ -858,7 +858,7 @@ fn singletons_class(ir: &IrFile, file_name: &str) -> TypeName {
     let stem = file_name.strip_suffix(".kt").unwrap_or(file_name);
     let name = format!(
         "ComposableSingletons${}",
-        crate::jvm::names::file_facade_segment(stem)
+        crate::names::file_part_short_name(stem)
     );
     match ir.package.as_deref() {
         Some(package) if !package.is_empty() => {

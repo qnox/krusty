@@ -49,40 +49,11 @@ pub(crate) fn function_interface_internal_name(arity: usize) -> String {
 
 /// The file-facade class internal name for a source file: `Foo.kt` → `FooKt` (package-qualified).
 pub fn file_class_name(file_stem: &str, package: Option<&str>) -> String {
-    let base = file_facade_segment(file_stem);
+    let base = crate::names::file_part_short_name(file_stem);
     match package {
         Some(p) if !p.is_empty() => format!("{}/{}", p.replace('.', "/"), base),
         _ => base,
     }
-}
-
-/// kotlinc's package-part class name for a file named `file_stem`: `box` → `BoxKt`.
-pub(crate) fn file_facade_segment(file_stem: &str) -> String {
-    let sanitized: String = file_stem
-        .chars()
-        .map(|character| {
-            if character.is_alphabetic() || character.is_numeric() {
-                character
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    let mut base = String::new();
-    let mut characters = sanitized.chars();
-    match characters.next() {
-        Some(first) if first.is_numeric() => {
-            base.push('_');
-            base.push_str(&sanitized);
-        }
-        Some(first) => {
-            base.extend(first.to_uppercase());
-            base.push_str(characters.as_str());
-        }
-        None => {}
-    }
-    base.push_str("Kt");
-    base
 }
 
 pub use crate::names::property_getter_name;
@@ -628,7 +599,6 @@ mod tests {
             ("_u", "_uKt"),
         ] {
             assert_eq!(file_class_name(stem, None), facade, "{stem}");
-            assert_eq!(file_facade_segment(stem), facade, "{stem}");
         }
     }
 

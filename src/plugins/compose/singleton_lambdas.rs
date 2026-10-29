@@ -143,10 +143,8 @@ fn read_from_singletons(
     singletons: TypeName,
     name: &str,
 ) {
-    let instance = ir.add_expr(IrExpr::ExternalStaticInstance {
-        owner: singletons,
-        ty: singletons,
-        field: "INSTANCE".to_string(),
+    let instance = ir.add_expr(IrExpr::SingletonValue {
+        classifier: singletons,
     });
     let read = ir.add_expr(IrExpr::PropertyRead {
         receiver: Some(instance),
