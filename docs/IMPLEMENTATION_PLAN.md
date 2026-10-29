@@ -5098,6 +5098,20 @@ their declarations into an index-based model (`declarations`, `model`), lays rec
 - **Next.** Pointer, struct and callback crossings in direct C calls, and the cgo-mode thread
   start that lifts the linker's refusal of a program that imports and can start threads.
 
+## Native compiler command  ◐
+
+- **Programs (done for linux_x64).** `krusty kotlinc-native` takes Kotlin/Native's
+  `kotlinc-native` options, compiles the sources against the Native stdlib KLIB and the
+  `-library` KLIBs, and links a static `.kexe` (`native::compile_native`). Options krusty cannot
+  honor are refused by name (`crates/krusty-cli/src/kotlinc_native.rs` unit tests).
+  `tests/native_compiler_command_e2e.rs` checks the answer on the JVM lane, then compiles a
+  two-file program with the command, runs it, and asserts the complete diagnostics of a broken
+  source.
+- **Next.** `-produce library`, which needs the KLIB writer to serialize ordinary function and
+  class bodies into `default/ir`; until then a first-party library's sources are compiled into the
+  program. Programs reach further as dependency body emission grows (library member bodies, then
+  non-constant parameter defaults of third-party KLIBs).
+
 ## Byte-identical box conformance, item 1 — local-class naming  ◐
 
 Goal: every box test passes AND writes the same class files as kotlinc. The first mechanism is how
