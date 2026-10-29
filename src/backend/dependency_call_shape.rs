@@ -32,6 +32,48 @@ pub(crate) enum DependencyExportCall {
     SerializedExtension,
 }
 
+impl DependencyExportCall {
+    /// The export operand positions a call leaving out the value parameters `omitted` (checked
+    /// ordinals) leaves to the declaration's default entry.
+    /// An omitted parameter is a value parameter, so it follows an inserted extension receiver.
+    /// Each ordinal names one distinct operand the export declares, or the call is malformed.
+    pub(crate) fn omitted_operands(
+        self,
+        omitted: &[u32],
+        declared: usize,
+    ) -> Result<Vec<usize>, &'static str> {
+        if omitted.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut positions = match self {
+            Self::TopLevel | Self::SerializedExtension => omitted
+                .iter()
+                .map(|&ordinal| ordinal as usize)
+                .collect::<Vec<_>>(),
+            Self::SourceExtension {
+                receiver_position, ..
+            } => omitted
+                .iter()
+                .map(|&ordinal| ordinal as usize)
+                .map(|ordinal| ordinal + usize::from(ordinal >= receiver_position))
+                .collect(),
+            _ => {
+                return Err(
+                    "a dependency call with omitted arguments through a receiver-erased export",
+                )
+            }
+        };
+        positions.sort_unstable();
+        if positions.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err("a dependency call omitting one operand twice");
+        }
+        if positions.iter().any(|&position| position >= declared) {
+            return Err("a dependency call omitting an operand its export does not declare");
+        }
+        Ok(positions)
+    }
+}
+
 pub(crate) struct DependencyCallShape<'a> {
     pub(crate) is_top_level_function: bool,
     pub(crate) is_extension: bool,
@@ -183,5 +225,66 @@ impl DependencyCallShape<'_> {
             }
             _ => Err("an emitted dependency callable whose checked receiver shape changed"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DependencyExportCall;
+    use crate::types::Ty;
+
+    #[test]
+    fn omitted_operands_follow_an_inserted_receiver() {
+        assert_eq!(
+            DependencyExportCall::TopLevel.omitted_operands(&[2, 0], 3),
+            Ok(vec![0, 2])
+        );
+        let extension = DependencyExportCall::SourceExtension {
+            receiver: Ty::String,
+            receiver_position: 0,
+        };
+        assert_eq!(extension.omitted_operands(&[0, 1], 3), Ok(vec![1, 2]));
+        assert_eq!(
+            DependencyExportCall::TopLevel.omitted_operands(&[], 0),
+            Ok(Vec::new())
+        );
+    }
+
+    #[test]
+    fn a_malformed_omission_is_rejected_before_any_operand_is_built() {
+        for (omitted, declared, error) in [
+            (
+                &[1, 1][..],
+                3,
+                "a dependency call omitting one operand twice",
+            ),
+            (
+                &[2, 0, 2][..],
+                3,
+                "a dependency call omitting one operand twice",
+            ),
+            (
+                &[3][..],
+                3,
+                "a dependency call omitting an operand its export does not declare",
+            ),
+        ] {
+            assert_eq!(
+                DependencyExportCall::TopLevel.omitted_operands(omitted, declared),
+                Err(error)
+            );
+        }
+        let extension = DependencyExportCall::SourceExtension {
+            receiver: Ty::String,
+            receiver_position: 0,
+        };
+        assert_eq!(
+            extension.omitted_operands(&[0, 0], 3),
+            Err("a dependency call omitting one operand twice")
+        );
+        assert_eq!(
+            DependencyExportCall::Member.omitted_operands(&[0], 2),
+            Err("a dependency call with omitted arguments through a receiver-erased export")
+        );
     }
 }

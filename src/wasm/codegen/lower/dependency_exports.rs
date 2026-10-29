@@ -157,28 +157,9 @@ impl Body<'_> {
         }
         // The operands the call supplies, at their declared positions. An omitted parameter is
         // a value parameter, so it follows an inserted receiver.
-        let omitted = match call {
-            _ if defaults.is_empty() => Vec::new(),
-            DependencyExportCall::TopLevel | DependencyExportCall::SerializedExtension => {
-                defaults.iter().map(|&ordinal| ordinal as usize).collect()
-            }
-            DependencyExportCall::SourceExtension {
-                receiver_position, ..
-            } => defaults
-                .iter()
-                .map(|&ordinal| ordinal as usize)
-                .map(|ordinal| ordinal + usize::from(ordinal >= receiver_position))
-                .collect::<Vec<_>>(),
-            _ => {
-                return Err(
-                    "a dependency call with omitted arguments through a receiver-erased export"
-                        .into(),
-                )
-            }
-        };
-        if omitted.iter().any(|&position| position >= declared.len()) {
-            return Err("a dependency call omitting an operand its export does not declare".into());
-        }
+        let omitted = call
+            .omitted_operands(defaults, declared.len())
+            .map_err(str::to_owned)?;
         let abi = declared;
         match call {
             DependencyExportCall::TopLevel | DependencyExportCall::SerializedExtension => {
