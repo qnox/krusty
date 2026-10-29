@@ -795,9 +795,11 @@ impl CallInferenceConstraints {
             }
             bound_violations.extend(self.rejected_arguments(source, formal, index, &bounds));
         }
-        // kotlinc reports each rejected argument once, in argument order.
-        bound_violations.sort_by_key(|violation: &GenericBoundViolation| violation.argument);
-        bound_violations.dedup_by_key(|violation| violation.argument);
+        // One argument can reject several formals; each keeps its own evidence, in argument order.
+        bound_violations.sort_by_key(|violation: &GenericBoundViolation| {
+            (violation.argument, violation.formal)
+        });
+        bound_violations.dedup_by_key(|violation| (violation.argument, violation.formal));
         let upper_only = self
             .upper
             .iter()

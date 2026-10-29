@@ -2760,3 +2760,18 @@ fun construct(c: Boolean): Same<*> = Same(mutableListOf<Square>(), if (c) Square
 "#;
     assert_rejection_same_as_kotlinc("InvariantFormalBeforeConditional", source);
 }
+
+#[test]
+fn one_structural_argument_rejects_each_formal_it_contradicts() {
+    // kotlinc reports every formal the one argument leaves uninferred, then the argument once.
+    let source = r#"
+class Duo<A, B>
+fun <A : Number, B : CharSequence> take(value: Duo<A, B>) {}
+class Sink<A : Number, B : CharSequence>(value: Duo<A, B>)
+fun test(value: Duo<String, Int>) {
+    take(value)
+    Sink(value)
+}
+"#;
+    assert_rejection_same_as_kotlinc("StructuralArgumentRejectsEachFormal", source);
+}

@@ -22,9 +22,12 @@ each input outside it is reported: in `keep(mutableListOf<Circle>(), shape)` aga
 never fixes `T`. When every argument for a formal is rejected, nothing is left to infer it from:
 `cannot infer type for type parameter` is reported first, at the callee, and a structural
 parameter renders the formal as `uninferred T (of fun <T : Square> keep)` (kotlinc 2.4.21).
-Function and constructor calls report it alike. The `resolver_regression_e2e` tests for bound
-violations, invariant fixation, their combination, structural parameters and mixed variance
-cover it.
+One argument can contradict several formals: `take(value)` with `Duo<String, Int>` against
+`fun <A : Number, B : CharSequence> take(Duo<A, B>)` reports `cannot infer` for `A`, then for `B`,
+then the argument once against `Duo<uninferred A (…), uninferred B (…)>`. Function and constructor
+calls report it alike. The `resolver_regression_e2e` tests for bound violations, invariant
+fixation, their combination, structural parameters, a multi-formal structural argument and mixed
+variance cover it.
 
 ## File policies under signature recovery
 
