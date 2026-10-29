@@ -48,6 +48,7 @@ use annotation_bindings::{BoundAnnotation, BoundAnnotations};
 mod anonymous_extension_functions;
 mod anonymous_object_capture;
 mod backing_field_binding;
+mod bare_constructor_precedence;
 mod boolean_implications;
 mod dependency_annotation_defaults;
 use anonymous_object_capture::{
@@ -19298,7 +19299,20 @@ impl<'a> Checker<'a> {
                 let mut low_priority_source_constructor = None;
                 let mut low_priority_provider_constructor = None;
                 let mut had_inapplicable_constructor = false;
-                if let Some(scoped_internal) = bare_constructor_classifier {
+                let call_args = CallArgs {
+                    call,
+                    args,
+                    arg_tys: &arg_tys,
+                };
+                if let Some(scoped_internal) = bare_constructor_classifier.filter(|&internal| {
+                    !self.nearer_function_takes_bare_constructor_call(
+                        scope,
+                        call_args,
+                        (&fname, internal),
+                        &explicit_type_args,
+                        expected,
+                    )
+                }) {
                     let (inherited, inherited_owner) =
                         self.inherited_nested_type_with_owner(&fname);
                     let inherited_shape = (inherited.found() == Some(scoped_internal))
@@ -19429,11 +19443,7 @@ impl<'a> Checker<'a> {
                                 } else {
                                     let result = self.finish_source_constructor_call(
                                         scope,
-                                        CallArgs {
-                                            call,
-                                            args,
-                                            arg_tys: &arg_tys,
-                                        },
+                                        call_args,
                                         &cls,
                                         selected,
                                         implicit_constructor_outer.map(|receiver| receiver.ty),
@@ -19526,11 +19536,7 @@ impl<'a> Checker<'a> {
                 // Inapplicable associated candidates join the final report.
                 let mut inapplicable_associated = Vec::new();
                 let associated_site = classifier_associated::AssociatedCallSite {
-                    call_args: CallArgs {
-                        call,
-                        args,
-                        arg_tys: &arg_tys,
-                    },
+                    call_args,
                     argument_names: arg_names.as_deref(),
                     explicit_type_args: &explicit_type_args,
                     expected,
