@@ -13,6 +13,15 @@ type mismatch". Regressions: `tests/box_regressions/nullableProjectedReceiverVar
 `tests/box_regressions/nullableBoundedCallerReceiverVariable.kt` and
 `resolver_regression_e2e::an_invariant_nullable_receiver_variable_rejects_a_non_null_argument_like_kotlinc`.
 
+## Native callable-reference identity at module exports
+
+A reference created by a source module and a reference selected through that module's KLIB export
+compare equal and hash alike. Native export records retain the source declaration's marker key
+independently of the emitted call-entry alias. Authenticated KLIB declarations retain their complete
+module-qualified signature for identity; provider-local callable numbers never become global keys.
+The shared conformance target checks the identical module graph with JVM and Native reference
+compilers before requiring Native identity, hash and different-declaration agreement.
+
 ## Nullable formal bounds in inference
 
 A declared bound `S : T?` admits null itself, so a lower bound `X` of `S` contributes only
@@ -23124,3 +23133,16 @@ formal binds to the caller's own type variable (`b + t` for
 `operator fun <A : Number?, B : A> Box<A>.plus(t: B): Pair2<A, B>` inside
 `fun <X : Number?, Y : X>`), the result names that variable (`Pair2<X, Y>`); the declaration's
 formal never survives the call, whatever its bound. Test: `box_regressions/boundedFormalExtensionReturn.kt`.
+
+## Runtime-owned dependency getter leaves
+
+An ordinary serialized KLIB body may read a property through a getter the target implements.
+The provider retains the exact property identity, declared accessor role and normalized property
+name. Preparation and linking authenticate the accessor's class/property group, complete receiver
+signature and own-formal application, parameters and declared result. A positive target capability
+stops traversal of that getter's serialized body; retained exports and existing primitive/intrinsic
+decisions retain priority. Native reuses its existing runtime accessor tables, and common lowering
+publishes the checked property read with its applied result and source receiver separately from
+the declared ABI. No dependency class layout is materialized for this operation. Owning tests:
+`klib_lowering::tests::accessor_calls` and the official-producer runtime accessor programs in
+`klib_closure_frames_e2e`. Compiler-introduced dependency blocks remain tracked in #2811.

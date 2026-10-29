@@ -544,6 +544,7 @@ impl Record {
         KlibCallable::new(
             crate::libraries::KlibBodyCallableShape {
                 class_contract: None,
+                accessor: None,
                 name: self.name,
                 kind: ExternalCallableKind::TopLevel,
                 visibility: crate::types::Visibility::Public,
