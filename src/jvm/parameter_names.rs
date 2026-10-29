@@ -92,6 +92,8 @@ pub(super) fn local_variable(
             }
             IrGeneratedParameterRole::LocalDelegateDispatch => Some("this$0".to_string()),
             IrGeneratedParameterRole::DelegateMethodReceiver => Some("<this>".to_string()),
+            // kotlinc writes no local-variable row for a mask parameter.
+            IrGeneratedParameterRole::DefaultMask => None,
         },
     }
 }
