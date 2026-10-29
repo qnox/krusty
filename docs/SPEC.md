@@ -23118,6 +23118,16 @@ a same-named classifier gains no such subtype relation. Tests: the normalized de
 `symbol_resolver::hierarchy_projection` and the JVM nominal-slot round trip in
 `function_reference_invoke_e2e`.
 
+## Lambda shapes follow the implicit receiver tower
+
+An unqualified call's lambda arguments are shaped by the innermost implicit receiver that offers a
+candidate. Inside `Column<Byte>(name).apply { check("n") { it.describe() } }` in a class that
+declares both `fun <T> Column<T>.check(name: String, op: (Column<T>) -> Op)` and
+`fun check(name: String, op: () -> Op)`, the inner `Column` receiver's member extension shapes the
+lambda, so `it` is the column. The outer `Table` receiver's member is not considered first. A
+receiver's own source member still outranks its extensions. Tests:
+`implicit_receiver_tower_lambda_shape_e2e`.
+
 ## Extension receivers bound to caller variables
 
 An extension receiver is applicable when its declared receiver, specialized by the bindings the
