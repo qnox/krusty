@@ -20,6 +20,7 @@ pub const KSP_PLUGIN_ID: &str = "com.google.devtools.ksp.symbol-processing";
 pub const ALLOPEN_PLUGIN_ID: &str = "org.jetbrains.kotlin.allopen";
 pub const NOARG_PLUGIN_ID: &str = "org.jetbrains.kotlin.noarg";
 pub const SAM_WITH_RECEIVER_PLUGIN_ID: &str = "org.jetbrains.kotlin.samWithReceiver";
+pub const ASSIGNMENT_PLUGIN_ID: &str = "org.jetbrains.kotlin.assignment";
 pub const COMPOSE_PLUGIN_ID: &str = "androidx.compose.compiler.plugins.kotlin";
 /// kotlinc's default scripting plugin, which kotlinc loads into every compilation and the Kotlin
 /// Gradle plugin also passes explicitly on every JVM compile's `-Xplugin` classpath.

@@ -381,7 +381,7 @@ impl Checker<'_> {
         )
     }
 
-    fn publish_formal_identity_owners<'f>(
+    pub(super) fn publish_formal_identity_owners<'f>(
         &mut self,
         formals: impl IntoIterator<Item = (&'f str, Option<bool>)>,
         owner: String,

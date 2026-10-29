@@ -5,6 +5,9 @@ use krusty::backend::{Artifact, Backend, CheckedIrFile, CheckedIrUnitKind};
 use krusty::diag::DiagSink;
 use krusty::klib_libraries::{KlibLibraries, KlibLibraryInput, KlibStdlibSemantics};
 
+#[path = "klib_closure_frames_e2e/elvis_blocks.rs"]
+mod elvis_blocks;
+
 const LIBRARY: &str = include_str!("fixtures/klib_closure_frames/Library.kt");
 
 const CONSUMER: &str = include_str!("fixtures/klib_closure_frames/Consumer.kt");

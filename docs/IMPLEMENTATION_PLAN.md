@@ -1,5 +1,12 @@
 # krusty — implementation plan
 
+## Wasm reference assertion exceptions
+
+Authenticate NullPointerException storage through the existing platform exception declaration
+normalizer and metadata parent chain. Failed reference assertions construct that exact class and
+throw through the shared Kotlin tag. Keep scalar-reference conversion outside this change; the
+generic numeric dependency ABI will consume this exception prerequisite separately.
+
 ## Native dependency reference identity handoff
 
 Retain the canonical declaration marker in the existing Native dependency export registry. Source
@@ -6299,7 +6306,10 @@ and the pass rejects every construct it does not cover yet.
 - [ ] `@Composable` function types and lambdas, and the composable call checker's diagnostics.
 - [x] Primitive and `String` parameters: `$changed`/`$dirty` slot tracking with strong skipping,
   `Composer.changed` comparisons, and each call's argument bits (static, passed on, uncertain).
-- [ ] More parameters: `$default` masks, receivers, varargs, more than ten, stability inference.
+- [x] Constant default arguments: the `$default` mask, defaults assigned in the group, placeholders
+  and masks at calls, no `$default` synthetic.
+- [ ] More parameters: non-constant defaults (defaults groups), receivers, varargs, more than ten,
+  stability inference.
 - [ ] The full body transform: control-flow groups, `remember`, early returns, inline composables.
 - [ ] `ComposableSingletons` lambda holders and the `$stable` field of classes.
 - [ ] Remove the partial marker and rerun the corpus for the Compose projects.
@@ -6313,3 +6323,11 @@ bodyless edge preparation and ordinary accessor linking; preserve retained expor
 primitive/intrinsic priority. Native consumes its existing runtime getter plans. Prove real
 official-producer/JVM-oracle programs and malformed header/facet controls. Keep compiler-introduced
 block lowering as the independent #2811 follow-up.
+
+## Lower serialized Elvis expression blocks
+
+Authenticate the producer's exact temporary/null-test/branch contract and lower it to the existing
+common Elvis snapshot and conditional. Preserve single evaluation, lazy fallback, nested order,
+return targets and declared storage; leave generic operand and unrelated conditional admission
+unchanged. Validate malformed contracts and checked-FIR parity alongside the original full #2811
+official-producer program and independent JVM-oracle controls.

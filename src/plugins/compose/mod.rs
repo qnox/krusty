@@ -9,8 +9,8 @@
 //! a build gives a Compose module to kotlinc.
 //!
 //! Covered: `Unit` top-level composable functions with a block body whose parameters are
-//! primitives or `String`, made restartable and skippable with per-parameter change tracking, and
-//! their calls to one another in the same file. Source
+//! primitives or `String`, with constant default arguments, made restartable and skippable with
+//! per-parameter change tracking, and their calls to one another in the same file. Source
 //! information, trace markers and `@FunctionKeyMeta` follow the plugin's options.
 
 mod durable_keys;

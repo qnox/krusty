@@ -22,6 +22,7 @@ mod closures;
 mod compiler_blocks;
 mod conditionals;
 mod constructions;
+mod elvis_blocks;
 mod loops;
 mod range_membership;
 mod string_templates;
@@ -353,6 +354,13 @@ impl<'a> BodyLowering<'a> {
                 // A block's type is its source block's, which checked FIR lowering records itself.
                 self.ty(expression, "block")?;
                 return self.block(statements);
+            }
+            KlibIrExprKind::Block {
+                statements,
+                origin: Some(origin),
+            } if origin == "ELVIS" => {
+                let ty = self.ty(expression, "Elvis block")?;
+                return self.elvis_block(statements, ty);
             }
             KlibIrExprKind::Block {
                 statements,
