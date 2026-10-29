@@ -550,6 +550,16 @@ fn declarations_are_in_the_order_ksp2_lists_them() {
 
 #[test]
 #[ignore = "downloads symbol-processing-api 2.3.12 and a JDK"]
+fn members_sharing_a_name_are_listed_together_as_ksp2_lists_them() {
+    members_log_is_what_ksp2_reports(
+        &[fixtures().join("grouping/Grouping.kt")],
+        "ksp-outputs-grouping",
+        "grouping.expected",
+    );
+}
+
+#[test]
+#[ignore = "downloads symbol-processing-api 2.3.12 and a JDK"]
 fn annotation_arguments_and_accessors_are_what_ksp2_reports() {
     log_is_what_ksp2_reports(
         "Annotations",
@@ -812,6 +822,18 @@ fn all_functions_and_properties_of_source_classifiers_are_what_ksp2_lists() {
         .map(str::to_string)
         .collect();
     assert_eq!(run.log, expected);
+}
+
+#[test]
+#[ignore = "downloads symbol-processing-api 2.3.12 and a JDK"]
+fn all_members_sharing_a_name_are_listed_together_as_ksp2_lists_them() {
+    log_is_what_ksp2_reports(
+        "AllMembers",
+        "allmembers.AllMembersProvider",
+        &[fixtures().join("all-members-grouping/Grouping.kt")],
+        "ksp-outputs-all-members-grouping",
+        "all-members-grouping.expected",
+    );
 }
 
 #[test]
