@@ -69,7 +69,7 @@ const PLATFORM_SOURCE: &str = "package store\n\
     \x20   }\n\
     }\n\
     fun property(key: String): Int = when (System.getProperty(key)) {\n\
-    \x20   \"a\" -> 1; \"b\" -> 2; null -> 3; else -> 4\n\
+    \x20   \"a\" -> 1; \"b\" -> 2; \"c\" -> 5; null -> 3; else -> 4\n\
     }\n\
     fun declared(method: Method): Int {\n\
     \x20   val name: String = method.name\n\
