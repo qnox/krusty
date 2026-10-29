@@ -6287,7 +6287,9 @@ and the pass rejects every construct it does not cover yet.
   `@FunctionKeyMeta`, source information and trace markers; calls between them in one file.
 - [ ] Calls to composables of other files and modules, and the grouping annotations.
 - [ ] `@Composable` function types and lambdas, and the composable call checker's diagnostics.
-- [ ] Parameters: `$changed` bit sets per parameter, `$default` masks, stability inference.
+- [x] Primitive and `String` parameters: `$changed`/`$dirty` slot tracking with strong skipping,
+  `Composer.changed` comparisons, and each call's argument bits (static, passed on, uncertain).
+- [ ] More parameters: `$default` masks, receivers, varargs, more than ten, stability inference.
 - [ ] The full body transform: control-flow groups, `remember`, early returns, inline composables.
 - [ ] `ComposableSingletons` lambda holders and the `$stable` field of classes.
 - [ ] Remove the partial marker and rerun the corpus for the Compose projects.

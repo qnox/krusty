@@ -1,6 +1,5 @@
 package krusty.ksphost;
 
-import com.google.devtools.ksp.UtilsKt;
 import com.google.devtools.ksp.symbol.FunctionKind;
 import com.google.devtools.ksp.symbol.KSAnnotation;
 import com.google.devtools.ksp.symbol.KSDeclaration;
@@ -22,6 +21,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Set;
+import java.util.function.Supplier;
 import kotlin.sequences.Sequence;
 
 // A source function or constructor, a function the language contributes to a classifier, or a
@@ -48,6 +48,8 @@ final class SourceFunction implements KSFunctionDeclaration {
     String jvmSignature;
     // The name KSP2 reports; null also when krusty does not name it the way KSP2 does yet.
     String jvmName;
+    // What `findOverridee` answers, or null when the round cannot say.
+    Supplier<KSDeclaration> overridee;
     // The extension receiver; `receiverUndescribed` when it has one krusty could not describe.
     KSTypeReference extensionReceiver;
     boolean receiverUndescribed;
@@ -111,15 +113,10 @@ final class SourceFunction implements KSFunctionDeclaration {
 
     @Override
     public KSDeclaration findOverridee() {
-        // A constructor overrides nothing, and neither does a written function without
-        // `override`; a generated one's `override` (a data class's `componentN`) says nothing.
-        if (UtilsKt.isConstructor(this)
-                || (origin == Origin.KOTLIN
-                        && modifiers != null
-                        && !modifiers.contains(Modifier.OVERRIDE))) {
-            return null;
+        if (overridee == null) {
+            throw Nodes.notImplemented("KSFunctionDeclaration.findOverridee");
         }
-        throw Nodes.notImplemented("KSFunctionDeclaration.findOverridee");
+        return overridee.get();
     }
 
     @Override
