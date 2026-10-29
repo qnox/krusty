@@ -1,5 +1,14 @@
 # krusty — a memory-lean Kotlin→JVM compiler PoC
 
+## Generic super calls
+
+`super.name(args)` dispatches to the selected declaration, but that declaration's own type
+parameters are still inferred from the call's arguments and explicit type arguments, as for any
+member call. `super.wrap(e)` with `fun <T> wrap(e: Expr<T>): Expr<T>` and `e: Expr<U>` checks
+`e` against `Expr<U>` and types the call as `Expr<U>`. Tests:
+`box_regressions/superCallInfersMethodTypeParameters.kt` and
+`generic_super_call_e2e::super_call_infers_the_method_type_parameters_like_kotlinc`.
+
 ## File policies under signature recovery
 
 A file's own annotations (`@file:Suppress`, opt-ins) are published before recovery diagnostics
