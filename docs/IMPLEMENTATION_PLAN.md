@@ -6174,7 +6174,12 @@ reuse local-class capture-use classification, retaining capture order and constr
 identities. Inline/default bodies discover those captures at construction; inspection publishes
 the plan after its class check. Four complete ABI/metadata/runtime controls and two FIR owner tests
 cover retained inline/default captures, a real same-spelled property and ordinary captures.
-Own versus lexical-capture metadata applications stay in #2653 with their full retained oracles.
+
+The checked classifier-application contract distinguishes own arguments from lexical captures and
+genuine inner instances. JVM encoding omits only the authenticated lexical suffix, retaining formal
+IDs and semantic types. KLIB and local-outer inner encoding retain their existing policies. All
+original #2653 complete metadata/ABI oracles are restored, with independent bounds and declaration
+layout controls.
 Parameterized alias superclass constructor argument inference remains a separate repair in #2655.
 
 ## Enclosing formal field signatures

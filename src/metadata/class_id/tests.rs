@@ -103,13 +103,13 @@ fn resolved_local_headers_preserve_raw_jvm_names_and_decline_klib_cleanly() {
         &std::iter::once(identity).collect(),
         &Default::default(),
         None,
-        crate::metadata::MetadataTypeLookups::default().inner_classifiers,
+        crate::metadata::MetadataTypeLookups::default().classifier_applications,
     );
     assert_eq!(strings.declaration_class_id(&local), Ok(0));
     assert_eq!(strings.serialize_types().as_bytes(), &[10, 0, 42, 1, 0]);
     assert_eq!(strings.into_strings(), ["header_names/AKt$run$Local"]);
     let mut klib =
-        StringTable::klib(crate::metadata::MetadataTypeLookups::default().inner_classifiers);
+        StringTable::klib(crate::metadata::MetadataTypeLookups::default().classifier_applications);
     assert_eq!(
         klib.declaration_class_id(&local),
         Err(ClassIdError::LocalInKlib(identity))

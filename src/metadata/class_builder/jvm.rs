@@ -299,7 +299,7 @@ pub fn build_class(
         tail.local_classifiers,
         tail.enum_entry_bodies,
         tail.intersection_approximation,
-        tail.inner_classifiers,
+        tail.classifier_applications,
     );
     let class = class_message(
         &mut st,

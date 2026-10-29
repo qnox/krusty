@@ -87,7 +87,7 @@ pub(crate) struct StringTable<'a> {
     intersection_approximation: Option<&'a dyn Fn(Ty) -> Option<Ty>>,
     /// Checked declaration lookup for `inner` classifiers. It distinguishes a known non-inner
     /// declaration from a classifier missing at the backend boundary.
-    inner_classifiers: InnerClassifiers<'a>,
+    classifier_applications: ClassifierApplications<'a>,
     /// `Some` when the messages are written for a KLIB `PackageFragment` rather than a JVM
     /// `@Metadata` annotation: the two carry the same declaration schema but name classes and
     /// place types differently (see [`KlibTables`]).
@@ -132,19 +132,31 @@ pub struct InnerClassifier {
     pub own_arguments: usize,
 }
 
-/// Checked declaration lookup for a metadata type's classifier. `Ok(None)` is a known non-inner
-/// declaration; `Err(classifier)` is an absent backend fact and must stop emission.
-pub type InnerClassifiers<'a> = &'a dyn Fn(TypeName) -> Result<Option<InnerClassifier>, TypeName>;
+/// Declaration-owned application layout. Lexical formals remain in semantic applications but do
+/// not become arguments of a JVM local classifier. An inner instance instead records its outer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClassifierApplication {
+    Direct,
+    LexicalCapture {
+        own_arguments: usize,
+        captured_arguments: usize,
+    },
+    Inner(InnerClassifier),
+}
 
-fn no_inner_classifiers(_: TypeName) -> Result<Option<InnerClassifier>, TypeName> {
-    Ok(None)
+/// Missing declaration evidence stops emission; direct and captured layouts are explicit facts.
+pub type ClassifierApplications<'a> =
+    &'a dyn Fn(TypeName) -> Result<ClassifierApplication, TypeName>;
+
+fn direct_classifier_application(_: TypeName) -> Result<ClassifierApplication, TypeName> {
+    Ok(ClassifierApplication::Direct)
 }
 
 /// Checked type facts supplied by a metadata-emitting target.
 #[derive(Clone)]
 pub(crate) struct MetadataTypeLookups<'a> {
     pub(crate) intersection_approximation: Option<&'a dyn Fn(Ty) -> Option<Ty>>,
-    pub(crate) inner_classifiers: InnerClassifiers<'a>,
+    pub(crate) classifier_applications: ClassifierApplications<'a>,
     pub(crate) local_classifiers: crate::fx_hash::HashSet<TypeName>,
     pub(crate) enum_entry_bodies: crate::fx_hash::HashSet<TypeName>,
 }
@@ -155,7 +167,7 @@ impl Default for MetadataTypeLookups<'_> {
             intersection_approximation: None,
             // Standalone metadata-builder tests declare no inner classifiers. Production emitters
             // replace this with their frozen checked classifier view.
-            inner_classifiers: &no_inner_classifiers,
+            classifier_applications: &direct_classifier_application,
             local_classifiers: Default::default(),
             enum_entry_bodies: Default::default(),
         }
@@ -173,7 +185,7 @@ impl Default for StringTable<'_> {
             local_classifiers: Default::default(),
             enum_entry_bodies: Default::default(),
             intersection_approximation: None,
-            inner_classifiers: &no_inner_classifiers,
+            classifier_applications: &direct_classifier_application,
             klib: None,
         }
     }
@@ -184,34 +196,44 @@ impl<'a> StringTable<'a> {
         local_classifiers: &crate::fx_hash::HashSet<TypeName>,
         enum_entry_bodies: &crate::fx_hash::HashSet<TypeName>,
         intersection_approximation: Option<&'a dyn Fn(Ty) -> Option<Ty>>,
-        inner_classifiers: InnerClassifiers<'a>,
+        classifier_applications: ClassifierApplications<'a>,
     ) -> Self {
         StringTable {
             local_classifiers: local_classifiers.clone(),
             enum_entry_bodies: enum_entry_bodies.clone(),
             intersection_approximation,
-            inner_classifiers,
+            classifier_applications,
             ..StringTable::default()
         }
     }
 
     /// A table for a KLIB `PackageFragment`: plain strings, qualified names and type tables.
-    pub(crate) fn klib(inner_classifiers: InnerClassifiers<'a>) -> Self {
+    pub(crate) fn klib(classifier_applications: ClassifierApplications<'a>) -> Self {
         Self {
-            inner_classifiers,
+            classifier_applications,
             klib: Some(KlibTables::default()),
             ..Self::default()
         }
     }
 
-    /// How `classifier`'s application splits when it is an `inner` class. A missing frozen
-    /// classifier fact is an emission error, never permission to serialize the flattened shape.
-    fn inner_classifier(
+    /// Project a checked application onto this carrier's metadata policy. KLIB retains its existing
+    /// flattened lexical applications; JVM inner types with a local outer retain their flat form.
+    fn classifier_application(
         &self,
         classifier: TypeName,
-    ) -> Result<Option<InnerClassifier>, TypeEncodeError> {
-        (self.inner_classifiers)(classifier)
-            .map(|inner| inner.filter(|inner| !self.local_classifiers.contains(&inner.outer)))
+    ) -> Result<ClassifierApplication, TypeEncodeError> {
+        (self.classifier_applications)(classifier)
+            .map(|application| match application {
+                ClassifierApplication::LexicalCapture { .. } if self.is_klib() => {
+                    ClassifierApplication::Direct
+                }
+                ClassifierApplication::Inner(inner)
+                    if self.local_classifiers.contains(&inner.outer) =>
+                {
+                    ClassifierApplication::Direct
+                }
+                other => other,
+            })
             .map_err(TypeEncodeError::MissingClassifier)
     }
 
@@ -585,6 +607,12 @@ pub(crate) enum TypeEncodeError {
         arguments: usize,
         own: usize,
     },
+    LexicalClassifierArity {
+        classifier: TypeName,
+        arguments: usize,
+        own: usize,
+        captured: usize,
+    },
 }
 
 impl fmt::Display for TypeEncodeError {
@@ -625,6 +653,16 @@ impl fmt::Display for TypeEncodeError {
             } => write!(
                 f,
                 "inner classifier '{}' declares {own} own type parameters but its application has {arguments} arguments",
+                classifier.render()
+            ),
+            Self::LexicalClassifierArity {
+                classifier,
+                arguments,
+                own,
+                captured,
+            } => write!(
+                f,
+                "local classifier '{}' declares {own} own and {captured} captured type parameters but its application has {arguments} arguments",
                 classifier.render()
             ),
         }
@@ -1054,8 +1092,25 @@ fn encode_type_with_parameter(
             // kotlinc interns the enclosing classifier before recursively interning its arguments,
             // even though protobuf field order writes `argument` before `class_name`.
             let classifier = strings.class_id(classifier_name);
-            let inner = strings.inner_classifier(classifier_name)?;
-            let own_arguments = inner.map_or(arguments.len(), |inner| inner.own_arguments);
+            let application = strings.classifier_application(classifier_name)?;
+            let (own_arguments, inner) = match application {
+                ClassifierApplication::Direct => (arguments.len(), None),
+                ClassifierApplication::Inner(inner) => (inner.own_arguments, Some(inner)),
+                ClassifierApplication::LexicalCapture {
+                    own_arguments,
+                    captured_arguments,
+                } => {
+                    if arguments.len() != own_arguments + captured_arguments {
+                        return Err(TypeEncodeError::LexicalClassifierArity {
+                            classifier: classifier_name,
+                            arguments: arguments.len(),
+                            own: own_arguments,
+                            captured: captured_arguments,
+                        });
+                    }
+                    (own_arguments, None)
+                }
+            };
             if own_arguments > arguments.len() {
                 return Err(TypeEncodeError::InnerClassifierArity {
                     classifier: classifier_name,
@@ -1596,7 +1651,7 @@ mod tests {
         let inner = outer.nested_child("Inner");
         let lookup = |classifier| {
             (classifier == inner)
-                .then_some(Some(InnerClassifier {
+                .then_some(ClassifierApplication::Inner(InnerClassifier {
                     outer,
                     own_arguments: 2,
                 }))
