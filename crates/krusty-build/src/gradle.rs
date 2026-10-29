@@ -2061,10 +2061,9 @@ fun main() {
             .collect()
     }
 
-    /// Assert that `task` was left to kotlinc because of the assignment compiler plugin: the build
-    /// reports exactly the refusal the krusty binary's support check printed for the assignment jar,
-    /// once. The Gradle cache prefix and artifact version vary by lane, so the exact jar path comes
-    /// from the recorded check rather than from Gradle's output.
+    /// Assert that `task` was left to kotlinc because of the assignment compiler plugin, which
+    /// krusty implements only partly: the support check saw the assignment jar exactly once, and
+    /// the build reports exactly the partial-substitution refusal it printed for that plugin.
     fn assert_assignment_left_to_kotlinc(output: &str, probes: &Path, task: &str) {
         let text = read_invocation_log(probes).expect("support check log");
         let mut assignments = invocations(&text)
@@ -2085,8 +2084,8 @@ fun main() {
             .collect::<Vec<_>>();
         assignments.dedup();
         assert_eq!(assignments.len(), 1, "{text}");
-        let refusal = PluginDiagnostic::Unsupported {
-            plugin: assignments.remove(0),
+        let refusal = PluginDiagnostic::PartialSubstitution {
+            plugin_id: "org.jetbrains.kotlin.assignment".to_string(),
         };
         assert_left_to_kotlinc(output, task, &[refusal.message()]);
     }
@@ -2695,6 +2694,7 @@ tasks.withType<KotlinJvmCompile>().configureEach {
                 "werror-warning-exception" -> emptyList<String>()
                 "duplicate-opt-in" -> listOf(
                     "krusty.fixture.ExperimentalFirstApi",
+                    "krusty.fixture.ExperimentalSecondApi",
                     "krusty.fixture.ExperimentalFirstApi",
                 )
                 else -> listOf(

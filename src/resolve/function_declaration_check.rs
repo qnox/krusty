@@ -439,7 +439,10 @@ impl Checker<'_> {
                 self.check_operator_declaration(
                     f,
                     self.ret_ty,
-                    operator_declarations::OperatorDeclarationSite::Member(stable_declaration),
+                    operator_declarations::OperatorDeclarationSite::Member(
+                        stable_declaration,
+                        extension_receiver.or(dispatch_this),
+                    ),
                 );
             }
             if infer_ret {
@@ -518,7 +521,10 @@ impl Checker<'_> {
             self.check_operator_declaration(
                 f,
                 self.ret_ty,
-                operator_declarations::OperatorDeclarationSite::Member(stable_declaration),
+                operator_declarations::OperatorDeclarationSite::Member(
+                    stable_declaration,
+                    extension_receiver.or(dispatch_this),
+                ),
             );
         }
         self.report_inferred_nothing_return(f, self.ret_ty, f.is_override());
@@ -930,7 +936,7 @@ impl Checker<'_> {
             self.check_operator_declaration(
                 f,
                 self.ret_ty,
-                operator_declarations::OperatorDeclarationSite::NonMember,
+                operator_declarations::OperatorDeclarationSite::NonMember(extension_receiver),
             );
         }
         // Default arguments are evaluated in the caller's context. The extension receiver and
@@ -1016,7 +1022,7 @@ impl Checker<'_> {
             self.check_operator_declaration(
                 f,
                 self.ret_ty,
-                operator_declarations::OperatorDeclarationSite::NonMember,
+                operator_declarations::OperatorDeclarationSite::NonMember(extension_receiver),
             );
         }
         self.report_inferred_nothing_return(f, self.ret_ty, false);
