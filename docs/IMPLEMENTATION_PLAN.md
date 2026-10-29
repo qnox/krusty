@@ -5088,6 +5088,20 @@ their declarations into an index-based model (`declarations`, `model`), lays rec
 - **Next.** Pointer, struct and callback crossings in direct C calls, and the cgo-mode thread
   start that lifts the linker's refusal of a program that imports and can start threads.
 
+## Native compiler command  ◐
+
+- **Programs (done for linux_x64).** `krusty kotlinc-native` takes Kotlin/Native's
+  `kotlinc-native` options, compiles the sources against the Native stdlib KLIB and the
+  `-library` KLIBs, and links a static `.kexe` (`native::compile_native`). Options krusty cannot
+  honor are refused by name (`crates/krusty-cli/src/kotlinc_native.rs` unit tests).
+  `tests/native_compiler_command_e2e.rs` checks the answer on the JVM lane, then compiles a
+  two-file program with the command, runs it, and asserts the complete diagnostics of a broken
+  source.
+- **Next.** `-produce library`, which needs the KLIB writer to serialize ordinary function and
+  class bodies into `default/ir`; until then a first-party library's sources are compiled into the
+  program. Programs reach further as dependency body emission grows (library member bodies, then
+  non-constant parameter defaults of third-party KLIBs).
+
 ## Byte-identical box conformance, item 1 — local-class naming  ◐
 
 Goal: every box test passes AND writes the same class files as kotlinc. The first mechanism is how
@@ -6254,6 +6268,14 @@ of the expected signature. Applied hierarchy traversal retains declared variance
 arity and suspend kind. Owning semantic tests cover reflective and inherited function declarations
 and unrelated-callable rejection; the JVM round trip covers nominal and reflection interface slots.
 
+Superclass-argument name reads retain the unavailable dispatch receiver as diagnostic evidence,
+separate from the usable receiver tower. Both paths share its declared scope identity. After
+lexical values and available receivers fail, a pure member-selection probe diagnoses the missing
+initialized instance before inferred-type demand or checked-body construction. Pending dispatch
+properties demand through their selected available receiver instead of a bare declaration name.
+The name-demand operation is extracted from the resolver facade; receiver and capture coordinates
+are unchanged. Ordered kotlinc diagnostics and positive enclosing-value controls cover #2658.
+
 ## Compose compiler plugin  🚧
 
 krusty reimplements the Compose compiler plugin as a native pass (`src/plugins/compose`), one
@@ -6265,7 +6287,9 @@ and the pass rejects every construct it does not cover yet.
   `@FunctionKeyMeta`, source information and trace markers; calls between them in one file.
 - [ ] Calls to composables of other files and modules, and the grouping annotations.
 - [ ] `@Composable` function types and lambdas, and the composable call checker's diagnostics.
-- [ ] Parameters: `$changed` bit sets per parameter, `$default` masks, stability inference.
+- [x] Primitive and `String` parameters: `$changed`/`$dirty` slot tracking with strong skipping,
+  `Composer.changed` comparisons, and each call's argument bits (static, passed on, uncertain).
+- [ ] More parameters: `$default` masks, receivers, varargs, more than ten, stability inference.
 - [ ] The full body transform: control-flow groups, `remember`, early returns, inline composables.
 - [ ] `ComposableSingletons` lambda holders and the `$stable` field of classes.
 - [ ] Remove the partial marker and rerun the corpus for the Compose projects.
