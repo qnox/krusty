@@ -162,30 +162,53 @@ final class Symbols {
         int count = in.readInt();
         List<Supplier<KSDeclaration>> members = new ArrayList<>(count);
         for (int i = 0; i < count; i++) {
-            byte tag = in.readByte();
-            switch (tag) {
-                case 0: {
-                    KSDeclaration declared = declarations.get(in.readInt());
-                    members.add(() -> declared);
-                    break;
-                }
-                case 1: {
-                    KSDeclaration owner = resolvedClass(Wire.readString(in));
-                    KSDeclaration described = readDeclaration(in, null, owner);
-                    members.add(() -> described);
-                    break;
-                }
-                case 2: {
-                    String owner = Wire.readString(in);
-                    int index = in.readInt();
-                    members.add(() -> sourceClasses.get(owner).declarations.get(index));
-                    break;
-                }
-                default:
-                    throw new IOException("unknown member " + tag);
-            }
+            members.add(readMember(in, declarations));
         }
         return new Members(members);
+    }
+
+    // One member (`put_member` in `src/ksp/protocol.rs`); `declarations` is null where no member
+    // names one of the classifier's own declarations.
+    private Supplier<KSDeclaration> readMember(DataInputStream in, List<KSDeclaration> declarations)
+            throws IOException {
+        byte tag = in.readByte();
+        switch (tag) {
+            case 0: {
+                if (declarations == null) {
+                    throw new IOException("a member of no classifier's own declarations");
+                }
+                KSDeclaration declared = declarations.get(in.readInt());
+                return () -> declared;
+            }
+            case 1: {
+                KSDeclaration owner = resolvedClass(Wire.readString(in));
+                KSDeclaration described = readDeclaration(in, null, owner);
+                return () -> described;
+            }
+            case 2: {
+                String owner = Wire.readString(in);
+                int index = in.readInt();
+                return () -> sourceClasses.get(owner).declarations.get(index);
+            }
+            default:
+                throw new IOException("unknown member " + tag);
+        }
+    }
+
+    // What `findOverridee` answers (`put_overridee` in `src/ksp/protocol.rs`): null when the round
+    // cannot say, otherwise the member, which supplies null when there is none.
+    private Supplier<KSDeclaration> readOverridee(DataInputStream in) throws IOException {
+        byte tag = in.readByte();
+        switch (tag) {
+            case 0:
+                return null;
+            case 1:
+                return () -> null;
+            case 2:
+                return readMember(in, null);
+            default:
+                throw new IOException("unknown overridee " + tag);
+        }
     }
 
     // A function (`put_function` in `src/ksp/protocol.rs`).
@@ -238,6 +261,7 @@ final class Symbols {
         function.returnType = Wire.readBoolean(in) ? readReference(in, function) : null;
         function.jvmSignature = readOptionalString(in);
         function.jvmName = readOptionalString(in);
+        function.overridee = readOverridee(in);
         if (kind == 3 && owner instanceof SourceClass) {
             ((SourceClass) owner).primaryConstructor = function;
         } else if (kind == 3 && owner instanceof LibraryClass) {
@@ -286,6 +310,7 @@ final class Symbols {
             property.hasBackingField = Wire.readBoolean(in);
         }
         property.jvmSignature = readOptionalString(in);
+        property.overridee = readOverridee(in);
         return property;
     }
 
