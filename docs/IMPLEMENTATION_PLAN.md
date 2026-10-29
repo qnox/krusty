@@ -6268,6 +6268,14 @@ of the expected signature. Applied hierarchy traversal retains declared variance
 arity and suspend kind. Owning semantic tests cover reflective and inherited function declarations
 and unrelated-callable rejection; the JVM round trip covers nominal and reflection interface slots.
 
+Superclass-argument name reads retain the unavailable dispatch receiver as diagnostic evidence,
+separate from the usable receiver tower. Both paths share its declared scope identity. After
+lexical values and available receivers fail, a pure member-selection probe diagnoses the missing
+initialized instance before inferred-type demand or checked-body construction. Pending dispatch
+properties demand through their selected available receiver instead of a bare declaration name.
+The name-demand operation is extracted from the resolver facade; receiver and capture coordinates
+are unchanged. Ordered kotlinc diagnostics and positive enclosing-value controls cover #2658.
+
 ## Compose compiler plugin  🚧
 
 krusty reimplements the Compose compiler plugin as a native pass (`src/plugins/compose`), one
@@ -6279,7 +6287,9 @@ and the pass rejects every construct it does not cover yet.
   `@FunctionKeyMeta`, source information and trace markers; calls between them in one file.
 - [ ] Calls to composables of other files and modules, and the grouping annotations.
 - [ ] `@Composable` function types and lambdas, and the composable call checker's diagnostics.
-- [ ] Parameters: `$changed` bit sets per parameter, `$default` masks, stability inference.
+- [x] Primitive and `String` parameters: `$changed`/`$dirty` slot tracking with strong skipping,
+  `Composer.changed` comparisons, and each call's argument bits (static, passed on, uncertain).
+- [ ] More parameters: `$default` masks, receivers, varargs, more than ten, stability inference.
 - [ ] The full body transform: control-flow groups, `remember`, early returns, inline composables.
 - [ ] `ComposableSingletons` lambda holders and the `$stable` field of classes.
 - [ ] Remove the partial marker and rerun the corpus for the Compose projects.
