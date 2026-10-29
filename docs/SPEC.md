@@ -1,5 +1,13 @@
 # krusty — a memory-lean Kotlin→JVM compiler PoC
 
+## Cast targets without type arguments
+
+`x as Auto` and `x as? Auto` with a generic `Auto` and no type arguments take the arguments from the
+operand's type, as a type test does: `Gen<String>` casts to `Auto<String>`, and `Gen<*>` to
+`Auto<*>`. The result is never the raw classifier. A type-parameter target (`x as T`) is already
+complete and is left as written. Tests: `box_regressions/bareCastTargetArguments.kt`
+and the last case of `diagnostics_classifier_cast_cases_e2e::classifier_cycle_and_cast_errors_match_kotlinc_exactly`.
+
 ## File policies under signature recovery
 
 A file's own annotations (`@file:Suppress`, opt-ins) are published before recovery diagnostics
