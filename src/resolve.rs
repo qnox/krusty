@@ -37862,7 +37862,12 @@ impl<'a> Checker<'a> {
             if candidate.is_extension() && candidate.callable.annotations.contains(&hides_members) {
                 (0_u8, (0_u8, 0_u32), candidate.receiver_rank)
             } else if candidate.kind == crate::libraries::FnKind::Member {
-                (1_u8, (0_u8, 0_u32), candidate.receiver_rank)
+                let hidden = self.member_hidden_from_site(candidate, extension_receiver);
+                (
+                    if hidden { 3 } else { 1 },
+                    (0_u8, 0_u32),
+                    candidate.receiver_rank,
+                )
             } else {
                 (
                     2_u8,
@@ -38257,7 +38262,7 @@ impl<'a> Checker<'a> {
             };
         let (_, members, contains_body_local) = self.body_local_member_overload_rung(recv, name);
         if !contains_body_local {
-            return candidates;
+            return self.hidden_members_yield_to_extensions(recv, candidates);
         }
         candidates
             .overloads
@@ -38711,33 +38716,6 @@ impl<'a> Checker<'a> {
         self.module.legacy_symbols().is_some_and(|symbols| {
             symbols.props.contains_key(name) || symbols.context_prop_names.contains(name)
         })
-    }
-
-    fn source_callable_visible(&self, candidate: &crate::libraries::FunctionInfo) -> bool {
-        if self.suppresses_diagnostic("INVISIBLE_REFERENCE")
-            || self.suppresses_diagnostic("INVISIBLE_MEMBER")
-        {
-            return true;
-        }
-        if !matches!(
-            candidate.kind,
-            crate::libraries::FnKind::TopLevel | crate::libraries::FnKind::Extension
-        ) {
-            return true;
-        }
-        crate::callable_access::source_callable_accessible(
-            candidate.visibility,
-            candidate.source_file,
-            Some(self.file_index),
-            || {
-                self.libraries
-                    .dependency_access_policy()
-                    .internal_callable_accessible(
-                        candidate.callable.external_identity,
-                        candidate.callable.owner,
-                    )
-            },
-        )
     }
 
     fn implicit_receivers(&self, scope: &CheckerScope<'_>) -> Vec<ImplicitReceiver> {
@@ -53614,6 +53592,7 @@ impl<'a> Checker<'a> {
                     && (candidate.kind != crate::libraries::FnKind::Member
                         || candidate.context_count == 0)
             });
+            self.drop_members_hidden_by_extensions(at, &mut functions.overloads);
             let mut members = functions.clone();
             members
                 .overloads
@@ -60066,6 +60045,7 @@ impl<'a> Checker<'a> {
         let selected = {
             let resolver = self.resolver();
             let (mut functions, _) = callables.clone().into_parts();
+            self.drop_members_hidden_by_extensions(recv, &mut functions.overloads);
             functions.overloads.retain(|candidate| {
                 candidate.kind == kind
                     && (kind == crate::libraries::FnKind::Member

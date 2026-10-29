@@ -3066,7 +3066,7 @@ fn receiver_allows_member_dispatch(receiver: Ty) -> bool {
     }
 }
 
-fn select_instance_reference_from_functions(
+pub(crate) fn select_instance_reference_from_functions(
     recv: Ty,
     functions: &[FunctionInfo],
 ) -> Option<LibraryMember> {

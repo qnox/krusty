@@ -159,6 +159,99 @@ impl SourceMemberSite for Checker<'_> {
 }
 
 impl<'a> Checker<'a> {
+    pub(super) fn source_callable_visible(
+        &self,
+        candidate: &crate::libraries::FunctionInfo,
+    ) -> bool {
+        if self.suppresses_diagnostic("INVISIBLE_REFERENCE")
+            || self.suppresses_diagnostic("INVISIBLE_MEMBER")
+        {
+            return true;
+        }
+        if !matches!(
+            candidate.kind,
+            crate::libraries::FnKind::TopLevel | crate::libraries::FnKind::Extension
+        ) {
+            return true;
+        }
+        crate::callable_access::source_callable_accessible(
+            candidate.visibility,
+            candidate.source_file,
+            Some(self.file_index),
+            || {
+                self.libraries
+                    .dependency_access_policy()
+                    .internal_callable_accessible(
+                        candidate.callable.external_identity,
+                        candidate.callable.owner,
+                    )
+            },
+        )
+    }
+
+    /// Whether a member function the call found on `receiver` is hidden from this site. Kotlin
+    /// ranks a hidden member below every visible candidate: an applicable extension takes the
+    /// call (`clone()` declared beside the protected `Object.clone`), and the member is reported
+    /// as inaccessible only when nothing visible applies. `internal` ownership stays with the
+    /// selected-member check.
+    pub(super) fn member_hidden_from_site(
+        &self,
+        candidate: &crate::libraries::FunctionInfo,
+        receiver: Option<Ty>,
+    ) -> bool {
+        let Some(receiver) = receiver else {
+            return false;
+        };
+        matches!(
+            candidate.visibility,
+            Visibility::Private | Visibility::Protected | Visibility::PackagePrivate
+        ) && !self.receiver_callable_accessible(
+            candidate.visibility,
+            candidate.callable.owner,
+            crate::symbol_resolver::member_scope_receiver(receiver),
+            candidate.callable.external_identity,
+        )
+    }
+
+    /// An instance member the reference site cannot see does not shadow an applicable extension:
+    /// `Col::clone` names the extension when `Object.clone` is protected. Without an extension the
+    /// member stays, so the reference reports the member's visibility.
+    pub(super) fn hidden_members_yield_to_extensions(
+        &self,
+        receiver: Ty,
+        mut candidates: CallableRefCandidates,
+    ) -> CallableRefCandidates {
+        if self.drop_members_hidden_by_extensions(receiver, &mut candidates.overloads) {
+            candidates.method = crate::symbol_resolver::select_instance_reference_from_functions(
+                receiver,
+                &candidates.overloads,
+            );
+        }
+        candidates
+    }
+
+    /// Drop the members of `receiver` the site cannot see when a visible extension of the same
+    /// name is a candidate too, so the extension is selected instead of the member's access error.
+    /// Returns whether a member was dropped.
+    pub(super) fn drop_members_hidden_by_extensions(
+        &self,
+        receiver: Ty,
+        overloads: &mut Vec<crate::libraries::FunctionInfo>,
+    ) -> bool {
+        if !overloads
+            .iter()
+            .any(|candidate| candidate.is_extension() && self.source_callable_visible(candidate))
+        {
+            return false;
+        }
+        let before = overloads.len();
+        overloads.retain(|candidate| {
+            candidate.kind != crate::libraries::FnKind::Member
+                || !self.member_hidden_from_site(candidate, Some(receiver))
+        });
+        overloads.len() != before
+    }
+
     /// Reject an inaccessible selected constructor after diagnosing its local inference result.
     /// Evidence from the rejected call is never published into the committed-call sidecar.
     pub(super) fn reject_ctor_access(

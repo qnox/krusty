@@ -274,6 +274,7 @@ impl<'a> Checker<'a> {
                     && (candidate.kind != crate::libraries::FnKind::Member
                         || candidate.context_count == 0)
             });
+            self.drop_members_hidden_by_extensions(receiver, &mut functions.overloads);
             let callables = crate::libraries::Callables::from_parts(functions, properties);
             let indexed = resolver.select_receiver_indexed_set_function_with_params(
                 receiver,
@@ -425,6 +426,7 @@ impl<'a> Checker<'a> {
                 && (candidate.kind != crate::libraries::FnKind::Member
                     || candidate.context_count == 0)
         });
+        self.drop_members_hidden_by_extensions(receiver, &mut functions.overloads);
         let mut members = functions.clone();
         members
             .overloads
@@ -639,6 +641,7 @@ impl<'a> Checker<'a> {
                 && (candidate.kind != crate::libraries::FnKind::Member
                     || candidate.context_count == 0)
         });
+        self.drop_members_hidden_by_extensions(receiver, &mut functions.overloads);
         let callables = crate::libraries::Callables::Functions(functions);
         if name == "set" {
             match resolver.select_receiver_indexed_set_function_with_params(

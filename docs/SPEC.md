@@ -1,5 +1,15 @@
 # krusty — a memory-lean Kotlin→JVM compiler PoC
 
+## Invisible members yield to extensions
+
+A private, protected, or package-private member the call site cannot see does not shadow an
+applicable extension with the same name. kotlinc ranks the invisible member below every visible
+candidate, so `c.clone()` with `fun Col.clone()` in scope calls the extension instead of the
+protected `Object.clone`. This holds for plain, safe, implicit-receiver, operator, and
+callable-reference uses. With no applicable extension the member stays selected and a call reports
+its visibility. Tests: `box_regressions/hiddenMemberYieldsToExtension.kt` and
+`hidden_member_extension_e2e`.
+
 ## File policies under signature recovery
 
 A file's own annotations (`@file:Suppress`, opt-ins) are published before recovery diagnostics
