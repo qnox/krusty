@@ -2,6 +2,17 @@
 
 use super::*;
 
+/// What a selection over a wider candidate family already decided for a constructor call.
+#[derive(Clone, Copy)]
+pub(super) enum ConstructorPreselection<'a> {
+    /// Nothing: the constructor family is selected here.
+    Open,
+    /// One declaration was chosen; only it is materialized.
+    Selected(&'a crate::libraries::FunctionInfo),
+    /// The candidates are equally specific: report why, but commit none.
+    Ambiguous,
+}
+
 impl Checker<'_> {
     /// Select one provider constructor tier through the same argument mapper and specificity
     /// operation used by source primary/secondary constructors. Every provider declaration already
@@ -22,7 +33,7 @@ impl Checker<'_> {
             bound_outer,
             expected,
             priority,
-            selected,
+            selected: preselection,
         } = options;
         let bound_context = match bound_outer {
             Some(receiver) => {
@@ -71,7 +82,7 @@ impl Checker<'_> {
         let mut type_argument_bound_failure = None;
 
         let mut declarations = self.constructor_declarations(internal, classifier);
-        if let Some(selected) = selected {
+        if let ConstructorPreselection::Selected(selected) = preselection {
             declarations.retain(|declaration| {
                 declaration.stable_declaration == selected.stable_declaration
                     && declaration.descriptor == selected.callable.descriptor
@@ -688,6 +699,9 @@ impl Checker<'_> {
                     return Ok(LibraryConstructorSelection::NoMatch);
                 }
             };
+        if matches!(preselection, ConstructorPreselection::Ambiguous) {
+            return Ok(LibraryConstructorSelection::NoMatch);
+        }
         let Some(member) = members.get(candidate_index).cloned() else {
             return Ok(LibraryConstructorSelection::NoMatch);
         };

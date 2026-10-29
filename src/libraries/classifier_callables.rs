@@ -224,6 +224,31 @@ impl FunctionInfo {
         Some(member)
     }
 
+    /// Normalize one constructor of `classifier`, reached by a bare `Name(args)` on the file and
+    /// import scope tower, into the candidate structure the same-named functions use. The
+    /// classifier's type parameters are the constructor's inference variables and its
+    /// application is the result.
+    pub(crate) fn scope_constructor(
+        internal: TypeName,
+        classifier: &LibraryType,
+        mut constructor: LibraryMember,
+    ) -> Self {
+        constructor.owner.get_or_insert(internal);
+        constructor.generic_sig = constructor_generic_signature(internal, classifier, &constructor);
+        let result = constructor
+            .generic_sig
+            .as_ref()
+            .map_or_else(|| Ty::obj_name(internal), |signature| signature.ret);
+        let mut candidate = Self::classifier_member(FnKind::TopLevel, internal, constructor);
+        candidate.callable.ret = result;
+        candidate.ret = ReturnInfo::new(false, Some(result));
+        candidate.constructor = Some(ConstructorCandidate {
+            classifier: internal,
+            outer: None,
+        });
+        candidate
+    }
+
     /// Normalize one constructor of the `inner` classifier `inner` as a member candidate of its
     /// outer class; `None` for a classifier that captures no outer instance. Kotlin collects such
     /// a constructor into the receiver's member level together with the same-named member

@@ -252,6 +252,8 @@ mod resolved_type_occurrences;
 mod safe_call_flow;
 mod safe_index;
 mod sam_constructors;
+mod scope_constructor_selection;
+use provider_constructor_selection::ConstructorPreselection;
 mod sam_conversion_recording;
 mod serialization_generated_members;
 mod source_constructor_type_oracle;
@@ -7942,9 +7944,9 @@ struct LibraryConstructorOptions<'a> {
     bound_outer: Option<Ty>,
     expected: Option<Ty>,
     priority: ConstructorPriorityTier,
-    /// A constructor already chosen by a selection that ran over a wider candidate family (the
-    /// receiver member level of `outer.Inner(args)`). Only that declaration is materialized.
-    selected: Option<&'a crate::libraries::FunctionInfo>,
+    /// What a selection that ran over a wider candidate family (the receiver member level of
+    /// `outer.Inner(args)`, or the shared bare-call selector) already decided.
+    selected: ConstructorPreselection<'a>,
 }
 
 fn constructor_delegation_cycles(edges: &[Option<usize>]) -> Vec<Vec<usize>> {
@@ -15064,7 +15066,7 @@ impl<'a> Checker<'a> {
                                 bound_outer: None,
                                 expected,
                                 priority: ConstructorPriorityTier::All,
-                                selected: None,
+                                selected: ConstructorPreselection::Open,
                             },
                         ) {
                             Ok(LibraryConstructorSelection::Selected) => {
@@ -19169,23 +19171,20 @@ impl<'a> Checker<'a> {
                                 low_priority_provider_constructor =
                                     Some((scoped_internal, classifier.clone(), requires_outer));
                             }
-                            match self.record_library_constructor(
+                            match self.record_scope_constructor(
                                 scope,
-                                call,
-                                scoped_internal,
-                                classifier,
-                                args,
-                                LibraryConstructorOptions {
+                                CallArgs {
+                                    call,
+                                    args,
+                                    arg_tys: &arg_tys,
+                                },
+                                (scoped_internal, classifier),
+                                scope_constructor_selection::ScopeConstructorCall {
                                     arg_names: arg_names.as_deref(),
-                                    applied_classifier: bare_alias_target,
-                                    bound_outer: None,
+                                    explicit_type_args: &explicit_type_args,
+                                    alias_target: bare_alias_target,
                                     expected,
-                                    priority: if has_low_priority {
-                                        ConstructorPriorityTier::Ordinary
-                                    } else {
-                                        ConstructorPriorityTier::All
-                                    },
-                                    selected: None,
+                                    has_low_priority,
                                 },
                             ) {
                                 Ok(LibraryConstructorSelection::Selected) => {
@@ -19314,23 +19313,20 @@ impl<'a> Checker<'a> {
                                 low_priority_provider_constructor =
                                     Some((scoped_internal, classifier.clone(), requires_outer));
                             }
-                            match self.record_library_constructor(
+                            match self.record_scope_constructor(
                                 scope,
-                                call,
-                                scoped_internal,
-                                classifier,
-                                args,
-                                LibraryConstructorOptions {
+                                CallArgs {
+                                    call,
+                                    args,
+                                    arg_tys: &arg_tys,
+                                },
+                                (scoped_internal, classifier),
+                                scope_constructor_selection::ScopeConstructorCall {
                                     arg_names: arg_names.as_deref(),
-                                    applied_classifier: bare_alias_target,
-                                    bound_outer: None,
+                                    explicit_type_args: &explicit_type_args,
+                                    alias_target: bare_alias_target,
                                     expected,
-                                    priority: if has_low_priority {
-                                        ConstructorPriorityTier::Ordinary
-                                    } else {
-                                        ConstructorPriorityTier::All
-                                    },
-                                    selected: None,
+                                    has_low_priority,
                                 },
                             ) {
                                 Ok(LibraryConstructorSelection::Selected) => {
@@ -19983,7 +19979,7 @@ impl<'a> Checker<'a> {
                             bound_outer: None,
                             expected,
                             priority: ConstructorPriorityTier::Low,
-                            selected: None,
+                            selected: ConstructorPreselection::Open,
                         },
                     ) {
                         Ok(LibraryConstructorSelection::Selected) => {
@@ -38564,10 +38560,13 @@ impl<'a> Checker<'a> {
         {
             return true;
         }
-        if !matches!(
-            candidate.kind,
-            crate::libraries::FnKind::TopLevel | crate::libraries::FnKind::Extension
-        ) {
+        // A constructor's access is owned by its classifier and checked when it is committed.
+        if candidate.constructor.is_some()
+            || !matches!(
+                candidate.kind,
+                crate::libraries::FnKind::TopLevel | crate::libraries::FnKind::Extension
+            )
+        {
             return true;
         }
         crate::callable_access::source_callable_accessible(
