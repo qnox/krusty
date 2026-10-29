@@ -32,3 +32,28 @@ fn primitive_receiver_of_library_inline_is_boxed_like_kotlinc() {
         &["InlinePrimitiveReceiverKt"],
     );
 }
+
+/// A value still in the erased slot reaches a primitive field, a constructor default, and a
+/// function default unboxed.
+const STORES: &str = r#"val objects = ArrayList<Any>()
+fun log(o: Any) { objects.add(o) }
+
+class Field(val num: Int) {
+    val map: Int = 1.apply { log(num) }
+}
+class Defaulted(val x: Int = 3.also(::log), val y: Long = 4L.also { log(it) })
+fun defaulted(x: Int = 5.also(::log), flag: Boolean = true.also { log(it) }): String = "$x$flag"
+
+fun box(): String {
+    val field = Field(2).map
+    val instance = Defaulted()
+    val call = defaulted()
+    val result = "$field ${instance.x} ${instance.y} $call $objects"
+    return if (result == "1 3 4 5true [2, 3, 4, 5, true]") "OK" else "Fail $result"
+}
+"#;
+
+#[test]
+fn stores_of_an_erased_primitive_receiver_unbox() {
+    common::expect_box_same_as_kotlinc(STORES, "InlinePrimitiveReceiverStores");
+}

@@ -143,13 +143,7 @@ impl Emitter<'_> {
         // stack has both evaluated into temporaries in that order and reloaded; every other value,
         // branchy or not, runs with the receiver left on the stack, as kotlinc does.
         self.emit_operands(&[receiver, value], code);
-        let stored = self.value_ty(value);
-        if stored.is_reference() && field_ty.scalar_value_repr() == Some(field_ty) {
-            // An inlined frame result read from an erased slot (`1.apply { }`) is still boxed.
-            super::scalar_coercion::unbox_prim_from(self.cw, code, stored, field_ty);
-        } else {
-            self.coerce_reference_on_stack(stored, field_ty, code);
-        }
+        self.coerce_reference_on_stack(self.value_ty(value), field_ty, code);
         // A value that carried its OWN source line leaves that line in effect; the store belongs to
         // the statement, so kotlinc marks the statement's line again at the `putfield`. Without it
         // the property's line stays in effect over everything that follows the store.

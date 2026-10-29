@@ -183,6 +183,20 @@ pub(super) fn unbox_prim_from_descriptor(
     }
 }
 
+/// Unbox a value still held in a boxed erased slot, such as an inlined type-parameter receiver
+/// (`1.apply { }`), when its consumer is a built-in primitive slot. Unsigned and value classes
+/// never reach such a slot boxed in a primitive wrapper.
+pub(super) fn unbox_erased_scalar(
+    cw: &mut ClassWriter,
+    code: &mut CodeBuilder,
+    produced: Ty,
+    slot: Ty,
+) {
+    if produced.is_reference() && produced != Ty::Null && slot.scalar_value_repr() == Some(slot) {
+        unbox_prim_from(cw, code, produced, slot);
+    }
+}
+
 /// Unbox through the target scalar's own wrapper.
 pub(super) fn unbox_prim(cw: &mut ClassWriter, code: &mut CodeBuilder, target: Ty) {
     crate::trace_compiler!("value_classes", "emit scalar unbox adapter={target:?}");
