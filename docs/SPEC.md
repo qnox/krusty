@@ -13120,17 +13120,33 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the class file only, never in Kotlin metadata, because kotlinc's IR plugin adds it after FIR
   metadata serialization. `sourceInformation` (`C(<name>)<line>@<offset>L<length>,…:<file>#<package hash
   in base 36>`) and trace markers (`<fq name> (<file>:<0-based line>)`) follow the plugin's options.
+  A composable lambda passed to a composable call that captures nothing is memoized: the file's
+  `ComposableSingletons$<file part>Kt` object (the file-part name even under `@file:JvmName`;
+  synthetic-class `@Metadata` with `xi=48`, a public constructor) holds a non-final private static
+  field `lambda$<key>` created in `<clinit>` by `composableLambdaInstance(<key>, false, <lambda>)`
+  at the lambda's opening line, with an `internal` getter `getLambda$<key>$<module>`, and the call
+  reads it there without a line. The lambda's body is
+  `private static final Unit lambda__<key>$lambda$0(Composer $composer, int $changed)` on that
+  object, `@Composable` and `@FunctionKeyMeta`, with no `$composer` null check, which runs
+  `if (shouldExecute(($changed & 3) != 2, $changed & 1)) { <trace> <statements> } else
+  skipToGroupEnd()`, the skip on the opening line and no line at entry. Its key is the Java hash
+  of `fun-$anonymous$()Unit/arg-<parameter>/call-<callee>[:<n>]/fun-<caller signature>/pkg-…/file-…`,
+  where `n` counts the caller's earlier calls of the same name; its source information has no
+  name (`C<calls>:<file>#<hash>`) and its trace names
+  `<object>.lambda$<key>.<anonymous> (<file>:<first statement's 0-based line>)`. A capturing,
+  nested or empty composable lambda is declined.
   The recompose lambda `<name>$lambda$0(<parameters>, $$changed, [$$default,] $composer, $force)`
   publishes its
   locals and no
   line, and the call's line starts at its dispatch, since kotlinc builds both arguments without
   offsets. Tests: `tests/fixtures/compose/restartableFunctions.kt`, `trackedParameters.kt`,
-  `defaultArguments.kt` and `lambdaParameters.kt`,
+  `defaultArguments.kt`, `lambdaParameters.kt` and `singletonLambdas.kt`,
   whose `box()` composes and recomposes the functions through a recording composer, and
   `kotlin_box_ir_jvm_conformance::compose_restartable_functions_are_byte_identical_to_kotlinc` and
   `compose_tracked_parameters_are_byte_identical_to_kotlinc`,
-  `compose_default_arguments_are_byte_identical_to_kotlinc` and
-  `compose_lambda_parameters_are_byte_identical_to_kotlinc`, which require their class sets to
+  `compose_default_arguments_are_byte_identical_to_kotlinc`,
+  `compose_lambda_parameters_are_byte_identical_to_kotlinc` and
+  `compose_singleton_lambdas_are_byte_identical_to_kotlinc`, which require their class sets to
   equal kotlinc's byte for byte;
   `cli_compiler_plugin_e2e::the_compose_pass_rejects_what_it_does_not_cover` and
   `compose_report_destinations_fail_the_compile`; and the `plugins::compose` and

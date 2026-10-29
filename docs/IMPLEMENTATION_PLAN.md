@@ -6267,8 +6267,10 @@ and the pass rejects every construct it does not cover yet.
 - [x] `@Composable () -> Unit` parameters: called with the composer and their own state bits,
   compared by identity, passed on to composable calls, and their `@ComposableInferredTarget`
   applier scheme inferred.
-- [ ] Composable lambdas (`ComposableSingletons`, `rememberComposableLambda`), other composable
-  function types, and the composable call checker's diagnostics.
+- [x] Composable lambdas that capture nothing, passed to a composable call: `ComposableSingletons`
+  properties made by `composableLambdaInstance`, each body a skippable group.
+- [ ] Capturing composable lambdas (`rememberComposableLambda`), nested and empty ones, other
+  composable function types, and the composable call checker's diagnostics.
 - [x] Primitive and `String` parameters: `$changed`/`$dirty` slot tracking with strong skipping,
   `Composer.changed` comparisons, and each call's argument bits (static, passed on, uncertain).
 - [x] Constant default arguments: the `$default` mask, defaults assigned in the group, placeholders
@@ -6276,5 +6278,5 @@ and the pass rejects every construct it does not cover yet.
 - [ ] More parameters: non-constant defaults (defaults groups), receivers, varargs, more than ten,
   stability inference.
 - [ ] The full body transform: control-flow groups, `remember`, early returns, inline composables.
-- [ ] `ComposableSingletons` lambda holders and the `$stable` field of classes.
+- [ ] The `$stable` field of classes.
 - [ ] Remove the partial marker and rerun the corpus for the Compose projects.

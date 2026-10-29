@@ -57,7 +57,7 @@ pub fn file_class_name(file_stem: &str, package: Option<&str>) -> String {
 }
 
 /// kotlinc's package-part class name for a file named `file_stem`: `box` → `BoxKt`.
-pub(super) fn file_facade_segment(file_stem: &str) -> String {
+pub(crate) fn file_facade_segment(file_stem: &str) -> String {
     let sanitized: String = file_stem
         .chars()
         .map(|character| {
