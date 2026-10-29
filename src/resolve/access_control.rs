@@ -252,6 +252,57 @@ impl<'a> Checker<'a> {
         overloads.len() != before
     }
 
+    /// Drop the hidden members of `receiver` only when one of the visible extensions applies to
+    /// this operator call. An extension of the same name that does not apply (`b + 1` against
+    /// `B.plus(String)`) leaves the hidden member to report its visibility.
+    pub(super) fn drop_members_hidden_by_applicable_extensions(
+        &self,
+        receiver: Ty,
+        overloads: &mut Vec<crate::libraries::FunctionInfo>,
+        call: OperatorCallShape<'_>,
+    ) {
+        let mut visible = overloads.clone();
+        if !self.drop_members_hidden_by_extensions(receiver, &mut visible) {
+            return;
+        }
+        let extensions = crate::libraries::Callables::Functions(crate::libraries::FunctionSet {
+            overloads: visible
+                .iter()
+                .filter(|candidate| candidate.is_extension())
+                .cloned()
+                .collect(),
+        });
+        let resolver = self.resolver();
+        let applies = match call {
+            OperatorCallShape::Call { name, args } => resolver
+                .select_receiver_function_with_params(receiver, name, args, &[], &extensions)
+                .is_some(),
+            OperatorCallShape::IndexedGet { args } => matches!(
+                resolver.select_receiver_indexed_get_function_with_params(
+                    receiver,
+                    "get",
+                    args,
+                    &[],
+                    &extensions,
+                ),
+                crate::symbol_resolver::CandidateSelection::Selected(_)
+            ),
+            OperatorCallShape::IndexedSet { args } => matches!(
+                resolver.select_receiver_indexed_set_function_with_params(
+                    receiver,
+                    "set",
+                    args,
+                    &[],
+                    &extensions,
+                ),
+                crate::symbol_resolver::CandidateSelection::Selected(_)
+            ),
+        };
+        if applies {
+            *overloads = visible;
+        }
+    }
+
     /// Reject an inaccessible selected constructor after diagnosing its local inference result.
     /// Evidence from the rejected call is never published into the committed-call sidecar.
     pub(super) fn reject_ctor_access(
@@ -553,4 +604,20 @@ mod tests {
             None,
         ));
     }
+}
+
+/// The operator convention a hidden member competes for, so extension applicability is checked
+/// with the same selection the call itself uses.
+#[derive(Clone, Copy)]
+pub(super) enum OperatorCallShape<'a> {
+    Call {
+        name: &'a str,
+        args: &'a [crate::symbol_resolver::CallArgKind],
+    },
+    IndexedGet {
+        args: &'a [crate::symbol_resolver::CallArgKind],
+    },
+    IndexedSet {
+        args: &'a [crate::symbol_resolver::CallArgKind],
+    },
 }

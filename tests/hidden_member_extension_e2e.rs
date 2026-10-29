@@ -43,3 +43,32 @@ fun t(b: B): Int = b.foo() + b.bar()\n";
     );
     common::assert_error_blocks_match_kotlinc(&sources, &reference_args);
 }
+
+#[test]
+fn an_inapplicable_extension_leaves_the_hidden_operator_member_an_access_error() {
+    const SRC: &str = "class B { private operator fun plus(x: Int): String = \"m\" }\n\
+fun use(b: B): String = b + 1\n\
+operator fun B.plus(x: String): String = x\n";
+    const WITHOUT_EXTENSION: &str =
+        "class B { private operator fun plus(x: Int): String = \"m\" }\n\
+fun use(b: B): String = b + 1\n";
+    let sources = [("Main.kt", SRC)];
+    let reference_args = common::language_directives::kotlinc_args(SRC);
+    assert_eq!(
+        common::reference_error_blocks(&sources, &reference_args),
+        ["Main.kt:2:27: cannot access 'fun plus(x: Int): String': it is private in 'B'."]
+    );
+    // The extension does not apply, so the call reports the hidden member exactly as it does
+    // with no extension at all. (Operator access diagnostics themselves are a separate gap.)
+    let control =
+        common::krusty_error_blocks_with_args(&[("Main.kt", WITHOUT_EXTENSION)], &reference_args);
+    assert_ne!(
+        control,
+        Vec::<String>::new(),
+        "the hidden member must be rejected"
+    );
+    assert_eq!(
+        common::krusty_error_blocks_with_args(&sources, &reference_args),
+        control
+    );
+}

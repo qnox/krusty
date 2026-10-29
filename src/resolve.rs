@@ -53593,7 +53593,11 @@ impl<'a> Checker<'a> {
                     && (candidate.kind != crate::libraries::FnKind::Member
                         || candidate.context_count == 0)
             });
-            self.drop_members_hidden_by_extensions(at, &mut functions.overloads);
+            self.drop_members_hidden_by_applicable_extensions(
+                at,
+                &mut functions.overloads,
+                access_control::OperatorCallShape::IndexedGet { args: &index_kinds },
+            );
             let mut members = functions.clone();
             members
                 .overloads
@@ -60029,7 +60033,11 @@ impl<'a> Checker<'a> {
         let selected = {
             let resolver = self.resolver();
             let (mut functions, _) = callables.clone().into_parts();
-            self.drop_members_hidden_by_extensions(recv, &mut functions.overloads);
+            self.drop_members_hidden_by_applicable_extensions(
+                recv,
+                &mut functions.overloads,
+                access_control::OperatorCallShape::Call { name, args: &[] },
+            );
             functions.overloads.retain(|candidate| {
                 candidate.kind == kind
                     && (kind == crate::libraries::FnKind::Member
