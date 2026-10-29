@@ -2368,6 +2368,10 @@ pub struct IrFile {
     /// where it was lowered, not from its shape: an adaptation or widening over the same call is
     /// another coercion. A target decides whether the conversion crosses a physical result slot.
     pub declaration_result_coercions: crate::fx_hash::HashSet<ExprId>,
+    /// The `ImplicitCoercion` JVM dependency-call realization places between a provider's physical
+    /// result and the checked semantic result, keyed by that coercion. Like
+    /// `declaration_result_coercions`, the mark comes from where the boundary was made.
+    pub jvm_external_result_coercions: crate::fx_hash::HashSet<ExprId>,
     /// Call-owned supplied-argument edges whose declaration parameters mention type parameters.
     /// A target may adapt only these exact edges, and only when its own carrier rules select them.
     pub declaration_argument_boundaries:

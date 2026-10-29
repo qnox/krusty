@@ -189,11 +189,22 @@ fn test_erased_result_directly(ir: &mut IrFile) {
             _ => continue,
         }
         ir.declaration_result_coercions.remove(&coercion);
+        ir.jvm_external_result_coercions.remove(&coercion);
     }
 }
 
 /// The call result a reference coercion converts and the erased reference slot that call leaves.
+/// Only a coercion that owns a call boundary qualifies: one common lowering marked between a
+/// declaration's result and its substitution, or the one dependency realization placed over a
+/// provider's physical result. Its operand must still be the retained call itself, not an expanded
+/// inline region or another transformed value; any other coercion converts an already realized
+/// semantic result and keeps its conversion.
 fn erased_reference_operand(ir: &IrFile, coercion: ExprId) -> Option<(ExprId, Ty)> {
+    if !ir.declaration_result_coercions.contains(&coercion)
+        && !ir.jvm_external_result_coercions.contains(&coercion)
+    {
+        return None;
+    }
     let IrExpr::TypeOp {
         op: IrTypeOp::ImplicitCoercion,
         arg: produced,
@@ -202,10 +213,10 @@ fn erased_reference_operand(ir: &IrFile, coercion: ExprId) -> Option<(ExprId, Ty
     else {
         return None;
     };
-    let slot = match ir.physical_types.get(produced) {
-        Some(slot) => *slot,
-        None => checked_result_slot(ir, declaration_result_call(ir, *produced)?)?,
-    };
+    if declaration_result_call(ir, *produced) != Some(*produced) {
+        return None;
+    }
+    let slot = *ir.physical_types.get(produced)?;
     let physical = crate::jvm::physical_type::ir_ty_to_jvm(&slot);
     (substituted.is_reference() && physical.is_reference()).then_some((*produced, slot))
 }
@@ -426,5 +437,87 @@ mod tests {
         assert!(
             matches!(ir.expr(assertion), IrExpr::NotNullAssert { operand, .. } if *operand == region)
         );
+    }
+
+    /// `produced() is String` over a coercion to `CharSequence`, marked or not.
+    fn instance_test(
+        marked: bool,
+        operand: impl FnOnce(&mut IrFile, ExprId) -> ExprId,
+    ) -> (IrFile, ExprId, ExprId, ExprId) {
+        let (mut ir, call) = producer();
+        let produced = operand(&mut ir, call);
+        let coercion = ir.add_expr(IrExpr::TypeOp {
+            op: IrTypeOp::ImplicitCoercion,
+            arg: produced,
+            type_operand: Ty::obj("kotlin/CharSequence"),
+        });
+        if marked {
+            ir.declaration_result_coercions.insert(coercion);
+        }
+        let test = ir.add_expr(IrExpr::TypeOp {
+            op: IrTypeOp::InstanceOf,
+            arg: coercion,
+            type_operand: Ty::String,
+        });
+        realize_call_result_boundaries(&mut ir);
+        (ir, call, coercion, test)
+    }
+
+    fn tested_operand(ir: &IrFile, test: ExprId) -> ExprId {
+        let IrExpr::TypeOp { arg, .. } = ir.expr(test) else {
+            panic!("the instance test survives");
+        };
+        *arg
+    }
+
+    #[test]
+    fn a_marked_checked_result_is_tested_in_its_erased_slot() {
+        let (ir, call, _, test) = instance_test(true, |_, call| call);
+        assert_eq!(tested_operand(&ir, test), call);
+    }
+
+    #[test]
+    fn an_unmarked_coercion_keeps_its_semantic_conversion() {
+        let (mut ir, call) = producer();
+        ir.physical_types.insert(call, Ty::obj("kotlin/Any"));
+        let coercion = ir.add_expr(IrExpr::TypeOp {
+            op: IrTypeOp::ImplicitCoercion,
+            arg: call,
+            type_operand: Ty::obj("kotlin/CharSequence"),
+        });
+        let test = ir.add_expr(IrExpr::TypeOp {
+            op: IrTypeOp::InstanceOf,
+            arg: coercion,
+            type_operand: Ty::String,
+        });
+        realize_call_result_boundaries(&mut ir);
+        assert_eq!(tested_operand(&ir, test), coercion);
+    }
+
+    #[test]
+    fn a_replaced_inline_result_keeps_its_semantic_conversion() {
+        let (ir, _, coercion, test) = instance_test(true, |ir, call| {
+            let region = ir.add_expr(IrExpr::Block {
+                stmts: Vec::new(),
+                value: Some(call),
+            });
+            ir.inline_regions.insert(region);
+            ir.physical_types.insert(region, Ty::obj("kotlin/Any"));
+            region
+        });
+        assert_eq!(tested_operand(&ir, test), coercion);
+    }
+
+    #[test]
+    fn a_transformed_result_keeps_its_semantic_conversion() {
+        let (ir, _, coercion, test) = instance_test(true, |ir, call| {
+            let asserted = ir.add_expr(IrExpr::NotNullAssert {
+                operand: call,
+                check: NullCheck::Source,
+            });
+            ir.physical_types.insert(asserted, Ty::obj("kotlin/Any"));
+            asserted
+        });
+        assert_eq!(tested_operand(&ir, test), coercion);
     }
 }

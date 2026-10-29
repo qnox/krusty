@@ -731,6 +731,9 @@ fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId) {
     if ir.declaration_result_coercions.contains(&source) {
         ir.declaration_result_coercions.insert(target);
     }
+    if ir.jvm_external_result_coercions.contains(&source) {
+        ir.jvm_external_result_coercions.insert(target);
+    }
     if let Some(boundaries) = ir.declaration_argument_boundaries.get(&source).cloned() {
         let supplied = |expression: ExprId| match ir.expr(expression) {
             IrExpr::Call { args, .. } => args.clone(),
