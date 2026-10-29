@@ -31,6 +31,14 @@ fun Card(title: String, count: Int) {
         {
             Label(title)
         })
+    Section({ Label("inner") }, title)
+}
+
+// The lambda's first capture is its own first value, not `content`.
+@Composable
+fun Section(content: @Composable () -> Unit, title: String) {
+    content()
+    Frame { Label(title) }
 }
 
 @Composable
@@ -123,14 +131,22 @@ fun box(): String {
         "endRestartGroup endRestartGroup startRestartGroup shouldExecute true " +
         "startRestartGroup shouldExecute true a endRestartGroup startRestartGroup changed " +
         "shouldExecute true startRestartGroup changed shouldExecute true a " +
-        "endRestartGroup endRestartGroup endRestartGroup endRestartGroup " +
-        "3|startRestartGroup changed changed shouldExecute true startRestartGroup " +
-        "shouldExecute false skipToGroupEnd endRestartGroup startRestartGroup " +
-        "shouldExecute false skipToGroupEnd endRestartGroup startRestartGroup " +
-        "shouldExecute true startRestartGroup shouldExecute true b endRestartGroup " +
-        "startRestartGroup changed shouldExecute false skipToGroupEnd endRestartGroup " +
-        "endRestartGroup endRestartGroup 3 true|startRestartGroup changed changed " +
-        "shouldExecute true startRestartGroup shouldExecute false skipToGroupEnd " +
+        "endRestartGroup endRestartGroup endRestartGroup startRestartGroup shouldExecute " +
+        "true startRestartGroup changed shouldExecute true startRestartGroup " +
+        "shouldExecute true inner endRestartGroup endRestartGroup startRestartGroup " +
+        "shouldExecute true startRestartGroup changed shouldExecute true " +
+        "startRestartGroup changed shouldExecute true a endRestartGroup endRestartGroup " +
+        "endRestartGroup endRestartGroup endRestartGroup 4|startRestartGroup changed " +
+        "changed shouldExecute true startRestartGroup shouldExecute false skipToGroupEnd " +
+        "endRestartGroup startRestartGroup shouldExecute false skipToGroupEnd " +
+        "endRestartGroup startRestartGroup shouldExecute true startRestartGroup " +
+        "shouldExecute true b endRestartGroup startRestartGroup changed shouldExecute " +
+        "false skipToGroupEnd endRestartGroup endRestartGroup startRestartGroup " +
+        "shouldExecute true startRestartGroup changed shouldExecute false skipToGroupEnd " +
+        "endRestartGroup startRestartGroup shouldExecute false skipToGroupEnd " +
+        "endRestartGroup endRestartGroup endRestartGroup 4 true|startRestartGroup changed " +
+        "changed shouldExecute true startRestartGroup shouldExecute false skipToGroupEnd " +
+        "endRestartGroup startRestartGroup shouldExecute false skipToGroupEnd " +
         "endRestartGroup startRestartGroup shouldExecute false skipToGroupEnd " +
         "endRestartGroup startRestartGroup shouldExecute false skipToGroupEnd " +
         "endRestartGroup endRestartGroup "

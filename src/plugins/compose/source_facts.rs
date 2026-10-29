@@ -1187,9 +1187,18 @@ fn unsupported_lambda_use(
                 );
             }
         }
-        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+        push_body_children(ir, expression, &mut pending);
     }
     None
+}
+
+/// Queue the operands of `expression` that are in its function's value namespace: a lambda's
+/// captures, not the template of its body kept for inlining, whose values are the lambda's own.
+fn push_body_children(ir: &IrFile, expression: ExprId, pending: &mut Vec<ExprId>) {
+    match &ir.exprs[expression as usize] {
+        IrExpr::Lambda { captures, .. } => pending.extend(captures.iter().copied()),
+        _ => crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child)),
+    }
 }
 
 /// Whether parameter `index` of `function` is declared `@Composable () -> Unit`, the one composable
@@ -1252,7 +1261,7 @@ fn used_parameters(ir: &IrFile, block: ExprId, count: u32) -> Vec<bool> {
                 used[index as usize] = true;
             }
         }
-        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+        push_body_children(ir, expression, &mut pending);
     }
     used
 }
