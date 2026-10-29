@@ -17600,12 +17600,22 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   round describes them and reads the JVM annotations written on them, as it does with no inline
   member. (`src/ksp_round.rs`, `an_inline_member_leaves_its_classifiers_members_resolved`;
   `crates/krusty-plugin-host/tests/ksp.rs`, `effective_java_modifiers_are_what_ksp2_reports`.)
-- **A KSP source declaration written without `override` has no overridee.**
-  `findOverridee` of a written (`KOTLIN`) function or property without the `override` modifier,
-  and of any constructor, is `null`, as KSP2 2.3.12 reports. The overridee of an `override`
-  member, and of a compiler-generated function whose `override` modifier says nothing of it (a
-  data class's `componentN`), is refused. (`crates/krusty-plugin-host/tests/ksp.rs`,
-  `overridees_are_what_ksp2_reports`, `the_overridee_of_an_override_is_refused`.)
+- **A KSP source member's overridee is the first member it directly overrides.**
+  `findOverridee` of a written (`KOTLIN`) `override` function or property is the first member it
+  directly overrides, in the order the classifier's supertypes are written, and a member only a
+  fake override inherits along the way is the declaration that fake override stands for: `C.f`
+  overrides `A.f` when `B` between them does not override it; `kotlin.Any`'s `toString` is
+  `KOTLIN_LIB`, declared by `kotlin.Any`. A data class's or data object's generated `equals`,
+  `hashCode` and `toString`, as `getAllFunctions` lists them, override the member each takes the
+  place of: `kotlin.Any`'s, or a superclass's override. A member written without `override`, any
+  constructor, a top-level declaration, a data class's `componentN` and `copy`, and a member of
+  `kotlin.Any` itself have none, as KSP2 2.3.12 reports. A library overridee
+  the round does not describe on its own is refused: a member of a Java classifier other than an
+  annotation (`Runnable.run`), one of a classifier with type parameters, which KSP2 reports
+  unsubstituted (`Comparable<F>.compareTo` takes a `T`), and one sharing its name with another of
+  its classifier's members. (`crates/krusty-plugin-host/tests/ksp.rs`,
+  `overridees_are_what_ksp2_reports`, `overridees_of_listed_members_are_what_ksp2_reports`,
+  `an_overridee_the_round_cannot_describe_is_refused`.)
 - **A KSP Java annotation's array elements without a default default to an empty array.**
   `KSAnnotation.defaultArguments` of an application of a Java library annotation lists an empty
   array for every array-typed element the annotation declares without a default, in declaration
@@ -17628,8 +17638,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   as that supertype lists them, then the classifier's constructors; `getAllProperties` lists the
   own properties, then each supertype's. A supertype's member is left out when it is private,
   already listed, or overridden by a member listed before, as the frontend selected the override.
-  A data class's generated `equals` (`open operator override public`, parameter `other: Any?`),
-  `hashCode` and `toString` (`open public`), `SYNTHETIC` and declared by the class, take the place
+  A data class's or data object's generated `equals` (`open operator override public`,
+  parameter `other: Any?`), `hashCode` and `toString` (`open public`), `SYNTHETIC` and declared by
+  the class, take the place
   of the member each overrides: `kotlin.Any`'s, or a superclass's that overrides it, so with no
   superclass they follow `kotlin.Any`'s order. A classifier with no written supertype inherits
   `kotlin.Any`'s functions and no property. Members inherited along two supertypes as different
