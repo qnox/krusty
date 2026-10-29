@@ -108,7 +108,8 @@ mod when_facts;
 pub use crate::enclosing_declarations::EnclosingDeclaration;
 /// A declared type's checked source spelling, which the IR carries per declaration
 /// ([`IrFile::prop_declared_spellings`]) as part of its contract with backends and plugins.
-pub use crate::spelling::Spelled;
+pub use crate::fir::{CallableId, ExternalCallableId, SourceFileId};
+pub use crate::spelling::{Spelled, TypeUseAnnotation};
 pub use crate::types::EqualityMode;
 pub use annotations::{
     AccessorAnnotations, AnnoRetention, AnnoValue, AppliedAnnotation, DeclarationAnnotations,
@@ -153,7 +154,7 @@ pub use local_property_references::IrLocalPropertyReference;
 pub use module_records::{
     IrCallableTypeParameter, IrClassifierKind, IrHeaderAnnotation, IrModuleCallable,
     IrModuleClassifier, IrModuleConstructions, IrModuleConstructor, IrModuleMemberAccess,
-    IrModuleSource,
+    IrModuleSource, IrOverriddenFunction,
 };
 pub use null_checks::NullCheck;
 pub use operators::{IrBinOp, IrTypeOp};
@@ -1361,6 +1362,9 @@ pub struct IrFile {
     /// Exact generated function metadata/debug contracts, keyed by semantic owning classifier.
     /// Producers publish once; backends consume function identities without name/descriptor scans.
     generated_member_publications: crate::fx_hash::HashMap<TypeName, IrGeneratedMemberPublication>,
+    /// Debug-only contracts of generated top-level functions, which the file facade owns. They
+    /// have no Kotlin `Function` record.
+    generated_facade_functions: Vec<IrGeneratedFunctionPublication>,
     /// Exact common-IR functions bound to compiler-synthesized data-class roles. The common
     /// producer records these before any backend rename; metadata and target realization consume
     /// the identities without scanning method spellings.
@@ -1615,6 +1619,16 @@ pub struct IrFile {
     /// same reason [`IrClass::field_annotations`] is one: the overwhelming majority of functions
     /// carry none, and every synthesized function stays constructible without naming them.
     pub function_annotations: crate::fx_hash::HashMap<u32, DeclarationAnnotations>,
+    /// The classifiers of the SOURCE-retained annotations a source function applies, by function
+    /// id. Nothing emits them; they are checked facts a compiler plugin reads (Compose's
+    /// `@NonSkippableComposable`).
+    pub function_source_annotations: crate::fx_hash::HashMap<u32, Vec<TypeName>>,
+    /// What the Compose plugin recorded from this file's source at the handoff, for its body
+    /// transform. `None` unless the plugin is active and the file declares a composable function.
+    pub compose: Option<Box<crate::plugins::compose::ComposeFileFacts>>,
+    /// Package functions a compiler plugin gave physical parameters their declaration does not
+    /// have (Compose's `$composer` and `$changed`). Metadata records their realized signature.
+    pub(crate) plugin_extended_signatures: crate::fx_hash::HashSet<FunId>,
     /// `(class, property source order)` → the synthetic `get<Name>$annotations()` marker method that carries
     /// that property's annotations. The property's `JvmPropertySignature` names the marker, so
     /// emission reads its FINAL name from here (the value-class pass may have mangled it).
@@ -1739,6 +1753,10 @@ pub struct IrFile {
     /// left value). Recorded where they are lowered, so a backend lays the guard out as its platform
     /// compiler does without recognizing the shape again.
     pub null_guards: crate::fx_hash::HashSet<ExprId>,
+    /// The temporary `value as? T` evaluates its operand into, keyed by its `Variable`. Only the
+    /// `is T` test and the matching branch's cast read it, so a backend may store the operand's
+    /// physical value without first converting it to the operand's semantic type.
+    pub safe_cast_temporaries: crate::fx_hash::HashSet<ExprId>,
     /// `::prop.isInitialized`, recorded when lowering `LateinitFieldRead`. The probe compares the
     /// property with null and does not throw. A backend chooses the raw field, getter, or bridge.
     pub lateinit_initialization_probes: crate::fx_hash::HashSet<ExprId>,
@@ -2350,6 +2368,10 @@ pub struct IrFile {
     /// where it was lowered, not from its shape: an adaptation or widening over the same call is
     /// another coercion. A target decides whether the conversion crosses a physical result slot.
     pub declaration_result_coercions: crate::fx_hash::HashSet<ExprId>,
+    /// The `ImplicitCoercion` JVM dependency-call realization places between a provider's physical
+    /// result and the checked semantic result, keyed by that coercion. Like
+    /// `declaration_result_coercions`, the mark comes from where the boundary was made.
+    pub jvm_external_result_coercions: crate::fx_hash::HashSet<ExprId>,
     /// Call-owned supplied-argument edges whose declaration parameters mention type parameters.
     /// A target may adapt only these exact edges, and only when its own carrier rules select them.
     pub declaration_argument_boundaries:

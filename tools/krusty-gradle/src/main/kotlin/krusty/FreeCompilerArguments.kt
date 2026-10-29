@@ -2,11 +2,14 @@ package krusty
 
 import org.gradle.api.GradleException
 
-// Free arguments reach krusty verbatim, as KGP passes them to kotlinc: krusty parses them with
+// Free arguments reach krusty verbatim, as KGP passes them to kotlinc: after the arguments derived
+// from the structured compiler options, so a free argument that restates one of those options
+// (`-progressive`, `-module-name=okhttp`) wins exactly as it does for kotlinc. krusty parses them with
 // kotlinc's argument table, reports kotlinc's errors and warnings, and refuses an argument it does
-// not implement. What this plugin checks is only the boundary of the arguments it derives from
-// structured task inputs. A free argument must not reach them under another spelling (a short or
-// deprecated alias), hide them in an argument file, or turn them into sources after `--`.
+// not implement. What this plugin checks is only the boundary of the arguments it owns: the task's
+// sources, destination, libraries and compiler plugins. A free argument must not reach them under
+// any spelling (a short or deprecated alias), hide them in an argument file, or turn them into
+// sources after `--`.
 
 /** A kotlinc argument's canonical name, and whether a bare occurrence consumes the next token. */
 private class KotlincArgument(val name: String, val takesValue: Boolean)
@@ -44,7 +47,7 @@ private val kotlincArgumentsByVersion: Map<String, Map<String, KotlincArgument>>
     }.toMap()
 }
 
-/** The structured input that owns each argument the plugin derives, by canonical name. */
+/** The plugin-owned input behind each argument a free argument must not reach, by canonical name. */
 private val reservedArguments: Map<String, String> = mapOf(
     "-d" to "the plugin-owned destination",
     "-Xbuild-file" to "the task sources and the plugin-owned destination",
@@ -53,9 +56,6 @@ private val reservedArguments: Map<String, String> = mapOf(
     "-Xfragments" to "the multiplatform compilation's source sets",
     "-Xfragment-sources" to "the multiplatform compilation's source sets",
     "-Xfragment-refines" to "the multiplatform compilation's source sets",
-    "-module-name" to "compilerOptions.moduleName",
-    "-jvm-target" to "compilerOptions.jvmTarget",
-    "-java-parameters" to "compilerOptions.javaParameters",
     "-jdk-home" to "compilerOptions.noJdk and the Java toolchain",
     "-no-jdk" to "compilerOptions.noJdk and the Java toolchain",
     "-no-stdlib" to "the plugin-owned dependency policy",
@@ -63,9 +63,6 @@ private val reservedArguments: Map<String, String> = mapOf(
     "-kotlin-home" to "the plugin-owned dependency policy",
     // krusty's own argument, not in kotlinc's table.
     "-Xkotlin-reference-version" to "the Kotlin Gradle plugin version",
-    "-language-version" to "compilerOptions.languageVersion",
-    "-api-version" to "compilerOptions.apiVersion",
-    "-progressive" to "compilerOptions.progressiveMode",
     "-Xplugin" to "compiler plugin configuration",
     "-P" to "compiler plugin configuration",
     "-Xcompiler-plugin" to "compiler plugin configuration",

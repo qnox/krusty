@@ -296,10 +296,11 @@ impl Checker<'_> {
             &function.type_param_bounds,
             &[],
         );
+        let receiver = owner_receiver_prefix(function.receiver.as_ref());
         self.publish_type_parameter_owner(
             scope,
             &function.type_params,
-            format!("fun <{formals}> {}", function.name),
+            format!("fun <{formals}> {receiver}{}", function.name),
         )
     }
 
@@ -319,19 +320,7 @@ impl Checker<'_> {
             &property.type_param_bounds,
             &[],
         );
-        let receiver = property
-            .receiver
-            .as_ref()
-            .map_or_else(String::new, |receiver| {
-                let mut display = super::BoundedSourceDisplay::new(usize::MAX);
-                super::write_source_type_display_with(
-                    &mut display,
-                    receiver,
-                    &mut super::write_source_type_leaf,
-                )
-                .expect("unbounded type display");
-                format!("{}.", display.finish())
-            });
+        let receiver = owner_receiver_prefix(property.receiver.as_ref());
         let keyword = if property.is_var { "var" } else { "val" };
         self.publish_type_parameter_owner(
             scope,
@@ -735,4 +724,19 @@ fn owner_formal(name: &str, variance: TypeVariance, bounds: &[Ty]) -> String {
     } else {
         format!("{variance}{name} : {}", bounds.join(", "))
     }
+}
+
+/// An extension declaration's receiver as its owner wording spells it (`List<T>.`), or nothing for
+/// a declaration without one.
+fn owner_receiver_prefix(receiver: Option<&TypeRef>) -> String {
+    receiver.map_or_else(String::new, |receiver| {
+        let mut display = super::BoundedSourceDisplay::new(usize::MAX);
+        super::write_source_type_display_with(
+            &mut display,
+            receiver,
+            &mut super::write_source_type_leaf,
+        )
+        .expect("unbounded type display");
+        format!("{}.", display.finish())
+    })
 }

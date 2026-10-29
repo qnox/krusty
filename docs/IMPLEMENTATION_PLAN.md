@@ -14,6 +14,34 @@ normalizer and metadata parent chain. Failed reference assertions construct that
 throw through the shared Kotlin tag. Keep scalar-reference conversion outside this change; the
 generic numeric dependency ABI will consume this exception prerequisite separately.
 
+## Native dependency reference identity handoff
+
+Retain the canonical declaration marker in the existing Native dependency export registry. Source
+exports join their exact checked callable ID to the module-function key; dependency-support exports
+use the existing injective module-qualified KLIB identity encoding. Selected external references
+consume this retained key, while authenticated declarations without source exports use their KLIB
+key. Missing required identity on a known export declines explicitly. Invocation aliases, marker
+ownership and provider-local IDs remain distinct. Serialized rich-reference admission stays in its
+separate follow-up.
+
+## Consume declaration names in metadata class headers
+
+Resolve selected declaration keys against the frozen name inventory and pass mandatory resolved
+class IDs into the common Class schema. JVM and KLIB headers share that writer; KLIB's class-name
+inventory reuses it. Select nested children and top-level KLIB roots from retained declaration
+ownership. Retain generated classifier names from the existing typed plugin facts.
+Keep explicit local provenance separate from unknown evidence. Other class-ID consumers in types,
+aliases, annotations and sealed-class inventories remain separate follow-ups; this step does not
+claim to replace their legacy encoding or callable-reference adapter naming.
+
+## Shared dependency conversion evidence
+
+Reuse the constructor-bound collaborator for ordinary dependency bodies and prepared templates.
+Pass the active header's complete formal bounds into the same explicit class-model proof and keep
+typed common coercions when a conversion changes nullability or scalar/reference representation.
+Keep the already-landed generic-argument arity guard unchanged. Validate the owning proof and body
+tests and the portable dependency-array-view fixture without backend mutes or new outcome entries.
+
 ## Native source callable-reference markers
 
 Give source-module references a program-scoped marker keyed by the existing module-qualified
@@ -5084,6 +5112,20 @@ their declarations into an index-based model (`declarations`, `model`), lays rec
 - **Next.** Pointer, struct and callback crossings in direct C calls, and the cgo-mode thread
   start that lifts the linker's refusal of a program that imports and can start threads.
 
+## Native compiler command  ◐
+
+- **Programs (done for linux_x64).** `krusty kotlinc-native` takes Kotlin/Native's
+  `kotlinc-native` options, compiles the sources against the Native stdlib KLIB and the
+  `-library` KLIBs, and links a static `.kexe` (`native::compile_native`). Options krusty cannot
+  honor are refused by name (`crates/krusty-cli/src/kotlinc_native.rs` unit tests).
+  `tests/native_compiler_command_e2e.rs` checks the answer on the JVM lane, then compiles a
+  two-file program with the command, runs it, and asserts the complete diagnostics of a broken
+  source.
+- **Next.** `-produce library`, which needs the KLIB writer to serialize ordinary function and
+  class bodies into `default/ir`; until then a first-party library's sources are compiled into the
+  program. Programs reach further as dependency body emission grows (library member bodies, then
+  non-constant parameter defaults of third-party KLIBs).
+
 ## Byte-identical box conformance, item 1 — local-class naming  ◐
 
 Goal: every box test passes AND writes the same class files as kotlinc. The first mechanism is how
@@ -6219,8 +6261,11 @@ supplying nested result context; independently inferred arguments remain intact.
 selection completes untyped lambda inputs from the retained candidate and source argument mapping,
 then rechecks only affected bodies without the rejected expected result. Normal checking and
 recovery share the function input layout, including contexts and anonymous receiver slots. Exact
-source/dependency diagnostics and admitted-context controls cover #2587. Explicit invalid-bound
-lambda diagnostic ordering remains a separate follow-up in #2629.
+source/dependency diagnostics and admitted-context controls cover #2587. For #2629, explicit bound
+rejection retains mapped, substituted postponed-lambda constraints before discarding the candidate.
+Reporting consumes those typed failure facts without redoing selection or assignability; fixed
+inputs and nested-producer isolation remain intact. Callable-reference winner diagnostics remain
+the separate #2776 follow-up.
 
 Late extension admission now uses strict receiver assignability or the existing satisfiable
 postponed-frame trial. The common operation also serves unbound constructor-reference receivers;
@@ -6246,3 +6291,42 @@ Nominal function values use the shared subtype relation to reach the canonical f
 of the expected signature. Applied hierarchy traversal retains declared variance, nullability,
 arity and suspend kind. Owning semantic tests cover reflective and inherited function declarations
 and unrelated-callable rejection; the JVM round trip covers nominal and reflection interface slots.
+
+Superclass-argument name reads retain the unavailable dispatch receiver as diagnostic evidence,
+separate from the usable receiver tower. Both paths share its declared scope identity. After
+lexical values and available receivers fail, a pure member-selection probe diagnoses the missing
+initialized instance before inferred-type demand or checked-body construction. Pending dispatch
+properties demand through their selected available receiver instead of a bare declaration name.
+The name-demand operation is extracted from the resolver facade; receiver and capture coordinates
+are unchanged. Ordered kotlinc diagnostics and positive enclosing-value controls cover #2658.
+
+## Compose compiler plugin  🚧
+
+krusty reimplements the Compose compiler plugin as a native pass (`src/plugins/compose`), one
+construct at a time, each byte-identical to kotlinc's output. The registry marks it partly
+implemented, so `krusty refusals` keeps a Compose module on kotlinc until the list below is done,
+and the pass rejects every construct it does not cover yet.
+
+- [x] Parameterless `Unit` top-level composables: restart groups, skipping, durable keys,
+  `@FunctionKeyMeta`, source information and trace markers; calls between them in one file.
+- [ ] Calls to composables of other files and modules, and the grouping annotations.
+- [ ] `@Composable` function types and lambdas, and the composable call checker's diagnostics.
+- [x] Primitive and `String` parameters: `$changed`/`$dirty` slot tracking with strong skipping,
+  `Composer.changed` comparisons, and each call's argument bits (static, passed on, uncertain).
+- [x] Constant default arguments: the `$default` mask, defaults assigned in the group, placeholders
+  and masks at calls, no `$default` synthetic.
+- [ ] More parameters: non-constant defaults (defaults groups), receivers, varargs, more than ten,
+  stability inference.
+- [ ] The full body transform: control-flow groups, `remember`, early returns, inline composables.
+- [ ] `ComposableSingletons` lambda holders and the `$stable` field of classes.
+- [ ] Remove the partial marker and rerun the corpus for the Compose projects.
+
+## Link target-owned serialized getter leaves
+
+Retain normalized KLIB accessor identity and role through declaration and backend handoffs.
+Authenticate exact property membership and the raw/applied declaring-class receiver before
+admitting a target getter capability. Share that positive decision across closure planning,
+bodyless edge preparation and ordinary accessor linking; preserve retained exports and existing
+primitive/intrinsic priority. Native consumes its existing runtime getter plans. Prove real
+official-producer/JVM-oracle programs and malformed header/facet controls. Keep compiler-introduced
+block lowering as the independent #2811 follow-up.

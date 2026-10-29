@@ -173,6 +173,9 @@ pub struct Options {
     /// `-Xsuppress-version-warnings`: omit the deprecated and experimental language/API warnings.
     /// Redundant feature arguments stay reported.
     pub suppress_version_warnings: bool,
+    /// `-Xreport-all-warnings`: a failed compilation reports its warnings beside its errors. Without
+    /// it, kotlinc reports only the errors of a compilation that fails.
+    pub report_all_warnings: bool,
 }
 
 impl Default for Options {
@@ -225,6 +228,7 @@ impl Default for Options {
             inline_string_concat: false,
             opt_in: Vec::new(),
             suppress_version_warnings: false,
+            report_all_warnings: false,
         }
     }
 }
@@ -413,6 +417,9 @@ pub struct PluginResolution {
     pub notes: Vec<String>,
     /// Printed as `error:` — any one fails the compilation before it starts.
     pub errors: Vec<String>,
+    /// Plugins krusty implements only in part: the compilation runs, but a build asking which
+    /// compilations krusty takes is refused it.
+    pub partial: Vec<String>,
 }
 
 impl Options {
@@ -433,6 +440,7 @@ impl Options {
                 native: NativePlugins::none(),
                 notes: Vec::new(),
                 errors: missing,
+                partial: Vec::new(),
             };
         }
         let classpath = classpath
@@ -453,6 +461,11 @@ impl Options {
             native: resolved.native,
             notes: notes.iter().map(|note| note.message()).collect(),
             errors: errors.iter().map(|error| error.message()).collect(),
+            partial: notes
+                .iter()
+                .filter(|note| note.is_refusal())
+                .map(|note| note.message())
+                .collect(),
         }
     }
 }

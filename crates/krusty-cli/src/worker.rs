@@ -155,9 +155,9 @@ fn boolean_option(flag: &str) -> Option<Option<&'static str>> {
         "--x_inline_classes" => Some("-Xinline-classes"),
         "--x_skip_prerelease_check" => Some("-Xskip-prerelease-check"),
         "--x_when_guards" => Some("-XXLanguage:+WhenGuards"),
+        "--x_report_all_warnings" => Some("-Xreport-all-warnings"),
         // Diagnostics and reporting: they change what the compiler PRINTS, not what it emits.
         "--x_render_internal_diagnostic_names"
-        | "--x_report_all_warnings"
         | "--trace"
         | "--no-proc"
         | "--x_wasm_attach_js_exception"

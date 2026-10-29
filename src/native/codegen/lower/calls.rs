@@ -1022,6 +1022,7 @@ mod tests {
     fn an_exact_dependency_export_never_receives_too_few_arguments() {
         let export = DependencyExport {
             symbol: "kt_klib_export_0".to_string(),
+            reference_declaration: None,
             signature: {
                 let mut ir = crate::ir::IrFile::default();
                 let function = ir.add_fun(crate::ir::IrFunction {

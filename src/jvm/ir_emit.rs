@@ -176,6 +176,8 @@ use primary_constructor_parameters::{
 };
 use try_emission::ProtectedRegion;
 mod class_metadata;
+#[cfg(test)]
+mod metadata_name_tests;
 use class_metadata::build_class_metadata;
 #[cfg(test)]
 use class_metadata::build_class_metadata_with_facts;
@@ -2414,8 +2416,8 @@ fn emit_class(
             .and_then(|fs| fs.iter().find(|(fname, _)| fname == name))
             .map(|(_, parameter)| parameter.as_str())
             .or(field.type_param.as_deref());
-        let field_sig = property_jvm_signatures(&signature_formatter, ty, type_parameter)
-            .field
+        let field_sig = signature_formatter
+            .field_signature(ty, type_parameter, acc)
             .filter(|_| !field.is_property_delegate());
         let physical_name = instance_field_jvm_name(ir, env.run, c, field_index);
         let field_desc = type_descriptor(jvm_value_ty(ty));
@@ -3503,12 +3505,12 @@ fn emit_enum_class(
         let nullability = (!f.is_lateinit())
             .then(|| declared_field_annotation(c, field_index))
             .flatten();
-        let signature =
-            property_jvm_signatures(&signature_formatter, &f.ty, f.type_param.as_deref())
-                .field
-                .filter(|_| !f.is_property_delegate());
+        let access = field_visibility::declared_field_access(c, field_index, false);
+        let signature = signature_formatter
+            .field_signature(&f.ty, f.type_param.as_deref(), access)
+            .filter(|_| !f.is_property_delegate());
         cw.add_field_late_sig(
-            field_visibility::declared_field_access(c, field_index, false),
+            access,
             &physical_name,
             &type_descriptor(*t),
             signature.as_deref(),
@@ -4796,8 +4798,9 @@ fn emit_placed_method(
 /// The generic `Signature` element for a parameterized concrete type (`List<String>` →
 /// `Ljava/util/List<Ljava/lang/String;>;`); `None` when erasure loses nothing. `T?` unwraps (generics
 /// survive nullability). Retained formals include an enclosing declaration's parameters.
-/// A FIELD's generic `Signature`, which follows the return-position rule: no declaration-site
-/// wildcards. A constructor PARAMETER of the same declared type takes them, so it goes through
+/// A FINAL field's generic `Signature`, which follows the return-position rule: no declaration-site
+/// wildcards (a non-final field's goes through [`JvmSignatureFormatter::field_signature`]). A
+/// constructor PARAMETER of the same declared type takes them, so it goes through
 /// [`parameterized_sig_at`] with the parameter mode instead.
 fn parameterized_sig(formatter: &JvmSignatureFormatter<'_>, ty: &Ty) -> Option<String> {
     parameterized_sig_at(formatter, ty, Wildcards::Suppressed)
@@ -6912,17 +6915,6 @@ mod invariant_tests {
         }
     }
 
-    struct NoClassifiers;
-
-    impl BackendClassifierSource for NoClassifiers {
-        fn classifier(
-            &self,
-            _classifier: crate::types::TypeName,
-        ) -> Option<std::sync::Arc<crate::backend::BackendClassifierFact>> {
-            None
-        }
-    }
-
     pub(super) fn emit_for_test(
         ir: &IrFile,
         facade: &str,
@@ -7032,7 +7024,7 @@ mod invariant_tests {
                     suspended_result_returns: &suspended_result_returns,
                     intrinsic_probe_continuations,
                 },
-                signature_symbols: &NoClassifiers,
+                signature_symbols: &super::metadata_name_tests::DeclarationNames(ir),
                 dependency_callables: &dependency_callables,
                 property_realizations: &property_realizations,
                 property_reference_realizations: &property_reference_realizations,
@@ -7083,39 +7075,6 @@ mod invariant_tests {
             method,
             Some(("build".to_string(), "(Ljava/lang/String;)V".to_string()))
         );
-    }
-
-    #[test]
-    fn nested_metadata_uses_declaration_identity_not_generated_name_shape() {
-        let mut ir = IrFile::default();
-        let mut outer = crate::plugins::synthetic_class("demo/Outer");
-        outer.is_source_declared = true;
-        let outer_id = ir.add_class(outer);
-        ir.record_class_source_order(outer_id, 0);
-
-        // A digit is valid in a source identifier; the former generated-name heuristic dropped it.
-        let mut declared = crate::plugins::synthetic_class("demo/Outer$Node2");
-        declared.is_source_declared = true;
-        let declared_id = ir.add_class(declared);
-        ir.record_class_source_order(declared_id, 1);
-
-        // Conversely, looking nested is not sufficient: backend-generated implementation classes
-        // are not declarations in Kotlin metadata.
-        ir.add_class(crate::plugins::synthetic_class("demo/Outer$Impl3"));
-        crate::metadata::class_declarations::record_all(&mut ir);
-
-        let metadata = build_class_metadata_with_facts(
-            &ir,
-            &crate::jvm::override_results::OverrideResults::default(),
-            &ir.classes[outer_id as usize],
-            &EmitOptions::default(),
-            &LocalDelegatedProperties::default(),
-            &NoClassifiers,
-            &EmitRun::default(),
-        )
-        .expect("plain source class metadata");
-        assert!(metadata.d2.iter().any(|entry| entry == "Node2"));
-        assert!(!metadata.d2.iter().any(|entry| entry == "Impl3"));
     }
 
     #[test]

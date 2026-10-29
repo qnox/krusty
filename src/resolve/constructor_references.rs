@@ -58,7 +58,7 @@ impl Checker<'_> {
         expected: Option<&'static crate::types::FnSig>,
     ) -> Ty {
         let Some((target, constructor)) = function
-            .bound_inner_constructor
+            .bound_inner_constructor()
             .zip(function.selected_constructor_member())
         else {
             return self.reject_selected_constructor_reference(expression);
