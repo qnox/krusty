@@ -125,6 +125,7 @@ mod provider_constructor_selection;
 use constructor_arguments::ConstructionExpectations;
 mod script_receivers;
 pub(crate) use delegated_properties::DelegateGetValueTarget;
+mod call_argument_position;
 mod contract_declarations;
 mod contract_effects;
 mod declaration_rendering;
@@ -31126,6 +31127,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         callable_reference_types: HashMap::default(),
         reflective_callable_references: crate::fx_hash::HashSet::default(),
         misfit_callable_references: crate::fx_hash::HashSet::default(),
+        checked_call_argument: None,
         exhaustive_whens: crate::fx_hash::HashSet::default(),
         when_subject_plans: when_flow::WhenSubjectPlans::default(),
         resolved_type_tys: HashMap::default(),
@@ -33547,6 +33549,9 @@ struct Checker<'a> {
     /// nearest candidate for the enclosing check (see `misfit_callable_references`). Selection
     /// records one and the same visit consumes it, so a later fitting revisit is unaffected.
     misfit_callable_references: crate::fx_hash::HashSet<ExprId>,
+    /// The call value argument [`Self::check_argument_expected`] is checking against its
+    /// parameter, so a misfit reference knows whether it is postponed into a call.
+    checked_call_argument: Option<ExprId>,
     exhaustive_whens: crate::fx_hash::HashSet<ExprId>,
     /// See [`TypeInfo::when_subject_plans`].
     when_subject_plans: when_flow::WhenSubjectPlans,
@@ -49484,10 +49489,12 @@ impl<'a> Checker<'a> {
             || (self.postponed_empty_reference_array_factory(scope, argument)
                 && expected.non_null().is_reference_array()
                 && expected.non_null().array_elem().is_some())
-            || (matches!(self.file.expr(argument), Expr::CallableRef { .. })
-                && expected.non_null().is_fun())
         {
             self.expr_expected(scope, argument, expected)
+        } else if matches!(self.file.expr(argument), Expr::CallableRef { .. })
+            && expected.non_null().is_fun()
+        {
+            self.check_argument_expected(scope, argument, expected, false, None)
         } else if self.lambda_needs_selected_shape(scope, argument, actual, expected) {
             self.check_argument_expected(
                 scope,
@@ -60509,7 +60516,8 @@ impl<'a> Checker<'a> {
         )
     }
 
-    fn check_argument_expected(
+    /// Check `expression` against `expected`, giving a lambda its contextual function shape.
+    pub(super) fn check_expected_operand(
         &mut self,
         scope: &CheckerScope<'_>,
         expression: ExprId,

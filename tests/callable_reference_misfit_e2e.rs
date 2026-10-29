@@ -109,3 +109,36 @@ enum class E(f: (B, Int) -> String) { X(B::g) }\n",
         ],
     );
 }
+
+#[test]
+fn superclass_constructor_arguments_report_their_candidates() {
+    assert_kotlinc_errors(
+        "class B\n\
+fun B.g(i: Int, j: Int): String = \"e\"\n\
+fun B.k(i: Int, j: Int): String = \"e\"\n\
+fun B.k(s: String, t: String, u: String): String = s\n\
+open class P(f: (B, Int) -> String)\n\
+class C : P(B::g)\n\
+class D : P(B::k)\n",
+        &[
+            "Main.kt:6:16: inapplicable candidate(s): fun B.g(i: Int, j: Int): String",
+            "Main.kt:7:16: none of the following candidates is applicable:",
+            "| ",
+            "| fun B.k(i: Int, j: Int): String:",
+            "|   Inapplicable candidate(s): fun B.k(i: Int, j: Int): String",
+            "| ",
+            "| fun B.k(s: String, t: String, u: String): String:",
+            "|   Inapplicable candidate(s): fun B.k(s: String, t: String, u: String): String",
+        ],
+    );
+}
+
+#[test]
+fn a_misfit_default_value_mismatches_its_parameter_like_an_initializer() {
+    assert_kotlinc_errors(
+        "class B\n\
+fun B.g(i: Int, j: Int): String = \"e\"\n\
+fun h(f: (B, Int) -> String = B::g) = f\n",
+        &["Main.kt:3:29: initializer type mismatch: expected '(B, Int) -> String', actual 'KFunction3<B, Int, Int, String>'."],
+    );
+}

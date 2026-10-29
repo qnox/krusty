@@ -4,15 +4,18 @@
 
 A callable reference none of whose function candidates fits its expected function shape still
 resolves, and its position decides the diagnostic, as in kotlinc 2.4.21. As a call's value argument
-(`take(B::g)`, `t?.take(B::g)`, an enum entry's or a constructor's argument) the candidates are
-reported at the name: one as `inapplicable candidate(s): fun B.g(i: Int, j: Int): String`, several
-as `none of the following candidates is applicable:` with each candidate followed by its own
-`Inapplicable candidate(s)` reason, members before extensions. Anywhere else (an initializer, a
-return, an assignment) the nearest tower level with candidates decides: a single candidate gives
-the reference its reflection type, so `val ref: (B, Int) -> String = B::g` reports `initializer
-type mismatch: expected '(B, Int) -> String', actual 'KFunction3<B, Int, Int, String>'`, and
-several are listed after `none of the following candidates is applicable:`. A member the site
-cannot see is not a candidate. Tests: `callable_reference_misfit_e2e`.
+(`take(B::g)`, `t?.take(B::g)`, an enum entry's or a superclass constructor's argument) the
+candidates are reported at the name: one as `inapplicable candidate(s): fun B.g(i: Int, j: Int):
+String`, several as `none of the following candidates is applicable:` with each candidate followed
+by its own `Inapplicable candidate(s)` reason, members before extensions. The checker knows the
+position from the argument it is checking against its selected parameter, so a superclass
+constructor's reference argument waits for that parameter as a lambda does. Anywhere else (an
+initializer, a parameter default, a return, an assignment) the nearest tower level with candidates
+decides: a single candidate gives the reference its reflection type, so `val ref: (B, Int) ->
+String = B::g` reports `initializer type mismatch: expected '(B, Int) -> String', actual
+'KFunction3<B, Int, Int, String>'`, and several are listed after `none of the following candidates
+is applicable:`. A member the site cannot see is not a candidate. Tests:
+`callable_reference_misfit_e2e`, `box_regressions/superclassCallableReferenceArguments.kt`.
 
 ## Invisible members yield to extensions
 
