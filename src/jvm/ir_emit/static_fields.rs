@@ -116,13 +116,9 @@ pub(super) fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, env:
             };
             visibility | 0x0018 // [PRIVATE | PUBLIC] | STATIC | FINAL
         } else if s.is_var {
-            // A public or internal `lateinit var` is `public static`: `isInitialized` and other
-            // raw reads `getstatic` it. Its field follows the setter, so a private one, one with a
-            // `private set` (no setter method), and every plain `var` stay private.
-            if s.is_lateinit
-                && !s.visibility.is_private()
-                && s.accessors.setter != crate::ir::IrStaticAccessor::Absent
-            {
+            // A public or internal `lateinit var` with a setter method is `public static`; every
+            // plain `var` stays private.
+            if crate::jvm::private_static_access::lateinit_field_is_public(ir, static_index) {
                 0x0009 // PUBLIC | STATIC
             } else {
                 0x000A // PRIVATE | STATIC
@@ -1082,9 +1078,12 @@ impl Emitter<'_> {
         // A PRIVATE property's field, or the backing field of a source-declared getter, read from
         // another class, goes through its owner's accessor. Calling the declared getter would
         // re-enter it: the read is inside that getter.
-        if let Some(storage) = crate::jvm::private_static_access::bridged_getter(self.ir, i)
-            .or_else(|| crate::jvm::private_static_access::declared_backing_getter(self.ir, i))
-            .filter(|storage| self.static_owner != Some(storage.owner) || self.export_private_calls)
+        if let Some(storage) =
+            crate::jvm::private_static_access::bridged_getter_read(self.ir, i, expr)
+                .or_else(|| crate::jvm::private_static_access::declared_backing_getter(self.ir, i))
+                .filter(|storage| {
+                    self.static_owner != Some(storage.owner) || self.export_private_calls
+                })
         {
             let m = static_accessors::static_methodref(
                 self.cw,

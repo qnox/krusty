@@ -5192,7 +5192,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   ldc name; invokestatic throwUninitializedPropertyAccessException; aconst_null; areturn`); same-file
   and cross-file reads call that getter, and same-file and cross-file writes call its default setter,
   since kotlinc never replaces a `lateinit` property's accessors with field access. With a `private
-  set` there is no setter method: the field is `private static` and writes store it. A private one keeps a `private static` field and inlines the
+  set` there is no setter method: the field is `private static`, writes store it, and an
+  `isInitialized` probe from another class reads it through `access$get<X>$p`. Known gap: kotlinc
+  emits the default getter of a property probed from another class of the file with no guard
+  (`getstatic; areturn`); krusty keeps the guard. A private one keeps a `private static` field and inlines the
   guard on each raw read and after `access$get<X>$p` (`dup; ifnonnull; pop; ldc name; invokestatic;
   aconst_null`). `::prop.isInitialized` is an initialization probe recorded when
   `LateinitFieldRead` is lowered, and the JVM loads that field with no guard. An `object` member `lateinit`

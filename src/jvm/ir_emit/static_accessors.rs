@@ -26,7 +26,7 @@ use super::access_bridges::ProtectedMemberAccessBridge;
 use super::*;
 use crate::fx_hash::{HashMap, HashSet};
 use crate::jvm::private_static_access::{
-    bridged_getter, bridged_setter, declared_backing_getter, declared_backing_setter,
+    bridged_getter_read, bridged_setter, declared_backing_getter, declared_backing_setter,
     member_property_accessor_name, StaticOwner,
 };
 use std::cell::RefCell;
@@ -977,7 +977,7 @@ impl Walk<'_> {
                 StaticOwner::Class(*owner),
                 StaticAccessor::Function(*function),
             )),
-            IrExpr::GetStatic(index) => bridged_getter(self.ir, *index)
+            IrExpr::GetStatic(index) => bridged_getter_read(self.ir, *index, expression)
                 .or_else(|| declared_backing_getter(self.ir, *index))
                 .map(|storage| (storage.owner, StaticAccessor::Getter(*index)))
                 .or_else(|| hoisted_field_accessor(self.ir, *index, false)),
