@@ -13287,13 +13287,37 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   its own shape in krusty. kotlinc 2.4.20's frontend instead drops that receiver and makes the first value
   parameter the receiver, but its backend then fails every such lambda conversion with an
   internal error (`LambdaMetafactoryArgumentsBuilder.validateMethodParameters`: "Mismatching
-  lambda and instance method parameters"), so there is no kotlinc output to match. The convention is a frontend fact (`SymbolSource::sam_with_receiver_annotations`, read
+  lambda and instance method parameters"), so there is no kotlinc output to match. The convention is a frontend fact (`SymbolSource::annotation_conventions`, read
   by `symbol_resolver::semantic_sam_signature`), so checking, lowering and the backend see the same
   receiver function type. Tests: `tests/sam_with_receiver_plugin_e2e.rs` (annotated Java and
   Kotlin interfaces, an inherited annotated method, a meta-annotation, an annotated subinterface of
   an unannotated method, a parameterless method, byte-identical to kotlinc and run),
   `plugins::sam_with_receiver` and `plugins::registry` unit tests
   (`sam_with_receiver_resolves_to_native_and_rejects_its_unregistered_preset_option`).
+- **The assignment plugin makes `target = value` the call `target.assign(value)`.**
+  `-Xplugin=assignment-compiler-plugin.jar` (registrar `AssignmentComponentRegistrar`) with
+  `-P plugin:org.jetbrains.kotlin.assignment:annotation=<fqname>` runs krusty's native pass. It
+  applies when the target is a non-local `val` property (member, top-level, or through an implicit
+  receiver, package-qualified, or an object's or companion's, including in an initializer) or a final Java field or setter-less Java getter, and the
+  target's type has a class or supertype carrying one of the annotations; a `var` stays an ordinary
+  assignment. The parser keeps the call `target.assign(value)` beside the statement, its call
+  source the whole target as in kotlinc; the checker resolves it as any receiver call, member or
+  extension, with no `operator` modifier, and records `StmtLowering::OverloadedAssignment`, which
+  body checking lowers as that call. When the call fails, its own diagnostics are kotlinc's (an
+  argument mismatch of a member or extension `assign`; the same-named extensions a receiver type
+  mismatch rejects, each with its reason in declaration order, or only the one more specific than
+  the rest, a non-generic one breaking a tie with generic ones; an unresolved reference when none is
+  in scope), and the assignment is also rejected at its `=` with "no applicable 'assign' function
+  found for '=' overload."; an `assign` returning anything but `Unit` is rejected there too, and at
+  its declaration (its result type, or its name when inferred) whenever it could serve: one value
+  parameter, on an annotated receiver. The plugin is registered `PartialNative`: a build hands a
+  compilation using it to kotlinc until every form, a `vararg` `assign` among them, is pinned
+  byte-identical. The annotation list is a frontend fact
+  (`SymbolSource::annotation_conventions`). Tests: `tests/assignment_plugin_e2e.rs` (member,
+  extension, inherited and interface annotations, top-level, initializer, extension-receiver and
+  scope-function targets, a `var`, Java fields and getters, byte-identical to kotlinc and run; the
+  complete no-applicable and non-`Unit` diagnostics against kotlinc's), `plugins::assignment` unit
+  test.
 - **`Pair`, `Triple` and `Map.Entry` serialize through the runtime's tuple serializers.** None of
   them is `@Serializable`, but kotlinc's plugin selects a serializer for each by the classifier,
   as it does for a standard collection. `Pair<A, B>` becomes `new PairSerializer(<A>, <B>)`,
