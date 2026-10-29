@@ -23247,3 +23247,15 @@ for every written scalar or expanded element; an inapplicable member permits the
 tower to consider an applicable extension. Diagnostics render the original declaration inputs.
 A method-owned formal remains separate from class formals.
 Tests: `nominal_projected_input_e2e`.
+
+## Serialized Elvis expression blocks
+
+A serialized Elvis expression retains its immutable compiler temporary and exact null proof.
+Lowering authenticates the temporary identity, signed compiler equality operation, null operand,
+two conditional branches and declared/applied types before publishing the common snapshot and
+Elvis conditional. It evaluates the left operand once, evaluates the fallback only for null, and
+preserves nested evaluation order and function return targets. Only the authenticated present
+read receives the non-null proof. Unrelated origin-less conditionals and unmodelled block origins
+still decline. Owning tests compare String, Int and Any IR with checked FIR, exercise malformed
+contracts, and execute the unchanged #2811 Pair program plus official-producer controls after JVM
+oracles in `klib_closure_frames_e2e::elvis_blocks`.

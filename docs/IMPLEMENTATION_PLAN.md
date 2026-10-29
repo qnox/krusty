@@ -6327,3 +6327,11 @@ block lowering as the independent #2811 follow-up.
 - [x] Retain nominal member declaration inputs and full owner bounds before receiver application;
   use them for scalar and expanded-vararg admission and diagnostics with complete kotlinc ledgers.
   Preserve invariant/in-projected inputs, named/default/non-last varargs and method-formal shadows.
+
+## Lower serialized Elvis expression blocks
+
+Authenticate the producer's exact temporary/null-test/branch contract and lower it to the existing
+common Elvis snapshot and conditional. Preserve single evaluation, lazy fallback, nested order,
+return targets and declared storage; leave generic operand and unrelated conditional admission
+unchanged. Validate malformed contracts and checked-FIR parity alongside the original full #2811
+official-producer program and independent JVM-oracle controls.
