@@ -61,7 +61,7 @@ impl Checker<'_> {
         let declaration_diagnostic =
             Self::callable_candidate_display(&function.callable.name, &function);
         let Some((target, constructor)) = function
-            .bound_inner_constructor
+            .bound_inner_constructor()
             .zip(function.selected_constructor_member())
         else {
             return self.reject_selected_constructor_reference(expression);

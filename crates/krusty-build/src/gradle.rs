@@ -2695,6 +2695,7 @@ tasks.withType<KotlinJvmCompile>().configureEach {
                 "werror-warning-exception" -> emptyList<String>()
                 "duplicate-opt-in" -> listOf(
                     "krusty.fixture.ExperimentalFirstApi",
+                    "krusty.fixture.ExperimentalSecondApi",
                     "krusty.fixture.ExperimentalFirstApi",
                 )
                 else -> listOf(
