@@ -8,6 +8,13 @@ an unboxed invocation carrier. Stored types and offsets jointly own the GC map a
 This representation choice changes no declaration identity, metadata or source-level type, and
 does not reconstruct receiver roles from a capture's spelling or machine carrier.
 
+## Null-pointer exception storage
+
+The platform NullPointerException declaration carries the existing runtime-exception storage role.
+Its metadata owns its superclass; a same-named foreign declaration or one with additional state
+receives no role. Wasm reference assertions use the authenticated hierarchy and base Throwable
+message/cause fields rather than manufacturing an untyped exception object.
+
 ## Native reference identities and exported entry points
 
 A KLIB export's physical invocation alias is independent of its declaration marker. The Native

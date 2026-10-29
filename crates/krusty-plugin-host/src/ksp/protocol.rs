@@ -15,7 +15,7 @@ use crate::protocol::{malformed, put_list, put_str, read_frame, utf8, write_fram
 
 use super::{GeneratedKind, KspGenerated, KspLoad, KspOutcome};
 
-pub(crate) const PROTOCOL: u32 = 14;
+pub(crate) const PROTOCOL: u32 = 15;
 
 const HELLO: u8 = 0;
 const LOAD: u8 = 1;
@@ -200,8 +200,12 @@ fn put_library_class(payload: &mut Vec<u8>, library: &KspLibraryClass) {
 }
 
 /// Members a classifier lists: 0 and the index of one of its own declarations; 1, the qualified
-/// name of the classifier that declares one described here, and that declaration; or 2, the
-/// qualified name of a source classifier and the index of one of its declarations.
+/// name of the classifier that declares one described here, and that declaration; 2, the
+/// qualified name of a source classifier and the index of one of its declarations; or 3, the
+/// qualified name of the classifier an intersection member is made for, the path of the source
+/// file declaring the member it is made from, if any, and its declaration; or 4, the qualified
+/// name of a source classifier, whether its properties (else its functions) are meant, and the
+/// position of a member it lists.
 fn put_members(payload: &mut Vec<u8>, members: &[KspMember]) {
     put_list(payload, members, put_member);
 }
@@ -221,6 +225,26 @@ fn put_member(payload: &mut Vec<u8>, member: &KspMember) {
             payload.push(2);
             put_str(payload, owner);
             payload.extend_from_slice(&index.to_be_bytes());
+        }
+        KspMember::Intersection {
+            owner,
+            file,
+            declaration,
+        } => {
+            payload.push(3);
+            put_str(payload, owner);
+            put_option(payload, file, |payload, path| put_str(payload, path));
+            put_declaration(payload, declaration);
+        }
+        KspMember::Listed {
+            owner,
+            property,
+            position,
+        } => {
+            payload.push(4);
+            put_str(payload, owner);
+            payload.push(u8::from(*property));
+            payload.extend_from_slice(&position.to_be_bytes());
         }
     }
 }
