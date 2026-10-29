@@ -28,8 +28,9 @@ pub(super) fn slot_type(ir: &IrFile, declaration: ExprId, semantic: Ty) -> Ty {
 ///
 /// kotlinc stores that parameter as its erased bound (`T : AutoCloseable?` is `AutoCloseable`) and
 /// `checkcast`s back to the call-site type at each use. An unconstrained `T` stays the specialized
-/// reference: its bound erases to `Object`, and no cast is emitted. A primitive specialization
-/// stays unboxed.
+/// reference: its bound erases to `Object`, and no cast is emitted. A primitive specialization is
+/// boxed into the erased bound, as kotlinc boxes `true.also { }`'s receiver and unboxes it for
+/// each use; the redundant-boxing pass removes the pair when every use unboxes.
 fn erased_inline_parameter_slot(ir: &IrFile, declaration: ExprId, semantic: Ty) -> Option<Ty> {
     let declared = ir.inline_declared_type(declaration)?;
     if !declared.non_null().is_ty_param() {
@@ -37,8 +38,11 @@ fn erased_inline_parameter_slot(ir: &IrFile, declaration: ExprId, semantic: Ty) 
     }
     let erased = ir_ty_to_jvm(&stored_value_ty(declared));
     let specialized = ir_ty_to_jvm(&stored_value_ty(semantic));
-    if !erased.is_reference() || !specialized.is_reference() || erased == specialized {
+    if !erased.is_reference() || erased == specialized {
         return None;
+    }
+    if !specialized.is_reference() {
+        return Some(erased);
     }
     let top = erased
         .obj_internal()
