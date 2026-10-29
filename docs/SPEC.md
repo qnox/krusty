@@ -13125,27 +13125,41 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   and runs krusty's pass, and `krusty refusals` lists the plugin, so the Gradle integration keeps
   giving a Compose module to kotlinc until the coverage is complete. A composable construct the pass
   does not cover is an error at that construct (`krusty's Compose compiler plugin does not support
-  <construct> yet; compile this module with kotlinc`), never a silent difference: parameters, a
+  <construct> yet; compile this module with kotlinc`), never a silent difference: a receiver, a
+  default argument, a vararg, more than ten parameters, a parameter type other than a primitive or
+  `String`, a call argument that is not a constant, a parameter, or computed from a parameter, a
   grouping annotation, a call to another file's composable, a name an overload with lambdas shares,
   and a class kotlinc would give `$stable`. A nonempty `metricsDestination`/`reportsDestination` is an
   `UnimplementedOption` error. The runtime functions the code calls are selected at the handoff by
   their Kotlin signatures, or the module is rejected. Covered:
-  parameterless `Unit` top-level composables with a block body. Each takes a nullable
-  `$composer: Composer` and `$changed: Int`, restarts in
+  `Unit` top-level composables with a block body whose parameters are primitives or `String`. Each
+  takes a nullable `$composer: Composer` and `$changed: Int` after its own parameters, restarts in
   `startRestartGroup(key)`/`endRestartGroup()?.updateScope(…)`, and skips through
-  `shouldExecute($changed != 0, $changed and 1)`/`skipToGroupEnd()`. Its calls to other composables
-  pass `$composer` and `0`. The group key is the Java `hashCode` of
+  `shouldExecute(…)`/`skipToGroupEnd()`. `$changed` holds a force bit, then three bits per
+  parameter (two of state: uncertain, same, different, static; one of stability). A function that
+  reads a parameter copies `$changed` into `$dirty` and, for each parameter it reads whose state is
+  uncertain, ors in `different` or `same` from the `Composer.changed` overload for its type; it then
+  runs when `$dirty and (1 | 0b001 per read slot) != 0b001 per read slot` (strong skipping). One
+  that reads none has no `$dirty` and runs when `$changed and 1 != 0`, or `$changed != 0` without
+  parameters. A call passes `$composer` and a `$changed` built as kotlinc's
+  `buildChangedArgumentForCall` builds it: `static` bits for a constant argument, the caller's
+  `$dirty` slot (masked, shifted to the callee's slot) for a parameter passed on, and `uncertain`
+  for anything computed. Source information names the parameters (`N(a,b)`) when the runtime
+  declares `androidx.compose.runtime.tooling.SourceInformation`, and is rejected otherwise. The
+  group key is the Java `hashCode` of
   `fun-<name>(<parameter types>)<result>/pkg-<package>/file-<file name>`, which `@FunctionKeyMeta`
   records with the UTF-16 offsets of the `fun` keyword and the body's end. That annotation lives in
   the class file only, never in Kotlin metadata, because kotlinc's IR plugin adds it after FIR
   metadata serialization. `sourceInformation` (`C(<name>)<line>@<offset>L<length>,…:<file>#<package hash
   in base 36>`) and trace markers (`<fq name> (<file>:<0-based line>)`) follow the plugin's options.
-  The recompose lambda `<name>$lambda$0($$changed, $composer, $force)` publishes its locals and no
+  The recompose lambda `<name>$lambda$0(<parameters>, $$changed, $composer, $force)` publishes its
+  locals and no
   line, and the call's line starts at its dispatch, since kotlinc builds both arguments without
-  offsets. Tests: `tests/fixtures/compose/restartableFunctions.kt`, whose `box()` composes
-  and recomposes the functions through a recording composer, and
-  `kotlin_box_ir_jvm_conformance::compose_restartable_functions_are_byte_identical_to_kotlinc`, which
-  requires its class set to equal kotlinc's byte for byte;
+  offsets. Tests: `tests/fixtures/compose/restartableFunctions.kt` and `trackedParameters.kt`,
+  whose `box()` composes and recomposes the functions through a recording composer, and
+  `kotlin_box_ir_jvm_conformance::compose_restartable_functions_are_byte_identical_to_kotlinc` and
+  `compose_tracked_parameters_are_byte_identical_to_kotlinc`, which require their class sets to
+  equal kotlinc's byte for byte;
   `cli_compiler_plugin_e2e::the_compose_pass_rejects_what_it_does_not_cover` and
   `compose_report_destinations_fail_the_compile`; and the `plugins::compose` and
   `plugins::registry` unit tests.
@@ -17623,6 +17637,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   KSP2 2.3.12 reports. A Kotlin library annotation keeps the rule for a `vararg` element only.
   (`crates/krusty-plugin-host/tests/ksp.rs`,
   `java_annotation_array_elements_default_to_empty_arrays`.)
+- **A Java `@Target` reads as Kotlin targets in `AnnotationTarget` order.** A Java annotation
+  class's `@java.lang.annotation.Target` reads as `kotlin.annotation.Target` whose
+  `allowedTargets` are the Kotlin targets each `ElementType` maps to (kotlinc's
+  `JavaAnnotationTargetMapper`), once each and in `AnnotationTarget` declaration order whatever
+  order the Java annotation writes its element types in, as kotlinc collects them into an enum set:
+  `{PARAMETER, TYPE, METHOD, FIELD}` reads as `CLASS, FIELD, VALUE_PARAMETER, FUNCTION,
+  PROPERTY_GETTER, PROPERTY_SETTER, FILE`, as KSP2 2.3.12 reports.
+  (`crates/krusty-plugin-host/tests/ksp.rs`, `library_annotation_members_are_what_ksp2_reports`;
+  `src/jvm/jvm_libraries/declaration_headers.rs`.)
 - **A KSP source classifier lists members sharing a name together.**
   `KSClassDeclaration.declarations` lists a classifier's functions and properties, written and
   generated, by name: each name where it first appears, and under one name its functions before its
@@ -23070,6 +23093,15 @@ reflective function classifiers and classes inheriting a function interface; an 
 a same-named classifier gains no such subtype relation. Tests: the normalized declaration cases in
 `symbol_resolver::hierarchy_projection` and the JVM nominal-slot round trip in
 `function_reference_invoke_e2e`.
+
+## Extension receivers bound to caller variables
+
+An extension receiver is applicable when its declared receiver, specialized by the bindings the
+receiver itself supplies, is a supertype of the actual receiver. Type variables of the caller
+that remain in the specialized receiver are fixed types there: `Column<EntityID<X>>` fits
+`Column<out E?>` for `<T : Any, E : EntityID<T>>` once `E := EntityID<X>`. A callee formal that
+the receiver leaves unbound stays rigid in this check, so it cannot make the receiver fit. Test:
+`box_regressions/extensionReceiverBindsCallerVariable.kt`.
 
 ## Extension results specialized to caller variables
 
