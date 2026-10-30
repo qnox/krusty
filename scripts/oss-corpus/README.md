@@ -27,9 +27,10 @@ so the Gradle, Kotlin and krusty processes and the daemons that outlive the buil
 records wall time, CPU time, and the peak of their summed resident memory (sampled every 100 ms,
 also split by kind), then stops the leftover daemons so the next build starts and pays for its own.
 `corpus.init.gradle` records when each task ran, and `compare.py` adds up each compilation's compile
-tasks: kotlinc's Kotlin task, and krusty's replacement, support check and Kotlin task. The reference
-build also downloads the project's dependencies, which the krusty build then finds cached; the
-compile times do not include downloads, the whole-build times do.
+tasks: kotlinc's Kotlin task, and krusty's replacement, support check and Kotlin task. The two
+measured builds are comparable: an unmeasured warm-up build first downloads everything the build
+needs (dependencies, plugins, toolchains) and its outputs are dropped, then both measured builds run
+with `--offline` from the same caches.
 
 `summarize.py` turns the per-project results into the run's report: stars, Kotlin and Java lines,
 compilations built, identical classes, the reason for every miss, what both builds cost, and the

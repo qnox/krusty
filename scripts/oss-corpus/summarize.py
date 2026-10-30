@@ -141,8 +141,8 @@ def cost_section(projects):
            'Each build runs alone on its own runner. Compile time sums the compile tasks: kotlinc\'s Kotlin task, and',
            'krusty\'s replacement, support check and Kotlin task (kotlinc\'s compile when a compilation is left to it).',
            'Peak memory sums every process the build started, daemons included; the compiler\'s is the Kotlin daemon\'s',
-           'in the reference build and the krusty processes\' in the krusty build. The reference build also downloads',
-           'the dependencies the krusty build then finds cached, so whole-build times favor krusty.',
+           'in the reference build and the krusty processes\' in the krusty build. A warm-up build downloads everything',
+           'first, and both measured builds run offline from the same caches.',
            '',
            '| Project | Compile time, compilations krusty built (kotlinc / krusty) | Compile time, all compilations |'
            ' Compiler peak RSS | Build peak RSS | Build wall time | Build CPU time |',

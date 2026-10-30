@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Builds one corpus project twice from a clean checkout, with kotlinc (its own Gradle build) and
 # with krusty (the same build with the krusty Gradle plugin applied by an init script), then
-# compares the class files of every Kotlin/JVM compile task.
+# compares the class files of every Kotlin/JVM compile task. A warm-up build first downloads what
+# both need, and both measured builds run offline.
 #
 #   run.sh <name> <work dir> <krusty binary> <krusty Gradle plugin repository> <plugin version>
 #
@@ -93,12 +94,18 @@ build() {
   status=$code
 }
 
-CORPUS_PLUGIN_SURVEY=$logs/$name.plugins.tsv build kotlinc
+# The warm-up build downloads everything the build needs (dependencies, Gradle and compiler plugins,
+# toolchains) and is not compared; its cost goes unrecorded and its outputs are dropped. The two
+# measured builds then run offline, so neither pays for the network and both start from the same
+# caches.
+build warmup
+rm -rf "$work/out/$name/warmup" "$logs/$name.warmup.metrics.json" "$logs/$name.warmup.tasks.tsv"
+CORPUS_PLUGIN_SURVEY=$logs/$name.plugins.tsv build kotlinc --offline
 reference=$status
 if [ ! -f "$logs/$name.kotlinc.compilations.tsv" ]; then
   echo "$name: the reference build recorded no compile-task inventory" >&2
   exit 1
 fi
 KRUSTY_PLUGIN_REPOSITORY=$plugin_repository KRUSTY_PLUGIN_VERSION=$plugin_version \
-  build krusty -I "$here/krusty.init.gradle" -Pkrusty.binary="$krusty"
+  build krusty --offline -I "$here/krusty.init.gradle" -Pkrusty.binary="$krusty"
 python3 "$here/compare.py" "$work" "$name" "$reference"
