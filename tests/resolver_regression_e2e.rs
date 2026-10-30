@@ -2637,6 +2637,36 @@ fun render(items: List<String>): Unit = with(Builder()) {
 }
 
 #[test]
+fn a_rejected_constructor_family_commits_none_of_its_declarations() {
+    // kotlinc reports every inapplicable constructor of the family and selects none of them.
+    let source = r#"
+class Two {
+    constructor(a: Int)
+    constructor(b: String)
+}
+fun several(): Two = Two(1.0)
+"#;
+    assert_rejection_same_as_kotlinc("RejectedConstructorFamily", source);
+}
+
+#[test]
+fn a_rejected_constructor_family_filtered_to_one_is_reported_not_committed() {
+    // Only `constructor(f)` takes one argument, so kotlinc reports that candidate's mismatch
+    // alone; the call is still rejected, and its type is that candidate's result.
+    let source = r#"
+interface Factory<K, E>
+class StrFactory : Factory<String, Char>
+class Two<K, E> {
+    constructor(f: Factory<K, E>)
+    constructor(s: String, n: Int)
+}
+val x: Two<Char, Char> = Two<Char, Char>(StrFactory())
+val y: String = Two<Char, Char>(StrFactory())
+"#;
+    assert_rejection_same_as_kotlinc("RejectedConstructorFilteredToOne", source);
+}
+
+#[test]
 fn a_bound_violating_only_argument_leaves_the_formal_uninferred() {
     // kotlinc rejects the argument's constraint at the argument; with no other evidence left, it
     // first reports that `T` cannot be inferred.

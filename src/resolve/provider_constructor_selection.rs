@@ -2,6 +2,21 @@
 
 use super::*;
 
+/// What a selection over a wider candidate family already decided for a constructor call.
+#[derive(Clone, Copy)]
+pub(super) enum ConstructorPreselection<'a> {
+    /// Nothing: the constructor family is selected here.
+    Open,
+    /// One declaration was chosen; only it is materialized.
+    Selected(&'a crate::libraries::FunctionInfo),
+    /// The candidates are equally specific: report why, but commit none.
+    Ambiguous,
+    /// No candidate applies: commit none, whatever survives the filters here. The declaration
+    /// the arguments map onto only records the type arguments it infers, and the rejection is
+    /// left unreported for the shared selector's caller to report.
+    Rejected,
+}
+
 impl Checker<'_> {
     /// The constructor path's view of one checked argument expression: its call-argument kind,
     /// with an integer literal typed by its semantic (not runtime) type.
@@ -48,7 +63,7 @@ impl Checker<'_> {
             bound_outer,
             expected,
             priority,
-            selected,
+            selected: preselection,
         } = options;
         let bound_context = match bound_outer {
             Some(receiver) => {
@@ -97,7 +112,7 @@ impl Checker<'_> {
         let mut type_argument_bound_failure = None;
 
         let mut declarations = self.constructor_declarations(internal, classifier);
-        if let Some(selected) = selected {
+        if let ConstructorPreselection::Selected(selected) = preselection {
             declarations.retain(|declaration| {
                 declaration.stable_declaration == selected.stable_declaration
                     && declaration.descriptor == selected.callable.descriptor
@@ -256,7 +271,7 @@ impl Checker<'_> {
                             "cannot infer type for type parameter '{formal}'. Specify it explicitly."
                         ),
                     );
-                    return Ok(LibraryConstructorSelection::Rejected);
+                    return Ok(LibraryConstructorSelection::Rejected(Ty::Error));
                 }
                 let mut enclosing_context_formals = crate::fx_hash::HashSet::default();
                 let actuals = args
@@ -716,6 +731,20 @@ impl Checker<'_> {
                     return Ok(LibraryConstructorSelection::NoMatch);
                 }
             };
+        match preselection {
+            ConstructorPreselection::Ambiguous => return Ok(LibraryConstructorSelection::NoMatch),
+            ConstructorPreselection::Rejected => {
+                // The type arguments this declaration infers type the call; its caller reports
+                // the rejection.
+                if let Some(Some(bindings)) = member_bindings.get(candidate_index) {
+                    self.record_library_constructor_type_arguments(
+                        call, internal, classifier, bindings,
+                    );
+                }
+                return Ok(LibraryConstructorSelection::Rejected(Ty::Error));
+            }
+            ConstructorPreselection::Open | ConstructorPreselection::Selected(_) => {}
+        }
         let Some(member) = members.get(candidate_index).cloned() else {
             return Ok(LibraryConstructorSelection::NoMatch);
         };
@@ -733,7 +762,7 @@ impl Checker<'_> {
         };
         let bindings = &member_bindings[candidate_index];
         if self.reject_ctor_access(call, internal, classifier, &member, bindings.as_ref()) {
-            return Ok(LibraryConstructorSelection::Rejected);
+            return Ok(LibraryConstructorSelection::Rejected(Ty::Error));
         }
         let mut slots = vec![None; member.params.len()];
         for (&argument, &slot) in args.iter().zip(&selected.argument_slots) {
