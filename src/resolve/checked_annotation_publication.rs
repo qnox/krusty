@@ -1254,11 +1254,24 @@ impl Checker<'_> {
                     | SyntheticKind::EmptyReference,
                 )) => {
                     let element = expected.and_then(Ty::array_elem);
-                    AnnotationValue::Array(
-                        args.iter()
-                            .map(|argument| self.fold_annotation_value(*argument, element))
-                            .collect::<Option<Vec<_>>>()?,
-                    )
+                    let mut values = Vec::new();
+                    for &argument in args {
+                        let whole_array = self.file.is_spread_arg(argument)
+                            || self.resolved_whole_array_vararg_args.contains(&argument);
+                        let value = self.fold_annotation_value(
+                            argument,
+                            if whole_array { expected } else { element },
+                        )?;
+                        if whole_array {
+                            let AnnotationValue::Array(elements) = value else {
+                                return None;
+                            };
+                            values.extend(elements);
+                        } else {
+                            values.push(value);
+                        }
+                    }
+                    AnnotationValue::Array(values)
                 }
                 _ => {
                     // A call selected as part of Kotlin's compile-time constant language (for

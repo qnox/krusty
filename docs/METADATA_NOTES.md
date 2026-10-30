@@ -163,6 +163,12 @@ raw qualified class name even though no physical classfile exists. Retain its pa
 exact segment before name-tree normalization, then publish that fact with the annotation shape.
 This preserves literal-dollar and nested names across separate metadata snapshots.
 
+## Closed annotation array operands
+
+Checked spreads and named whole-array operands contribute their elements to one annotation array
+payload. Both classfile annotation attributes and Kotlin metadata consume that same flattened value;
+ordinary operands remain individual elements. The recorded argument role owns this distinction.
+
 ## Serialization constructor handoff
 
 The serialization constructor's `named_params` retain nullable reference elements and the nullable
