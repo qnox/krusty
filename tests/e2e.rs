@@ -8,6 +8,8 @@ mod constructor_type_argument_publication_e2e;
 #[path = "dependent_constructor_bounds_e2e.rs"]
 mod dependent_constructor_bounds_e2e;
 mod enclosing_formal_signatures_e2e;
+#[path = "inferred_alias_constructor_abbreviation_e2e.rs"]
+mod inferred_alias_constructor_abbreviation_e2e;
 #[path = "nested_signature_argument_layout_e2e.rs"]
 mod nested_signature_argument_layout_e2e;
 
@@ -388,14 +390,6 @@ mod classpath_fun_typed_property_lambda_e2e;
 mod classpath_function_reference_e2e;
 #[path = "classpath_hidden_deprecated_e2e.rs"]
 mod classpath_hidden_deprecated_e2e;
-#[path = "classpath_inline_lambda_route_e2e.rs"]
-mod classpath_inline_lambda_route_e2e;
-#[path = "classpath_inline_plan_parity_e2e.rs"]
-mod classpath_inline_plan_parity_e2e;
-#[path = "classpath_inline_splice_e2e.rs"]
-mod classpath_inline_splice_e2e;
-#[path = "classpath_inline_splice_parity_e2e.rs"]
-mod classpath_inline_splice_parity_e2e;
 #[path = "classpath_inner_classes_e2e.rs"]
 mod classpath_inner_classes_e2e;
 #[path = "classpath_is_smartcast_e2e.rs"]
@@ -458,8 +452,6 @@ mod classpath_receiver_lambda_e2e;
 mod classpath_receiver_lambda_overload_e2e;
 #[path = "classpath_reified_expected_return_e2e.rs"]
 mod classpath_reified_expected_return_e2e;
-#[path = "classpath_reified_inline_toplevel_e2e.rs"]
-mod classpath_reified_inline_toplevel_e2e;
 #[path = "classpath_reified_named_default_vararg_e2e.rs"]
 mod classpath_reified_named_default_vararg_e2e;
 #[path = "classpath_relocated_facade_typealias_e2e.rs"]
@@ -514,8 +506,6 @@ mod cli_compiler_plugin_e2e;
 mod cli_dropin_e2e;
 #[path = "cli_verify_e2e.rs"]
 mod cli_verify_e2e;
-#[path = "closeable_use_receiver_e2e.rs"]
-mod closeable_use_receiver_e2e;
 #[path = "closure_in_class_e2e.rs"]
 mod closure_in_class_e2e;
 #[path = "closure_operand_spill_e2e.rs"]
@@ -961,6 +951,8 @@ mod extension_receiver_property_smartcast_e2e;
 mod external_modifier_targets_e2e;
 #[path = "facade_emission_e2e.rs"]
 mod facade_emission_e2e;
+#[path = "facade_lateinit_setter_e2e.rs"]
+mod facade_lateinit_setter_e2e;
 #[path = "fallthrough_close_line_e2e.rs"]
 mod fallthrough_close_line_e2e;
 #[path = "feature_box_e2e.rs"]
@@ -1033,8 +1025,6 @@ mod for_iterable_elvis_e2e;
 mod for_typed_loop_var_e2e;
 #[path = "foreach_convention_e2e.rs"]
 mod foreach_convention_e2e;
-#[path = "foreach_indexed_inline_e2e.rs"]
-mod foreach_indexed_inline_e2e;
 #[path = "fq_ctor_call_e2e.rs"]
 mod fq_ctor_call_e2e;
 #[path = "fq_generic_ctor_property_inference_e2e.rs"]
@@ -1321,6 +1311,8 @@ mod java_nonfinal_constant_e2e;
 mod java_raw_type_e2e;
 #[path = "java_self_bounded_constructor_e2e.rs"]
 mod java_self_bounded_constructor_e2e;
+#[path = "e2e/library_inline.rs"]
+mod library_inline;
 #[path = "local_class_capture_order_e2e.rs"]
 mod local_class_capture_order_e2e;
 #[path = "local_class_construction_capture_e2e.rs"]
@@ -1451,8 +1443,6 @@ mod lib_dep_harness_e2e;
 mod lib_fixture_parallel_e2e;
 #[path = "library_fun_type_lambda_param_e2e.rs"]
 mod library_fun_type_lambda_param_e2e;
-#[path = "library_inline_lambda_brace_line_e2e.rs"]
-mod library_inline_lambda_brace_line_e2e;
 #[path = "lifted_callable_names_e2e.rs"]
 mod lifted_callable_names_e2e;
 #[path = "list_fold_e2e.rs"]
@@ -2265,6 +2255,7 @@ mod loop_backedge_narrowing_e2e;
 mod nested_data_class_tostring_recipe_e2e;
 #[path = "nested_inline_delegate_e2e.rs"]
 mod nested_inline_delegate_e2e;
+mod nominal_projected_input_e2e;
 #[path = "nullable_sam_e2e.rs"]
 mod nullable_sam_e2e;
 #[path = "open_serializable_write_self_e2e.rs"]
@@ -2452,8 +2443,6 @@ mod result_property_carrier_e2e;
 mod rewritten_orphan_pool_e2e;
 #[path = "root_package_cast_message_e2e.rs"]
 mod root_package_cast_message_e2e;
-#[path = "run_catching_inline_e2e.rs"]
-mod run_catching_inline_e2e;
 #[path = "run_noreceiver_e2e.rs"]
 mod run_noreceiver_e2e;
 #[path = "safe_call_after_throw_e2e.rs"]
@@ -2829,8 +2818,6 @@ mod unsigned_range_contains_e2e;
 mod unsigned_range_inline_line_e2e;
 #[path = "unsigned_toplevel_e2e.rs"]
 mod unsigned_toplevel_e2e;
-#[path = "use_inline_finally_e2e.rs"]
-mod use_inline_finally_e2e;
 #[path = "use_site_variance_e2e.rs"]
 mod use_site_variance_e2e;
 #[path = "utf16_string_constant_e2e.rs"]

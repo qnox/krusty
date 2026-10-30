@@ -1,5 +1,14 @@
 # krusty — a memory-lean Kotlin→JVM compiler PoC
 
+## Nested producers against dependent bounds
+
+A postponed generic producer passed where the outer variable is still open is solved against that
+variable's declared bound when the bound depends on an already bound variable: in
+`update(column: Column<T>, value: Expression<S>)` with `S : T?` and `T` fixed, `nullableExpr()`
+sees `Expression<T?>`. Matching a nullable result shape `R?` against `X?` binds `R` to `X & Any`,
+since `X` itself may admit null. A bound that depends on no other variable is not inference evidence
+for the producer. Test: `box_regressions/nestedProducerDependentBound.kt`.
+
 ## Wasm reference not-null assertions
 
 A failed reference `!!` throws the platform declaration's `NullPointerException` through the
@@ -5241,11 +5250,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   are evaluated relative to it. A top-level `lateinit var` is a facade static. A public or internal
   one is a `public static` field whose default getter throws (`getstatic; dup; ifnull; areturn; pop;
   ldc name; invokestatic throwUninitializedPropertyAccessException; aconst_null; areturn`); same-file
-  and cross-file reads call that getter. A private one keeps a `private static` field and inlines the
+  and cross-file reads call that getter, and same-file and cross-file writes call its default setter,
+  since kotlinc never replaces a `lateinit` property's accessors with field access. With a `private
+  set` there is no setter method: the field is `private static`, writes store it, and an
+  `isInitialized` probe from another class reads it through `access$get<X>$p`. The default getter
+  of a property that another class of the file probes with `isInitialized` has no guard
+  (`getstatic; areturn`), as kotlinc emits it; a probe in the facade or its lambdas keeps it. A private one keeps a `private static` field and inlines the
   guard on each raw read and after `access$get<X>$p` (`dup; ifnonnull; pop; ldc name; invokestatic;
   aconst_null`). `::prop.isInitialized` is an initialization probe recorded when
   `LateinitFieldRead` is lowered, and the JVM loads that field with no guard. An `object` member `lateinit`
   stays on the instance-field path. `tests/top_level_lateinit_e2e.rs`,
+  `tests/facade_lateinit_setter_e2e.rs`,
   `tests/lateinit_operand_stack_e2e.rs`, `tests/lateinit_companion_read_e2e.rs`.
 - **`===`/`!==` on a nullable-primitive operand is rejected** (skip): boxed identity vs the unboxed
   primitive — and `Double`/`Float`'s `-0.0`/`NaN` — has subtle semantics krusty doesn't model.
@@ -12059,6 +12074,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   spelling. Not yet propagated: a call returning a declared alias type, a read of a declaration
   spelled with an alias, and inference through a generic call (`run { Cargo() }`). Tests:
   `tests/inferred_alias_abbreviation_e2e.rs`.
+- **An inferred alias argument carries its published flexibility in the abbreviation too.** An
+  argument inferred through a Java usage is flexible in the published constructor type, and kotlinc
+  abbreviates that same type: `ArrayList(listOf("a"))` is `ArrayList<String!>` abbreviated as
+  `kotlin.collections.ArrayList<String!>`. The selected call records the alias formals and
+  expansion it inferred them through, and declaration publication binds those formals again
+  against the published expansion. Explicit alias arguments are the call's own and stay as written.
+  Tests: `tests/inferred_alias_constructor_abbreviation_e2e.rs` (byte-identical vs kotlinc).
 
 - **A type-use annotation is recorded on its type occurrence in `@Metadata`.** kotlinc writes every
   annotation applied to a declared type occurrence whose retention is not `SOURCE` as
@@ -19531,8 +19553,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`id(s).length` is `checkcast String` before `String.length`). A consumer of the bound does not:
   returning `id(s)` as `Comparable<String>` uses the slot unchanged, while `value?.close()` invokes
   `AutoCloseable.close` directly with the nullable `dup; ifnull` shape. An unconstrained `T` stays
-  the specialized reference — its bound erases to `Object` — and a primitive specialization stays unboxed.
-  (`tests/inline_erased_parameter_e2e.rs`.)
+  the specialized reference — its bound erases to `Object`. A primitive specialization is boxed
+  into that slot and unboxed at each use: `b.also { }` on a `Boolean` is `Boolean.valueOf; astore`,
+  the lambda's `it` is `booleanValue`, and a result returned as `Any?` reloads the box. An `Int` use
+  is `checkcast Number; intValue`. The callee's own receiver of `apply` is that slot; the extension
+  lambda's `$this$apply` is a separate unboxed local. When every use unboxes, as for a result
+  returned as `Boolean`, the redundant-boxing pass leaves the primitive. Every read of that slot
+  unboxes, so a primitive consumer (an operator, a store, a default) receives the primitive; only an
+  implicit coercion to a reference reads the box itself. A top-level property store of an inlined
+  value marks the statement's line again at `putstatic`, as an instance field store does.
+  (`tests/inline_erased_parameter_e2e.rs`, `tests/inline_primitive_receiver_e2e.rs`.)
 
 - **An inlined `Closeable.use` stores the receiver as `Closeable` and narrows its result after
   `finally`.** `T.use` keeps the extension receiver in a `Closeable` slot: a receiver that is not
@@ -21053,10 +21083,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   annotation again. An explicit `@JvmName` is not changed further: an internal member keeps it
   without the `$<module>` suffix (a function, a declared accessor or a default one), and a
   value-class-typed property keeps it without the value-class hash. A companion's synthesized
-  default accessors also carry the annotations written on them (`@get:Deprecated`). Known gaps: a
-  `@JvmStatic` companion property has no outer static wrapper, and
-  a top-level `lateinit var`, which has no checked body, carries no accessor annotations. A
-  top-level property's retained `PROPERTY`-targeted annotation gets no `$annotations` marker at all
+  default accessors also carry the annotations written on them (`@get:Deprecated`). A top-level
+  property or function with no checked body (a `lateinit var`, an `external fun`) still hands its
+  checked annotations to lowering through a body-less metadata group, as a body-less classifier does,
+  so `@set:JvmName("assignNamed") lateinit var named: String` declares and is called as
+  `assignNamed` (`tests/facade_lateinit_setter_e2e.rs`). Known gaps: a `@JvmStatic` companion
+  property has no outer static wrapper, and a top-level property's retained `PROPERTY`-targeted annotation gets no `$annotations` marker at all
   (with or without `@JvmName`); only a suppressed SOURCE application's empty marker is emitted there.
   Tests: `accessor_jvm_name_e2e`.
 
@@ -22663,7 +22695,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   An unavailable dispatch rung reserves the constructor-prefix receiver coordinate without adding
   instance-property bindings, so enclosing receiver captures retain their checked identities.
   Tests: `tests/typealias_constructor_inference_e2e.rs` compares complete JVM ABI and runtime
-  behavior with kotlinc. When no enclosing value or available receiver supplies the name, a
+  behavior with kotlinc. Its `parameterized_parent_aliases` child retains the original expanded
+  #2655 fixture and both complete controls, including nested aliases and a covariant interface.
+  When no enclosing value or available receiver supplies the name, a
   member of the unavailable instance reports `cannot access '<this>' before the instance has
   been initialized.` at the property reference. The diagnostic probe uses the same declared
   receiver identity that the usable tower excludes; it never records a property read or capture.
@@ -23294,6 +23328,16 @@ formal binds to the caller's own type variable (`b + t` for
 `fun <X : Number?, Y : X>`), the result names that variable (`Pair2<X, Y>`); the declaration's
 formal never survives the call, whatever its bound. Test: `box_regressions/boundedFormalExtensionReturn.kt`.
 
+## Lexical captures in anonymous superclass lambdas
+
+A lambda retained in an anonymous object's superclass-constructor argument carries its enclosing
+lexical values through that object's constructor prefix before forming the closure. Nested lambdas
+preserve the same binding, mutable locals retain their shared cell, and a lambda parameter shadows
+an outer value without creating a capture of it. Type aliases and a same-named inherited property
+do not change this contract. The differential runtime controls live in
+`typealias_constructor_inference_e2e`. The pre-existing captureless lambda placement/constructor
+ABI difference is preserved separately with its complete oracle in #2833.
+
 ## Runtime-owned dependency getter leaves
 
 An ordinary serialized KLIB body may read a property through a getter the target implements.
@@ -23306,6 +23350,16 @@ publishes the checked property read with its applied result and source receiver 
 the declared ABI. No dependency class layout is materialized for this operation. Owning tests:
 `klib_lowering::tests::accessor_calls` and the official-producer runtime accessor programs in
 `klib_closure_frames_e2e`. Compiler-introduced dependency blocks remain tracked in #2811.
+
+## Declared inputs of applied nominal members
+
+Applying a classifier receiver preserves the member declaration's original logical input slots
+and receiver bindings. Applicability and argument diagnostics inspect the declared vararg element
+before its array carrier is specialized. An out/star projection reports the receiver prohibition
+for every written scalar or expanded element; an inapplicable member permits the ordinary scope
+tower to consider an applicable extension. Diagnostics render the original declaration inputs.
+A method-owned formal remains separate from class formals.
+Tests: `nominal_projected_input_e2e`.
 
 ## Serialized Elvis expression blocks
 

@@ -6173,7 +6173,9 @@ results remain exact; shared outcomes and operand ABI ownership are unchanged.
 Canonical compact parent templates, including alias arguments, are computed once before signature
 inference and shared with classifier publication; parent diagnostics retain their publication order.
 Complete anonymous metadata parity stays in #2653/#2654 with its full retained fixture oracles.
-Parameterized alias superclass constructor argument inference remains a separate repair in #2655.
+Parameterized alias superclass arguments retain their enclosing lexical bindings. The original
+expanded #2655 fixture and both complete ABI/runtime controls are retained in
+`tests/typealias_constructor_inference_e2e/parameterized_parent_aliases.rs` alongside the minimal tests.
 
 ## Enclosing formal field signatures
 
@@ -6325,6 +6327,16 @@ and the pass rejects every construct it does not cover yet.
 - [ ] The `$stable` field of classes.
 - [ ] Remove the partial marker and rerun the corpus for the Compose projects.
 
+## Anonymous superclass closure captures
+
+Align shared constructor-use discovery with the checked retained-closure decision for #2657.
+Early read/write discovery provisions candidate lexical dependencies from lambda syntax; final
+publication admits closure roots from the checked lowering and non-error type. Preserve existing
+binding identities, forwarding rules and field reconciliation. Feed the existing FIR constructor-
+prefix and nested-capture operations rather than adding a new capture ABI or lookup in lowering.
+Validate both original issue programs, direct/nested generic lambdas, shared mutable storage and
+parameter shadowing against Kotlin, together with the existing constructor capture regressions.
+
 ## Link target-owned serialized getter leaves
 
 Retain normalized KLIB accessor identity and role through declaration and backend handoffs.
@@ -6334,6 +6346,10 @@ bodyless edge preparation and ordinary accessor linking; preserve retained expor
 primitive/intrinsic priority. Native consumes its existing runtime getter plans. Prove real
 official-producer/JVM-oracle programs and malformed header/facet controls. Keep compiler-introduced
 block lowering as the independent #2811 follow-up.
+
+- [x] Retain nominal member declaration inputs and full owner bounds before receiver application;
+  use them for scalar and expanded-vararg admission and diagnostics with complete kotlinc ledgers.
+  Preserve invariant/in-projected inputs, named/default/non-last varargs and method-formal shadows.
 
 ## Lower serialized Elvis expression blocks
 
