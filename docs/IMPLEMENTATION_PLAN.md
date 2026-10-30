@@ -285,6 +285,12 @@ the checked classifier identity available to nested annotation folding without b
 constructor selection. Owned source/dependency publication and ordinary-call controls cover the
 shared path.
 
+## Finalized array expression type validity
+
+Check ordinary `Array<Nothing>` values after selected-call and reified decisions commit. Reuse the
+semantic recursive array matcher while preserving class-literal LHS policy and lexical suppression.
+Keep complete expression/reified diagnostic ledgers and compare the suppressed value's JVM ABI.
+
 ## String operation authority publication
 
 The shared StringPlus operation requires the existing selected-stdlib authority for both member

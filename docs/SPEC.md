@@ -16842,6 +16842,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
     the ordinary error; the warning always uses the plain wording, even inside an array. kotlinc's
     CLI prints no warning for a file with errors, so each warning shape is compared alone.
     (`tests/reified_type_arguments_e2e.rs`.)
+  - A finalized ordinary expression whose semantic type contains `Array<Nothing>`, including a
+    nested type argument, reports "expression cannot have a type of 'Array<Nothing>'." at the
+    value or callee. This `UNSUPPORTED` check respects its own suppression and accompanies any
+    reified-substitution error. Class-literal LHS types retain their separate feature-gated policy;
+    star projections name no bottom element. Exact complete diagnostic and suppressed JVM ABI
+    comparisons live in `tests/array_expression_type_validity_e2e.rs`.
+    A suppressed bottom-array value uses the JVM's existing `java.lang.Void` descriptor mapping in
+    generic-signature formatting too, so its method has no extraneous `kotlin.Nothing` signature.
   - `ErrorAboutDataClassCopyVisibilityChange`: a `data class` whose primary constructor is not
     public is reported at the constructor's visibility modifier unless it is annotated
     `@ConsistentCopyVisibility` or `@ExposedCopyVisibility`, and a call or callable reference to its
