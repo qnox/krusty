@@ -23375,3 +23375,14 @@ read receives the non-null proof. Unrelated origin-less conditionals and unmodel
 still decline. Owning tests compare String, Int and Any IR with checked FIR, exercise malformed
 contracts, and execute the unchanged #2811 Pair program plus official-producer controls after JVM
 oracles in `klib_closure_frames_e2e::elvis_blocks`.
+
+## JVM object methods on annotation interfaces
+
+A checked `toString`, `hashCode` or `equals` call on a freshly constructed annotation names its
+declared interface. The generated implementation is materialized at that interface slot before
+invocation. Reading a declared annotation parameter, or calling through `Any` or an ordinary
+interface, retains class-owned dispatch. The realized construction identity and selected semantic
+call role own this JVM choice.
+`annotation_impl_class_e2e` compares complete emitted class inventories and raw artifacts, and runs
+the same programs after Kotlin; the ordinary Java-interface controls remain in
+`interface_object_method_e2e`.

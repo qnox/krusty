@@ -1,5 +1,14 @@
 # krusty — implementation plan
 
+## JVM annotation interface object methods
+
+Retain the realized construction's exact annotation interface at the JVM consumption boundary.
+Authenticated Any-method roles select that interface for a fresh allocation; declared annotation
+parameters and ordinary interface receivers retain their class-owned dispatch. Generated annotation
+carriers consume the selected interface receiver slot
+through the existing operand materializer. Keep header constant-pool ordering as its separate
+follow-up; compare complete annotation artifacts and exercise declared-parameter and interface controls.
+
 ## Wasm reference assertion exceptions
 
 Authenticate NullPointerException storage through the existing platform exception declaration
