@@ -13,6 +13,7 @@ use crate::environment::Environment;
 use crate::process::{HostProcess, EXIT_GRACE};
 use crate::protocol::{self, LoadedPlugin, Reply, Request, PROTOCOL};
 use crate::provision::HostRuntime;
+use crate::script_template::ScriptTemplateDefinition;
 use crate::session::SessionRequest;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -224,6 +225,25 @@ impl Host {
         }
     }
 
+    /// Reads the definition of the script template `template`, a class on `classpath`, from its
+    /// compilation configuration, as kotlinc's `-script-templates` does. The template's class loader
+    /// is closed once the definition is read.
+    pub fn script_definition(
+        &mut self,
+        classpath: &[String],
+        template: &str,
+    ) -> Result<ScriptTemplateDefinition, HostError> {
+        let request = Request::ScriptDefinition {
+            classpath,
+            template,
+        };
+        match self.exchange(&request)? {
+            Reply::ScriptDefined(definition) => Ok(definition),
+            Reply::Failed(message) => Err(HostError::Plugin { message }),
+            _ => Err(unexpected("script-definition")),
+        }
+    }
+
     /// The host process's id.
     pub fn id(&self) -> u32 {
         self.process.id()
@@ -247,8 +267,8 @@ mod tests {
     use super::*;
     use std::time::Instant;
 
-    /// The host's greeting for protocol 4 and kotlinc 2.4.20, as `printf` octal escapes.
-    const HELLO: &str = r"\000\000\000\017\000\000\000\000\004\000\000\000\0062.4.20";
+    /// The host's greeting for protocol 5 and kotlinc 2.4.20, as `printf` octal escapes.
+    const HELLO: &str = r"\000\000\000\017\000\000\000\000\005\000\000\000\0062.4.20";
     const GRACE: Duration = Duration::from_millis(300);
 
     /// A host that writes its pid to `pid_file`, greets, then runs `then` in the same process.

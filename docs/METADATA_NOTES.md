@@ -1,5 +1,21 @@
 # `@kotlin.Metadata` — reverse-engineering notes (Phase 4b)
 
+## Annotation classifier kind and JVM dispatch
+
+The JVM annotation realizer retains the exact declared interface in the generated carrier's
+`annotation_impl_of` identity. A fresh allocation exposes that representation to its consumer;
+reading a declared annotation parameter keeps the parameter's own slot contract. Existing selected
+Any-method roles and that construction evidence own interface dispatch and receiver materialization,
+without member spelling, generated-name checks, metadata changes or common semantic selection.
+
+## Native bound-receiver physical storage
+
+The common callable-reference record owns the bound-receiver capture coordinate. Native emission
+uses that coordinate to choose semantic object storage, even when a primitive or value class has
+an unboxed invocation carrier. Stored types and offsets jointly own the GC map and thunk loads.
+This representation choice changes no declaration identity, metadata or source-level type, and
+does not reconstruct receiver roles from a capture's spelling or machine carrier.
+
 ## Null-pointer exception storage
 
 The platform NullPointerException declaration carries the existing runtime-exception storage role.
@@ -147,6 +163,12 @@ raw qualified class name even though no physical classfile exists. Retain its pa
 exact segment before name-tree normalization, then publish that fact with the annotation shape.
 This preserves literal-dollar and nested names across separate metadata snapshots.
 
+## Closed annotation array operands
+
+Checked spreads and named whole-array operands contribute their elements to one annotation array
+payload. Both classfile annotation attributes and Kotlin metadata consume that same flattened value;
+ordinary operands remain individual elements. The recorded argument role owns this distinction.
+
 ## Serialization constructor handoff
 
 The serialization constructor's `named_params` retain nullable reference elements and the nullable
@@ -182,10 +204,14 @@ ordinary result denotability does not introduce a separate checking context.
 Parent templates are the same alias-expanded compact facts later published in classifier headers;
 metadata and anonymous exposure do not reconstruct arguments from transitional collector shapes.
 
-Complete anonymous-class metadata parity remains tracked by #2653 (own versus lexical-capture
-applications) and #2654 (package-local classifier facts and raw payloads). Their unchanged complete
-fixture oracles remain attached to those issues; ABI publication checks do not establish metadata
-payload parity.
+Package metadata retains the same authenticated local-classifier and enum-entry-body inventories as
+class metadata. Function and backing-field signature records use that locality evidence too: a
+reader cannot reconstruct a local classifier's physical JVM name from its metadata class ID.
+The original #2654 private-factory, explicitly typed getter and inferred-getter controls compare
+complete decoded and raw payloads; the inferred-getter and property-storage controls also compare
+the complete class ABI. Tests: `tests/facade_local_classifier_metadata_e2e.rs`.
+Own versus lexical-capture applications remain tracked by #2653 with its unchanged complete fixture
+oracles; ABI publication checks do not establish metadata payload parity.
 
 Layout reads use class headers and builtin declaration tables, not the enclosing `LibraryType` or
 its members. Physical mapped Java requests keep invariant formals independently of a Kotlin view's
@@ -247,6 +273,14 @@ dependency annotation payloads and preserves ordinary annotation defaults and en
 KLIB dependency-root classification retains authenticated intrinsic-support ownership independently
 of successful code emission. A declined wrapper does not become an ordinary body; its metadata and
 declaration identity remain unchanged, and ordinary roots retain their strict closure contracts.
+
+## Ordinary bottom-array values
+
+Finalized-expression array validity consumes already checked semantic types, including nested
+arguments, and changes no declaration or metadata layout. The class-literal feature policy remains
+separate; a suppressed bottom-array value retains its complete existing JVM method signature.
+JVM signature elements reuse the existing physical descriptor for `Nothing`, preventing a
+nonexistent `kotlin/Nothing` class from appearing in an otherwise nongeneric array signature.
 
 ## Constructor parameter annotation pool order
 

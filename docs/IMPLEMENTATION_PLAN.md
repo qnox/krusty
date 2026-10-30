@@ -1,5 +1,21 @@
 # krusty — implementation plan
 
+## JVM annotation interface object methods
+
+Retain the realized construction's exact annotation interface at the JVM consumption boundary.
+Authenticated Any-method roles select that interface for a fresh allocation; declared annotation
+parameters and ordinary interface receivers retain their class-owned dispatch. Generated annotation
+carriers consume the selected interface receiver slot
+through the existing operand materializer. Keep header constant-pool ordering as its separate
+follow-up; compare complete annotation artifacts and exercise declared-parameter and interface controls.
+
+## Native callable-reference capture storage
+
+Use one target-owned physical capture plan for closure layout, GC references, stores and ordinary
+or SAM thunk loads. Store the recorded equality receiver as Any? and use the existing conversion
+boundary to restore the body carrier. Preserve checked adapter parameters and ordinary captures;
+the storage repair is independent of serialized callable-reference admission and identity work.
+
 ## Wasm reference assertion exceptions
 
 Authenticate NullPointerException storage through the existing platform exception declaration
@@ -290,6 +306,12 @@ the checked classifier identity available to nested annotation folding without b
 constructor selection. Owned source/dependency publication and ordinary-call controls cover the
 shared path.
 
+## Finalized array expression type validity
+
+Check ordinary `Array<Nothing>` values after selected-call and reified decisions commit. Reuse the
+semantic recursive array matcher while preserving class-literal LHS policy and lexical suppression.
+Keep complete expression/reified diagnostic ledgers and compare the suppressed value's JVM ABI.
+
 ## String operation authority publication
 
 The shared StringPlus operation requires the existing selected-stdlib authority for both member
@@ -551,6 +573,12 @@ expansion and adds no backend capabilities, outcome allowances or metadata field
 - ✅ `tests/nullable_e2e.rs` (runs on JVM incl. `!!`→NPE, ABI vs kotlinc). `?.` safe-calls are
   explicitly rejected for now (skipped, not miscompiled). Box conformance: 27 / 27 OK / 0 FAIL
   (nullable is foundational; it compounds once collections/`?.`/char literals land).
+
+## Checked annotation array operand values
+
+Reuse the checked whole-array argument role when folding selected array factories for annotation
+values. Preserve nested spread order, named arrays, empty contributions and ordinary elements;
+compare the complete emitted class inventory and raw artifacts with Kotlin before runtime controls.
 
 ## Phase 14 — Modifiers, annotations & conformance fixes  ✅
 - ✅ Data-driven (scanned the "expected a top-level declaration" bucket): **leading declaration
@@ -5119,10 +5147,15 @@ their declarations into an index-based model (`declarations`, `model`), lays rec
   `tests/native_compiler_command_e2e.rs` checks the answer on the JVM lane, then compiles a
   two-file program with the command, runs it, and asserts the complete diagnostics of a broken
   source.
+- **Computed defaults across source modules (done, Native and Wasm).** A KLIB declaration with
+  a default is published with `LibraryCallable::defaults_from_declaration`: a call omitting a
+  computed default keeps the declaration's identity, and the target routes it to the declaring
+  module's default entry, exported beside the declaration (`multimoduleComputedDefaults.kt`).
+  Constant defaults are still passed at the call site.
 - **Next.** `-produce library`, which needs the KLIB writer to serialize ordinary function and
   class bodies into `default/ir`; until then a first-party library's sources are compiled into the
   program. Programs reach further as dependency body emission grows (library member bodies, then
-  non-constant parameter defaults of third-party KLIBs).
+  the non-constant parameter defaults of third-party KLIB bodies).
 
 ## Byte-identical box conformance, item 1 — local-class naming  ◐
 
@@ -6180,7 +6213,10 @@ retain declaration-name spans for exact ambiguous-parent diagnostics. Private an
 results remain exact; shared outcomes and operand ABI ownership are unchanged.
 Canonical compact parent templates, including alias arguments, are computed once before signature
 inference and shared with classifier publication; parent diagnostics retain their publication order.
-Complete anonymous metadata parity stays in #2653/#2654 with its full retained fixture oracles.
+File-facade metadata now carries the existing local/enum-body classifier inventories into both
+package class-ID encoding and JVM signature-record decisions. The original three #2654 complete
+metadata oracles are restored, with an additional complete property-storage ABI/metadata control.
+Own versus lexical-capture metadata applications stay in #2653 with their full retained oracles.
 Parameterized alias superclass arguments retain their enclosing lexical bindings. The original
 expanded #2655 fixture and both complete ABI/runtime controls are retained in
 `tests/typealias_constructor_inference_e2e/parameterized_parent_aliases.rs` alongside the minimal tests.
@@ -6321,8 +6357,10 @@ and the pass rejects every construct it does not cover yet.
 - [x] `@Composable () -> Unit` parameters: called with the composer and their own state bits,
   compared by identity, passed on to composable calls, and their `@ComposableInferredTarget`
   applier scheme inferred.
-- [ ] Composable lambdas (`ComposableSingletons`, `rememberComposableLambda`), other composable
-  function types, and the composable call checker's diagnostics.
+- [x] Composable lambdas that capture nothing, passed to a composable call: `ComposableSingletons`
+  properties made by `composableLambdaInstance`, each body a skippable group.
+- [ ] Capturing composable lambdas (`rememberComposableLambda`), nested and empty ones, other
+  composable function types, and the composable call checker's diagnostics.
 - [x] Primitive and `String` parameters: `$changed`/`$dirty` slot tracking with strong skipping,
   `Composer.changed` comparisons, and each call's argument bits (static, passed on, uncertain).
 - [x] Constant default arguments: the `$default` mask, defaults assigned in the group, placeholders
@@ -6330,7 +6368,7 @@ and the pass rejects every construct it does not cover yet.
 - [ ] More parameters: non-constant defaults (defaults groups), receivers, varargs, more than ten,
   stability inference.
 - [ ] The full body transform: control-flow groups, `remember`, early returns, inline composables.
-- [ ] `ComposableSingletons` lambda holders and the `$stable` field of classes.
+- [ ] The `$stable` field of classes.
 - [ ] Remove the partial marker and rerun the corpus for the Compose projects.
 
 ## Anonymous superclass closure captures

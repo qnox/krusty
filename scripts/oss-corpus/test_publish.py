@@ -19,9 +19,14 @@ def write(path, data):
         f.write(data)
 
 
-def compare(name, built):
+def compare(name, built, cost=None):
     return json.dumps(dict(name=name, reference_exit=0, built=built, compilations=2, identical=built,
-                           classes=4, rows=[]))
+                           classes=4, rows=[], **(dict(cost=cost) if cost else {})))
+
+
+def build(compile_, peak, wall):
+    return dict(built_compile_seconds=compile_, compile_seconds=compile_, wall_seconds=wall, cpu_seconds=wall,
+                peak_rss_mb=dict(total=peak, gradle=0, kotlin_daemon=0, krusty=0, other=0))
 
 
 class Publish(unittest.TestCase):
@@ -31,8 +36,10 @@ class Publish(unittest.TestCase):
             write(f'{tree}/projects/kept/compare.json', compare('kept', 1))
             write(f'{tree}/projects/gone/compare.json', compare('gone', 1))
             write(f'{tree}/projects/fresh/compare.json', compare('fresh', 0))
-            write(f'{tree}/history.tsv', publish.HISTORY_HEADER + 'old line\n')
-            write(f'{work}/run/corpus-fresh/out/fresh/compare.json', compare('fresh', 2))
+            # An earlier header without the cost columns.
+            write(f'{tree}/history.tsv', 'date\tproject\n' + 'old line\n')
+            write(f'{work}/run/corpus-fresh/out/fresh/compare.json', compare('fresh', 2, dict(
+                kotlinc=build(30.5, 2500, 120.0), krusty=build(10.0, 1400, 90.0))))
             write(f'{work}/run/corpus-fresh/logs/fresh.plugins.tsv', 'gradle\t:\tp\n')
             names = publish.publish(f'{work}/run', tree, {'kept', 'fresh'}, 'abc123', '2026-10-25',
                                     'https://example.test/run/9')
@@ -48,7 +55,8 @@ class Publish(unittest.TestCase):
                 self.assertNotIn('measured', json.load(f))
             with open(f'{tree}/history.tsv') as f:
                 self.assertEqual(f.read(), publish.HISTORY_HEADER + 'old line\n'
-                                 '2026-10-25\tabc123\tfresh\t0\t2\t2\t2\t4\thttps://example.test/run/9\n')
+                                 '2026-10-25\tabc123\tfresh\t0\t2\t2\t2\t4\thttps://example.test/run/9\t'
+                                 '30.5\t10.0\t2500\t1400\t120.0\t90.0\n')
 
 
 if __name__ == '__main__':

@@ -1,5 +1,22 @@
 # krusty — a memory-lean Kotlin→JVM compiler PoC
 
+## JVM array clone result
+
+The JVM `Array<T>.clone()` declaration returns `Array<T>` with `T` keeping the classifier's own
+implicit `Any?` bound, so `Array<String?>.clone()` is `Array<String?>`. A non-null bound made it
+`Array<String>` and rejected moshi's `pathNames = copyFrom.pathNames.clone()`. Test:
+`array_member_reference_e2e::a_nullable_element_array_clone_keeps_its_element_type`.
+
+## Smart casts from `when` guards
+
+An arm's guard (`is Lit if e.type is Marker -> ...`) is checked with the arm's own condition facts
+and adds its true-branch facts to that arm's body, so `e.type` reads as `Marker` there. A guard
+`this is T` also refines the implicit receiver for that body, past the arm's own condition
+(`is Mid if this is Leaf -> needLeaf(this)`). The facts
+do not reach later arms: a guarded arm adds no fall-through facts, and a guard joined by `||`
+proves nothing. Tests: `box_regressions/whenGuardSmartCast.kt` and
+`when_null_guard_smartcast_e2e::a_when_guard_narrows_only_its_own_arm`.
+
 ## Nested producers against dependent bounds
 
 A postponed generic producer passed where the outer variable is still open is solved against that
@@ -8641,16 +8658,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   reference) and before the next method's name. A primitive setter has no `checkNotNullParameter`
   that would intern it earlier, and the name had gone to the end of the pool. Test:
   `tests/top_level_setter_pool_e2e.rs`.
-- **A non-final backing field signs declaration-site variance as wildcards.** kotlinc's
-  `mapFieldSignature` maps a final field's type in its return-type mode and any other field's in its
-  value-parameter mode. A `val xs: List<CharSequence>` signs `Ljava/util/List<Ljava/lang/CharSequence;>;`,
+- **A `var`'s backing field signs declaration-site variance as wildcards.** kotlinc's
+  `mapFieldSignature` maps a field's type in its value-parameter mode when the field backs a `var`
+  property and in its return-type mode otherwise. A `val xs: List<CharSequence>` signs `Ljava/util/List<Ljava/lang/CharSequence;>;`,
   while a `var` (plain, private, `lateinit` or `@JvmField`, at top level, in a class, an object, a
   companion or an enum) signs `Ljava/util/List<+Ljava/lang/CharSequence;>;`, and a
   `var recompose: (String, Int) -> Unit` signs
   `Lkotlin/jvm/functions/Function2<-Ljava/lang/String;-Ljava/lang/Integer;Lkotlin/Unit;>;`. A
   redundant wildcard is dropped as in a parameter (`var plain: List<String>` keeps
-  `Ljava/util/List<Ljava/lang/String;>;`). The mode follows the field's emitted `ACC_FINAL` flag.
-  Test: `tests/mutable_field_signature_e2e.rs`.
+  `Ljava/util/List<Ljava/lang/String;>;`). The mode follows the property, not the field's
+  `ACC_FINAL` flag: the Compose plugin's non-final `ComposableSingletons` fields back `val`s and sign
+  `Function2<Composer;Integer;Unit>` without wildcards. Tests: `tests/mutable_field_signature_e2e.rs`,
+  `compose_singleton_lambdas_are_byte_identical_to_kotlinc`.
 - **A top-level property's backing field carries its generic `Signature`.** A top-level `val xs:
   List<String>` becomes a static field of the FILE FACADE, whose field table is built by
   `emit_statics` rather than the class-field path — so it dropped the `Signature` the same property
@@ -9097,6 +9116,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   PARAMETER and wildcards inside it. Realized as a `Wildcards` mode threaded through the signature formatter. Test:
   `tests/generic_signature_e2e.rs::declaration_site_wildcards_appear_in_parameter_positions_only`
   and `tests/generic_signature_e2e.rs::a_java_type_keeps_invariant_parameters`.
+- **An enum argument is never final for the parameter wildcard rule.** A parameter position drops
+  an `out` wildcard whose argument cannot have subtypes (`List<String>` signs
+  `Ljava/util/List<Ljava/lang/String;>;`). kotlinc decides that with `isFinalClass`, which excludes
+  enum classes, so every enum keeps its wildcard: `fun f(a: List<Plain>)` over
+  `enum class Plain { A }` signs `Ljava/util/List<+LPlain;>;`, as does a nested enum, an enum with
+  entry bodies, a Java enum such as `TimeUnit`, and an enum below another `out` argument
+  (`List<Box<Plain>>` signs `Ljava/util/List<+LBox<+LPlain;>;>;`). krusty treated an enum without
+  entry bodies as final and dropped the wildcard. Test:
+  `tests/generic_argument_wildcards_e2e.rs::an_enum_argument_keeps_its_parameter_wildcard_like_kotlinc`.
 
 - **A classpath member's (function OR property) declared collection mutability survives at EVERY nesting
   level.** The JVM `Signature` attribute erases read-only vs mutable (`List`/`MutableList` both spell
@@ -10612,7 +10640,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Common lowering records the elvis block as an expression whose start line is kept, and the JVM
   line table keeps that entry. A chain `a ?: b ?: c` begins only once, at `a`: kotlinc folds it
   into one chain, so the elvis krusty nests on the first one's right side states no start line of
-  its own. Test: `tests/elvis_own_line_e2e.rs`.
+  its own. Across the chain kotlinc marks, on each link's null path, the next link's operand line
+  at the `pop` rather than after it, and every later link's temporary restates the chain's start
+  line where it is stored: `a(x)\n ?: a(y)\n ?: z` on lines 3 to 5 writes `line 4` at the first
+  `pop` and `line 3` at the second `dup`. The last link's right side keeps the ordinary layout
+  (`z`'s line after the `pop`). Common lowering records the chain's start line for each later
+  link and the next operand's line as the fold's mark. Test: `tests/elvis_own_line_e2e.rs`.
 
 - **A not-null assertion keeps its own line beside its operand's line.** kotlinc states a `!!`'s
   own line before its operand. When the operand's first instruction marks another line at that
@@ -13266,17 +13299,33 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the class file only, never in Kotlin metadata, because kotlinc's IR plugin adds it after FIR
   metadata serialization. `sourceInformation` (`C(<name>)<line>@<offset>L<length>,…:<file>#<package hash
   in base 36>`) and trace markers (`<fq name> (<file>:<0-based line>)`) follow the plugin's options.
+  A composable lambda passed to a composable call that captures nothing is memoized: the file's
+  `ComposableSingletons$<file part>Kt` object (the file-part name even under `@file:JvmName`;
+  synthetic-class `@Metadata` with `xi=48`, a public constructor) holds a non-final private static
+  field `lambda$<key>` created in `<clinit>` by `composableLambdaInstance(<key>, false, <lambda>)`
+  at the lambda's opening line, with an `internal` getter `getLambda$<key>$<module>`, and the call
+  reads it there without a line. The lambda's body is
+  `private static final Unit lambda__<key>$lambda$0(Composer $composer, int $changed)` on that
+  object, `@Composable` and `@FunctionKeyMeta`, with no `$composer` null check, which runs
+  `if (shouldExecute(($changed & 3) != 2, $changed & 1)) { <trace> <statements> } else
+  skipToGroupEnd()`, the skip on the opening line and no line at entry. Its key is the Java hash
+  of `fun-$anonymous$()Unit/arg-<parameter>/call-<callee>[:<n>]/fun-<caller signature>/pkg-…/file-…`,
+  where `n` counts the caller's earlier calls of the same name; its source information has no
+  name (`C<calls>:<file>#<hash>`) and its trace names
+  `<object>.lambda$<key>.<anonymous> (<file>:<first statement's 0-based line>)`. A capturing,
+  nested or empty composable lambda is declined.
   The recompose lambda `<name>$lambda$0(<parameters>, $$changed, [$$default,] $composer, $force)`
   publishes its
   locals and no
   line, and the call's line starts at its dispatch, since kotlinc builds both arguments without
   offsets. Tests: `tests/fixtures/compose/restartableFunctions.kt`, `trackedParameters.kt`,
-  `defaultArguments.kt` and `lambdaParameters.kt`,
+  `defaultArguments.kt`, `lambdaParameters.kt` and `singletonLambdas.kt`,
   whose `box()` composes and recomposes the functions through a recording composer, and
   `kotlin_box_ir_jvm_conformance::compose_restartable_functions_are_byte_identical_to_kotlinc` and
   `compose_tracked_parameters_are_byte_identical_to_kotlinc`,
-  `compose_default_arguments_are_byte_identical_to_kotlinc` and
-  `compose_lambda_parameters_are_byte_identical_to_kotlinc`, which require their class sets to
+  `compose_default_arguments_are_byte_identical_to_kotlinc`,
+  `compose_lambda_parameters_are_byte_identical_to_kotlinc` and
+  `compose_singleton_lambdas_are_byte_identical_to_kotlinc`, which require their class sets to
   equal kotlinc's byte for byte;
   `cli_compiler_plugin_e2e::the_compose_pass_rejects_what_it_does_not_cover` and
   `compose_report_destinations_fail_the_compile`; and the `plugins::compose` and
@@ -15169,6 +15218,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   identities between the passes; the temporaries pass does not infer the earlier pass from
   unrelated constants, jumps, or throws remaining in the method. Tests:
   `bytecode_passes::temporaries::tests` and `tests/safe_call_after_throw_e2e.rs`.
+- **A label right after a `goto` that stands beside a reached label is not one retained from
+  unreachable code.** kotlinc normalizes directly adjacent labels into one before it optimizes, so
+  such a run is reached when any of its labels is. An unreached label in it, like the first label
+  in front of a safe call's null path after the non-null path's `goto`, is not counted as retained,
+  and `options?.let { if (…) null else "x" }` keeps its receiver on the stack
+  (`aload; dup; ifnull`) as kotlinc does. After an `athrow` or a return the label still counts as
+  retained: kotlinc emits a dead continuation there (an inlined body's result path) that the
+  elimination deletes, which is why `lastException?.let { throw it }` keeps its temporary.
+  Tests: `constant_conditions::tests::a_label_beside_a_reached_jump_target_is_not_retained_from_deleted_code`,
+  `constant_conditions::tests::a_label_after_a_throw_beside_a_reached_jump_target_stays_retained`,
+  `tests/safe_call_dup_e2e.rs` and `tests/safe_call_after_throw_e2e.rs`.
 - **A `Boolean` compared with a `Boolean` literal is an ordinary two-operand comparison; only a
   negation is a polarity.** kotlinc's `Equals` sends two primitive `Boolean` operands to
   `BooleanComparison`, which materializes both and jumps with `if_icmp<cond>`; it never reads a
@@ -16571,9 +16631,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Deprecated and removed arguments get kotlinc's `DEPRECATED_CLI_ARG`/`REMOVED_CLI_ARG` warnings.
   Every argument of every supported release has exactly one krusty disposition
   (`crates/krusty-cli/src/kotlinc_arguments/disposition.rs`): *applied*; *inert*, accepted without
-  effect only where a kotlinc differential proves it changes nothing krusty emits (the two checks
-  on classpath binaries krusty does not make, `-Xskip-metadata-version-check` and
-  `-Xskip-prerelease-check`); or *unsupported*, which fails the command line with
+  effect only where a kotlinc differential proves it changes nothing krusty emits (the three checks
+  on classpath binaries krusty does not make, `-Xskip-metadata-version-check`,
+  `-Xskip-prerelease-check` and `-Xallow-unstable-dependencies`); or *unsupported*, which fails the command line with
   `krusty: error: krusty does not implement the kotlinc argument '<argument>'`, exit 2, before
   anything is written. An argument krusty does not implement is never dropped silently.
   `-progressive` turns on the selected release's progressive language features (the
@@ -16847,6 +16907,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
     the ordinary error; the warning always uses the plain wording, even inside an array. kotlinc's
     CLI prints no warning for a file with errors, so each warning shape is compared alone.
     (`tests/reified_type_arguments_e2e.rs`.)
+  - A finalized ordinary expression whose semantic type contains `Array<Nothing>`, including a
+    nested type argument, reports "expression cannot have a type of 'Array<Nothing>'." at the
+    value or callee. This `UNSUPPORTED` check respects its own suppression and accompanies any
+    reified-substitution error. Class-literal LHS types retain their separate feature-gated policy;
+    star projections name no bottom element. Exact complete diagnostic and suppressed JVM ABI
+    comparisons live in `tests/array_expression_type_validity_e2e.rs`.
+    A suppressed bottom-array value uses the JVM's existing `java.lang.Void` descriptor mapping in
+    generic-signature formatting too, so its method has no extraneous `kotlin.Nothing` signature.
   - `ErrorAboutDataClassCopyVisibilityChange`: a `data class` whose primary constructor is not
     public is reported at the constructor's visibility modifier unless it is annotated
     `@ConsistentCopyVisibility` or `@ExposedCopyVisibility`, and a call or callable reference to its
@@ -19542,8 +19610,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`id(s).length` is `checkcast String` before `String.length`). A consumer of the bound does not:
   returning `id(s)` as `Comparable<String>` uses the slot unchanged, while `value?.close()` invokes
   `AutoCloseable.close` directly with the nullable `dup; ifnull` shape. An unconstrained `T` stays
-  the specialized reference — its bound erases to `Object` — and a primitive specialization stays unboxed.
-  (`tests/inline_erased_parameter_e2e.rs`.)
+  the specialized reference — its bound erases to `Object`. A primitive specialization is boxed
+  into that slot and unboxed at each use: `b.also { }` on a `Boolean` is `Boolean.valueOf; astore`,
+  the lambda's `it` is `booleanValue`, and a result returned as `Any?` reloads the box. An `Int` use
+  is `checkcast Number; intValue`. The callee's own receiver of `apply` is that slot; the extension
+  lambda's `$this$apply` is a separate unboxed local. When every use unboxes, as for a result
+  returned as `Boolean`, the redundant-boxing pass leaves the primitive. Every read of that slot
+  unboxes, so a primitive consumer (an operator, a store, a default) receives the primitive; only an
+  implicit coercion to a reference reads the box itself. A top-level property store of an inlined
+  value marks the statement's line again at `putstatic`, as an instance field store does.
+  (`tests/inline_erased_parameter_e2e.rs`, `tests/inline_primitive_receiver_e2e.rs`.)
 
 - **An inlined `Closeable.use` stores the receiver as `Closeable` and narrows its result after
   `finally`.** `T.use` keeps the extension receiver in a `Closeable` slot: a receiver that is not
@@ -22003,6 +22079,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `…::class_literals_inside_an_array_literal_resolve`,
   `…::an_array_literal_in_an_unemitted_position_stays_inert`.
 
+  A checked array factory folds each spread or named whole-array operand against the array type
+  and appends its elements once. Ordinary operands fold against the element type and retain their
+  position. The checker reuses the same recorded whole-array argument role as FIR lowering;
+  nested factories and empty arrays preserve this rule recursively. Complete class artifacts and
+  Kotlin-first execution are compared in `tests/annotation_array_spread_values_e2e.rs`.
+
 - **Class initializer inference selects declared members through the module symbol source.** A
   property such as `val parts = split(pattern)` may refer forward to an explicitly typed member,
   and the member receiver rung outranks a same-named top-level function. Signature collection now
@@ -23359,3 +23441,35 @@ read receives the non-null proof. Unrelated origin-less conditionals and unmodel
 still decline. Owning tests compare String, Int and Any IR with checked FIR, exercise malformed
 contracts, and execute the unchanged #2811 Pair program plus official-producer controls after JVM
 oracles in `klib_closure_frames_e2e::elvis_blocks`.
+
+## Local classifiers in file-facade metadata
+
+A file facade records local classifier IDs using the same declaration-owned locality facts as class
+metadata, including anonymous objects and classifiers nested in local or enum-entry bodies. JVM
+function and backing-field signature records retain descriptors that a metadata reader cannot
+reconstruct from those local IDs. This changes serialization evidence rather than checked type
+arguments or declaration-result approximation. Tests compare the complete facade payload and
+class ABI with kotlinc in `tests/facade_local_classifier_metadata_e2e.rs`.
+
+## Native bound callable-reference receiver storage
+
+A bound callable reference retains its receiver as a semantic object for equality and hashing,
+including primitive and value-class receivers. Native closure layout records that exact receiver
+capture as reference storage and traces it accordingly. Invocation converts the stored object back
+to the adapter's declared carrier; ordinary captures keep their existing storage types and order.
+Receiver expressions are evaluated once before the closure is allocated.
+
+The Native storage ABI regression establishes each program's kotlinc result before checking scalar,
+scalar-backed and reference-backed value-class equality, hashes, typed invocation and mixed capture
+ordering. The runtime reference-equality protocol and KType layout are unchanged.
+
+## JVM object methods on annotation interfaces
+
+A checked `toString`, `hashCode` or `equals` call on a freshly constructed annotation names its
+declared interface. The generated implementation is materialized at that interface slot before
+invocation. Reading a declared annotation parameter, or calling through `Any` or an ordinary
+interface, retains class-owned dispatch. The realized construction identity and selected semantic
+call role own this JVM choice.
+`annotation_impl_class_e2e` compares complete emitted class inventories and raw artifacts, and runs
+the same programs after Kotlin; the ordinary Java-interface controls remain in
+`interface_object_method_e2e`.
