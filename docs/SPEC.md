@@ -8636,16 +8636,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   reference) and before the next method's name. A primitive setter has no `checkNotNullParameter`
   that would intern it earlier, and the name had gone to the end of the pool. Test:
   `tests/top_level_setter_pool_e2e.rs`.
-- **A non-final backing field signs declaration-site variance as wildcards.** kotlinc's
-  `mapFieldSignature` maps a final field's type in its return-type mode and any other field's in its
-  value-parameter mode. A `val xs: List<CharSequence>` signs `Ljava/util/List<Ljava/lang/CharSequence;>;`,
+- **A `var`'s backing field signs declaration-site variance as wildcards.** kotlinc's
+  `mapFieldSignature` maps a field's type in its value-parameter mode when the field backs a `var`
+  property and in its return-type mode otherwise. A `val xs: List<CharSequence>` signs `Ljava/util/List<Ljava/lang/CharSequence;>;`,
   while a `var` (plain, private, `lateinit` or `@JvmField`, at top level, in a class, an object, a
   companion or an enum) signs `Ljava/util/List<+Ljava/lang/CharSequence;>;`, and a
   `var recompose: (String, Int) -> Unit` signs
   `Lkotlin/jvm/functions/Function2<-Ljava/lang/String;-Ljava/lang/Integer;Lkotlin/Unit;>;`. A
   redundant wildcard is dropped as in a parameter (`var plain: List<String>` keeps
-  `Ljava/util/List<Ljava/lang/String;>;`). The mode follows the field's emitted `ACC_FINAL` flag.
-  Test: `tests/mutable_field_signature_e2e.rs`.
+  `Ljava/util/List<Ljava/lang/String;>;`). The mode follows the property, not the field's
+  `ACC_FINAL` flag: the Compose plugin's non-final `ComposableSingletons` fields back `val`s and sign
+  `Function2<Composer;Integer;Unit>` without wildcards. Tests: `tests/mutable_field_signature_e2e.rs`,
+  `compose_singleton_lambdas_are_byte_identical_to_kotlinc`.
 - **A top-level property's backing field carries its generic `Signature`.** A top-level `val xs:
   List<String>` becomes a static field of the FILE FACADE, whose field table is built by
   `emit_statics` rather than the class-field path — so it dropped the `Signature` the same property
