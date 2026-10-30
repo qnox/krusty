@@ -17,6 +17,11 @@ carriers consume the selected interface receiver slot
 through the existing operand materializer. Keep header constant-pool ordering as its separate
 follow-up; compare complete annotation artifacts and exercise declared-parameter and interface controls.
 
+The annotation-header follow-up reserves only the existing version-enabled nullability descriptors
+before method bodies. Shared string-method finalization also covers memberless implementations.
+Keep constructor guards, metadata and the version policy intact; validate complete artifacts across
+the supported-release manifest, including reference-valued and memberless annotations.
+
 ## Native callable-reference capture storage
 
 Use one target-owned physical capture plan for closure layout, GC references, stores and ordinary

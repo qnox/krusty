@@ -111,6 +111,56 @@ fn fresh_annotation_any_methods_run_like_kotlin() {
     common::expect_box_same_as_kotlinc(FRESH_ANY_METHOD_DISPATCH, "FreshAnnotationAnyMethods");
 }
 
+const REFERENCE_MEMBER_HEADERS: &str = r#"annotation class Named(val value: String)
+fun read(value: Named): String = value.value
+fun box(): String = read(Named("OK"))
+"#;
+
+const MEMBERLESS_HEADERS: &str = r#"annotation class Empty
+fun box(): String {
+    val value: Any = Empty()
+    return if (value.toString() == "@Empty()") "OK" else "bad"
+}
+"#;
+
+fn assert_complete_header_artifacts(file: &str, source: &str) {
+    let classes = common::classes_against_kotlinc_module(&[(file, source)]);
+    assert_eq!(
+        classes.krusty.keys().collect::<Vec<_>>(),
+        classes.reference.keys().collect::<Vec<_>>(),
+        "the complete emitted class inventory must match"
+    );
+    let differences = classes
+        .reference
+        .iter()
+        .filter_map(|(name, reference)| {
+            let ours = &classes.krusty[name];
+            (reference != ours).then(|| common::exact_class_difference(name, reference, ours))
+        })
+        .collect::<Vec<_>>();
+    assert!(differences.is_empty(), "{}", differences.join("\n\n"));
+}
+
+#[test]
+fn reference_member_annotation_headers_match_complete_kotlin_artifacts() {
+    assert_complete_header_artifacts("AnnotationReferenceHeaders.kt", REFERENCE_MEMBER_HEADERS);
+}
+
+#[test]
+fn reference_member_annotation_headers_run_like_kotlin() {
+    common::expect_box_same_as_kotlinc(REFERENCE_MEMBER_HEADERS, "AnnotationReferenceHeaders");
+}
+
+#[test]
+fn memberless_annotation_headers_match_complete_kotlin_artifacts() {
+    assert_complete_header_artifacts("AnnotationEmptyHeaders.kt", MEMBERLESS_HEADERS);
+}
+
+#[test]
+fn memberless_annotation_headers_run_like_kotlin() {
+    common::expect_box_same_as_kotlinc(MEMBERLESS_HEADERS, "AnnotationEmptyHeaders");
+}
+
 fn emitted_classes(source: &str) -> Option<Vec<String>> {
     let classes = common::compile_in_process(
         source,
