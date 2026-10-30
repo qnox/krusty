@@ -367,6 +367,11 @@ for constant-pool publication. Its nesting relation and Kotlin metadata remain u
 the earlier explicit class seed lets annotation-only references and declared children precede it
 when the ordinary table order requires that position.
 
+Equal qualified-name source rows use their retained declaration visitation order within the
+declaring writer's slots. Common lowering may evaluate a nested constructor operand first;
+that does not change the table's declaration order. Final pool relayout preserves this source
+order while retaining pool movement for generated and referenced rows and ancestor constraints.
+
 ## Module file — part ordering
 
 Within one package, the `.kotlin_module` part list is sorted by part name

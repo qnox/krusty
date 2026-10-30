@@ -40,6 +40,7 @@ mod index_slots;
 use crate::fx_hash::HashMap;
 use std::ops::Range;
 
+use super::inner_classes::TiedInnerRows;
 use index_slots::{ClassSlots, Holder, Part, Unread};
 
 /// A method a bytecode rewrite changed, with the pool entries it interned.
@@ -81,7 +82,7 @@ pub(super) fn relayout(
     relaid: &[RelaidMethod],
     unnamed: Unnamed,
     retained: &[u16],
-    tied_rows: &[Vec<u16>],
+    tied_rows: &[TiedInnerRows],
 ) -> Vec<u8> {
     match relaid_class(&class, relaid, unnamed, retained, tied_rows) {
         Ok(Some(laid_out)) => laid_out,
@@ -99,7 +100,7 @@ fn relaid_class(
     relaid: &[RelaidMethod],
     unnamed: Unnamed,
     retained: &[u16],
-    tied_rows: &[Vec<u16>],
+    tied_rows: &[TiedInnerRows],
 ) -> Result<Option<Vec<u8>>, Kept> {
     let read = index_slots::read(class).map_err(Kept::Unread)?;
     let order = Layout::of(&read, relaid, unnamed, retained).order();
@@ -587,7 +588,7 @@ fn rewrite(
     class: &[u8],
     read: &ClassSlots,
     order: &[u16],
-    tied_rows: &[Vec<u16>],
+    tied_rows: &[TiedInnerRows],
 ) -> Result<Vec<u8>, Kept> {
     let mut renumbered = vec![0u16; read.entries.len()];
     let mut next: u16 = 1;
@@ -628,10 +629,16 @@ fn rewrite(
     if let Some(rows) = read.inner_class_rows {
         let rows = (rows as isize + shift) as usize;
         for tied in tied_rows {
-            let tied: Vec<u16> = tied
-                .iter()
-                .map(|&index| renumbered[usize::from(index)])
-                .collect();
+            let renumber = |indices: &[u16]| {
+                indices
+                    .iter()
+                    .map(|&index| renumbered[usize::from(index)])
+                    .collect()
+            };
+            let tied = TiedInnerRows {
+                rows: renumber(&tied.rows),
+                declarations: renumber(&tied.declarations),
+            };
             order_tied_rows(&mut out[rows..], &tied);
         }
     }
@@ -640,7 +647,7 @@ fn rewrite(
 
 /// Order the rows of the `InnerClasses` table starting at `table` (its row count) whose classes
 /// are `tied` by their classes' pool indices, each row keeping one of the places they held.
-fn order_tied_rows(table: &mut [u8], tied: &[u16]) {
+fn order_tied_rows(table: &mut [u8], tied: &TiedInnerRows) {
     const ROW: usize = 8;
     let count = usize::from(u16::from_be_bytes([table[0], table[1]]));
     let inner = |row: &[u8]| u16::from_be_bytes([row[0], row[1]]);
@@ -648,7 +655,7 @@ fn order_tied_rows(table: &mut [u8], tied: &[u16]) {
     let places: Vec<usize> = rows
         .chunks(ROW)
         .enumerate()
-        .filter(|(_, row)| tied.contains(&inner(row)))
+        .filter(|(_, row)| tied.rows.contains(&inner(row)))
         .map(|(place, _)| place)
         .collect();
     let mut tied_rows: Vec<[u8; ROW]> = places
@@ -660,6 +667,24 @@ fn order_tied_rows(table: &mut [u8], tied: &[u16]) {
         })
         .collect();
     tied_rows.sort_by_key(|row| inner(row));
+    let declaration_places = tied_rows
+        .iter()
+        .enumerate()
+        .filter_map(|(place, row)| tied.declarations.contains(&inner(row)).then_some(place))
+        .collect::<Vec<_>>();
+    let mut declarations = declaration_places
+        .iter()
+        .map(|&place| tied_rows[place])
+        .collect::<Vec<_>>();
+    declarations.sort_by_key(|row| {
+        tied.declarations
+            .iter()
+            .position(|&index| index == inner(row))
+            .expect("a declared row")
+    });
+    for (place, row) in declaration_places.into_iter().zip(declarations) {
+        tied_rows[place] = row;
+    }
     for (place, row) in places.into_iter().zip(tied_rows) {
         rows[place * ROW..][..ROW].copy_from_slice(&row);
     }
