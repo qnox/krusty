@@ -227,8 +227,8 @@ use member_schedule::{
 };
 pub use metadata_policy::KotlinMetadata;
 use metadata_policy::{
-    finish_local_synthetic_class, is_continuation_class, is_coroutine_state_machine,
-    synthetic_class_xi, SYNTHETIC_LOCAL, SYNTHETIC_PROTECTED, SYNTHETIC_PUBLIC,
+    continuation_class_xi, finish_local_synthetic_class, is_continuation_class,
+    is_coroutine_state_machine, synthetic_class_xi, SYNTHETIC_LOCAL, SYNTHETIC_PUBLIC,
 };
 use method_defaults::{
     emit_default_stub, emit_facade_default_stub, static_default_stub_marker, DefaultStubSource,
@@ -1642,11 +1642,14 @@ fn emit_pass(
     for (class_id, c) in ir.classes.iter().enumerate() {
         let class_id = class_id as ClassId;
         let fq_name = c.fq_name();
-        // A function whose suspension points all turned out to be tail calls has no machine.
+        // A function whose suspension points all turned out to be tail calls has no machine, and
+        // its continuation is written only when a method's `$$forInline` copy constructs it.
         if let Some(crate::jvm::classfile::CoroutineOutcome::TailCalls) =
             env.run.transformed_coroutine(&fq_name)
         {
-            continue;
+            if !crate::jvm::suspend_inline_functions::constructed_by_method_copy(ir, class_id) {
+                continue;
+            }
         }
         if unwritten_continuations.contains(&c.fq_name) {
             continue;
@@ -2325,9 +2328,11 @@ fn emit_class(
     let has_abstract = c.methods.iter().any(|&fid| {
         !standalone_method_is_elided(ir, fid, env) && ir.functions[fid as usize].body.is_none()
     });
-    // A synthesized continuation class is package-private in kotlinc.
+    // A synthesized continuation class is package-private in kotlinc, unless a method's
+    // `$$forInline` copy constructs it.
     let mut access = if is_continuation {
-        0x0020 // SUPER (package-private)
+        let public = crate::jvm::suspend_inline_functions::constructed_by_method_copy(ir, class_id);
+        u16::from(public) | 0x0020 // [PUBLIC |] SUPER
     } else {
         class_public_bit(ir, c) | 0x0020 // [PUBLIC |] SUPER
     };
@@ -2470,7 +2475,13 @@ fn emit_class(
     // declared (`L$0`, `I$0`, …), and kotlinc's pool carries each of those strings once, first visited
     // with the FIELD. Building the annotation earlier interned the subset the array happens to mention
     // ahead of the table and left the rest to the fields, reordering the whole pool.
-    if let Some(metadata) = continuation_metadata {
+    // A machine-less continuation (its function's suspension points all tail calls, written for
+    // a method's `$$forInline` copy) has no states to describe.
+    let tail_calls = matches!(
+        transformed,
+        Some(crate::jvm::classfile::CoroutineOutcome::TailCalls)
+    );
+    if let Some(metadata) = continuation_metadata.filter(|_| !tail_calls) {
         cw.set_debug_metadata(&crate::jvm::bytecode_passes::coroutines::DebugMetadata {
             source_file: opts.source_file.clone().unwrap_or_default(),
             line_numbers: metadata.l.clone(),
@@ -4235,13 +4246,14 @@ fn emit_method_inner(
         },
     };
     emit_placed_method(ir, fid, placement, owner, facade, cw, env);
-    if crate::jvm::suspend_inline_functions::has_for_inline_copy(ir, fid)
-        && env.emit_time_machines.transformed(fid).is_some()
-    {
+    let for_inline = crate::jvm::suspend_inline_functions::for_inline_copy(ir, fid)
+        .filter(|_| env.emit_time_machines.transformed(fid).is_some());
+    if let Some(kind) = for_inline {
         let copy = MethodPlacement::ForInlineCopy {
             static_owner,
             instance: instance && singleton.is_none(),
             singleton,
+            kind,
         };
         emit_placed_method(ir, fid, copy, owner, facade, cw, env);
     }
@@ -4265,6 +4277,7 @@ fn emit_placed_method(
             static_owner,
             instance,
             singleton,
+            ..
         } => (Some(static_owner), instance, None, singleton),
         MethodPlacement::Holder(receiver) => (None, true, Some(receiver), None),
         MethodPlacement::Singleton {
@@ -4514,6 +4527,22 @@ fn emit_placed_method(
             store(Ty::Int, slot, &mut code);
             (slot, code.bytes.len() as u16)
         });
+    if placement.constructs_fake_continuation() {
+        let completion = param_tys.len().saturating_sub(1) as u32 + u32::from(receiver_value);
+        let completion = e
+            .slots
+            .get(&completion)
+            .map(|&(slot, _)| slot)
+            .expect("a suspend method's copy has a completion parameter");
+        // The class the machine re-enters, under its final name: a copy's continuation is renamed
+        // with the copy, after coroutine lowering named it.
+        let continuation = env
+            .emit_time_machines
+            .transformed(fid)
+            .map(|machine| machine.continuation_class.clone())
+            .expect("a method's `$$forInline` copy is written beside its transformed machine");
+        e.emit_fake_continuation_construction(&continuation, completion, &mut code);
+    }
     // The marker and the parameter guards carry no line. The method's first entry is the first
     // statement, or the expression body — kotlinc does not also record the signature line there.
     // Building the machine: everything the discovery pass learned is in hand, so the entry,
