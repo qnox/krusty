@@ -84,7 +84,7 @@ pub(super) fn archive_entry_name<'a>(
 }
 
 fn open_jar(jar: &Path) -> Option<zip::ZipArchive<File>> {
-    zip::ZipArchive::new(File::open(jar).ok()?).ok()
+    crate::archive::open_file(File::open(jar).ok()?).ok()
 }
 
 fn parse_metadata_class(

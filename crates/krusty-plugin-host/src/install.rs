@@ -101,7 +101,7 @@ pub(crate) fn unpack(archive: &Path, name: &str, into: &Path) -> Result<(), Stri
     std::fs::create_dir_all(into).map_err(|error| format!("{}: {error}", into.display()))?;
     if name.ends_with(".zip") {
         let file = std::fs::File::open(archive).map_err(|error| error.to_string())?;
-        let mut zip = zip::ZipArchive::new(file).map_err(|error| error.to_string())?;
+        let mut zip = krusty::archive::open_file(file).map_err(|error| error.to_string())?;
         return zip.extract(into).map_err(|error| error.to_string());
     }
     let output = Command::new("tar")

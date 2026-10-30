@@ -2771,7 +2771,7 @@ impl Classpath {
                 Ok(file) => file,
                 Err(error) => return EntryReadResult::Failed(error.to_string()),
             };
-            let archive = match zip::ZipArchive::new(file) {
+            let archive = match crate::archive::open_file(file) {
                 Ok(archive) => archive,
                 Err(error) => return EntryReadResult::Failed(error.to_string()),
             };

@@ -671,7 +671,7 @@ pub fn classpath_entry_problems(entries: &[PathBuf]) -> Vec<ClasspathEntryProble
                                     || extension.eq_ignore_ascii_case("zip")
                             });
                         if is_archive {
-                            zip::ZipArchive::new(file)
+                            krusty::archive::open_file(file)
                                 .err()
                                 .map(|error| format!("not a readable archive ({error})"))
                         } else {
