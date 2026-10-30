@@ -1,27 +1,11 @@
 # krusty — a memory-lean Kotlin→JVM compiler PoC
 
-## Wasm function values
+## JVM array clone result
 
-A non-suspend lambda or callable reference is a Wasm object. Its struct is a subtype of the common
-object struct, holding the dispatch table, then the captured values in the order common lowering
-lists them: a reference's declaration captures, then its bound receiver. The table extends
-`$AnyTable` with one field after the interface table, the entry a call enters. Every function value
-of one arity shares that table type and the entry type `(this, argument…) -> result`, every operand
-a reference, as `FunctionN.invoke` is on the JVM. The entry unboxes each argument to the type the
-implementation declares and boxes its result. Two `Unit`s meet there: the implementation's
-`Unit` result has no Wasm value, and the entry hands back the object-valued `kotlin.Unit` singleton
-in its place; the call site then converts that reference to the invocation's checked result type,
-so a semantic `Unit` result is dropped again and never read as an object. A lambda's `==` is
-identity. Two references to one declaration are equal in Kotlin, which this backend does not
-compare yet, so their `==` traps instead of answering `false`; `hashCode` and `toString` of a
-function value trap as well.
-
-Suspend function values and `fun interface` (SAM) conversions of a lambda or a callable reference
-have no Wasm representation yet and decline the compilation, with `a suspend function value` and
-``a lambda converted to a `fun interface` `` respectively. Test: `functionValueCalls.kt` against
-the JVM reference and every backend, and `wasm_suspend_function_values_decline` and
-`wasm_sam_converted_function_values_decline`, which check the JVM reference before the exact Wasm
-decline.
+The JVM `Array<T>.clone()` declaration returns `Array<T>` with `T` keeping the classifier's own
+implicit `Any?` bound, so `Array<String?>.clone()` is `Array<String?>`. A non-null bound made it
+`Array<String>` and rejected moshi's `pathNames = copyFrom.pathNames.clone()`. Test:
+`array_member_reference_e2e::a_nullable_element_array_clone_keeps_its_element_type`.
 
 ## Smart casts from `when` guards
 
@@ -174,6 +158,29 @@ owners and exact retained segments. A dollar inside a declaration name never int
 classifier or owner. Publication retains visibility and declaration order, and excludes local and
 anonymous classifiers as before. Header-boundary regressions check the complete published inventory,
 absence of invented prefixes, and exact nesting for literal-dollar owner/member names.
+
+## Wasm function values
+
+A non-suspend lambda or callable reference is a Wasm object. Its struct is a subtype of the common
+object struct, holding the dispatch table, then the captured values in the order common lowering
+lists them: a reference's declaration captures, then its bound receiver. The table extends
+`$AnyTable` with one field after the interface table, the entry a call enters. Every function value
+of one arity shares that table type and the entry type `(this, argument…) -> result`, every operand
+a reference, as `FunctionN.invoke` is on the JVM. The entry unboxes each argument to the type the
+implementation declares and boxes its result. Two `Unit`s meet there: the implementation's
+`Unit` result has no Wasm value, and the entry hands back the object-valued `kotlin.Unit` singleton
+in its place; the call site then converts that reference to the invocation's checked result type,
+so a semantic `Unit` result is dropped again and never read as an object. A lambda's `==` is
+identity. Two references to one declaration are equal in Kotlin, which this backend does not
+compare yet, so their `==` traps instead of answering `false`; `hashCode` and `toString` of a
+function value trap as well.
+
+Suspend function values and `fun interface` (SAM) conversions of a lambda or a callable reference
+have no Wasm representation yet and decline the compilation, with `a suspend function value` and
+``a lambda converted to a `fun interface` `` respectively. Test: `functionValueCalls.kt` against
+the JVM reference and every backend, and `wasm_suspend_function_values_decline` and
+`wasm_sam_converted_function_values_decline`, which check the JVM reference before the exact Wasm
+decline.
 
 ## Wasm reference-array literals and reads
 
@@ -15229,6 +15236,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   identities between the passes; the temporaries pass does not infer the earlier pass from
   unrelated constants, jumps, or throws remaining in the method. Tests:
   `bytecode_passes::temporaries::tests` and `tests/safe_call_after_throw_e2e.rs`.
+- **A label right after a `goto` that stands beside a reached label is not one retained from
+  unreachable code.** kotlinc normalizes directly adjacent labels into one before it optimizes, so
+  such a run is reached when any of its labels is. An unreached label in it, like the first label
+  in front of a safe call's null path after the non-null path's `goto`, is not counted as retained,
+  and `options?.let { if (…) null else "x" }` keeps its receiver on the stack
+  (`aload; dup; ifnull`) as kotlinc does. After an `athrow` or a return the label still counts as
+  retained: kotlinc emits a dead continuation there (an inlined body's result path) that the
+  elimination deletes, which is why `lastException?.let { throw it }` keeps its temporary.
+  Tests: `constant_conditions::tests::a_label_beside_a_reached_jump_target_is_not_retained_from_deleted_code`,
+  `constant_conditions::tests::a_label_after_a_throw_beside_a_reached_jump_target_stays_retained`,
+  `tests/safe_call_dup_e2e.rs` and `tests/safe_call_after_throw_e2e.rs`.
 - **A `Boolean` compared with a `Boolean` literal is an ordinary two-operand comparison; only a
   negation is a polarity.** kotlinc's `Equals` sends two primitive `Boolean` operands to
   `BooleanComparison`, which materializes both and jumps with `if_icmp<cond>`; it never reads a
@@ -23441,3 +23459,14 @@ Receiver expressions are evaluated once before the closure is allocated.
 The Native storage ABI regression establishes each program's kotlinc result before checking scalar,
 scalar-backed and reference-backed value-class equality, hashes, typed invocation and mixed capture
 ordering. The runtime reference-equality protocol and KType layout are unchanged.
+
+## JVM object methods on annotation interfaces
+
+A checked `toString`, `hashCode` or `equals` call on a freshly constructed annotation names its
+declared interface. The generated implementation is materialized at that interface slot before
+invocation. Reading a declared annotation parameter, or calling through `Any` or an ordinary
+interface, retains class-owned dispatch. The realized construction identity and selected semantic
+call role own this JVM choice.
+`annotation_impl_class_e2e` compares complete emitted class inventories and raw artifacts, and runs
+the same programs after Kotlin; the ordinary Java-interface controls remain in
+`interface_object_method_e2e`.
