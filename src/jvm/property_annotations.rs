@@ -12,17 +12,18 @@ use crate::ir::{FnParamInfo, IrExpr, IrFile, IrFunction, IrParameterIdentity};
 use crate::names::property_getter_name;
 use crate::types::Ty;
 
-/// Add one marker method per property with retained annotations, right after that property's getter
+/// Add one marker method per property requiring an annotation carrier, right after its getter
 /// (kotlinc's member order), and attach the property's annotations to it. The class keeps its
 /// property annotations: `@Metadata` reads the property's own annotation facts from them.
 pub fn synthesize_property_annotation_markers(ir: &mut IrFile) {
     for class_index in 0..ir.classes.len() {
         let annotated = ir.classes[class_index].property_annotations.clone();
         for property in annotated {
-            // A retained application needs its JVM carrier. A suppressed SOURCE application has
+            // A retained application needs its JVM carrier. A SOURCE application has
             // no annotation attribute, but kotlinc still emits the empty marker that its property
             // metadata names. An erased optional expectation needs neither.
             if property.annotations.retains_none()
+                && !property.annotations.has_source_application()
                 && !property.annotations.has_suppressed_source_application()
             {
                 continue;
@@ -85,8 +86,10 @@ pub fn synthesize_property_annotation_markers(ir: &mut IrFile) {
                 .package_property_annotations
                 .get(&property.property)?
                 .property;
-            (!annotations.retains_none() || annotations.has_suppressed_source_application())
-                .then(|| (property.clone(), annotations.clone()))
+            (!annotations.retains_none()
+                || annotations.has_source_application()
+                || annotations.has_suppressed_source_application())
+            .then(|| (property.clone(), annotations.clone()))
         })
         .collect::<Vec<_>>();
     for (property, annotations) in package_properties {

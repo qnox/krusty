@@ -830,7 +830,6 @@ classes/overloadUnaryOperator.kt
 classes/privateOuterFunctions.kt
 classes/privateOuterProperty.kt
 classes/privateToThis.kt
-classes/selfcreate.kt
 closures/anonymousObjectAsLastExpressionInLambda.kt
 closures/captureExtensionReceiver.kt
 closures/captureExtensionReceiverX2.kt
@@ -3988,7 +3987,6 @@ innerNested/superConstructorCall/objectExtendsInnerDefaultArgument.kt
 innerNested/superConstructorCall/objectExtendsInnerOfLocalVarargAndDefault.kt
 innerNested/superConstructorCall/objectExtendsInnerOfLocalWithCapture.kt
 innerNested/superConstructorCall/objectExtendsInnerWithDelegatingConstructor.kt
-innerNested/superConstructorCall/objectExtendsLocalCaptureInSuperCall.kt
 innerNested/superConstructorCall/objectExtendsLocalWithClosure.kt
 innerNested/superConstructorCall/objectOuterDiffersFromInnerOuter.kt
 instructions/swap/swapRefToSharedVarInt.kt
@@ -6020,7 +6018,6 @@ typealias/kt45308.kt
 typealias/localTypeAliases.kt
 typealias/nestedTypeAliasesAndStaticScope.kt
 typealias/nestedTypeAliasesAndTypeArguments.kt
-typealias/objectLiteralConstructor.kt
 typealias/privateInKlib.kt
 typealias/simple.kt
 typealias/typeAliasAsBareType.kt
