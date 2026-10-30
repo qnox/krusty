@@ -23395,6 +23395,13 @@ declared interface. The generated implementation is materialized at that interfa
 invocation. Reading a declared annotation parameter, or calling through `Any` or an ordinary
 interface, retains class-owned dispatch. The realized construction identity and selected semantic
 call role own this JVM choice.
+
+Synthetic annotation implementations reserve enabled nullability descriptors at their method
+headers, before body constants. A memberless `toString` has the same version-enabled non-null
+return annotation as a member-bearing implementation. Constructor guards and annotation payloads
+retain their contracts. Complete artifact controls cover primitive, reference-valued and memberless
+annotations over every supported release read from the manifest.
+
 `annotation_impl_class_e2e` compares complete emitted class inventories and raw artifacts, and runs
 the same programs after Kotlin; the ordinary Java-interface controls remain in
 `interface_object_method_e2e`.
