@@ -56739,23 +56739,15 @@ impl<'a> Checker<'a> {
                 // Accumulate this arm's false-branch facts for every later arm. Conditions joined
                 // by commas are alternatives, so reaching the next arm means each one was false.
                 if arm.guard.is_none() {
-                    for &condition in &arm.conditions {
-                        let cnd = condition.expression();
-                        let (mut casts, mut declined) =
-                            self.when_condition_narrowings(cond_scope, subject, condition, false);
-                        crate::trace_compiler!(
-                            "smartcast",
-                            "when fallthrough condition={} casts={casts:?} declined={declined:?}",
-                            cnd.0,
-                        );
-                        fallthrough_casts.append(&mut casts);
-                        fallthrough_declined.append(&mut declined);
-                    }
+                    let (mut casts, mut declined) =
+                        self.when_fallthrough_narrowings(cond_scope, subject, &arm.conditions);
+                    fallthrough_casts.append(&mut casts);
+                    fallthrough_declined.append(&mut declined);
                 }
                 // A single condition establishes its true-branch facts in the arm body. Conditions
                 // separated by commas are alternatives, so none of their facts holds for every
                 // path into the body.
-                let (arm_casts, arm_declined) = match arm.conditions.as_slice() {
+                let (mut arm_casts, mut arm_declined) = match arm.conditions.as_slice() {
                     [condition] => {
                         self.when_condition_narrowings(cond_scope, subject, *condition, true)
                     }
@@ -56769,15 +56761,21 @@ impl<'a> Checker<'a> {
                     }
                     _ => None,
                 };
-                let bt = {
+                let (bt, arm_this_narrow) = {
                     let scope = &arm_scope;
                     self.apply_narrowings(scope, &arm_casts, &arm_declined, false);
                     self.with_this_narrow(arm_this_narrow, |c| {
+                        let mut this_narrow = arm_this_narrow;
                         if let Some(guard) = arm.guard {
-                            let guard_ty = c.expr(scope, guard);
-                            c.expect_assignable(Ty::Boolean, guard_ty, c.span(guard), "when guard");
+                            let mut guarded = c.checked_when_guard(scope, guard);
+                            arm_casts.append(&mut guarded.casts);
+                            arm_declined.append(&mut guarded.declined);
+                            this_narrow = guarded.this_narrow.or(this_narrow);
                         }
-                        c.joined_branch_result(scope, arm.body, branch_wanted, has_else)
+                        let body = c.with_this_narrow(this_narrow, |c| {
+                            c.joined_branch_result(scope, arm.body, branch_wanted, has_else)
+                        });
+                        (body, this_narrow)
                     })
                 };
                 if self.completed_normally(arm.body) {
