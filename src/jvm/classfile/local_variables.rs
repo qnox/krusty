@@ -176,7 +176,7 @@ impl CodeBuilder {
 impl ClassWriter {
     /// The `LocalVariableTable` a method's emission recorded, its strings interned.
     pub(super) fn local_table(&mut self, code: &CodeBuilder) -> Vec<LvtEntry> {
-        code.local_entries()
+        self.written_local_entries(code)
             .iter()
             // A `LocalVariableTable` `start_pc` must index the code array (JVMS §4.7.13) —
             // HotSpot's class-file parser rejects the whole class otherwise. A local DECLARED
@@ -228,7 +228,7 @@ impl ClassWriter {
     /// so a nested block's local follows every constant of the method body, not the instruction
     /// that closed its scope, and precedes the frame classes.
     pub(super) fn intern_local_table(&mut self, code: &CodeBuilder) {
-        for (_, _, _, local, descriptor) in code.local_entries() {
+        for (_, _, _, local, descriptor) in self.written_local_entries(code).iter() {
             self.cp.utf8(local);
             self.cp.utf8(descriptor);
         }
