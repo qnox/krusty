@@ -1197,13 +1197,20 @@ impl Checker<'_> {
             // An integer LITERAL takes the element's declared width too. Emitting `I` for a
             // `byte`/`short` element writes the wrong tag just as a mistyped constant does, and
             // read-back throws `AnnotationTypeMismatchException`.
-            Expr::IntLit(value) | Expr::UIntLit(value) => match expected.map(Ty::non_null) {
+            Expr::UIntLit(value) => match expected.map(Ty::non_null) {
+                Some(Ty::UByte) => AnnotationValue::UByte(u8::try_from(*value).ok()?),
+                Some(Ty::UShort) => AnnotationValue::UShort(u16::try_from(*value).ok()?),
+                Some(Ty::ULong) => AnnotationValue::ULong(u64::try_from(*value).ok()?),
+                _ => AnnotationValue::UInt(u32::try_from(*value).ok()?),
+            },
+            Expr::IntLit(value) => match expected.map(Ty::non_null) {
                 Some(Ty::Byte) => AnnotationValue::Byte(i8::try_from(*value).ok()?),
                 Some(Ty::Short) => AnnotationValue::Short(i16::try_from(*value).ok()?),
                 Some(Ty::Long) => AnnotationValue::Long(*value),
                 _ => AnnotationValue::Int(*value as i32),
             },
-            Expr::LongLit(value) | Expr::ULongLit(value) => AnnotationValue::Long(*value),
+            Expr::LongLit(value) => AnnotationValue::Long(*value),
+            Expr::ULongLit(value) => AnnotationValue::ULong(*value as u64),
             Expr::DoubleLit(value) => AnnotationValue::Double(*value),
             Expr::FloatLit(value) => AnnotationValue::Float(*value),
             Expr::BoolLit(value) => AnnotationValue::Boolean(*value),
@@ -1335,22 +1342,28 @@ impl Checker<'_> {
         use crate::libraries::LibConst;
         use crate::types::AnnotationValue;
 
-        let declared = expected.map(Ty::non_null);
+        let declared = expected.unwrap_or(self.expr_types[e.0 as usize]).non_null();
         // A constant reference was resolved by checking; any other constant expression (`-1`,
         // `LIMIT * 2`) folds through the same checked constant language as a `const val`.
         let constant = match self.resolved_constants.get(&e) {
             Some(constant) => constant.clone(),
-            None => self.checked_constant(e, declared?)?,
+            None => self.checked_constant(e, declared)?,
         };
+        let unsigned = unsigned_constant_magnitude(&constant);
         Some(match &constant.value {
             LibConst::Int(value) => match declared {
-                Some(Ty::Boolean) => AnnotationValue::Boolean(*value != 0),
-                Some(Ty::Char) => AnnotationValue::Char(u16::try_from(*value).ok()?),
-                Some(Ty::Long) => AnnotationValue::Long(i64::from(*value)),
-                Some(Ty::Byte) => AnnotationValue::Byte(i8::try_from(*value).ok()?),
-                Some(Ty::Short) => AnnotationValue::Short(i16::try_from(*value).ok()?),
+                Ty::UByte => AnnotationValue::UByte(u8::try_from(unsigned?).ok()?),
+                Ty::UShort => AnnotationValue::UShort(u16::try_from(unsigned?).ok()?),
+                Ty::UInt => AnnotationValue::UInt(u32::try_from(unsigned?).ok()?),
+                Ty::ULong => AnnotationValue::ULong(unsigned?),
+                Ty::Boolean => AnnotationValue::Boolean(*value != 0),
+                Ty::Char => AnnotationValue::Char(u16::try_from(*value).ok()?),
+                Ty::Long => AnnotationValue::Long(i64::from(*value)),
+                Ty::Byte => AnnotationValue::Byte(i8::try_from(*value).ok()?),
+                Ty::Short => AnnotationValue::Short(i16::try_from(*value).ok()?),
                 _ => AnnotationValue::Int(*value),
             },
+            LibConst::Long(_) if declared == Ty::ULong => AnnotationValue::ULong(unsigned?),
             LibConst::Long(value) => AnnotationValue::Long(*value),
             LibConst::Float(value) => AnnotationValue::Float(*value),
             LibConst::Double(value) => AnnotationValue::Double(*value),
@@ -1358,3 +1371,35 @@ impl Checker<'_> {
         })
     }
 }
+
+/// Recover a checked integral constant's magnitude before applying another declared width.
+/// Its semantic type distinguishes an unsigned carrier's high bit from a negative signed value.
+fn unsigned_constant_magnitude(constant: &crate::libraries::LibraryConst) -> Option<u64> {
+    use crate::libraries::LibConst;
+    let value = match constant.value {
+        LibConst::Int(value) => i64::from(value),
+        LibConst::Long(value) => value,
+        _ => return None,
+    };
+    match constant.ty.non_null() {
+        Ty::UByte if (i64::from(i8::MIN)..=i64::from(u8::MAX)).contains(&value) => {
+            Some(u64::from(value as u8))
+        }
+        Ty::UShort if (i64::from(i16::MIN)..=i64::from(u16::MAX)).contains(&value) => {
+            Some(u64::from(value as u16))
+        }
+        Ty::UInt if (i64::from(i32::MIN)..=i64::from(u32::MAX)).contains(&value) => {
+            Some(u64::from(value as u32))
+        }
+        Ty::ULong => Some(value as u64),
+        Ty::UByte | Ty::UShort | Ty::UInt => None,
+        Ty::Byte => u64::try_from(i8::try_from(value).ok()?).ok(),
+        Ty::Short => u64::try_from(i16::try_from(value).ok()?).ok(),
+        Ty::Int => u64::try_from(i32::try_from(value).ok()?).ok(),
+        Ty::Long => u64::try_from(value).ok(),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod constant_values_tests;

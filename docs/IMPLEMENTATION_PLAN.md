@@ -6377,3 +6377,9 @@ official-producer program and independent JVM-oracle controls.
   official-producer value inventory, including high-bit boundaries and signed contrasts.
 - [ ] Preserve unsigned identity through the common checked annotation model and provider
   normalization; keep that semantic work separate from this wire encoding correction.
+
+- [x] Preserve checked-source unsigned annotation identity through common values, IR, metadata
+  type-annotation decoding and typed KSP transport. Keep physical class-reader tags and build ABI
+  carriers distinct from the semantic model; validate full source payloads and the pinned KSP oracle.
+- [ ] Normalize raw dependency annotation defaults using their exact declaration parameter types;
+  keep that provider work separate from checked-source publication and scalar wire decoding.

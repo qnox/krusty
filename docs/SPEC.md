@@ -23403,3 +23403,11 @@ Metadata values retain the IR constant's unsigned identity in `Annotation.Argume
 signed constants omit the flag. The owning encoder test compares complete messages for zero, the
 high bit and the maximum of every unsigned width, plus signed contrasts, against official Kotlin
 Native output from `tests/fixtures/unsigned_metadata_constants/UnsignedConstants.kt`.
+
+Checked annotation values preserve UByte, UShort, UInt and ULong as distinct semantic values,
+including array elements and resolved constant reads. A constant's checked type determines the
+interpretation of its carrier bits before another declared width is applied. IR and metadata
+retain that identity; physical JVM annotation tags and ABI fingerprints use their signed carriers.
+KSP observes Kotlin unsigned wrapper objects with their complete values. The shared fixture
+`unsigned_annotation_values/UnsignedAnnotations.kt` pins every width at zero, the high bit and its
+maximum, alongside a signed contrast, through checked publication, full class artifacts and KSP.

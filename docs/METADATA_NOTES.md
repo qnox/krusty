@@ -1421,3 +1421,16 @@ BYTE, SHORT, INT or LONG and `int_value` remains the zigzag encoding of its sign
 high-bit values. Signed constants have no flags field. Recursive annotation and array values use
 the same encoder. The complete compile-time-value messages of the pinned official Native producer
 are the byte oracle; this does not infer unsigned identity when an earlier semantic model lost it.
+
+## Checked unsigned annotation identity
+
+The common annotation value model retains all four unsigned widths. Checked source literals and
+constant references publish those values; the latter interpret bits using the constant's semantic
+type before applying the declared element width. Common IR keeps the matching unsigned constant.
+The metadata type-annotation adapter accepts exactly `IS_UNSIGNED` on BYTE, SHORT, INT and LONG
+with valid signed carriers, and rejects other flags and incompatible kinds.
+
+KSP protocol 16 transports four unsigned value tags. Its JVM adapter boxes their declared carriers
+as Kotlin unsigned wrapper objects, matching KSP2's runtime classes and full values. The class
+reader and build ABI fingerprint remain physical JVM contracts. Raw dependency annotation-default
+normalization remains a declaration-type-owned provider follow-up.
