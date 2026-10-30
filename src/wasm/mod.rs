@@ -12,6 +12,7 @@
 //! once, when the backend is finalized.
 
 mod array_access;
+mod boxes;
 mod codegen;
 mod encode;
 mod exception_transport;
