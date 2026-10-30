@@ -16037,6 +16037,7 @@ impl<'a> Checker<'a> {
                 // therefore handled by their own rungs below before the imported-extension family.
                 let mut member_mapping_failure = None;
                 let mut extension_rung = None;
+                let mut inaccessible_member = None;
                 let mut rejected_member_candidates = receiver_callables.functions().to_vec();
                 if crate::symbol_resolver::supports_member_lookup(rt) {
                     match self.record_member_call_with_slots(
@@ -16053,10 +16054,12 @@ impl<'a> Checker<'a> {
                             extension,
                             member_mapping_failure: failure,
                             rejected_candidates,
+                            inaccessible_member: inaccessible,
                         } => {
                             member_mapping_failure = failure;
                             rejected_member_candidates = rejected_candidates;
                             extension_rung = Some(extension);
+                            inaccessible_member = inaccessible;
                         }
                     }
                 }
@@ -16135,6 +16138,11 @@ impl<'a> Checker<'a> {
                         &receiver_callables,
                     ),
                 };
+                if let Some(member) =
+                    inaccessible_member.filter(|_| extension_rung.selection.is_none())
+                {
+                    return self.commit_inaccessible_member_call(scope, call, args, *member);
+                }
                 // A member that exists but rejected the arguments owns the failure, reported below
                 // alone or joined with these extensions, unless the target release hands it to a
                 // more specific extension (`rejected_call_owner`).
@@ -33876,6 +33884,10 @@ enum MemberSlotCall {
         /// terminal diagnostic consumes these exact declarations instead of querying providers a
         /// second time after selection has failed.
         rejected_candidates: Vec<crate::libraries::FunctionInfo>,
+        /// An explicit receiver's member that applies but is inaccessible. kotlinc ranks it below
+        /// every resolved candidate of a later rung, so it is committed, with its access error,
+        /// only when no later rung resolves the call.
+        inaccessible_member: Option<Box<crate::symbol_resolver::ResolvedMember>>,
     },
 }
 
@@ -37581,6 +37593,16 @@ impl<'a> Checker<'a> {
                 applicable.last().unwrap().5.callable.ret,
             );
         }
+        // kotlinc ranks a visibility error below every resolved candidate, on any tower rung: an
+        // inaccessible member leaves the call to an accessible extension and is reported only
+        // when nothing accessible applies.
+        if applicable.iter().any(|(_, _, _, _, _, candidate, _, _)| {
+            self.member_candidate_accessible(candidate, extension_receiver)
+        }) {
+            applicable.retain(|(_, _, _, _, _, candidate, _, _)| {
+                self.member_candidate_accessible(candidate, extension_receiver)
+            });
+        }
         // Applicability is evaluated one callable-tower rung at a time. A declaration from a
         // farther import/lexical rung must not beat an applicable nearer extension merely because
         // its receiver or value parameters are more specific. Likewise, receiver distance only
@@ -38450,33 +38472,6 @@ impl<'a> Checker<'a> {
         self.module.legacy_symbols().is_some_and(|symbols| {
             symbols.props.contains_key(name) || symbols.context_prop_names.contains(name)
         })
-    }
-
-    fn source_callable_visible(&self, candidate: &crate::libraries::FunctionInfo) -> bool {
-        if self.suppresses_diagnostic("INVISIBLE_REFERENCE")
-            || self.suppresses_diagnostic("INVISIBLE_MEMBER")
-        {
-            return true;
-        }
-        if !matches!(
-            candidate.kind,
-            crate::libraries::FnKind::TopLevel | crate::libraries::FnKind::Extension
-        ) {
-            return true;
-        }
-        crate::callable_access::source_callable_accessible(
-            candidate.visibility,
-            candidate.source_file,
-            Some(self.file_index),
-            || {
-                self.libraries
-                    .dependency_access_policy()
-                    .internal_callable_accessible(
-                        candidate.callable.external_identity,
-                        candidate.callable.owner,
-                    )
-            },
-        )
     }
 
     fn implicit_receivers(&self, scope: &CheckerScope<'_>) -> Vec<ImplicitReceiver> {
@@ -54508,6 +54503,7 @@ impl<'a> Checker<'a> {
                                 extension,
                                 member_mapping_failure,
                                 rejected_candidates,
+                                inaccessible_member,
                             } => {
                                 let result = self
                                     .record_scope_level_receiver_call(
@@ -54528,6 +54524,13 @@ impl<'a> Checker<'a> {
                                             args: a,
                                             arg_tys,
                                         };
+                                        if let Some(member) = inaccessible_member
+                                            .filter(|_| extension.selection.is_none())
+                                        {
+                                            return Some(self.commit_inaccessible_member_call(
+                                                scope, e, a, *member,
+                                            ));
+                                        }
                                         let owned = match member_mapping_failure {
                                             Some(failure) if extension.selection.is_none() => self
                                                 .report_owned_member_failure(
@@ -54577,6 +54580,7 @@ impl<'a> Checker<'a> {
                                 extension,
                                 member_mapping_failure,
                                 rejected_candidates,
+                                inaccessible_member,
                             } => {
                                 let result = self
                                     .record_scope_level_receiver_call(
@@ -54597,6 +54601,13 @@ impl<'a> Checker<'a> {
                                             args: a,
                                             arg_tys,
                                         };
+                                        if let Some(member) = inaccessible_member
+                                            .filter(|_| extension.selection.is_none())
+                                        {
+                                            return Some(self.commit_inaccessible_member_call(
+                                                scope, e, a, *member,
+                                            ));
+                                        }
                                         let owned = match member_mapping_failure {
                                             Some(failure) if extension.selection.is_none() => self
                                                 .report_owned_member_failure(
@@ -59662,19 +59673,6 @@ impl<'a> Checker<'a> {
         self.resolved_calls
             .insert(call, ResolvedCall::Member(selected));
         Some(ret)
-    }
-
-    fn selected_member_accessible(
-        &self,
-        selected: &crate::symbol_resolver::ResolvedMember,
-        owner: TypeName,
-    ) -> bool {
-        self.receiver_callable_accessible(
-            selected.member.visibility,
-            owner,
-            selected.receiver,
-            selected.member.external_identity,
-        )
     }
 
     fn inferred_member_ret(&self, receiver: Ty, name: &str, params: &[Ty]) -> Option<Ty> {
