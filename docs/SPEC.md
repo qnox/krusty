@@ -6,6 +6,16 @@ The JVM `Array<T>.clone()` declaration returns `Array<T>` with `T` keeping the c
 implicit `Any?` bound, so `Array<String?>.clone()` is `Array<String?>`. A non-null bound made it
 `Array<String>` and rejected moshi's `pathNames = copyFrom.pathNames.clone()`. Test:
 `array_member_reference_e2e::a_nullable_element_array_clone_keeps_its_element_type`.
+## Inaccessible members against accessible extensions
+
+A member the call site cannot access ranks below every resolved candidate, as kotlinc's visibility
+error applicability does. It loses to an applicable accessible member or extension of the same rung,
+and an explicit receiver's inaccessible member also yields to later rungs: the enclosing classes'
+member extensions, then top-level and imported extensions, for plain and safe calls alike. It is
+committed, with its access error, only when no later rung resolves the call. Exposed's
+`column.clone()` therefore selects `Alias`'s private `Column<T>.clone()` over the protected
+`java.lang.Object.clone()`. Tests: `box_regressions/inaccessibleMemberYieldsToExtension.kt` and
+`classpath_protected_member_e2e::inaccessible_object_clone_yields_to_a_member_extension`.
 
 ## Nested producers against dependent bounds
 
