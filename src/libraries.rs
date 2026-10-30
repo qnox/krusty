@@ -41,6 +41,7 @@ mod result_nullability;
 mod runtime_exception;
 mod scalar_instruction;
 mod singleton_dispatch;
+mod source_inputs;
 mod stdlib_klib_intrinsics;
 pub use annotation_application::{
     AnnotationApplication, AnnotationElementDefault, AnnotationParameterPolicy,
@@ -94,6 +95,7 @@ pub use provider_override::ProviderOverrideSlot;
 pub use result_nullability::{ResultEnhancement, ReturnInfo};
 pub use runtime_exception::{RuntimeExceptionKind, RuntimeExceptionLayout};
 pub use singleton_dispatch::SingletonDispatch;
+pub(crate) use source_inputs::{ReceiverInputBounds, SourceInputDeclaration};
 pub(crate) use stdlib_klib_intrinsics::{stdlib_klib_intrinsic, StdlibKlibIntrinsic};
 
 use crate::fx_hash::{HashMap, HashSet};
@@ -999,6 +1001,12 @@ pub struct LibraryCallable {
     /// placeholders for the omitted trailing ones, an `int` bit-mask (a bit set per omitted parameter),
     /// and a `null` marker — the JVM realization of default arguments. `false` for an ordinary call.
     pub default_call: bool,
+    /// The declaration fills its own omitted arguments: a dependency declaration whose defaults
+    /// are part of its declaring module, where that module's compilation realizes them as one
+    /// entry taking every operand and a mask of the omitted ones. A call omitting a computed
+    /// default to such a declaration keeps the declaration's identity, with
+    /// [`Self::default_call`] set; no platform `$default` symbol is named.
+    pub defaults_from_declaration: bool,
     /// For a generic `vararg` callable resolved with a bound element type (`listOf<Long>(…)` →
     /// `Long`): the *logical* element type the trailing arguments adapt to. `None` for a non-vararg
     /// call or when the element type is not recovered. The backend uses it to coerce each packed
@@ -1371,6 +1379,9 @@ pub fn map_call_args<T: Copy>(
 #[derive(Clone)]
 pub struct FunctionInfo {
     pub kind: FnKind,
+    /// Declaration input slots and receiver bindings retained before classifier application.
+    /// An unapplied candidate still carries its declaration directly in `semantic_signature`.
+    pub(crate) source_inputs: Option<Box<SourceInputDeclaration>>,
     /// Provider-owned override-slot identity for declarations whose platform compatibility differs
     /// from their source-language signature. This is distinct from the physical emit handle.
     pub(crate) provider_override_slot: Option<ProviderOverrideSlot>,
@@ -1648,6 +1659,7 @@ impl FunctionInfo {
             .saturating_sub(usize::from(kind == FnKind::Extension));
         FunctionInfo {
             kind,
+            source_inputs: None,
             provider_override_slot: None,
             classifier_static: false,
             associated_classifier: None,
