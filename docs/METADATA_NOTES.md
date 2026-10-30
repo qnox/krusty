@@ -166,8 +166,11 @@ official serialization plugin. This updates test coverage without changing metad
 Base expressions of an anonymous object are checked before its dispatch-property scope exists.
 The selected lexical value and complete applied parent flow through ordinary constructor checking;
 an inherited property of the same spelling does not change generic inference. Complete JVM class
-headers and member tables are compared with kotlinc in the constructor-alias regression. No metadata
-wire fields, declaration identities or backend-specific substitutions change at this boundary.
+headers and member tables are compared with kotlinc in the constructor-alias regression. The original
+expanded #2655 program and both ABI/runtime controls live in
+`tests/typealias_constructor_inference_e2e/parameterized_parent_aliases.rs`, alongside the separate
+minimal controls. No metadata wire fields, declaration identities or backend-specific substitutions
+change at this boundary.
 
 ## Class formal layouts before member publication
 
@@ -1355,7 +1358,25 @@ Normalized constructor signatures and the canonical source-argument mapping reta
 function-expression expectations when an explicit class argument violates its bound. Reporting
 uses the same typed failure evidence for source and reference-produced dependency declarations;
 it does not reconstruct parameter types from constructor text. Metadata encoding and callable ABI
-are unchanged. Callable-reference selected-declaration diagnostic retention is tracked in #2776.
+are unchanged. Callable-reference publication retains its selected declaration's diagnostic
+projection before invocation adaptation. A rejected constructor constraint consumes that same
+projection and the mapped functional types, retaining the constructor heading, bound error and
+reference-candidate error in order. Top-level, member, extension, local and constructor providers
+share this checker boundary; reference revisits discard previous evidence. No diagnostic text
+becomes metadata, a callable identity or a backend target (#2776).
+The selected declaration also determines receiver-constraint wording. Constructor references retain
+their declaration diagnostic before adaptation: generic formals and the logical classifier result
+come from normalized constructor/classifier facts, while aliases retain their selected alias and
+outer-owner signature. The physical constructor return remains unchanged.
+
+## Anonymous superclass closure capture ownership
+
+Constructor-use inventory distinguishes candidate storage discovery from checked publication.
+An admitted retained lambda keeps lexical dependencies in its anonymous class; ordinary forwarded
+super arguments remain construction-site expressions. Final closure admission uses the same
+checked lowering/type facts as super-argument disposition. Existing lexical capture identities,
+shared-cell decisions and FIR constructor-prefix coordinates supply the resulting fields and
+closure parameters. No metadata naming, new capture identity or backend recovery is introduced.
 
 ## Serialized getter declaration contracts
 

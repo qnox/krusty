@@ -3,9 +3,13 @@
 //! External corpus/reference-toolchain suites live in `conformance.rs`.
 
 mod constructor_boxing_casts_e2e;
+#[path = "constructor_type_argument_publication_e2e.rs"]
+mod constructor_type_argument_publication_e2e;
 #[path = "dependent_constructor_bounds_e2e.rs"]
 mod dependent_constructor_bounds_e2e;
 mod enclosing_formal_signatures_e2e;
+#[path = "inferred_alias_constructor_abbreviation_e2e.rs"]
+mod inferred_alias_constructor_abbreviation_e2e;
 #[path = "nested_signature_argument_layout_e2e.rs"]
 mod nested_signature_argument_layout_e2e;
 
@@ -959,6 +963,8 @@ mod extension_receiver_property_smartcast_e2e;
 mod external_modifier_targets_e2e;
 #[path = "facade_emission_e2e.rs"]
 mod facade_emission_e2e;
+#[path = "facade_lateinit_setter_e2e.rs"]
+mod facade_lateinit_setter_e2e;
 #[path = "fallthrough_close_line_e2e.rs"]
 mod fallthrough_close_line_e2e;
 #[path = "feature_box_e2e.rs"]

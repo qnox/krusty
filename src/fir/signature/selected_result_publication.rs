@@ -11,6 +11,16 @@ pub trait SelectedResultPublicationSemantics {
         None
     }
 
+    /// The abbreviation of the call's published result `published`: arguments the call
+    /// inferred for the alias are those `published` binds.
+    fn published_call_result_abbreviation(
+        &self,
+        origin: OriginId,
+        _published: ResolvedTy,
+    ) -> Option<ResolvedTypeAbbreviation> {
+        self.call_result_abbreviation(origin)
+    }
+
     fn call_result_publication(
         &self,
         _scope: SignatureScope,
