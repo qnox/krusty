@@ -16,6 +16,7 @@ enum Defect {
     ConditionReadsParameter,
     NonNullAbsentResult,
     ExtraStatement,
+    SelectorReadType,
 }
 
 /// kotlinc's `fun f(a: Boolean?): Boolean? = a?.not()`.
@@ -54,7 +55,11 @@ fn fixture(defect: Defect) -> Demo {
             } else {
                 body.constant(T::NullableNothing, KlibIrConstant::Null)
             };
-            let receiver = body.get(&symbol, T::NullableBoolean);
+            let receiver = if defect == Defect::SelectorReadType {
+                body.get(&symbol, T::NullableString)
+            } else {
+                body.get(&symbol, T::NullableBoolean)
+            };
             let receiver =
                 body.type_operator(KlibIrTypeOperator::ImplicitCast, receiver, T::Boolean);
             let selector = body.builtin(not(), vec![receiver], None);
@@ -128,6 +133,10 @@ fn a_malformed_safe_call_declines_by_its_exact_boundary() {
         (
             Defect::ExtraStatement,
             "a safe call does not contain one temporary and a conditional",
+        ),
+        (
+            Defect::SelectorReadType,
+            "a safe-call receiver read is typed apart from its temporary",
         ),
     ] {
         assert_eq!(

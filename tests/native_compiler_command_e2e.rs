@@ -91,6 +91,70 @@ fn a_program_from_several_files_compiles_links_and_runs() {
     std::fs::remove_dir_all(&scratch).expect("remove the compiler command's directory");
 }
 
+/// The console functions and `Any?.toString()` run through their stdlib bodies: a safe call over
+/// the argument and the root class's members, which the runtime dispatches on the receiver.
+const PRINTING: &str = "\
+class Named(private val name: String) {
+    override fun toString(): String = \"Named($name)\"
+}
+
+fun render(value: Any?): String = value.toString()
+
+fun box(): String {
+    if (render(null) != \"null\") return \"absent\"
+    if (render(42) != \"42\") return \"number\"
+    if (render(Named(\"value\")) != \"Named(value)\") return \"named\"
+    return \"OK\"
+}
+
+fun main() {
+    val result = box()
+    if (result != \"OK\") throw IllegalStateException(result)
+    val absent: Any? = null
+    println(\"text\")
+    println(absent)
+    println(42)
+    println(Named(\"value\"))
+    print(\"no newline\")
+    println()
+}
+";
+
+#[test]
+fn a_program_prints_through_the_stdlib_bodies() {
+    if !native_compiler_available() {
+        return;
+    }
+    assert_eq!(common::kotlinc_box_result(PRINTING), "OK");
+    common::expect_box_ok_with_stdlib(PRINTING, "compilerCommandPrinting");
+
+    let scratch = common::scratch_dir().expect("allocate the compiler command's directory");
+    let main = scratch.join("main.kt");
+    std::fs::write(&main, PRINTING).expect("write main.kt");
+    let compiled = Command::new(common::krusty_binary())
+        .args(["kotlinc-native", "-o"])
+        .arg(scratch.join("app"))
+        .arg(&main)
+        .output()
+        .expect("run krusty kotlinc-native");
+    assert_eq!(
+        completed(compiled),
+        (Some(0), String::new(), String::new()),
+        "the program compiles and links silently"
+    );
+    let run = common::run_freshly_written(&mut Command::new(scratch.join("app.kexe")))
+        .expect("run the Native program");
+    assert_eq!(
+        completed(run),
+        (
+            Some(0),
+            "text\nnull\n42\nNamed(value)\nno newline\n".to_owned(),
+            String::new()
+        )
+    );
+    std::fs::remove_dir_all(&scratch).expect("remove the compiler command's directory");
+}
+
 #[test]
 fn a_source_error_is_reported_and_no_program_is_written() {
     if !native_compiler_available() {

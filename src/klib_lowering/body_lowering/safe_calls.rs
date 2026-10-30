@@ -115,22 +115,32 @@ impl BodyLowering<'_> {
         &mut self,
         argument: KlibIrExprId,
         target: Ty,
-    ) -> Option<ExprId> {
-        let KlibIrExprKind::GetValue { symbol, .. } = &self.arena.expr(argument).kind else {
-            return None;
+    ) -> Lowered<Option<ExprId>> {
+        let read = self.arena.expr(argument);
+        let KlibIrExprKind::GetValue { symbol, .. } = &read.kind else {
+            return Ok(None);
         };
         if !self.null_proven.contains(symbol) || target.is_nullable() {
-            return None;
+            return Ok(None);
         }
-        let local = self.locals.get(symbol)?;
-        if Ty::nullable(target) != local.ty {
-            return None;
+        let Some(local) = self.locals.get(symbol) else {
+            return Ok(None);
+        };
+        let local_ty = local.ty;
+        let local_index = local.index;
+        if self.ty(read, "safe-call receiver read")? != local_ty {
+            return Err(mismatch(
+                "a safe-call receiver read is typed apart from its temporary",
+            ));
         }
-        let read = self.ir.add_expr(IrExpr::GetValue(local.index));
-        Some(self.ir.add_expr(IrExpr::TypeOp {
+        if Ty::nullable(target) != local_ty {
+            return Ok(None);
+        }
+        let read = self.ir.add_expr(IrExpr::GetValue(local_index));
+        Ok(Some(self.ir.add_expr(IrExpr::TypeOp {
             op: IrTypeOp::ImplicitCoercion,
             arg: read,
             type_operand: target.canonical_semantic(),
-        }))
+        })))
     }
 }
