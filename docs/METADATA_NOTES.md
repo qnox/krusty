@@ -1,5 +1,12 @@
 # `@kotlin.Metadata` — reverse-engineering notes (Phase 4b)
 
+## Numeric dependency slot representation
+
+Wasm keeps declared export parameter/result types beside the exact export identity and separately
+authenticates the checked application, substitutions and receiver coordinates. The shared runtime
+box registry supplies primitive identity and full-width payloads to both dependency values and
+ordinary source expressions. No second Int/Long identity or metadata wire change is introduced.
+
 ## Null-pointer exception storage
 
 The platform NullPointerException declaration carries the existing runtime-exception storage role.
