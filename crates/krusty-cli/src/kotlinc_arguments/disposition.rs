@@ -65,6 +65,7 @@ pub const APPLIED: &[&str] = &[
     "-nowarn",
     "-opt-in",
     "-progressive",
+    "-script-templates",
     "-version",
 ];
 
@@ -221,7 +222,6 @@ pub const UNSUPPORTED: &[&str] = &[
     "-include-runtime",
     "-kotlin-home",
     "-script",
-    "-script-templates",
     "-verbose",
 ];
 

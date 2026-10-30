@@ -63,7 +63,7 @@ pub(crate) fn compile_source_set(
     language_settings: &krusty::language_settings::LanguageSettings,
 ) -> Option<Vec<(String, Vec<u8>)>> {
     let stems = source_stems(sources);
-    let inputs = source_inputs(sources, &stems, common, None);
+    let inputs = source_inputs(sources, &stems, common);
     compile_inputs(
         &inputs,
         &stems,
@@ -93,7 +93,6 @@ pub(crate) fn source_inputs<'a>(
     sources: &[(&str, &'a str)],
     stems: &'a [String],
     common: usize,
-    script_definition: Option<&'a krusty::script_definitions::ScriptDefinition>,
 ) -> Vec<SourceInput<'a>> {
     sources
         .iter()
@@ -103,11 +102,7 @@ pub(crate) fn source_inputs<'a>(
             let input = if name.ends_with(".java") {
                 SourceInput::java(source)
             } else if name.ends_with(".kts") {
-                let script = SourceInput::kotlin_script(source);
-                match script_definition {
-                    Some(definition) => script.with_script_definition(definition),
-                    None => script,
-                }
+                SourceInput::kotlin_script(source)
             } else {
                 SourceInput::kotlin(source)
             }

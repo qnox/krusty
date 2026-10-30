@@ -13,6 +13,9 @@ serde_json = "1"
 krusty = { path = "../.." }
 # `krusty compilation-fingerprint`: the build layer's view of a compiled dependency, and digests.
 krusty-build = { path = "../krusty-build" }
+# `-script-templates`: a template's compilation configuration is built by running its code, in the
+# plugin host's JVM.
+krusty-plugin-host = { path = "../krusty-plugin-host" }
 zip = { version = "9", default-features = false, features = ["deflate"] }
 # The compiler allocates and frees many short-lived vectors and strings; under glibc's allocator a
 # quarter of a large module's compile ran in malloc and free. mimalloc took a 100-package,

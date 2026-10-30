@@ -376,6 +376,9 @@ pub(super) fn apply(
                 opts.plugins.accept(&format!("-P={value}"), || None);
             }
         }
+        "-script-templates" => opts
+            .script_templates
+            .extend(list.iter().filter(|template| !template.is_empty()).cloned()),
         "-java-parameters" => opts.java_parameters = flag,
         "-version" => opts.print_version = flag,
         "-help" | "-X" => opts.print_help |= flag,

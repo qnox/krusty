@@ -151,6 +151,13 @@ jobs:
         with:
           path: ~/.cache/JetBrains/Kotlin/cli
           key: kotlin-toolchain-cli-${{ runner.os }}-${{ hashFiles('scripts/kotlin-toolchain/kotlin') }}
+      # `-script-templates` reads a template's configuration in the plugin host, which the script
+      # e2e tests start from its pinned toolchain, as the lint job's host tests do.
+      - name: cache plugin host runtime
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/krusty/plugin-host
+          key: plugin-host-${{ hashFiles('crates/krusty-plugin-host/src/pins/*.tsv', 'crates/krusty-plugin-host/adapter/*', 'crates/krusty-plugin-host/ksp-adapter/**') }}
       - name: select recorded-byte cache mode
         id: recorded-mode
         env:

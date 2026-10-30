@@ -618,6 +618,20 @@ pub fn compile(opts: &cli::Options) -> Result<usize, String> {
     let effective_classpath = opts
         .effective_classpath()
         .map_err(|error| format!("krusty: {error}\n"))?;
+    // kotlinc builds a script template's definition by running the template's code, which only a
+    // JVM can do; a compilation without templates never starts one.
+    let script_templates = if opts.script_templates.is_empty() {
+        None
+    } else {
+        Some(
+            krusty_cli::script_templates::ScriptTemplates::read(
+                &opts.script_templates,
+                &effective_classpath,
+                &version.to_string(),
+            )
+            .map_err(|error| format!("error: {error}\n"))?,
+        )
+    };
     let plugins = opts.resolve_plugins(&effective_classpath);
     for note in &plugins.notes {
         eprintln!("info: {note}");
@@ -651,6 +665,14 @@ pub fn compile(opts: &cli::Options) -> Result<usize, String> {
                 source,
             )
             .with_file_stem(stem);
+            let input = match script_templates
+                .as_ref()
+                .filter(|_| input.kind == krusty::source::SourceKind::KotlinScript)
+                .and_then(|templates| templates.for_source(Path::new(path)))
+            {
+                Some(definition) => input.with_script_definition(definition),
+                None => input,
+            };
             let input = match opts.source_fragments.get(path) {
                 Some(fragment) => input.with_fragment(*fragment),
                 None => input,

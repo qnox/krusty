@@ -852,6 +852,7 @@ version = "0.0.1"
 dependencies = [
  "krusty",
  "krusty-build",
+ "krusty-plugin-host",
  "libc",
  "mimalloc",
  "serde",

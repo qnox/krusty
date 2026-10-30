@@ -206,26 +206,11 @@ object HostConfig : ScriptCompilationConfiguration({\n\
 \x20   isStandalone(false)\n\
 })\n";
 
-/// `HostConfig`, as the data krusty compiles against.
-fn host_definition() -> krusty::script_definitions::ScriptDefinition {
-    krusty::script_definitions::ScriptDefinition {
-        template: Some("t.HostScript".to_string()),
-        constructor_parameters: vec![krusty::script_definitions::ScriptParameter {
-            name: "target".to_string(),
-            classifier: "t.Host".to_string(),
-            type_arguments: Vec::new(),
-        }],
-        implicit_receivers: vec!["t.Host".to_string()],
-        default_imports: vec!["kotlin.math.abs".to_string()],
-    }
-}
-
 fn assert_host_scripts_match_kotlinc(scripts: &[(&str, &str)]) {
     let classes = common::script_classes_against_kotlinc(
         &[("Host.kt", HOST_TEMPLATE)],
         "t.HostScript",
         scripts,
-        &host_definition(),
     );
     let differences = classes.differences();
     assert!(

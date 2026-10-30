@@ -17475,6 +17475,19 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   names `kotlin.Array<kotlin.String>` by qualified identity, so a script importing its own
   `String` or `Array` still takes `String[]` and reads `args` through the template.
   (`tests/kotlin_script_e2e.rs`, `imports_do_not_rebind_the_template_parameter_type_like_kotlinc`.)
+- **`-script-templates` reads each template's configuration by running it, as kotlinc does.** A
+  template's `ScriptCompilationConfiguration` is built by its own code, so the `krusty` CLI builds
+  it in the plugin host's JVM (`createCompilationConfigurationFromTemplate` with kotlinc's default
+  JVM host configuration) over the compilation's classpath. A script belongs to the first template,
+  in command-line order, whose file extension ends its file name after a `.`; one no template
+  claims compiles against the standard definition. The script class extends the configuration's
+  base class and its constructor takes, first, the parameters of that class's primary constructor
+  (a secondary constructor is never used), then one value per implicit receiver; the
+  configuration's default imports precede the script's own. A template whose configuration sets
+  anything else (compiler options, a file path pattern, provided properties, and so on), or whose
+  base class takes a parameter of a nullable or nested generic type, is refused by name rather
+  than compiled differently. Verified against kotlinc 2.4.21. (`tests/kotlin_script_e2e.rs`,
+  `crates/krusty-cli/src/script_templates.rs`, `crates/krusty-plugin-host/tests/script_definitions.rs`.)
 - **An initializer has no function to return from.** A `return` in an `init` block (of a class or
   an enum entry) or a property initializer (top-level, member, or script) is `'return' is
   prohibited here.`, as kotlinc reports it. (`tests/diagnostics_language_parity_e2e.rs`,

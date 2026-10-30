@@ -593,38 +593,16 @@ pub fn classes_against_kotlinc_module_without_script_runtime(
     classes_against_kotlinc(sources, 0, false, &[])
 }
 
-/// Compile `sources` as one module with every script compiled against `script_definition`.
-fn compile_scripts_with_definition(
-    sources: &[(&str, &str)],
-    cp_jars: &[PathBuf],
-    jdk_modules: &Path,
-    script_definition: &krusty::script_definitions::ScriptDefinition,
-) -> Option<Vec<(String, Vec<u8>)>> {
-    use super::common_core::source_set_compile::{compile_inputs, source_inputs, source_stems};
-    let stems = source_stems(sources);
-    let inputs = source_inputs(sources, &stems, 0, Some(script_definition));
-    compile_inputs(
-        &inputs,
-        &stems,
-        cp_jars,
-        Some(jdk_modules),
-        None,
-        None,
-        &krusty::language_settings::LanguageSettings::default(),
-    )
-}
-
 /// Kotlin scripts compiled against a script template of their own. Each compiler first builds the
 /// `template` sources, which declare the template class `template_class` and its compilation
-/// configuration, against the scripting libraries. kotlinc then compiles `scripts` with
-/// `-script-templates template_class`, evaluating the configuration, and krusty compiles them
-/// against `definition`, the data that configuration describes, on its own build of the template.
-/// The classes compared are the scripts'.
+/// configuration, against the scripting libraries. Each then compiles `scripts` from its command
+/// line with `-script-templates template_class` against its own build of the template: krusty's
+/// CLI reads the configuration in its plugin host, as kotlinc evaluates it in its own JVM. The
+/// classes compared are the scripts'.
 pub fn script_classes_against_kotlinc(
     template: &[(&str, &str)],
     template_class: &str,
     scripts: &[(&str, &str)],
-    definition: &krusty::script_definitions::ScriptDefinition,
 ) -> ClassSets {
     let root = super::common_core::scratch_dir().expect("allocate script class inventory");
     let scripting = ["kotlin-scripting-common.jar", "kotlin-scripting-jvm.jar"].map(|jar| {
@@ -679,14 +657,14 @@ pub fn script_classes_against_kotlinc(
         "-cp".to_owned(),
         classpath(&[&reference_template, &scripting[0], &scripting[1]]),
     ];
-    arguments.extend(script_paths);
+    arguments.extend(script_paths.iter().cloned());
     kotlinc(arguments);
     let mut reference_classes = std::collections::BTreeMap::new();
     collect_classes(&reference, &reference, &mut reference_classes);
 
     let jdk = super::common_core::jdk_modules();
     let stdlib = super::common_core::stdlib_jar();
-    let mut library = vec![stdlib.clone()];
+    let mut library = vec![stdlib];
     library.extend(scripting.iter().cloned());
     let template_classes =
         super::e2e_support::compile_in_process_files_common(template, 0, &library, Some(&jdk))
@@ -700,14 +678,22 @@ pub fn script_classes_against_kotlinc(
             std::fs::write(path, bytes).expect("write template class");
         }
     }
-    let mut script_classpath = vec![krusty_template, stdlib];
-    script_classpath.extend(krusty::jvm::kotlin_dist_jar("kotlin-script-runtime.jar"));
-    script_classpath.extend(scripting);
-    let krusty = compile_scripts_with_definition(scripts, &script_classpath, &jdk, definition)
-        .expect("krusty accepted the scripts")
-        .into_iter()
-        .filter(|(_, bytes)| bytes.starts_with(&[0xCA, 0xFE, 0xBA, 0xBE]))
-        .collect();
+    let krusty_scripts = root.join("krusty");
+    let output = std::process::Command::new(super::common_core::krusty_binary())
+        .arg("-d")
+        .arg(&krusty_scripts)
+        .args(["-script-templates", template_class, "-cp"])
+        .arg(classpath(&[&krusty_template, &scripting[0], &scripting[1]]))
+        .args(&script_paths)
+        .output()
+        .expect("run the krusty CLI");
+    assert!(
+        output.status.success(),
+        "krusty rejected the scripts: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let mut krusty = std::collections::BTreeMap::new();
+    collect_classes(&krusty_scripts, &krusty_scripts, &mut krusty);
     let _ = std::fs::remove_dir_all(root);
     ClassSets {
         reference: reference_classes,

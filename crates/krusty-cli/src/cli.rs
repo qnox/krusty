@@ -170,6 +170,9 @@ pub struct Options {
     /// `-opt-in=<fq name>[,<fq name>…]` (also `-opt-in <value>`, repeatable): requirement markers
     /// accepted module-wide, applied to the language settings once they are built.
     pub opt_in: Vec<String>,
+    /// `-script-templates <class>[,<class>…]`: the script templates whose scripts this compilation
+    /// compiles, in the order kotlinc matches a script against them.
+    pub script_templates: Vec<String>,
     /// `-Xsuppress-version-warnings`: omit the deprecated and experimental language/API warnings.
     /// Redundant feature arguments stay reported.
     pub suppress_version_warnings: bool,
@@ -227,6 +230,7 @@ impl Default for Options {
             assertions: None,
             inline_string_concat: false,
             opt_in: Vec::new(),
+            script_templates: Vec::new(),
             suppress_version_warnings: false,
             report_all_warnings: false,
         }
@@ -749,6 +753,8 @@ Common options (kotlinc-compatible):
                         any other plugin is an error (krusty cannot run FIR/IR plugin jars)
   -P plugin:<id>:<key>=<value>
                         pass an option to a plugin
+  -script-templates <class>,<class>
+                        script templates; each one's compilation configuration is read in a JVM
   -Xkotlin-reference-version=<v>
                         reproduce this supported kotlinc release (default: the newest)
   -help                 print this help and exit
