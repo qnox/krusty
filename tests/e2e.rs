@@ -109,6 +109,7 @@ mod annotated_class_decl_line_e2e;
 mod annotated_setter_parameter_e2e;
 #[path = "annotation_array_literal_e2e.rs"]
 mod annotation_array_literal_e2e;
+mod annotation_array_spread_values_e2e;
 #[path = "annotation_class_element_e2e.rs"]
 mod annotation_class_element_e2e;
 #[path = "annotation_cross_file_defaults_e2e.rs"]
@@ -2993,3 +2994,6 @@ mod intersection_bound_metadata_order_e2e;
 mod type_safe_override_call_e2e;
 #[path = "where_bound_arguments_e2e.rs"]
 mod where_bound_arguments_e2e;
+
+#[path = "facade_local_classifier_metadata_e2e.rs"]
+mod facade_local_classifier_metadata_e2e;
