@@ -127,7 +127,9 @@ mod metadata_policy;
 mod method_access;
 pub(crate) use method_access::is_reifiable;
 mod method_defaults;
-pub(in crate::jvm) use method_defaults::body_has_reified_markers;
+pub(in crate::jvm) use method_defaults::{
+    body_has_reified_markers, default_stub_descriptor, default_stub_mask_count,
+};
 mod method_entry;
 mod method_signatures;
 mod must_inline_lambdas;

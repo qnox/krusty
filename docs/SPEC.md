@@ -1492,7 +1492,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   its `access$` accessor, inline marker and reference name keep the Kotlin name, while a
   reference's reflected signature uses the JVM name. `kotlin_module` groups the parts by facade
   (field 3 = 1-based facade ids, field 4 = facade names). `@JvmField` on a top-level property of a
-  multifile file is kotlinc's frontend error at the annotation
+  multifile file is kotlinc's frontend error at the annotation. Every method a facade forwards
+  (non-private functions, their `$default` stubs, non-private accessors) keeps its JVM name and
+  descriptor with its checked declaration; when two parts of one facade take the same slot, the
+  module fails before any class is written with kotlinc's unlocated platform declaration clash
+  per slot, in part order, listing the declarations in kotlinc's order (a slot only `$default`
+  stubs share is not reported again). A package function's clash rendering marks a defaulted
+  parameter ` = ...`
   (`tests/box_regressions/jvmMultifileClass*.kt`, `tests/jvm_multifile_class_e2e.rs`,
   `tests/file_jvm_name_e2e.rs`).
 - **`@Metadata` writer — plain top-level PROPERTY records.** The facade `Package` proto used to

@@ -15,6 +15,7 @@ use crate::jvm::class_node::{ClassMethod, ClassNode};
 use crate::jvm::classfile::{
     ClassWriter, MetadataStamp, ACC_FINAL, ACC_PUBLIC, ACC_SUPER, ACC_SYNTHETIC,
 };
+use crate::jvm::declaration_collisions::{self, FacadeSlot};
 use crate::jvm::ir_emit::KotlinMetadata;
 use crate::jvm::method_node::{Insn, LocalVariable, MethodNode, Node};
 use crate::types::type_name;
@@ -80,6 +81,8 @@ struct Part {
     /// The methods the part declares before its synthetic accessors, by name and descriptor.
     members: Vec<(String, String)>,
     constants: Vec<FacadeConstant>,
+    /// The forwarded methods with the declarations they realize, checked across the facade.
+    slots: Vec<FacadeSlot>,
 }
 
 /// The module's emitted parts, by the internal name of the facade each belongs to.
@@ -95,6 +98,7 @@ impl MultifileParts {
         internal: &str,
         class: &[u8],
         (members, constants): (Vec<(String, String)>, Vec<FacadeConstant>),
+        slots: Vec<FacadeSlot>,
     ) {
         self.facades
             .entry(facade.to_string())
@@ -104,7 +108,22 @@ impl MultifileParts {
                 class: class.to_vec(),
                 members,
                 constants,
+                slots,
             });
+    }
+
+    /// The platform declaration clashes between the parts of each facade, which kotlinc reports
+    /// for the module before writing any class.
+    pub(crate) fn clashes(&self) -> Vec<String> {
+        self.facades
+            .values()
+            .flat_map(|parts| {
+                let parts = sorted_parts(parts);
+                declaration_collisions::facade_clashes(
+                    parts.iter().map(|part| part.slots.as_slice()),
+                )
+            })
+            .collect()
     }
 
     /// Each facade's class file, by internal name.
@@ -119,14 +138,19 @@ impl MultifileParts {
     }
 }
 
-fn write_facade(facade: &str, parts: &[Part], stamp: MetadataStamp) -> Result<Vec<u8>, String> {
-    // The JVM's string order, as kotlinc sorts the parts.
+/// A facade's parts in the JVM's string order, as kotlinc sorts them.
+fn sorted_parts(parts: &[Part]) -> Vec<&Part> {
     let mut parts = parts.iter().collect::<Vec<_>>();
     parts.sort_by(|left, right| {
         left.internal
             .encode_utf16()
             .cmp(right.internal.encode_utf16())
     });
+    parts
+}
+
+fn write_facade(facade: &str, parts: &[Part], stamp: MetadataStamp) -> Result<Vec<u8>, String> {
+    let parts = sorted_parts(parts);
     let nodes = parts
         .iter()
         .map(|part| {

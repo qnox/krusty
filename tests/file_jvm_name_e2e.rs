@@ -124,3 +124,25 @@ fn a_multifile_jvm_field_is_one_exact_frontend_error() {
         ["4:1: error: jvmField cannot be applied to top level property of a file annotated with JvmMultifileClass."]
     );
 }
+
+/// The four-line program the frontend rejected before multifile classes were supported now
+/// compiles to kotlinc's part and facade.
+#[test]
+fn a_multifile_jvm_name_compiles_to_kotlincs_part_and_facade() {
+    let source = "@file:JvmName(\"Shared\")\n\
+        @file:JvmMultifileClass\n\
+        package p\n\
+        fun value() = 1\n";
+    let classes = common::classes_against_kotlinc_module(&[("main.kt", source)]);
+    assert_eq!(
+        classes.krusty.keys().collect::<Vec<_>>(),
+        ["p/Shared", "p/Shared__MainKt"],
+        "exact class inventory"
+    );
+    assert_eq!(
+        classes.reference.keys().collect::<Vec<_>>(),
+        classes.krusty.keys().collect::<Vec<_>>(),
+    );
+    let differences = classes.differences();
+    assert!(differences.is_empty(), "{}", differences.join("\n"));
+}

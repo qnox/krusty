@@ -1218,6 +1218,15 @@ impl JvmBackend {
             return outputs;
         };
         if let Some(multifile_facade) = &multifile_facade {
+            // The methods the facade forwards, checked against the other parts' once every part
+            // is emitted.
+            let Ok(facade_slots) = crate::jvm::declaration_collisions::facade_slots(
+                &ir,
+                &pass_facts.override_results,
+                diags,
+            ) else {
+                return outputs;
+            };
             if let Some((_, part)) = classes
                 .iter()
                 .find(|(internal, _)| *internal == facade_name)
@@ -1227,6 +1236,7 @@ impl JvmBackend {
                     &facade_name,
                     part,
                     run.multifile_part.take(),
+                    facade_slots,
                 );
             }
         }
@@ -1502,6 +1512,13 @@ impl Backend for JvmBackend {
     }
 
     fn check_module(&self, state: &JvmState, diags: &mut DiagSink) {
+        let clashes = state.multifile_parts.clashes();
+        if !clashes.is_empty() {
+            for clash in clashes {
+                diags.module_error(clash);
+            }
+            return;
+        }
         if let Err(error) = state.multifile_parts.write(self.metadata_stamp()) {
             diags.error(
                 crate::diag::Span::new(0, 0),
