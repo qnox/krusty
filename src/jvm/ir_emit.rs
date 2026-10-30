@@ -2416,8 +2416,8 @@ fn emit_class(
             .and_then(|fs| fs.iter().find(|(fname, _)| fname == name))
             .map(|(_, parameter)| parameter.as_str())
             .or(field.type_param.as_deref());
-        let field_sig = property_jvm_signatures(&signature_formatter, ty, type_parameter)
-            .field
+        let field_sig = signature_formatter
+            .field_signature(ty, type_parameter, acc)
             .filter(|_| !field.is_property_delegate());
         let physical_name = instance_field_jvm_name(ir, env.run, c, field_index);
         let field_desc = type_descriptor(jvm_value_ty(ty));
@@ -3505,12 +3505,12 @@ fn emit_enum_class(
         let nullability = (!f.is_lateinit())
             .then(|| declared_field_annotation(c, field_index))
             .flatten();
-        let signature =
-            property_jvm_signatures(&signature_formatter, &f.ty, f.type_param.as_deref())
-                .field
-                .filter(|_| !f.is_property_delegate());
+        let access = field_visibility::declared_field_access(c, field_index, false);
+        let signature = signature_formatter
+            .field_signature(&f.ty, f.type_param.as_deref(), access)
+            .filter(|_| !f.is_property_delegate());
         cw.add_field_late_sig(
-            field_visibility::declared_field_access(c, field_index, false),
+            access,
             &physical_name,
             &type_descriptor(*t),
             signature.as_deref(),
@@ -4394,8 +4394,13 @@ fn emit_placed_method(
     // attribute exists for a source or Java caller, and nothing can name these methods to call
     // them. Keep this scoped to the producer's exact identities; unrelated synthetic methods may
     // still have a source-visible generic contract.
-    // kotlinc maps a lambda literal's body without generics; an anonymous function's keeps them.
-    let method_sig = (!ir.serialization_cache_methods.contains(&fid) && !ir.is_lambda_literal(fid))
+    // kotlinc maps a lambda literal's body without generics, and a compiler-synthesized lambda's;
+    // an anonymous function's keeps them.
+    let synthesized = ir.lambda_class_provenance(fid)
+        == Some(crate::ir::type_reflection::LambdaClassProvenance::SynthesizedAdapter);
+    let method_sig = (!ir.serialization_cache_methods.contains(&fid)
+        && !ir.is_lambda_literal(fid)
+        && !synthesized)
         .then(|| declared_method_signature(&signature_formatter, ir, env.override_results, fid))
         .flatten();
     let reserved_sig = match holder_receiver {
@@ -4798,8 +4803,9 @@ fn emit_placed_method(
 /// The generic `Signature` element for a parameterized concrete type (`List<String>` →
 /// `Ljava/util/List<Ljava/lang/String;>;`); `None` when erasure loses nothing. `T?` unwraps (generics
 /// survive nullability). Retained formals include an enclosing declaration's parameters.
-/// A FIELD's generic `Signature`, which follows the return-position rule: no declaration-site
-/// wildcards. A constructor PARAMETER of the same declared type takes them, so it goes through
+/// A FINAL field's generic `Signature`, which follows the return-position rule: no declaration-site
+/// wildcards (a non-final field's goes through [`JvmSignatureFormatter::field_signature`]). A
+/// constructor PARAMETER of the same declared type takes them, so it goes through
 /// [`parameterized_sig_at`] with the parameter mode instead.
 fn parameterized_sig(formatter: &JvmSignatureFormatter<'_>, ty: &Ty) -> Option<String> {
     parameterized_sig_at(formatter, ty, Wildcards::Suppressed)

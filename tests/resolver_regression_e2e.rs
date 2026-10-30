@@ -2651,3 +2651,113 @@ fun render(items: List<String>): Unit = with(Builder()) {
     );
     common::assert_error_blocks_match_kotlinc(&sources, &reference_args);
 }
+
+#[test]
+fn a_bound_violating_only_argument_leaves_the_formal_uninferred() {
+    // kotlinc rejects the argument's constraint at the argument; with no other evidence left, it
+    // first reports that `T` cannot be inferred.
+    let source = r#"
+open class Shape
+class Square : Shape()
+class Keep<T : Square>(item: T)
+fun <T : Square> keep(item: T): Int = 1
+fun shape(): Shape = Shape()
+fun call(): Int = keep(shape())
+fun construct(): Keep<*> = Keep(shape())
+"#;
+    assert_rejection_same_as_kotlinc("BoundViolatingOnlyArgument", source);
+}
+
+#[test]
+fn a_bound_violation_after_valid_evidence_blames_the_later_argument() {
+    let source = r#"
+open class Shape
+class Square : Shape()
+class KeepTwo<T : Square>(first: T, second: T)
+fun <T : Square> keepTwo(first: T, second: T): Int = 1
+fun shape(): Shape = Shape()
+fun call(): Int = keepTwo(Square(), shape())
+fun construct(): KeepTwo<*> = KeepTwo(Square(), shape())
+"#;
+    assert_rejection_same_as_kotlinc("BoundViolationAfterValidEvidence", source);
+}
+
+#[test]
+fn an_invariant_argument_fixes_the_formal_before_a_later_argument() {
+    // `MutableList<Square>` fixes `T` to `Square`, so the `Shape` argument is the contradiction;
+    // joining both inputs to `Shape` would blame the list instead.
+    let source = r#"
+open class Shape
+class Square : Shape()
+class Same<T>(items: MutableList<T>, item: T)
+fun <T> same(items: MutableList<T>, item: T): Int = items.size
+fun shape(): Shape = Shape()
+fun call(): Int = same(mutableListOf<Square>(), shape())
+fun construct(): Same<*> = Same(mutableListOf<Square>(), shape())
+"#;
+    assert_rejection_same_as_kotlinc("InvariantArgumentFixesFormal", source);
+}
+
+#[test]
+fn a_mixed_variance_parameter_does_not_fix_its_formal() {
+    // `(T) -> T` mentions `T` in both directions, which is not an equality constraint: `T` solves
+    // to `Any` from the function's `Any` input bound together with the `Int` argument.
+    let src = r#"
+class Apply<T>(val f: (T) -> T, val value: T)
+fun <T> apply(f: (T) -> T, value: T): T = f(value)
+fun box(): String {
+    val f: (Any) -> String = { "OK" }
+    val constructed = Apply(f, 1)
+    return if (apply(f, 1) == "OK" && constructed.f(constructed.value) == "OK") "OK" else "FAIL"
+}
+"#;
+    assert_accepted_and_runs(src, "MixedVarianceParameter");
+}
+
+#[test]
+fn a_bound_and_an_invariant_contradiction_reject_every_argument() {
+    // The list's `Circle` leaves `T : Square`, so it fixes nothing; `shape` is then checked
+    // against the bound alone and rejected too. With no evidence left, `T` is uninferred and the
+    // list parameter renders it so.
+    let source = r#"
+open class Shape
+class Square : Shape()
+class Circle : Shape()
+class Keep<T : Square>(items: MutableList<T>, item: T)
+fun <T : Square> keep(items: MutableList<T>, item: T) {}
+fun call(shape: Shape) {
+    keep(mutableListOf<Circle>(), shape)
+}
+fun construct(shape: Shape): Keep<*> = Keep(mutableListOf<Circle>(), shape)
+"#;
+    assert_rejection_same_as_kotlinc("BoundAndInvariantContradictions", source);
+}
+
+#[test]
+fn a_rejected_structural_argument_renders_its_uninferred_formal() {
+    let source = r#"
+open class Shape
+class Square : Shape()
+class KeepAll<T : Square>(items: List<T>)
+fun <T : Square> keepAll(items: List<T>): Int = 1
+fun shape(): Shape = Shape()
+fun call(): Int = keepAll(listOf(shape()))
+fun construct(): KeepAll<*> = KeepAll(listOf(shape()))
+"#;
+    assert_rejection_same_as_kotlinc("RejectedStructuralArgument", source);
+}
+
+#[test]
+fn one_structural_argument_rejects_each_formal_it_contradicts() {
+    // kotlinc reports every formal the one argument leaves uninferred, then the argument once.
+    let source = r#"
+class Duo<A, B>
+fun <A : Number, B : CharSequence> take(value: Duo<A, B>) {}
+class Sink<A : Number, B : CharSequence>(value: Duo<A, B>)
+fun test(value: Duo<String, Int>) {
+    take(value)
+    Sink(value)
+}
+"#;
+    assert_rejection_same_as_kotlinc("StructuralArgumentRejectsEachFormal", source);
+}
