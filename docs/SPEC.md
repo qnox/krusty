@@ -16585,9 +16585,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Deprecated and removed arguments get kotlinc's `DEPRECATED_CLI_ARG`/`REMOVED_CLI_ARG` warnings.
   Every argument of every supported release has exactly one krusty disposition
   (`crates/krusty-cli/src/kotlinc_arguments/disposition.rs`): *applied*; *inert*, accepted without
-  effect only where a kotlinc differential proves it changes nothing krusty emits (the two checks
-  on classpath binaries krusty does not make, `-Xskip-metadata-version-check` and
-  `-Xskip-prerelease-check`); or *unsupported*, which fails the command line with
+  effect only where a kotlinc differential proves it changes nothing krusty emits (the three checks
+  on classpath binaries krusty does not make, `-Xskip-metadata-version-check`,
+  `-Xskip-prerelease-check` and `-Xallow-unstable-dependencies`); or *unsupported*, which fails the command line with
   `krusty: error: krusty does not implement the kotlinc argument '<argument>'`, exit 2, before
   anything is written. An argument krusty does not implement is never dropped silently.
   `-progressive` turns on the selected release's progressive language features (the
