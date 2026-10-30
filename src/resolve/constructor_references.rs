@@ -42,6 +42,7 @@ struct SelectedConstructorReference {
     outer: ConstructorReferenceOuter,
     argument_mapping: Option<Vec<AdaptedRefArgument>>,
     signature: Ty,
+    declaration_diagnostic: String,
 }
 
 impl Checker<'_> {
@@ -57,6 +58,8 @@ impl Checker<'_> {
         type_arguments: Vec<Ty>,
         expected: Option<&'static crate::types::FnSig>,
     ) -> Ty {
+        let declaration_diagnostic =
+            Self::callable_candidate_display(&function.callable.name, &function);
         let Some((target, constructor)) = function
             .bound_inner_constructor()
             .zip(function.selected_constructor_member())
@@ -104,6 +107,7 @@ impl Checker<'_> {
                 outer: receiver.constructor_outer(),
                 argument_mapping,
                 signature,
+                declaration_diagnostic,
             },
         )
     }
@@ -329,6 +333,10 @@ impl Checker<'_> {
                     .then_some((selected, None))
             })
         }?;
+        let declaration_signature =
+            crate::libraries::constructor_declaration_signature(internal, &classifier, &selected);
+        let declaration_diagnostic =
+            Self::generic_constructor_display(&declaration_signature, &selected);
         let inference_parameters = expected_constructor_params.unwrap_or_default();
         crate::trace_compiler!(
             "constructor_ref",
@@ -467,6 +475,7 @@ impl Checker<'_> {
                 outer: outer_binding,
                 argument_mapping,
                 signature,
+                declaration_diagnostic,
             },
         ))
     }
@@ -482,7 +491,9 @@ impl Checker<'_> {
             outer: outer_binding,
             argument_mapping,
             signature,
+            declaration_diagnostic,
         } = selected;
+        self.record_reference_diagnostic(expression, declaration_diagnostic);
         self.expr_lowers.insert(
             expression,
             ExprLowering::ConstructorRef {

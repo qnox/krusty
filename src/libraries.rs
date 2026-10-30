@@ -56,7 +56,9 @@ pub use call_realization::{
 pub(crate) use call_realization::{KlibBodyCallableShape, KlibBodyCompanionReceiver};
 pub use call_sig::required_arity;
 pub use callable_scope_rung::CallableScopeRung;
-pub(crate) use classifier_callables::{constructor_generic_signature, ConstructorAlias};
+pub(crate) use classifier_callables::{
+    constructor_declaration_signature, constructor_generic_signature, ConstructorAlias,
+};
 pub use classifier_callables::{BoundInnerConstructor, ConstructorCandidate};
 pub(crate) use classifier_declaration::type_alias_target_classifier;
 pub use classifier_declaration::{
@@ -1439,6 +1441,10 @@ pub struct FunctionInfo {
     pub constructor: Option<ConstructorCandidate>,
     /// The alias selected on the caller's scope tower for this constructor candidate.
     pub(crate) constructor_alias: Option<Box<ConstructorAlias>>,
+    /// This declaration's identity as its classifier declares it, before a hierarchy rung applies
+    /// the receiver's type arguments (`Map.get(K): V?`, not `Map.get(String): Int?`). Recorded once,
+    /// when the declaration is first specialized; an override records it as what it overrides.
+    pub(crate) declaration_identity: Option<Box<crate::types::OverriddenDeclaration>>,
 }
 
 /// Where an extension receiver sits among a callable's PHYSICAL parameters. Kotlin puts the leading
@@ -1667,6 +1673,7 @@ impl FunctionInfo {
             implicit_classifier_callable: None,
             constructor: None,
             constructor_alias: None,
+            declaration_identity: None,
         }
     }
 

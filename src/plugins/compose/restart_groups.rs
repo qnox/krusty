@@ -32,6 +32,9 @@
 //! caller omitted. An omitted argument is static, and the group assigns its default before the
 //! body: `if ($default and 0b10 != 0) count = 3`. Calls pass a placeholder for an omitted argument.
 //!
+//! A `@Composable () -> Unit` parameter becomes a `(Composer, Int) -> Unit` value, compared with
+//! `changedInstance` and called with the composer and its own state bits.
+//!
 //! The IR is built in the shape common lowering gives the same statements written in source, so
 //! every target realizes it exactly as it realizes them.
 
@@ -42,7 +45,7 @@ use crate::ir::{
 use crate::types::{EqualityMode, Ty};
 
 use super::runtime::{self, ComposeRuntime};
-use super::source_facts::{function_body, ArgumentState, RestartableFunction};
+use super::source_facts::{function_body, ArgumentState, RestartableFunction, TrackedParameter};
 
 /// Bits per parameter slot of a `$changed` int, after its low "force" bit.
 const BITS_PER_SLOT: u32 = 3;
@@ -157,6 +160,9 @@ fn add_composer_parameters(ir: &mut IrFile, facts: &RestartableFunction) {
     let source_parameters = facts.parameters.len();
     let declaration = &mut ir.functions[function as usize];
     let generated = 2 + usize::from(slots.default.is_some());
+    for (index, parameter) in facts.parameters.iter().enumerate() {
+        declaration.params[index] = physical_type(parameter);
+    }
     declaration
         .params
         .extend([Ty::nullable(runtime::composer()), Ty::Int]);
@@ -198,6 +204,16 @@ fn add_composer_parameters(ir: &mut IrFile, facts: &RestartableFunction) {
     ir.plugin_extended_signatures.insert(function);
 }
 
+/// A parameter's type after `ComposerParamTransformer`, which gives a composable function value the
+/// calling convention too.
+fn physical_type(parameter: &TrackedParameter) -> Ty {
+    if parameter.lambda {
+        runtime::composable_lambda()
+    } else {
+        parameter.ty
+    }
+}
+
 /// Give a composable call the caller's composer and what the caller knows of each argument, and,
 /// for a callee with defaults, a placeholder for each omitted argument and the mask naming them.
 fn pass_composer(
@@ -207,6 +223,18 @@ fn pass_composer(
     call: ExprId,
     arguments: &[ArgumentState],
 ) {
+    if let IrExpr::InvokeFunction { .. } = ir.exprs[call as usize] {
+        let composer = ir.add_expr(IrExpr::GetValue(caller.composer));
+        let changed = changed_argument(ir, caller, arguments);
+        ir.mark_positionless(composer);
+        ir.mark_positionless(changed);
+        let IrExpr::InvokeFunction { args, params, .. } = &mut ir.exprs[call as usize] else {
+            unreachable!("an invoke is still an invoke");
+        };
+        args.extend([composer, changed]);
+        params.extend([runtime::composer(), Ty::Int]);
+        return;
+    }
     let IrExpr::Call { callee, args, .. } = &ir.exprs[call as usize] else {
         unreachable!("a composable call is a call");
     };
@@ -374,12 +402,12 @@ fn dirty_preamble(
         let uncertain = int_comparison(ir, IrBinOp::Eq, isolated, 0);
         let composer = ir.add_expr(IrExpr::GetValue(slots.composer));
         let value = ir.add_expr(IrExpr::GetValue(slot));
-        let compared = runtime::call(
-            ir,
-            runtime.changed_for(parameter.ty),
-            Some(composer),
-            vec![value],
-        );
+        let changed = if parameter.lambda {
+            &runtime.changed_instance
+        } else {
+            runtime.changed_for(parameter.ty)
+        };
+        let compared = runtime::call(ir, changed, Some(composer), vec![value]);
         let different = ir.add_expr(IrExpr::Const(IrConst::Int(bits_for_slot(DIFFERENT, slot))));
         let same = ir.add_expr(IrExpr::Const(IrConst::Int(bits_for_slot(SAME, slot))));
         let state = ir.add_expr(IrExpr::When {
@@ -662,7 +690,7 @@ fn recompose_lambda(
     let mut params = facts
         .parameters
         .iter()
-        .map(|parameter| parameter.ty)
+        .map(physical_type)
         .collect::<Vec<_>>();
     params.push(Ty::Int);
     params.extend(slots.default.map(|_| Ty::Int));
@@ -727,16 +755,17 @@ fn recompose_lambda(
     lambda
 }
 
-/// `@FunctionKeyMeta(key, startOffset, endOffset)`, which tooling maps a group key back to its
-/// declaration with.
+/// `@ComposableInferredTarget(scheme)`, and `@FunctionKeyMeta(key, startOffset, endOffset)`, which
+/// tooling maps a group key back to its declaration with.
 fn annotate_key(ir: &mut IrFile, facts: &RestartableFunction) {
-    let Some(annotation) = facts.key_meta.then(|| runtime::function_key_meta(facts)) else {
-        return;
-    };
-    ir.function_annotations
-        .entry(facts.function)
-        .or_default()
-        .push(annotation);
+    let annotations = ir.function_annotations.entry(facts.function).or_default();
+    // The inferred scheme is visible to the module's dependents, which check their calls with it.
+    if let Some(scheme) = &facts.inferred_target {
+        annotations.push_metadata_visible(runtime::composable_inferred_target(scheme));
+    }
+    if facts.key_meta {
+        annotations.push(runtime::function_key_meta(facts));
+    }
 }
 
 /// The first value slot past every one the function's body uses.

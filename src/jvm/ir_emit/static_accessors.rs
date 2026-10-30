@@ -26,7 +26,7 @@ use super::access_bridges::ProtectedMemberAccessBridge;
 use super::*;
 use crate::fx_hash::{HashMap, HashSet};
 use crate::jvm::private_static_access::{
-    bridged_getter, bridged_setter, declared_backing_getter, declared_backing_setter,
+    bridged_getter_read, bridged_setter, declared_backing_getter, declared_backing_setter,
     member_property_accessor_name, StaticOwner,
 };
 use std::cell::RefCell;
@@ -83,6 +83,8 @@ pub(super) struct StaticAccessorPlan {
     companion_fields: HashMap<(TypeName, TypeName), Box<str>>,
     /// Inline functions whose private reads and calls are published through accessors.
     exporting_private_access: HashSet<u32>,
+    /// Top-level `lateinit` statics whose `isInitialized` some class other than the facade probes.
+    foreign_initialization_probes: HashSet<u32>,
 }
 
 impl StaticAccessorPlan {
@@ -98,6 +100,12 @@ impl StaticAccessorPlan {
     /// Whether emitting `function` must route private access through public accessors.
     pub(super) fn exports_private_access(&self, function: u32) -> bool {
         self.exporting_private_access.contains(&function)
+    }
+
+    /// Whether a class other than the facade probes top-level `lateinit` static `index` with
+    /// `isInitialized`. kotlinc then emits that property's default getter without its guard.
+    pub(super) fn probed_from_another_class(&self, index: u32) -> bool {
+        self.foreign_initialization_probes.contains(&index)
     }
 }
 
@@ -412,6 +420,7 @@ pub(super) fn plan(
         protected: RefCell::default(),
         private_calls,
         helper_access: env.local_delegate_access,
+        foreign_initialization_probes: RefCell::default(),
     };
     let mut carriers: HashMap<TypeName, Vec<Use>> = HashMap::default();
     for context in contexts {
@@ -498,6 +507,7 @@ pub(super) fn plan(
         protected: walk.protected.into_inner(),
         companion_fields: walk.companion_fields.into_inner(),
         exporting_private_access,
+        foreign_initialization_probes: walk.foreign_initialization_probes.into_inner(),
         ..StaticAccessorPlan::default()
     };
     let mut seen = HashSet::default();
@@ -767,6 +777,8 @@ struct Walk<'a> {
     /// function.
     private_calls: &'a HashMap<crate::ir::ExprId, (u32, u32)>,
     helper_access: &'a crate::jvm::local_delegate_accessors::HelperAccess,
+    /// Top-level `lateinit` statics probed with `isInitialized` outside the facade.
+    foreign_initialization_probes: RefCell<HashSet<u32>>,
 }
 
 impl Walk<'_> {
@@ -850,6 +862,16 @@ impl Walk<'_> {
                     }
                 }
                 continue;
+            }
+            if let IrExpr::GetStatic(index) = ir.expr(expression) {
+                if context != StaticOwner::Facade
+                    && ir.statics[*index as usize].owner.is_none()
+                    && ir.lateinit_initialization_probes.contains(&expression)
+                {
+                    self.foreign_initialization_probes
+                        .borrow_mut()
+                        .insert(*index);
+                }
             }
             let carrier = match ir.expr(expression) {
                 IrExpr::StaticInstance { owner, .. } => Some(ir.classes[*owner as usize].fq_name),
@@ -977,7 +999,7 @@ impl Walk<'_> {
                 StaticOwner::Class(*owner),
                 StaticAccessor::Function(*function),
             )),
-            IrExpr::GetStatic(index) => bridged_getter(self.ir, *index)
+            IrExpr::GetStatic(index) => bridged_getter_read(self.ir, *index, expression)
                 .or_else(|| declared_backing_getter(self.ir, *index))
                 .map(|storage| (storage.owner, StaticAccessor::Getter(*index)))
                 .or_else(|| hoisted_field_accessor(self.ir, *index, false)),

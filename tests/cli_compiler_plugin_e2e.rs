@@ -561,6 +561,20 @@ fn the_compose_pass_rejects_what_it_does_not_cover() {
          that is not a constant, a parameter, or computed from a parameter yet",
     );
     assert_compose_rejects(
+        "compose-lambda-value",
+        "@Composable fun Greeting(content: @Composable () -> Unit) {\nval saved = content\n}\n",
+        &[],
+        "3:13: error: krusty's Compose compiler plugin does not support a composable lambda \
+         parameter used other than by calling it or passing it to a composable call yet",
+    );
+    assert_compose_rejects(
+        "compose-recursive-lambda",
+        "@Composable fun Greeting(content: @Composable () -> Unit) {\nGreeting(content)\n}\n",
+        &[],
+        "3:13: error: krusty's Compose compiler plugin does not support a recursive composable \
+         function whose lambda parameters' applier kotlinc infers yet",
+    );
+    assert_compose_rejects(
         "compose-non-skippable",
         "@Composable @androidx.compose.runtime.NonSkippableComposable fun Greeting() {}\n",
         &[],
