@@ -2759,6 +2759,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   A republished inherited member has no source here and keeps no line.
   Test: `tests/default_impls_forward_lines_e2e.rs`.
 
+  An expression body's last line is the line of its last character, closing parentheses included:
+  `= !(\n  a\n)` and `= a +\n  (\n    b\n  )` end on the `)` line. Parentheses leave no AST node,
+  so the body expression's own span stops before them; the function declaration's span, which ends
+  on the body's last token, gives the end line. Test:
+  `default_impls_forward_returns_on_the_closing_parenthesis_line` in
+  `tests/default_impls_forward_lines_e2e.rs`.
+
   A `$DefaultImpls` forward of the interface's OWN member also copies that member's declared
   annotations and its parameters' annotations, as kotlinc does. The constant pool is reserved in
   kotlinc's order: the member's `RUNTIME` annotations, then `Ljava/lang/Deprecated;` (on a forward
