@@ -189,7 +189,10 @@ impl Backend for CraneliftBackend {
         lower::realizes_dependency_getter(signature)
     }
 
-    fn represents_dependency_classifier(&self, classifier: crate::types::TypeName) -> bool {
+    fn represents_dependency_classifier(
+        &self,
+        classifier: crate::backend::DependencyClassifier,
+    ) -> bool {
         lower::represents_dependency_classifier(classifier)
     }
 
