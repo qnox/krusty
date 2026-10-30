@@ -70,11 +70,11 @@ impl Body<'_> {
         }
         for (index, &param) in own.iter().enumerate() {
             entry.local_get(index as u32 + 1);
-            self.from_reference(&mut entry, param)?;
+            self.unpack_argument(&mut entry, param)?;
         }
         entry.call(body);
         let scratch = own.len() as u32 + 1;
-        self.to_reference(&mut entry, &mut locals, scratch, ret)?;
+        self.pack_result(&mut entry, &mut locals, scratch, ret)?;
         let invoke = self.module.declare();
         self.module.define(
             invoke,
@@ -165,7 +165,7 @@ impl Body<'_> {
     }
 
     /// Convert the reference on top of `code`'s stack to the carrier of `ty`.
-    fn from_reference(&mut self, code: &mut Code, ty: Ty) -> Result<(), Unsupported> {
+    fn unpack_argument(&mut self, code: &mut Code, ty: Ty) -> Result<(), Unsupported> {
         match carrier(ty)? {
             None => Err("a function value taking a `Unit` value".into()),
             Some(REFERENCE) => Ok(()),
@@ -186,7 +186,7 @@ impl Body<'_> {
 
     /// Convert the `ty` value on top of `code`'s stack to a reference, `Unit` to `kotlin.Unit`,
     /// through locals from `first` on, which this records in `locals`.
-    fn to_reference(
+    fn pack_result(
         &mut self,
         code: &mut Code,
         locals: &mut Vec<ValType>,
