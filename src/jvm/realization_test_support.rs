@@ -35,9 +35,13 @@ pub(crate) fn realize_calls(
     let module = crate::backend::BackendModuleFacts::from_classifiers([], [])
         .expect("an empty module classifier snapshot is valid");
     let classifiers = crate::backend::CheckedBackendClassifiers::new(&module, dependencies);
+    let file_classes = super::file_facades::FileClasses {
+        multifile_facades: vec![None; facades.len()].into(),
+        containers: facades.into(),
+    };
     super::module_calls::realize(
         ir,
-        &facades,
+        &file_classes,
         &classifiers,
         &callables,
         &mut property_realizations,

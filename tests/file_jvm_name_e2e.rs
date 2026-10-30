@@ -104,14 +104,15 @@ fn a_file_jvm_name_owns_property_references_and_delegated_metadata() {
     );
 }
 
-/// Multifile realization needs a per-source implementation part plus a module-aggregated public
-/// facade. Reject the resolved annotation before lowering until that two-owner contract exists.
+/// kotlinc rejects `@JvmField` on a top-level property of a multifile class file, at the
+/// annotation: the part's fields are not the facade's.
 #[test]
-fn a_multifile_jvm_name_is_one_exact_frontend_error() {
+fn a_multifile_jvm_field_is_one_exact_frontend_error() {
     let source = "@file:JvmName(\"Shared\")\n\
         @file:JvmMultifileClass\n\
         package p\n\
-        fun value() = 1\n";
+        @JvmField val value = 1\n\
+        val other = 2\n";
     let diagnostics = common::front_end_diagnostics_located_for(
         CompilationTarget::Jvm,
         source,
@@ -120,6 +121,6 @@ fn a_multifile_jvm_name_is_one_exact_frontend_error() {
     );
     assert_eq!(
         diagnostics,
-        ["2:7: error: @file:JvmMultifileClass is not supported for JVM compilation yet; its part classes and delegating facade require distinct physical owners"]
+        ["4:1: error: jvmField cannot be applied to top level property of a file annotated with JvmMultifileClass."]
     );
 }

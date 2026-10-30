@@ -1476,9 +1476,25 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   source's checked file-annotation applications in Pass 1; the JVM backend reads the `JvmName`
   value by its resolved identity, so every cross-file call, reference and default stub names the
   same facade, and the facade carries the file's BINARY/RUNTIME annotations as kotlinc writes them
-  (`tests/file_jvm_name_e2e.rs`). `@file:JvmMultifileClass` is rejected in the frontend until the
-  JVM handoff carries two physical owners per source, emission can aggregate each public facade in
-  module finalization, and the metadata/module-index writers represent its part-to-facade mapping.
+  (`tests/file_jvm_name_e2e.rs`).
+- **Multifile classes — `@file:JvmMultifileClass`.** kotlinc honors the annotation only beside a
+  `@file:JvmName`; without one the file stays an ordinary package part. Each source of a multifile class compiles to
+  a synthetic final part `Facade__FooKt` (metadata `k=5`, `xs` naming the facade; the part keeps
+  the file's annotations except `@JvmName`), and module finalization writes one public facade per
+  class (`k=4`, `d1` = the part internal names in JVM string order, `SourceFile` only for a
+  single part). The facade declares, part by part, a static forwarder for every public method the
+  part declares before its synthetic accessors (copying the part method's flags, generic
+  signature, annotations and parameter names; one line, the parameters as its only locals), then
+  the parts' non-private `const val` fields, which the parts do not declare. Every call to a
+  non-private top-level function or accessor of a part names the facade, even from inside the
+  part; fields, private members and `access$` accessors stay on the part. A private static method
+  of a part (function, accessor, lambda body) is named `<name>$<Part>` unless `@JvmName` names it;
+  its `access$` accessor, inline marker and reference name keep the Kotlin name, while a
+  reference's reflected signature uses the JVM name. `kotlin_module` groups the parts by facade
+  (field 3 = 1-based facade ids, field 4 = facade names). `@JvmField` on a top-level property of a
+  multifile file is kotlinc's frontend error at the annotation
+  (`tests/box_regressions/jvmMultifileClass*.kt`, `tests/jvm_multifile_class_e2e.rs`,
+  `tests/file_jvm_name_e2e.rs`).
 - **`@Metadata` writer — plain top-level PROPERTY records.** The facade `Package` proto used to
   record extension properties only; plain top-level `val`/`var`s resolved through krusty's OWN
   static-field fallback, but the REAL kotlinc resolves an `import demo.greeting` exclusively from a

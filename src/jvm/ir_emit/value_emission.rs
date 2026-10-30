@@ -749,7 +749,7 @@ impl super::Emitter<'_> {
                         return;
                     }
                     let aw: i32 = param_tys.iter().map(|t| slot_words(*t) as i32).sum();
-                    let owner = self.facade.clone();
+                    let owner = self.file_function_owner(*fid);
                     let m = self
                         .cw
                         .methodref(&owner, &name, &method_descriptor(&param_tys, ret));

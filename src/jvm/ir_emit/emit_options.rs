@@ -39,6 +39,9 @@ pub struct EmitOptions {
     /// The compilation's plugins, asked for their class metadata extensions as each record is
     /// written.
     pub(crate) plugins: std::rc::Rc<crate::plugins::PluginHost>,
+    /// The public facade's internal name when the file is a `@file:JvmMultifileClass` part: the
+    /// file class is the part, and its non-private members are invoked through the facade.
+    pub(crate) multifile_facade: Option<String>,
 }
 
 /// The `mv` written without `-language-version`: kotlinc's default-language-version stamp.
@@ -116,6 +119,7 @@ impl Default for EmitOptions {
             annotations_in_metadata: true,
             pre_release_metadata: false,
             plugins: std::rc::Rc::default(),
+            multifile_facade: None,
         }
     }
 }

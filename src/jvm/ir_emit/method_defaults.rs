@@ -632,7 +632,7 @@ pub(super) fn emit_facade_default_stub(
             code.ret_void();
         }
         if let Some(Some((slot, start))) = inline_marker {
-            let marker_name = format!("$i$f${}", ir.functions[fid as usize].name);
+            let marker_name = format!("$i$f${}", ir.name_before_part_suffix(fid));
             code.add_local_entry(start, None, slot, &marker_name, "I");
         }
         if inline_body.is_some() {
@@ -656,7 +656,12 @@ pub(super) fn emit_facade_default_stub(
         }
         let argument_words = real_params.iter().map(|ty| slot_words(*ty) as i32).sum();
         let descriptor = method_descriptor(&real_params, ret);
-        let method = emitter.cw.methodref(facade, &method_name, &descriptor);
+        let owner = if static_owner == StaticOwner::Facade {
+            emitter.file_function_owner(fid)
+        } else {
+            facade.to_string()
+        };
+        let method = emitter.cw.methodref(&owner, &method_name, &descriptor);
         code.invokestatic(method, argument_words, slot_words(ret) as i32);
         emit_return(ret, &mut code);
     }
