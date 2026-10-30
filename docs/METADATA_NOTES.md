@@ -1,5 +1,12 @@
 # `@kotlin.Metadata` — reverse-engineering notes (Phase 4b)
 
+## Null-pointer exception storage
+
+The platform NullPointerException declaration carries the existing runtime-exception storage role.
+Its metadata owns its superclass; a same-named foreign declaration or one with additional state
+receives no role. Wasm reference assertions use the authenticated hierarchy and base Throwable
+message/cause fields rather than manufacturing an untyped exception object.
+
 ## Native reference identities and exported entry points
 
 A KLIB export's physical invocation alias is independent of its declaration marker. The Native
@@ -1341,7 +1348,16 @@ Normalized constructor signatures and the canonical source-argument mapping reta
 function-expression expectations when an explicit class argument violates its bound. Reporting
 uses the same typed failure evidence for source and reference-produced dependency declarations;
 it does not reconstruct parameter types from constructor text. Metadata encoding and callable ABI
-are unchanged. Callable-reference selected-declaration diagnostic retention is tracked in #2776.
+are unchanged. Callable-reference publication retains its selected declaration's diagnostic
+projection before invocation adaptation. A rejected constructor constraint consumes that same
+projection and the mapped functional types, retaining the constructor heading, bound error and
+reference-candidate error in order. Top-level, member, extension, local and constructor providers
+share this checker boundary; reference revisits discard previous evidence. No diagnostic text
+becomes metadata, a callable identity or a backend target (#2776).
+The selected declaration also determines receiver-constraint wording. Constructor references retain
+their declaration diagnostic before adaptation: generic formals and the logical classifier result
+come from normalized constructor/classifier facts, while aliases retain their selected alias and
+outer-owner signature. The physical constructor return remains unchanged.
 
 ## Serialized getter declaration contracts
 
@@ -1353,3 +1369,11 @@ the raw dispatch classifier's signature mask and complete own-formal receiver ap
 Declared getter results remain distinct from the checked read's applied result. Native's runtime
 leaf capability reuses its existing accessor signature plans and does not import property bodies
 or reconstruct class storage. No metadata wire format changes.
+
+## Serialized Elvis provenance
+
+An `ELVIS` block supplies an immutable compiler variable followed by a two-branch conditional
+without its own origin. The selected equality signature and both reads must name the same exact
+temporary/null proof; names never correlate these declarations. Declared temporary storage remains
+separate from the present branch's proven type. Common IR retains Elvis provenance with the absent
+source-line sentinel; no synthetic source line or metadata wire change is introduced.

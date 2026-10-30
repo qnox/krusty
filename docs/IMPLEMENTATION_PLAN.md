@@ -1,5 +1,12 @@
 # krusty — implementation plan
 
+## Wasm reference assertion exceptions
+
+Authenticate NullPointerException storage through the existing platform exception declaration
+normalizer and metadata parent chain. Failed reference assertions construct that exact class and
+throw through the shared Kotlin tag. Keep scalar-reference conversion outside this change; the
+generic numeric dependency ABI will consume this exception prerequisite separately.
+
 ## Native dependency reference identity handoff
 
 Retain the canonical declaration marker in the existing Native dependency export registry. Source
@@ -6250,8 +6257,13 @@ recovery share the function input layout, including contexts and anonymous recei
 source/dependency diagnostics and admitted-context controls cover #2587. For #2629, explicit bound
 rejection retains mapped, substituted postponed-lambda constraints before discarding the candidate.
 Reporting consumes those typed failure facts without redoing selection or assignability; fixed
-inputs and nested-producer isolation remain intact. Callable-reference winner diagnostics remain
-the separate #2776 follow-up.
+inputs and nested-producer isolation remain intact. For #2776, successful callable-reference
+publication also retains a checker-only diagnostic projection from the same selected declaration.
+Mapped rejected function arguments distinguish lambda assignability from reference-candidate
+diagnostics, preserving the reference's constructor heading and name span. Revisited references
+replace their evidence. Top-level publication helpers live in a dedicated owner; selection and
+backend targets are unchanged. Source, dependency, member, extension, adapted, local and constructor
+reference controls compare complete ordered reference diagnostics.
 
 Late extension admission now uses strict receiver assignability or the existing satisfiable
 postponed-frame trial. The common operation also serves unbound constructor-reference receivers;
@@ -6320,3 +6332,11 @@ bodyless edge preparation and ordinary accessor linking; preserve retained expor
 primitive/intrinsic priority. Native consumes its existing runtime getter plans. Prove real
 official-producer/JVM-oracle programs and malformed header/facet controls. Keep compiler-introduced
 block lowering as the independent #2811 follow-up.
+
+## Lower serialized Elvis expression blocks
+
+Authenticate the producer's exact temporary/null-test/branch contract and lower it to the existing
+common Elvis snapshot and conditional. Preserve single evaluation, lazy fallback, nested order,
+return targets and declared storage; leave generic operand and unrelated conditional admission
+unchanged. Validate malformed contracts and checked-FIR parity alongside the original full #2811
+official-producer program and independent JVM-oracle controls.

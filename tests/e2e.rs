@@ -3,6 +3,8 @@
 //! External corpus/reference-toolchain suites live in `conformance.rs`.
 
 mod constructor_boxing_casts_e2e;
+#[path = "constructor_type_argument_publication_e2e.rs"]
+mod constructor_type_argument_publication_e2e;
 #[path = "dependent_constructor_bounds_e2e.rs"]
 mod dependent_constructor_bounds_e2e;
 mod enclosing_formal_signatures_e2e;
@@ -13,6 +15,8 @@ mod nested_signature_argument_layout_e2e;
 mod abstract_serializable_e2e;
 #[path = "annotation_documented_mirror_e2e.rs"]
 mod annotation_documented_mirror_e2e;
+#[path = "assignment_plugin_e2e.rs"]
+mod assignment_plugin_e2e;
 #[path = "backticked_dotted_package_qualifier_e2e.rs"]
 mod backticked_dotted_package_qualifier_e2e;
 #[path = "bridge_result_cast_e2e.rs"]
@@ -282,6 +286,8 @@ mod caller_type_param_receiver_e2e;
 mod cannot_infer_cascade_e2e;
 #[path = "capture_first_use_order_e2e.rs"]
 mod capture_first_use_order_e2e;
+#[path = "captured_stable_binding_e2e.rs"]
+mod captured_stable_binding_e2e;
 #[path = "cast_evaluation_order_e2e.rs"]
 mod cast_evaluation_order_e2e;
 #[path = "catch_annotation_comma_e2e.rs"]
@@ -1321,6 +1327,8 @@ mod local_class_capture_order_e2e;
 mod local_class_construction_capture_e2e;
 #[path = "local_function_reference_inference_e2e.rs"]
 mod local_function_reference_inference_e2e;
+#[path = "mutable_field_signature_e2e.rs"]
+mod mutable_field_signature_e2e;
 java_member_modules::declare!();
 mod java_nullability_modules;
 java_nullability_modules::declare!();
@@ -2988,6 +2996,8 @@ mod field_store_lines_e2e;
 #[path = "written_default_accessor_e2e.rs"]
 mod written_default_accessor_e2e;
 
+#[path = "erased_result_type_operator_e2e.rs"]
+mod erased_result_type_operator_e2e;
 #[path = "intersection_bound_metadata_order_e2e.rs"]
 mod intersection_bound_metadata_order_e2e;
 #[path = "type_safe_override_call_e2e.rs"]

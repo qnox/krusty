@@ -86,6 +86,23 @@ pub(crate) fn constructor_generic_signature(
     })
 }
 
+/// A constructor's complete declared shape, including its logical classifier result before
+/// reference adaptation. The physical nongeneric constructor return may instead be Unit.
+pub(crate) fn constructor_declaration_signature(
+    internal: TypeName,
+    classifier: &LibraryType,
+    constructor: &LibraryMember,
+) -> GenericSig {
+    constructor_generic_signature(internal, classifier, constructor).unwrap_or_else(|| GenericSig {
+        formals: Vec::new(),
+        formal_bounds: Vec::new(),
+        receiver: None,
+        params: constructor.constructor_declaration_params().to_vec(),
+        ret: classifier_instance_type(internal, classifier),
+        return_policy: GenericReturnPolicy::Exact,
+    })
+}
+
 fn classifier_instance_type(internal: TypeName, classifier: &LibraryType) -> Ty {
     let type_arguments = classifier
         .type_params()
