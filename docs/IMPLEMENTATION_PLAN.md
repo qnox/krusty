@@ -5067,9 +5067,16 @@ code is the one the code generator already names: provider-owned bodies through 
   object does not have, so the target realizes the call at its dispatch receiver as it does a
   source call, and an unsupported member declines there by name. This is not interception:
   members of library-laid-out classes still need their bodies compiled. `println` and `print`
-  now link through their stdlib bodies. Next stops on the stdlib: `IntRange` accessors and
-  primitive iterators, calls through accessor signatures, generic calls, object values and
-  callee parameter defaults.
+  now link through their stdlib bodies.
+- **Lowering: accessor leaves and collection checks.** A property getter whose owner the target
+  represents, or whose provider supplies the leaf, links as an accessor like an emitted getter
+  (`realizes_getter`). A serialized type operator narrows a value of a generic classifier when the
+  target is that classifier with any arguments, or a subtype of its star projection, since
+  kotlinc erases the checked arguments. On Native an `is` against a read-only collection interface
+  tests the runtime marker the interface carries, which program classes implementing it also wear
+  (`collection_check_descriptor`). `map` and `filter` now link through their stdlib bodies. Next
+  stops: `IntRange` accessors and primitive iterators, generic calls, object values and callee
+  parameter defaults.
 - Tests: the unit tests in `metadata/klib_ir/tree_decoding.rs`, `metadata/id_signature/` and
   `klib_lowering/` (whose stdlib checks run when `KRUSTY_KOTLIN_NATIVE` is set). End-to-end coverage comes through
   the box harness rather than a separate KLIB suite: the Native lane gains the `// MODULE:`
