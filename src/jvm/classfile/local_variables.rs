@@ -1,5 +1,6 @@
 //! A method's `LocalVariableTable` strings: when its names and descriptors intern.
 
+use super::inline_scope_frames::LocalEntry;
 use super::{ClassWriter, CodeBuilder, LvtEntry};
 
 #[derive(Clone, Copy)]
@@ -176,7 +177,16 @@ impl CodeBuilder {
 impl ClassWriter {
     /// The `LocalVariableTable` a method's emission recorded, its strings interned.
     pub(super) fn local_table(&mut self, code: &CodeBuilder) -> Vec<LvtEntry> {
-        self.written_local_entries(code)
+        let entries = self.written_local_entries(code);
+        self.interned_local_table(code, &entries)
+    }
+
+    fn interned_local_table(
+        &mut self,
+        code: &CodeBuilder,
+        entries: &[LocalEntry],
+    ) -> Vec<LvtEntry> {
+        entries
             .iter()
             // A `LocalVariableTable` `start_pc` must index the code array (JVMS §4.7.13) —
             // HotSpot's class-file parser rejects the whole class otherwise. A local DECLARED
@@ -213,12 +223,17 @@ impl ClassWriter {
             .cp
             .lookup_utf8(desc)
             .expect("a just-emitted method retains its interned descriptor");
-        let lvt = self.local_table(code);
-        let method = self
+        let index = self
             .methods
-            .iter_mut()
-            .find(|method| method.name == n && method.desc == d && method.code.is_some())
+            .iter()
+            .position(|method| method.name == n && method.desc == d && method.code.is_some())
             .expect("a just-emitted method must exist before retaining its debug tables");
+        // `add_method_sig` has stored the constructor's source map with it, so its locals are
+        // written against that map, after the methods before it.
+        let map = self.methods[index].source_map.clone().unwrap_or_default();
+        let entries = self.local_entries_written_after(code, &map, &self.methods[..index]);
+        let lvt = self.interned_local_table(code, &entries);
+        let method = &mut self.methods[index];
         method.lnt = code.line_marks().to_vec();
         method.lvt = lvt;
     }

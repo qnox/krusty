@@ -18,7 +18,7 @@ use super::local_variables::LocalEntryPlacement;
 use super::{ClassWriter, CodeBuilder};
 use crate::jvm::inliner::{inline_scopes, InlineScopes};
 
-type LocalEntry = (u16, Option<u16>, u16, String, String);
+pub(super) type LocalEntry = (u16, Option<u16>, u16, String, String);
 
 /// One inline frame the method's body expands.
 #[derive(Clone, Debug)]
@@ -103,8 +103,18 @@ impl ClassWriter {
     /// table (`SourceMapCopyingMethodVisitor`); the class map is the one the earlier methods'
     /// copies leave.
     pub(super) fn written_local_entries<'c>(&self, code: &'c CodeBuilder) -> Cow<'c, [LocalEntry]> {
+        self.local_entries_written_after(code, &self.method_source_map, &self.methods)
+    }
+
+    /// [`Self::written_local_entries`] for a method whose source map `map` follows `earlier`.
+    pub(super) fn local_entries_written_after<'c>(
+        &self,
+        code: &'c CodeBuilder,
+        map: &crate::jvm::source_map::SourceMap,
+        earlier: &[super::MethodInfo],
+    ) -> Cow<'c, [LocalEntry]> {
         let entries = code.named_local_entries();
-        if self.method_source_map.is_empty() {
+        if map.is_empty() {
             return entries;
         }
         let calls: Vec<(usize, u16)> = entries
@@ -120,7 +130,7 @@ impl ClassWriter {
             return entries;
         }
         let mut class = self.source_map.clone();
-        for method in &self.methods {
+        for method in earlier {
             if let Some(map) = &method.source_map {
                 let lines: Vec<u16> = method.lnt.iter().map(|&(_, line)| line).collect();
                 class.copied_lines(map, &lines, &[]);
@@ -128,7 +138,7 @@ impl ClassWriter {
         }
         let written: Vec<u16> = code.line_marks().iter().map(|&(_, line)| line).collect();
         let queries: Vec<u16> = calls.iter().map(|&(_, line)| line).collect();
-        let mapped = class.copied_lines(&self.method_source_map, &written, &queries);
+        let mapped = class.copied_lines(map, &written, &queries);
         let mut entries = entries.into_owned();
         for ((index, _), line) in calls.into_iter().zip(mapped) {
             entries[index].3 =

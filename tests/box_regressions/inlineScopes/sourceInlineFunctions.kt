@@ -1,3 +1,4 @@
+// TARGET_BACKEND: JVM_IR
 // USE_INLINE_SCOPES_NUMBERS
 inline fun twice(f: (Int) -> Int): Int {
     val a = f(1)

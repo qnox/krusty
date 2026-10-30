@@ -240,6 +240,10 @@ reflection/typeOf/nonReifiedTypeParameters/recursiveBoundWithInline.kt
 reflection/typeOf/nonReifiedTypeParameters/recursiveBoundWithoutInline.kt
 regressions/inlineScopes/libraryInlineLambdas.kt
 regressions/inlineScopes/libraryInlineNestedLambdas.kt
+regressions/inlineScopes/libraryLambdaSplices.kt
+regressions/inlineScopes/libraryScopeFunctions.kt
+regressions/inlineScopes/secondaryConstructor.kt
+regressions/inlineScopes/sourceInlineFunctions.kt
 regressions/kt1172.kt
 regressions/kt344Runnable.kt
 reified/catchParameter/nullableNothing.kt
