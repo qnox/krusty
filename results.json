@@ -534,11 +534,11 @@
     }
    ],
    "measured": {
-    "date": "2026-10-29",
-    "commit": "c08730becd6a8d1749d99fc3b3cfd86edbc0cddb",
-    "run": "https://github.com/qnox/krusty/actions/runs/40835862021"
+    "date": "2026-10-30",
+    "commit": "9d48408a34a96bfcb5c0aec31e780b60f7092ab2",
+    "run": "https://github.com/qnox/krusty/actions/runs/41020944727"
    },
-   "stars": 9303,
+   "stars": 9302,
    "misses": [
     [
      "not run: a task it depends on failed",
@@ -579,7 +579,7 @@
    "compilations": 19,
    "built": 4,
    "classes": 3705,
-   "identical": 79,
+   "identical": 81,
    "rows": [
     {
      "task": ":core:benchmark:compileKotlinJvm",
@@ -643,7 +643,7 @@
      "fallback": null,
      "error": null,
      "classes": 212,
-     "identical": 67,
+     "identical": 69,
      "only_kotlinc": 3,
      "only_krusty": 2
     },
@@ -819,11 +819,11 @@
     }
    ],
    "measured": {
-    "date": "2026-10-29",
-    "commit": "c08730becd6a8d1749d99fc3b3cfd86edbc0cddb",
-    "run": "https://github.com/qnox/krusty/actions/runs/40835862021"
+    "date": "2026-10-30",
+    "commit": "9d48408a34a96bfcb5c0aec31e780b60f7092ab2",
+    "run": "https://github.com/qnox/krusty/actions/runs/41020944727"
    },
-   "stars": 10025,
+   "stars": 10024,
    "misses": [
     [
      "not run: a task it depends on failed",
@@ -1283,11 +1283,11 @@
     }
    ],
    "measured": {
-    "date": "2026-10-29",
-    "commit": "c08730becd6a8d1749d99fc3b3cfd86edbc0cddb",
-    "run": "https://github.com/qnox/krusty/actions/runs/40835862021"
+    "date": "2026-10-30",
+    "commit": "9d48408a34a96bfcb5c0aec31e780b60f7092ab2",
+    "run": "https://github.com/qnox/krusty/actions/runs/41020944727"
    },
-   "stars": 13822,
+   "stars": 13823,
    "misses": [
     [
      "left to kotlinc: compiler plugin kotlin-atomicfu-compiler-plugin-embeddable, argument -Xrender-internal-diagnostic-names, argument -Xno-receiver-assertions",
@@ -1355,7 +1355,7 @@
      "task": ":ktor-client-android:compileKotlinJvm",
      "dir": "ktor-client/ktor-client-android/build/classes/atomicfu-orig/jvm/main",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
      "error": null,
      "classes": 11,
      "identical": 0,
@@ -1366,7 +1366,7 @@
      "task": ":ktor-client-android:compileTestKotlinJvm",
      "dir": "ktor-client/ktor-client-android/build/classes/atomicfu-orig/jvm/test",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
      "error": null,
      "classes": 13,
      "identical": 0,
@@ -1839,7 +1839,7 @@
      "task": ":ktor-client-webrtc:compileTestKotlinJvm",
      "dir": "ktor-client/ktor-client-webrtc/build/classes/kotlin/jvm/test",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
      "error": null,
      "classes": 105,
      "identical": 0,
@@ -1850,7 +1850,7 @@
      "task": ":ktor-client-websockets:compileKotlinJvm",
      "dir": "ktor-client/ktor-client-plugins/ktor-client-websockets/build/classes/atomicfu-orig/jvm/main",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
      "error": null,
      "classes": 1,
      "identical": 0,
@@ -1872,7 +1872,7 @@
      "task": ":ktor-compiler-plugin:compileKotlin",
      "dir": "ktor-compiler-plugin/build/classes/kotlin/main",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
      "error": null,
      "classes": 111,
      "identical": 0,
@@ -1971,7 +1971,7 @@
      "task": ":ktor-htmx:compileKotlinJvm",
      "dir": "ktor-shared/ktor-htmx/build/classes/atomicfu-orig/jvm/main",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
      "error": null,
      "classes": 6,
      "identical": 0,
@@ -1982,7 +1982,7 @@
      "task": ":ktor-http-cio:compileKotlinJvm",
      "dir": "ktor-http/ktor-http-cio/build/classes/atomicfu-orig/jvm/main",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
      "error": null,
      "classes": 68,
      "identical": 0,
@@ -2235,7 +2235,7 @@
      "task": ":ktor-serialization-jackson:compileTestKotlinJvm",
      "dir": "ktor-shared/ktor-serialization/ktor-serialization-jackson/build/classes/atomicfu-orig/jvm/test",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
      "error": null,
      "classes": 36,
      "identical": 0,
@@ -2279,7 +2279,7 @@
      "task": ":ktor-serialization-kotlinx-json:compileTestKotlinJvm",
      "dir": "ktor-shared/ktor-serialization/ktor-serialization-kotlinx/ktor-serialization-kotlinx-json/build/classes/atomicfu-orig/jvm/test",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
      "error": null,
      "classes": 44,
      "identical": 0,
@@ -2290,7 +2290,7 @@
      "task": ":ktor-serialization-kotlinx-protobuf:compileKotlinJvm",
      "dir": "ktor-shared/ktor-serialization/ktor-serialization-kotlinx/ktor-serialization-kotlinx-protobuf/build/classes/atomicfu-orig/jvm/main",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
      "error": null,
      "classes": 1,
      "identical": 0,
@@ -2356,7 +2356,7 @@
      "task": ":ktor-serialization-kotlinx:compileTestKotlinJvm",
      "dir": "ktor-shared/ktor-serialization/ktor-serialization-kotlinx/build/classes/atomicfu-orig/jvm/test",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
      "error": null,
      "classes": 1,
      "identical": 0,
@@ -2400,7 +2400,7 @@
      "task": ":ktor-server-auth-api-key:compileTestKotlinJvm",
      "dir": "ktor-server/ktor-server-plugins/ktor-server-auth-api-key/build/classes/atomicfu-orig/jvm/test",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
      "error": null,
      "classes": 45,
      "identical": 0,
@@ -2466,7 +2466,7 @@
      "task": ":ktor-server-auth-oidc:compileTestKotlinJvm",
      "dir": "ktor-server/ktor-server-plugins/ktor-server-auth-oidc/build/classes/atomicfu-orig/jvm/test",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
      "error": null,
      "classes": 305,
      "identical": 0,
@@ -2675,7 +2675,7 @@
      "task": ":ktor-server-content-negotiation:compileTestKotlinJvm",
      "dir": "ktor-server/ktor-server-plugins/ktor-server-content-negotiation/build/classes/atomicfu-orig/jvm/test",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
      "error": null,
      "classes": 97,
      "identical": 0,
@@ -2873,7 +2873,7 @@
      "task": ":ktor-server-html-builder:compileKotlinJvm",
      "dir": "ktor-server/ktor-server-plugins/ktor-server-html-builder/build/classes/atomicfu-orig/jvm/main",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
      "error": null,
      "classes": 10,
      "identical": 0,
@@ -2961,7 +2961,7 @@
      "task": ":ktor-server-jetty-jakarta:compileTestKotlinJvm",
      "dir": "ktor-server/ktor-server-jetty-jakarta/build/classes/atomicfu-orig/jvm/test",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
      "error": null,
      "classes": 71,
      "identical": 0,
@@ -2994,7 +2994,7 @@
      "task": ":ktor-server-jetty:compileKotlinJvm",
      "dir": "ktor-server/ktor-server-jetty/build/classes/atomicfu-orig/jvm/main",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
      "error": null,
      "classes": 24,
      "identical": 0,
@@ -3027,7 +3027,7 @@
      "task": ":ktor-server-jte:compileTestKotlinJvm",
      "dir": "ktor-server/ktor-server-plugins/ktor-server-jte/build/classes/atomicfu-orig/jvm/test",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
      "error": null,
      "classes": 26,
      "identical": 0,
@@ -3071,7 +3071,7 @@
      "task": ":ktor-server-metrics:compileKotlinJvm",
      "dir": "ktor-server/ktor-server-plugins/ktor-server-metrics/build/classes/atomicfu-orig/jvm/main",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
      "error": null,
      "classes": 13,
      "identical": 0,
@@ -3104,7 +3104,7 @@
      "task": ":ktor-server-mustache:compileTestKotlinJvm",
      "dir": "ktor-server/ktor-server-plugins/ktor-server-mustache/build/classes/atomicfu-orig/jvm/test",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
      "error": null,
      "classes": 17,
      "identical": 0,
@@ -3258,7 +3258,7 @@
      "task": ":ktor-server-resources:compileTestKotlinJvm",
      "dir": "ktor-server/ktor-server-plugins/ktor-server-resources/build/classes/atomicfu-orig/jvm/test",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
      "error": null,
      "classes": 278,
      "identical": 0,
@@ -3280,7 +3280,7 @@
      "task": ":ktor-server-routing-openapi:compileTestKotlinJvm",
      "dir": "ktor-server/ktor-server-plugins/ktor-server-routing-openapi/build/classes/atomicfu-orig/jvm/test",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
      "error": null,
      "classes": 176,
      "identical": 0,
@@ -3346,7 +3346,7 @@
      "task": ":ktor-server-servlet:compileTestKotlinJvm",
      "dir": "ktor-server/ktor-server-servlet/build/classes/atomicfu-orig/jvm/test",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
      "error": null,
      "classes": 10,
      "identical": 0,
@@ -3533,7 +3533,7 @@
      "task": ":ktor-server-thymeleaf:compileTestKotlinJvm",
      "dir": "ktor-server/ktor-server-plugins/ktor-server-thymeleaf/build/classes/atomicfu-orig/jvm/test",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
      "error": null,
      "classes": 33,
      "identical": 0,
@@ -3687,7 +3687,7 @@
      "task": ":ktor-test-base:compileTestKotlinJvm",
      "dir": "ktor-shared/ktor-test-base/build/classes/atomicfu-orig/jvm/test",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
      "error": null,
      "classes": 16,
      "identical": 0,
@@ -3720,7 +3720,7 @@
      "task": ":ktor-utils:compileTestKotlinJvm",
      "dir": "ktor-utils/build/classes/atomicfu-orig/jvm/test",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names'; krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
+     "fallback": "krusty does not implement everything it requests (krusty does not implement the kotlinc argument '-Xrender-internal-diagnostic-names')",
      "error": null,
      "classes": 189,
      "identical": 0,
@@ -3934,11 +3934,11 @@
     }
    ],
    "measured": {
-    "date": "2026-10-29",
-    "commit": "c08730becd6a8d1749d99fc3b3cfd86edbc0cddb",
-    "run": "https://github.com/qnox/krusty/actions/runs/40835862021"
+    "date": "2026-10-30",
+    "commit": "9d48408a34a96bfcb5c0aec31e780b60f7092ab2",
+    "run": "https://github.com/qnox/krusty/actions/runs/41020944727"
    },
-   "stars": 14558,
+   "stars": 14557,
    "misses": [
     [
      "left to kotlinc: argument -Xrender-internal-diagnostic-names",
@@ -4399,11 +4399,11 @@
     }
    ],
    "measured": {
-    "date": "2026-10-29",
-    "commit": "c08730becd6a8d1749d99fc3b3cfd86edbc0cddb",
-    "run": "https://github.com/qnox/krusty/actions/runs/40835862021"
+    "date": "2026-10-30",
+    "commit": "9d48408a34a96bfcb5c0aec31e780b60f7092ab2",
+    "run": "https://github.com/qnox/krusty/actions/runs/41020944727"
    },
-   "stars": 30002,
+   "stars": 30004,
    "misses": [
     [
      "not run: a task it depends on failed",
@@ -4695,11 +4695,11 @@
     }
    ],
    "measured": {
-    "date": "2026-10-29",
-    "commit": "c08730becd6a8d1749d99fc3b3cfd86edbc0cddb",
-    "run": "https://github.com/qnox/krusty/actions/runs/40835862021"
+    "date": "2026-10-30",
+    "commit": "9d48408a34a96bfcb5c0aec31e780b60f7092ab2",
+    "run": "https://github.com/qnox/krusty/actions/runs/41020944727"
    },
-   "stars": 16257,
+   "stars": 16270,
    "misses": [
     [
      "not run: a task it depends on failed",
@@ -4855,8 +4855,8 @@
      "task": ":mirai-console.codegen:compileKotlin",
      "dir": "mirai-console/backend/codegen/build/classes/kotlin/main",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (compilerOptions.optIn contains duplicate marker 'kotlin.contracts.ExperimentalContracts')",
-     "error": null,
+     "fallback": null,
+     "error": "not run: a task it depends on failed",
      "classes": 47,
      "identical": 0,
      "only_kotlinc": null,
@@ -5196,8 +5196,8 @@
      "task": ":mirai-console:compileTestKotlin",
      "dir": "mirai-console/backend/mirai-console/build/classes/kotlin/test",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (compilerOptions.optIn contains duplicate marker 'kotlinx.serialization.ExperimentalSerializationApi')",
-     "error": null,
+     "fallback": null,
+     "error": "not run: a task it depends on failed",
      "classes": 229,
      "identical": 0,
      "only_kotlinc": null,
@@ -5240,8 +5240,8 @@
      "task": ":mirai-core-mock:compileTestKotlin",
      "dir": "mirai-core-mock/build/classes/kotlin/test",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (compilerOptions.optIn contains duplicate marker 'net.mamoe.mirai.utils.MiraiInternalApi')",
-     "error": null,
+     "fallback": null,
+     "error": "not run: a task it depends on failed",
      "classes": 276,
      "identical": 0,
      "only_kotlinc": null,
@@ -5284,8 +5284,8 @@
      "task": ":mirai-core:compileTestKotlinJvm",
      "dir": "mirai-core/build/classes/atomicfu-orig/jvm/test",
      "built": false,
-     "fallback": "krusty does not implement everything it requests (compilerOptions.optIn contains duplicate marker 'kotlinx.serialization.ExperimentalSerializationApi')",
-     "error": null,
+     "fallback": null,
+     "error": "not run: a task it depends on failed",
      "classes": 888,
      "identical": 0,
      "only_kotlinc": null,
@@ -5577,19 +5577,15 @@
     }
    ],
    "measured": {
-    "date": "2026-10-29",
-    "commit": "c08730becd6a8d1749d99fc3b3cfd86edbc0cddb",
-    "run": "https://github.com/qnox/krusty/actions/runs/40835862021"
+    "date": "2026-10-30",
+    "commit": "9d48408a34a96bfcb5c0aec31e780b60f7092ab2",
+    "run": "https://github.com/qnox/krusty/actions/runs/41020944727"
    },
-   "stars": 14792,
+   "stars": 14794,
    "misses": [
     [
      "not run: a task it depends on failed",
-     44
-    ],
-    [
-     "left to kotlinc: krusty does not implement everything it requests (compilerOptions.optIn contains duplicate marker 'kotlinx.serialization.ExperimentalSerializationApi')",
-     2
+     48
     ],
     [
      "ci-release-helper/src/CiHelper.kt:198:68: error: krusty: empty arrayOf() needs an explicit type (unsupported)",
@@ -5601,14 +5597,6 @@
     ],
     [
      "mirai-console/tools/gradle-plugin/src/main/kotlin/IGNORED_DEPENDENCIES_IN_SHADOW.kt:10:7: error: @file:JvmMultifileClass is not supported for JVM compilation yet; its part classes and delegating facade require distinct physical owners",
-     1
-    ],
-    [
-     "left to kotlinc: krusty does not implement everything it requests (compilerOptions.optIn contains duplicate marker 'kotlin.contracts.ExperimentalContracts')",
-     1
-    ],
-    [
-     "left to kotlinc: krusty does not implement everything it requests (compilerOptions.optIn contains duplicate marker 'net.mamoe.mirai.utils.MiraiInternalApi')",
      1
     ],
     [
@@ -5811,9 +5799,9 @@
     }
    ],
    "measured": {
-    "date": "2026-10-29",
-    "commit": "c08730becd6a8d1749d99fc3b3cfd86edbc0cddb",
-    "run": "https://github.com/qnox/krusty/actions/runs/40835862021"
+    "date": "2026-10-30",
+    "commit": "9d48408a34a96bfcb5c0aec31e780b60f7092ab2",
+    "run": "https://github.com/qnox/krusty/actions/runs/41020944727"
    },
    "stars": 10167,
    "misses": [
@@ -6586,11 +6574,11 @@
     }
    ],
    "measured": {
-    "date": "2026-10-29",
-    "commit": "c08730becd6a8d1749d99fc3b3cfd86edbc0cddb",
-    "run": "https://github.com/qnox/krusty/actions/runs/40835862021"
+    "date": "2026-10-30",
+    "commit": "9d48408a34a96bfcb5c0aec31e780b60f7092ab2",
+    "run": "https://github.com/qnox/krusty/actions/runs/41020944727"
    },
-   "stars": 21981,
+   "stars": 21985,
    "misses": [
     [
      "left to kotlinc: argument -Xallow-unstable-dependencies",
@@ -7346,11 +7334,11 @@
     }
    ],
    "measured": {
-    "date": "2026-10-29",
-    "commit": "c08730becd6a8d1749d99fc3b3cfd86edbc0cddb",
-    "run": "https://github.com/qnox/krusty/actions/runs/40835862021"
+    "date": "2026-10-30",
+    "commit": "9d48408a34a96bfcb5c0aec31e780b60f7092ab2",
+    "run": "https://github.com/qnox/krusty/actions/runs/41020944727"
    },
-   "stars": 47100,
+   "stars": 47101,
    "misses": [
     [
      "not run: a task it depends on failed",
@@ -7508,9 +7496,9 @@
     }
    ],
    "measured": {
-    "date": "2026-10-29",
-    "commit": "c08730becd6a8d1749d99fc3b3cfd86edbc0cddb",
-    "run": "https://github.com/qnox/krusty/actions/runs/40835862021"
+    "date": "2026-10-30",
+    "commit": "9d48408a34a96bfcb5c0aec31e780b60f7092ab2",
+    "run": "https://github.com/qnox/krusty/actions/runs/41020944727"
    },
    "stars": 9054,
    "misses": [
@@ -8014,11 +8002,11 @@
     }
    ],
    "measured": {
-    "date": "2026-10-29",
-    "commit": "c08730becd6a8d1749d99fc3b3cfd86edbc0cddb",
-    "run": "https://github.com/qnox/krusty/actions/runs/40835862021"
+    "date": "2026-10-30",
+    "commit": "9d48408a34a96bfcb5c0aec31e780b60f7092ab2",
+    "run": "https://github.com/qnox/krusty/actions/runs/41020944727"
    },
-   "stars": 16338,
+   "stars": 16342,
    "misses": [
     [
      "not run: a task it depends on failed",
@@ -8151,11 +8139,11 @@
     }
    ],
    "measured": {
-    "date": "2026-10-29",
-    "commit": "c08730becd6a8d1749d99fc3b3cfd86edbc0cddb",
-    "run": "https://github.com/qnox/krusty/actions/runs/40835862021"
+    "date": "2026-10-30",
+    "commit": "9d48408a34a96bfcb5c0aec31e780b60f7092ab2",
+    "run": "https://github.com/qnox/krusty/actions/runs/41020944727"
    },
-   "stars": 11498,
+   "stars": 11508,
    "misses": [
     [
      "left to kotlinc: compiler plugin purityPlugin",
