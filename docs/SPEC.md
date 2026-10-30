@@ -12059,6 +12059,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   spelling. Not yet propagated: a call returning a declared alias type, a read of a declaration
   spelled with an alias, and inference through a generic call (`run { Cargo() }`). Tests:
   `tests/inferred_alias_abbreviation_e2e.rs`.
+- **An inferred alias argument carries its published flexibility in the abbreviation too.** An
+  argument inferred through a Java usage is flexible in the published constructor type, and kotlinc
+  abbreviates that same type: `ArrayList(listOf("a"))` is `ArrayList<String!>` abbreviated as
+  `kotlin.collections.ArrayList<String!>`. The selected call records the alias formals and
+  expansion it inferred them through, and declaration publication binds those formals again
+  against the published expansion. Explicit alias arguments are the call's own and stay as written.
+  Tests: `tests/inferred_alias_constructor_abbreviation_e2e.rs` (byte-identical vs kotlinc).
 
 - **A type-use annotation is recorded on its type occurrence in `@Metadata`.** kotlinc writes every
   annotation applied to a declared type occurrence whose retention is not `SOURCE` as
