@@ -60,6 +60,7 @@ impl Emitter<'_> {
             declared_interface,
             self.ir.dispatch_classes.get(&expression).copied(),
             Some(receiver),
+            None,
         ) {
             Ok((owner, interface)) => Some((owner.render(), interface)),
             Err(missing) => {

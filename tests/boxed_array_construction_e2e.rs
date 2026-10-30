@@ -96,6 +96,47 @@ fun box(): String {\n\
     assert_eq!(run(SRC).expect("JVM Array.clone"), "OK");
 }
 
+/// Array members on the JVM: a member an array inherits from `Any` names the erased array class
+/// (`[Ljava/lang/Object;` for every `Array<T>`, `[I` for `IntArray`), the array's own `clone()`
+/// names `Object.clone`, and an array of arrays is cast to `[Ljava/lang/Object;` first.
+const ARRAY_MEMBER_OWNERS: &str = r#"
+fun members(strings: Array<String>, nested: Array<Array<String>>, ints: IntArray, numbers: Array<out Number>): String {
+    val hashes = strings.hashCode() + nested.hashCode() + ints.hashCode() + numbers.hashCode()
+    val texts = strings.toString() + nested.toString() + ints.toString()
+    val equal = strings.equals(nested) || ints.equals(strings)
+    val stringsCopy = strings.clone()
+    val nestedCopy = nested.clone()
+    val intsCopy = ints.clone()
+    val numbersCopy = numbers.clone()
+    val copies = stringsCopy.size + nestedCopy.size + intsCopy.size + numbersCopy.size
+    return "$hashes$texts$equal$copies"
+}
+
+fun <T> generic(values: Array<T>): Int = values.hashCode() + values.clone().size
+
+fun box(): String {
+    val strings = arrayOf("O", "K")
+    val nested = arrayOf(strings)
+    val ints = intArrayOf(1, 2)
+    members(strings, nested, ints, arrayOf<Number>(1, 2.0))
+    if (generic(strings) == 0) return "generic"
+    val copy = nested.clone()
+    if (copy === nested || copy[0] !== strings) return "nested clone"
+    if (!strings.equals(strings) || strings.equals(strings.clone())) return "equals"
+    return strings[0] + strings[1]
+}
+"#;
+
+#[test]
+fn array_member_calls_name_kotlincs_owners() {
+    common::assert_class_code_matches_kotlinc(
+        "ArrayMemberOwners",
+        ARRAY_MEMBER_OWNERS,
+        "ArrayMemberOwnersKt",
+    );
+    common::expect_box_same_as_kotlinc(ARRAY_MEMBER_OWNERS, "ArrayMemberOwners");
+}
+
 #[test]
 fn context_typed_empty_arrayof_compiles_and_runs() {
     const SRC: &str = "val top: Array<String> = arrayOf()\n\

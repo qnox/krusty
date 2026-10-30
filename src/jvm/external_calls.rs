@@ -1145,6 +1145,7 @@ fn realize_expressions(
                             callable.owner_is_interface,
                             ir.dispatch_classes.get(&expression).copied(),
                             ir.ext_call_source_receiver.get(&expression).copied(),
+                            callable.declaration_owner,
                         )
                         .map_err(|missing| {
                             ExternalDependencyTarget::DispatchClassifier {
@@ -1236,6 +1237,7 @@ fn realize_expressions(
                                 callable.owner_is_interface,
                                 ir.dispatch_classes.get(&expression).copied(),
                                 ir.ext_call_source_receiver.get(&expression).copied(),
+                                callable.declaration_owner,
                             )
                             .map_err(|missing| ExternalDependencyTarget::DispatchClassifier {
                                 target,
@@ -1274,6 +1276,7 @@ fn realize_expressions(
                                 callable.owner_is_interface,
                                 ir.dispatch_classes.get(&expression).copied(),
                                 ir.ext_call_source_receiver.get(&expression).copied(),
+                                callable.declaration_owner,
                             )
                             .map_err(|missing| ExternalDependencyTarget::DispatchClassifier {
                                 target,

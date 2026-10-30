@@ -448,6 +448,7 @@ impl Emitter<'_> {
                     target
                 };
                 this.adapt_physical_operand_for(operand, source, target, code);
+                this.coerce_array_dispatch_receiver(source, code);
             } else {
                 this.adapt_physical_call_operand_for(
                     call_expression,
