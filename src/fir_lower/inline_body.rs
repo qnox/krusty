@@ -339,6 +339,16 @@ impl BodyLowering<'_> {
             source_line,
             !cleanup.is_empty(),
         )?;
+        // An extension lambda's receiver is a separate local; the callee's own receiver
+        // parameter is the frame local that holds the declaration's type-parameter value.
+        if let (Some(slot), Some(declared)) = (
+            callee_receiver,
+            declared_receiver
+                .map(crate::fir::ResolvedTy::get)
+                .filter(|receiver| receiver.non_null().is_ty_param()),
+        ) {
+            self.record_inlined_type_parameter_slot(&statements, slot, declared);
+        }
 
         let value = if let Some(recovery) = recovery {
             if !cleanup.is_empty() || cause.is_some() {
@@ -1055,6 +1065,16 @@ impl BodyLowering<'_> {
         let IrExpr::GetValue(slot) = *self.ir.expr(receiver) else {
             return;
         };
+        self.record_inlined_type_parameter_slot(statements, slot, declared);
+    }
+
+    /// The local that holds an inlined type-parameter value keeps the declaration type.
+    fn record_inlined_type_parameter_slot(
+        &mut self,
+        statements: &[ExprId],
+        slot: u32,
+        declared: Ty,
+    ) {
         let Some(&declaration) = statements.iter().find(|statement| {
             matches!(
                 self.ir.expr(**statement),

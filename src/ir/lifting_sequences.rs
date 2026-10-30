@@ -87,10 +87,46 @@ impl super::IrFile {
         );
     }
 
-    /// Whether any callable is lifted along `sequence`.
-    pub(crate) fn lifts_along(&self, sequence: &IrLiftingSequence) -> bool {
+    /// Whether a callable other than the lambdas implemented by `implementations` is lifted along
+    /// `sequence`.
+    pub(crate) fn lifts_other_than(
+        &self,
+        sequence: &IrLiftingSequence,
+        implementations: &[super::FunId],
+    ) -> bool {
+        let excluded = implementations
+            .iter()
+            .filter_map(|implementation| self.lifted_functions.get(implementation))
+            .filter(|(lifted, _)| lifted == sequence)
+            .filter_map(|(_, site)| Some(site.path.first()?.position))
+            .collect::<Vec<_>>();
         self.lifting_sequences
             .get(sequence)
-            .is_some_and(|entries| !entries.is_empty())
+            .is_some_and(|entries| entries.keys().any(|position| !excluded.contains(position)))
+    }
+
+    /// Move `implementation`, a source lambda a compiler plugin takes out of the body it is
+    /// written in, to `container`, as the only callable lifted along `sequence`. kotlinc's IR
+    /// plugins run before its lowering lifts lambdas, so the body it leaves numbers what remains
+    /// as though the lambda had never been written there. The lambda declares no callable of its
+    /// own.
+    pub(crate) fn relocate_lifted_lambda(
+        &mut self,
+        implementation: super::FunId,
+        sequence: IrLiftingSequence,
+        source_order: u32,
+        container: super::IrEnclosure,
+    ) {
+        let (written, site) = self
+            .lifted_functions
+            .remove(&implementation)
+            .expect("a relocated lambda was lifted from its source body");
+        let [step] = site.path.as_ref() else {
+            panic!("a relocated lambda is written directly in a declaration's body");
+        };
+        if let Some(entries) = self.lifting_sequences.get_mut(&written) {
+            entries.remove(&step.position);
+        }
+        self.place_generated_lambda(sequence, source_order, container, implementation);
     }
 }
