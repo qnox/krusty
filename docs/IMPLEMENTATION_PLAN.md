@@ -5127,10 +5127,15 @@ their declarations into an index-based model (`declarations`, `model`), lays rec
   `tests/native_compiler_command_e2e.rs` checks the answer on the JVM lane, then compiles a
   two-file program with the command, runs it, and asserts the complete diagnostics of a broken
   source.
+- **Computed defaults across source modules (done, Native and Wasm).** A KLIB declaration with
+  a default is published with `LibraryCallable::defaults_from_declaration`: a call omitting a
+  computed default keeps the declaration's identity, and the target routes it to the declaring
+  module's default entry, exported beside the declaration (`multimoduleComputedDefaults.kt`).
+  Constant defaults are still passed at the call site.
 - **Next.** `-produce library`, which needs the KLIB writer to serialize ordinary function and
   class bodies into `default/ir`; until then a first-party library's sources are compiled into the
   program. Programs reach further as dependency body emission grows (library member bodies, then
-  non-constant parameter defaults of third-party KLIBs).
+  the non-constant parameter defaults of third-party KLIB bodies).
 
 ## Byte-identical box conformance, item 1 — local-class naming  ◐
 
