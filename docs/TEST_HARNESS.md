@@ -207,6 +207,12 @@ and both Wasm target-KLIB lanes' known non-passing backlogs are explicit under `
 corpus-absent entry fails. Sharded and filtered runs judge only their scheduled files while still
 validating committed paths against the complete corpus.
 
+The one approved outcome reset, for the #2459 KLIB inline-body migration, is spent and cannot be
+renewed. Its rows in `scripts/outcome-list-migrations.tsv` are append-only history:
+`scripts/check-outcome-lists.sh` accepts a row only when the comparison introduces it, so a
+historical row never authorizes a later reset. Follow-ups recovering that debt use the ordinary
+shrink-only rule.
+
 After a change that moves any outcome, rewrite both manifests from a full run and commit the diffs
 with the change, so review sees exactly which files moved:
 
