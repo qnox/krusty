@@ -17,6 +17,19 @@ do not reach later arms: a guarded arm adds no fall-through facts, and a guard j
 proves nothing. Tests: `box_regressions/whenGuardSmartCast.kt` and
 `when_null_guard_smartcast_e2e::a_when_guard_narrows_only_its_own_arm`.
 
+## Smart casts from a non-null safe cast
+
+A non-null `operand as? T` result proves its stable operand is `T`, exactly where the result itself
+is proven non-null: after `(x as? T) ?: return`, after `if ((x as? T) == null) return`, and on the
+true side of a safe-call chain rooted at the cast compared with `true`
+(`(x as? T)?.f() == true && x.g()`). An elvis that completes normally, a guarded statement, or a
+chain compared with `false` proves nothing, as kotlinc 2.4.21 reports. The proof is of a non-null
+result, so a nullable target narrows to its non-null form (`(x as? String?) ?: return` makes `x` a
+`String`). A local `var` that a closure mutates declines the cast with kotlinc's
+smart-cast-impossible diagnostic. Tests: `tests/box_regressions/safeCastNonNullSmartCast.kt`,
+`resolver_regression_e2e::a_safe_cast_without_a_non_null_proof_does_not_smart_cast_like_kotlinc`
+and `elvis_return_smartcast_e2e`.
+
 ## Nested producers against dependent bounds
 
 A postponed generic producer passed where the outer variable is still open is solved against that
