@@ -174,6 +174,27 @@ impl SymbolResolver<'_> {
         self.receiver_callable_inventory(receiver, name).accessible
     }
 
+    /// The extensions named `name` at the innermost scope level declaring any, whatever their
+    /// receiver, among the levels the file brings into scope itself; default imports never count.
+    /// When nothing of that name applies to an explicit receiver, kotlinc reports these as the
+    /// candidates a receiver type mismatch rejected rather than an unresolved reference.
+    pub(crate) fn receiver_mismatched_extensions(&self, name: &str) -> Vec<FunctionInfo> {
+        let Some(scope) = self.fn_scope else {
+            return Vec::new();
+        };
+        super::scope_level_callables::tagged_symbol_levels_in_function_scope(&self.src, name, scope)
+            .iter()
+            .filter(|level| level.is_written_scope())
+            .map(|level| {
+                level_functions(&level.symbols)
+                    .filter(|function| function.is_extension())
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .find(|extensions| !extensions.is_empty())
+            .unwrap_or_default()
+    }
+
     /// The member function overloads `recv.name` denotes: the accessible member part of
     /// [`SymbolResolver::select_symbol`]'s overload family, without selecting a call among them.
     pub(crate) fn member_overloads(&self, recv: SymRecv, name: &str) -> Vec<FunctionInfo> {

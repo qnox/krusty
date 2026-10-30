@@ -26,6 +26,18 @@ fn first_body_line(ir: &crate::ir::IrFile, body: ExprId) -> Option<u32> {
     }
 }
 
+/// Whether a lambda body ends in the `Unit` its implicit return yields: the value itself, or the
+/// coercion `{ effects; Unit }`.
+fn ends_in_unit(ir: &crate::ir::IrFile, body: ExprId) -> bool {
+    match ir.expr(body) {
+        IrExpr::UnitInstance => true,
+        IrExpr::Block {
+            value: Some(value), ..
+        } => matches!(ir.expr(*value), IrExpr::UnitInstance),
+        _ => false,
+    }
+}
+
 /// The IR record of one mapped body line of an external inline declaration: the dependency's
 /// line and the call-site line it answers to.
 fn external_frame_line(
@@ -327,6 +339,16 @@ impl BodyLowering<'_> {
             source_line,
             !cleanup.is_empty(),
         )?;
+        // An extension lambda's receiver is a separate local; the callee's own receiver
+        // parameter is the frame local that holds the declaration's type-parameter value.
+        if let (Some(slot), Some(declared)) = (
+            callee_receiver,
+            declared_receiver
+                .map(crate::fir::ResolvedTy::get)
+                .filter(|receiver| receiver.non_null().is_ty_param()),
+        ) {
+            self.record_inlined_type_parameter_slot(&statements, slot, declared);
+        }
 
         let value = if let Some(recovery) = recovery {
             if !cleanup.is_empty() || cause.is_some() {
@@ -896,10 +918,29 @@ impl BodyLowering<'_> {
                         depth: 0,
                     },
                 );
-                let lambda_frame = self.ir.add_expr(IrExpr::Block {
-                    stmts: vec![parameter_declaration, marker, inline_body],
-                    value: None,
-                });
+                // A `Unit` lambda falls off its closing brace, which kotlinc marks on a `nop` while
+                // the lambda's locals are still open, ahead of the frame's own closing `nop`. The
+                // frame carries that brace as the `Unit` value it ends in.
+                let brace = self
+                    .ir
+                    .expr_end_lines
+                    .get(&inline_body)
+                    .copied()
+                    .filter(|line| *line != 0 && ends_in_unit(self.ir, inline_body));
+                let lambda_frame = match brace {
+                    Some(brace) => {
+                        let frame = self.ir.add_expr(IrExpr::Block {
+                            stmts: vec![parameter_declaration, marker],
+                            value: Some(inline_body),
+                        });
+                        self.ir.expr_end_lines.insert(frame, brace);
+                        frame
+                    }
+                    None => self.ir.add_expr(IrExpr::Block {
+                        stmts: vec![parameter_declaration, marker, inline_body],
+                        value: None,
+                    }),
+                };
                 if let Some(call_line) = call_line {
                     // The lambda frame closes on the body's invocation line, mapped under the
                     // call; the mark drives the frame's closing `nop`.
@@ -1024,6 +1065,16 @@ impl BodyLowering<'_> {
         let IrExpr::GetValue(slot) = *self.ir.expr(receiver) else {
             return;
         };
+        self.record_inlined_type_parameter_slot(statements, slot, declared);
+    }
+
+    /// The local that holds an inlined type-parameter value keeps the declaration type.
+    fn record_inlined_type_parameter_slot(
+        &mut self,
+        statements: &[ExprId],
+        slot: u32,
+        declared: Ty,
+    ) {
         let Some(&declaration) = statements.iter().find(|statement| {
             matches!(
                 self.ir.expr(**statement),

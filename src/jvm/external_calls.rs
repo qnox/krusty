@@ -1668,6 +1668,8 @@ pub(super) fn bridge_external_result(
         arg: call,
         type_operand: semantic,
     };
+    ir.jvm_external_result_coercions
+        .insert(index as crate::ir::ExprId);
     call
 }
 
