@@ -6369,3 +6369,11 @@ common Elvis snapshot and conditional. Preserve single evaluation, lazy fallback
 return targets and declared storage; leave generic operand and unrelated conditional admission
 unchanged. Validate malformed contracts and checked-FIR parity alongside the original full #2811
 official-producer program and independent JVM-oracle controls.
+
+## Preserve unsigned metadata constant flags
+
+- [x] Serialize unsigned identity already retained by `IrConst` in the shared metadata value
+  encoder, preserving its signed-width carrier and payload. Compare the complete 16-property
+  official-producer value inventory, including high-bit boundaries and signed contrasts.
+- [ ] Preserve unsigned identity through the common checked annotation model and provider
+  normalization; keep that semantic work separate from this wire encoding correction.
