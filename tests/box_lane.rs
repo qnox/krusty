@@ -882,23 +882,41 @@ pub fn prepare_sources(
 }
 
 /// Why a case that names its backends with `// TARGET_BACKEND:` does not apply to a lane outside
-/// them. An owned fixture may do this, as one for a JVM-only compiler argument does; every other
-/// reason it is not applicable is fatal.
+/// them.
 pub const TARGETED_AT_ANOTHER_BACKEND: &str = "targeted at another backend";
 
+/// Whether `file` is an owned fixture written only for other backends, as one for a JVM-only
+/// compiler argument is. It is outside the lane rather than one of its not-applicable cases, whose
+/// lists only shrink; every other reason an owned fixture does not apply is fatal.
+fn outside_lane(file: &Path, result: &Outcome) -> bool {
+    super::box_inventory::owned(file)
+        && matches!(result, Outcome::NotApplicable(reason) if *reason == TARGETED_AT_ANOTHER_BACKEND)
+}
+
 fn checked_outcome(file: &Path, result: &Outcome) -> Result<box_ratchet::Outcome, String> {
-    let fatal = match result {
-        Outcome::Harness(_) | Outcome::CompilerPanic(_) => true,
-        Outcome::NotApplicable(reason) => *reason != TARGETED_AT_ANOTHER_BACKEND,
-        _ => false,
-    };
-    if super::box_inventory::owned(file) && fatal {
+    if super::box_inventory::owned(file)
+        && matches!(
+            result,
+            Outcome::Harness(_) | Outcome::CompilerPanic(_) | Outcome::NotApplicable(_)
+        )
+    {
         return Err(format!(
             "owned box case {} has fatal outcome: {result:?}",
             file.display()
         ));
     }
     Ok(ratchet_outcome(result))
+}
+
+#[test]
+fn an_owned_fixture_for_other_backends_is_outside_the_lane() {
+    let owned =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/box_regressions/multimodule/example.kt");
+    let targeted = Outcome::NotApplicable(TARGETED_AT_ANOTHER_BACKEND);
+    assert!(outside_lane(&owned, &targeted));
+    assert!(!outside_lane(&owned, &Outcome::NotApplicable("muted")));
+    assert!(!outside_lane(&owned, &Outcome::Pass));
+    assert!(!outside_lane(Path::new("/upstream/a.kt"), &targeted));
 }
 
 #[test]
@@ -925,11 +943,6 @@ fn owned_fatal_outcomes_cannot_be_blessed_as_box_failures() {
     assert_eq!(
         checked_outcome(&file, &Outcome::Declined("unsupported".into())),
         Ok(box_ratchet::Outcome::Fail)
-    );
-    assert_eq!(
-        checked_outcome(&file, &Outcome::NotApplicable(TARGETED_AT_ANOTHER_BACKEND)),
-        Ok(box_ratchet::Outcome::NotApplicable),
-        "an owned fixture may name the backends it is written for"
     );
     assert_eq!(
         checked_outcome(
@@ -1146,6 +1159,9 @@ pub fn run(lane: &dyn Lane) {
     let mut failed: Vec<(PathBuf, String)> = Vec::new();
     let mut current = BTreeMap::new();
     for (file, result) in outcomes {
+        if outside_lane(file, &result) {
+            continue;
+        }
         let relative = relative(file);
         let observed = checked_outcome(file, &result).unwrap_or_else(|error| panic!("{error}"));
         assert!(
