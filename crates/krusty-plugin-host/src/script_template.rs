@@ -9,6 +9,9 @@ pub struct ScriptTemplateDefinition {
     pub file_extension: String,
     /// The class every script of the template extends.
     pub base_class: Option<ScriptType>,
+    /// The parameters of the base class's primary constructor, by name: the parameters every
+    /// script's constructor takes first and passes on to it.
+    pub constructor_parameters: Vec<(String, ScriptType)>,
     /// The classes of the scripts' implicit receivers, in the configuration's order.
     pub implicit_receivers: Vec<ScriptType>,
     /// The properties each script is given, by name, in the configuration's order.
@@ -27,4 +30,7 @@ pub struct ScriptTemplateDefinition {
 pub struct ScriptType {
     pub name: String,
     pub nullable: bool,
+    /// The type's type arguments. A type the configuration itself names has none: the scripting
+    /// API keeps only its class.
+    pub arguments: Vec<ScriptType>,
 }

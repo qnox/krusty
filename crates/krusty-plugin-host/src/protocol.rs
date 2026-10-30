@@ -190,6 +190,8 @@ pub(crate) fn read_reply(input: &mut impl Read) -> io::Result<Reply> {
             } else {
                 None
             },
+            constructor_parameters: payload
+                .list(|payload| Ok((payload.string()?, script_type(payload)?)))?,
             implicit_receivers: payload.list(script_type)?,
             provided_properties: payload
                 .list(|payload| Ok((payload.string()?, script_type(payload)?)))?,
@@ -206,6 +208,7 @@ fn script_type(payload: &mut Payload) -> io::Result<ScriptType> {
     Ok(ScriptType {
         name: payload.string()?,
         nullable: payload.byte()? != 0,
+        arguments: payload.list(script_type)?,
     })
 }
 

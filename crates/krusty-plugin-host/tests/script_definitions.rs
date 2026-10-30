@@ -57,6 +57,7 @@ fn named(name: &str) -> ScriptType {
     ScriptType {
         name: name.into(),
         nullable: false,
+        arguments: Vec::new(),
     }
 }
 
@@ -69,7 +70,9 @@ class Host\n\
 class Extra\n\
 \n\
 @KotlinScript(fileExtension = \"host.kts\", compilationConfiguration = HostConfig::class)\n\
-abstract class HostScript(val target: Host)\n\
+abstract class HostScript(val target: Host, val names: List<String>?) {\n\
+\x20   constructor(name: String) : this(Host(), listOf(name))\n\
+}\n\
 \n\
 object HostConfig : ScriptCompilationConfiguration({\n\
 \x20   implicitReceivers(Host::class, Extra::class)\n\
@@ -89,6 +92,17 @@ fn a_template_configuration_is_read_as_kotlinc_reads_it() {
         ScriptTemplateDefinition {
             file_extension: "host.kts".into(),
             base_class: Some(named("t.HostScript")),
+            constructor_parameters: vec![
+                ("target".into(), named("t.Host")),
+                (
+                    "names".into(),
+                    ScriptType {
+                        name: "kotlin.collections.List".into(),
+                        nullable: true,
+                        arguments: vec![named("kotlin.String")],
+                    }
+                ),
+            ],
             implicit_receivers: vec![named("t.Host"), named("t.Extra")],
             provided_properties: vec![("who".into(), named("kotlin.String"))],
             default_imports: vec!["kotlin.math.abs".into(), "java.io.*".into()],
@@ -98,14 +112,15 @@ fn a_template_configuration_is_read_as_kotlinc_reads_it() {
     );
 }
 
-/// A configuration that sets what a definition's reader does not read, such as compiler options,
-/// names those keys, so a compiler that does not apply them can refuse the template.
+/// A configuration that sets what a definition's reader does not read, such as compiler options or
+/// a file path pattern, names those keys, so a compiler that does not apply them can refuse the
+/// template.
 const OPTIONS_TEMPLATE: &str = "package t\n\
 \n\
 import kotlin.script.experimental.annotations.KotlinScript\n\
 import kotlin.script.experimental.api.*\n\
 \n\
-@KotlinScript(compilationConfiguration = OptionsConfig::class)\n\
+@KotlinScript(compilationConfiguration = OptionsConfig::class, filePathPattern = \"scripts/.*\")\n\
 abstract class OptionsScript\n\
 \n\
 object OptionsConfig : ScriptCompilationConfiguration({\n\
@@ -124,11 +139,12 @@ fn keys_the_reader_does_not_read_are_named() {
         ScriptTemplateDefinition {
             file_extension: "kts".into(),
             base_class: Some(named("t.OptionsScript")),
+            constructor_parameters: Vec::new(),
             implicit_receivers: Vec::new(),
             provided_properties: Vec::new(),
             default_imports: Vec::new(),
             is_standalone: true,
-            other_keys: vec!["compilerOptions".into()],
+            other_keys: vec!["compilerOptions".into(), "filePathPattern".into()],
         }
     );
 }
