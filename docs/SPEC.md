@@ -15164,6 +15164,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   identities between the passes; the temporaries pass does not infer the earlier pass from
   unrelated constants, jumps, or throws remaining in the method. Tests:
   `bytecode_passes::temporaries::tests` and `tests/safe_call_after_throw_e2e.rs`.
+- **A label that stands right beside a reached label is not one retained from unreachable code.**
+  kotlinc normalizes directly adjacent labels into one before it optimizes, so a run of labels with
+  only labels between is reached when any of them is. An unreached label in such a run, like the
+  first label in front of a safe call's null path after the non-null path's `goto`, is not counted
+  as retained, and `options?.let { if (…) null else "x" }` keeps its receiver on the stack
+  (`aload; dup; ifnull`) as kotlinc does. Only a label separated from every reached one by deleted
+  code is retained. Tests: `constant_conditions::tests::a_label_beside_a_reached_jump_target_is_not_retained_from_deleted_code`
+  and `tests/safe_call_dup_e2e.rs`.
 - **A `Boolean` compared with a `Boolean` literal is an ordinary two-operand comparison; only a
   negation is a polarity.** kotlinc's `Equals` sends two primitive `Boolean` operands to
   `BooleanComparison`, which materializes both and jumps with `if_icmp<cond>`; it never reads a
