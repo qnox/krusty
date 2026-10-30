@@ -881,13 +881,18 @@ pub fn prepare_sources(
     Ok(sources)
 }
 
+/// Why a case that names its backends with `// TARGET_BACKEND:` does not apply to a lane outside
+/// them. An owned fixture may do this, as one for a JVM-only compiler argument does; every other
+/// reason it is not applicable is fatal.
+pub const TARGETED_AT_ANOTHER_BACKEND: &str = "targeted at another backend";
+
 fn checked_outcome(file: &Path, result: &Outcome) -> Result<box_ratchet::Outcome, String> {
-    if super::box_inventory::owned(file)
-        && matches!(
-            result,
-            Outcome::Harness(_) | Outcome::CompilerPanic(_) | Outcome::NotApplicable(_)
-        )
-    {
+    let fatal = match result {
+        Outcome::Harness(_) | Outcome::CompilerPanic(_) => true,
+        Outcome::NotApplicable(reason) => *reason != TARGETED_AT_ANOTHER_BACKEND,
+        _ => false,
+    };
+    if super::box_inventory::owned(file) && fatal {
         return Err(format!(
             "owned box case {} has fatal outcome: {result:?}",
             file.display()
@@ -920,6 +925,11 @@ fn owned_fatal_outcomes_cannot_be_blessed_as_box_failures() {
     assert_eq!(
         checked_outcome(&file, &Outcome::Declined("unsupported".into())),
         Ok(box_ratchet::Outcome::Fail)
+    );
+    assert_eq!(
+        checked_outcome(&file, &Outcome::NotApplicable(TARGETED_AT_ANOTHER_BACKEND)),
+        Ok(box_ratchet::Outcome::NotApplicable),
+        "an owned fixture may name the backends it is written for"
     );
     assert_eq!(
         checked_outcome(
