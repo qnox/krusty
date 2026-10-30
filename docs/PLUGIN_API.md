@@ -181,7 +181,12 @@ mask, as kotlinc does, instead of in a `$default` synthetic. A `@Composable () -
 takes the composable calling convention: it is called with the composer and its own state bits,
 compared by identity, and passed on, and kotlinc's applier inference over such parameters is
 recorded as `@ComposableInferredTarget`, an annotation the plugin makes visible to Kotlin metadata
-(`DeclarationAnnotations::push_metadata_visible`). Durable group keys,
+(`DeclarationAnnotations::push_metadata_visible`). A composable lambda passed to such a parameter
+that captures nothing is memoized as kotlinc's `ComposerLambdaMemoization` does: a
+`composableLambdaInstance(key, false, …)` property of the file's `ComposableSingletons$<file>Kt`
+object, a class the plugin declares itself (`IrFile::mark_declarationless_class` gives it
+kotlinc's synthetic-class `@Metadata`), read at the call; the lambda's body is a skippable group
+of its own. Durable group keys,
 `sourceInformation` strings, trace markers and `@FunctionKeyMeta` (class file only, never Kotlin
 metadata, as kotlinc's IR plugin adds it after FIR serialization) follow kotlinc's formulas. Every
 other mode is an explicit decline at its declaration or call: a function with a receiver, a default
@@ -189,7 +194,8 @@ argument that is not a constant, a vararg, more than ten parameters, a parameter
 result, any other composable function type or use of a composable lambda parameter, recursion
 through lambda parameters, an explicit applier target, a call argument the pass cannot classify as constant, passed on or computed, a grouping annotation (`@NonRestartableComposable`, `@NonSkippableComposable`,
 `@ReadOnlyComposable`, `@ExplicitGroupsComposable`), a call to a composable of another file or
-module, a composable whose name an overload with lambdas shares, and any class kotlinc would give
+module, a composable lambda that captures a value, holds another lambda or is empty, a composable
+whose lambda numbering another lambda or overload shares, and any class kotlinc would give
 `$stable` and `@StabilityInferred`.
 
 The runtime functions the generated code calls (`Composer.startRestartGroup`,

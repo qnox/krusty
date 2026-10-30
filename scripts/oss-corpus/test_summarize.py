@@ -109,6 +109,36 @@ class Summary(unittest.TestCase):
                              ['left to kotlinc: compose', 1]]),
         ])
 
+    def test_build_cost_compares_both_builds_of_each_measured_project(self):
+        def cost(built, compile_, wall, cpu, daemon, krusty, total):
+            return dict(built_compile_seconds=built, compile_seconds=compile_, wall_seconds=wall,
+                        cpu_seconds=cpu, peak_rss_mb=dict(total=total, gradle=0, kotlin_daemon=daemon,
+                                                          krusty=krusty, other=0))
+        with tempfile.TemporaryDirectory() as work:
+            reports = []
+            measured = project('zeta', [row(':a:compileKotlin', True, 4, 4)])
+            measured['cost'] = dict(kotlinc=cost(30.0, 40.0, 120.0, 300.0, 1500, 0, 2500),
+                                    krusty=cost(10.0, 25.0, 90.0, 200.0, 0, 400, 1400))
+            # A result published before builds were measured has no cost and no row.
+            earlier = project('Alpha', [row(':compileKotlin', True, 1, 1)])
+            for p in (measured, earlier):
+                path = os.path.join(work, p['name'] + '.json')
+                with open(path, 'w') as f:
+                    json.dump(p, f)
+                reports.append(path)
+            text = subprocess.run([sys.executable, os.path.join(HERE, 'summarize.py'), *reports],
+                                  check=True, capture_output=True, text=True).stdout
+        section = text[text.index('## Build cost'):].splitlines()
+        self.assertEqual(section[-4:], [
+            '| Project | Compile time, compilations krusty built (kotlinc / krusty) | Compile time, all compilations |'
+            ' Compiler peak RSS | Build peak RSS | Build wall time | Build CPU time |',
+            '| --- | ---: | ---: | ---: | ---: | ---: | ---: |',
+            '| zeta | 30.0 s / 10.0 s (3.0×) | 40.0 s / 25.0 s | 1,500 MB / 400 MB | 2,500 MB / 1,400 MB | '
+            '120.0 s / 90.0 s | 300.0 s / 200.0 s |',
+            '| **Total** | **30.0 s / 10.0 s (3.0×)** | **40.0 s / 25.0 s** | | | **120.0 s / 90.0 s** | '
+            '**300.0 s / 200.0 s** |',
+        ])
+
 
 if __name__ == '__main__':
     unittest.main()

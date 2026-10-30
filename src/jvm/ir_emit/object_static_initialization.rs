@@ -257,7 +257,11 @@ fn add_late_member_field(
         .map(|(_, parameter)| parameter.as_str())
         .or(field.type_param.as_deref());
     let field_sig = signature_formatter
-        .field_signature(&field.ty, type_parameter, acc)
+        .field_signature(
+            &field.ty,
+            type_parameter,
+            field_visibility::backs_var_property(c, field_index),
+        )
         .filter(|_| !field.is_property_delegate());
     let physical_name = instance_field_jvm_name(ir, run, c, field_index);
     let descriptor = ir_type_desc(&field.ty);
