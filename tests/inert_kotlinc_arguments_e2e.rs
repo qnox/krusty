@@ -117,7 +117,10 @@ fn skipping_the_pre_release_check_compiles_as_kotlinc_does() {
 
 #[test]
 fn allowing_unstable_dependencies_compiles_as_kotlinc_does() {
-    assert_inert("-Xallow-unstable-dependencies", &["-Xabi-stability=unstable"]);
+    assert_inert(
+        "-Xallow-unstable-dependencies",
+        &["-Xabi-stability=unstable"],
+    );
 }
 
 /// Compile one `source` file with both compilers under `argument`, compare their classes byte for
