@@ -171,8 +171,24 @@ pub(super) fn report(
         );
     }
 
+    // Like class-owned generated carriers, the facade publishes its header diagnostic for the
+    // earliest collision group. Each retained source declaration still owns its group diagnostic.
+    let first_source = |members: &[Declaration]| {
+        members
+            .iter()
+            .map(|declaration| declaration_span(ir, *declaration))
+            .filter(|span| span.hi != 0)
+            .map(|span| span.lo)
+            .min()
+            .unwrap_or(u32::MAX)
+    };
+    groups.sort_by(|(left_signature, left), (right_signature, right)| {
+        first_source(left)
+            .cmp(&first_source(right))
+            .then_with(|| left_signature.cmp(right_signature))
+    });
     let mut clashes = Vec::new();
-    let mut reported_delegate_header = false;
+    let mut reported_generated_header = false;
     for ((name, descriptor), members) in groups {
         if members.len() < 2 {
             continue;
@@ -208,11 +224,14 @@ pub(super) fn report(
         let message = super::clash_message(&name, &descriptor, &listed);
         let mut located = Vec::new();
         for declaration in members {
-            if matches!(declaration, Declaration::InPlaceDelegate { .. }) {
-                if reported_delegate_header {
+            if matches!(
+                declaration,
+                Declaration::InPlaceDelegate { .. } | Declaration::PropertyAnnotationMarker(_)
+            ) {
+                if reported_generated_header {
                     continue;
                 }
-                reported_delegate_header = true;
+                reported_generated_header = true;
             }
             located.push((declaration_span(ir, declaration), message.clone()));
         }
@@ -342,12 +361,16 @@ fn render(ir: &IrFile, declaration: Declaration) -> Result<String, UndeterminedD
             }
         }
         Declaration::PropertyAnnotationMarker(function) => {
-            let function = &ir.functions[function as usize];
-            Ok(format!(
-                "fun {}(): Unit defined in {}",
-                super::rendered_callable_name(&function.name),
-                owner(ir)
-            ))
+            let identities = ir
+                .function_parameter_identities(function)
+                .expect("a property annotation marker retains its parameter identities");
+            super::render_physical_function(
+                &ir.functions[function as usize],
+                identities
+                    .iter()
+                    .map(|identity| identity.source_name.as_deref().unwrap_or("<this>")),
+                owner(ir),
+            )
         }
         Declaration::InPlaceDelegate { function, .. } => super::render_physical_function(
             &ir.functions[function as usize],

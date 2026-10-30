@@ -509,6 +509,7 @@ fn function_pb(
     contract_types: &mut ContractTypeTable,
     param_assertions: bool,
     annotations_in_metadata: bool,
+    extensions: &mut dyn FnMut(&mut StringTable<'_>, &mut Pb),
 ) -> Pb {
     let mut p = Pb::new();
     // Function.flags = 9 — emitted only when non-default (`6` = public final is the proto default).
@@ -681,6 +682,7 @@ fn function_pb(
     let mut signature = (!f.annotations.records().is_empty())
         .then(|| method_signature_pb(st, f))
         .flatten();
+    extensions(st, &mut p);
     // Applied annotations (Function.annotation = 12): `Annotation.id` (field 1) referencing the class
     // through the string table's DESC_TO_CLASS_ID form, exactly as kotlinc records e.g.
     // `@LowPriorityInOverloadResolution`. kotlinc's `LanguageFeature.AnnotationsInMetadata` (since
@@ -787,11 +789,13 @@ pub struct PropMeta {
     /// The setter's own visibility; one narrower than the property's (`internal set`,
     /// `private set`) makes the setter's word non-default.
     pub setter_visibility: crate::types::Visibility,
-    /// Whether Kotlin metadata reports that the source property declares annotations. Suppressed
-    /// SOURCE provenance may retain a target marker without setting this bit.
-    pub declares_annotations: bool,
+    /// Checked property annotation records and the independent declaration flag. Suppressed
+    /// SOURCE provenance may retain a target marker without setting metadata's annotation bit.
+    pub annotations: crate::metadata::MetadataAnnotations,
     /// JVM-only synthetic annotation marker selected by facade realization.
     pub annotation_method: Option<(String, String)>,
+    /// Checked backing-field applications; they remain separate from the property's own records.
+    pub field_annotations: crate::metadata::MetadataAnnotations,
     /// Companion-associated (`companion val C.name`) — sets `Property.flags` bit 19.
     pub companion: bool,
     /// The accessors' own annotations (`@A get`, `@A set`, `set(@A v)`): each accessor word's
@@ -916,7 +920,7 @@ struct AccessorWords {
 impl AccessorWords {
     fn of(m: &PropMeta) -> Self {
         let shared = visibility_bits(m.visibility) << 1;
-        let default_word = shared | u64::from(m.declares_annotations);
+        let default_word = shared | u64::from(m.annotations.declares_annotations());
         let not_default = |declared: bool| {
             if declared {
                 property_flags::ACCESSOR_IS_NOT_DEFAULT
@@ -963,6 +967,7 @@ fn property_pb(
     m: &PropMeta,
     requirements: &mut VersionRequirementTable,
     annotations_in_metadata: bool,
+    extensions: &mut dyn FnMut(&mut StringTable<'_>, &mut Pb),
 ) -> Pb {
     let mut p = Pb::new();
     assert_eq!(
@@ -1107,7 +1112,7 @@ fn property_pb(
     };
     let pflags = (base & !property_flags::VISIBILITY_MASK)
         | (vis << 1)
-        | u64::from(m.declares_annotations)
+        | u64::from(m.annotations.declares_annotations())
         | const_bit
         | companion_bit
         | lateinit_bit
@@ -1129,20 +1134,34 @@ fn property_pb(
     if !st.is_klib() {
         jvm_property_signature(st, &mut p, m);
     }
+    extensions(st, &mut p);
 
     // The accessors' records intern after the JVM signature, the getter's first.
     if annotations_in_metadata {
         let accessors = &m.accessor_annotations;
+        let records = [&accessors.getter, &accessors.setter].map(|annotations| {
+            annotations
+                .records()
+                .iter()
+                .map(|annotation| annotation_pb(st, annotation))
+                .collect::<Vec<_>>()
+        });
+        // Accessor strings intern first, but the property's own records serialize first.
+        let property_field = if st.is_klib() { 170 } else { 14 };
+        for annotation in m.annotations.records() {
+            p.repeated_message(property_field, &annotation_pb(st, annotation));
+        }
         // Property.getter_annotation / setter_annotation = 15 / 16, or the KLIB extensions
         // `propertyGetterAnnotation` / `propertySetterAnnotation` = 177 / 178.
         let fields = if st.is_klib() { [177, 178] } else { [15, 16] };
-        for (field, annotations) in fields
-            .into_iter()
-            .zip([&accessors.getter, &accessors.setter])
-        {
-            for annotation in annotations.records() {
-                p.repeated_message(field, &annotation_pb(st, annotation));
+        for (field, records) in fields.into_iter().zip(records) {
+            for annotation in records {
+                p.repeated_message(field, &annotation);
             }
+        }
+        let backing_field = if st.is_klib() { 181 } else { 34 };
+        for annotation in m.field_annotations.records() {
+            p.repeated_message(backing_field, &annotation_pb(st, annotation));
         }
     }
     p
@@ -1228,14 +1247,15 @@ pub(crate) struct MemberTables<'a> {
 ///
 /// STRINGS INTERN IN SOURCE DECLARATION ORDER across kinds (a `const val` before a `fun` interns
 /// first), while the proto still writes functions before properties — so the string indices match
-/// kotlinc's. Each record is built in declaration order and emitted by field. `finish` appends a
-/// carrier's own fields to each record right after the shared ones, in that same order.
+/// kotlinc's. Each record is built in declaration order and emitted by field. Carrier extensions
+/// intern before declaration annotations; trailing values (a KLIB constant) intern after them.
 pub(crate) fn write_package_members(
     package: &mut Pb,
     st: &mut StringTable<'_>,
     members: PackageMembers<'_>,
     tables: &mut MemberTables<'_>,
     (param_assertions, annotations_in_metadata): (bool, bool),
+    extensions: &mut dyn FnMut(&mut StringTable<'_>, PackageMember, &mut Pb),
     finish: &mut dyn FnMut(&mut StringTable<'_>, PackageMember, &mut Pb),
 ) {
     let mut build_order: Vec<(usize, PackageMember)> = members
@@ -1273,6 +1293,7 @@ pub(crate) fn write_package_members(
                     tables.contract_types,
                     param_assertions,
                     annotations_in_metadata,
+                    &mut |st, record| extensions(st, member, record),
                 ),
             ),
             PackageMember::Property(index) => (
@@ -1282,6 +1303,7 @@ pub(crate) fn write_package_members(
                     &members.properties[index],
                     tables.requirements,
                     annotations_in_metadata,
+                    &mut |st, record| extensions(st, member, record),
                 ),
             ),
             PackageMember::Alias(index) => (
@@ -1354,6 +1376,7 @@ pub(crate) fn build_package_with_intersection_approximation(
             contract_types: &mut contract_types,
         },
         (param_assertions, annotations_in_metadata),
+        &mut |_, _, _| {},
         &mut |_, _, _| {},
     );
     if let Some(table) = contract_types.encode() {
@@ -1468,8 +1491,9 @@ mod tests {
                 has_backing_field: true,
                 modifiers: crate::ir::IrPropertyModifiers::default(),
                 setter_visibility: crate::types::Visibility::Public,
-                declares_annotations: false,
+                annotations: Default::default(),
                 annotation_method: None,
+                field_annotations: Default::default(),
                 companion: false,
                 accessor_annotations: Default::default(),
                 field_name: None,
@@ -1481,7 +1505,13 @@ mod tests {
 
         let mut strings = StringTable::default();
         let mut requirements = VersionRequirementTable::default();
-        let plain = property_pb(&mut strings, &property(false), &mut requirements, true);
+        let plain = property_pb(
+            &mut strings,
+            &property(false),
+            &mut requirements,
+            true,
+            &mut |_, _| {},
+        );
         assert!(
             !plain.as_bytes().contains(&0x58),
             "a plain val must omit Property.flags at the protobuf default"
@@ -1489,7 +1519,13 @@ mod tests {
 
         let mut strings = StringTable::default();
         let mut requirements = VersionRequirementTable::default();
-        let constant = property_pb(&mut strings, &property(true), &mut requirements, true);
+        let constant = property_pb(
+            &mut strings,
+            &property(true),
+            &mut requirements,
+            true,
+            &mut |_, _| {},
+        );
         assert!(
             constant
                 .as_bytes()
@@ -1530,8 +1566,9 @@ mod tests {
                     ..Default::default()
                 },
                 setter_visibility: crate::types::Visibility::Public,
-                declares_annotations: false,
+                annotations: Default::default(),
                 annotation_method: None,
+                field_annotations: Default::default(),
                 companion: false,
                 accessor_annotations: Default::default(),
                 field_name: None,
@@ -1593,8 +1630,9 @@ mod tests {
                     ..Default::default()
                 },
                 setter_visibility: crate::types::Visibility::Public,
-                declares_annotations: false,
+                annotations: Default::default(),
                 annotation_method: None,
+                field_annotations: Default::default(),
                 companion: false,
                 accessor_annotations: Default::default(),
                 field_name: None,
@@ -1655,8 +1693,9 @@ mod tests {
                 has_backing_field: true,
                 modifiers: crate::ir::IrPropertyModifiers::default(),
                 setter_visibility: crate::types::Visibility::Public,
-                declares_annotations: false,
+                annotations: Default::default(),
                 annotation_method: None,
+                field_annotations: Default::default(),
                 companion: false,
                 accessor_annotations: Default::default(),
                 field_name: None,
@@ -1710,8 +1749,9 @@ mod tests {
                     ..Default::default()
                 },
                 setter_visibility: crate::types::Visibility::Public,
-                declares_annotations: false,
+                annotations: Default::default(),
                 annotation_method: None,
+                field_annotations: Default::default(),
                 companion: false,
                 accessor_annotations: Default::default(),
                 field_name: None,

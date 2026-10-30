@@ -1406,6 +1406,15 @@ inner constructors and checked body-local methods preserve the same evidence. Su
 the existing logical continuation normalization. Applied callable/physical parameter vectors keep
 their existing ABI and packing roles; the facet does not add class formals to callable arity.
 
+## Package property annotation records
+
+Package properties retain checked PROPERTY and FIELD payloads under their stable property identity;
+metadata uses the same declaration flag/record model as class properties. JVM records use fields
+14 and 34; KLIB records use 170 and 181. Accessor strings intern before the property records. KLIB
+file extensions intern before annotation records, while constant payloads intern afterward. The
+official Native property-message golden includes both integral and string constants to retain this
+ordering independently of JVM marker realization.
+
 ## Serialized Elvis provenance
 
 An `ELVIS` block supplies an immutable compiler variable followed by a two-branch conditional

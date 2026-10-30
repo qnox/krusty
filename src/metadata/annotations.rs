@@ -23,6 +23,13 @@ pub static NO_ANNOTATIONS: MetadataAnnotations = MetadataAnnotations {
 };
 
 impl MetadataAnnotations {
+    /// Retain an independently checked owner flag when its prefix applications select several
+    /// sites but this metadata field records only one site's payload.
+    pub(crate) fn with_declaration_flag(mut self, declared: bool) -> Self {
+        self.declared = declared;
+        self
+    }
+
     /// A declaration's checked annotations, recorded in declaration order.
     pub fn of(annotations: &DeclarationAnnotations) -> Self {
         Self::with_records(

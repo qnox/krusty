@@ -80,16 +80,59 @@ pub fn synthesize_property_annotation_markers(ir: &mut IrFile) {
     let package_properties = ir
         .package_properties
         .iter()
-        .filter(|property| property.suppressed_source_annotation_application)
-        .map(|property| (property.property, property.name.clone()))
+        .filter_map(|property| {
+            let annotations = &ir
+                .package_property_annotations
+                .get(&property.property)?
+                .property;
+            (!annotations.retains_none() || annotations.has_suppressed_source_application())
+                .then(|| (property.clone(), annotations.clone()))
+        })
         .collect::<Vec<_>>();
-    for (property, name) in package_properties {
-        let getter = realized_package_getter_name(ir, property)
-            .unwrap_or_else(|| property_getter_name(&name));
+    for (property, annotations) in package_properties {
+        let getter = realized_package_getter_name(ir, property.property)
+            .unwrap_or_else(|| property_getter_name(&property.name));
         let marker_name = format!("{getter}$annotations");
-        let marker = synthesize_marker(ir, marker_name, Vec::new(), Vec::new());
-        ir.mark_jvm_package_property_annotation_marker(property, marker);
+        let (parameters, identities) = package_marker_parameters(ir, &property);
+        let marker = synthesize_marker(ir, marker_name, parameters, identities);
+        if property.visibility == crate::types::Visibility::Private {
+            ir.set_method_visibility(marker, crate::types::Visibility::Private);
+        }
+        ir.function_annotations.insert(marker, annotations);
+        ir.mark_jvm_package_property_annotation_marker(property.property, marker);
     }
+}
+
+/// Consume the selected accessor's checked parameter frame. A storage-only property without a
+/// getter has no context or extension operands; generic erasure belongs to this JVM boundary.
+fn package_marker_parameters(
+    ir: &IrFile,
+    property: &crate::ir::IrPackageProperty,
+) -> (Vec<Ty>, Vec<IrParameterIdentity>) {
+    let getter = match ir.local_property_layouts.get(&property.property) {
+        Some(crate::ir::IrLocalPropertyLayout::TopLevelStorage { getter, .. }) => *getter,
+        Some(crate::ir::IrLocalPropertyLayout::TopLevelAccessor { getter, .. }) => Some(*getter),
+        _ => panic!("a package property annotation retains its selected accessor layout"),
+    };
+    let Some(getter) = getter else {
+        assert!(
+            property.context_parameters.is_empty()
+                && (property.receiver.is_none() || property.is_companion_extension()),
+            "a package property with receiver operands retains its getter"
+        );
+        return (Vec::new(), Vec::new());
+    };
+    let parameters = super::generic_erasure::erased_for_function(
+        ir,
+        getter,
+        &ir.functions[getter as usize].params,
+    );
+    let identities = ir
+        .function_parameter_identities(getter)
+        .expect("a package getter retains its parameter identities")
+        .to_vec();
+    assert_eq!(parameters.len(), identities.len());
+    (parameters, identities)
 }
 
 /// The getter JVM name module realization gave the property declared at `source_order`: a
@@ -107,7 +150,10 @@ fn realized_getter_name(ir: &IrFile, class_index: usize, source_order: u32) -> O
 
 /// The getter JVM name module realization gave a top-level property: a declared getter's function
 /// name, or its storage's written `@JvmName`.
-fn realized_package_getter_name(ir: &IrFile, property: crate::fir::PropertyId) -> Option<String> {
+pub(super) fn realized_package_getter_name(
+    ir: &IrFile,
+    property: crate::fir::PropertyId,
+) -> Option<String> {
     match ir.local_property_layouts.get(&property)? {
         crate::ir::IrLocalPropertyLayout::TopLevelStorage {
             storage,

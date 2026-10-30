@@ -21121,9 +21121,22 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   property or function with no checked body (a `lateinit var`, an `external fun`) still hands its
   checked annotations to lowering through a body-less metadata group, as a body-less classifier does,
   so `@set:JvmName("assignNamed") lateinit var named: String` declares and is called as
-  `assignNamed` (`tests/facade_lateinit_setter_e2e.rs`). Known gaps: a `@JvmStatic` companion
-  property has no outer static wrapper, and a top-level property's retained `PROPERTY`-targeted annotation gets no `$annotations` marker at all
-  (with or without `@JvmName`); only a suppressed SOURCE application's empty marker is emitted there.
+  `assignNamed` (`tests/facade_lateinit_setter_e2e.rs`). A package property's checked annotation
+  payload crosses the same stable property identity as its accessors: retained PROPERTY applications
+  get a JVM marker carrying those applications, FIELD applications stay on the backing field, and
+  both sites have their own metadata records. A suppressed SOURCE application keeps an empty marker
+  without metadata's annotation flag; an erased optional expectation retains the flag without a
+  marker. Extension and context markers consume the checked getter parameter frame, with generic
+  erasure at the JVM boundary, and metadata names the complete realized descriptor. Tests:
+  `tests/package_property_annotations_e2e.rs`. A `@JvmStatic` companion property still has no outer
+  static wrapper.
+
+  The property's metadata annotation flag belongs to its checked declaration prefix, including
+  prefix applications selecting a getter or field; the PROPERTY record list contains only that
+  site's applications. All recorded marker identities participate in marker debug tables and
+  value-class naming. Independent facade marker collision groups follow retained source order;
+  the first group publishes the generated header diagnostic and each source declaration publishes
+  its own complete diagnostic.
   Tests: `accessor_jvm_name_e2e`.
 
 - **`@JvmName` on a top-level function names the emitted method.** The annotation's constant

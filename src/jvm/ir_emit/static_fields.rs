@@ -152,6 +152,9 @@ pub(super) fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, env:
             cv,
             field_ann,
         );
+        if let Some(annotations) = ir.package_static_field_annotations(static_index) {
+            cw.set_last_late_field_annotations(annotations);
+        }
     }
     // kotlinc visits `<clinit>` (name + descriptor) before the initializer constants its body
     // interns. Every initializer that is not folded into a `ConstantValue` gives the facade a

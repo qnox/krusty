@@ -6369,6 +6369,13 @@ block lowering as the independent #2811 follow-up.
   use them for scalar and expanded-vararg admission and diagnostics with complete kotlinc ledgers.
   Preserve invariant/in-projected inputs, named/default/non-last varargs and method-formal shadows.
 
+## Retain package property annotation payloads
+
+Publish checked property/field annotations by stable property identity and reuse them in shared
+metadata and JVM annotation carriers. Keep marker parameters, visibility, accessor names and
+collision diagnostics consistent with the selected declaration. Validate complete JVM classes and
+official KLIB property messages without outcome or applicability changes.
+
 ## Lower serialized Elvis expression blocks
 
 Authenticate the producer's exact temporary/null-test/branch contract and lower it to the existing

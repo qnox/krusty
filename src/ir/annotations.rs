@@ -53,6 +53,17 @@ pub struct PropertyAnnotations {
     pub annotations: DeclarationAnnotations,
 }
 
+/// Checked applications on a package property's own declaration and its backing field. Accessor
+/// applications retain their separate checked accessor identities.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct PackagePropertyAnnotations {
+    /// The checked property prefix declares metadata annotations even when its applications select
+    /// only a getter or field. This flag is independent of the PROPERTY-site payload below.
+    pub declares_metadata_annotations: bool,
+    pub property: DeclarationAnnotations,
+    pub field: DeclarationAnnotations,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct DeclarationAnnotations {
     retained: Vec<RetainedAnnotation>,
