@@ -1,5 +1,28 @@
 # krusty — a memory-lean Kotlin→JVM compiler PoC
 
+## Wasm function values
+
+A non-suspend lambda or callable reference is a Wasm object. Its struct is a subtype of the common
+object struct, holding the dispatch table, then the captured values in the order common lowering
+lists them: a reference's declaration captures, then its bound receiver. The table extends
+`$AnyTable` with one field after the interface table, the entry a call enters. Every function value
+of one arity shares that table type and the entry type `(this, argument…) -> result`, every operand
+a reference, as `FunctionN.invoke` is on the JVM. The entry unboxes each argument to the type the
+implementation declares and boxes its result. Two `Unit`s meet there: the implementation's
+`Unit` result has no Wasm value, and the entry hands back the object-valued `kotlin.Unit` singleton
+in its place; the call site then converts that reference to the invocation's checked result type,
+so a semantic `Unit` result is dropped again and never read as an object. A lambda's `==` is
+identity. Two references to one declaration are equal in Kotlin, which this backend does not
+compare yet, so their `==` traps instead of answering `false`; `hashCode` and `toString` of a
+function value trap as well.
+
+Suspend function values and `fun interface` (SAM) conversions of a lambda or a callable reference
+have no Wasm representation yet and decline the compilation, with `a suspend function value` and
+``a lambda converted to a `fun interface` `` respectively. Test: `functionValueCalls.kt` against
+the JVM reference and every backend, and `wasm_suspend_function_values_decline` and
+`wasm_sam_converted_function_values_decline`, which check the JVM reference before the exact Wasm
+decline.
+
 ## Nested producers against dependent bounds
 
 A postponed generic producer passed where the outer variable is still open is solved against that
@@ -19542,8 +19565,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`id(s).length` is `checkcast String` before `String.length`). A consumer of the bound does not:
   returning `id(s)` as `Comparable<String>` uses the slot unchanged, while `value?.close()` invokes
   `AutoCloseable.close` directly with the nullable `dup; ifnull` shape. An unconstrained `T` stays
-  the specialized reference — its bound erases to `Object` — and a primitive specialization stays unboxed.
-  (`tests/inline_erased_parameter_e2e.rs`.)
+  the specialized reference — its bound erases to `Object`. A primitive specialization is boxed
+  into that slot and unboxed at each use: `b.also { }` on a `Boolean` is `Boolean.valueOf; astore`,
+  the lambda's `it` is `booleanValue`, and a result returned as `Any?` reloads the box. An `Int` use
+  is `checkcast Number; intValue`. The callee's own receiver of `apply` is that slot; the extension
+  lambda's `$this$apply` is a separate unboxed local. When every use unboxes, as for a result
+  returned as `Boolean`, the redundant-boxing pass leaves the primitive. Every read of that slot
+  unboxes, so a primitive consumer (an operator, a store, a default) receives the primitive; only an
+  implicit coercion to a reference reads the box itself. A top-level property store of an inlined
+  value marks the statement's line again at `putstatic`, as an instance field store does.
+  (`tests/inline_erased_parameter_e2e.rs`, `tests/inline_primitive_receiver_e2e.rs`.)
 
 - **An inlined `Closeable.use` stores the receiver as `Closeable` and narrows its result after
   `finally`.** `T.use` keeps the extension receiver in a `Closeable` slot: a receiver that is not
