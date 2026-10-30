@@ -1,5 +1,9 @@
 `Properties.kt` compares the complete JVM class inventory, including each property marker and its
 metadata signature. Field/getter targeting and suppressed SOURCE provenance remain independent.
+`UseSites.kt` compares every complete class for isolated getter, setter, setter-parameter, field
+and property destinations, mixed destinations and SOURCE retention, using ordinary user annotations.
+`SetterPayloads.kt` independently checks complete default-setter parameter payloads with mixed
+retention, nested annotations, arrays and nullable reference storage.
 The two mixed-clash fixtures keep the same complete marker and delegate declarations in both source
 orders, comparing every emitted diagnostic and its location with the reference compiler.
 

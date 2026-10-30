@@ -6375,6 +6375,11 @@ Publish checked property/field annotations by stable property identity and reuse
 metadata and JVM annotation carriers. Keep marker parameters, visibility, accessor names and
 collision diagnostics consistent with the selected declaration. Validate complete JVM classes and
 official KLIB property messages without outcome or applicability changes.
+Derive property annotation presence from the checked PROPERTY/FIELD partitions; accessor-only
+applications keep independent getter/setter metadata flags. Preserve optional and SOURCE policies.
+Retain SOURCE presence separately from payload and metadata flags for property marker realization.
+Default setters consume their checked parameter annotations through the complete shared payload
+reservation API and the existing metadata parameter writer.
 
 ## Lower serialized Elvis expression blocks
 

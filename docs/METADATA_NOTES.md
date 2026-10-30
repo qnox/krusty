@@ -1408,6 +1408,16 @@ their existing ABI and packing roles; the facet does not add class formals to ca
 
 ## Package property annotation records
 
+Package property annotation presence follows checked PROPERTY/FIELD destinations. Getter, setter
+and setter-parameter applications keep independent accessor flags; their source prefix does not
+make the property's own metadata annotated. Optional expectations and SOURCE retention keep the
+same policy as each checked declaration partition.
+
+SOURCE presence survives independently of its dropped payload and false metadata annotation bit;
+an erased optional expectation gains no source carrier. JVM property markers consume that retained
+presence. An annotated default setter writes its value-parameter metadata like a class property's
+setter, and parameter annotation payloads intern before the physical method body.
+
 Package properties retain checked PROPERTY and FIELD payloads under their stable property identity;
 metadata uses the same declaration flag/record model as class properties. JVM records use fields
 14 and 34; KLIB records use 170 and 181. Accessor strings intern before the property records. KLIB

@@ -759,8 +759,8 @@ pub struct PropMeta {
     pub getter: Option<(String, String)>,
     pub setter: Option<(String, String)>,
     /// Exact source identity of an explicitly named custom setter parameter. An implicit setter
-    /// has no source parameter declaration and therefore leaves `Property.setter_value_parameter`
-    /// (field 6) absent.
+    /// has no source parameter declaration and leaves `Property.setter_value_parameter` (field 6)
+    /// absent unless its value parameter carries checked annotations.
     pub setter_parameter_name: Option<String>,
     /// A `const val`: kotlinc sets the CONST flag bit and records a field-only
     /// `JvmPropertySignature` (no accessor exists — reads inline the `ConstantValue`).
@@ -933,8 +933,11 @@ impl AccessorWords {
             | not_default(m.modifiers.declared_getter || m.modifiers.delegated)
             | u64::from(accessors.getter.declares_annotations());
         let narrowed = m.setter_visibility != m.visibility;
-        let setter_not_default =
-            m.is_var && (m.modifiers.declared_setter || m.modifiers.delegated || narrowed);
+        let setter_not_default = m.is_var
+            && (m.modifiers.declared_setter
+                || m.modifiers.delegated
+                || narrowed
+                || accessors.setter_parameter.declares_annotations());
         let setter = m.is_var.then(|| {
             (visibility_bits(m.setter_visibility) << 1)
                 | not_default(setter_not_default)

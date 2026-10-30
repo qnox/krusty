@@ -2,6 +2,9 @@
 
 use super::{IrConst, Ty, TypeName};
 
+#[cfg(test)]
+mod tests;
+
 /// Backend-agnostic retention fact resolved by the frontend.
 pub type AnnoRetention = crate::types::AnnotationRetention;
 
@@ -57,8 +60,8 @@ pub struct PropertyAnnotations {
 /// applications retain their separate checked accessor identities.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct PackagePropertyAnnotations {
-    /// The checked property prefix declares metadata annotations even when its applications select
-    /// only a getter or field. This flag is independent of the PROPERTY-site payload below.
+    /// Checked PROPERTY or FIELD destinations declare property metadata annotations. Accessor-only
+    /// destinations retain their own flags. Presence is independent of the PROPERTY-site payload.
     pub declares_metadata_annotations: bool,
     pub property: DeclarationAnnotations,
     pub field: DeclarationAnnotations,
@@ -67,6 +70,9 @@ pub(crate) struct PackagePropertyAnnotations {
 #[derive(Clone, Debug, Default)]
 pub struct DeclarationAnnotations {
     retained: Vec<RetainedAnnotation>,
+    /// A checked SOURCE application still belongs to this declaration although its payload is
+    /// absent from class files and Kotlin metadata. Erased optional expectations have no carrier.
+    source_application: bool,
     /// The declaration also carried non-SOURCE `@OptionalExpectation` applications with no actual
     /// on this platform. kotlinc removes them from IR with their `expect` classes, so no class
     /// file or metadata record names them, yet the declaration's metadata flags still report
@@ -86,13 +92,14 @@ impl DeclarationAnnotations {
     pub fn new(annotations: Vec<RetainedAnnotation>) -> Self {
         Self {
             retained: annotations,
+            source_application: false,
             erased_optional_expectations: false,
             suppressed_source_application: false,
             lowered: 0,
         }
     }
 
-    /// Partition checked applications for one declaration: SOURCE retention is dropped, an
+    /// Partition checked applications for one declaration: SOURCE payload is dropped, an
     /// optional expectation leaves only the [`Self::declares_annotations`] fact, and every other
     /// application is retained.
     pub fn from_checked<'a>(
@@ -101,6 +108,7 @@ impl DeclarationAnnotations {
         let mut annotations = Self::default();
         for (checked, annotation) in applications {
             if checked.retention == crate::types::AnnotationRetention::Source {
+                annotations.source_application |= !checked.facts.optional_expectation;
                 continue;
             }
             if checked.facts.optional_expectation {
@@ -117,18 +125,24 @@ impl DeclarationAnnotations {
     }
 
     /// Whether the declaration carries annotation provenance: a retained application, an erased
-    /// optional expectation, or a suppressed SOURCE application retained for target realization.
+    /// optional expectation, or ordinary/suppressed SOURCE presence retained for target realization.
     /// Never derive it from [`Self::retains_none`].
     pub fn declares_annotations(&self) -> bool {
         !self.retained.is_empty()
+            || self.source_application
             || self.erased_optional_expectations
             || self.suppressed_source_application
     }
 
-    /// Whether Kotlin metadata reports `HAS_ANNOTATIONS`. Suppressed SOURCE provenance can require
+    /// Whether Kotlin metadata reports `HAS_ANNOTATIONS`. SOURCE provenance can require
     /// a target carrier without making the source declaration annotated in metadata.
     pub(crate) fn declares_metadata_annotations(&self) -> bool {
         self.retained.len() > self.lowered || self.erased_optional_expectations
+    }
+
+    /// Whether ordinary SOURCE presence survives independently of its dropped payload.
+    pub(crate) fn has_source_application(&self) -> bool {
+        self.source_application
     }
 
     pub(crate) fn with_suppressed_source_application(mut self, retained: bool) -> Self {
