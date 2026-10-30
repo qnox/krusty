@@ -472,39 +472,56 @@ impl Emitter<'_> {
         code: &mut CodeBuilder,
     ) -> (Ty, Ty) {
         let reference_target = !ir_ty_to_jvm(&stored_value_ty(type_operand)).is_jvm_scalar();
-        if reference_target && self.erased_reference_result(arg).is_some() {
+        if let Some(read) = self.trailing_value_read(arg).filter(|_| reference_target) {
+            // A boxed inlined value reaches a reference consumer as the box its slot holds.
+            self.boxed_scalar_reads.insert(read);
+            let produced = self.emit_implicit_coercion_reference_operand(arg, type_operand, code);
+            self.boxed_scalar_reads.remove(&read);
+            return produced;
+        }
+        if reference_target {
+            return self.emit_implicit_coercion_reference_operand(arg, type_operand, code);
+        }
+        let arg = self.unboxed_reference_source(arg, type_operand);
+        self.emit_type_op_operand(arg, code)
+    }
+
+    /// A reference target's operand, as [`Self::emit_implicit_coercion_operand`] emits it.
+    fn emit_implicit_coercion_reference_operand(
+        &mut self,
+        arg: ExprId,
+        type_operand: Ty,
+        code: &mut CodeBuilder,
+    ) -> (Ty, Ty) {
+        if self.erased_reference_result(arg).is_some() {
             // A reference target materializes an erased result at its own type, so the result's
             // narrowing to the substituted type is not written first.
             let source = self.emit_consumed_operand(arg, code);
             return (source, source);
         }
-        if reference_target {
-            // A reference target reads an erased result narrowed to a scalar as the callee returned
-            // it: kotlinc coerces the `Object` slot straight to the consumer and never unboxes it.
-            return match self.erased_scalar_result(arg) {
-                Some((call, slot)) => {
-                    self.emit_value(call, code);
-                    (slot, slot)
-                }
-                None => match self.emit_boxed_call_reference(arg, code) {
-                    Some(wrapper) => (wrapper, wrapper),
-                    // A smart cast reaches this coercion unnarrowed; it materializes the value at
-                    // its own type.
-                    None => match self.consumed_implicit_cast_operand(arg) {
-                        Some(operand) => {
-                            let source = self.emit_consumed_operand(operand, code);
-                            (source, source)
-                        }
-                        None => {
-                            let arg = self.unboxed_reference_source(arg, type_operand);
-                            self.emit_type_op_operand(arg, code)
-                        }
-                    },
+        // A reference target reads an erased result narrowed to a scalar as the callee returned
+        // it: kotlinc coerces the `Object` slot straight to the consumer and never unboxes it.
+        match self.erased_scalar_result(arg) {
+            Some((call, slot)) => {
+                self.emit_value(call, code);
+                (slot, slot)
+            }
+            None => match self.emit_boxed_call_reference(arg, code) {
+                Some(wrapper) => (wrapper, wrapper),
+                // A smart cast reaches this coercion unnarrowed; it materializes the value at
+                // its own type.
+                None => match self.consumed_implicit_cast_operand(arg) {
+                    Some(operand) => {
+                        let source = self.emit_consumed_operand(operand, code);
+                        (source, source)
+                    }
+                    None => {
+                        let arg = self.unboxed_reference_source(arg, type_operand);
+                        self.emit_type_op_operand(arg, code)
+                    }
                 },
-            };
+            },
         }
-        let arg = self.unboxed_reference_source(arg, type_operand);
-        self.emit_type_op_operand(arg, code)
     }
 
     fn emit_implicit_coercion(
