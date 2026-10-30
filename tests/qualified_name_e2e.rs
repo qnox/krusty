@@ -6,8 +6,7 @@
 //! package-qualified top-level callables. Each case is exercised against BOTH origins — a classifier
 //! declared in a sibling source file of the same module, and one read back from the classpath — so
 //! the qualified spelling ends at the same resolved identity regardless of where the declaration came
-//! from. Every expectation here is the reference compiler's verdict (`docs/SPEC.md`,
-//! "Fully-qualified name references").
+//! from. Every expectation here is the reference compiler's verdict.
 
 use super::common;
 

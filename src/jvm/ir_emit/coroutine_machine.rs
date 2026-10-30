@@ -3,7 +3,7 @@
 //!
 //! The IR machine cannot build one for these: at the point it runs, the suspension is inside a
 //! lambda it treats as a closure boundary, and the locals that must be spilled do not exist until
-//! the inline body has been spliced. See `docs/JVM_INLINE_BEFORE_CPS.md`.
+//! the inline body has been spliced.
 //!
 //! So the machine is built during emission, in two passes over the same body. The first emits it
 //! with no machine at all, which is the post-splice bytecode the spill set has to be read from; the

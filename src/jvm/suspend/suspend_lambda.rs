@@ -12,8 +12,7 @@
 //! The state machine is kotlinc's transformer's, in its lambda mode, when the class is written.
 //! The lambdas taken so far are the shapes the transformer takes for a named function: every
 //! suspension point is a plain call and no inline body is spliced in. The others keep today's
-//! lowering, a lifted function with a continuation class of its own, until their steps land (see
-//! `docs/JVM_INLINE_BEFORE_CPS.md`).
+//! lowering, a lifted function with a continuation class of its own, until their steps land.
 
 use super::bytecode_machine::{eligible_points, owned_suspensions, Route, Routed, Subject};
 use super::cps::{

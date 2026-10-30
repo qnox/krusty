@@ -48,7 +48,7 @@ existing contracts.
   ```
 
   `KRUSTY_KOTLINC` is what the harness reads, so exporting it is the whole of the setup. This matters
-  more than it looks: kotlinc is the correctness oracle (`docs/SPEC.md` §6), so a change validated
+  more than it looks: kotlinc is the correctness oracle, so a change validated
   without it has been checked against an expectation rather than against the reference — which is
   exactly the mistake the differential harness exists to prevent.
 - Use focused harness runs, not raw `cargo test`, while iterating. Standalone suites still use `./run-tests.sh --test <name> -- --nocapture`; grouped e2e tests use a test-name filter, e.g. `./run-tests.sh --test e2e lambda_e2e::lambdas_run -- --nocapture`.
@@ -286,7 +286,7 @@ not-applicable lists are not under this gate: they record what the reference kot
 this environment, and the required reference run proves every entry against that compiler.
 
 The rest of the suite is version-sensitive too, because the supported kotlinc releases do not word
-every diagnostic alike (see `docs/SPEC.md` §6). `KRUSTY_LANGUAGE_VERSION=<v> ./run-tests.sh` runs the
+every diagnostic alike. `KRUSTY_LANGUAGE_VERSION=<v> ./run-tests.sh` runs the
 whole suite with krusty reproducing release `<v>` against that release's kotlinc; `just test-all`
 does it for every manifest version at once.
 
@@ -805,9 +805,6 @@ difference per class set in `target/byte_diff_report.txt` (see "Byte-Identity Di
 
 Read the badges, or the `conformance` job of the latest master CI run, when you need today's
 figures; use the target-specific recipes locally when you need this checkout's.
-
-A count in a phase-log entry (`docs/IMPLEMENTATION_PLAN.md`) is a snapshot of what that phase
-measured at the time it landed, not a claim about the present, and must not be quoted as current.
 
 Two rules hold whatever the number is. Only compare `box()=OK` counts when `FAIL: 0` — a count taken
 beside a failure is not a coverage measurement. And `KRUSTY_NO_RUN=1` is for compile/emit profiling

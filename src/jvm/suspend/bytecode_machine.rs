@@ -1,5 +1,5 @@
 //! The suspend functions whose state machine kotlinc's coroutine transformer builds from their
-//! finished bytecode, as kotlinc does (see `docs/JVM_INLINE_BEFORE_CPS.md` §1a).
+//! finished bytecode, as kotlinc does.
 //!
 //! Such a function keeps its body. It only takes the CPS signature: each suspension point passes
 //! the function's own `$completion` on, and the returns box to `Object`. The emitter marks every

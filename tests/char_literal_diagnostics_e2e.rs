@@ -123,7 +123,7 @@ fn truncated_unicode_escape_is_rejected() {
 #[test]
 fn nul_escape_is_rejected() {
     // Kotlin has no `\0` escape (C does): kotlinc rejects `'\0'`, even though `unquote_char`
-    // decodes it and `docs/SPEC.md` lists it among the string-template escapes.
+    // decodes it.
     assert_reports("'\\0'", "unsupported escape sequence");
 }
 

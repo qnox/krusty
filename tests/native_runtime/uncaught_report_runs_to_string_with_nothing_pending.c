@@ -14,7 +14,7 @@
    and writes `Exception in thread "main" Failure: disk full` to stderr, then the stack trace
    (`\tat U1Kt.main(u1.kt:4)` and on), and exits with status 1. The first line is the report this
    runtime writes; it writes no stack trace, having no unwinder to read one from, and exits with
-   134, its status for every abnormal end (see docs/SPEC.md). */
+   134, its status for every abnormal end. */
 #include "krusty_rt.h"
 #include "krusty_sys.h"
 

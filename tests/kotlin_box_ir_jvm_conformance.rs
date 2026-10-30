@@ -482,7 +482,7 @@ fn compile_multifile(
     // sees the emitted classes as an overlay on the shared jar classpath, and they ride along to
     // BoxRunner's loader. When javac-first fails — the Java references Kotlin declarations, so it
     // cannot be ordered first — fall back to the KOTLIN-FIRST pipeline: signature stubs → krusty →
-    // real javac (docs/JAVA_INTEROP.md slice 2).
+    // real javac.
     let mut java_classes: Vec<(String, Vec<u8>)> = Vec::new();
     if !java_blocks.is_empty() {
         match common::javac_compile(&java_blocks, cp_jars) {
