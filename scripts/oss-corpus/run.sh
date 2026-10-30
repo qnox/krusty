@@ -109,7 +109,10 @@ fi
 # With `$CORPUS_PERF` set (the `perf` command, allowed to sample every process), the krusty
 # build is sampled system-wide at a low rate, and the krusty processes' call stacks are folded into
 # <logs>/<name>.krusty.folded; with `$CORPUS_FLAMEGRAPH` (inferno's `inferno-flamegraph`) also drawn as
-# <logs>/<name>.krusty.svg. Sampling 99 times a second costs the build next to nothing.
+# <logs>/<name>.krusty.svg. Sampling 99 times a second costs the build next to nothing. A previous
+# run's samples and graph are removed first, so a run that is not sampled, or samples nothing,
+# publishes none.
+rm -f "$logs/$name.krusty.folded" "$logs/$name.krusty.svg" "$logs/$name.perf.log"
 if [ -n "${CORPUS_PERF:-}" ]; then
   $CORPUS_PERF record -a -g -F 99 -o "$work/$name.perf.data" >"$logs/$name.perf.log" 2>&1 &
   perf_pid=$!
