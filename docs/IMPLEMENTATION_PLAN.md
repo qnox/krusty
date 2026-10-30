@@ -10,6 +10,13 @@ migration reduces the classpath facade from 6,317 to 6,277 lines; unrelated faca
 remain separate work. Validate unchanged annotation and serialization inventories, class bytes,
 JSON comparisons and refusal controls before and after extraction.
 
+## Native callable-reference capture storage
+
+Use one target-owned physical capture plan for closure layout, GC references, stores and ordinary
+or SAM thunk loads. Store the recorded equality receiver as Any? and use the existing conversion
+boundary to restore the body carrier. Preserve checked adapter parameters and ordinary captures;
+the storage repair is independent of serialized callable-reference admission and identity work.
+
 ## Wasm reference assertion exceptions
 
 Authenticate NullPointerException storage through the existing platform exception declaration
