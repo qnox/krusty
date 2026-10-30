@@ -116,9 +116,9 @@ pub(super) fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, env:
             };
             visibility | 0x0018 // [PRIVATE | PUBLIC] | STATIC | FINAL
         } else if s.is_var {
-            // A public or internal `lateinit var` is `public static`: `isInitialized` and other
-            // raw reads `getstatic` it. A private one, and every plain `var`, stays private.
-            if s.is_lateinit && !s.visibility.is_private() {
+            // A public or internal `lateinit var` with a setter method is `public static`; every
+            // plain `var` stays private.
+            if crate::jvm::private_static_access::lateinit_field_is_public(ir, static_index) {
                 0x0009 // PUBLIC | STATIC
             } else {
                 0x000A // PRIVATE | STATIC
@@ -396,7 +396,15 @@ pub(super) fn emit_default_static_accessor(
     }
     let fref = cw.fieldref(owner, field_name, &desc);
     g.getstatic(fref, slot_words(jt) as i32);
-    if s.is_lateinit {
+    // kotlinc emits no guard in the getter of a property another class probes with
+    // `isInitialized`: that getter returns the raw field.
+    let guarded = s.is_lateinit
+        && !env
+            .run
+            .static_accessor_plan
+            .borrow()
+            .probed_from_another_class(static_index);
+    if guarded {
         // kotlinc's getter: return the value, or throw and then `aconst_null; areturn` so the
         // null path has a reference for the verifier.
         g.dup();
@@ -1078,9 +1086,12 @@ impl Emitter<'_> {
         // A PRIVATE property's field, or the backing field of a source-declared getter, read from
         // another class, goes through its owner's accessor. Calling the declared getter would
         // re-enter it: the read is inside that getter.
-        if let Some(storage) = crate::jvm::private_static_access::bridged_getter(self.ir, i)
-            .or_else(|| crate::jvm::private_static_access::declared_backing_getter(self.ir, i))
-            .filter(|storage| self.static_owner != Some(storage.owner) || self.export_private_calls)
+        if let Some(storage) =
+            crate::jvm::private_static_access::bridged_getter_read(self.ir, i, expr)
+                .or_else(|| crate::jvm::private_static_access::declared_backing_getter(self.ir, i))
+                .filter(|storage| {
+                    self.static_owner != Some(storage.owner) || self.export_private_calls
+                })
         {
             let m = static_accessors::static_methodref(
                 self.cw,
@@ -1190,7 +1201,7 @@ impl Emitter<'_> {
         } else {
             let m = self.cw.methodref(
                 &facade,
-                &property_getter_name(&name),
+                &self.ir.statics[i as usize].default_getter_jvm_name(),
                 &format!("(){}", type_descriptor(jt)),
             );
             code.invokestatic(m, 0, slot_words(jt) as i32);
@@ -1276,6 +1287,13 @@ impl Emitter<'_> {
             return;
         }
         super::debug_lines::restore_initializer_store_line(initializer_line, code);
+        // An inlined value leaves its own line in effect; kotlinc marks the statement's line
+        // again at the store, as an instance field store does.
+        if self.ir.expr_source_lines.contains_key(&value) {
+            if let Some(&statement_line) = self.ir.expr_lines.get(&statement) {
+                self.mark_expression_line(statement, statement_line, code);
+            }
+        }
         // A PRIVATE property's field, or the backing field of a source-declared setter, written
         // from another class, goes through its owner's accessor.
         if let Some(storage) = crate::jvm::private_static_access::bridged_setter(self.ir, index)
@@ -1330,7 +1348,9 @@ impl Emitter<'_> {
                 );
                 code.invokestatic(m, slot_words(jt) as i32, 0);
             }
-        } else if self.static_owner == Some(StaticOwner::Facade) || is_const {
+        } else if (self.static_owner == Some(StaticOwner::Facade) || is_const)
+            && !self.calls_facade_lateinit_setter(index)
+        {
             let fref = self.cw.fieldref(
                 &facade,
                 self.ir.static_field_jvm_name(index),
@@ -1340,11 +1360,18 @@ impl Emitter<'_> {
         } else {
             let m = self.cw.methodref(
                 &facade,
-                &property_setter_name(&name),
+                &self.ir.statics[index as usize].default_setter_jvm_name(),
                 &format!("({})V", type_descriptor(jt)),
             );
             code.invokestatic(m, slot_words(jt) as i32, 0);
         }
+    }
+
+    /// kotlinc keeps a `lateinit` property's default accessors even inside the facade that owns
+    /// its field (`JvmPropertiesLowering` never replaces them with field access), so a write in
+    /// that facade calls `setX` just as a read calls `getX`.
+    fn calls_facade_lateinit_setter(&self, index: u32) -> bool {
+        self.ir.statics[index as usize].is_lateinit && self.ir.has_jvm_default_static_setter(index)
     }
 
     /// Emit one checked static initializer through its declared JVM storage boundary. Facade,

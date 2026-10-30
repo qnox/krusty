@@ -72,6 +72,16 @@ pub fn expected_delegated_property() -> &'static str {
     }
 }
 
+/// A selected callable reference rejected by its receiver constraint. From 2.4.20 the diagnostic
+/// names that candidate; older compilers use the unresolved-reference wrong-receiver heading.
+pub fn callable_reference_receiver_mismatch(candidate: &str) -> String {
+    if since(KotlinVersion::V2_4_20) {
+        format!("candidate '{candidate}' is inapplicable because of a receiver type mismatch.")
+    } else {
+        "unresolved reference. None of the following candidates is applicable because of a receiver type mismatch:".to_owned()
+    }
+}
+
 /// `UNRESOLVED_REFERENCE` for a name looked up on an explicit receiver expression. From 2.4.20
 /// kotlinc appends the receiver's type (`FOR_OPTIONAL_RECEIVER`) when it is a class-like type
 /// without errors; `receiver` is that rendered type, or `None` when kotlinc would omit it.
