@@ -1,19 +1,11 @@
 # krusty — a memory-lean Kotlin→JVM compiler PoC
 
-## Invisible members yield to extensions
+## JVM array clone result
 
-A private, protected, or package-private member the call site cannot see does not shadow an
-applicable extension with the same name. kotlinc ranks the invisible member below every visible
-candidate, so `c.clone()` with `fun Col.clone()` in scope calls the extension instead of the
-protected `Object.clone`. This holds for plain, safe, implicit-receiver, operator, and
-callable-reference uses. An extension of the same name that does not apply to the arguments
-(`b[0]` against `B.get(String)`, or the wrong arity) leaves the member selected, and the call
-reports its visibility, an indexed `get` included. An applicable but ambiguous family of visible
-extensions still takes the call, so `b + Both()` reports the extensions' ambiguity rather than the
-member's visibility. A binary operator reports either diagnostic at its operator token, with
-kotlinc's complete declaration rendering. A callable reference `B::f` names the visible extension.
-Tests: `box_regressions/hiddenMemberYieldsToExtension.kt` and
-`hidden_member_extension_e2e`.
+The JVM `Array<T>.clone()` declaration returns `Array<T>` with `T` keeping the classifier's own
+implicit `Any?` bound, so `Array<String?>.clone()` is `Array<String?>`. A non-null bound made it
+`Array<String>` and rejected moshi's `pathNames = copyFrom.pathNames.clone()`. Test:
+`array_member_reference_e2e::a_nullable_element_array_clone_keeps_its_element_type`.
 
 ## Smart casts from `when` guards
 
@@ -15221,6 +15213,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   identities between the passes; the temporaries pass does not infer the earlier pass from
   unrelated constants, jumps, or throws remaining in the method. Tests:
   `bytecode_passes::temporaries::tests` and `tests/safe_call_after_throw_e2e.rs`.
+- **A label right after a `goto` that stands beside a reached label is not one retained from
+  unreachable code.** kotlinc normalizes directly adjacent labels into one before it optimizes, so
+  such a run is reached when any of its labels is. An unreached label in it, like the first label
+  in front of a safe call's null path after the non-null path's `goto`, is not counted as retained,
+  and `options?.let { if (…) null else "x" }` keeps its receiver on the stack
+  (`aload; dup; ifnull`) as kotlinc does. After an `athrow` or a return the label still counts as
+  retained: kotlinc emits a dead continuation there (an inlined body's result path) that the
+  elimination deletes, which is why `lastException?.let { throw it }` keeps its temporary.
+  Tests: `constant_conditions::tests::a_label_beside_a_reached_jump_target_is_not_retained_from_deleted_code`,
+  `constant_conditions::tests::a_label_after_a_throw_beside_a_reached_jump_target_stays_retained`,
+  `tests/safe_call_dup_e2e.rs` and `tests/safe_call_after_throw_e2e.rs`.
 - **A `Boolean` compared with a `Boolean` literal is an ordinary two-operand comparison; only a
   negation is a polarity.** kotlinc's `Equals` sends two primitive `Boolean` operands to
   `BooleanComparison`, which materializes both and jumps with `if_icmp<cond>`; it never reads a
@@ -23339,6 +23342,21 @@ Concrete or conflicting receiver applications still fail. The same operation adm
 unbound outer receiver in a constructor reference. Tests: `builder_inference_receivers_e2e`,
 `postponed_bound_inference_e2e` and the exact wrong-receiver ledgers in
 `bound_inner_alias_inference_e2e`.
+
+## Invisible members yield to extensions
+
+A private, protected, or package-private member the call site cannot see does not shadow an
+applicable extension with the same name. kotlinc ranks the invisible member below every visible
+candidate, so `c.clone()` with `fun Col.clone()` in scope calls the extension instead of the
+protected `Object.clone`. This holds for plain, safe, implicit-receiver, operator, and
+callable-reference uses. An extension of the same name that does not apply to the arguments
+(`b[0]` against `B.get(String)`, or the wrong arity) leaves the member selected, and the call
+reports its visibility, an indexed `get` included. An applicable but ambiguous family of visible
+extensions still takes the call, so `b + Both()` reports the extensions' ambiguity rather than the
+member's visibility. A binary operator reports either diagnostic at its operator token, with
+kotlinc's complete declaration rendering. A callable reference `B::f` names the visible extension.
+Tests: `box_regressions/hiddenMemberYieldsToExtension.kt` and
+`hidden_member_extension_e2e`.
 
 ## Nominal function values
 
