@@ -493,7 +493,21 @@ pub(crate) fn annotation_pb(
 ) -> Pb {
     let mut out = Pb::new();
     out.field_varint(1, u64::from(st.class_id(annotation.internal)));
-    for (name, value) in &annotation.values {
+    let written = annotation.written_order.as_deref().unwrap_or_default();
+    let supplied = written
+        .iter()
+        .map(|ordinal| &annotation.values[usize::from(*ordinal)]);
+    let unwritten = annotation
+        .values
+        .iter()
+        .enumerate()
+        .filter(|(ordinal, _)| {
+            !written
+                .iter()
+                .any(|written| usize::from(*written) == *ordinal)
+        })
+        .map(|(_, value)| value);
+    for (name, value) in supplied.chain(unwritten) {
         let mut argument = Pb::new();
         argument.field_varint(1, u64::from(st.local(name)));
         argument.field_message(2, &annotation_value_pb(st, value));

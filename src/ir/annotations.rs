@@ -250,9 +250,12 @@ impl From<&crate::types::AnnotationValue> for AnnoValue {
             }
             AnnotationValue::Class(ty) => AnnoValue::Class(*ty),
             AnnotationValue::Annotation {
-                internal, values, ..
+                internal,
+                values,
+                written,
             } => AnnoValue::Annotation(AppliedAnnotation {
                 internal: *internal,
+                written_order: written.as_ref().map(|written| written.order.clone()),
                 values: values
                     .iter()
                     .map(|(name, value)| (name.clone(), AnnoValue::from(value)))
@@ -271,6 +274,10 @@ impl From<&crate::types::ResolvedAnnotation> for AppliedAnnotation {
     fn from(annotation: &crate::types::ResolvedAnnotation) -> Self {
         Self {
             internal: annotation.annotation,
+            written_order: annotation
+                .written
+                .as_ref()
+                .map(|written| written.order.clone()),
             values: annotation
                 .arguments
                 .iter()
@@ -287,4 +294,9 @@ pub struct AppliedAnnotation {
     pub internal: TypeName,
     /// `element_value_pairs`: `(element_name, value)` in declaration order.
     pub values: Vec<(String, AnnoValue)>,
+    /// Written arguments as indices into `values`, in source order. An omitted materialized
+    /// vararg is absent here. Metadata writes these first, then unwritten values; class-file
+    /// annotation attributes keep declaration order. Providers and generated applications with
+    /// no written form retain their stored order through `None`.
+    pub written_order: Option<Box<[u16]>>,
 }

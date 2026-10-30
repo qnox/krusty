@@ -12143,6 +12143,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   included, are what a use inherits.
   Tests: `tests/type_use_annotation_metadata_e2e.rs`.
 
+  Checked applications retain written argument indices beside their declaration-ordered values
+  through common IR, including each nested annotation inside a grouped vararg. Metadata consumes
+  those indices directly, then appends materialized unwritten values such as an omitted vararg's
+  empty array. It does not remap arguments from syntax after checking. Declaration annotation
+  metadata follows the same written order; physical annotation attributes keep declaration order.
+
 - **A named function-type parameter records `@ParameterName` on its type.** kotlinc writes
   `(count: Int) -> Unit` as `Function1<@ParameterName(name = "count") Int, Unit>` in `@Metadata`:
   a `Type.annotation` whose one argument is the string `name`, after the annotations the parameter

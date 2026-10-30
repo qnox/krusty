@@ -183,6 +183,7 @@ pub(super) fn composable_inferred_target(scheme: &str) -> RetainedAnnotation {
     RetainedAnnotation {
         retention: AnnoRetention::Binary,
         annotation: AppliedAnnotation {
+            written_order: None,
             internal: type_name(COMPOSABLE_INFERRED_TARGET),
             values: vec![(
                 "scheme".to_string(),
@@ -199,6 +200,7 @@ pub(super) fn composable() -> RetainedAnnotation {
     RetainedAnnotation {
         retention: AnnoRetention::Binary,
         annotation: AppliedAnnotation {
+            written_order: None,
             internal: type_name(super::COMPOSABLE),
             values: Vec::new(),
         },
@@ -212,6 +214,7 @@ pub(super) fn function_key_meta(key: i32, (start, end): (i32, i32)) -> RetainedA
     RetainedAnnotation {
         retention: AnnoRetention::Binary,
         annotation: AppliedAnnotation {
+            written_order: None,
             internal: type_name(FUNCTION_KEY_META),
             values: vec![
                 ("key".to_string(), AnnoValue::Const(IrConst::Int(key))),

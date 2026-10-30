@@ -2690,6 +2690,7 @@ mod tests {
             access: ACC_PUBLIC | ACC_STATIC | ACC_FINAL,
         });
         writer.set_runtime_annotations(&[crate::ir::AppliedAnnotation {
+            written_order: None,
             internal: crate::types::type_name(nested),
             values: Vec::new(),
         }]);

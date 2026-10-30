@@ -4471,13 +4471,6 @@ fn emit_placed_method(
         .get(&fid)
         .map(Vec::as_slice)
         .unwrap_or(&[]);
-    let ann_types = function_annotations::header_annotation_types(
-        ret_ann,
-        user_param_anns,
-        &emitted_param_anns,
-        nullability_annotated,
-    );
-    let ann_types: Vec<&str> = ann_types.iter().map(String::as_str).collect();
     let method_parameters = if env.java_parameters {
         super::method_parameters::function(ir, fid, &param_tys, holder_receiver)
     } else {
@@ -4487,9 +4480,15 @@ fn emit_placed_method(
         &method_name,
         &reserved_desc,
         reserved_sig.as_deref(),
-        &ann_types,
+        &[],
         &declared_annotations,
         &method_parameters,
+    );
+    e.cw.reserve_method_parameter_annotation_pool(
+        ret_ann,
+        user_param_anns,
+        &emitted_param_anns,
+        nullability_annotated,
     );
     let mut code = CodeBuilder::new(e.frame.size());
     method_entry::emit(
@@ -4792,7 +4791,7 @@ fn emit_placed_method(
     {
         e.cw.set_method_nullability(&method_name, &desc, ret_ann, &emitted_param_anns);
     }
-    // The USER parameter annotations (their types are already interned, above).
+    // The USER parameter annotations (their complete payloads are already interned, above).
     if !user_param_anns.is_empty() {
         e.cw.set_method_param_annotations(&method_name, &desc, user_param_anns);
     }
