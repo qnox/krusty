@@ -54,18 +54,22 @@ def read_folded(path):
     return stacks
 
 
-def rank(stacks, limit=25):
-    """The total sample count, and the functions with the most samples of their own (`self`, the
-    leaf frame) with the samples of the stacks they appear in (`total`), most self time first."""
+def rank(stacks, min_share=0.001):
+    """The total sample count, and every function with at least `min_share` of the samples either
+    of its own (`self`, as the leaf frame) or with it anywhere on the stack (`total`), most self time
+    first. A caller with no time of its own is kept for its total, and the cut stays small, so the
+    corpus report can add the projects up before it picks its top functions."""
     own, inclusive = collections.Counter(), collections.Counter()
     for stack, count in stacks.items():
         frames = stack.split(';')
         own[frames[-1]] += count
         for name in set(frames):
             inclusive[name] += count
-    top = sorted(own.items(), key=lambda kv: (-kv[1], kv[0]))[:limit]
-    return dict(samples=sum(stacks.values()),
-                functions=[dict(function=name, self=count, total=inclusive[name]) for name, count in top])
+    samples = sum(stacks.values())
+    kept = [name for name in inclusive if max(own[name], inclusive[name]) >= min_share * samples]
+    kept.sort(key=lambda name: (-own[name], -inclusive[name], name))
+    return dict(samples=samples,
+                functions=[dict(function=name, self=own[name], total=inclusive[name]) for name in kept])
 
 
 def main():

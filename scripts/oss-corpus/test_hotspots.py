@@ -35,10 +35,15 @@ class Hotspots(unittest.TestCase):
 
     def test_functions_rank_by_their_own_samples(self):
         stacks = hotspots.fold(PERF_SCRIPT.splitlines(keepends=True))
-        self.assertEqual(hotspots.rank(stacks, limit=2), dict(samples=3, functions=[
+        self.assertEqual(hotspots.rank(stacks), dict(samples=3, functions=[
             dict(function='memchr::memmem::Finder::find', self=2, total=2),
             dict(function='[libc.so.6]', self=1, total=1),
+            dict(function='krusty::main', self=0, total=3),
+            dict(function='zip::read::ZipArchive::new', self=0, total=2),
         ]))
+        # Below the cut, a function is dropped whatever its role.
+        self.assertEqual([f['function'] for f in hotspots.rank(stacks, min_share=0.5)['functions']],
+                         ['memchr::memmem::Finder::find', 'krusty::main', 'zip::read::ZipArchive::new'])
 
 
 if __name__ == '__main__':
