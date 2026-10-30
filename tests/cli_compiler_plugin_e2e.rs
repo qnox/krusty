@@ -574,6 +574,32 @@ fn the_compose_pass_rejects_what_it_does_not_cover() {
         "3:13: error: krusty's Compose compiler plugin does not support a recursive composable \
          function whose lambda parameters' applier kotlinc infers yet",
     );
+    let frame = "@Composable fun Frame(content: @Composable () -> Unit) {\ncontent()\n}\n";
+    assert_compose_rejects(
+        "compose-capturing-lambda",
+        &format!(
+            "{frame}@Composable fun Greeting(text: String) {{\nFrame {{ println(text) }}\n}}\n"
+        ),
+        &[],
+        "6:13: error: krusty's Compose compiler plugin does not support a composable lambda that \
+         captures a value yet",
+    );
+    assert_compose_rejects(
+        "compose-nested-lambda",
+        &format!(
+            "{frame}@Composable fun Greeting() {{\nFrame {{\nFrame {{ Frame {{ }} }}\n}}\n}}\n"
+        ),
+        &[],
+        "6:13: error: krusty's Compose compiler plugin does not support a lambda in a composable \
+         lambda yet",
+    );
+    assert_compose_rejects(
+        "compose-empty-lambda",
+        &format!("{frame}@Composable fun Greeting() {{\nFrame {{ }}\n}}\n"),
+        &[],
+        "7:7: error: krusty's Compose compiler plugin does not support an empty composable lambda \
+         yet",
+    );
     assert_compose_rejects(
         "compose-non-skippable",
         "@Composable @androidx.compose.runtime.NonSkippableComposable fun Greeting() {}\n",
