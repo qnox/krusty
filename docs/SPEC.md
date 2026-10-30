@@ -7,6 +7,16 @@ implicit `Any?` bound, so `Array<String?>.clone()` is `Array<String?>`. A non-nu
 `Array<String>` and rejected moshi's `pathNames = copyFrom.pathNames.clone()`. Test:
 `array_member_reference_e2e::a_nullable_element_array_clone_keeps_its_element_type`.
 
+## Smart casts from `when` guards
+
+An arm's guard (`is Lit if e.type is Marker -> ...`) is checked with the arm's own condition facts
+and adds its true-branch facts to that arm's body, so `e.type` reads as `Marker` there. A guard
+`this is T` also refines the implicit receiver for that body, past the arm's own condition
+(`is Mid if this is Leaf -> needLeaf(this)`). The facts
+do not reach later arms: a guarded arm adds no fall-through facts, and a guard joined by `||`
+proves nothing. Tests: `box_regressions/whenGuardSmartCast.kt` and
+`when_null_guard_smartcast_e2e::a_when_guard_narrows_only_its_own_arm`.
+
 ## Nested producers against dependent bounds
 
 A postponed generic producer passed where the outer variable is still open is solved against that
@@ -9099,6 +9109,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   PARAMETER and wildcards inside it. Realized as a `Wildcards` mode threaded through the signature formatter. Test:
   `tests/generic_signature_e2e.rs::declaration_site_wildcards_appear_in_parameter_positions_only`
   and `tests/generic_signature_e2e.rs::a_java_type_keeps_invariant_parameters`.
+- **An enum argument is never final for the parameter wildcard rule.** A parameter position drops
+  an `out` wildcard whose argument cannot have subtypes (`List<String>` signs
+  `Ljava/util/List<Ljava/lang/String;>;`). kotlinc decides that with `isFinalClass`, which excludes
+  enum classes, so every enum keeps its wildcard: `fun f(a: List<Plain>)` over
+  `enum class Plain { A }` signs `Ljava/util/List<+LPlain;>;`, as does a nested enum, an enum with
+  entry bodies, a Java enum such as `TimeUnit`, and an enum below another `out` argument
+  (`List<Box<Plain>>` signs `Ljava/util/List<+LBox<+LPlain;>;>;`). krusty treated an enum without
+  entry bodies as final and dropped the wildcard. Test:
+  `tests/generic_argument_wildcards_e2e.rs::an_enum_argument_keeps_its_parameter_wildcard_like_kotlinc`.
 
 - **A classpath member's (function OR property) declared collection mutability survives at EVERY nesting
   level.** The JVM `Signature` attribute erases read-only vs mutable (`List`/`MutableList` both spell
@@ -19544,8 +19563,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`id(s).length` is `checkcast String` before `String.length`). A consumer of the bound does not:
   returning `id(s)` as `Comparable<String>` uses the slot unchanged, while `value?.close()` invokes
   `AutoCloseable.close` directly with the nullable `dup; ifnull` shape. An unconstrained `T` stays
-  the specialized reference — its bound erases to `Object` — and a primitive specialization stays unboxed.
-  (`tests/inline_erased_parameter_e2e.rs`.)
+  the specialized reference — its bound erases to `Object`. A primitive specialization is boxed
+  into that slot and unboxed at each use: `b.also { }` on a `Boolean` is `Boolean.valueOf; astore`,
+  the lambda's `it` is `booleanValue`, and a result returned as `Any?` reloads the box. An `Int` use
+  is `checkcast Number; intValue`. The callee's own receiver of `apply` is that slot; the extension
+  lambda's `$this$apply` is a separate unboxed local. When every use unboxes, as for a result
+  returned as `Boolean`, the redundant-boxing pass leaves the primitive. Every read of that slot
+  unboxes, so a primitive consumer (an operator, a store, a default) receives the primitive; only an
+  implicit coercion to a reference reads the box itself. A top-level property store of an inlined
+  value marks the statement's line again at `putstatic`, as an instance field store does.
+  (`tests/inline_erased_parameter_e2e.rs`, `tests/inline_primitive_receiver_e2e.rs`.)
 
 - **An inlined `Closeable.use` stores the receiver as `Closeable` and narrows its result after
   `finally`.** `T.use` keeps the extension receiver in a `Closeable` slot: a receiver that is not

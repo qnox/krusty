@@ -328,12 +328,18 @@ impl<'a> JvmSignatureFormatter<'a> {
         crate::metadata::inner_classifiers::inner_classifier(self.ir, self.symbols, classifier)
     }
 
+    /// kotlinc's `isFinalClass`: a final classifier that is not an enum class. An enum is never
+    /// closed here, even one whose entries have no bodies, so `List<SomeEnum>` keeps its
+    /// `? extends` wildcard.
     fn classifier_is_closed(&self, owner: TypeName) -> Option<bool> {
         if let Some(classifier) = self.current_class(owner) {
             return Some(
                 classifier.is_object
                     || classifier.is_annotation
-                    || (!classifier.is_interface && !classifier.is_abstract && !classifier.is_open),
+                    || (!classifier.is_enum
+                        && !classifier.is_interface
+                        && !classifier.is_abstract
+                        && !classifier.is_open),
             );
         }
         let Some(classifier) = self.symbols.classifier(owner) else {
@@ -348,8 +354,7 @@ impl<'a> JvmSignatureFormatter<'a> {
             crate::libraries::TypeKind::Class => {
                 !classifier.is_abstract && !classifier.is_extensible
             }
-            crate::libraries::TypeKind::Enum => !classifier.is_extensible,
-            crate::libraries::TypeKind::Interface => false,
+            crate::libraries::TypeKind::Enum | crate::libraries::TypeKind::Interface => false,
         })
     }
 
