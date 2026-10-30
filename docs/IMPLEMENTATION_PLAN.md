@@ -10,6 +10,13 @@ removes adapter-result facts with their expression nodes. Preserve the modern em
 and range-fold exclusions; reference admission adds a shared closure-body entry, not a second walker.
 Core function subtyping and Native marker/export identity remain separate prerequisites.
 
+## Native callable-reference capture storage
+
+Use one target-owned physical capture plan for closure layout, GC references, stores and ordinary
+or SAM thunk loads. Store the recorded equality receiver as Any? and use the existing conversion
+boundary to restore the body carrier. Preserve checked adapter parameters and ordinary captures;
+the storage repair is independent of serialized callable-reference admission and identity work.
+
 ## Wasm reference assertion exceptions
 
 Authenticate NullPointerException storage through the existing platform exception declaration
@@ -294,6 +301,12 @@ while function literals and callable references await their selected callable sh
 the checked classifier identity available to nested annotation folding without bypassing ordinary
 constructor selection. Owned source/dependency publication and ordinary-call controls cover the
 shared path.
+
+## Finalized array expression type validity
+
+Check ordinary `Array<Nothing>` values after selected-call and reified decisions commit. Reuse the
+semantic recursive array matcher while preserving class-literal LHS policy and lexical suppression.
+Keep complete expression/reified diagnostic ledgers and compare the suppressed value's JVM ABI.
 
 ## String operation authority publication
 
