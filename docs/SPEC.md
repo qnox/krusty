@@ -5241,11 +5241,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   are evaluated relative to it. A top-level `lateinit var` is a facade static. A public or internal
   one is a `public static` field whose default getter throws (`getstatic; dup; ifnull; areturn; pop;
   ldc name; invokestatic throwUninitializedPropertyAccessException; aconst_null; areturn`); same-file
-  and cross-file reads call that getter. A private one keeps a `private static` field and inlines the
+  and cross-file reads call that getter, and same-file and cross-file writes call its default setter,
+  since kotlinc never replaces a `lateinit` property's accessors with field access. With a `private
+  set` there is no setter method: the field is `private static`, writes store it, and an
+  `isInitialized` probe from another class reads it through `access$get<X>$p`. The default getter
+  of a property that another class of the file probes with `isInitialized` has no guard
+  (`getstatic; areturn`), as kotlinc emits it; a probe in the facade or its lambdas keeps it. A private one keeps a `private static` field and inlines the
   guard on each raw read and after `access$get<X>$p` (`dup; ifnonnull; pop; ldc name; invokestatic;
   aconst_null`). `::prop.isInitialized` is an initialization probe recorded when
   `LateinitFieldRead` is lowered, and the JVM loads that field with no guard. An `object` member `lateinit`
   stays on the instance-field path. `tests/top_level_lateinit_e2e.rs`,
+  `tests/facade_lateinit_setter_e2e.rs`,
   `tests/lateinit_operand_stack_e2e.rs`, `tests/lateinit_companion_read_e2e.rs`.
 - **`===`/`!==` on a nullable-primitive operand is rejected** (skip): boxed identity vs the unboxed
   primitive — and `Double`/`Float`'s `-0.0`/`NaN` — has subtle semantics krusty doesn't model.
@@ -21044,10 +21050,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   annotation again. An explicit `@JvmName` is not changed further: an internal member keeps it
   without the `$<module>` suffix (a function, a declared accessor or a default one), and a
   value-class-typed property keeps it without the value-class hash. A companion's synthesized
-  default accessors also carry the annotations written on them (`@get:Deprecated`). Known gaps: a
-  `@JvmStatic` companion property has no outer static wrapper, and
-  a top-level `lateinit var`, which has no checked body, carries no accessor annotations. A
-  top-level property's retained `PROPERTY`-targeted annotation gets no `$annotations` marker at all
+  default accessors also carry the annotations written on them (`@get:Deprecated`). A top-level
+  property or function with no checked body (a `lateinit var`, an `external fun`) still hands its
+  checked annotations to lowering through a body-less metadata group, as a body-less classifier does,
+  so `@set:JvmName("assignNamed") lateinit var named: String` declares and is called as
+  `assignNamed` (`tests/facade_lateinit_setter_e2e.rs`). Known gaps: a `@JvmStatic` companion
+  property has no outer static wrapper, and a top-level property's retained `PROPERTY`-targeted annotation gets no `$annotations` marker at all
   (with or without `@JvmName`); only a suppressed SOURCE application's empty marker is emitted there.
   Tests: `accessor_jvm_name_e2e`.
 

@@ -963,6 +963,8 @@ mod extension_receiver_property_smartcast_e2e;
 mod external_modifier_targets_e2e;
 #[path = "facade_emission_e2e.rs"]
 mod facade_emission_e2e;
+#[path = "facade_lateinit_setter_e2e.rs"]
+mod facade_lateinit_setter_e2e;
 #[path = "fallthrough_close_line_e2e.rs"]
 mod fallthrough_close_line_e2e;
 #[path = "feature_box_e2e.rs"]
