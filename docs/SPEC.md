@@ -10592,7 +10592,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Common lowering records the elvis block as an expression whose start line is kept, and the JVM
   line table keeps that entry. A chain `a ?: b ?: c` begins only once, at `a`: kotlinc folds it
   into one chain, so the elvis krusty nests on the first one's right side states no start line of
-  its own. Test: `tests/elvis_own_line_e2e.rs`.
+  its own. Across the chain kotlinc marks, on each link's null path, the next link's operand line
+  at the `pop` rather than after it, and every later link's temporary restates the chain's start
+  line where it is stored: `a(x)\n ?: a(y)\n ?: z` on lines 3 to 5 writes `line 4` at the first
+  `pop` and `line 3` at the second `dup`. The last link's right side keeps the ordinary layout
+  (`z`'s line after the `pop`). Common lowering records the chain's start line for each later
+  link and the next operand's line as the fold's mark. Test: `tests/elvis_own_line_e2e.rs`.
 
 - **A not-null assertion keeps its own line beside its operand's line.** kotlinc states a `!!`'s
   own line before its operand. When the operand's first instruction marks another line at that
