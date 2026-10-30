@@ -622,6 +622,35 @@ fn a_defaulted_construction_maps_its_lines_like_kotlinc() {
     );
 }
 
+/// A dependency's defaulted constructor takes the same rule: its placeholders, masks and marker
+/// are realized as the construction's operands, and the construction's line returns at the first.
+#[test]
+fn a_defaulted_dependency_construction_maps_its_lines_like_kotlinc() {
+    let lib = common::compile_lib(
+        "DefaultedDependencyConstruction",
+        "class Q(val a: String, val b: Int = 1, val c: String, val d: String? = null)\n",
+    )
+    .expect("the dependency compiles");
+    let built = common::compare_with_kotlinc_plugin_jdk_cp(
+        "DefaultedDependencyConstructionCaller",
+        "fun run(x: String): Q = Q(\n\
+         \x20   a = x,\n\
+         \x20   c = x.trim(),\n\
+         )\n",
+        "DefaultedDependencyConstructionCallerKt",
+        &[lib],
+        "17",
+        &[],
+    )
+    .expect("reference kotlinc is provisioned");
+    assert!(
+        built.krusty_bytes == built.reference_bytes,
+        "the dependency construction differs from kotlinc:\nkotlinc:\n{}\nkrusty:\n{}",
+        built.reference,
+        built.krusty
+    );
+}
+
 /// A primitive `compareTo` is lowered to `Intrinsics.compare`, which is still a real dispatch and
 /// still returns to the call's line.
 #[test]

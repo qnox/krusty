@@ -213,10 +213,13 @@ impl DefaultCallOperands {
 
     /// Reattach every plan to the final operands after a backend transform has rewritten call
     /// children in place while preserving their order. Provenance and the ABI-suffix boundary are
-    /// positional contracts; a changed arity or a non-call owner is an invalid backend state.
+    /// positional contracts; a changed arity or an owner that is neither a call nor a construction
+    /// is an invalid backend state.
     pub(super) fn synchronize(&mut self, ir: &crate::ir::IrFile) -> bool {
         for (&call, plan) in &mut self.entries {
-            let Some(crate::ir::IrExpr::Call { args, .. }) = ir.exprs.get(call as usize) else {
+            let (Some(crate::ir::IrExpr::Call { args, .. })
+            | Some(crate::ir::IrExpr::New { args, .. })) = ir.exprs.get(call as usize)
+            else {
                 return false;
             };
             if plan.len() != args.len() {

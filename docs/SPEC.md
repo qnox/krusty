@@ -19454,7 +19454,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
     such runs puts its own line in effect and the next run restores the call's. With every
     parameter supplied, the mask push is that first synthetic operand. A defaulted CONSTRUCTOR
     takes the identical rule: it previously restored the line only at the `invokespecial`, three
-    bytes late.
+    bytes late. A dependency's constructor is realized as a construction whose descriptor is the
+    `$default` overload's and whose operands already hold the placeholders, masks and marker; the
+    realization records which of them it added, so the construction's line returns at their first
+    run there too (`a_defaulted_dependency_construction_maps_its_lines_like_kotlinc`).
   - **Which operands those are is RECORDED, never recognized by shape.** A realized `Const(0)` and
     a source `0` are the same node, so the pass that invents them records their physical positions
     against the call (`jvm::default_call_operands::DefaultCallOperands`, the backend-owned table the
