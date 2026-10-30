@@ -76,6 +76,7 @@ mod body_local_hierarchy;
 mod body_local_property_selection;
 mod call_applicability;
 use call_applicability::{ArgSlots, CallCandidateScore};
+mod array_type_validity;
 mod call_constraints;
 mod call_diagnostics;
 mod call_result_constraint;
@@ -89,6 +90,7 @@ mod class_literal_array_of_nothing;
 mod class_literal_receiver;
 mod class_literal_type_arguments;
 mod class_names_aliases;
+mod expression_finalization;
 mod star_projected_classifier;
 use candidate_display::{
     ambiguous_classifier_message, classifier_access_display_from_shape,
@@ -39566,12 +39568,12 @@ impl<'a> Checker<'a> {
                 selected.callable.default_call = true;
                 selected.callable.inline = crate::libraries::InlineKind::MustInline;
             } else if let Some(literals) = self.library_default_literals(call, &selected) {
-                // The provider states each omitted default as a CONSTANT, so the call site passes
-                // it. A constant has no side effects and depends on no other argument, which is
-                // what makes this the same call the callee's own default-filling would have made —
-                // and it needs no `$default` symbol, which is the one thing a klib cannot name.
+                // Each omitted default is a CONSTANT, with no effects and no reads of other
+                // arguments, so the call site passes it and no `$default` symbol is named.
                 self.resolved_library_default_literals
                     .insert(call, literals);
+            } else if selected.callable.defaults_from_declaration {
+                selected.callable.default_call = true;
             } else {
                 self.diags.error(
                     self.call_callee_name_span(call),
@@ -50724,12 +50726,7 @@ impl<'a> Checker<'a> {
         let t = crate::wide_stack::on_wide_stack(|| {
             self.expr_inner(scope, e, expected, value_required)
         });
-        self.check_expression_usage(scope, e);
-        self.check_static_access_type_arguments(e);
-        self.check_expression_qualifier_tree(e);
-        self.check_reified_type_arguments(scope, e);
-        self.check_expression_missing_supertypes(e);
-        self.record_flexible_value(e);
+        expression_finalization::finalize(self, scope, e, t);
         self.active_lexical_policies.truncate(policy_depth);
         self.expectation_frames.pop();
         self.expr_depth -= 1;
@@ -56730,23 +56727,15 @@ impl<'a> Checker<'a> {
                 // Accumulate this arm's false-branch facts for every later arm. Conditions joined
                 // by commas are alternatives, so reaching the next arm means each one was false.
                 if arm.guard.is_none() {
-                    for &condition in &arm.conditions {
-                        let cnd = condition.expression();
-                        let (mut casts, mut declined) =
-                            self.when_condition_narrowings(cond_scope, subject, condition, false);
-                        crate::trace_compiler!(
-                            "smartcast",
-                            "when fallthrough condition={} casts={casts:?} declined={declined:?}",
-                            cnd.0,
-                        );
-                        fallthrough_casts.append(&mut casts);
-                        fallthrough_declined.append(&mut declined);
-                    }
+                    let (mut casts, mut declined) =
+                        self.when_fallthrough_narrowings(cond_scope, subject, &arm.conditions);
+                    fallthrough_casts.append(&mut casts);
+                    fallthrough_declined.append(&mut declined);
                 }
                 // A single condition establishes its true-branch facts in the arm body. Conditions
                 // separated by commas are alternatives, so none of their facts holds for every
                 // path into the body.
-                let (arm_casts, arm_declined) = match arm.conditions.as_slice() {
+                let (mut arm_casts, mut arm_declined) = match arm.conditions.as_slice() {
                     [condition] => {
                         self.when_condition_narrowings(cond_scope, subject, *condition, true)
                     }
@@ -56760,15 +56749,21 @@ impl<'a> Checker<'a> {
                     }
                     _ => None,
                 };
-                let bt = {
+                let (bt, arm_this_narrow) = {
                     let scope = &arm_scope;
                     self.apply_narrowings(scope, &arm_casts, &arm_declined, false);
                     self.with_this_narrow(arm_this_narrow, |c| {
+                        let mut this_narrow = arm_this_narrow;
                         if let Some(guard) = arm.guard {
-                            let guard_ty = c.expr(scope, guard);
-                            c.expect_assignable(Ty::Boolean, guard_ty, c.span(guard), "when guard");
+                            let mut guarded = c.checked_when_guard(scope, guard);
+                            arm_casts.append(&mut guarded.casts);
+                            arm_declined.append(&mut guarded.declined);
+                            this_narrow = guarded.this_narrow.or(this_narrow);
                         }
-                        c.joined_branch_result(scope, arm.body, branch_wanted, has_else)
+                        let body = c.with_this_narrow(this_narrow, |c| {
+                            c.joined_branch_result(scope, arm.body, branch_wanted, has_else)
+                        });
+                        (body, this_narrow)
                     })
                 };
                 if self.completed_normally(arm.body) {
