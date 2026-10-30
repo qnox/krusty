@@ -24,7 +24,7 @@ pub(crate) fn realize_calls(
 ) {
     let facades = stems
         .iter()
-        .map(|stem| super::names::file_facade_segment(stem))
+        .map(|stem| crate::names::file_part_short_name(stem))
         .collect::<Vec<_>>();
     let mut property_realizations = super::property_realizations::PropertyRealizations::default();
     super::local_properties::realize(ir, &mut property_realizations)

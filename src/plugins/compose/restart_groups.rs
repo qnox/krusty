@@ -35,6 +35,12 @@
 //! A `@Composable () -> Unit` parameter becomes a `(Composer, Int) -> Unit` value, compared with
 //! `changedInstance` and called with the composer and its own state bits.
 //!
+//! A composable lambda passed to one takes the `$composer` and `$changed` of that calling
+//! convention, and its body becomes a group without a start or end of its own, since the runtime's
+//! `ComposableLambdaImpl` opens and closes it:
+//! `if ($composer.shouldExecute($changed and 0b0011 != 0b0010, $changed and 1)) { … } else
+//! $composer.skipToGroupEnd()`.
+//!
 //! The IR is built in the shape common lowering gives the same statements written in source, so
 //! every target realizes it exactly as it realizes them.
 
@@ -45,7 +51,10 @@ use crate::ir::{
 use crate::types::{EqualityMode, Ty};
 
 use super::runtime::{self, ComposeRuntime};
-use super::source_facts::{function_body, ArgumentState, RestartableFunction, TrackedParameter};
+use super::source_facts::{
+    function_body, lambda_body, ArgumentState, RestartableFunction, SingletonLambda,
+    TrackedParameter,
+};
 
 /// Bits per parameter slot of a `$changed` int, after its low "force" bit.
 const BITS_PER_SLOT: u32 = 3;
@@ -74,6 +83,14 @@ struct Slots {
 }
 
 impl Slots {
+    /// A composable lambda's: it takes nothing else, and decides on `$changed` alone.
+    const LAMBDA: Self = Self {
+        composer: 0,
+        changed: 1,
+        default: None,
+        dirty: None,
+    };
+
     fn of(facts: &RestartableFunction) -> Self {
         let parameters = facts.parameters.len() as u32;
         let default = has_defaults(facts).then_some(parameters + 2);
@@ -142,6 +159,15 @@ pub(super) fn transform(ir: &mut IrFile) {
     for function in &facts.functions {
         add_composer_parameters(ir, function);
     }
+    // A lambda's calls are given their composer before its callers read it from the singletons.
+    for lambda in &facts.lambdas {
+        add_lambda_composer_parameters(ir, lambda);
+        for site in &lambda.calls {
+            pass_composer(ir, Slots::LAMBDA, &callees, site.call, &site.arguments);
+        }
+        lambda_group(ir, &facts.runtime, lambda);
+    }
+    super::singleton_lambdas::memoize(ir, &facts.runtime, &facts.lambdas, facts.singletons);
     for function in &facts.functions {
         let slots = Slots::of(function);
         for site in &function.calls {
@@ -202,6 +228,138 @@ fn add_composer_parameters(ir: &mut IrFile, facts: &RestartableFunction) {
     nullable.extend([true, false]);
     nullable.extend(slots.default.map(|_| false));
     ir.plugin_extended_signatures.insert(function);
+}
+
+/// Give the function a composable lambda is lowered to the `$composer` and `$changed` its value
+/// is called with, and move its locals past them.
+fn add_lambda_composer_parameters(ir: &mut IrFile, lambda: &SingletonLambda) {
+    let function = lambda.implementation;
+    let declaration = &mut ir.functions[function as usize];
+    debug_assert!(
+        declaration.params.is_empty(),
+        "a `() -> Unit` lambda takes nothing"
+    );
+    declaration.params = vec![runtime::composer(), Ty::Int];
+    declaration.param_checks = vec![None; 2];
+    let body = declaration.body.expect("a lambda has a body");
+    crate::ir::shift_value_indices(ir, body, 0, 2);
+    ir.fn_params.entry(function).or_default().identities = vec![
+        IrParameterIdentity::producer_value("$composer"),
+        IrParameterIdentity::producer_value("$changed"),
+    ];
+    let IrExpr::Lambda {
+        arity, inline_body, ..
+    } = &mut ir.exprs[lambda.lambda as usize]
+    else {
+        unreachable!("a singleton lambda is a lambda");
+    };
+    *arity = 2;
+    // The value is called through the runtime's wrapper, never inlined.
+    *inline_body = None;
+}
+
+/// The body kotlinc gives a composable lambda. The runtime's `ComposableLambda` wrapper starts
+/// its group, so the body only decides, on `$changed` alone, whether to run:
+///
+/// ```text
+/// sourceInformation($composer, "C…")
+/// if ($composer.shouldExecute($changed and 0b011 != 0b010, $changed and 1)) {
+///     … the source statements, traced …
+/// } else {
+///     $composer.skipToGroupEnd()
+/// }
+/// ```
+fn lambda_group(ir: &mut IrFile, runtime: &ComposeRuntime, lambda: &SingletonLambda) {
+    let body = lambda_body(ir, lambda.implementation).expect("a singleton lambda has a block body");
+    let slots = Slots::LAMBDA;
+    let mut statements = Vec::new();
+    if let Some(information) = &lambda.source_information {
+        let composer = ir.add_expr(IrExpr::GetValue(slots.composer));
+        let text = ir.add_expr(IrExpr::Const(IrConst::String(information.as_str().into())));
+        statements.push(runtime::call(
+            ir,
+            &runtime.source_information,
+            None,
+            vec![composer, text],
+        ));
+    }
+    let composer = ir.add_expr(IrExpr::GetValue(slots.composer));
+    let state = and_constant(ir, slots.changed, STATIC);
+    let any_changed = int_comparison(ir, IrBinOp::Ne, state, DIFFERENT);
+    let force = and_constant(ir, slots.changed, 1);
+    let execute = runtime::call(
+        ir,
+        &runtime.should_execute,
+        Some(composer),
+        vec![any_changed, force],
+    );
+    let executed = traced(
+        ir,
+        runtime,
+        lambda.key,
+        slots,
+        lambda.trace.as_deref(),
+        Vec::new(),
+        &body.statements,
+    );
+    let composer = ir.add_expr(IrExpr::GetValue(slots.composer));
+    let skip = runtime::call(ir, &runtime.skip_to_group_end, Some(composer), Vec::new());
+    // kotlinc skips at the lambda's start offset, its opening brace.
+    mark_line(ir, skip, lambda.opening_line);
+    let skipped = ir.add_expr(IrExpr::Block {
+        stmts: vec![skip],
+        value: None,
+    });
+    let branch = ir.add_expr(IrExpr::When {
+        branches: vec![(Some(execute), executed), (None, skipped)],
+    });
+    ir.whens.exhaustive.insert(branch, Ty::Unit);
+    statements.push(branch);
+    ir.exprs[body.block as usize] = IrExpr::Block {
+        stmts: statements,
+        value: None,
+    };
+    // kotlinc builds the group without offsets: the first line is its first statement's.
+    ir.expr_lines.remove(&body.block);
+    let root = ir.functions[lambda.implementation as usize]
+        .body
+        .expect("a lambda has a body");
+    ir.mark_positionless(root);
+}
+
+/// The statements a group runs when it executes: `executed`, then `statements` between the trace
+/// events when trace markers are enabled.
+fn traced(
+    ir: &mut IrFile,
+    runtime: &ComposeRuntime,
+    key: i32,
+    slots: Slots,
+    trace: Option<&str>,
+    mut executed: Vec<ExprId>,
+    statements: &[ExprId],
+) -> ExprId {
+    if let Some(trace) = trace {
+        let key = ir.add_expr(IrExpr::Const(IrConst::Int(key)));
+        let changed = ir.add_expr(IrExpr::GetValue(slots.decided()));
+        let unused = ir.add_expr(IrExpr::Const(IrConst::Int(-1)));
+        let text = ir.add_expr(IrExpr::Const(IrConst::String(trace.into())));
+        let event = runtime::call(
+            ir,
+            &runtime.trace_event_start,
+            None,
+            vec![key, changed, unused, text],
+        );
+        executed.push(if_trace_in_progress(ir, runtime, event));
+    }
+    executed.extend(statements.iter().copied());
+    if trace.is_some() {
+        let event = runtime::call(ir, &runtime.trace_event_end, None, Vec::new());
+        executed.push(if_trace_in_progress(ir, runtime, event));
+    }
+    ir.add_expr(IrExpr::Block {
+        stmts: executed,
+        value: None,
+    })
 }
 
 /// A parameter's type after `ComposerParamTransformer`, which gives a composable function value the
@@ -547,29 +705,16 @@ fn restart_group(ir: &mut IrFile, runtime: &ComposeRuntime, facts: &RestartableF
         vec![any_changed, force],
     );
 
-    let mut executed = assign_defaults(ir, facts, slots);
-    if let Some(trace) = &facts.trace {
-        let key = ir.add_expr(IrExpr::Const(IrConst::Int(facts.key)));
-        let changed = ir.add_expr(IrExpr::GetValue(slots.decided()));
-        let unused = ir.add_expr(IrExpr::Const(IrConst::Int(-1)));
-        let text = ir.add_expr(IrExpr::Const(IrConst::String(trace.as_str().into())));
-        let event = runtime::call(
-            ir,
-            &runtime.trace_event_start,
-            None,
-            vec![key, changed, unused, text],
-        );
-        executed.push(if_trace_in_progress(ir, runtime, event));
-    }
-    executed.extend(body.statements.iter().copied());
-    if facts.trace.is_some() {
-        let event = runtime::call(ir, &runtime.trace_event_end, None, Vec::new());
-        executed.push(if_trace_in_progress(ir, runtime, event));
-    }
-    let executed = ir.add_expr(IrExpr::Block {
-        stmts: executed,
-        value: None,
-    });
+    let defaults = assign_defaults(ir, facts, slots);
+    let executed = traced(
+        ir,
+        runtime,
+        facts.key,
+        slots,
+        facts.trace.as_deref(),
+        defaults,
+        &body.statements,
+    );
     let composer = ir.add_expr(IrExpr::GetValue(slots.composer));
     let skip = runtime::call(ir, &runtime.skip_to_group_end, Some(composer), Vec::new());
     // kotlinc skips at the declaration's start offset, the `fun` keyword.
@@ -764,7 +909,7 @@ fn annotate_key(ir: &mut IrFile, facts: &RestartableFunction) {
         annotations.push_metadata_visible(runtime::composable_inferred_target(scheme));
     }
     if facts.key_meta {
-        annotations.push(runtime::function_key_meta(facts));
+        annotations.push(runtime::function_key_meta(facts.key, facts.offsets));
     }
 }
 

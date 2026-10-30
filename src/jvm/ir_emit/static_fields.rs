@@ -131,7 +131,7 @@ pub(super) fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, env:
         // A PARAMETERIZED type (`val xs: List<String>`) carries its full generic `Signature`, exactly
         // as the same property declared inside a class does — the facade's field table is a different
         // emitter, and without this a top-level property's element type was lost to erasure.
-        let signature = signature_formatter.field_signature(&s.ty, None, acc);
+        let signature = signature_formatter.field_signature(&s.ty, None, s.is_var);
         // A reference-typed facade static carries kotlinc's nullability annotation like any other
         // backing field, except a `lateinit` one, which holds null until assigned.
         let field_ann = (!s.is_lateinit)
@@ -640,7 +640,7 @@ pub(super) fn declare(
             .then(|| super::declared_static_annotation(s))
             .flatten();
         let signature = signature_formatter
-            .field_signature(&s.ty, None, acc)
+            .field_signature(&s.ty, None, s.is_var)
             .filter(|_| !s.property_delegate);
         cw.add_field_late_sig(
             acc,
@@ -739,7 +739,7 @@ pub(super) fn emit_enum_static_fields(
         // A PARAMETERIZED static keeps its generic `Signature` (the delegate is a
         // `Lazy<KSerializer<Object>>`), and a reference-typed one carries kotlinc's nullability
         // annotation — the same treatment the class and facade field tables give their statics.
-        let signature = signature_formatter.field_signature(&s.ty, None, acc);
+        let signature = signature_formatter.field_signature(&s.ty, None, s.is_var);
         let ann = super::declared_static_annotation(s).filter(|_| !s.is_lateinit);
         // A folded `const val` is its `ConstantValue`; `<clinit>` does not store it.
         let constant = (s.init)
@@ -1301,6 +1301,13 @@ impl Emitter<'_> {
             return;
         }
         super::debug_lines::restore_initializer_store_line(initializer_line, code);
+        // An inlined value leaves its own line in effect; kotlinc marks the statement's line
+        // again at the store, as an instance field store does.
+        if self.ir.expr_source_lines.contains_key(&value) {
+            if let Some(&statement_line) = self.ir.expr_lines.get(&statement) {
+                self.mark_expression_line(statement, statement_line, code);
+            }
+        }
         // A PRIVATE property's field, or the backing field of a source-declared setter, written
         // from another class, goes through its owner's accessor.
         if let Some(storage) = crate::jvm::private_static_access::bridged_setter(self.ir, index)

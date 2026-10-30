@@ -1,5 +1,12 @@
 # krusty — implementation plan
 
+## Native callable-reference capture storage
+
+Use one target-owned physical capture plan for closure layout, GC references, stores and ordinary
+or SAM thunk loads. Store the recorded equality receiver as Any? and use the existing conversion
+boundary to restore the body carrier. Preserve checked adapter parameters and ordinary captures;
+the storage repair is independent of serialized callable-reference admission and identity work.
+
 ## Wasm reference assertion exceptions
 
 Authenticate NullPointerException storage through the existing platform exception declaration
@@ -284,6 +291,12 @@ while function literals and callable references await their selected callable sh
 the checked classifier identity available to nested annotation folding without bypassing ordinary
 constructor selection. Owned source/dependency publication and ordinary-call controls cover the
 shared path.
+
+## Finalized array expression type validity
+
+Check ordinary `Array<Nothing>` values after selected-call and reified decisions commit. Reuse the
+semantic recursive array matcher while preserving class-literal LHS policy and lexical suppression.
+Keep complete expression/reified diagnostic ledgers and compare the suppressed value's JVM ABI.
 
 ## String operation authority publication
 
@@ -5114,10 +5127,15 @@ their declarations into an index-based model (`declarations`, `model`), lays rec
   `tests/native_compiler_command_e2e.rs` checks the answer on the JVM lane, then compiles a
   two-file program with the command, runs it, and asserts the complete diagnostics of a broken
   source.
+- **Computed defaults across source modules (done, Native and Wasm).** A KLIB declaration with
+  a default is published with `LibraryCallable::defaults_from_declaration`: a call omitting a
+  computed default keeps the declaration's identity, and the target routes it to the declaring
+  module's default entry, exported beside the declaration (`multimoduleComputedDefaults.kt`).
+  Constant defaults are still passed at the call site.
 - **Next.** `-produce library`, which needs the KLIB writer to serialize ordinary function and
   class bodies into `default/ir`; until then a first-party library's sources are compiled into the
   program. Programs reach further as dependency body emission grows (library member bodies, then
-  non-constant parameter defaults of third-party KLIBs).
+  the non-constant parameter defaults of third-party KLIB bodies).
 
 ## Byte-identical box conformance, item 1 — local-class naming  ◐
 
@@ -6313,8 +6331,10 @@ and the pass rejects every construct it does not cover yet.
 - [x] `@Composable () -> Unit` parameters: called with the composer and their own state bits,
   compared by identity, passed on to composable calls, and their `@ComposableInferredTarget`
   applier scheme inferred.
-- [ ] Composable lambdas (`ComposableSingletons`, `rememberComposableLambda`), other composable
-  function types, and the composable call checker's diagnostics.
+- [x] Composable lambdas that capture nothing, passed to a composable call: `ComposableSingletons`
+  properties made by `composableLambdaInstance`, each body a skippable group.
+- [ ] Capturing composable lambdas (`rememberComposableLambda`), nested and empty ones, other
+  composable function types, and the composable call checker's diagnostics.
 - [x] Primitive and `String` parameters: `$changed`/`$dirty` slot tracking with strong skipping,
   `Composer.changed` comparisons, and each call's argument bits (static, passed on, uncertain).
 - [x] Constant default arguments: the `$default` mask, defaults assigned in the group, placeholders
@@ -6322,7 +6342,7 @@ and the pass rejects every construct it does not cover yet.
 - [ ] More parameters: non-constant defaults (defaults groups), receivers, varargs, more than ten,
   stability inference.
 - [ ] The full body transform: control-flow groups, `remember`, early returns, inline composables.
-- [ ] `ComposableSingletons` lambda holders and the `$stable` field of classes.
+- [ ] The `$stable` field of classes.
 - [ ] Remove the partial marker and rerun the corpus for the Compose projects.
 
 ## Anonymous superclass closure captures

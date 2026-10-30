@@ -28,7 +28,7 @@ impl FileClasses {
             .enumerate()
             .map(|(source, stem)| {
                 let source = SourceFileId::from_raw(source as u32);
-                let segment = super::names::file_facade_segment(stem);
+                let segment = crate::names::file_part_short_name(stem);
                 let declared = declared_jvm_name(module, source);
                 // kotlinc splits a multifile class only under a declared facade name; without
                 // `@JvmName` the file is an ordinary package part.

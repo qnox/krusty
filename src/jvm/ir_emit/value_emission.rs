@@ -116,6 +116,9 @@ impl super::Emitter<'_> {
                     );
                 };
                 self.load_constructor_value(*i, jt, slot, code);
+                if let Some(primitive) = self.unboxed_scalar_read(e, *i) {
+                    super::scalar_coercion::unbox_prim_from(self.cw, code, jt, primitive);
+                }
             }
             IrExpr::PropertyRead {
                 receiver,

@@ -2074,6 +2074,10 @@ pub struct IrFile {
     /// Internal names of classes kotlinc marks `ACC_SYNTHETIC` (0x1000) on the class itself — e.g. a
     /// `@Serializable` class's generated `$$serializer` object.
     synthetic_classes: crate::fx_hash::HashSet<TypeName>,
+    /// Internal names of classes a compiler plugin generates with no Kotlin declaration behind
+    /// them, such as Compose's `ComposableSingletons$<File>Kt`. No declaration record describes
+    /// them, and kotlinc writes them a synthetic-class `@Metadata`.
+    declarationless_classes: crate::fx_hash::HashSet<TypeName>,
     /// Provenance and initialization placement for statics generated without a Kotlin declaration.
     generated_static_facts: crate::fx_hash::HashMap<u32, generated_members::GeneratedStaticFacts>,
     /// `FunId`s of methods carrying a `Deprecated` classfile attribute (from `@Deprecated`) — e.g. a
@@ -2214,7 +2218,8 @@ pub struct IrFile {
     pub secondary_ctor_lines:
         crate::fx_hash::HashMap<crate::fir::DeclarationId, IrSecondaryCtorLines>,
     /// Declared PRIMARY-constructor visibility per class (`class C protected constructor(…)`);
-    /// absent = public. It sets `@Metadata` `Constructor.flags` and the JVM access.
+    /// absent = public, or private for a singleton, whose constructor only a generated singleton
+    /// records as public. It sets `@Metadata` `Constructor.flags` and the JVM access.
     pub ctor_visibilities: crate::fx_hash::HashMap<TypeName, crate::types::Visibility>,
     /// A declared function's `vararg` parameter — class `@Metadata` must emit
     /// `ValueParameter.vararg_element_type` (f4) or a consumer demands one literal array (`too many
