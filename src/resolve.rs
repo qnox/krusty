@@ -82,6 +82,7 @@ mod call_result_constraint;
 mod call_result_templates;
 mod callable_reference_lhs;
 mod callable_reference_prefilter;
+mod callable_reference_publication;
 mod callable_reference_selection;
 mod candidate_display;
 mod class_literal_array_of_nothing;
@@ -194,6 +195,7 @@ mod local_initialization;
 mod local_method_dependencies;
 mod local_properties;
 mod loop_flow;
+mod member_extension_declarations;
 mod member_extension_instantiation;
 pub(crate) use member_extension_instantiation::MemberExtensionProbes;
 use member_extension_instantiation::{
@@ -10383,41 +10385,6 @@ struct DispatchPropertyBinding {
     owner_storage: bool,
 }
 
-/// The packages in scope for an unqualified top-level or extension call.
-/// Member-extension functions named `name` declared by `owner_ty`, with that owner's applied type
-/// bindings. Reads only a symbol source, so signature solving uses it without constructing a
-/// `Checker` — there is no body to check in Pass 1.
-fn semantic_member_ext_funs_in(
-    source: &dyn SymbolSource,
-    owner_ty: Ty,
-    name: &str,
-) -> (
-    Vec<(crate::libraries::LibraryMember, MemberExtFunSig)>,
-    HashMap<String, Ty>,
-) {
-    let Some(owner) = owner_ty.obj_internal() else {
-        return (Vec::new(), HashMap::default());
-    };
-    let Some(declaration) = source.classifier(owner) else {
-        return (Vec::new(), HashMap::default());
-    };
-    let class_bindings = declaration
-        .type_params
-        .iter()
-        .cloned()
-        .zip(owner_ty.type_args().iter().copied())
-        .collect();
-    let functions = declaration
-        .members
-        .iter()
-        .filter(|member| member.name == name && member.is_member_extension())
-        .filter_map(|member| {
-            Checker::semantic_member_ext_fun(member).map(|signature| (member.clone(), signature))
-        })
-        .collect();
-    (functions, class_bindings)
-}
-
 /// Applied semantic hierarchy from a federated symbol source. This is the Pass-2 counterpart of
 /// the mutable collection table's provisional hierarchy walk and remains valid after `ClassSig`
 /// destruction.
@@ -10463,7 +10430,11 @@ fn member_extension_function_shapes_in(
         for (owner, owner_ty, dispatch_depth) in
             applied_symbol_hierarchy(source, dispatch_receiver.ty)
         {
-            let (functions, class_bindings) = semantic_member_ext_funs_in(source, owner_ty, name);
+            let member_extension_declarations::MemberExtensionDeclarations {
+                functions,
+                bindings: class_bindings,
+                input_bounds,
+            } = member_extension_declarations::at_receiver(source, owner_ty, name);
             crate::trace_compiler!(
                 "resolve",
                 "member extension scope name={name} dispatch={:?} owner={owner} declarations={}",
@@ -10544,6 +10515,7 @@ fn member_extension_function_shapes_in(
                     dispatch_receiver.ty,
                     &mut diagnostic_candidate,
                     &class_bindings,
+                    &input_bounds,
                 );
                 diagnostic_candidate.scope_rank =
                     u32::try_from(priority.dispatch_rank).unwrap_or(u32::MAX);
@@ -14435,6 +14407,7 @@ impl<'a> Checker<'a> {
                             &self.anonymous_lexical_scope,
                             name,
                             function_local,
+                            capture_storage::ConstructorArgumentUses::Candidates,
                         );
                     let shared_cell = capture_storage::CapturedBinding {
                         delegated: local.delegate_storage_ty.is_some(),
@@ -14596,6 +14569,7 @@ impl<'a> Checker<'a> {
                         calls: &self.resolved_calls,
                         expressions: &self.expr_lowers,
                         statements: &self.stmt_lowers,
+                        constructor_arguments: capture_storage::ConstructorArgumentUses::Candidates,
                     },
                     &mut self.discovered_anonymous_captures,
                 );
@@ -14679,6 +14653,10 @@ impl<'a> Checker<'a> {
                         calls: &self.resolved_calls,
                         expressions: &self.expr_lowers,
                         statements: &self.stmt_lowers,
+                        constructor_arguments: capture_storage::ConstructorArgumentUses::Checked {
+                            expressions: &self.expr_lowers,
+                            types: &self.expr_types,
+                        },
                     },
                     &mut self.discovered_anonymous_captures,
                 );
@@ -31024,6 +31002,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         field_ty: None,
         field_receiver_identity: None,
         expr_lowers: HashMap::default(),
+        selected_callable_reference_diagnostics: HashMap::default(),
         resolved_sam_conversions: HashMap::default(),
         inferred_fun_rets: HashMap::default(),
         inferred_ext_fun_rets: HashMap::default(),
@@ -31158,6 +31137,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         checked_local_class_declarations: crate::fx_hash::HashSet::default(),
         checked_local_classifier_identities: HashMap::default(),
         checked_local_classifier_type_arguments: HashMap::default(),
+        checked_local_classifier_input_bounds: HashMap::default(),
         failed_local_declaration_bindings: crate::fx_hash::HashSet::default(),
         signature_default_expression_depth: 0,
         anonymous_lexical_scope: AnonymousLexicalClassScope::default(),
@@ -33517,6 +33497,8 @@ struct Checker<'a> {
     field_receiver_identity: Option<(usize, usize)>,
     /// Accumulated output maps (moved into TypeInfo at the end of `check_file`).
     expr_lowers: HashMap<ExprId, ExprLowering>,
+    selected_callable_reference_diagnostics:
+        HashMap<ExprId, callable_reference_publication::SelectedReferenceDiagnostic>,
     resolved_sam_conversions: HashMap<ExprId, ResolvedSamConversion>,
     inferred_fun_rets: HashMap<(u32, u32), Ty>,
     inferred_ext_fun_rets: HashMap<(u32, u32, String), Ty>,
@@ -33818,6 +33800,8 @@ struct Checker<'a> {
     checked_local_class_declarations: crate::fx_hash::HashSet<DeclId>,
     checked_local_classifier_identities: HashMap<crate::fir::DeclarationId, TypeName>,
     checked_local_classifier_type_arguments: HashMap<crate::fir::DeclarationId, Vec<Ty>>,
+    checked_local_classifier_input_bounds:
+        HashMap<crate::fir::DeclarationId, crate::libraries::ReceiverInputBounds>,
     /// Stable local roles that the active parser binding could not supply. Publication consumes
     /// this failure ledger directly and never falls back to transient source coordinates.
     failed_local_declaration_bindings: crate::fx_hash::HashSet<crate::fir::DeclarationId>,
@@ -35109,6 +35093,7 @@ impl<'a> Checker<'a> {
                 return Ty::Error;
             }
         }
+        self.record_function_reference_diagnostic(expression, &function);
         let target = CallableReferenceTarget::Extension {
             callable: Box::new(target),
             stable_declaration: function.stable_declaration,
@@ -35652,99 +35637,6 @@ impl<'a> Checker<'a> {
             declaration,
             function.callable.ret,
         ))
-    }
-
-    fn record_top_level_function_ref(
-        &mut self,
-        expression: ExprId,
-        name: &str,
-        selected: &crate::libraries::FunctionInfo,
-        ty: Ty,
-    ) -> Ty {
-        let target = selected.callable.clone();
-        if let Some(source_key) = selected.source_key {
-            self.resolved_source_calls.insert(expression, source_key);
-        }
-        match (
-            selected.stable_declaration,
-            selected.source_key,
-            &target.origin,
-        ) {
-            (Some(_), _, Origin::Module { .. }) => {}
-            (None, Some(_), Origin::Module { .. }) => {}
-            (None, None, Origin::Library) if target.external_identity.is_some() => {}
-            _ => {
-                self.diags.error(
-                    self.member_name_span(expression, name),
-                    format!(
-                        "cannot reference '{name}': the selected callable has no stable identity"
-                    ),
-                );
-                return Ty::Error;
-            }
-        }
-        self.expr_lowers.insert(
-            expression,
-            ExprLowering::TopLevelFunctionRef(Box::new(ResolvedTopLevelFunctionRef {
-                target,
-                stable_declaration: selected.stable_declaration,
-            })),
-        );
-        ty
-    }
-
-    fn record_adapted_top_level_function_ref(
-        &mut self,
-        expression: ExprId,
-        name: &str,
-        selected: &crate::libraries::FunctionInfo,
-        expected: &'static crate::types::FnSig,
-        vararg_collect: Option<usize>,
-        argument_mapping: Option<Vec<AdaptedRefArgument>>,
-    ) -> Ty {
-        let resolved_argument_mapping = self
-            .callable_ref_argument_plan(selected, expected)
-            .expect("a selected adapted reference must retain its complete argument plan");
-        let target = selected.callable.clone();
-        if let Some(source_key) = selected.source_key {
-            self.resolved_source_calls.insert(expression, source_key);
-        }
-        let target_default_values = match (
-            selected.stable_declaration,
-            selected.source_key,
-            &target.origin,
-        ) {
-            (Some(_), _, Origin::Module { .. }) => selected.default_values.clone(),
-            (None, Some(_), Origin::Module { .. }) => selected.default_values.clone(),
-            (None, None, Origin::Library) if target.external_identity.is_some() => Vec::new(),
-            _ => {
-                self.diags.error(
-                    self.member_name_span(expression, name),
-                    format!(
-                        "cannot reference '{name}': the selected callable has no stable identity"
-                    ),
-                );
-                return Ty::Error;
-            }
-        };
-        self.expr_lowers.insert(
-            expression,
-            ExprLowering::AdaptedRef {
-                target: Box::new(target),
-                stable_declaration: selected.stable_declaration,
-                target_default_values,
-                adapted_params: expected.params.clone(),
-                ret: expected.ret,
-                vararg_tail: selected.call_sig.vararg
-                    && expected.params.len() + 1 == selected.callable.params.len(),
-                target_vararg: selected.call_sig.vararg,
-                vararg_collect,
-                argument_mapping,
-                resolved_argument_mapping,
-                suspend_conversion: expected.suspend && !selected.callable.suspend,
-            },
-        );
-        Ty::from(TyKind::Fun(expected))
     }
 
     /// Map an expected function value's parameters onto one declaration. Each target parameter is
@@ -36924,14 +36816,12 @@ impl<'a> Checker<'a> {
                     type_args,
                     declared_parameter,
                 );
-                let substituted =
-                    crate::symbol_resolver::ty_subst_keep_unbound(declared_parameter, &bindings);
-                let nested_expected = match substituted.kind() {
-                    TyKind::TyParam(_, bound) => {
-                        crate::symbol_resolver::ty_subst_keep_unbound(bound, &bindings)
-                    }
-                    _ => substituted,
-                };
+                let nested_expected = nested_producer_bindings::producer_expectation(
+                    &signature,
+                    type_args,
+                    &bindings,
+                    declared_parameter,
+                );
                 crate::trace_compiler!(
                     "resolve",
                     "postponed argument call={call:?} parameter={parameter} expected={nested_expected:?} generic_ret={:?}",
@@ -37359,7 +37249,7 @@ impl<'a> Checker<'a> {
                     argument_names,
                 )?
             };
-            let Some(mut score) = call_applicability::score(
+            let Some(mut score) = call_applicability::score_with_declaration(
                 self,
                 scope,
                 &shape.params,
@@ -37370,6 +37260,13 @@ impl<'a> Checker<'a> {
                     arg_names: argument_names,
                     trailing_lambda,
                 },
+                candidate.source_inputs.as_deref().map(|declaration| {
+                    call_applicability::DeclarationInputs {
+                        declaration,
+                        bindings: &specialized_bindings,
+                        parameter_indices: &shape.parameter_indices,
+                    }
+                }),
             ) else {
                 crate::trace_compiler!(
                     "resolve",
@@ -37446,7 +37343,7 @@ impl<'a> Checker<'a> {
                         argument_names,
                     )?
                 };
-                let Some(specialized_score) = call_applicability::score(
+                let Some(specialized_score) = call_applicability::score_with_declaration(
                     self,
                     scope,
                     &shape.params,
@@ -37457,6 +37354,13 @@ impl<'a> Checker<'a> {
                         arg_names: argument_names,
                         trailing_lambda,
                     },
+                    candidate.source_inputs.as_deref().map(|declaration| {
+                        call_applicability::DeclarationInputs {
+                            declaration,
+                            bindings: &specialized_bindings,
+                            parameter_indices: &shape.parameter_indices,
+                        }
+                    }),
                 ) else {
                     continue;
                 };
@@ -38371,6 +38275,10 @@ impl<'a> Checker<'a> {
             && resolved_signature.params == natural_params
             && resolved_signature.ret == member.ret
             && resolved_signature.suspend == member.suspend();
+        self.record_reference_diagnostic(
+            expression,
+            Self::library_member_candidate_display(&member.name, &member),
+        );
         crate::trace_compiler!(
             "callable_reference",
             "expression={expression:?} binding={binding:?} member={}.{} expected={:?} natural_params={natural_params:?} natural_ret={:?} mapping={argument_mapping:?} exact={exact_shape}",
@@ -38422,6 +38330,10 @@ impl<'a> Checker<'a> {
         if member.ret == Ty::Nothing {
             return None;
         }
+        self.record_reference_diagnostic(
+            expression,
+            Self::library_member_candidate_display(&member.name, &member),
+        );
         let mut params = member.params.clone();
         if matches!(binding, CallableReferenceBinding::Unbound) {
             params.insert(0, receiver);
@@ -45271,8 +45183,12 @@ impl<'a> Checker<'a> {
                     .zip(self.resolved_index)
                     .and_then(|(active, index)| active.canonical_classifier_declaration(d, index))
                 {
-                    self.checked_local_classifier_type_arguments
-                        .insert(declaration, dispatch_arguments.clone());
+                    self.record_body_local_classifier_arguments(
+                        declaration,
+                        &dispatch_arguments,
+                        &class_tparams,
+                        scope,
+                    );
                 }
             }
             let inherited_reified_type_parameters = cl
@@ -57145,6 +57061,8 @@ impl<'a> Checker<'a> {
         receiver: Option<ExprId>,
         name: String,
     ) -> Ty {
+        self.selected_callable_reference_diagnostics.remove(&e);
+        self.callable_reference_types.remove(&e);
         // Reflection classifiers inherit one callable
         // signature in metadata. Overload selection consumes that semantic signature; the original
         // nominal expectation remains below to determine the expression's reflection API type.
@@ -57157,6 +57075,9 @@ impl<'a> Checker<'a> {
         let previous_callable_reference = self.active_callable_reference.replace(e);
         let nominal = self.callable_ref_function_type(scope, e, selection_expected, receiver, name);
         self.active_callable_reference = previous_callable_reference;
+        if nominal.mentions_error() || nominal.mentions_pending() {
+            self.selected_callable_reference_diagnostics.remove(&e);
+        }
         let function_type = nominal
             .is_fun()
             .then_some(nominal)
@@ -57566,6 +57487,11 @@ impl<'a> Checker<'a> {
                 Err(error) => return Some(error),
             };
             if let Some(candidate) = candidate {
+                self.record_local_reference_diagnostic(
+                    expression,
+                    candidate.statement,
+                    candidate.signature.ret,
+                );
                 if let Some((plan, suspend_conversion)) = &candidate.adaptation {
                     if Self::adapted_ref_plan_is_identity(plan) && !suspend_conversion {
                         self.mark_local_function_ref(expression, candidate.statement, false);
@@ -58305,6 +58231,11 @@ impl<'a> Checker<'a> {
                     Err(error) => return self.set(e, error),
                 };
                 if let Some(candidate) = candidate {
+                    self.record_local_reference_diagnostic(
+                        e,
+                        candidate.statement,
+                        candidate.signature.ret,
+                    );
                     if let Some((plan, suspend_conversion)) = &candidate.adaptation {
                         if Self::adapted_ref_plan_is_identity(plan) && !suspend_conversion {
                             self.mark_local_function_ref(e, candidate.statement, true);

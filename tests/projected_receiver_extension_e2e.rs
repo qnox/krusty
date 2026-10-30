@@ -411,7 +411,8 @@ fn anonymous_factory_aliased_parent_runs_like_kotlinc() {
     common::expect_box_same_as_kotlinc(ANONYMOUS_ALIASED_PARENT, "anonymous_aliased_parent");
 }
 
-// Complete constructor-alias inference oracles are retained in #2655 with independent baselines.
+// Complete constructor-alias inference oracles live in
+// typealias_constructor_inference_e2e::parameterized_parent_aliases.
 
 const ANONYMOUS_INTERFACE_PARENT_ALIASES: &str = r#"
 interface Token<T>
