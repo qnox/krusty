@@ -238,6 +238,8 @@ reflection/typeOf/js/typeOfCapturedStar.kt
 reflection/typeOf/js/typeOfReifiedUnit.kt
 reflection/typeOf/nonReifiedTypeParameters/recursiveBoundWithInline.kt
 reflection/typeOf/nonReifiedTypeParameters/recursiveBoundWithoutInline.kt
+regressions/inlineScopes/libraryInlineLambdas.kt
+regressions/inlineScopes/libraryInlineNestedLambdas.kt
 regressions/kt1172.kt
 regressions/kt344Runnable.kt
 reified/catchParameter/nullableNothing.kt

@@ -265,6 +265,8 @@ reflection/typeOf/nonReifiedTypeParameters/recursiveBoundWithoutInline.kt
 reflection/types/innerGenericArguments.kt
 reflection/types/typeArguments.kt
 reflection/types/useSiteVariance.kt
+regressions/inlineScopes/libraryInlineLambdas.kt
+regressions/inlineScopes/libraryInlineNestedLambdas.kt
 regressions/kt1172.kt
 regressions/kt2246.kt
 regressions/kt344Runnable.kt
