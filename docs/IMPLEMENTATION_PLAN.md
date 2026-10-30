@@ -6173,7 +6173,9 @@ results remain exact; shared outcomes and operand ABI ownership are unchanged.
 Canonical compact parent templates, including alias arguments, are computed once before signature
 inference and shared with classifier publication; parent diagnostics retain their publication order.
 Complete anonymous metadata parity stays in #2653/#2654 with its full retained fixture oracles.
-Parameterized alias superclass constructor argument inference remains a separate repair in #2655.
+Parameterized alias superclass arguments retain their enclosing lexical bindings. The original
+expanded #2655 fixture and both complete ABI/runtime controls are retained in
+`tests/typealias_constructor_inference_e2e/parameterized_parent_aliases.rs` alongside the minimal tests.
 
 ## Enclosing formal field signatures
 
