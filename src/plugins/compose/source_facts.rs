@@ -11,6 +11,7 @@ use crate::plugins::runtime_declarations::PluginRuntime;
 use crate::plugins::{PluginRejection, PluginSourceView};
 use crate::types::{Ty, TyKind, TypeName};
 
+use super::applier_targets::{self, LambdaCall, TargetConstraints};
 use super::durable_keys::{package_hash, radix_string, KeyPath};
 use super::runtime::ComposeRuntime;
 use super::{ComposeOptions, COMPOSABLE};
@@ -18,6 +19,10 @@ use super::{ComposeOptions, COMPOSABLE};
 /// The Compose facts of one file.
 pub struct ComposeFileFacts {
     pub(super) functions: Vec<RestartableFunction>,
+    /// The file's composable lambdas that capture nothing, in source order.
+    pub(super) lambdas: Vec<SingletonLambda>,
+    /// The class holding them: the file's `ComposableSingletons$<File>Kt`.
+    pub(super) singletons: TypeName,
     pub(super) runtime: ComposeRuntime,
 }
 
@@ -34,6 +39,9 @@ pub(super) struct RestartableFunction {
     pub(super) trace: Option<String>,
     /// Whether the function is annotated with its key.
     pub(super) key_meta: bool,
+    /// The applier scheme inferred for its composable lambda parameters, which
+    /// `@ComposableInferredTarget` records.
+    pub(super) inferred_target: Option<String>,
     /// The 1-based line of the body's opening brace, where the group starts.
     pub(super) opening_line: u32,
     /// The 1-based line of the `fun` keyword, where the group is skipped.
@@ -49,6 +57,31 @@ pub(super) struct RestartableFunction {
     pub(super) lifting: (crate::ir::IrLiftingSequence, u32),
 }
 
+/// A composable lambda that captures nothing, which kotlinc's `ComposerLambdaMemoization` creates
+/// once, in a property of the file's `ComposableSingletons` object, and reads wherever it is
+/// written.
+pub(super) struct SingletonLambda {
+    /// The lambda expression, an argument of the composable call `call`.
+    pub(super) lambda: ExprId,
+    pub(super) call: ExprId,
+    /// The function its body was lowered to.
+    pub(super) implementation: FunId,
+    /// The durable key of its group, after which its property is named.
+    pub(super) key: i32,
+    /// The lambda's UTF-16 start and end offsets, which `@FunctionKeyMeta` records.
+    pub(super) offsets: (i32, i32),
+    /// The `sourceInformation` string, when the option asks for it.
+    pub(super) source_information: Option<String>,
+    /// The `traceEventStart` string, when trace markers are enabled.
+    pub(super) trace: Option<String>,
+    /// Whether its implementation is annotated with its key.
+    pub(super) key_meta: bool,
+    /// The 1-based line of the opening brace, where the lambda is created and skipped.
+    pub(super) opening_line: u32,
+    /// Its body's direct composable calls, in source order.
+    pub(super) calls: Vec<ComposableCallSite>,
+}
+
 /// One value parameter of a restartable function.
 pub(super) struct TrackedParameter {
     pub(super) name: String,
@@ -57,13 +90,18 @@ pub(super) struct TrackedParameter {
     pub(super) used: bool,
     /// Its default value, a constant the group assigns when the caller omits the argument.
     pub(super) default: Option<ExprId>,
+    /// Whether it is a composable `() -> Unit` value, which takes the caller's composer when called
+    /// and is compared by identity.
+    pub(super) lambda: bool,
 }
 
 /// A composable call directly in a restartable body, and what the caller knows about each argument
 /// it passes, which becomes the call's `$changed` bits.
 pub(super) struct ComposableCallSite {
+    /// A call of a composable function, or an `invoke` of a composable parameter.
     pub(super) call: ExprId,
-    /// The callee's parameters in order, the omitted ones included.
+    /// The callee's parameters in order, the omitted ones included; an `invoke`'s one slot is the
+    /// called value itself.
     pub(super) arguments: Vec<ArgumentState>,
 }
 
@@ -109,8 +147,32 @@ pub(super) fn record(
         })
         .map(|(&function, _)| function)
         .collect::<crate::fx_hash::HashSet<_>>();
-    reject_composable_types(ir, composable, rejections);
+    let package_functions = ir
+        .package_functions
+        .iter()
+        .map(|declaration| declaration.function)
+        .collect::<crate::fx_hash::HashSet<_>>();
+    reject_composable_types(
+        ir,
+        composable,
+        |function, index| {
+            composable_functions.contains(&function)
+                && package_functions.contains(&function)
+                && is_composable_lambda(ir, function, index, composable)
+        },
+        rejections,
+    );
     reject_stability_inferred_classes(ir, source, rejections);
+    if ir.file_annotations.applications().any(|annotation| {
+        GROUP_ANNOTATIONS[4..]
+            .iter()
+            .any(|&(target, _)| annotation.internal == crate::types::type_name(target))
+    }) {
+        rejections.push(PluginRejection {
+            span: crate::diag::Span::new(0, 0),
+            message: unsupported("a file-level applier target"),
+        });
+    }
     let calls = composable_calls(ir, source, &composable_functions, composable);
     if composable_functions.is_empty() && calls.is_empty() {
         return;
@@ -121,7 +183,21 @@ pub(super) fn record(
         0 => source.file_name.to_string(),
         hash => format!("{}#{}", source.file_name, radix_string(hash, 36)),
     };
+    let singletons = singletons_class(ir, source.file_name);
+    // The class's source name, which a lambda's trace string spells.
+    let singletons_name = singletons.render().replace('/', ".");
+    let scope = BodyScope {
+        calls: &calls,
+        positions: &positions,
+        composable,
+        options,
+        source,
+        file_reference: &file_reference,
+        singletons: &singletons_name,
+    };
     let mut functions = Vec::new();
+    let mut singleton_lambdas = Vec::new();
+    let mut targets = HashMap::default();
     let mut handled = crate::fx_hash::HashSet::default();
     // Every call directly in a restartable body, a rejected one included, which needs no second
     // rejection as a stray call.
@@ -132,8 +208,11 @@ pub(super) fn record(
         }
         handled.insert(declaration.function);
         let span = declaration.signature_span;
+        let lambdas = (0..declaration.params.len())
+            .map(|index| is_composable_lambda(ir, declaration.function, index, composable))
+            .collect::<Vec<_>>();
         if let Some(what) = unsupported_group_annotation(ir, declaration.function)
-            .or_else(|| unsupported_declaration(declaration))
+            .or_else(|| unsupported_declaration(declaration, &lambdas))
             .or_else(|| unsupported_defaults(ir, declaration.function))
             .or_else(|| {
                 (options.source_information
@@ -165,89 +244,86 @@ pub(super) fn record(
             });
             continue;
         };
-        if let Some(what) = unsupported_body_expression(ir, body.block) {
+        let parameter_count = declaration.params.len() as u32;
+        let invoked = |statement: ExprId| match &ir.exprs[statement as usize] {
+            IrExpr::InvokeFunction { func, .. } => match ir.exprs[*func as usize] {
+                IrExpr::GetValue(index) if index < parameter_count && lambdas[index as usize] => {
+                    Some(index)
+                }
+                _ => None,
+            },
+            _ => None,
+        };
+        let direct = body
+            .statements
+            .iter()
+            .copied()
+            .filter(|&statement| calls.contains_key(&statement) || invoked(statement).is_some())
+            .collect::<Vec<_>>();
+        direct_calls.extend(direct.iter().copied());
+        let singleton_arguments = lambda_arguments(ir, &direct, composable);
+        if let Some(what) = unsupported_body_expression(ir, body.block, &singleton_arguments) {
             rejections.push(PluginRejection {
                 span,
                 message: unsupported(what),
             });
+            include_lambda_calls(ir, &singleton_arguments, &calls, &mut direct_calls);
             continue;
         }
-        // The recompose lambda is the only callable lifted along the function's sequence; one that
-        // also numbers source callables (another overload's) is not placed yet.
+        // The recompose lambda is the only callable lifted along the function's sequence once the
+        // composable lambdas it passes leave for the singletons class; a sequence that also numbers
+        // another lambda, of the function's own or of an overload's, is not placed yet.
         let lifting = crate::ir::IrLiftingSequence {
             source: source.source,
             owner: "file".into(),
             container: declaration.name.as_str().into(),
         };
-        if ir.lifts_along(&lifting) {
+        let relocated = singleton_arguments
+            .iter()
+            .map(|argument| argument.implementation)
+            .collect::<Vec<_>>();
+        if ir.lifts_other_than(&lifting, &relocated) {
             rejections.push(PluginRejection {
                 span,
                 message: unsupported(
-                    "a composable function whose name an overload with lambdas shares",
+                    "a composable function whose lambda numbering another lambda or overload shares",
                 ),
             });
+            include_lambda_calls(ir, &singleton_arguments, &calls, &mut direct_calls);
             continue;
         }
-        let direct = body
-            .statements
-            .iter()
-            .copied()
-            .filter(|statement| calls.contains_key(statement))
-            .collect::<Vec<_>>();
-        direct_calls.extend(direct.iter().copied());
-        let parameter_count = declaration.params.len() as u32;
+        if let Some(what) = unsupported_lambda_use(ir, body.block, &direct, &lambdas) {
+            rejections.push(PluginRejection {
+                span,
+                message: unsupported(what),
+            });
+            include_lambda_calls(ir, &singleton_arguments, &calls, &mut direct_calls);
+            continue;
+        }
         let mut sites = Vec::with_capacity(direct.len());
         let mut locations = Vec::with_capacity(direct.len());
         for &call in &direct {
-            if !calls[&call].same_file {
-                rejections.push(PluginRejection {
-                    span: calls[&call].span.unwrap_or(span),
-                    message: unsupported("a call to a composable function from another file"),
+            if let Some(index) = invoked(call) {
+                let Some(call_span) = source.expression_span(ir, call) else {
+                    rejections.push(PluginRejection {
+                        span,
+                        message: unsupported("a composable call without a source position"),
+                    });
+                    continue;
+                };
+                sites.push(ComposableCallSite {
+                    call,
+                    arguments: vec![ArgumentState::Forwarded(index)],
                 });
+                locations.push(call_location(&positions, call_span));
                 continue;
             }
-            let Some(call_span) = calls[&call].span else {
-                rejections.push(PluginRejection {
-                    span,
-                    message: unsupported("a composable call without a source position"),
-                });
-                continue;
-            };
-            let IrExpr::Call { callee, args, .. } = &ir.exprs[call as usize] else {
-                unreachable!("a composable call is a call");
-            };
-            let omitted: &[u32] = match &**callee {
-                Callee::LocalWithDefaults { defaults, .. } => defaults,
-                _ => &[],
-            };
-            let mut supplied = args.iter();
-            let arguments = (0..(args.len() + omitted.len()) as u32)
-                .map(|ordinal| {
-                    if omitted.contains(&ordinal) {
-                        return Some(ArgumentState::Omitted);
-                    }
-                    let argument = *supplied.next()?;
-                    argument_state(ir, argument, parameter_count)
-                })
-                .collect::<Option<Vec<_>>>();
-            let Some(arguments) = arguments else {
-                rejections.push(PluginRejection {
-                    span: call_span,
-                    message: unsupported(
-                        "a composable call argument that is not a constant, a parameter, or \
-                         computed from a parameter",
-                    ),
-                });
-                continue;
-            };
-            sites.push(ComposableCallSite { call, arguments });
-            let start = positions.unit(call_span.lo);
-            let end = positions.unit(call_span.hi);
-            locations.push(format!(
-                "{}@{start}L{}",
-                positions.line(call_span.lo),
-                end - start
-            ));
+            if let Some((site, location)) =
+                scope.direct_call_site(ir, call, parameter_count, span, rejections)
+            {
+                sites.push(site);
+                locations.push(location);
+            }
         }
         let name = ir
             .fn_source_names
@@ -259,6 +335,12 @@ pub(super) fn record(
         } else {
             format!("{package}.{name}")
         };
+        if lambdas.contains(&true) {
+            targets.insert(
+                declaration.function,
+                target_constraints(ir, &lambdas, &sites),
+            );
+        }
         let used = used_parameters(ir, body.block, parameter_count);
         let defaults = ir
             .param_defaults(declaration.function)
@@ -272,13 +354,21 @@ pub(super) fn record(
                 ty: *ty,
                 used,
                 default: defaults.get(index).copied().flatten(),
+                lambda: lambdas[index],
             })
             .collect::<Vec<_>>();
         let signature = format!(
             "{name}({}){}",
             parameters
                 .iter()
-                .map(|parameter| simple_type_name(parameter.ty))
+                .map(|parameter| {
+                    // The frontend's type for a composable `() -> Unit` value.
+                    if parameter.lambda {
+                        "ComposableFunction0".to_string()
+                    } else {
+                        simple_type_name(parameter.ty)
+                    }
+                })
                 .collect::<Vec<_>>()
                 .join(","),
             simple_type_name(declaration.ret)
@@ -297,14 +387,28 @@ pub(super) fn record(
                     .join(",")
             )
         };
+        let path = KeyPath {
+            signature: &signature,
+            package: &package,
+            file_name: source.file_name,
+        };
+        for argument in &singleton_arguments {
+            let callee = callee_name(ir, argument.call);
+            let sibling = direct
+                .iter()
+                .take_while(|&&call| call != argument.call)
+                .filter(|&&call| callee.is_some() && callee_name(ir, call) == callee)
+                .count() as u32;
+            let key = path.lambda_key(callee.unwrap_or_default(), sibling, argument.parameter);
+            if let Some(lambda) =
+                scope.singleton_lambda(ir, argument, key, &mut direct_calls, rejections)
+            {
+                singleton_lambdas.push(lambda);
+            }
+        }
         functions.push(RestartableFunction {
             function: declaration.function,
-            key: KeyPath {
-                signature: &signature,
-                package: &package,
-                file_name: source.file_name,
-            }
-            .key(),
+            key: path.key(),
             offsets: (
                 positions.unit(span.lo) as i32,
                 positions.unit(body_span.hi) as i32,
@@ -320,6 +424,7 @@ pub(super) fn record(
                 )
             }),
             key_meta: options.function_key_meta,
+            inferred_target: None,
             opening_line: positions.line(body_span.lo) + 1,
             declaration_line: positions.line(span.lo) + 1,
             closing_line: positions.line(body_span.hi.saturating_sub(1)) + 1,
@@ -327,6 +432,37 @@ pub(super) fn record(
             calls: sites,
             lifting: (lifting, declaration.source_order),
         });
+    }
+    // A lambda passed to a rejected function constrains nothing the file still compiles.
+    let constrained = targets
+        .keys()
+        .copied()
+        .collect::<crate::fx_hash::HashSet<_>>();
+    for constraints in targets.values_mut() {
+        constraints
+            .calls
+            .retain(|call| constrained.contains(&call.callee));
+    }
+    match applier_targets::infer(&targets) {
+        Ok(schemes) => {
+            for function in &mut functions {
+                function.inferred_target = schemes
+                    .get(&function.function)
+                    .and_then(applier_targets::Scheme::inferred);
+            }
+        }
+        Err(recursive) => rejections.push(PluginRejection {
+            span: ir
+                .package_functions
+                .iter()
+                .find(|declaration| declaration.function == recursive)
+                .map_or(crate::diag::Span::new(0, 0), |declaration| {
+                    declaration.signature_span
+                }),
+            message: unsupported(
+                "a recursive composable function whose lambda parameters' applier kotlinc infers",
+            ),
+        }),
     }
     for (&function, _) in ir
         .function_annotations
@@ -351,6 +487,8 @@ pub(super) fn record(
         .map(|(_, call)| call.span.unwrap_or(crate::diag::Span::new(0, 0)))
         .collect::<Vec<_>>();
     stray.sort_by_key(|span| (span.lo, span.hi));
+    // A lambda's body is lowered twice, once for its inline form, so a call in it is met twice.
+    stray.dedup();
     rejections.extend(stray.into_iter().map(|span| PluginRejection {
         span,
         message: unsupported("a composable call outside the statements of a composable body"),
@@ -359,7 +497,15 @@ pub(super) fn record(
         return;
     };
     match ComposeRuntime::bind(runtime) {
-        Ok(runtime) => ir.compose = Some(Box::new(ComposeFileFacts { functions, runtime })),
+        Ok(runtime) => {
+            singleton_lambdas.sort_by_key(|lambda| lambda.offsets);
+            ir.compose = Some(Box::new(ComposeFileFacts {
+                functions,
+                lambdas: singleton_lambdas,
+                singletons,
+                runtime,
+            }));
+        }
         Err(missing) => {
             let span = ir
                 .package_functions
@@ -413,8 +559,9 @@ fn line_start(text: &str, line: u32) -> u32 {
     offset as u32
 }
 
-/// The runtime annotations that change how kotlinc's plugin groups a composable function.
-const GROUP_ANNOTATIONS: [(&str, &str); 4] = [
+/// The runtime annotations that change how kotlinc's plugin groups a composable function, or fix
+/// the applier its inference would otherwise find.
+const GROUP_ANNOTATIONS: [(&str, &str); 6] = [
     (
         "androidx/compose/runtime/NonRestartableComposable",
         "a `@NonRestartableComposable` function",
@@ -430,6 +577,14 @@ const GROUP_ANNOTATIONS: [(&str, &str); 4] = [
     (
         "androidx/compose/runtime/ExplicitGroupsComposable",
         "an `@ExplicitGroupsComposable` function",
+    ),
+    (
+        "androidx/compose/runtime/ComposableTarget",
+        "a `@ComposableTarget` function",
+    ),
+    (
+        "androidx/compose/runtime/ComposableOpenTarget",
+        "a `@ComposableOpenTarget` function",
     ),
 ];
 
@@ -461,8 +616,68 @@ fn unsupported_group_annotation(ir: &IrFile, function: FunId) -> Option<&'static
 /// parameters (`ComposeRuntimeFeature.SourceInfoParameterNames`).
 const SOURCE_INFORMATION: &str = "androidx/compose/runtime/tooling/SourceInformation";
 
-/// The declaration shapes the restart-group transform does not handle yet.
-fn unsupported_declaration(declaration: &crate::ir::IrPackageFunction) -> Option<&'static str> {
+/// What a restartable body does with its composable lambda parameters, which their applier scheme
+/// is inferred from.
+fn target_constraints(
+    ir: &IrFile,
+    lambdas: &[bool],
+    sites: &[ComposableCallSite],
+) -> TargetConstraints {
+    let mut invoked = Vec::new();
+    let mut calls = Vec::new();
+    for site in sites {
+        match &ir.exprs[site.call as usize] {
+            IrExpr::InvokeFunction { .. } => {
+                if let [ArgumentState::Forwarded(parameter)] = site.arguments[..] {
+                    invoked.push(parameter);
+                }
+            }
+            IrExpr::Call { callee, .. } => {
+                let arguments = (0..)
+                    .zip(&site.arguments)
+                    .filter_map(|(callee_parameter, argument)| match *argument {
+                        ArgumentState::Forwarded(parameter) if lambdas[parameter as usize] => {
+                            Some((callee_parameter, parameter))
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                if !arguments.is_empty() {
+                    calls.push(LambdaCall {
+                        callee: callee
+                            .source_function()
+                            .expect("a composable call in the file calls one of its functions"),
+                        arguments,
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+    TargetConstraints {
+        lambdas: (0..)
+            .zip(lambdas)
+            .filter(|(_, &lambda)| lambda)
+            .map(|(index, _)| index)
+            .collect(),
+        invoked,
+        calls,
+    }
+}
+
+/// `sourceInformation`'s location of a composable call: its line, offset and length.
+fn call_location(positions: &Utf16Offsets, span: crate::diag::Span) -> String {
+    let start = positions.unit(span.lo);
+    let end = positions.unit(span.hi);
+    format!("{}@{start}L{}", positions.line(span.lo), end - start)
+}
+
+/// The declaration shapes the restart-group transform does not handle yet. `lambdas` says which
+/// parameters are composable `() -> Unit` values, which are stable.
+fn unsupported_declaration(
+    declaration: &crate::ir::IrPackageFunction,
+    lambdas: &[bool],
+) -> Option<&'static str> {
     if declaration.receiver.is_some() || declaration.context_count != 0 {
         Some("a composable function with a receiver")
     } else if declaration.vararg_index.is_some() {
@@ -472,7 +687,8 @@ fn unsupported_declaration(declaration: &crate::ir::IrPackageFunction) -> Option
     } else if declaration
         .params
         .iter()
-        .any(|(_, ty)| !is_known_stable(*ty))
+        .zip(lambdas)
+        .any(|((_, ty), &lambda)| !lambda && !is_known_stable(*ty))
     {
         Some("a composable function parameter whose stability kotlinc infers")
     } else if !matches!(declaration.ret.kind(), TyKind::Unit) {
@@ -489,17 +705,442 @@ fn unsupported_declaration(declaration: &crate::ir::IrPackageFunction) -> Option
 }
 
 /// An expression in a composable body the transform does not handle yet: an early `return`, which
-/// must end the group first, or a lambda, whose lifted name the group's own lambda would share.
-fn unsupported_body_expression(ir: &IrFile, block: ExprId) -> Option<&'static str> {
+/// must end the group first, a lambda other than the composable `singletons` passed to its calls,
+/// whose lifted name the group's own lambda would share, or one of those that captures a value or
+/// holds another lambda.
+fn unsupported_body_expression(
+    ir: &IrFile,
+    block: ExprId,
+    singletons: &[LambdaArgument],
+) -> Option<&'static str> {
     let mut pending = vec![block];
     while let Some(expression) = pending.pop() {
         match &ir.exprs[expression as usize] {
             IrExpr::Return(_) => return Some("a `return` in a composable function"),
+            IrExpr::Lambda {
+                captures, impl_fn, ..
+            } if singletons
+                .iter()
+                .any(|argument| argument.lambda == expression) =>
+            {
+                if !captures.is_empty() {
+                    return Some("a composable lambda that captures a value");
+                }
+                if holds_lambda(ir, *impl_fn) {
+                    return Some("a lambda in a composable lambda");
+                }
+            }
             IrExpr::Lambda { .. } => return Some("a lambda in a composable function"),
             _ => crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child)),
         }
     }
     None
+}
+
+/// Whether the body of `function` writes a lambda.
+fn holds_lambda(ir: &IrFile, function: FunId) -> bool {
+    let mut pending = ir.functions[function as usize]
+        .body
+        .into_iter()
+        .collect::<Vec<_>>();
+    while let Some(expression) = pending.pop() {
+        if matches!(ir.exprs[expression as usize], IrExpr::Lambda { .. }) {
+            return true;
+        }
+        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+    }
+    false
+}
+
+/// Count the composable calls in the bodies of `arguments`' lambdas and the lambdas in them, both
+/// lowerings of each, as answered by the rejection of the function that passes them.
+fn include_lambda_calls(
+    ir: &IrFile,
+    arguments: &[LambdaArgument],
+    calls: &HashMap<ExprId, ComposableCall>,
+    direct_calls: &mut crate::fx_hash::HashSet<ExprId>,
+) {
+    for argument in arguments {
+        let mut pending = ir.functions[argument.implementation as usize]
+            .body
+            .into_iter()
+            .collect::<Vec<_>>();
+        if let IrExpr::Lambda {
+            inline_body: Some(copy),
+            ..
+        } = ir.exprs[argument.lambda as usize]
+        {
+            pending.push(copy);
+        }
+        while let Some(expression) = pending.pop() {
+            if calls.contains_key(&expression) {
+                direct_calls.insert(expression);
+            }
+            if let IrExpr::Lambda { impl_fn, .. } = ir.exprs[expression as usize] {
+                pending.extend(ir.functions[impl_fn as usize].body);
+            }
+            crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+        }
+    }
+}
+
+/// A lambda passed to a composable lambda parameter of a composable call.
+pub(super) struct LambdaArgument {
+    call: ExprId,
+    lambda: ExprId,
+    implementation: FunId,
+    /// The callee's parameter it is passed to.
+    parameter: u32,
+}
+
+/// The lambdas `direct`'s calls pass to composable lambda parameters of the file's functions.
+fn lambda_arguments(ir: &IrFile, direct: &[ExprId], composable: TypeName) -> Vec<LambdaArgument> {
+    let mut arguments = Vec::new();
+    for &call in direct {
+        let IrExpr::Call { callee, args, .. } = &ir.exprs[call as usize] else {
+            continue;
+        };
+        let Some(function) = callee.source_function() else {
+            continue;
+        };
+        for (parameter, argument) in supplied_arguments(callee, args) {
+            if let IrExpr::Lambda { impl_fn, .. } = ir.exprs[argument as usize] {
+                if is_composable_lambda(ir, function, parameter as usize, composable) {
+                    arguments.push(LambdaArgument {
+                        call,
+                        lambda: argument,
+                        implementation: impl_fn,
+                        parameter,
+                    });
+                }
+            }
+        }
+    }
+    arguments
+}
+
+/// Each argument a call supplies, with the callee parameter it is passed to; the parameters it
+/// omits take their defaults.
+fn supplied_arguments<'a>(
+    callee: &'a Callee,
+    args: &'a [ExprId],
+) -> impl Iterator<Item = (u32, ExprId)> + 'a {
+    let omitted = omitted_parameters(callee);
+    (0u32..)
+        .filter(move |parameter| !omitted.contains(parameter))
+        .zip(args.iter().copied())
+}
+
+/// The parameters whose arguments a call omits.
+fn omitted_parameters(callee: &Callee) -> &[u32] {
+    match callee {
+        Callee::LocalWithDefaults { defaults, .. } => defaults,
+        _ => &[],
+    }
+}
+
+/// The source name of the file's function a call calls.
+fn callee_name(ir: &IrFile, call: ExprId) -> Option<&str> {
+    let IrExpr::Call { callee, .. } = &ir.exprs[call as usize] else {
+        return None;
+    };
+    let function = callee.source_function()?;
+    Some(
+        ir.fn_source_names
+            .get(&function)
+            .unwrap_or(&ir.functions[function as usize].name),
+    )
+}
+
+/// The file's `ComposableSingletons` class, named after the file as kotlinc names the file's own
+/// class (`PackagePartClassUtils.getFilePartShortName`), whatever `@JvmName` the file has.
+fn singletons_class(ir: &IrFile, file_name: &str) -> TypeName {
+    let stem = file_name.strip_suffix(".kt").unwrap_or(file_name);
+    let name = format!(
+        "ComposableSingletons${}",
+        crate::names::file_part_short_name(stem)
+    );
+    match ir.package.as_deref() {
+        Some(package) if !package.is_empty() => {
+            crate::types::type_name(&format!("{package}/{name}"))
+        }
+        _ => crate::types::type_name(&name),
+    }
+}
+
+/// The source block common lowering gives a lambda's function: its body is a block of the
+/// source `{ … }`, wrapped once more, and the `return Unit` that ends it.
+pub(super) fn lambda_body(ir: &IrFile, function: FunId) -> Option<FunctionBody> {
+    let root = ir.functions[function as usize].body?;
+    let IrExpr::Block { stmts, value: None } = &ir.exprs[root as usize] else {
+        return None;
+    };
+    let [wrapper, end] = stmts.as_slice() else {
+        return None;
+    };
+    if !matches!(ir.exprs[*end as usize], IrExpr::Return(Some(_))) {
+        return None;
+    }
+    let IrExpr::Block {
+        stmts: wrapped,
+        value: None,
+    } = &ir.exprs[*wrapper as usize]
+    else {
+        return None;
+    };
+    let [block] = wrapped.as_slice() else {
+        return None;
+    };
+    let IrExpr::Block { stmts, value } = &ir.exprs[*block as usize] else {
+        return None;
+    };
+    Some(FunctionBody {
+        block: *block,
+        statements: stmts.iter().copied().chain(*value).collect(),
+    })
+}
+
+/// What a file's composable bodies are classified against.
+struct BodyScope<'a> {
+    calls: &'a HashMap<ExprId, ComposableCall>,
+    positions: &'a Utf16Offsets,
+    composable: TypeName,
+    options: &'a ComposeOptions,
+    source: &'a PluginSourceView<'a>,
+    /// The file as source information names it, with its package hash.
+    file_reference: &'a str,
+    /// The source name of the file's `ComposableSingletons` class.
+    singletons: &'a str,
+}
+
+impl BodyScope<'_> {
+    /// The site of `call`, a direct call of one of the file's composable functions in a body with
+    /// `parameters` value parameters, and its `sourceInformation` location; `None` after
+    /// rejecting it.
+    fn direct_call_site(
+        &self,
+        ir: &IrFile,
+        call: ExprId,
+        parameters: u32,
+        span: crate::diag::Span,
+        rejections: &mut Vec<PluginRejection>,
+    ) -> Option<(ComposableCallSite, String)> {
+        let found = &self.calls[&call];
+        if !found.same_file {
+            rejections.push(PluginRejection {
+                span: found.span.unwrap_or(span),
+                message: unsupported("a call to a composable function from another file"),
+            });
+            return None;
+        }
+        let Some(call_span) = found.span else {
+            rejections.push(PluginRejection {
+                span,
+                message: unsupported("a composable call without a source position"),
+            });
+            return None;
+        };
+        let IrExpr::Call { callee, args, .. } = &ir.exprs[call as usize] else {
+            unreachable!("a composable call is a call");
+        };
+        let function = callee
+            .source_function()
+            .expect("a call of the file's composable function names it");
+        let omitted = omitted_parameters(callee);
+        let mut supplied = supplied_arguments(callee, args).peekable();
+        let arguments = (0..(args.len() + omitted.len()) as u32)
+            .map(|parameter| {
+                if omitted.contains(&parameter) {
+                    return Some(ArgumentState::Omitted);
+                }
+                let (_, argument) = supplied.next()?;
+                // A composable lambda that captures nothing is a singleton, the same in every
+                // execution.
+                if matches!(ir.exprs[argument as usize], IrExpr::Lambda { .. }) {
+                    return is_composable_lambda(ir, function, parameter as usize, self.composable)
+                        .then_some(ArgumentState::Static);
+                }
+                argument_state(ir, argument, parameters)
+            })
+            .collect::<Option<Vec<_>>>();
+        let Some(arguments) = arguments else {
+            rejections.push(PluginRejection {
+                span: call_span,
+                message: unsupported(
+                    "a composable call argument that is not a constant, a parameter, or \
+                     computed from a parameter",
+                ),
+            });
+            return None;
+        };
+        Some((
+            ComposableCallSite { call, arguments },
+            call_location(self.positions, call_span),
+        ))
+    }
+
+    /// The facts of the singleton lambda `argument` passes, whose group key is `key`, or `None`
+    /// after rejecting its body. The composable calls in it join `direct_calls`.
+    fn singleton_lambda(
+        &self,
+        ir: &IrFile,
+        argument: &LambdaArgument,
+        key: i32,
+        direct_calls: &mut crate::fx_hash::HashSet<ExprId>,
+        rejections: &mut Vec<PluginRejection>,
+    ) -> Option<SingletonLambda> {
+        let span = self
+            .source
+            .expression_span(ir, argument.lambda)
+            .unwrap_or(crate::diag::Span::new(0, 0));
+        let mut reject = |what: &str| {
+            rejections.push(PluginRejection {
+                span,
+                message: unsupported(what),
+            });
+        };
+        // The form of the body kept for inlining goes with the lambda, calls and all.
+        if let IrExpr::Lambda {
+            inline_body: Some(copy),
+            ..
+        } = ir.exprs[argument.lambda as usize]
+        {
+            let mut pending = vec![copy];
+            while let Some(expression) = pending.pop() {
+                if self.calls.contains_key(&expression) {
+                    direct_calls.insert(expression);
+                }
+                crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+            }
+        }
+        let Some(body) = lambda_body(ir, argument.implementation) else {
+            reject("a composable lambda whose body is not a block");
+            return None;
+        };
+        let direct = body
+            .statements
+            .iter()
+            .copied()
+            .filter(|statement| self.calls.contains_key(statement))
+            .collect::<Vec<_>>();
+        direct_calls.extend(direct.iter().copied());
+        if let Some(what) = unsupported_body_expression(ir, body.block, &[]) {
+            reject(what);
+            return None;
+        }
+        let Some(first) = body
+            .statements
+            .first()
+            .and_then(|&statement| self.source.expression_span(ir, statement))
+        else {
+            reject("an empty composable lambda");
+            return None;
+        };
+        if span.hi == 0 {
+            reject("a composable lambda without a source position");
+            return None;
+        }
+        let mut calls = Vec::with_capacity(direct.len());
+        let mut locations = Vec::with_capacity(direct.len());
+        for &call in &direct {
+            if let Some((site, location)) = self.direct_call_site(ir, call, 0, span, rejections) {
+                calls.push(site);
+                locations.push(location);
+            }
+        }
+        let positions = self.positions;
+        Some(SingletonLambda {
+            lambda: argument.lambda,
+            call: argument.call,
+            implementation: argument.implementation,
+            key,
+            offsets: (
+                positions.unit(span.lo) as i32,
+                positions.unit(span.hi) as i32,
+            ),
+            source_information: self
+                .options
+                .source_information
+                .then(|| format!("C{}:{}", locations.join(","), self.file_reference)),
+            // kotlinc names the line the body starts on, its first statement's.
+            trace: self.options.trace_markers.then(|| {
+                format!(
+                    "{}.lambda${key}.<anonymous> ({}:{})",
+                    self.singletons,
+                    self.source.file_name,
+                    positions.line(first.lo)
+                )
+            }),
+            key_meta: self.options.function_key_meta,
+            opening_line: positions.line(span.lo) + 1,
+            calls,
+        })
+    }
+}
+
+/// A use of a composable `() -> Unit` parameter the transform does not handle yet: anything but
+/// calling it, or passing it to a composable call, as a statement of the body.
+fn unsupported_lambda_use(
+    ir: &IrFile,
+    block: ExprId,
+    direct: &[ExprId],
+    lambdas: &[bool],
+) -> Option<&'static str> {
+    let mut covered = crate::fx_hash::HashSet::default();
+    for &statement in direct {
+        match &ir.exprs[statement as usize] {
+            IrExpr::InvokeFunction { func, .. } => {
+                covered.insert(*func);
+            }
+            IrExpr::Call { args, .. } => covered.extend(args.iter().copied()),
+            _ => {}
+        }
+    }
+    let mut pending = vec![block];
+    while let Some(expression) = pending.pop() {
+        if let IrExpr::GetValue(index) = ir.exprs[expression as usize] {
+            if lambdas.get(index as usize) == Some(&true) && !covered.contains(&expression) {
+                return Some(
+                    "a composable lambda parameter used other than by calling it or passing it \
+                     to a composable call",
+                );
+            }
+        }
+        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+    }
+    None
+}
+
+/// Whether parameter `index` of `function` is declared `@Composable () -> Unit`, the one composable
+/// function type whose calling convention the transform implements.
+fn is_composable_lambda(ir: &IrFile, function: FunId, index: usize, composable: TypeName) -> bool {
+    let Some(&ty) = ir.functions[function as usize].params.get(index) else {
+        return false;
+    };
+    let TyKind::Fun(signature) = ty.kind() else {
+        return false;
+    };
+    let Some(spelled) = ir
+        .fn_declared_spellings
+        .get(&function)
+        .and_then(|spellings| spellings.params.get(index))
+    else {
+        return false;
+    };
+    signature.params.is_empty()
+        && matches!(signature.ret.kind(), TyKind::Unit)
+        && signature.context_count == 0
+        && !signature.has_receiver
+        && !signature.suspend
+        && matches!(
+            spelled.annotations.as_slice(),
+            [crate::ir::TypeUseAnnotation::Checked(checked)] if checked.annotation == composable
+        )
+        && spelled.expansion_annotations.is_empty()
+        && !spelled
+            .args
+            .iter()
+            .any(|argument| spelled_mentions(argument, composable))
 }
 
 /// A default argument the pass does not apply yet: one that is not a constant, which kotlinc
@@ -674,30 +1315,38 @@ fn composable_calls(
         .collect()
 }
 
-/// Reject every declared type that names a composable function type: the calling convention of
-/// such a value is not implemented yet.
+/// Reject every declared type that names a composable function type, except the parameters
+/// `admitted` names, whose calling convention the transform implements.
 fn reject_composable_types(
     ir: &IrFile,
     composable: TypeName,
+    admitted: impl Fn(FunId, usize) -> bool,
     rejections: &mut Vec<PluginRejection>,
 ) {
     let names_composable = |spelled: &crate::ir::Spelled| spelled_mentions(spelled, composable);
-    let declared = ir
+    let functions = ir
         .fn_declared_spellings
         .iter()
-        .map(|(&function, spellings)| (ir.functions[function as usize].name.as_str(), spellings))
-        .chain(
-            ir.prop_declared_spellings
-                .values()
-                .map(|spellings| ("a property", spellings)),
-        );
-    let mut names = declared
-        .filter(|(_, spellings)| {
+        .filter(|(&function, spellings)| {
+            names_composable(&spellings.ret)
+                || names_composable(&spellings.receiver)
+                || (0..)
+                    .zip(&spellings.params)
+                    .any(|(index, spelled)| names_composable(spelled) && !admitted(function, index))
+        });
+    let properties = ir
+        .prop_declared_spellings
+        .values()
+        .filter(|spellings| {
             names_composable(&spellings.ret)
                 || names_composable(&spellings.receiver)
                 || spellings.params.iter().any(names_composable)
         })
-        .map(|(name, _)| name.to_string())
+        .map(|_| "a property");
+    let mut names = functions
+        .map(|(&function, _)| ir.functions[function as usize].name.as_str())
+        .chain(properties)
+        .map(str::to_string)
         .collect::<Vec<_>>();
     names.sort();
     names.dedup();

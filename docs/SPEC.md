@@ -14,6 +14,25 @@ parameter also mentions keeps its exact binding, so `sink.put(t, n)` against
 `resolver_regression_e2e::an_in_projected_formal_with_an_ordinary_occurrence_keeps_its_exact_binding`
 and `diagnostics_inference_parity_e2e::callable_reference_bound_failure_is_inference_error`.
 
+## Smart casts from `when` guards
+
+An arm's guard (`is Lit if e.type is Marker -> ...`) is checked with the arm's own condition facts
+and adds its true-branch facts to that arm's body, so `e.type` reads as `Marker` there. A guard
+`this is T` also refines the implicit receiver for that body, past the arm's own condition
+(`is Mid if this is Leaf -> needLeaf(this)`). The facts
+do not reach later arms: a guarded arm adds no fall-through facts, and a guard joined by `||`
+proves nothing. Tests: `box_regressions/whenGuardSmartCast.kt` and
+`when_null_guard_smartcast_e2e::a_when_guard_narrows_only_its_own_arm`.
+
+## Nested producers against dependent bounds
+
+A postponed generic producer passed where the outer variable is still open is solved against that
+variable's declared bound when the bound depends on an already bound variable: in
+`update(column: Column<T>, value: Expression<S>)` with `S : T?` and `T` fixed, `nullableExpr()`
+sees `Expression<T?>`. Matching a nullable result shape `R?` against `X?` binds `R` to `X & Any`,
+since `X` itself may admit null. A bound that depends on no other variable is not inference evidence
+for the producer. Test: `box_regressions/nestedProducerDependentBound.kt`.
+
 ## Wasm reference not-null assertions
 
 A failed reference `!!` throws the platform declaration's `NullPointerException` through the
@@ -3543,6 +3562,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   declaration-owned contract without reopening the source expression.
   Tests: `tests/java_platform_type_publication_e2e.rs` (byte-identical vs kotlinc),
   `metadata::type_encoder::tests::platform_type_encodes_a_nullable_flexible_upper_bound`.
+- **A Java constructor with explicit type arguments yields a rigid type.** A constructor call's
+  type is its classifier's own type, whose arguments are the class type parameters, not Java
+  occurrences of them. kotlinc therefore types `ArrayList<String>()`, `HashSet<String>()` and
+  `java.util.ArrayList<String>()` as `ArrayList<String>`, through a type alias or not, and an
+  inferred declaration publishes no `kotlin.jvm.PlatformType` for them. Constructor publication
+  makes a class type parameter flexible only for an inferred argument (`ArrayList(listOf("a"))`
+  is `ArrayList<String!>`). Tests: `tests/constructor_type_argument_publication_e2e.rs`
+  (byte-identical vs kotlinc).
 - **A nullable argument fixes a flexible Java type variable to its nullable type.** kotlinc reduces
   `Foo? <: T!` to `Foo? <: T` (`simplifyLowerConstraint`), so `fun <E> a(x: E?): List<E> =
   Collections.singletonList(x)` infers `T := E?` and the result `(Mutable)List<E?>!` no longer fits
@@ -5247,11 +5274,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   are evaluated relative to it. A top-level `lateinit var` is a facade static. A public or internal
   one is a `public static` field whose default getter throws (`getstatic; dup; ifnull; areturn; pop;
   ldc name; invokestatic throwUninitializedPropertyAccessException; aconst_null; areturn`); same-file
-  and cross-file reads call that getter. A private one keeps a `private static` field and inlines the
+  and cross-file reads call that getter, and same-file and cross-file writes call its default setter,
+  since kotlinc never replaces a `lateinit` property's accessors with field access. With a `private
+  set` there is no setter method: the field is `private static`, writes store it, and an
+  `isInitialized` probe from another class reads it through `access$get<X>$p`. The default getter
+  of a property that another class of the file probes with `isInitialized` has no guard
+  (`getstatic; areturn`), as kotlinc emits it; a probe in the facade or its lambdas keeps it. A private one keeps a `private static` field and inlines the
   guard on each raw read and after `access$get<X>$p` (`dup; ifnonnull; pop; ldc name; invokestatic;
   aconst_null`). `::prop.isInitialized` is an initialization probe recorded when
   `LateinitFieldRead` is lowered, and the JVM loads that field with no guard. An `object` member `lateinit`
   stays on the instance-field path. `tests/top_level_lateinit_e2e.rs`,
+  `tests/facade_lateinit_setter_e2e.rs`,
   `tests/lateinit_operand_stack_e2e.rs`, `tests/lateinit_companion_read_e2e.rs`.
 - **`===`/`!==` on a nullable-primitive operand is rejected** (skip): boxed identity vs the unboxed
   primitive — and `Double`/`Float`'s `-0.0`/`NaN` — has subtle semantics krusty doesn't model.
@@ -8441,7 +8474,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `tests/renamed_builtin_bridge_owner_e2e.rs`.
 - **A Kotlin class whose immediate superclass is a Java collection declares the special bridges for the members that class inherits.** `class Bare : java.util.LinkedHashMap<String, Int>()` publishes `get(String)Integer` (`ACC_PUBLIC|ACC_BRIDGE`, an `invokespecial` of `LinkedHashMap.get` plus `checkcast` to `Integer`), the synthetic final `get(Object)Object`, and the final `get(Object)Integer`, and the same shape for every other special map member, even though the class overrides nothing. The `invokespecial` owner is the immediate superclass. A renamed member (`size`, `keySet`, `entrySet`, `remove(int)` as `removeAt`) keeps the Kotlin name on the non-final delegate and the JVM name on the final bridge. Members whose JVM name differs from the Kotlin name (`keys`, `entries`, `removeAt`) follow the others. `get`, `getOrDefault`, and `MutableMap.remove` also get the erased synthetic bridge; a failed check returns null, the default argument, or false. `keys`/`values`/`entries` carry a generic signature: the Kotlin getter erases a class type parameter to its bound, and the JVM-name bridge keeps it (`Collection<Object>` versus `Collection<T>`). A member the class itself declares is left to that override. A subclass of the Kotlin class inherits the final bridges and does not declare them again. Tests: `tests/inherited_collection_bridge_e2e.rs`.
 - **An override of a collection member keeps kotlinc's special bridge flags.** The type-checked bridge a class override of `contains`, `remove`, `indexOf`, `lastIndexOf`, `containsKey`, `containsValue` or `get` gets under the member's erased root signature is kotlinc's `BRIDGE_SPECIAL`: `ACC_PUBLIC|ACC_FINAL|ACC_BRIDGE`. A map lookup whose foreign key fails the type check (`get`, `MutableMap.remove`) returns `null` from that non-synthetic bridge. A source interface keeps its bridge non-final so another declaration can implement it. A subclass inherits an identical final bridge from a superclass in the same module or a dependency instead of declaring it, as kotlinc's bridge blacklist does; declaring it would override a final method. An inherited `getOrDefault(Object, Object)` bridge keeps the class-owned value variable in its generic signature (`(Object, V): V`) even though its JVM descriptor erases both occurrences to `Object`. Tests: `tests/special_collection_bridge_e2e.rs`.
-- **A call to an override of a type-safe collection member goes through that member's erased signature.** kotlinc's JVM signature mapper (`getOverriddenBuiltinReflectingJvmDescriptor`) calls a declaration that overrides `Collection.contains`, `MutableCollection.remove`, `List.indexOf`/`lastIndexOf`, `Map.containsKey`/`containsValue`/`get`/`getOrDefault` or either `MutableMap.remove` with the overridden member's erased descriptor, so `map["k"]` on a class with `override fun get(key: String): Int?` is `invokevirtual Owner.get(Ljava/lang/Object;)Ljava/lang/Object;` followed by `checkcast java/lang/Integer`, and reaches the override through its special bridge. The owner stays the receiver's class. This holds for a source override, a dependency override and a delegated member alike; a `super` call keeps the override's own descriptor. The overridden declaration is identified by its complete declared signature, erased and checked against the type-safe collection policy, never by owner, name and arity. Each module callable record carries every declaration it overrides with that declaration's unapplied signature, through other module overrides, so a call from another file of the module is realized the same way. Test: `tests/type_safe_override_call_e2e.rs` (single-file, cross-file and dependency-module callers).
+- **A call to an override of a type-safe collection member goes through that member's erased signature.** kotlinc's JVM signature mapper (`getOverriddenBuiltinReflectingJvmDescriptor`) calls a declaration that overrides `Collection.contains`, `MutableCollection.remove`, `List.indexOf`/`lastIndexOf`, `Map.containsKey`/`containsValue`/`get`/`getOrDefault` or either `MutableMap.remove` with the overridden member's erased descriptor, so `map["k"]` on a class with `override fun get(key: String): Int?` is `invokevirtual Owner.get(Ljava/lang/Object;)Ljava/lang/Object;` followed by `checkcast java/lang/Integer`, and reaches the override through its special bridge. The owner stays the receiver's class. This holds for a source override, a dependency override and a delegated member alike; a `super` call keeps the override's own descriptor. The overridden declaration is identified by its complete declared signature, erased and checked against the type-safe collection policy, never by owner, name and arity. Each module callable record carries every declaration it overrides with that declaration's unapplied signature, through other module overrides, so a call from another file of the module is realized the same way. A dependency override's overridden declarations are recorded as their classifiers declare them (`Map.get(K): V?`), before the member hierarchy applies the receiver's type arguments, since only that signature erases to the policy's descriptor. Test: `tests/type_safe_override_call_e2e.rs` (single-file, cross-file and dependency-module callers, each compared byte for byte with kotlinc).
 - **A bridge erases the overridden declaration's own signature, which the override edge carries.**
   The supertype side of an erasure bridge is the overridden declaration as declared, before the
   implementing class's type arguments are applied: `Echo<T>.echo(x: T): T` bridges as
@@ -8627,16 +8660,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   reference) and before the next method's name. A primitive setter has no `checkNotNullParameter`
   that would intern it earlier, and the name had gone to the end of the pool. Test:
   `tests/top_level_setter_pool_e2e.rs`.
-- **A non-final backing field signs declaration-site variance as wildcards.** kotlinc's
-  `mapFieldSignature` maps a final field's type in its return-type mode and any other field's in its
-  value-parameter mode. A `val xs: List<CharSequence>` signs `Ljava/util/List<Ljava/lang/CharSequence;>;`,
+- **A `var`'s backing field signs declaration-site variance as wildcards.** kotlinc's
+  `mapFieldSignature` maps a field's type in its value-parameter mode when the field backs a `var`
+  property and in its return-type mode otherwise. A `val xs: List<CharSequence>` signs `Ljava/util/List<Ljava/lang/CharSequence;>;`,
   while a `var` (plain, private, `lateinit` or `@JvmField`, at top level, in a class, an object, a
   companion or an enum) signs `Ljava/util/List<+Ljava/lang/CharSequence;>;`, and a
   `var recompose: (String, Int) -> Unit` signs
   `Lkotlin/jvm/functions/Function2<-Ljava/lang/String;-Ljava/lang/Integer;Lkotlin/Unit;>;`. A
   redundant wildcard is dropped as in a parameter (`var plain: List<String>` keeps
-  `Ljava/util/List<Ljava/lang/String;>;`). The mode follows the field's emitted `ACC_FINAL` flag.
-  Test: `tests/mutable_field_signature_e2e.rs`.
+  `Ljava/util/List<Ljava/lang/String;>;`). The mode follows the property, not the field's
+  `ACC_FINAL` flag: the Compose plugin's non-final `ComposableSingletons` fields back `val`s and sign
+  `Function2<Composer;Integer;Unit>` without wildcards. Tests: `tests/mutable_field_signature_e2e.rs`,
+  `compose_singleton_lambdas_are_byte_identical_to_kotlinc`.
 - **A top-level property's backing field carries its generic `Signature`.** A top-level `val xs:
   List<String>` becomes a static field of the FILE FACADE, whose field table is built by
   `emit_statics` rather than the class-field path — so it dropped the `Signature` the same property
@@ -9083,6 +9118,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   PARAMETER and wildcards inside it. Realized as a `Wildcards` mode threaded through the signature formatter. Test:
   `tests/generic_signature_e2e.rs::declaration_site_wildcards_appear_in_parameter_positions_only`
   and `tests/generic_signature_e2e.rs::a_java_type_keeps_invariant_parameters`.
+- **An enum argument is never final for the parameter wildcard rule.** A parameter position drops
+  an `out` wildcard whose argument cannot have subtypes (`List<String>` signs
+  `Ljava/util/List<Ljava/lang/String;>;`). kotlinc decides that with `isFinalClass`, which excludes
+  enum classes, so every enum keeps its wildcard: `fun f(a: List<Plain>)` over
+  `enum class Plain { A }` signs `Ljava/util/List<+LPlain;>;`, as does a nested enum, an enum with
+  entry bodies, a Java enum such as `TimeUnit`, and an enum below another `out` argument
+  (`List<Box<Plain>>` signs `Ljava/util/List<+LBox<+LPlain;>;>;`). krusty treated an enum without
+  entry bodies as final and dropped the wildcard. Test:
+  `tests/generic_argument_wildcards_e2e.rs::an_enum_argument_keeps_its_parameter_wildcard_like_kotlinc`.
 
 - **A classpath member's (function OR property) declared collection mutability survives at EVERY nesting
   level.** The JVM `Signature` attribute erases read-only vs mutable (`List`/`MutableList` both spell
@@ -10598,7 +10642,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Common lowering records the elvis block as an expression whose start line is kept, and the JVM
   line table keeps that entry. A chain `a ?: b ?: c` begins only once, at `a`: kotlinc folds it
   into one chain, so the elvis krusty nests on the first one's right side states no start line of
-  its own. Test: `tests/elvis_own_line_e2e.rs`.
+  its own. Across the chain kotlinc marks, on each link's null path, the next link's operand line
+  at the `pop` rather than after it, and every later link's temporary restates the chain's start
+  line where it is stored: `a(x)\n ?: a(y)\n ?: z` on lines 3 to 5 writes `line 4` at the first
+  `pop` and `line 3` at the second `dup`. The last link's right side keeps the ordinary layout
+  (`z`'s line after the `pop`). Common lowering records the chain's start line for each later
+  link and the next operand's line as the fold's mark. Test: `tests/elvis_own_line_e2e.rs`.
 
 - **A not-null assertion keeps its own line beside its operand's line.** kotlinc states a `!!`'s
   own line before its operand. When the operand's first instruction marks another line at that
@@ -12065,6 +12114,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   spelling. Not yet propagated: a call returning a declared alias type, a read of a declaration
   spelled with an alias, and inference through a generic call (`run { Cargo() }`). Tests:
   `tests/inferred_alias_abbreviation_e2e.rs`.
+- **An inferred alias argument carries its published flexibility in the abbreviation too.** An
+  argument inferred through a Java usage is flexible in the published constructor type, and kotlinc
+  abbreviates that same type: `ArrayList(listOf("a"))` is `ArrayList<String!>` abbreviated as
+  `kotlin.collections.ArrayList<String!>`. The selected call records the alias formals and
+  expansion it inferred them through, and declaration publication binds those formals again
+  against the published expansion. Explicit alias arguments are the call's own and stay as written.
+  Tests: `tests/inferred_alias_constructor_abbreviation_e2e.rs` (byte-identical vs kotlinc).
 
 - **A type-use annotation is recorded on its type occurrence in `@Metadata`.** kotlinc writes every
   annotation applied to a declared type occurrence whose retention is not `SOURCE` as
@@ -13202,9 +13258,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   does not cover is an error at that construct (`krusty's Compose compiler plugin does not support
   <construct> yet; compile this module with kotlinc`), never a silent difference: a receiver, a
   default argument that is not a constant, a vararg, more than ten parameters, a parameter type other than a primitive or
-  `String`, a call argument that is not a constant, a parameter, or computed from a parameter, a
-  grouping annotation, a call to another file's composable, a name an overload with lambdas shares,
-  and a class kotlinc would give `$stable`. A nonempty `metricsDestination`/`reportsDestination` is an
+  `String` or `@Composable () -> Unit`, a call argument that is not a constant, a parameter, or
+  computed from a parameter, any other use of a composable lambda parameter, a grouping annotation
+  or explicit applier target, a call to another file's composable, a name an overload with lambdas
+  shares, a recursive function with composable lambda parameters, and a class kotlinc would give
+  `$stable`. A nonempty `metricsDestination`/`reportsDestination` is an
   `UnimplementedOption` error. The runtime functions the code calls are selected at the handoff by
   their Kotlin signatures, or the module is rejected. Covered:
   `Unit` top-level composables with a block body whose parameters are primitives or `String`. Each
@@ -13227,23 +13285,49 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `if ($default and bit != 0) p = <default>` (at the default's own line) before the trace start.
   A defaulted reference parameter becomes nullable (no check, `@Nullable`), since a call that omits
   it passes `null`; omitted primitives pass their zero. The group starts at the body's opening
-  brace's line and skips at the `fun` keyword's line. The
+  brace's line and skips at the `fun` keyword's line. A `@Composable () -> Unit` parameter becomes
+  `Function2<Composer, Int, Unit>` (the recompose lambda's copy carries no generic `Signature`, as
+  no lambda body's does), is compared with `Composer.changedInstance`, and is called
+  `invoke($composer, <bits>)` with its own slot's bits moved to slot 0, as an `invoke`'s dispatch
+  receiver follows its (here no) arguments; source information lists the call. kotlinc's applier
+  inference unifies a function's applier with each lambda parameter it calls and with what a callee's
+  scheme binds a passed lambda to; a scheme that binds anything is recorded as
+  `@ComposableInferredTarget(scheme = "[0[0][_]]")`, which, unlike `@FunctionKeyMeta`, Kotlin
+  metadata records too. The group key names such a parameter's type `ComposableFunction0`, the
+  frontend's type for it. The
   group key is the Java `hashCode` of
   `fun-<name>(<parameter types>)<result>/pkg-<package>/file-<file name>`, which `@FunctionKeyMeta`
   records with the UTF-16 offsets of the `fun` keyword and the body's end. That annotation lives in
   the class file only, never in Kotlin metadata, because kotlinc's IR plugin adds it after FIR
   metadata serialization. `sourceInformation` (`C(<name>)<line>@<offset>L<length>,…:<file>#<package hash
   in base 36>`) and trace markers (`<fq name> (<file>:<0-based line>)`) follow the plugin's options.
+  A composable lambda passed to a composable call that captures nothing is memoized: the file's
+  `ComposableSingletons$<file part>Kt` object (the file-part name even under `@file:JvmName`;
+  synthetic-class `@Metadata` with `xi=48`, a public constructor) holds a non-final private static
+  field `lambda$<key>` created in `<clinit>` by `composableLambdaInstance(<key>, false, <lambda>)`
+  at the lambda's opening line, with an `internal` getter `getLambda$<key>$<module>`, and the call
+  reads it there without a line. The lambda's body is
+  `private static final Unit lambda__<key>$lambda$0(Composer $composer, int $changed)` on that
+  object, `@Composable` and `@FunctionKeyMeta`, with no `$composer` null check, which runs
+  `if (shouldExecute(($changed & 3) != 2, $changed & 1)) { <trace> <statements> } else
+  skipToGroupEnd()`, the skip on the opening line and no line at entry. Its key is the Java hash
+  of `fun-$anonymous$()Unit/arg-<parameter>/call-<callee>[:<n>]/fun-<caller signature>/pkg-…/file-…`,
+  where `n` counts the caller's earlier calls of the same name; its source information has no
+  name (`C<calls>:<file>#<hash>`) and its trace names
+  `<object>.lambda$<key>.<anonymous> (<file>:<first statement's 0-based line>)`. A capturing,
+  nested or empty composable lambda is declined.
   The recompose lambda `<name>$lambda$0(<parameters>, $$changed, [$$default,] $composer, $force)`
   publishes its
   locals and no
   line, and the call's line starts at its dispatch, since kotlinc builds both arguments without
-  offsets. Tests: `tests/fixtures/compose/restartableFunctions.kt`, `trackedParameters.kt` and
-  `defaultArguments.kt`,
+  offsets. Tests: `tests/fixtures/compose/restartableFunctions.kt`, `trackedParameters.kt`,
+  `defaultArguments.kt`, `lambdaParameters.kt` and `singletonLambdas.kt`,
   whose `box()` composes and recomposes the functions through a recording composer, and
   `kotlin_box_ir_jvm_conformance::compose_restartable_functions_are_byte_identical_to_kotlinc` and
-  `compose_tracked_parameters_are_byte_identical_to_kotlinc` and
-  `compose_default_arguments_are_byte_identical_to_kotlinc`, which require their class sets to
+  `compose_tracked_parameters_are_byte_identical_to_kotlinc`,
+  `compose_default_arguments_are_byte_identical_to_kotlinc`,
+  `compose_lambda_parameters_are_byte_identical_to_kotlinc` and
+  `compose_singleton_lambdas_are_byte_identical_to_kotlinc`, which require their class sets to
   equal kotlinc's byte for byte;
   `cli_compiler_plugin_e2e::the_compose_pass_rejects_what_it_does_not_cover` and
   `compose_report_destinations_fail_the_compile`; and the `plugins::compose` and
@@ -16538,9 +16622,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Deprecated and removed arguments get kotlinc's `DEPRECATED_CLI_ARG`/`REMOVED_CLI_ARG` warnings.
   Every argument of every supported release has exactly one krusty disposition
   (`crates/krusty-cli/src/kotlinc_arguments/disposition.rs`): *applied*; *inert*, accepted without
-  effect only where a kotlinc differential proves it changes nothing krusty emits (the two checks
-  on classpath binaries krusty does not make, `-Xskip-metadata-version-check` and
-  `-Xskip-prerelease-check`); or *unsupported*, which fails the command line with
+  effect only where a kotlinc differential proves it changes nothing krusty emits (the three checks
+  on classpath binaries krusty does not make, `-Xskip-metadata-version-check`,
+  `-Xskip-prerelease-check` and `-Xallow-unstable-dependencies`); or *unsupported*, which fails the command line with
   `krusty: error: krusty does not implement the kotlinc argument '<argument>'`, exit 2, before
   anything is written. An argument krusty does not implement is never dropped silently.
   `-progressive` turns on the selected release's progressive language features (the
@@ -16814,6 +16898,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
     the ordinary error; the warning always uses the plain wording, even inside an array. kotlinc's
     CLI prints no warning for a file with errors, so each warning shape is compared alone.
     (`tests/reified_type_arguments_e2e.rs`.)
+  - A finalized ordinary expression whose semantic type contains `Array<Nothing>`, including a
+    nested type argument, reports "expression cannot have a type of 'Array<Nothing>'." at the
+    value or callee. This `UNSUPPORTED` check respects its own suppression and accompanies any
+    reified-substitution error. Class-literal LHS types retain their separate feature-gated policy;
+    star projections name no bottom element. Exact complete diagnostic and suppressed JVM ABI
+    comparisons live in `tests/array_expression_type_validity_e2e.rs`.
+    A suppressed bottom-array value uses the JVM's existing `java.lang.Void` descriptor mapping in
+    generic-signature formatting too, so its method has no extraneous `kotlin.Nothing` signature.
   - `ErrorAboutDataClassCopyVisibilityChange`: a `data class` whose primary constructor is not
     public is reported at the constructor's visibility modifier unless it is annotated
     `@ConsistentCopyVisibility` or `@ExposedCopyVisibility`, and a call or callable reference to its
@@ -19509,8 +19601,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`id(s).length` is `checkcast String` before `String.length`). A consumer of the bound does not:
   returning `id(s)` as `Comparable<String>` uses the slot unchanged, while `value?.close()` invokes
   `AutoCloseable.close` directly with the nullable `dup; ifnull` shape. An unconstrained `T` stays
-  the specialized reference — its bound erases to `Object` — and a primitive specialization stays unboxed.
-  (`tests/inline_erased_parameter_e2e.rs`.)
+  the specialized reference — its bound erases to `Object`. A primitive specialization is boxed
+  into that slot and unboxed at each use: `b.also { }` on a `Boolean` is `Boolean.valueOf; astore`,
+  the lambda's `it` is `booleanValue`, and a result returned as `Any?` reloads the box. An `Int` use
+  is `checkcast Number; intValue`. The callee's own receiver of `apply` is that slot; the extension
+  lambda's `$this$apply` is a separate unboxed local. When every use unboxes, as for a result
+  returned as `Boolean`, the redundant-boxing pass leaves the primitive. Every read of that slot
+  unboxes, so a primitive consumer (an operator, a store, a default) receives the primitive; only an
+  implicit coercion to a reference reads the box itself. A top-level property store of an inlined
+  value marks the statement's line again at `putstatic`, as an instance field store does.
+  (`tests/inline_erased_parameter_e2e.rs`, `tests/inline_primitive_receiver_e2e.rs`.)
 
 - **An inlined `Closeable.use` stores the receiver as `Closeable` and narrows its result after
   `finally`.** `T.use` keeps the extension receiver in a `Closeable` slot: a receiver that is not
@@ -21031,10 +21131,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   annotation again. An explicit `@JvmName` is not changed further: an internal member keeps it
   without the `$<module>` suffix (a function, a declared accessor or a default one), and a
   value-class-typed property keeps it without the value-class hash. A companion's synthesized
-  default accessors also carry the annotations written on them (`@get:Deprecated`). Known gaps: a
-  `@JvmStatic` companion property has no outer static wrapper, and
-  a top-level `lateinit var`, which has no checked body, carries no accessor annotations. A
-  top-level property's retained `PROPERTY`-targeted annotation gets no `$annotations` marker at all
+  default accessors also carry the annotations written on them (`@get:Deprecated`). A top-level
+  property or function with no checked body (a `lateinit var`, an `external fun`) still hands its
+  checked annotations to lowering through a body-less metadata group, as a body-less classifier does,
+  so `@set:JvmName("assignNamed") lateinit var named: String` declares and is called as
+  `assignNamed` (`tests/facade_lateinit_setter_e2e.rs`). Known gaps: a `@JvmStatic` companion
+  property has no outer static wrapper, and a top-level property's retained `PROPERTY`-targeted annotation gets no `$annotations` marker at all
   (with or without `@JvmName`); only a suppressed SOURCE application's empty marker is emitted there.
   Tests: `accessor_jvm_name_e2e`.
 
@@ -22641,7 +22743,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   An unavailable dispatch rung reserves the constructor-prefix receiver coordinate without adding
   instance-property bindings, so enclosing receiver captures retain their checked identities.
   Tests: `tests/typealias_constructor_inference_e2e.rs` compares complete JVM ABI and runtime
-  behavior with kotlinc. When no enclosing value or available receiver supplies the name, a
+  behavior with kotlinc. Its `parameterized_parent_aliases` child retains the original expanded
+  #2655 fixture and both complete controls, including nested aliases and a covariant interface.
+  When no enclosing value or available receiver supplies the name, a
   member of the unavailable instance reports `cannot access '<this>' before the instance has
   been initialized.` at the property reference. The diagnostic probe uses the same declared
   receiver identity that the usable tower excludes; it never records a property read or capture.
@@ -23200,8 +23304,21 @@ and the checked lambda or anonymous-function type, even when both render identic
 function parameter independent of the rejected type variable participates in the same candidate
 constraint system. Argument-owned failures replace the constructor-wide inapplicable message;
 ordinary typed values retain that message and the explicit bound error. Fixed lambda inputs remain
-available, and rejected result context still cannot complete a nested producer. Callable-reference
-completion requires separate selected-declaration diagnostic provenance, tracked in #2776.
+available, and rejected result context still cannot complete a nested producer.
+
+A callable reference in that rejected constraint system retains the diagnostic projection of its
+already-selected declaration. Its inapplicable-candidate error follows the constructor-wide heading
+and bound error, at the reference's name span. Top-level, member, extension, adapted, local and
+constructor references use their selected declaration rather than another lookup or overload trial.
+Each reference visit replaces its previous diagnostic evidence. The mapped functional expectation
+and actual invocation shape remain typed checker facts; diagnostic rendering never supplies a
+semantic target. Tests: `dependent_constructor_bounds_e2e` source and dependency reference cases.
+Extension declarations retain the receiver-constraint diagnostic, including bound and local
+extensions. Constructor diagnostics use the declared generic signature and logical classifier
+result, independently of the physical constructor return or the adapted invocation result.
+Receiver-constraint wording follows the selected reference release through `diagnostic_wording`:
+the older unresolved-reference heading and newer candidate-specific message share the same selected
+declaration evidence.
 
 When a receiver-bound alias constructor is rejected before argument checking, retained declaration
 and receiver bindings still describe its lambda inputs. Missing callable formals are diagnosed at
@@ -23259,6 +23376,16 @@ formal binds to the caller's own type variable (`b + t` for
 `fun <X : Number?, Y : X>`), the result names that variable (`Pair2<X, Y>`); the declaration's
 formal never survives the call, whatever its bound. Test: `box_regressions/boundedFormalExtensionReturn.kt`.
 
+## Lexical captures in anonymous superclass lambdas
+
+A lambda retained in an anonymous object's superclass-constructor argument carries its enclosing
+lexical values through that object's constructor prefix before forming the closure. Nested lambdas
+preserve the same binding, mutable locals retain their shared cell, and a lambda parameter shadows
+an outer value without creating a capture of it. Type aliases and a same-named inherited property
+do not change this contract. The differential runtime controls live in
+`typealias_constructor_inference_e2e`. The pre-existing captureless lambda placement/constructor
+ABI difference is preserved separately with its complete oracle in #2833.
+
 ## Runtime-owned dependency getter leaves
 
 An ordinary serialized KLIB body may read a property through a getter the target implements.
@@ -23272,6 +23399,16 @@ the declared ABI. No dependency class layout is materialized for this operation.
 `klib_lowering::tests::accessor_calls` and the official-producer runtime accessor programs in
 `klib_closure_frames_e2e`. Compiler-introduced dependency blocks remain tracked in #2811.
 
+## Declared inputs of applied nominal members
+
+Applying a classifier receiver preserves the member declaration's original logical input slots
+and receiver bindings. Applicability and argument diagnostics inspect the declared vararg element
+before its array carrier is specialized. An out/star projection reports the receiver prohibition
+for every written scalar or expanded element; an inapplicable member permits the ordinary scope
+tower to consider an applicable extension. Diagnostics render the original declaration inputs.
+A method-owned formal remains separate from class formals.
+Tests: `nominal_projected_input_e2e`.
+
 ## Serialized Elvis expression blocks
 
 A serialized Elvis expression retains its immutable compiler temporary and exact null proof.
@@ -23283,3 +23420,26 @@ read receives the non-null proof. Unrelated origin-less conditionals and unmodel
 still decline. Owning tests compare String, Int and Any IR with checked FIR, exercise malformed
 contracts, and execute the unchanged #2811 Pair program plus official-producer controls after JVM
 oracles in `klib_closure_frames_e2e::elvis_blocks`.
+
+## Native bound callable-reference receiver storage
+
+A bound callable reference retains its receiver as a semantic object for equality and hashing,
+including primitive and value-class receivers. Native closure layout records that exact receiver
+capture as reference storage and traces it accordingly. Invocation converts the stored object back
+to the adapter's declared carrier; ordinary captures keep their existing storage types and order.
+Receiver expressions are evaluated once before the closure is allocated.
+
+The Native storage ABI regression establishes each program's kotlinc result before checking scalar,
+scalar-backed and reference-backed value-class equality, hashes, typed invocation and mixed capture
+ordering. The runtime reference-equality protocol and KType layout are unchanged.
+
+## JVM object methods on annotation interfaces
+
+A checked `toString`, `hashCode` or `equals` call on a freshly constructed annotation names its
+declared interface. The generated implementation is materialized at that interface slot before
+invocation. Reading a declared annotation parameter, or calling through `Any` or an ordinary
+interface, retains class-owned dispatch. The realized construction identity and selected semantic
+call role own this JVM choice.
+`annotation_impl_class_e2e` compares complete emitted class inventories and raw artifacts, and runs
+the same programs after Kotlin; the ordinary Java-interface controls remain in
+`interface_object_method_e2e`.

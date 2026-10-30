@@ -20,6 +20,14 @@ pub(super) struct CallCandidateScore {
     pub(super) sam_signatures: Vec<Option<crate::symbol_resolver::SamSignature>>,
 }
 
+/// Receiver application and argument mapping keep separate declaration coordinates. Only source
+/// admission uses this view; the applied parameter vector still owns ranking and array packing.
+pub(super) struct DeclarationInputs<'a> {
+    pub(super) declaration: &'a crate::libraries::SourceInputDeclaration,
+    pub(super) bindings: &'a crate::symbol_resolver::GSigBinds,
+    pub(super) parameter_indices: &'a [usize],
+}
+
 impl CallCandidateScore {
     pub(super) fn uses_sam_conversion(&self) -> bool {
         self.sam_signatures.iter().any(Option::is_some)
@@ -39,12 +47,28 @@ pub(super) fn score(
     call_sig: &CallSig,
     slots: ArgSlots<'_>,
 ) -> Option<CallCandidateScore> {
+    score_with_declaration(checker, scope, params, call_sig, slots, None)
+}
+
+pub(super) fn score_with_declaration(
+    checker: &Checker<'_>,
+    scope: &CheckerScope<'_>,
+    params: &[Ty],
+    call_sig: &CallSig,
+    slots: ArgSlots<'_>,
+    declaration: Option<DeclarationInputs<'_>>,
+) -> Option<CallCandidateScore> {
     let ArgSlots {
         args,
         partial_arg_tys,
         arg_names,
         trailing_lambda,
     } = slots;
+    let declared_bindings = declaration.as_ref().map(|inputs| {
+        let mut bindings = inputs.bindings.clone();
+        bindings.extend(inputs.declaration.receiver_bindings.clone());
+        bindings
+    });
     let sam_signatures = std::cell::RefCell::new(vec![None; args.len()]);
     let record_sam = |source: usize, expected: Ty| {
         let signature = checker.semantic_sam_signature(expected)?;
@@ -60,6 +84,39 @@ pub(super) fn score(
         let semantic_actual = checker
             .unit_coerced_lambda_type(argument, expected, semantic_actual)
             .unwrap_or(semantic_actual);
+        // A provisional declaration result cannot reject a shaped candidate before the
+        // signature engine demands and finalizes it.
+        if expected.mentions_pending() || semantic_actual.mentions_pending() {
+            return Some(0);
+        }
+        if let Some(inputs) = declaration.as_ref() {
+            let ordinal = *inputs.parameter_indices.get(parameter)?;
+            let raw = inputs.declaration.declared_input(ordinal)?;
+            let named = arg_names
+                .and_then(|names| names.get(source))
+                .is_some_and(Option::is_some);
+            let raw = if call_sig.vararg_index == Some(parameter)
+                && !checker.file.is_spread_arg(argument)
+                && !named
+            {
+                raw.array_read_elem().unwrap_or(raw)
+            } else {
+                raw
+            };
+            let (input, projection) = crate::symbol_resolver::instantiate_input_slot(
+                &checker.fed_source(),
+                Some(&inputs.declaration.signature),
+                raw,
+                declared_bindings.as_ref().expect("declaration bindings"),
+                crate::symbol_resolver::UnboundSpecialization::Preserve,
+            );
+            if projection.is_some()
+                && !checker.receiver_is_assignable(semantic_actual, input)
+                && !checker.call_result_can_bind_expected(argument, input)
+            {
+                return None;
+            }
+        }
         let contextual_call_result = checker.call_result_can_bind_expected(argument, expected);
         // A collection literal is an expected-type-dependent expression. Its expectation-free
         // probe deliberately materializes the language fallback (`List<T>`), but that probe is
@@ -87,13 +144,6 @@ pub(super) fn score(
                     .copied()
                     .unwrap_or(false),
             );
-        // A nested declaration result may still be the signature engine's private `Pending`
-        // marker while an outer postponed-call frame is collecting constraints. It provides no
-        // overload preference, but it cannot make an otherwise shaped candidate inapplicable;
-        // the declaration is demanded and finalized before checked FIR is constructed.
-        if expected.mentions_pending() || semantic_actual.mentions_pending() {
-            return Some(0);
-        }
         if (checker.postponed_call_mentions(expected)
             || checker.postponed_call_mentions(semantic_actual))
             && !checker.postponed_argument_constraint_is_satisfiable(expected, semantic_actual)

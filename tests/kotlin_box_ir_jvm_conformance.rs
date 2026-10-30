@@ -1422,6 +1422,21 @@ fn compose_default_arguments_are_byte_identical_to_kotlinc() {
     assert_compose_fixture_matches_kotlinc("defaultArguments");
 }
 
+#[test]
+fn compose_lambda_parameters_are_byte_identical_to_kotlinc() {
+    assert_compose_fixture_matches_kotlinc("lambdaParameters");
+}
+
+#[test]
+fn compose_lambda_applier_schemes_are_byte_identical_to_kotlinc() {
+    assert_compose_fixture_matches_kotlinc("lambdaSchemes");
+}
+
+#[test]
+fn compose_singleton_lambdas_are_byte_identical_to_kotlinc() {
+    assert_compose_fixture_matches_kotlinc("singletonLambdas");
+}
+
 fn assert_compose_fixture_matches_kotlinc(stem: &str) {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/compose")

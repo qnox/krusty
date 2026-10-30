@@ -2417,7 +2417,11 @@ fn emit_class(
             .map(|(_, parameter)| parameter.as_str())
             .or(field.type_param.as_deref());
         let field_sig = signature_formatter
-            .field_signature(ty, type_parameter, acc)
+            .field_signature(
+                ty,
+                type_parameter,
+                field_visibility::backs_var_property(c, field_index),
+            )
             .filter(|_| !field.is_property_delegate());
         let physical_name = instance_field_jvm_name(ir, env.run, c, field_index);
         let field_desc = type_descriptor(jvm_value_ty(ty));
@@ -3507,7 +3511,11 @@ fn emit_enum_class(
             .flatten();
         let access = field_visibility::declared_field_access(c, field_index, false);
         let signature = signature_formatter
-            .field_signature(&f.ty, f.type_param.as_deref(), access)
+            .field_signature(
+                &f.ty,
+                f.type_param.as_deref(),
+                field_visibility::backs_var_property(c, field_index),
+            )
             .filter(|_| !f.is_property_delegate());
         cw.add_field_late_sig(
             access,
@@ -4394,8 +4402,13 @@ fn emit_placed_method(
     // attribute exists for a source or Java caller, and nothing can name these methods to call
     // them. Keep this scoped to the producer's exact identities; unrelated synthetic methods may
     // still have a source-visible generic contract.
-    // kotlinc maps a lambda literal's body without generics; an anonymous function's keeps them.
-    let method_sig = (!ir.serialization_cache_methods.contains(&fid) && !ir.is_lambda_literal(fid))
+    // kotlinc maps a lambda literal's body without generics, and a compiler-synthesized lambda's;
+    // an anonymous function's keeps them.
+    let synthesized = ir.lambda_class_provenance(fid)
+        == Some(crate::ir::type_reflection::LambdaClassProvenance::SynthesizedAdapter);
+    let method_sig = (!ir.serialization_cache_methods.contains(&fid)
+        && !ir.is_lambda_literal(fid)
+        && !synthesized)
         .then(|| declared_method_signature(&signature_formatter, ir, env.override_results, fid))
         .flatten();
     let reserved_sig = match holder_receiver {
@@ -5111,6 +5124,11 @@ struct Emitter<'a> {
     suspend_lambda_parameter_reads: HashSet<crate::ir::ExprId>,
     /// Function-value invocations whose consumer takes `invoke`'s erased `Object` as it is.
     erased_invocations: HashSet<crate::ir::ExprId>,
+    /// Values held boxed in an erased slot whose semantic type is this built-in primitive: an
+    /// inlined type-parameter value (`b.also { }`). A read unboxes the value.
+    boxed_scalar_values: HashMap<u32, Ty>,
+    /// Reads of such a value a reference consumer takes as the box the slot holds.
+    boxed_scalar_reads: HashSet<crate::ir::ExprId>,
     inline_coercions: block_scope::InlineCoercionState,
     /// The next state's ordinal. A state belongs to an emission SITE, not to an expression: an
     /// inline function that invokes its lambda twice splices the same body twice, and each copy
@@ -5270,6 +5288,11 @@ impl<'a> Emitter<'a> {
             transformed_suspensions: Default::default(),
             suspend_lambda_parameter_reads: HashSet::default(),
             erased_invocations: HashSet::default(),
+            boxed_scalar_values: inline_body_emission::collect_boxed_scalar_values(
+                ir,
+                roots.iter().copied(),
+            ),
+            boxed_scalar_reads: HashSet::default(),
             inline_coercions: block_scope::InlineCoercionState::default(),
             machine_next_ordinal: 0,
             machine_entered: false,
@@ -6437,9 +6460,8 @@ impl<'a> Emitter<'a> {
                 IrConst::Null => Ty::Null,
             },
             IrExpr::GetValue(i) => self
-                .slots
-                .get(i)
-                .map(|(_, t)| *t)
+                .unboxed_scalar_read(e, *i)
+                .or_else(|| self.slots.get(i).map(|(_, t)| *t))
                 .or_else(|| self.var_types.get(i).copied())
                 .or_else(|| self.singleton_receiver_value(*i).map(Ty::obj_name))
                 .unwrap_or(Ty::Error),
