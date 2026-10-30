@@ -1,17 +1,11 @@
 # krusty — a memory-lean Kotlin→JVM compiler PoC
 
-## Nullable type variables in extension receivers
+## JVM array clone result
 
-An extension declared on `Column<out E?>` applies to `Column<EntityID<U>>` where `U` is the
-caller's own type parameter: the callee's formal `E` binds `EntityID<U>`, and a non-null actual
-may stand for the nullable declared argument under `out`, or when the actual is itself nullable.
-A caller variable `V : EntityID<String>?` binds `E` to `V & Any`, and `E : EntityID<T>` reads
-`T = String` from `V`'s bound. Receiver lookup treats `E?` as the same wildcard as `E`;
-applicability decides the variance, so an invariant `Column<E?>` receiver rejects a non-null
-`Column<EntityID<U>>` and a `Column<V>` with kotlinc 2.4.21's "inapplicable because of a receiver
-type mismatch". Regressions: `tests/box_regressions/nullableProjectedReceiverVariable.kt`,
-`tests/box_regressions/nullableBoundedCallerReceiverVariable.kt` and
-`resolver_regression_e2e::an_invariant_nullable_receiver_variable_rejects_a_non_null_argument_like_kotlinc`.
+The JVM `Array<T>.clone()` declaration returns `Array<T>` with `T` keeping the classifier's own
+implicit `Any?` bound, so `Array<String?>.clone()` is `Array<String?>`. A non-null bound made it
+`Array<String>` and rejected moshi's `pathNames = copyFrom.pathNames.clone()`. Test:
+`array_member_reference_e2e::a_nullable_element_array_clone_keeps_its_element_type`.
 
 ## Smart casts from `when` guards
 
@@ -15219,6 +15213,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   identities between the passes; the temporaries pass does not infer the earlier pass from
   unrelated constants, jumps, or throws remaining in the method. Tests:
   `bytecode_passes::temporaries::tests` and `tests/safe_call_after_throw_e2e.rs`.
+- **A label right after a `goto` that stands beside a reached label is not one retained from
+  unreachable code.** kotlinc normalizes directly adjacent labels into one before it optimizes, so
+  such a run is reached when any of its labels is. An unreached label in it, like the first label
+  in front of a safe call's null path after the non-null path's `goto`, is not counted as retained,
+  and `options?.let { if (…) null else "x" }` keeps its receiver on the stack
+  (`aload; dup; ifnull`) as kotlinc does. After an `athrow` or a return the label still counts as
+  retained: kotlinc emits a dead continuation there (an inlined body's result path) that the
+  elimination deletes, which is why `lastException?.let { throw it }` keeps its temporary.
+  Tests: `constant_conditions::tests::a_label_beside_a_reached_jump_target_is_not_retained_from_deleted_code`,
+  `constant_conditions::tests::a_label_after_a_throw_beside_a_reached_jump_target_stays_retained`,
+  `tests/safe_call_dup_e2e.rs` and `tests/safe_call_after_throw_e2e.rs`.
 - **A `Boolean` compared with a `Boolean` literal is an ordinary two-operand comparison; only a
   negation is a polarity.** kotlinc's `Equals` sends two primitive `Boolean` operands to
   `BooleanComparison`, which materializes both and jumps with `if_icmp<cond>`; it never reads a
@@ -23366,6 +23371,19 @@ that remain in the specialized receiver are fixed types there: `Column<EntityID<
 `Column<out E?>` for `<T : Any, E : EntityID<T>>` once `E := EntityID<X>`. A callee formal that
 the receiver leaves unbound stays rigid in this check, so it cannot make the receiver fit. Test:
 `box_regressions/extensionReceiverBindsCallerVariable.kt`.
+
+## Nullable type variables in extension receivers
+
+An extension declared on `Column<out E?>` applies to `Column<EntityID<U>>` where `U` is the
+caller's own type parameter: the callee's formal `E` binds `EntityID<U>`, and a non-null actual
+may stand for the nullable declared argument under `out`, or when the actual is itself nullable.
+A caller variable `V : EntityID<String>?` binds `E` to `V & Any`, and `E : EntityID<T>` reads
+`T = String` from `V`'s bound. Receiver lookup treats `E?` as the same wildcard as `E`;
+applicability decides the variance, so an invariant `Column<E?>` receiver rejects a non-null
+`Column<EntityID<U>>` and a `Column<V>` with kotlinc 2.4.21's "inapplicable because of a receiver
+type mismatch". Regressions: `tests/box_regressions/nullableProjectedReceiverVariable.kt`,
+`tests/box_regressions/nullableBoundedCallerReceiverVariable.kt` and
+`resolver_regression_e2e::an_invariant_nullable_receiver_variable_rejects_a_non_null_argument_like_kotlinc`.
 
 ## Extension results specialized to caller variables
 
