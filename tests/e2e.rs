@@ -1186,8 +1186,6 @@ mod init_block_lines_e2e;
 mod initializer_inline_local_scopes_e2e;
 #[path = "e2e/inline.rs"]
 mod inline;
-#[path = "e2e/library_inline.rs"]
-mod library_inline;
 #[path = "inline_member_super_arguments_e2e.rs"]
 mod inline_member_super_arguments_e2e;
 #[path = "inlined_code_inner_classes_e2e.rs"]
@@ -1305,6 +1303,8 @@ mod java_nonfinal_constant_e2e;
 mod java_raw_type_e2e;
 #[path = "java_self_bounded_constructor_e2e.rs"]
 mod java_self_bounded_constructor_e2e;
+#[path = "e2e/library_inline.rs"]
+mod library_inline;
 #[path = "local_class_capture_order_e2e.rs"]
 mod local_class_capture_order_e2e;
 #[path = "local_class_construction_capture_e2e.rs"]
