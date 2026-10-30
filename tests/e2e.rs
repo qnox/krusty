@@ -109,6 +109,7 @@ mod annotated_class_decl_line_e2e;
 mod annotated_setter_parameter_e2e;
 #[path = "annotation_array_literal_e2e.rs"]
 mod annotation_array_literal_e2e;
+mod annotation_array_spread_values_e2e;
 #[path = "annotation_class_element_e2e.rs"]
 mod annotation_class_element_e2e;
 #[path = "annotation_cross_file_defaults_e2e.rs"]

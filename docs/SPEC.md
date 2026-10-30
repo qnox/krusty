@@ -22033,6 +22033,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `…::class_literals_inside_an_array_literal_resolve`,
   `…::an_array_literal_in_an_unemitted_position_stays_inert`.
 
+  A checked array factory folds each spread or named whole-array operand against the array type
+  and appends its elements once. Ordinary operands fold against the element type and retain their
+  position. The checker reuses the same recorded whole-array argument role as FIR lowering;
+  nested factories and empty arrays preserve this rule recursively. Complete class artifacts and
+  Kotlin-first execution are compared in `tests/annotation_array_spread_values_e2e.rs`.
+
 - **Class initializer inference selects declared members through the module symbol source.** A
   property such as `val parts = split(pattern)` may refer forward to an explicitly typed member,
   and the member receiver rung outranks a same-named top-level function. Signature collection now

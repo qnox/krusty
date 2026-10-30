@@ -560,6 +560,12 @@ expansion and adds no backend capabilities, outcome allowances or metadata field
   explicitly rejected for now (skipped, not miscompiled). Box conformance: 27 / 27 OK / 0 FAIL
   (nullable is foundational; it compounds once collections/`?.`/char literals land).
 
+## Checked annotation array operand values
+
+Reuse the checked whole-array argument role when folding selected array factories for annotation
+values. Preserve nested spread order, named arrays, empty contributions and ordinary elements;
+compare the complete emitted class inventory and raw artifacts with Kotlin before runtime controls.
+
 ## Phase 14 — Modifiers, annotations & conformance fixes  ✅
 - ✅ Data-driven (scanned the "expected a top-level declaration" bucket): **leading declaration
   modifiers** (`public`/`private`/`open`/`abstract`/`inline`/`operator`/`override`/`suspend`/
