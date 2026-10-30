@@ -106,6 +106,25 @@ if [ ! -f "$logs/$name.kotlinc.compilations.tsv" ]; then
   echo "$name: the reference build recorded no compile-task inventory" >&2
   exit 1
 fi
+# With `$CORPUS_PERF` set (the `perf` command, allowed to sample every process), the krusty
+# build is sampled system-wide at a low rate, and the krusty processes' call stacks are folded into
+# <logs>/<name>.krusty.folded; with `$CORPUS_FLAMEGRAPH` (inferno's `inferno-flamegraph`) also drawn as
+# <logs>/<name>.krusty.svg. Sampling 99 times a second costs the build next to nothing.
+if [ -n "${CORPUS_PERF:-}" ]; then
+  $CORPUS_PERF record -a -g -F 99 -o "$work/$name.perf.data" >"$logs/$name.perf.log" 2>&1 &
+  perf_pid=$!
+fi
 KRUSTY_PLUGIN_REPOSITORY=$plugin_repository KRUSTY_PLUGIN_VERSION=$plugin_version \
   build krusty --offline -I "$here/krusty.init.gradle" -Pkrusty.binary="$krusty"
+if [ -n "${CORPUS_PERF:-}" ]; then
+  kill -INT "$perf_pid"
+  wait "$perf_pid" || true
+  $CORPUS_PERF script -i "$work/$name.perf.data" --comms krusty -F comm,ip,sym,dso 2>>"$logs/$name.perf.log" |
+    python3 "$here/hotspots.py" fold >"$logs/$name.krusty.folded"
+  rm -f "$work/$name.perf.data"
+  if [ -n "${CORPUS_FLAMEGRAPH:-}" ] && [ -s "$logs/$name.krusty.folded" ]; then
+    "$CORPUS_FLAMEGRAPH" --title "$name: krusty" --width 1600 "$logs/$name.krusty.folded" \
+      >"$logs/$name.krusty.svg"
+  fi
+fi
 python3 "$here/compare.py" "$work" "$name" "$reference"
