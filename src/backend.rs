@@ -140,6 +140,14 @@ pub trait Backend {
         false
     }
 
+    /// Whether the target, not the library's serialized class body, owns the representation of a
+    /// dependency classifier. A member of such a classifier is realized by the target at its
+    /// dispatch receiver, as a source call of it is; its KLIB body reads a class layout the target
+    /// object does not have and is never lowered.
+    fn represents_dependency_classifier(&self, _classifier: crate::types::TypeName) -> bool {
+        false
+    }
+
     /// How common lowering realizes calls to same-module inline functions for this backend. A
     /// backend that compiles each inline function's body and inlines it at the call keeps the calls
     /// it can inline that way; every other backend has them expanded in IR.

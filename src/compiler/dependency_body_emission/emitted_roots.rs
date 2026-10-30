@@ -95,7 +95,11 @@ pub(super) fn declarations(
             && facts
                 .target_getter(&identity, bodies, capabilities.target_realizes_getter)
                 .map_err(|reason| format!("an invalid target getter declaration: {reason:?}"))?;
+        let member = facts
+            .target_member(&identity, capabilities.target_represents_classifier)
+            .map_err(|reason| format!("an invalid target member declaration: {reason:?}"))?;
         let emits_body = !externals.contains_key(&identity)
+            && !member
             && !constructor
             && primitive.is_none()
             && target.is_none()
