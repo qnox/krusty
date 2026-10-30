@@ -443,7 +443,7 @@ fn provisions_the_pinned_kotlin_2_4_20_classpath() {
     let _ = std::fs::remove_dir_all(&cache);
     eprint!("{}", String::from_utf8_lossy(&report));
     let runtime = result.unwrap_or_else(|error| panic!("{error}"));
-    assert_eq!(runtime.compiler_classpath.len(), 8);
+    assert_eq!(runtime.compiler_classpath.len(), 10);
 }
 
 #[test]

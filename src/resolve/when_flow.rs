@@ -10,6 +10,14 @@ use crate::types::Ty;
 /// by the declined path's spelling.
 type WhenNarrowings = (Vec<(NarrowPath, Ty)>, Vec<(String, Ty)>);
 
+/// The facts a checked `when` guard proves for its arm's body.
+pub(super) struct CheckedWhenGuard {
+    pub(super) casts: Vec<(NarrowPath, Ty)>,
+    pub(super) declined: Vec<(String, Ty)>,
+    /// The implicit receiver's refinement from a guard `this is T`.
+    pub(super) this_narrow: Option<Ty>,
+}
+
 /// The subject facts each condition of a subject `when` was checked against, keyed by the
 /// condition expression.
 #[derive(Default)]
@@ -186,6 +194,49 @@ impl Checker<'_> {
             self.when_subject_plans
                 .nullable_ieee754_equalities
                 .insert(condition_expression, comparison);
+        }
+    }
+
+    /// The facts every later arm may assume once this arm's conditions all failed. Conditions
+    /// joined by commas are alternatives, so reaching the next arm means each one was false.
+    pub(super) fn when_fallthrough_narrowings(
+        &self,
+        scope: &CheckerScope<'_>,
+        subject: Option<ExprId>,
+        conditions: &[WhenCondition],
+    ) -> WhenNarrowings {
+        let (mut casts, mut declined) = (Vec::new(), Vec::new());
+        for &condition in conditions {
+            let (mut condition_casts, mut condition_declined) =
+                self.when_condition_narrowings(scope, subject, condition, false);
+            crate::trace_compiler!(
+                "smartcast",
+                "when fallthrough condition={} casts={condition_casts:?} declined={condition_declined:?}",
+                condition.expression().0,
+            );
+            casts.append(&mut condition_casts);
+            declined.append(&mut condition_declined);
+        }
+        (casts, declined)
+    }
+
+    /// Check an arm's `if` guard in the scope its conditions narrowed, and apply its true-branch
+    /// facts to the arm body: `is Lit if e.type is Marker -> e.type.binary` reads `e.type` as a
+    /// `Marker`. A guard `this is T` refines the implicit receiver past the arm's own condition.
+    /// The facts are returned so a recheck of the body reapplies them.
+    pub(super) fn checked_when_guard(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        guard: ExprId,
+    ) -> CheckedWhenGuard {
+        let guard_ty = self.expr(scope, guard);
+        self.expect_assignable(Ty::Boolean, guard_ty, self.span(guard), "when guard");
+        let (casts, declined) = self.condition_narrowings(scope, guard, true);
+        self.apply_narrowings(scope, &casts, &declined, false);
+        CheckedWhenGuard {
+            casts,
+            declined,
+            this_narrow: self.this_is_narrowing(scope, guard, false),
         }
     }
 
