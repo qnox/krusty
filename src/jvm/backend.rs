@@ -1490,6 +1490,8 @@ pub fn facade_package_metadata_from_ir(
     metadata_stamp: crate::jvm::classfile::MetadataStamp,
     annotations_in_metadata: bool,
 ) -> Option<crate::jvm::ir_emit::KotlinMetadata> {
+    let local_classifiers = crate::metadata::local_classifiers::names(ir);
+    let enum_entry_bodies = crate::metadata::local_classifiers::enum_entry_bodies(ir);
     let functions = ir
         .package_functions
         .iter()
@@ -1528,7 +1530,7 @@ pub fn facade_package_metadata_from_ir(
                     ),
                 declaration.ret,
                 &physical_descriptor,
-                &Default::default(),
+                &local_classifiers,
             ) || declaration.spellings.names_actualized_expect())
             .then_some(physical_descriptor);
             crate::metadata::builder::FnMeta {
@@ -1653,7 +1655,7 @@ pub fn facade_package_metadata_from_ir(
                         || super::metadata_method_signatures::requires_field_signature(
                             declaration.ty,
                             physical,
-                            &Default::default(),
+                            &local_classifiers,
                         )
                 }),
                 annotation_method: ir
@@ -1688,6 +1690,8 @@ pub fn facade_package_metadata_from_ir(
         crate::metadata::MetadataTypeLookups {
             intersection_approximation: Some(&approximate),
             inner_classifiers: &inner_classifier,
+            local_classifiers,
+            enum_entry_bodies,
         },
         metadata_stamp,
         annotations_in_metadata,
