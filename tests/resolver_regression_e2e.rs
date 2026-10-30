@@ -2524,3 +2524,102 @@ fun box(): String = viaLambdaReceiver(Holder("ok"))
         &["ResolverImplicitReceiverPropertyCallSuffixKt", "Holder"],
     );
 }
+
+/// An extension function's type parameter is named with its owner's receiver as the declaration
+/// spells it (`fun <T> T?.orName`), as kotlinc words it; a function without a receiver keeps the
+/// bare name.
+#[test]
+fn an_extension_function_type_parameter_owner_names_its_receiver() {
+    let sources = [(
+        "Owner.kt",
+        r#"fun <T : Number> List<T>.firstName(): T = "first"
+fun <T> T?.orName(): T = "name"
+fun <K, V> Map<in K, V>.valueName(key: K): V? = key.hashCode()
+fun <T : CharSequence> plainName(): T = 1
+"#,
+    )];
+    let reference_args = common::language_directives::kotlinc_args(sources[0].1);
+    assert_eq!(
+        common::reference_error_blocks(&sources, &reference_args),
+        [
+            "Owner.kt:1:43: return type mismatch: expected 'T (of fun <T : Number> List<T>.firstName)', actual 'String'.",
+            "Owner.kt:2:26: return type mismatch: expected 'T (of fun <T> T?.orName)', actual 'String'.",
+            "Owner.kt:3:49: return type mismatch: expected 'V? (of fun <K, V> Map<in K, V>.valueName)', actual 'Int'.",
+            "Owner.kt:4:41: return type mismatch: expected 'T (of fun <T : CharSequence> plainName)', actual 'Int'.",
+        ]
+    );
+    common::assert_error_blocks_match_kotlinc(&sources, &reference_args);
+}
+
+/// The builder shape from a SQL library: a member extension's defaulted `separator` rejects the
+/// builder that a top-level extension of the same name accepts, and a trailing receiver lambda
+/// follows. kotlinc selects the top-level extension; the classes match its output.
+#[test]
+fn a_rejected_member_extension_gives_way_to_a_top_level_builder_extension() {
+    let src = r#"
+class Builder {
+    var out = ""
+
+    fun <T> List<T>.appendTo(separator: String = ", ", prefix: String = "", transform: Builder.(T) -> Unit) {
+        out += prefix
+        for (index in indices) {
+            if (index > 0) out += separator
+            transform(this[index])
+        }
+    }
+}
+
+fun <T> List<T>.appendTo(builder: Builder, separator: String = ", ", prefix: String = "", transform: Builder.(T) -> Unit): Builder {
+    with(builder) { this@appendTo.appendTo(separator, prefix, transform) }
+    return builder
+}
+
+fun render(items: List<String>): String = with(Builder()) {
+    items.appendTo(this, prefix = "SET ") { out += it }
+    out
+}
+
+fun box(): String {
+    val rendered = render(listOf("a", "b"))
+    return if (rendered == "SET a, b") "OK" else "FAIL: $rendered"
+}
+"#;
+    let stem = "ResolverMemberExtensionYieldsToBuilderExtension";
+    assert_accepted_and_runs(src, stem);
+    common::assert_classes_identical_to_kotlinc(
+        stem,
+        src,
+        &[
+            "ResolverMemberExtensionYieldsToBuilderExtensionKt",
+            "Builder",
+        ],
+    );
+}
+
+/// A member extension that rejects the arguments gives way only to an applicable top-level
+/// extension. When the top-level extension does not accept the receiver, the member extension's
+/// own argument mismatch is the diagnostic, as kotlinc reports it.
+#[test]
+fn a_rejected_member_extension_without_an_applicable_top_level_extension_reports_its_mismatch() {
+    let sources = [(
+        "Render.kt",
+        r#"class Builder {
+    fun <T> Iterable<T>.appendTo(separator: CharSequence, transform: Builder.(T) -> Unit) {}
+}
+
+fun <T> Set<T>.appendTo(builder: Builder, transform: Builder.(T) -> Unit) {}
+
+fun render(items: List<String>): Unit = with(Builder()) {
+    items.appendTo(this) { }
+}
+"#,
+    )];
+    let reference_args = common::language_directives::kotlinc_args(sources[0].1);
+    assert_eq!(
+        common::reference_error_blocks(&sources, &reference_args),
+        [
+            "Render.kt:8:20: argument type mismatch: actual type is 'Builder', but 'CharSequence' was expected.",
+        ]
+    );
+    common::assert_error_blocks_match_kotlinc(&sources, &reference_args);
+}

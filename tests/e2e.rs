@@ -669,6 +669,8 @@ mod ctor_lambda_return_binds_type_param_e2e;
 mod ctor_numeric_widening_e2e;
 #[path = "custom_floating_range_membership_e2e.rs"]
 mod custom_floating_range_membership_e2e;
+#[path = "data_class_component_overload_e2e.rs"]
+mod data_class_component_overload_e2e;
 #[path = "data_class_copy_visibility_e2e.rs"]
 mod data_class_copy_visibility_e2e;
 #[path = "data_class_metadata_wiring_e2e.rs"]
@@ -1174,6 +1176,8 @@ mod inert_kotlinc_arguments_e2e;
 mod inferred_alias_abbreviation_e2e;
 #[path = "inferred_computed_prop_e2e.rs"]
 mod inferred_computed_prop_e2e;
+#[path = "inferred_constructor_argument_overload_e2e.rs"]
+mod inferred_constructor_argument_overload_e2e;
 #[path = "inferred_property_type_args_e2e.rs"]
 mod inferred_property_type_args_e2e;
 #[path = "inheritance_e2e.rs"]
@@ -1439,6 +1443,8 @@ mod lib_dep_harness_e2e;
 mod lib_fixture_parallel_e2e;
 #[path = "library_fun_type_lambda_param_e2e.rs"]
 mod library_fun_type_lambda_param_e2e;
+#[path = "library_inline_lambda_brace_line_e2e.rs"]
+mod library_inline_lambda_brace_line_e2e;
 #[path = "lifted_callable_names_e2e.rs"]
 mod lifted_callable_names_e2e;
 #[path = "list_fold_e2e.rs"]
@@ -1894,6 +1900,8 @@ mod native_comparable_e2e;
 mod native_comparable_ranges_e2e;
 #[path = "native_comparator_e2e.rs"]
 mod native_comparator_e2e;
+#[path = "native_compiler_command_e2e.rs"]
+mod native_compiler_command_e2e;
 #[path = "native_concurrency_e2e.rs"]
 mod native_concurrency_e2e;
 #[path = "native_const_reference_e2e.rs"]
@@ -2540,6 +2548,8 @@ mod serialization_default_element_guard_e2e;
 mod serialization_default_member_e2e;
 #[path = "serialization_external_kinds_e2e.rs"]
 mod serialization_external_kinds_e2e;
+#[path = "serialization_file_contextual_elements_e2e.rs"]
+mod serialization_file_contextual_elements_e2e;
 #[path = "serialization_generated_debug_e2e.rs"]
 mod serialization_generated_debug_e2e;
 #[path = "serialization_krusty_only_e2e.rs"]
@@ -2980,5 +2990,7 @@ mod written_default_accessor_e2e;
 
 #[path = "intersection_bound_metadata_order_e2e.rs"]
 mod intersection_bound_metadata_order_e2e;
+#[path = "type_safe_override_call_e2e.rs"]
+mod type_safe_override_call_e2e;
 #[path = "where_bound_arguments_e2e.rs"]
 mod where_bound_arguments_e2e;
