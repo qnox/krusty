@@ -149,17 +149,23 @@ impl CompactSelectedResultPublication {
         whole_array_arguments: Box<[bool]>,
         explicit_type_arguments: bool,
     ) -> Self {
+        // A constructor yields its classifier's own type, whose arguments are rigid type
+        // parameters. Only an inferred argument takes the flexibility of the Java usage it was
+        // inferred through; an explicit one is substituted as written.
         let declared_arguments = formals
             .iter()
             .enumerate()
             .map(|(index, formal)| {
-                Ty::ty_param(
-                    formal,
-                    bounds
-                        .get(index)
-                        .copied()
-                        .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any"))),
-                )
+                let bound = bounds
+                    .get(index)
+                    .copied()
+                    .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
+                let bound = if explicit_type_arguments && bound.is_platform_nullable() {
+                    Ty::nullable(bound.platform_lower_bound())
+                } else {
+                    bound
+                };
+                Ty::ty_param(formal, bound)
             })
             .collect::<Vec<_>>();
         Self {

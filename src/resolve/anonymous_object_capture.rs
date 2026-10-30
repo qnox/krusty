@@ -3,7 +3,7 @@
 
 use super::capture_storage::{
     anonymous_body_expressions, anonymous_descendant_uses_name, anonymous_descendant_writes_name,
-    anonymous_descendants, enclosing_value_visible_beside_member,
+    anonymous_descendants, enclosing_value_visible_beside_member, ConstructorArgumentUses,
 };
 use super::scope::ContextReceiverKind;
 use super::{
@@ -1037,6 +1037,7 @@ pub(super) struct SelectedLocalCallableCaptures<'a> {
     pub(super) calls: &'a HashMap<ExprId, ResolvedCall>,
     pub(super) expressions: &'a HashMap<ExprId, ExprLowering>,
     pub(super) statements: &'a HashMap<StmtId, StmtLowering>,
+    pub(super) constructor_arguments: ConstructorArgumentUses<'a>,
 }
 
 fn expression_uses_selected_local_callable_capture(
@@ -1101,7 +1102,7 @@ fn anonymous_descendant_uses_selected_local_callable_capture(
     selected: SelectedLocalCallableCaptures<'_>,
 ) -> bool {
     anonymous_descendants(declaration, lexical_scope).any(|candidate| {
-        anonymous_body_expressions(file, candidate)
+        anonymous_body_expressions(file, candidate, selected.constructor_arguments)
             .into_iter()
             .any(|expression| {
                 expression_uses_selected_local_callable_capture(file, expression, name, selected)
@@ -1167,6 +1168,7 @@ pub(super) fn record_anonymous_construction_captures(
                         &candidate.name,
                         candidate.ty,
                         candidate.function_local,
+                        selected_local_callables.constructor_arguments,
                     )
                     || anonymous_descendant_uses_selected_local_callable_capture(
                         file,
@@ -1181,6 +1183,7 @@ pub(super) fn record_anonymous_construction_captures(
                         lexical_scope,
                         &candidate.name,
                         candidate.function_local,
+                        selected_local_callables.constructor_arguments,
                     ))
             }
         })
