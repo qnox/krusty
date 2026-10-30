@@ -6199,7 +6199,10 @@ retain declaration-name spans for exact ambiguous-parent diagnostics. Private an
 results remain exact; shared outcomes and operand ABI ownership are unchanged.
 Canonical compact parent templates, including alias arguments, are computed once before signature
 inference and shared with classifier publication; parent diagnostics retain their publication order.
-Complete anonymous metadata parity stays in #2653/#2654 with its full retained fixture oracles.
+File-facade metadata now carries the existing local/enum-body classifier inventories into both
+package class-ID encoding and JVM signature-record decisions. The original three #2654 complete
+metadata oracles are restored, with an additional complete property-storage ABI/metadata control.
+Own versus lexical-capture metadata applications stay in #2653 with their full retained oracles.
 Parameterized alias superclass arguments retain their enclosing lexical bindings. The original
 expanded #2655 fixture and both complete ABI/runtime controls are retained in
 `tests/typealias_constructor_inference_e2e/parameterized_parent_aliases.rs` alongside the minimal tests.

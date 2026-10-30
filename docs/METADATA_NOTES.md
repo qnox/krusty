@@ -198,10 +198,14 @@ ordinary result denotability does not introduce a separate checking context.
 Parent templates are the same alias-expanded compact facts later published in classifier headers;
 metadata and anonymous exposure do not reconstruct arguments from transitional collector shapes.
 
-Complete anonymous-class metadata parity remains tracked by #2653 (own versus lexical-capture
-applications) and #2654 (package-local classifier facts and raw payloads). Their unchanged complete
-fixture oracles remain attached to those issues; ABI publication checks do not establish metadata
-payload parity.
+Package metadata retains the same authenticated local-classifier and enum-entry-body inventories as
+class metadata. Function and backing-field signature records use that locality evidence too: a
+reader cannot reconstruct a local classifier's physical JVM name from its metadata class ID.
+The original #2654 private-factory, explicitly typed getter and inferred-getter controls compare
+complete decoded and raw payloads; the inferred-getter and property-storage controls also compare
+the complete class ABI. Tests: `tests/facade_local_classifier_metadata_e2e.rs`.
+Own versus lexical-capture applications remain tracked by #2653 with its unchanged complete fixture
+oracles; ABI publication checks do not establish metadata payload parity.
 
 Layout reads use class headers and builtin declaration tables, not the enclosing `LibraryType` or
 its members. Physical mapped Java requests keep invariant formals independently of a Kotlin view's
