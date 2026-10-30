@@ -76,6 +76,7 @@ mod body_local_hierarchy;
 mod body_local_property_selection;
 mod call_applicability;
 use call_applicability::{ArgSlots, CallCandidateScore};
+mod array_type_validity;
 mod call_constraints;
 mod call_diagnostics;
 mod call_result_constraint;
@@ -89,6 +90,7 @@ mod class_literal_array_of_nothing;
 mod class_literal_receiver;
 mod class_literal_type_arguments;
 mod class_names_aliases;
+mod expression_finalization;
 mod star_projected_classifier;
 use candidate_display::{
     ambiguous_classifier_message, classifier_access_display_from_shape,
@@ -39566,12 +39568,12 @@ impl<'a> Checker<'a> {
                 selected.callable.default_call = true;
                 selected.callable.inline = crate::libraries::InlineKind::MustInline;
             } else if let Some(literals) = self.library_default_literals(call, &selected) {
-                // The provider states each omitted default as a CONSTANT, so the call site passes
-                // it. A constant has no side effects and depends on no other argument, which is
-                // what makes this the same call the callee's own default-filling would have made —
-                // and it needs no `$default` symbol, which is the one thing a klib cannot name.
+                // Each omitted default is a CONSTANT, with no effects and no reads of other
+                // arguments, so the call site passes it and no `$default` symbol is named.
                 self.resolved_library_default_literals
                     .insert(call, literals);
+            } else if selected.callable.defaults_from_declaration {
+                selected.callable.default_call = true;
             } else {
                 self.diags.error(
                     self.call_callee_name_span(call),
@@ -50724,12 +50726,7 @@ impl<'a> Checker<'a> {
         let t = crate::wide_stack::on_wide_stack(|| {
             self.expr_inner(scope, e, expected, value_required)
         });
-        self.check_expression_usage(scope, e);
-        self.check_static_access_type_arguments(e);
-        self.check_expression_qualifier_tree(e);
-        self.check_reified_type_arguments(scope, e);
-        self.check_expression_missing_supertypes(e);
-        self.record_flexible_value(e);
+        expression_finalization::finalize(self, scope, e, t);
         self.active_lexical_policies.truncate(policy_depth);
         self.expectation_frames.pop();
         self.expr_depth -= 1;

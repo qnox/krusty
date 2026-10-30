@@ -6,6 +6,111 @@
 
 use super::common;
 
+const NULLABILITY_HEADERS: &str = r#"annotation class Explicit(val value: Int)
+fun box(): String = if (Explicit(7).toString() == "@Explicit(value=7)") "OK" else "bad"
+"#;
+
+#[test]
+fn annotation_implementation_nullability_headers_match_complete_kotlin_artifacts() {
+    let classes = common::classes_against_kotlinc_module(&[(
+        "AnnotationNullabilityHeaders.kt",
+        NULLABILITY_HEADERS,
+    )]);
+    assert_eq!(
+        classes.krusty.keys().collect::<Vec<_>>(),
+        classes.reference.keys().collect::<Vec<_>>(),
+        "the complete emitted class inventory must match"
+    );
+    let differences = classes
+        .reference
+        .iter()
+        .filter_map(|(name, reference)| {
+            let ours = &classes.krusty[name];
+            (reference != ours).then(|| common::exact_class_difference(name, reference, ours))
+        })
+        .collect::<Vec<_>>();
+    assert!(differences.is_empty(), "{}", differences.join("\n\n"));
+}
+
+#[test]
+fn annotation_implementation_nullability_headers_run_like_kotlin() {
+    common::expect_box_same_as_kotlinc(NULLABILITY_HEADERS, "AnnotationNullabilityHeaders");
+}
+
+const ANY_METHOD_DISPATCH: &str = r#"annotation class Mark(val value: Int)
+fun render(value: Mark): String = value.toString()
+fun hash(value: Mark): Int = value.hashCode()
+fun same(left: Mark, right: Mark): Boolean = left.equals(right)
+fun box(): String {
+    val first = Mark(7)
+    val other = Mark(7)
+    if (render(first) != "@Mark(value=7)") return "render"
+    if (hash(first) != hash(other) || !same(first, other)) return "contract"
+    val erased: Any = first
+    return if (erased.toString() == render(first)) "OK" else "erased"
+}
+"#;
+
+#[test]
+fn annotation_implementation_any_methods_match_complete_kotlin_artifacts() {
+    let classes =
+        common::classes_against_kotlinc_module(&[("AnnotationAnyMethods.kt", ANY_METHOD_DISPATCH)]);
+    assert_eq!(
+        classes.krusty.keys().collect::<Vec<_>>(),
+        classes.reference.keys().collect::<Vec<_>>(),
+        "the complete emitted class inventory must match"
+    );
+    let differences = classes
+        .reference
+        .iter()
+        .filter_map(|(name, reference)| {
+            let ours = &classes.krusty[name];
+            (reference != ours).then(|| common::exact_class_difference(name, reference, ours))
+        })
+        .collect::<Vec<_>>();
+    assert!(differences.is_empty(), "{}", differences.join("\n\n"));
+}
+
+#[test]
+fn annotation_implementation_any_methods_run_like_kotlin() {
+    common::expect_box_same_as_kotlinc(ANY_METHOD_DISPATCH, "AnnotationAnyMethods");
+}
+
+const FRESH_ANY_METHOD_DISPATCH: &str = r#"annotation class Fresh(val value: Int)
+fun box(): String {
+    if (Fresh(7).toString() != "@Fresh(value=7)") return "render"
+    if (Fresh(7).hashCode() != Fresh(7).hashCode()) return "hash"
+    return if (Fresh(7).equals(Fresh(7))) "OK" else "equals"
+}
+"#;
+
+#[test]
+fn fresh_annotation_any_methods_match_complete_kotlin_artifacts() {
+    let classes = common::classes_against_kotlinc_module(&[(
+        "FreshAnnotationAnyMethods.kt",
+        FRESH_ANY_METHOD_DISPATCH,
+    )]);
+    assert_eq!(
+        classes.krusty.keys().collect::<Vec<_>>(),
+        classes.reference.keys().collect::<Vec<_>>(),
+        "the complete emitted class inventory must match"
+    );
+    let differences = classes
+        .reference
+        .iter()
+        .filter_map(|(name, reference)| {
+            let ours = &classes.krusty[name];
+            (reference != ours).then(|| common::exact_class_difference(name, reference, ours))
+        })
+        .collect::<Vec<_>>();
+    assert!(differences.is_empty(), "{}", differences.join("\n\n"));
+}
+
+#[test]
+fn fresh_annotation_any_methods_run_like_kotlin() {
+    common::expect_box_same_as_kotlinc(FRESH_ANY_METHOD_DISPATCH, "FreshAnnotationAnyMethods");
+}
+
 fn emitted_classes(source: &str) -> Option<Vec<String>> {
     let classes = common::compile_in_process(
         source,

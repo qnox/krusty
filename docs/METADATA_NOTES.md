@@ -1,5 +1,13 @@
 # `@kotlin.Metadata` — reverse-engineering notes (Phase 4b)
 
+## Annotation classifier kind and JVM dispatch
+
+The JVM annotation realizer retains the exact declared interface in the generated carrier's
+`annotation_impl_of` identity. A fresh allocation exposes that representation to its consumer;
+reading a declared annotation parameter keeps the parameter's own slot contract. Existing selected
+Any-method roles and that construction evidence own interface dispatch and receiver materialization,
+without member spelling, generated-name checks, metadata changes or common semantic selection.
+
 ## Native bound-receiver physical storage
 
 The common callable-reference record owns the bound-receiver capture coordinate. Native emission
@@ -255,6 +263,14 @@ dependency annotation payloads and preserves ordinary annotation defaults and en
 KLIB dependency-root classification retains authenticated intrinsic-support ownership independently
 of successful code emission. A declined wrapper does not become an ordinary body; its metadata and
 declaration identity remain unchanged, and ordinary roots retain their strict closure contracts.
+
+## Ordinary bottom-array values
+
+Finalized-expression array validity consumes already checked semantic types, including nested
+arguments, and changes no declaration or metadata layout. The class-literal feature policy remains
+separate; a suppressed bottom-array value retains its complete existing JVM method signature.
+JVM signature elements reuse the existing physical descriptor for `Nothing`, preventing a
+nonexistent `kotlin/Nothing` class from appearing in an otherwise nongeneric array signature.
 
 ## Constructor parameter annotation pool order
 

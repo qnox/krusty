@@ -17,7 +17,7 @@ pub(crate) fn facade_segments(stems: &[String], module: &BackendModuleFacts) -> 
                 "the frontend admitted an unsupported @file:JvmMultifileClass source"
             );
             declared_jvm_name(module, source)
-                .unwrap_or_else(|| super::names::file_facade_segment(stem))
+                .unwrap_or_else(|| crate::names::file_part_short_name(stem))
         })
         .collect()
 }

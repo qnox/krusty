@@ -897,6 +897,13 @@ fn realize_expressions(
             detail,
         })?;
         let mut extension_receiver_at = None;
+        let annotation_receiver = match &ir.exprs[index] {
+            IrExpr::Call {
+                dispatch_receiver: Some(receiver),
+                ..
+            } => super::annotation_constructions::construction_interface(ir, *receiver),
+            _ => None,
+        };
         let IrExpr::Call {
             callee,
             dispatch_receiver,
@@ -1143,9 +1150,13 @@ fn realize_expressions(
                             &dispatch_classifiers,
                             callable.physical_owner,
                             callable.owner_is_interface,
-                            ir.dispatch_classes.get(&expression).copied(),
-                            ir.ext_call_source_receiver.get(&expression).copied(),
-                            callable.declaration_owner,
+                            crate::jvm::member_dispatch::VirtualReceiver {
+                                dispatch: ir.dispatch_classes.get(&expression).copied(),
+                                value_type: ir.ext_call_source_receiver.get(&expression).copied(),
+                                annotation_construction: annotation_receiver,
+                                semantic_role,
+                                declaration_owner: callable.declaration_owner,
+                            },
                         )
                         .map_err(|missing| {
                             ExternalDependencyTarget::DispatchClassifier {
@@ -1235,9 +1246,16 @@ fn realize_expressions(
                                 &dispatch_classifiers,
                                 callable.physical_owner,
                                 callable.owner_is_interface,
-                                ir.dispatch_classes.get(&expression).copied(),
-                                ir.ext_call_source_receiver.get(&expression).copied(),
-                                callable.declaration_owner,
+                                crate::jvm::member_dispatch::VirtualReceiver {
+                                    dispatch: ir.dispatch_classes.get(&expression).copied(),
+                                    value_type: ir
+                                        .ext_call_source_receiver
+                                        .get(&expression)
+                                        .copied(),
+                                    annotation_construction: annotation_receiver,
+                                    semantic_role,
+                                    declaration_owner: callable.declaration_owner,
+                                },
                             )
                             .map_err(|missing| ExternalDependencyTarget::DispatchClassifier {
                                 target,
@@ -1274,9 +1292,16 @@ fn realize_expressions(
                                 &dispatch_classifiers,
                                 callable.physical_owner,
                                 callable.owner_is_interface,
-                                ir.dispatch_classes.get(&expression).copied(),
-                                ir.ext_call_source_receiver.get(&expression).copied(),
-                                callable.declaration_owner,
+                                crate::jvm::member_dispatch::VirtualReceiver {
+                                    dispatch: ir.dispatch_classes.get(&expression).copied(),
+                                    value_type: ir
+                                        .ext_call_source_receiver
+                                        .get(&expression)
+                                        .copied(),
+                                    annotation_construction: annotation_receiver,
+                                    semantic_role,
+                                    declaration_owner: callable.declaration_owner,
+                                },
                             )
                             .map_err(|missing| ExternalDependencyTarget::DispatchClassifier {
                                 target,
