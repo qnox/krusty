@@ -1,5 +1,18 @@
 # krusty — a memory-lean Kotlin→JVM compiler PoC
 
+## JVM array member owners
+
+A call on a JVM array follows the callable's declaration owner, as kotlinc does. A member the array
+inherits from `Any` (`hashCode`, `equals`, `toString`) is called through the array classifier's
+fake override, whose class is the erased array type: `[Ljava/lang/Object;` for every `Array<T>`,
+`[I` for `IntArray`. The array classifier's own `clone()` keeps its provider's realization,
+`Object.clone` followed by a cast to the result type (kotlinc's `Clone` intrinsic). An `Array<T>`
+dispatch receiver is coerced to `[Ljava/lang/Object;`, so an array of arrays is cast before the
+call, as it already was for `size`. The owner is chosen from the recorded `SemanticCallableOwner`,
+never from the member's name. Not yet matched: kotlinc keeps `clone()`'s result as `Object` until
+its use, so `a.clone().size` casts straight to `[Ljava/lang/Object;`. Test:
+`boxed_array_construction_e2e::array_member_calls_name_kotlincs_owners`.
+
 ## Nested producers against dependent bounds
 
 A postponed generic producer passed where the outer variable is still open is solved against that
@@ -3203,8 +3216,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   nested-local declarations, anonymous objects, enum-entry bodies, and generated classes—join the
   frozen module/dependency facts by exact identity at each JVM realization boundary. Their absence
   is not retried through a provider or inferred from a generated class name.
-  An array receiver names the JVM array type (`[Ljava/lang/String;`, `[C`), not `kotlin/Array`
-  or `kotlin/CharArray`, which have no class file (`tests/inherited_member_owner_e2e.rs`).
+  An array receiver's inherited `Any` member names the erased JVM array type (`[C`, and
+  `[Ljava/lang/Object;` for every `Array<T>`), not `kotlin/Array` or `kotlin/CharArray`, which
+  have no class file; see "JVM array member owners" (`tests/boxed_array_construction_e2e.rs`).
 - `enum class`: compiled as a `final` class extending `java/lang/Enum` with a `public static final`
   constant per entry, a synthetic `$VALUES` array, a private `(String name, int ordinal, …userArgs)`
   constructor calling `super(name, ordinal)`, a `<clinit>` that constructs entries in declaration

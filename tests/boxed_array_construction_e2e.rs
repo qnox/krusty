@@ -134,6 +134,11 @@ fn array_member_calls_name_kotlincs_owners() {
         ARRAY_MEMBER_OWNERS,
         "ArrayMemberOwnersKt",
     );
+    common::assert_classes_identical_to_kotlinc(
+        "ArrayMemberOwners",
+        ARRAY_MEMBER_OWNERS,
+        &["ArrayMemberOwnersKt"],
+    );
     common::expect_box_same_as_kotlinc(ARRAY_MEMBER_OWNERS, "ArrayMemberOwners");
 }
 
