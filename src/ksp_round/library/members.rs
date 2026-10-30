@@ -297,9 +297,13 @@ impl MemberView<'_> {
             line: None,
             annotations: Vec::new(),
             modifiers: Some(modifiers),
-            // The view does not carry a function's own type parameters yet.
-            type_parameters: None,
-            extension_receiver: KspTypeSlot::Absent,
+            // The view does not carry a function's own type parameters or receiver yet, only
+            // whether it has them.
+            type_parameters: (!function.is_generic).then(Vec::new),
+            extension_receiver: match function.is_extension {
+                true => KspTypeSlot::Undescribed,
+                false => KspTypeSlot::Absent,
+            },
             parameters: self.parameters(&function.parameters),
             return_type: self.scope.ty(function.ret),
             jvm_signature: None,

@@ -433,6 +433,25 @@ pub(super) fn supertype_with_classifier(
         .find(|ty| ty.obj_internal() == Some(owner))
 }
 
+impl super::SymbolResolver<'_> {
+    /// Whether kotlinc's assignment plugin turns an assignment to a `val` of type `ty` into a call
+    /// of `assign`: the class of `ty`, or one of its supertypes, carries one of the compilation's
+    /// assignment annotations.
+    pub(crate) fn supports_assignment_overloading(&self, ty: Ty) -> bool {
+        let annotations = &self.src.annotation_conventions().assignment;
+        !annotations.is_empty()
+            && receiver_hierarchy(&self.src, ty.non_null())
+                .into_iter()
+                .filter_map(|(applied, _)| self.src.classifier(applied.obj_internal()?))
+                .any(|classifier| {
+                    classifier
+                        .annotations
+                        .iter()
+                        .any(|annotation| annotations.contains(&annotation.annotation))
+                })
+    }
+}
+
 pub(super) fn receiver_hierarchy(source: &dyn SymbolSource, receiver: Ty) -> Vec<(Ty, u32)> {
     let mut queue = std::collections::VecDeque::from([(receiver, 0)]);
     let mut seen = crate::fx_hash::HashSet::default();
