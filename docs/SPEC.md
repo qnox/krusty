@@ -8646,16 +8646,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   reference) and before the next method's name. A primitive setter has no `checkNotNullParameter`
   that would intern it earlier, and the name had gone to the end of the pool. Test:
   `tests/top_level_setter_pool_e2e.rs`.
-- **A non-final backing field signs declaration-site variance as wildcards.** kotlinc's
-  `mapFieldSignature` maps a final field's type in its return-type mode and any other field's in its
-  value-parameter mode. A `val xs: List<CharSequence>` signs `Ljava/util/List<Ljava/lang/CharSequence;>;`,
+- **A `var`'s backing field signs declaration-site variance as wildcards.** kotlinc's
+  `mapFieldSignature` maps a field's type in its value-parameter mode when the field backs a `var`
+  property and in its return-type mode otherwise. A `val xs: List<CharSequence>` signs `Ljava/util/List<Ljava/lang/CharSequence;>;`,
   while a `var` (plain, private, `lateinit` or `@JvmField`, at top level, in a class, an object, a
   companion or an enum) signs `Ljava/util/List<+Ljava/lang/CharSequence;>;`, and a
   `var recompose: (String, Int) -> Unit` signs
   `Lkotlin/jvm/functions/Function2<-Ljava/lang/String;-Ljava/lang/Integer;Lkotlin/Unit;>;`. A
   redundant wildcard is dropped as in a parameter (`var plain: List<String>` keeps
-  `Ljava/util/List<Ljava/lang/String;>;`). The mode follows the field's emitted `ACC_FINAL` flag.
-  Test: `tests/mutable_field_signature_e2e.rs`.
+  `Ljava/util/List<Ljava/lang/String;>;`). The mode follows the property, not the field's
+  `ACC_FINAL` flag: the Compose plugin's non-final `ComposableSingletons` fields back `val`s and sign
+  `Function2<Composer;Integer;Unit>` without wildcards. Tests: `tests/mutable_field_signature_e2e.rs`,
+  `compose_singleton_lambdas_are_byte_identical_to_kotlinc`.
 - **A top-level property's backing field carries its generic `Signature`.** A top-level `val xs:
   List<String>` becomes a static field of the FILE FACADE, whose field table is built by
   `emit_statics` rather than the class-field path — so it dropped the `Signature` the same property
@@ -13285,17 +13287,33 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the class file only, never in Kotlin metadata, because kotlinc's IR plugin adds it after FIR
   metadata serialization. `sourceInformation` (`C(<name>)<line>@<offset>L<length>,…:<file>#<package hash
   in base 36>`) and trace markers (`<fq name> (<file>:<0-based line>)`) follow the plugin's options.
+  A composable lambda passed to a composable call that captures nothing is memoized: the file's
+  `ComposableSingletons$<file part>Kt` object (the file-part name even under `@file:JvmName`;
+  synthetic-class `@Metadata` with `xi=48`, a public constructor) holds a non-final private static
+  field `lambda$<key>` created in `<clinit>` by `composableLambdaInstance(<key>, false, <lambda>)`
+  at the lambda's opening line, with an `internal` getter `getLambda$<key>$<module>`, and the call
+  reads it there without a line. The lambda's body is
+  `private static final Unit lambda__<key>$lambda$0(Composer $composer, int $changed)` on that
+  object, `@Composable` and `@FunctionKeyMeta`, with no `$composer` null check, which runs
+  `if (shouldExecute(($changed & 3) != 2, $changed & 1)) { <trace> <statements> } else
+  skipToGroupEnd()`, the skip on the opening line and no line at entry. Its key is the Java hash
+  of `fun-$anonymous$()Unit/arg-<parameter>/call-<callee>[:<n>]/fun-<caller signature>/pkg-…/file-…`,
+  where `n` counts the caller's earlier calls of the same name; its source information has no
+  name (`C<calls>:<file>#<hash>`) and its trace names
+  `<object>.lambda$<key>.<anonymous> (<file>:<first statement's 0-based line>)`. A capturing,
+  nested or empty composable lambda is declined.
   The recompose lambda `<name>$lambda$0(<parameters>, $$changed, [$$default,] $composer, $force)`
   publishes its
   locals and no
   line, and the call's line starts at its dispatch, since kotlinc builds both arguments without
   offsets. Tests: `tests/fixtures/compose/restartableFunctions.kt`, `trackedParameters.kt`,
-  `defaultArguments.kt` and `lambdaParameters.kt`,
+  `defaultArguments.kt`, `lambdaParameters.kt` and `singletonLambdas.kt`,
   whose `box()` composes and recomposes the functions through a recording composer, and
   `kotlin_box_ir_jvm_conformance::compose_restartable_functions_are_byte_identical_to_kotlinc` and
   `compose_tracked_parameters_are_byte_identical_to_kotlinc`,
-  `compose_default_arguments_are_byte_identical_to_kotlinc` and
-  `compose_lambda_parameters_are_byte_identical_to_kotlinc`, which require their class sets to
+  `compose_default_arguments_are_byte_identical_to_kotlinc`,
+  `compose_lambda_parameters_are_byte_identical_to_kotlinc` and
+  `compose_singleton_lambdas_are_byte_identical_to_kotlinc`, which require their class sets to
   equal kotlinc's byte for byte;
   `cli_compiler_plugin_e2e::the_compose_pass_rejects_what_it_does_not_cover` and
   `compose_report_destinations_fail_the_compile`; and the `plugins::compose` and
