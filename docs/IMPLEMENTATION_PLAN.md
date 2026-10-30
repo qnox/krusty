@@ -5915,6 +5915,9 @@ non-inline callers, still reads the field directly. Test:
 - `src/wasm/` lowers checked common IR to one WasmGC module per program for both kotlinc Wasm
   targets; the targets share every instruction and differ only in the host write function and the
   Node.js loader. Unsupported constructs decline the whole compilation by name.
+- Constructor-prefix admission distinguishes recorded anonymous-super forwards from unsupported
+  captures. Existing typed parameter/super-call lowering executes field-free forwarded operands;
+  both Wasm hosts run the same portable nested-construction fixture as JVM and Native.
 - First slice: top-level functions and properties over primitives and `String` (locals, `when`,
   loops with labels, arithmetic with Kotlin's promotion and narrowing, equality, templates,
   same-file calls).

@@ -23098,6 +23098,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Tests: `wasm::codegen::tests`, and the `wasm-js`/`wasm-wasi` box lanes
   (`tests/kotlin_box_wasm_conformance.rs`).
 
+- **Forwarded anonymous-super operands are constructor values, not captures.** Wasm admits a
+  non-inner constructor prefix only when each parameter retains its exact forwarded-super ordinal,
+  ordinary value provenance and absence of capture or field storage. The existing constructor
+  argument and selected-super-call paths consume those parameters. Unsupported capture roles still
+  decline. `nestedAnonymousConstructionOrder.kt` stays in the shared inventory for every backend.
+
 - **Wasm nullable scalar assertions require an unboxing contract.** `ref.as_non_null` retains a
   reference; it cannot produce the checked i32, i64, f32 or f64 result of a nullable scalar's `!!`.
   Such an assertion declines with `a not-null assertion requiring a scalar reference conversion`,

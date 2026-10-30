@@ -1390,6 +1390,12 @@ inner constructors and checked body-local methods preserve the same evidence. Su
 the existing logical continuation normalization. Applied callable/physical parameter vectors keep
 their existing ABI and packing roles; the facet does not add class formals to callable arity.
 
+## Wasm constructor-prefix roles
+
+Wasm constructor admission consumes `IrCtorArg`'s forwarded-super ordinal and parameter provenance
+separately from the total constructor-prefix count. Only field-free ordinary forwards are admitted
+by this extension; source metadata and capture storage retain their existing contracts.
+
 ## Serialized Elvis provenance
 
 An `ELVIS` block supplies an immutable compiler variable followed by a two-branch conditional
