@@ -18,6 +18,7 @@
 
 use crate::fx_hash::HashMap;
 
+use super::boxes::Boxes;
 use super::encode::{
     BlockType, Code, CompositeType, FieldType, Function, HeapType, Module, StorageType, ValType,
 };
@@ -52,6 +53,8 @@ pub(super) struct Runtime {
     /// The object model's root types and `kotlin.Any`'s members.
     pub(super) objects: ObjectRoot,
     pub(super) exceptions: ExceptionTransport,
+    /// The box types of the primitives this module carries as references.
+    pub(super) boxes: Boxes,
     /// Offsets of string constants already in the data segment.
     constants: HashMap<Vec<u16>, u32>,
 }
@@ -111,6 +114,7 @@ impl Runtime {
             i64_div: module.declare(),
             objects,
             exceptions,
+            boxes: Boxes::default(),
             constants: HashMap::default(),
         };
         runtime.define_string_equals(module);

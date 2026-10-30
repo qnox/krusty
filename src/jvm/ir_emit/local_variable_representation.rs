@@ -28,8 +28,9 @@ pub(super) fn slot_type(ir: &IrFile, declaration: ExprId, semantic: Ty) -> Ty {
 ///
 /// kotlinc stores that parameter as its erased bound (`T : AutoCloseable?` is `AutoCloseable`) and
 /// `checkcast`s back to the call-site type at each use. An unconstrained `T` stays the specialized
-/// reference: its bound erases to `Object`, and no cast is emitted. A primitive specialization
-/// stays unboxed.
+/// reference: its bound erases to `Object`, and no cast is emitted. A primitive specialization is
+/// boxed into the erased bound, as kotlinc boxes `true.also { }`'s receiver and unboxes it for
+/// each use; the redundant-boxing pass removes the pair when every use unboxes.
 fn erased_inline_parameter_slot(ir: &IrFile, declaration: ExprId, semantic: Ty) -> Option<Ty> {
     let declared = ir.inline_declared_type(declaration)?;
     if !declared.non_null().is_ty_param() {
@@ -37,8 +38,14 @@ fn erased_inline_parameter_slot(ir: &IrFile, declaration: ExprId, semantic: Ty) 
     }
     let erased = ir_ty_to_jvm(&stored_value_ty(declared));
     let specialized = ir_ty_to_jvm(&stored_value_ty(semantic));
-    if !erased.is_reference() || !specialized.is_reference() || erased == specialized {
+    if !erased.is_reference() || erased == specialized {
         return None;
+    }
+    if !specialized.is_reference() {
+        // Only a built-in primitive boxes to its wrapper; an unsigned or value class specialization
+        // has its own box class.
+        let primitive = stored_value_ty(semantic);
+        return (primitive.scalar_value_repr() == Some(primitive)).then_some(erased);
     }
     let top = erased
         .obj_internal()
@@ -48,6 +55,14 @@ fn erased_inline_parameter_slot(ir: &IrFile, declaration: ExprId, semantic: Ty) 
     } else {
         Some(erased)
     }
+}
+
+/// The built-in primitive a declaration holds boxed in its erased inline type-parameter slot.
+pub(super) fn boxed_scalar_slot(ir: &IrFile, declaration: ExprId, semantic: Ty) -> Option<Ty> {
+    let primitive = ir_ty_to_jvm(&stored_value_ty(semantic));
+    (primitive.scalar_value_repr() == Some(primitive)
+        && slot_type(ir, declaration, semantic).is_reference())
+    .then_some(primitive)
 }
 
 fn emit_deferred_zero(
@@ -365,6 +380,28 @@ impl Emitter<'_> {
                     self.mark_expression_line(declaration, line, code);
                 }
             }
+        }
+    }
+}
+
+impl Emitter<'_> {
+    /// The primitive a read of a boxed value unboxes to, unless its consumer takes the box.
+    pub(super) fn unboxed_scalar_read(&self, read: ExprId, index: u32) -> Option<Ty> {
+        if self.boxed_scalar_reads.contains(&read) {
+            return None;
+        }
+        self.boxed_scalar_values.get(&index).copied()
+    }
+
+    /// The read that produces `value`'s result, through the values of nested blocks, when it reads
+    /// a local. A reference consumer of an inlined frame's boxed result takes it unchanged.
+    pub(super) fn trailing_value_read(&self, value: ExprId) -> Option<ExprId> {
+        match self.ir.expr(value) {
+            IrExpr::GetValue(_) => Some(value),
+            IrExpr::Block {
+                value: Some(inner), ..
+            } => self.trailing_value_read(*inner),
+            _ => None,
         }
     }
 }
