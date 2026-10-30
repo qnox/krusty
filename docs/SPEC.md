@@ -1,5 +1,12 @@
 # krusty — a memory-lean Kotlin→JVM compiler PoC
 
+## JVM array clone result
+
+The JVM `Array<T>.clone()` declaration returns `Array<T>` with `T` keeping the classifier's own
+implicit `Any?` bound, so `Array<String?>.clone()` is `Array<String?>`. A non-null bound made it
+`Array<String>` and rejected moshi's `pathNames = copyFrom.pathNames.clone()`. Test:
+`array_member_reference_e2e::a_nullable_element_array_clone_keeps_its_element_type`.
+
 ## Smart casts from `when` guards
 
 An arm's guard (`is Lit if e.type is Marker -> ...`) is checked with the arm's own condition facts
