@@ -523,6 +523,8 @@ pub struct JvmBackend {
     lambda_modes: crate::jvm::ir_emit::LambdaModes,
     /// `-Xstring-concat=inline`: build string concatenations with `StringBuilder` at every target.
     inline_string_concat: bool,
+    /// `-Xuse-inline-scopes-numbers`: name inlined locals by their inline scope's number.
+    inline_scopes_numbers: bool,
     /// Whether to emit the `Intrinsics.checkNotNullParameter` guards (`-Xno-param-assertions`
     /// clears this).
     param_assertions: bool,
@@ -550,6 +552,7 @@ impl JvmBackend {
             java_parameters: false,
             lambda_modes: crate::jvm::ir_emit::LambdaModes::default(),
             inline_string_concat: false,
+            inline_scopes_numbers: false,
             param_assertions: true,
             call_assertions: true,
             metadata_version: None,
@@ -626,6 +629,12 @@ impl JvmBackend {
         self
     }
 
+    /// `-Xuse-inline-scopes-numbers`: name inlined locals by their inline scope's number.
+    pub fn with_inline_scopes_numbers(mut self, enabled: bool) -> JvmBackend {
+        self.inline_scopes_numbers = enabled;
+        self
+    }
+
     /// Set the class-file version subsequent emits target (from the CLI's `-jvm-target`).
     pub fn with_class_major(mut self, major: Option<u16>) -> JvmBackend {
         self.class_major = major;
@@ -675,6 +684,7 @@ pub fn shipping_emit_options(
         lambda_modes: crate::jvm::ir_emit::LambdaModes::default(),
         java_parameters: false,
         inline_string_concat: false,
+        inline_scopes_numbers: false,
         // Compute + emit each class's own `@Metadata`. Without it a krusty-compiled CLASS is
         // unreadable BY KRUSTY: the facade metadata describes top-level declarations only, so a
         // second compilation sees no constructor/member parameter names (named arguments) and no
@@ -1133,6 +1143,7 @@ impl JvmBackend {
         .with_jvm_default(self.jvm_default)
         .with_lambda_modes(self.lambda_modes)
         .with_inline_string_concat(self.inline_string_concat)
+        .with_inline_scopes_numbers(self.inline_scopes_numbers)
         .with_param_assertions(self.param_assertions)
         .with_metadata_version(self.metadata_version)
         .with_annotations_in_metadata(self.annotations_in_metadata)

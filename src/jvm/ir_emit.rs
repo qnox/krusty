@@ -497,6 +497,8 @@ pub(super) struct EmitEnv<'a> {
     java_parameters: bool,
     /// `-Xstring-concat=inline`: build string concatenations with `StringBuilder` at every target.
     inline_string_concat: bool,
+    /// `-Xuse-inline-scopes-numbers`: name inlined locals by their inline scope's number.
+    inline_scopes_numbers: bool,
     /// The `@kotlin.Metadata` `mv` (`-language-version`, or [`DEFAULT_METADATA_VERSION`]) and
     /// pre-release flag this emission writes.
     metadata_stamp: crate::jvm::classfile::MetadataStamp,
@@ -1274,6 +1276,7 @@ pub(crate) fn emit_all_with_checked_classifiers(
         lambda_modes: opts.lambda_modes,
         java_parameters: opts.java_parameters,
         inline_string_concat: opts.inline_string_concat,
+        inline_scopes_numbers: opts.inline_scopes_numbers,
         metadata_stamp: opts.metadata_stamp(),
         property_realizations: facts.property_realizations,
         property_reference_realizations: facts.property_reference_realizations,
@@ -5199,6 +5202,8 @@ struct Emitter<'a> {
     lambda_modes: LambdaModes,
     /// `-Xstring-concat=inline`: never build a concatenation with `invokedynamic`.
     inline_string_concat: bool,
+    /// The scope numbering of the method being emitted, under `-Xuse-inline-scopes-numbers`.
+    inline_scopes: Option<crate::jvm::inliner::InlineScopes>,
     /// Active `finally` bodies, outermost first. A source-level control transfer executes these
     /// before leaving its protected region; the stack carries exact IR identities, not syntax.
     return_finalizers: Vec<u32>,
@@ -5303,6 +5308,9 @@ impl<'a> Emitter<'a> {
             this_uninitialized: false,
             lambda_modes: env.lambda_modes,
             inline_string_concat: env.inline_string_concat,
+            inline_scopes: env
+                .inline_scopes_numbers
+                .then(crate::jvm::inliner::InlineScopes::default),
             return_finalizers: Vec::new(),
             protected_regions: Vec::new(),
             terminal_statement_target: None,
