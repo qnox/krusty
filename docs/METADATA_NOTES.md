@@ -256,6 +256,14 @@ KLIB dependency-root classification retains authenticated intrinsic-support owne
 of successful code emission. A declined wrapper does not become an ordinary body; its metadata and
 declaration identity remain unchanged, and ordinary roots retain their strict closure contracts.
 
+## Ordinary bottom-array values
+
+Finalized-expression array validity consumes already checked semantic types, including nested
+arguments, and changes no declaration or metadata layout. The class-literal feature policy remains
+separate; a suppressed bottom-array value retains its complete existing JVM method signature.
+JVM signature elements reuse the existing physical descriptor for `Nothing`, preventing a
+nonexistent `kotlin/Nothing` class from appearing in an otherwise nongeneric array signature.
+
 ## Constructor parameter annotation pool order
 
 Constructor header reservation interns annotation element names and values, not just annotation

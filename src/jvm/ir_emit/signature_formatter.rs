@@ -609,7 +609,7 @@ impl<'a> JvmSignatureFormatter<'a> {
         match ty.kind() {
             TyKind::STRING => Some("Ljava/lang/String;".to_string()),
             TyKind::Unit => Some("Lkotlin/Unit;".to_string()),
-            TyKind::Nothing => Some("Lkotlin/Nothing;".to_string()),
+            TyKind::Nothing => Some(ir_type_desc(ty)),
             TyKind::InProjection(inner) => Some(format!("-{}", self.ty_at(&inner, wildcards)?)),
             TyKind::OutProjection(inner) => Some(format!("+{}", self.ty_at(&inner, wildcards)?)),
             TyKind::Fun(signature) => self.function_ty(signature, wildcards),
