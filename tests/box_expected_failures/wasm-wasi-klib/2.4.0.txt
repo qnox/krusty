@@ -944,7 +944,6 @@ contextParameters/suspendContextParemetersWithExtension.kt
 contextParameters/suspendContextualWithExtension.kt
 contextParameters/unaryOperators.kt
 contextParameters/useFromAnotherModuleSuspending.kt
-contextParameters/useFromAnotherModuleWithDefaultParameterValues.kt
 contextParameters/withExtensionReceiverInSupertype.kt
 contracts/contractForCast.kt
 contracts/destructuredVariable.kt
@@ -2672,7 +2671,6 @@ inline/kt66017_inlineFromTheSameModule.kt
 inline/kt67024.kt
 inline/kt67866.kt
 inline/kt69041.kt
-inline/kt82065.kt
 inline/lambdaAsAny.kt
 inline/lambdaInLambda.kt
 inline/lambdaReassignment.kt
@@ -3553,7 +3551,6 @@ inlineEvaluationOrder/while.kt
 inlineEvaluationOrder/whileComplex.kt
 inlineEvaluationOrder/whileConditionExtracted.kt
 inlineSizeReduction/lastBreak.kt
-inlineSizeReduction/multiModuleDefaultArgsCleanup.kt
 inlineSizeReduction/oneTopLevelReturn.kt
 inlineSizeReduction/propertyAssignment.kt
 inlineSizeReduction/propertyReferenceDoesNotProduceSideEffect.kt
@@ -3861,7 +3858,6 @@ multiplatform/k2/defaultArguments/defaultArgumentInDelegatedFunction.kt
 multiplatform/k2/defaultArguments/delegatedExpectedInterface.kt
 multiplatform/k2/defaultArguments/extensionReceiverValue.kt
 multiplatform/k2/defaultArguments/function.kt
-multiplatform/k2/defaultArguments/functionFromOtherModule.kt
 multiplatform/k2/defaultArguments/inheritedFromCommonClass.kt
 multiplatform/k2/defaultArguments/inheritedFromExpectedClass.kt
 multiplatform/k2/defaultArguments/inheritedFromExpectedInterface.kt

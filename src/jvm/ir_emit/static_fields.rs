@@ -130,7 +130,7 @@ pub(super) fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, env:
         // A PARAMETERIZED type (`val xs: List<String>`) carries its full generic `Signature`, exactly
         // as the same property declared inside a class does — the facade's field table is a different
         // emitter, and without this a top-level property's element type was lost to erasure.
-        let signature = signature_formatter.field_signature(&s.ty, None, acc);
+        let signature = signature_formatter.field_signature(&s.ty, None, s.is_var);
         // A reference-typed facade static carries kotlinc's nullability annotation like any other
         // backing field, except a `lateinit` one, which holds null until assigned.
         let field_ann = (!s.is_lateinit)
@@ -626,7 +626,7 @@ pub(super) fn declare(
             .then(|| super::declared_static_annotation(s))
             .flatten();
         let signature = signature_formatter
-            .field_signature(&s.ty, None, acc)
+            .field_signature(&s.ty, None, s.is_var)
             .filter(|_| !s.property_delegate);
         cw.add_field_late_sig(
             acc,
@@ -725,7 +725,7 @@ pub(super) fn emit_enum_static_fields(
         // A PARAMETERIZED static keeps its generic `Signature` (the delegate is a
         // `Lazy<KSerializer<Object>>`), and a reference-typed one carries kotlinc's nullability
         // annotation — the same treatment the class and facade field tables give their statics.
-        let signature = signature_formatter.field_signature(&s.ty, None, acc);
+        let signature = signature_formatter.field_signature(&s.ty, None, s.is_var);
         let ann = super::declared_static_annotation(s).filter(|_| !s.is_lateinit);
         // A folded `const val` is its `ConstantValue`; `<clinit>` does not store it.
         let constant = (s.init)
