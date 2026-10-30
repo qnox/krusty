@@ -2417,7 +2417,11 @@ fn emit_class(
             .map(|(_, parameter)| parameter.as_str())
             .or(field.type_param.as_deref());
         let field_sig = signature_formatter
-            .field_signature(ty, type_parameter, acc)
+            .field_signature(
+                ty,
+                type_parameter,
+                field_visibility::backs_var_property(c, field_index),
+            )
             .filter(|_| !field.is_property_delegate());
         let physical_name = instance_field_jvm_name(ir, env.run, c, field_index);
         let field_desc = type_descriptor(jvm_value_ty(ty));
@@ -3507,7 +3511,11 @@ fn emit_enum_class(
             .flatten();
         let access = field_visibility::declared_field_access(c, field_index, false);
         let signature = signature_formatter
-            .field_signature(&f.ty, f.type_param.as_deref(), access)
+            .field_signature(
+                &f.ty,
+                f.type_param.as_deref(),
+                field_visibility::backs_var_property(c, field_index),
+            )
             .filter(|_| !f.is_property_delegate());
         cw.add_field_late_sig(
             access,
