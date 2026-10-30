@@ -192,7 +192,8 @@ pub(super) fn owned_suspensions(
     // Common IR is a DAG: the CPS rewrites change nodes in place, so this body first owns one node
     // per use, as it does on the IR machine's path.
     for (source, target) in crate::ir::make_expression_children_unique_tracked(ir, body) {
-        let IrExpr::Call { args, .. } = &ir.exprs[target as usize] else {
+        let (IrExpr::Call { args, .. } | IrExpr::New { args, .. }) = &ir.exprs[target as usize]
+        else {
             continue;
         };
         if !route

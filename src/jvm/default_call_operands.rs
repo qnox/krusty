@@ -245,8 +245,8 @@ impl DefaultCallOperands {
         true
     }
 
-    /// Clone one per-call plan after common-IR DAG unsharing. The cloned call owns cloned operand
-    /// identities but exactly the same provenance and ABI boundary.
+    /// Clone one call's or construction's plan after common-IR DAG unsharing. The clone owns
+    /// cloned operand identities but exactly the same provenance and ABI boundary.
     pub(super) fn clone_call(
         &mut self,
         source: ExprId,

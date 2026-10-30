@@ -19457,7 +19457,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
     bytes late. A dependency's constructor is realized as a construction whose descriptor is the
     `$default` overload's and whose operands already hold the placeholders, masks and marker; the
     realization records which of them it added, so the construction's line returns at their first
-    run there too (`a_defaulted_dependency_construction_maps_its_lines_like_kotlinc`).
+    run there too (`a_defaulted_dependency_construction_maps_its_lines_like_kotlinc`). When a
+    suspending body unshares the expressions around a suspension point, a copied construction keeps
+    that record exactly as a copied call does, in both the state-machine handoff and the bytecode
+    machine (`a_defaulted_dependency_construction_in_a_suspending_body_maps_its_lines_like_kotlinc`).
   - **Which operands those are is RECORDED, never recognized by shape.** A realized `Const(0)` and
     a source `0` are the same node, so the pass that invents them records their physical positions
     against the call (`jvm::default_call_operands::DefaultCallOperands`, the backend-owned table the
