@@ -5,8 +5,8 @@
 #
 #   run.sh <name> <work dir> <krusty binary> <krusty Gradle plugin repository> <plugin version>
 #
-# Writes <work dir>/out/<name>/{kotlinc,krusty} (class trees), <work dir>/logs/<name>.*.log and
-# <work dir>/out/<name>/compare.json. Compiler arguments are never captured or replayed.
+# Writes <work dir>/out/<name>/{kotlinc,krusty} (class trees), <work dir>/logs/<name>.* (each build's
+# log, compile-task inventory, task times and metrics) and <work dir>/out/<name>/compare.json. Compiler arguments are never captured or replayed.
 
 # Setup fails fast: a failed fetch, checkout, patch or version-pin rewrite stops the run before
 # anything is measured. Only the two Gradle builds' exit statuses are captured rather than fatal.
@@ -64,7 +64,9 @@ fi
 # One build of the Gradle root, then its compile outputs moved to out/<mode>: the directories the
 # build's own compile-task inventory lists, so the next build starts without them. The init scripts
 # read every project of the build, so the configuration cache and isolated projects are off. The
-# Gradle exit status is left in `status`; a broken inventory or snapshot fails the run.
+# Gradle exit status is left in `status`; a broken inventory or snapshot fails the run. `measure.py`
+# records the build's wall time, CPU time and peak memory, daemons included, and stops the daemons it
+# leaves behind; the init script records when each task ran.
 build() {
   local mode=$1
   shift
@@ -75,7 +77,9 @@ build() {
   start=$(date +%s)
   (
     cd "$root"
-    CORPUS_COMPILATIONS=$manifest timeout 5400 ./gradlew --no-daemon -I "$here/corpus.init.gradle" \
+    CORPUS_COMPILATIONS=$manifest CORPUS_TASK_TIMES=$logs/$name.$mode.tasks.tsv \
+      python3 "$here/measure.py" "$logs/$name.$mode.metrics.json" \
+      timeout 5400 ./gradlew --no-daemon -I "$here/corpus.init.gradle" \
       "$@" corpusCompile --continue --rerun-tasks --no-configure-on-demand \
       --no-configuration-cache -Dorg.gradle.isolated-projects=false
   ) >"$logs/$name.$mode.log" 2>&1 || code=$?

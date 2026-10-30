@@ -22,18 +22,27 @@ unsupported compiler plugin or option) counts as a miss, with the plugin's reaso
 fails counts as a miss with the first error it logged. Android modules take part only in a project
 that names a variant in `projects.tsv`, and then only that variant's compiles.
 
+Both builds are measured. `measure.py` runs each one as the child subreaper of everything it starts,
+so the Gradle, Kotlin and krusty processes and the daemons that outlive the build are all counted: it
+records wall time, CPU time, and the peak of their summed resident memory (sampled every 100 ms,
+also split by kind), then stops the leftover daemons so the next build starts and pays for its own.
+`corpus.init.gradle` records when each task ran, and `compare.py` adds up each compilation's compile
+tasks: kotlinc's Kotlin task, and krusty's replacement, support check and Kotlin task. The reference
+build also downloads the project's dependencies, which the krusty build then finds cached; the
+compile times do not include downloads, the whole-build times do.
+
 `summarize.py` turns the per-project results into the run's report: stars, Kotlin and Java lines,
-compilations built, identical classes, the reason for every miss, and the Gradle and compiler
-plugins the corpus uses. The nightly run, and a manual run with `publish` set, records the results
+compilations built, identical classes, the reason for every miss, what both builds cost, and the
+Gradle and compiler plugins the corpus uses. The nightly run, and a manual run with `publish` set, records the results
 on the `corpus-results` branch with `publish.py`: `README.md` is the scoreboard, `projects/<name>/`
 holds each project's latest result (a project a run could not measure keeps its previous one), and
 `history.tsv` gets one line per project per run.
 
 Setup fails fast: a failed fetch, a checkout that is not the pinned commit, a patch that does not
 apply, or a Kotlin version pin that does not match exactly one assignment (`pin.py`) stops the run
-before either build. `test_compare.py`, `test_setup.py`, `test_summarize.py` and `test_publish.py`
-cover the comparison, the output inventory, the pin rewrite, the setup failures, the report and the
-results branch.
+before either build. `test_compare.py`, `test_setup.py`, `test_summarize.py`, `test_publish.py` and
+`test_measure.py` cover the comparison, the output inventory, the pin rewrite, the setup failures,
+the report, the results branch and the build measurement.
 
 `run.sh` rewrites each project's Kotlin version pin to the newest release in `kotlin-versions`.
 These projects carry a patch for that bump:
