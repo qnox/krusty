@@ -196,6 +196,7 @@ mod local_initialization;
 mod local_method_dependencies;
 mod local_properties;
 mod loop_flow;
+mod member_extension_declarations;
 mod member_extension_instantiation;
 pub(crate) use member_extension_instantiation::MemberExtensionProbes;
 use member_extension_instantiation::{
@@ -10385,41 +10386,6 @@ struct DispatchPropertyBinding {
     owner_storage: bool,
 }
 
-/// The packages in scope for an unqualified top-level or extension call.
-/// Member-extension functions named `name` declared by `owner_ty`, with that owner's applied type
-/// bindings. Reads only a symbol source, so signature solving uses it without constructing a
-/// `Checker` — there is no body to check in Pass 1.
-fn semantic_member_ext_funs_in(
-    source: &dyn SymbolSource,
-    owner_ty: Ty,
-    name: &str,
-) -> (
-    Vec<(crate::libraries::LibraryMember, MemberExtFunSig)>,
-    HashMap<String, Ty>,
-) {
-    let Some(owner) = owner_ty.obj_internal() else {
-        return (Vec::new(), HashMap::default());
-    };
-    let Some(declaration) = source.classifier(owner) else {
-        return (Vec::new(), HashMap::default());
-    };
-    let class_bindings = declaration
-        .type_params
-        .iter()
-        .cloned()
-        .zip(owner_ty.type_args().iter().copied())
-        .collect();
-    let functions = declaration
-        .members
-        .iter()
-        .filter(|member| member.name == name && member.is_member_extension())
-        .filter_map(|member| {
-            Checker::semantic_member_ext_fun(member).map(|signature| (member.clone(), signature))
-        })
-        .collect();
-    (functions, class_bindings)
-}
-
 /// Applied semantic hierarchy from a federated symbol source. This is the Pass-2 counterpart of
 /// the mutable collection table's provisional hierarchy walk and remains valid after `ClassSig`
 /// destruction.
@@ -10465,7 +10431,11 @@ fn member_extension_function_shapes_in(
         for (owner, owner_ty, dispatch_depth) in
             applied_symbol_hierarchy(source, dispatch_receiver.ty)
         {
-            let (functions, class_bindings) = semantic_member_ext_funs_in(source, owner_ty, name);
+            let member_extension_declarations::MemberExtensionDeclarations {
+                functions,
+                bindings: class_bindings,
+                input_bounds,
+            } = member_extension_declarations::at_receiver(source, owner_ty, name);
             crate::trace_compiler!(
                 "resolve",
                 "member extension scope name={name} dispatch={:?} owner={owner} declarations={}",
@@ -10546,6 +10516,7 @@ fn member_extension_function_shapes_in(
                     dispatch_receiver.ty,
                     &mut diagnostic_candidate,
                     &class_bindings,
+                    &input_bounds,
                 );
                 diagnostic_candidate.scope_rank =
                     u32::try_from(priority.dispatch_rank).unwrap_or(u32::MAX);
@@ -31177,6 +31148,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         checked_local_class_declarations: crate::fx_hash::HashSet::default(),
         checked_local_classifier_identities: HashMap::default(),
         checked_local_classifier_type_arguments: HashMap::default(),
+        checked_local_classifier_input_bounds: HashMap::default(),
         failed_local_declaration_bindings: crate::fx_hash::HashSet::default(),
         signature_default_expression_depth: 0,
         anonymous_lexical_scope: AnonymousLexicalClassScope::default(),
@@ -33839,6 +33811,8 @@ struct Checker<'a> {
     checked_local_class_declarations: crate::fx_hash::HashSet<DeclId>,
     checked_local_classifier_identities: HashMap<crate::fir::DeclarationId, TypeName>,
     checked_local_classifier_type_arguments: HashMap<crate::fir::DeclarationId, Vec<Ty>>,
+    checked_local_classifier_input_bounds:
+        HashMap<crate::fir::DeclarationId, crate::libraries::ReceiverInputBounds>,
     /// Stable local roles that the active parser binding could not supply. Publication consumes
     /// this failure ledger directly and never falls back to transient source coordinates.
     failed_local_declaration_bindings: crate::fx_hash::HashSet<crate::fir::DeclarationId>,
@@ -36853,14 +36827,12 @@ impl<'a> Checker<'a> {
                     type_args,
                     declared_parameter,
                 );
-                let substituted =
-                    crate::symbol_resolver::ty_subst_keep_unbound(declared_parameter, &bindings);
-                let nested_expected = match substituted.kind() {
-                    TyKind::TyParam(_, bound) => {
-                        crate::symbol_resolver::ty_subst_keep_unbound(bound, &bindings)
-                    }
-                    _ => substituted,
-                };
+                let nested_expected = nested_producer_bindings::producer_expectation(
+                    &signature,
+                    type_args,
+                    &bindings,
+                    declared_parameter,
+                );
                 crate::trace_compiler!(
                     "resolve",
                     "postponed argument call={call:?} parameter={parameter} expected={nested_expected:?} generic_ret={:?}",
@@ -37288,7 +37260,7 @@ impl<'a> Checker<'a> {
                     argument_names,
                 )?
             };
-            let Some(mut score) = call_applicability::score(
+            let Some(mut score) = call_applicability::score_with_declaration(
                 self,
                 scope,
                 &shape.params,
@@ -37299,6 +37271,13 @@ impl<'a> Checker<'a> {
                     arg_names: argument_names,
                     trailing_lambda,
                 },
+                candidate.source_inputs.as_deref().map(|declaration| {
+                    call_applicability::DeclarationInputs {
+                        declaration,
+                        bindings: &specialized_bindings,
+                        parameter_indices: &shape.parameter_indices,
+                    }
+                }),
             ) else {
                 crate::trace_compiler!(
                     "resolve",
@@ -37375,7 +37354,7 @@ impl<'a> Checker<'a> {
                         argument_names,
                     )?
                 };
-                let Some(specialized_score) = call_applicability::score(
+                let Some(specialized_score) = call_applicability::score_with_declaration(
                     self,
                     scope,
                     &shape.params,
@@ -37386,6 +37365,13 @@ impl<'a> Checker<'a> {
                         arg_names: argument_names,
                         trailing_lambda,
                     },
+                    candidate.source_inputs.as_deref().map(|declaration| {
+                        call_applicability::DeclarationInputs {
+                            declaration,
+                            bindings: &specialized_bindings,
+                            parameter_indices: &shape.parameter_indices,
+                        }
+                    }),
                 ) else {
                     continue;
                 };
@@ -45208,8 +45194,12 @@ impl<'a> Checker<'a> {
                     .zip(self.resolved_index)
                     .and_then(|(active, index)| active.canonical_classifier_declaration(d, index))
                 {
-                    self.checked_local_classifier_type_arguments
-                        .insert(declaration, dispatch_arguments.clone());
+                    self.record_body_local_classifier_arguments(
+                        declaration,
+                        &dispatch_arguments,
+                        &class_tparams,
+                        scope,
+                    );
                 }
             }
             let inherited_reified_type_parameters = cl
