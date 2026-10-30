@@ -198,6 +198,175 @@ fn an_explicit_bound_failure_preserves_a_pretyped_function_argument() {
 }
 
 #[test]
+fn an_explicit_bound_failure_keeps_a_callable_reference_constraint() {
+    let source = "class Callback<T : Number>(block: (T) -> String)\n\
+        fun text(value: String): String = value\n\
+        fun wrong() = Callback<String>(::text)\n";
+    let result = common::compiler_diagnostics(&[("Use.kt", source)], &[common::stdlib_jar()]);
+    assert_eq!(
+        common::compiler_errors(&result.reference_stderr),
+        vec![
+            common::CompilerError {
+                file: "Use.kt".to_owned(),
+                line: 3,
+                column: 15,
+                message: "inapplicable candidate(s): constructor<T : Number>(block: (T) -> String): Callback<T>".to_owned(),
+            },
+            common::CompilerError {
+                file: "Use.kt".to_owned(),
+                line: 3,
+                column: 24,
+                message: "type argument is not within its bounds: type parameter 'T (of class Callback<T : Number>)' must be subtype of 'Number', but actual: 'String'.".to_owned(),
+            },
+            common::CompilerError {
+                file: "Use.kt".to_owned(),
+                line: 3,
+                column: 34,
+                message: "inapplicable candidate(s): fun text(value: String): String".to_owned(),
+            },
+        ]
+    );
+    common::expect_identical_rejection(&result, "constructor bound and callable reference");
+}
+
+#[test]
+fn a_dependency_constructor_bound_failure_keeps_the_selected_reference_diagnostic() {
+    let library = common::kotlinc_lib_out(&[(
+        "Declarations.kt",
+        "package bounds\n\
+            class Callback<T : Number>(block: (T) -> String)\n\
+            fun text(value: String): String = value\n",
+    )])
+    .expect("reference provisions the bounded constructor and selected function");
+    let result = common::compiler_diagnostics(
+        &[(
+            "Use.kt",
+            "import bounds.*\nfun wrong() = Callback<String>(::text)\n",
+        )],
+        &[library, common::stdlib_jar()],
+    );
+    assert_eq!(common::compiler_errors(&result.reference_stderr).len(), 3);
+    common::expect_identical_rejection(
+        &result,
+        "dependency constructor bound and selected reference",
+    );
+}
+
+fn expect_rejected_reference(source: &str, label: &str) {
+    let result = common::compiler_diagnostics(&[("Use.kt", source)], &[common::stdlib_jar()]);
+    assert_eq!(
+        common::compiler_errors(&result.reference_stderr).len(),
+        3,
+        "{label}"
+    );
+    common::expect_identical_rejection(&result, label);
+}
+
+#[test]
+fn a_constructor_bound_failure_keeps_a_bound_member_reference() {
+    expect_rejected_reference(
+        "class Callback<T : Number>(block: (T) -> String)\n\
+            class Text { fun text(value: String): String = value }\n\
+            fun wrong() = Callback<String>(Text()::text)\n",
+        "bound member reference after constructor bound failure",
+    );
+}
+
+#[test]
+fn a_constructor_bound_failure_keeps_an_unbound_member_reference() {
+    expect_rejected_reference(
+        "class Callback<T : Number>(block: (Text, T) -> String)\n\
+            class Text { fun text(value: String): String = value }\n\
+            fun wrong() = Callback<String>(Text::text)\n",
+        "unbound member reference after constructor bound failure",
+    );
+}
+
+#[test]
+fn a_constructor_bound_failure_keeps_an_extension_reference() {
+    expect_rejected_reference(
+        "class Callback<T : Number>(block: (T) -> String)\n\
+            fun String.text(): String = this\n\
+            fun wrong() = Callback<String>(String::text)\n",
+        "extension reference after constructor bound failure",
+    );
+}
+
+#[test]
+fn a_constructor_bound_failure_keeps_an_adapted_reference() {
+    expect_rejected_reference(
+        "class Callback<T : Number>(block: (T) -> String)\n\
+            fun text(value: String, suffix: String = \"\"): String = value + suffix\n\
+            fun wrong() = Callback<String>(::text)\n",
+        "default-adapted reference after constructor bound failure",
+    );
+}
+
+#[test]
+fn a_constructor_bound_failure_keeps_a_local_function_reference() {
+    expect_rejected_reference(
+        "class Callback<T : Number>(block: (T) -> String)\n\
+            fun wrong() {\n\
+                fun text(value: String): String = value\n\
+                Callback<String>(::text)\n\
+            }\n",
+        "local function reference after constructor bound failure",
+    );
+}
+
+#[test]
+fn a_constructor_bound_failure_keeps_a_constructor_reference() {
+    expect_rejected_reference(
+        "class Callback<T : Number>(block: (T) -> Text)\n\
+            class Text(value: String)\n\
+            fun wrong() = Callback<String>(::Text)\n",
+        "constructor reference after constructor bound failure",
+    );
+}
+
+#[test]
+fn a_constructor_bound_failure_keeps_a_generic_constructor_reference() {
+    expect_rejected_reference(
+        "class Callback<T : Number>(block: (T) -> Text<String>)\n\
+            class Text<U>(value: U)\n\
+            fun wrong() = Callback<String>(::Text)\n",
+        "generic constructor reference after constructor bound failure",
+    );
+}
+
+#[test]
+fn a_constructor_bound_failure_keeps_a_bound_extension_reference() {
+    expect_rejected_reference(
+        "class Callback<T : Number>(block: () -> String)\n\
+            fun String.text(): String = this\n\
+            fun wrong() = Callback<String>(\"value\"::text)\n",
+        "bound extension reference after constructor bound failure",
+    );
+}
+
+#[test]
+fn a_constructor_bound_failure_keeps_a_local_extension_reference() {
+    expect_rejected_reference(
+        "class Callback<T : Number>(block: (T) -> String)\n\
+            fun wrong() {\n\
+                fun String.text(): String = this\n\
+                Callback<String>(String::text)\n\
+            }\n",
+        "local extension reference after constructor bound failure",
+    );
+}
+
+#[test]
+fn a_constructor_bound_failure_keeps_an_independent_reference_constraint() {
+    expect_rejected_reference(
+        "class Callback<T : Number>(block: (Int) -> String)\n\
+            fun text(value: Int): String = value.toString()\n\
+            fun wrong() = Callback<String>(::text)\n",
+        "independent reference constraint after constructor bound failure",
+    );
+}
+
+#[test]
 fn a_valid_constructor_bound_preserves_inferred_and_written_lambda_inputs() {
     let source = r#"
 class Callback<T : Number>(val block: (T) -> String)

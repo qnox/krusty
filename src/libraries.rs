@@ -41,6 +41,7 @@ mod result_nullability;
 mod runtime_exception;
 mod scalar_instruction;
 mod singleton_dispatch;
+mod source_inputs;
 mod stdlib_klib_intrinsics;
 pub use annotation_application::{
     AnnotationApplication, AnnotationElementDefault, AnnotationParameterPolicy,
@@ -56,7 +57,9 @@ pub use call_realization::{
 pub(crate) use call_realization::{KlibBodyCallableShape, KlibBodyCompanionReceiver};
 pub use call_sig::required_arity;
 pub use callable_scope_rung::CallableScopeRung;
-pub(crate) use classifier_callables::{constructor_generic_signature, ConstructorAlias};
+pub(crate) use classifier_callables::{
+    constructor_declaration_signature, constructor_generic_signature, ConstructorAlias,
+};
 pub use classifier_callables::{BoundInnerConstructor, ConstructorCandidate};
 pub(crate) use classifier_declaration::type_alias_target_classifier;
 pub use classifier_declaration::{
@@ -92,6 +95,7 @@ pub use provider_override::ProviderOverrideSlot;
 pub use result_nullability::{ResultEnhancement, ReturnInfo};
 pub use runtime_exception::{RuntimeExceptionKind, RuntimeExceptionLayout};
 pub use singleton_dispatch::SingletonDispatch;
+pub(crate) use source_inputs::{ReceiverInputBounds, SourceInputDeclaration};
 pub(crate) use stdlib_klib_intrinsics::{stdlib_klib_intrinsic, StdlibKlibIntrinsic};
 
 use crate::fx_hash::{HashMap, HashSet};
@@ -1369,6 +1373,9 @@ pub fn map_call_args<T: Copy>(
 #[derive(Clone)]
 pub struct FunctionInfo {
     pub kind: FnKind,
+    /// Declaration input slots and receiver bindings retained before classifier application.
+    /// An unapplied candidate still carries its declaration directly in `semantic_signature`.
+    pub(crate) source_inputs: Option<Box<SourceInputDeclaration>>,
     /// Provider-owned override-slot identity for declarations whose platform compatibility differs
     /// from their source-language signature. This is distinct from the physical emit handle.
     pub(crate) provider_override_slot: Option<ProviderOverrideSlot>,
@@ -1439,6 +1446,10 @@ pub struct FunctionInfo {
     pub constructor: Option<ConstructorCandidate>,
     /// The alias selected on the caller's scope tower for this constructor candidate.
     pub(crate) constructor_alias: Option<Box<ConstructorAlias>>,
+    /// This declaration's identity as its classifier declares it, before a hierarchy rung applies
+    /// the receiver's type arguments (`Map.get(K): V?`, not `Map.get(String): Int?`). Recorded once,
+    /// when the declaration is first specialized; an override records it as what it overrides.
+    pub(crate) declaration_identity: Option<Box<crate::types::OverriddenDeclaration>>,
 }
 
 /// Where an extension receiver sits among a callable's PHYSICAL parameters. Kotlin puts the leading
@@ -1642,6 +1653,7 @@ impl FunctionInfo {
             .saturating_sub(usize::from(kind == FnKind::Extension));
         FunctionInfo {
             kind,
+            source_inputs: None,
             provider_override_slot: None,
             classifier_static: false,
             associated_classifier: None,
@@ -1667,6 +1679,7 @@ impl FunctionInfo {
             implicit_classifier_callable: None,
             constructor: None,
             constructor_alias: None,
+            declaration_identity: None,
         }
     }
 
