@@ -5559,9 +5559,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   callee has no scopes, so its lambda takes the call's line. The table spells the names once it is
   complete (`src/jvm/classfile/inline_scope_frames.rs`), and a marker's call-site line moves from
   the method's lines into the class's with the method's line table, as kotlinc's
-  `SourceMapCopyingMethodVisitor` copies it. The command line still refuses the argument until
-  every inlining path numbers its scopes, and the box harness selects it with
-  `// USE_INLINE_SCOPES_NUMBERS` (`tests/box_regressions/inlineScopes/`).
+  `SourceMapCopyingMethodVisitor` copies it. The command line accepts the argument
+  (`tests/inline_scopes_numbers_flag_e2e.rs`), and the box harness selects it with
+  `// USE_INLINE_SCOPES_NUMBERS` (`tests/box_regressions/inlineScopes/`). Not numbered yet: a
+  library call the byte splice places, a regenerated anonymous object's scopes, and a library call
+  inside a same-module inline function expanded for a default argument, which already differs
+  from kotlinc without the argument.
 - **A block's local slots are reused after the block ends**, as kotlinc's `FrameMap` reuses them:
   its block end leaves each variable the block declared, and a variable left from the top of the
   frame hands its slot back. A sibling branch, the next loop, a later catch parameter and the
