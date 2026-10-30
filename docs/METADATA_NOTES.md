@@ -367,6 +367,11 @@ for constant-pool publication. Its nesting relation and Kotlin metadata remain u
 the earlier explicit class seed lets annotation-only references and declared children precede it
 when the ordinary table order requires that position.
 
+Equal qualified-name source rows use their retained declaration visitation order within the
+declaring writer's slots. Common lowering may evaluate a nested constructor operand first;
+that does not change the table's declaration order. Final pool relayout preserves this source
+order while retaining pool movement for generated and referenced rows and ancestor constraints.
+
 ## Module file — part ordering
 
 Within one package, the `.kotlin_module` part list is sorted by part name
@@ -1400,6 +1405,20 @@ the raw dispatch classifier's signature mask and complete own-formal receiver ap
 Declared getter results remain distinct from the checked read's applied result. Native's runtime
 leaf capability reuses its existing accessor signature plans and does not import property bodies
 or reconstruct class storage. No metadata wire format changes.
+
+## Applied member input declarations
+
+`FunctionInfo` retains a common declaration-input facet before nominal specialization: the raw
+logical signature, exact receiver bindings, and complete owner-bound lists. Member extensions,
+inner constructors and checked body-local methods preserve the same evidence. Suspend inputs use
+the existing logical continuation normalization. Applied callable/physical parameter vectors keep
+their existing ABI and packing roles; the facet does not add class formals to callable arity.
+
+## Wasm constructor-prefix roles
+
+Wasm constructor admission consumes `IrCtorArg`'s forwarded-super ordinal and parameter provenance
+separately from the total constructor-prefix count. Only field-free ordinary forwards are admitted
+by this extension; source metadata and capture storage retain their existing contracts.
 
 ## Serialized Elvis provenance
 

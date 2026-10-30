@@ -1,5 +1,14 @@
 # krusty — a memory-lean Kotlin→JVM compiler PoC
 
+## Nested producers against dependent bounds
+
+A postponed generic producer passed where the outer variable is still open is solved against that
+variable's declared bound when the bound depends on an already bound variable: in
+`update(column: Column<T>, value: Expression<S>)` with `S : T?` and `T` fixed, `nullableExpr()`
+sees `Expression<T?>`. Matching a nullable result shape `R?` against `X?` binds `R` to `X & Any`,
+since `X` itself may admit null. A bound that depends on no other variable is not inference evidence
+for the producer. Test: `box_regressions/nestedProducerDependentBound.kt`.
+
 ## Wasm reference not-null assertions
 
 A failed reference `!!` throws the platform declaration's `NullPointerException` through the
@@ -184,6 +193,11 @@ missing ownership evidence does not authorize a stale classpath declaration to r
 Anonymous classes, reference carriers and checked body-local naming keep their separate contracts.
 Complete table comparisons cover top-level and nested literal-dollar names in both source orders.
 Metadata class-ID encoding and source-name publication remain separate follow-ups.
+
+Equal-name rows for source classes declared by the current JVM writer retain declaration
+visitation order, independently of constructor-operand evaluation. Referenced and generated rows
+keep constant-pool priority, including after coroutine pool relayout; declaring ancestors still
+precede descendants. Nested anonymous construction has complete class ABI and runtime controls.
 
 ## Builtin declaration names
 
@@ -23089,6 +23103,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Tests: `wasm::codegen::tests`, and the `wasm-js`/`wasm-wasi` box lanes
   (`tests/kotlin_box_wasm_conformance.rs`).
 
+- **Forwarded anonymous-super operands are constructor values, not captures.** Wasm admits a
+  non-inner constructor prefix only when each parameter retains its exact forwarded-super ordinal,
+  ordinary value provenance and absence of capture or field storage. The existing constructor
+  argument and selected-super-call paths consume those parameters. Unsupported capture roles still
+  decline. `nestedAnonymousConstructionOrder.kt` stays in the shared inventory for every backend.
+
 - **Wasm nullable scalar assertions require an unboxing contract.** `ref.as_non_null` retains a
   reference; it cannot produce the checked i32, i64, f32 or f64 result of a nullable scalar's `!!`.
   Such an assertion declines with `a not-null assertion requiring a scalar reference conversion`,
@@ -23326,6 +23346,16 @@ publishes the checked property read with its applied result and source receiver 
 the declared ABI. No dependency class layout is materialized for this operation. Owning tests:
 `klib_lowering::tests::accessor_calls` and the official-producer runtime accessor programs in
 `klib_closure_frames_e2e`. Compiler-introduced dependency blocks remain tracked in #2811.
+
+## Declared inputs of applied nominal members
+
+Applying a classifier receiver preserves the member declaration's original logical input slots
+and receiver bindings. Applicability and argument diagnostics inspect the declared vararg element
+before its array carrier is specialized. An out/star projection reports the receiver prohibition
+for every written scalar or expanded element; an inapplicable member permits the ordinary scope
+tower to consider an applicable extension. Diagnostics render the original declaration inputs.
+A method-owned formal remains separate from class formals.
+Tests: `nominal_projected_input_e2e`.
 
 ## Serialized Elvis expression blocks
 

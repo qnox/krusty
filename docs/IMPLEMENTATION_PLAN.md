@@ -100,6 +100,11 @@ a classpath record with the same physical identity. Preserve local/coroutine/ref
 and exact table order. This slice leaves source identity publication and metadata class-ID encoding
 for subsequent changes; the complete literal-dollar classfile regression remains open there.
 
+Consume the existing source declaration order at the JVM table boundary for equal-name source
+rows owned by each writer. Preserve referenced/generated row slots and ancestor constraints, and
+reapply that policy after final pool relayout. Nested-construction ABI/runtime and mixed
+continuation controls pin the distinction from emitted allocation order.
+
 ## Builtin declaration-name producers
 
 Populate the existing declaration-name fact from admitted core/function/array factories and raw
@@ -5915,6 +5920,9 @@ non-inline callers, still reads the field directly. Test:
 - `src/wasm/` lowers checked common IR to one WasmGC module per program for both kotlinc Wasm
   targets; the targets share every instruction and differ only in the host write function and the
   Node.js loader. Unsupported constructs decline the whole compilation by name.
+- Constructor-prefix admission distinguishes recorded anonymous-super forwards from unsupported
+  captures. Existing typed parameter/super-call lowering executes field-free forwarded operands;
+  both Wasm hosts run the same portable nested-construction fixture as JVM and Native.
 - First slice: top-level functions and properties over primitives and `String` (locals, `when`,
   loops with labels, arithmetic with Kotlin's promotion and narrowing, equality, templates,
   same-file calls).
@@ -6354,6 +6362,10 @@ bodyless edge preparation and ordinary accessor linking; preserve retained expor
 primitive/intrinsic priority. Native consumes its existing runtime getter plans. Prove real
 official-producer/JVM-oracle programs and malformed header/facet controls. Keep compiler-introduced
 block lowering as the independent #2811 follow-up.
+
+- [x] Retain nominal member declaration inputs and full owner bounds before receiver application;
+  use them for scalar and expanded-vararg admission and diagnostics with complete kotlinc ledgers.
+  Preserve invariant/in-projected inputs, named/default/non-last varargs and method-formal shadows.
 
 ## Lower serialized Elvis expression blocks
 
