@@ -434,11 +434,14 @@ impl Emitter<'_> {
                 // (`T : Throwable` read as `Throwable`) is not the receiver's own class yet:
                 // kotlinc coerces it to the substituted type the call names.
                 let property_reference = this.property_ref_class_and_captures(operand).is_some();
+                let annotation_implementation =
+                    this.annotation_implementation_interface(source).is_some();
                 let erased_bound = matches!(
                     this.erased_reference_result(operand),
                     Some(super::operand_representation::ErasedResult::Coerced { .. })
                 );
                 let target = if !property_reference
+                    && !annotation_implementation
                     && !erased_bound
                     && source.is_reference()
                     && !super::jvm_is_erased_top(super::ir_ty_to_jvm(&source))

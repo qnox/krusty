@@ -9,6 +9,14 @@ selected provider ID, while emitted-body planning preserves the full module-qual
 key. Header evidence never becomes a selected/export obligation by itself. This slice handles only
 unbound, non-generic, non-suspend top-level forwarding references; broader captures remain separate.
 
+## Annotation classifier kind and JVM dispatch
+
+The JVM annotation realizer retains the exact declared interface in the generated carrier's
+`annotation_impl_of` identity. A fresh allocation exposes that representation to its consumer;
+reading a declared annotation parameter keeps the parameter's own slot contract. Existing selected
+Any-method roles and that construction evidence own interface dispatch and receiver materialization,
+without member spelling, generated-name checks, metadata changes or common semantic selection.
+
 ## Native bound-receiver physical storage
 
 The common callable-reference record owns the bound-receiver capture coordinate. Native emission
