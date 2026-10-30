@@ -43,9 +43,11 @@ impl ScopeConstructorSelection {
 
 impl Checker<'_> {
     /// Select and record the constructor of `internal` that a bare call reaches. A classifier
-    /// that captures no outer instance, written by its own name, has its constructors selected
-    /// as ordinary callable candidates; the provider constructor path then materializes only the
-    /// selected declaration, or reports why none applies.
+    /// that captures neither an outer instance nor an enclosing declaration's type parameters,
+    /// written by its own name, has its constructors selected as ordinary callable candidates;
+    /// the provider constructor path then materializes only the selected declaration, or
+    /// reports why none applies. A captured type parameter is bound from the call's lexical
+    /// scope, which only the provider path does.
     pub(super) fn record_scope_constructor(
         &mut self,
         scope: &CheckerScope<'_>,
@@ -58,16 +60,18 @@ impl Checker<'_> {
         } else {
             ConstructorPriorityTier::All
         };
-        let shared =
-            (classifier.outer_instance.is_none() && call.alias_target.is_none()).then(|| {
-                self.select_scope_constructor(
-                    scope,
-                    call_args,
-                    (internal, classifier),
-                    (call.explicit_type_args, call.arg_names),
-                    (call.expected, priority),
-                )
-            });
+        let shared = (classifier.outer_instance.is_none()
+            && classifier.own_type_parameter_count == classifier.type_params().len()
+            && call.alias_target.is_none())
+        .then(|| {
+            self.select_scope_constructor(
+                scope,
+                call_args,
+                (internal, classifier),
+                (call.explicit_type_args, call.arg_names),
+                (call.expected, priority),
+            )
+        });
         let checkpoint = self.diags.diags.len();
         let recorded = self.record_library_constructor(
             scope,
@@ -90,9 +94,14 @@ impl Checker<'_> {
         let Some(ScopeConstructorSelection::Inapplicable(candidates)) = shared else {
             return recorded;
         };
-        if !matches!(recorded, Ok(LibraryConstructorSelection::NoMatch))
-            || self.diags.diags.len() != checkpoint
-        {
+        // A declaration the arguments map onto answers an unreported rejection: its inferred
+        // instance types the call, as kotlinc keeps an inapplicable candidate's result.
+        let mapped = match recorded {
+            Ok(LibraryConstructorSelection::NoMatch) => false,
+            Ok(LibraryConstructorSelection::Rejected(_)) => true,
+            _ => return recorded,
+        };
+        if self.diags.diags.len() != checkpoint {
             return recorded;
         }
         // The provider path found nothing to report: the candidates the shared selector rejected
@@ -113,9 +122,15 @@ impl Checker<'_> {
         match rejected {
             Some(result) => {
                 self.diags.sort_source_order_from(checkpoint);
+                let result = match mapped {
+                    true => {
+                        self.ctor_result_name(scope, call_args.call, internal, call.expected, None)
+                    }
+                    false => result,
+                };
                 Ok(LibraryConstructorSelection::Rejected(result))
             }
-            None => recorded,
+            None => Ok(LibraryConstructorSelection::NoMatch),
         }
     }
 

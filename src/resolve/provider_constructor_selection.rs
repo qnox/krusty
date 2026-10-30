@@ -11,7 +11,9 @@ pub(super) enum ConstructorPreselection<'a> {
     Selected(&'a crate::libraries::FunctionInfo),
     /// The candidates are equally specific: report why, but commit none.
     Ambiguous,
-    /// No candidate applies: report why, but commit none, whatever survives the filters here.
+    /// No candidate applies: commit none, whatever survives the filters here. The declaration
+    /// the arguments map onto only records the type arguments it infers, and the rejection is
+    /// left unreported for the shared selector's caller to report.
     Rejected,
 }
 
@@ -729,11 +731,19 @@ impl Checker<'_> {
                     return Ok(LibraryConstructorSelection::NoMatch);
                 }
             };
-        if matches!(
-            preselection,
-            ConstructorPreselection::Ambiguous | ConstructorPreselection::Rejected
-        ) {
-            return Ok(LibraryConstructorSelection::NoMatch);
+        match preselection {
+            ConstructorPreselection::Ambiguous => return Ok(LibraryConstructorSelection::NoMatch),
+            ConstructorPreselection::Rejected => {
+                // The type arguments this declaration infers type the call; its caller reports
+                // the rejection.
+                if let Some(Some(bindings)) = member_bindings.get(candidate_index) {
+                    self.record_library_constructor_type_arguments(
+                        call, internal, classifier, bindings,
+                    );
+                }
+                return Ok(LibraryConstructorSelection::Rejected(Ty::Error));
+            }
+            ConstructorPreselection::Open | ConstructorPreselection::Selected(_) => {}
         }
         let Some(member) = members.get(candidate_index).cloned() else {
             return Ok(LibraryConstructorSelection::NoMatch);

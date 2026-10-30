@@ -234,17 +234,7 @@ impl FunctionInfo {
         mut constructor: LibraryMember,
     ) -> Self {
         constructor.owner.get_or_insert(internal);
-        constructor.generic_sig = constructor_generic_signature(internal, classifier, &constructor)
-            .map(|mut signature| {
-                // Formals a local classifier captures from enclosing declarations are those
-                // declarations' own type parameters, fixed in the call's scope, not inferred here.
-                let own = classifier.own_type_parameter_count;
-                if signature.formals.len() == classifier.type_params().len() {
-                    signature.formals.truncate(own);
-                    signature.formal_bounds.truncate(own);
-                }
-                signature
-            });
+        constructor.generic_sig = constructor_generic_signature(internal, classifier, &constructor);
         let result = constructor
             .generic_sig
             .as_ref()
