@@ -1,13 +1,14 @@
 //! The kotlinc arguments krusty accepts without acting on them (`Disposition::Inert`) must leave
 //! krusty's output identical to kotlinc's under the same argument. Each turns off a check kotlinc
-//! makes and krusty does not. Two are checks on the classes a compilation reads: a library whose
-//! metadata version is from the future, or whose classes come from a pre-release compiler, fails
-//! under kotlinc unless the check is off. Those tests build such a library with kotlinc, then
-//! compile a consumer with both compilers under the argument and compare the classes byte for
-//! byte. The third is the reservation of the `kotlin` package for the standard library, which a
-//! source declaring that package passes only with `-Xallow-kotlin-package`. The fourth is the
-//! warning kotlinc reports for a `@Suppress` that names an error diagnostic. The fifth is the warning
-//! kotlinc reports that expect/actual classes are Beta.
+//! makes and krusty does not. Three are checks on the classes a compilation reads: a library whose
+//! metadata version is from the future, or whose classes come from a pre-release or an unstable
+//! (`-Xabi-stability=unstable`) compiler, fails under kotlinc unless the check is off. Those tests
+//! build such a library with kotlinc, since only kotlinc writes those markers, then compile a
+//! consumer with both compilers under the argument and compare the classes byte for byte. The
+//! fourth is the reservation of the `kotlin` package for the standard library, which a
+//! source declaring that package passes only with `-Xallow-kotlin-package`. The fifth is the
+//! warning kotlinc reports for a `@Suppress` that names an error diagnostic. The sixth is the
+//! warning kotlinc reports that expect/actual classes are Beta.
 
 use std::path::{Path, PathBuf};
 
@@ -112,6 +113,11 @@ fn skipping_the_metadata_version_check_compiles_as_kotlinc_does() {
 #[test]
 fn skipping_the_pre_release_check_compiles_as_kotlinc_does() {
     assert_inert("-Xskip-prerelease-check", &["-language-version", "2.5"]);
+}
+
+#[test]
+fn allowing_unstable_dependencies_compiles_as_kotlinc_does() {
+    assert_inert("-Xallow-unstable-dependencies", &["-Xabi-stability=unstable"]);
 }
 
 /// Compile one `source` file with both compilers under `argument`, compare their classes byte for
