@@ -11,9 +11,9 @@ use crate::plugins::runtime_declarations::{
 };
 use crate::types::{type_name, Ty};
 
-use super::source_facts::RestartableFunction;
-
 const RUNTIME: &str = "androidx/compose/runtime";
+const INTERNAL: &str = "androidx/compose/runtime/internal";
+const COMPOSABLE_LAMBDA: &str = "androidx/compose/runtime/internal/ComposableLambda";
 const COMPOSER: &str = "androidx/compose/runtime/Composer";
 const SCOPE_UPDATE_SCOPE: &str = "androidx/compose/runtime/ScopeUpdateScope";
 const FUNCTION_KEY_META: &str = "androidx/compose/runtime/internal/FunctionKeyMeta";
@@ -46,6 +46,9 @@ pub(super) struct ComposeRuntime {
     pub(super) changed: Vec<(Ty, BoundRuntimeFunction)>,
     /// `Composer.changedInstance`, which compares a function value by identity.
     pub(super) changed_instance: BoundRuntimeFunction,
+    /// `composableLambdaInstance(key, tracked, block)`, the runtime's wrapper of a composable
+    /// lambda that captures nothing.
+    pub(super) composable_lambda_instance: BoundRuntimeFunction,
 }
 
 impl ComposeRuntime {
@@ -111,6 +114,12 @@ impl ComposeRuntime {
                 vec![nullable_any()],
                 Ty::Boolean,
             )?,
+            composable_lambda_instance: function(
+                RuntimeDeclaration::Package(type_name(INTERNAL)),
+                "composableLambdaInstance",
+                vec![Ty::Int, Ty::Boolean, Ty::obj("kotlin/Any")],
+                Ty::obj(COMPOSABLE_LAMBDA),
+            )?,
         })
     }
 
@@ -169,8 +178,6 @@ pub(super) fn call(
     })
 }
 
-/// `@FunctionKeyMeta(key = …, startOffset = …, endOffset = …)`, binary-retained like the runtime
-/// declares it.
 /// `@ComposableInferredTarget(scheme)`, the applier scheme inferred for a function's lambdas.
 pub(super) fn composable_inferred_target(scheme: &str) -> RetainedAnnotation {
     RetainedAnnotation {
@@ -186,17 +193,28 @@ pub(super) fn composable_inferred_target(scheme: &str) -> RetainedAnnotation {
     }
 }
 
-pub(super) fn function_key_meta(function: &RestartableFunction) -> RetainedAnnotation {
-    let (start, end) = function.offsets;
+/// `@Composable`, binary-retained like the runtime declares it, which the function a composable
+/// lambda is lowered to carries.
+pub(super) fn composable() -> RetainedAnnotation {
+    RetainedAnnotation {
+        retention: AnnoRetention::Binary,
+        annotation: AppliedAnnotation {
+            internal: type_name(super::COMPOSABLE),
+            values: Vec::new(),
+        },
+        facts: Default::default(),
+    }
+}
+
+/// `@FunctionKeyMeta(key = …, startOffset = …, endOffset = …)`, binary-retained like the runtime
+/// declares it.
+pub(super) fn function_key_meta(key: i32, (start, end): (i32, i32)) -> RetainedAnnotation {
     RetainedAnnotation {
         retention: AnnoRetention::Binary,
         annotation: AppliedAnnotation {
             internal: type_name(FUNCTION_KEY_META),
             values: vec![
-                (
-                    "key".to_string(),
-                    AnnoValue::Const(IrConst::Int(function.key)),
-                ),
+                ("key".to_string(), AnnoValue::Const(IrConst::Int(key))),
                 (
                     "startOffset".to_string(),
                     AnnoValue::Const(IrConst::Int(start)),

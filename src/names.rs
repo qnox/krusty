@@ -56,6 +56,38 @@ pub fn property_setter_name(prop: &str) -> String {
     }
 }
 
+/// Kotlin's file part short name for a file named `file_stem`, `box` → `BoxKt`: its
+/// `PackagePartClassUtils.getFilePartShortName`. It names more than the JVM's file facade: the
+/// Compose plugin names each file's `ComposableSingletons$<part>` object after it on every target,
+/// whatever `@file:JvmName` says.
+pub(crate) fn file_part_short_name(file_stem: &str) -> String {
+    let sanitized: String = file_stem
+        .chars()
+        .map(|character| {
+            if character.is_alphabetic() || character.is_numeric() {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let mut base = String::new();
+    let mut characters = sanitized.chars();
+    match characters.next() {
+        Some(first) if first.is_numeric() => {
+            base.push('_');
+            base.push_str(&sanitized);
+        }
+        Some(first) => {
+            base.extend(first.to_uppercase());
+            base.push_str(characters.as_str());
+        }
+        None => {}
+    }
+    base.push_str("Kt");
+    base
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -69,6 +101,24 @@ mod tests {
         assert_eq!(property_getter_name("island"), "getIsland");
         assert_eq!(property_setter_name("island"), "setIsland");
         assert_eq!(property_getter_name("äpfel"), "getÄpfel");
+    }
+
+    #[test]
+    fn file_part_names_follow_kotlinc_package_part_rules() {
+        for (stem, part) in [
+            ("box", "BoxKt"),
+            ("1", "_1Kt"),
+            (
+                "32defaultParametersInSuspend",
+                "_32defaultParametersInSuspendKt",
+            ),
+            ("a-b", "A_bKt"),
+            ("x.y", "X_yKt"),
+            ("q$r", "Q_rKt"),
+            ("_u", "_uKt"),
+        ] {
+            assert_eq!(file_part_short_name(stem), part, "{stem}");
+        }
     }
 
     #[test]

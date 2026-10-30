@@ -43,6 +43,7 @@ pub(super) fn attach_declared_function_debug(
     if function.body.is_none() {
         return;
     }
+    let line = line.filter(|_| !opens_on_no_line(ir, fid));
     let param_tys = jvm_function_params(ir, fid);
     let parameter_identities = ir.function_parameter_identities(fid);
     if !param_tys.is_empty() {
@@ -174,6 +175,14 @@ fn inline_depth_marker_width(slot: u16) -> u16 {
     1 + store
 }
 
+/// Whether a compiler plugin rebuilt the function's body without source offsets, as Compose
+/// rebuilds a composable lambda's: kotlinc maps no line to its start.
+fn opens_on_no_line(ir: &IrFile, fid: u32) -> bool {
+    ir.functions[fid as usize]
+        .body
+        .is_some_and(|body| ir.is_positionless(body))
+}
+
 /// Byte width of `aload <slot>` (`aload_0..3`, `aload u1`, or `wide aload u2`).
 fn aload_len(slot: u16) -> u16 {
     if slot <= 3 {
@@ -188,8 +197,12 @@ fn aload_len(slot: u16) -> u16 {
 /// The line a lambda implementation marks right after its parameter guards: its body's line,
 /// kotlinc's shape even for an empty body (whose emission marks no line of its own). A
 /// destructured parameter's component reads come first and carry no line, so there the body's own
-/// statements, or its fall-through return, give the first line instead.
+/// statements, or its fall-through return, give the first line instead. A body a compiler plugin
+/// rebuilt without offsets (Compose's composable lambda) opens on no line.
 pub(super) fn lambda_entry_line(ir: &IrFile, fid: u32) -> Option<u32> {
+    if opens_on_no_line(ir, fid) {
+        return None;
+    }
     let destructures = ir
         .function_parameter_identities(fid)
         .is_some_and(|identities| {
