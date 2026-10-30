@@ -1864,6 +1864,8 @@ mod native_array_snapshots_e2e;
 mod native_assert_e2e;
 #[path = "native_bottom_value_e2e.rs"]
 mod native_bottom_value_e2e;
+#[path = "native_bound_reference_storage_e2e.rs"]
+mod native_bound_reference_storage_e2e;
 #[path = "native_boxed_numbers_e2e.rs"]
 mod native_boxed_numbers_e2e;
 #[path = "native_builder_scope_e2e.rs"]

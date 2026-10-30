@@ -9,6 +9,13 @@ carriers consume the selected interface receiver slot
 through the existing operand materializer. Keep header constant-pool ordering as its separate
 follow-up; compare complete annotation artifacts and exercise declared-parameter and interface controls.
 
+## Native callable-reference capture storage
+
+Use one target-owned physical capture plan for closure layout, GC references, stores and ordinary
+or SAM thunk loads. Store the recorded equality receiver as Any? and use the existing conversion
+boundary to restore the body carrier. Preserve checked adapter parameters and ordinary captures;
+the storage repair is independent of serialized callable-reference admission and identity work.
+
 ## Wasm reference assertion exceptions
 
 Authenticate NullPointerException storage through the existing platform exception declaration
