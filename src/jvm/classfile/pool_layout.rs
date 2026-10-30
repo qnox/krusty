@@ -30,12 +30,11 @@
 //! classes. The rows the writer passes as tied are therefore ordered by their classes' places in
 //! the pool laid out here.
 //!
-//! Every index in the class is then renumbered. A class whose `ldc` operand would no longer fit in
-//! one byte keeps the pool as interned: an instruction's length cannot change after its method's
-//! offsets are final. An `ldc_w` whose index comes to fit in one byte stays `ldc_w`, where ASM
-//! would write `ldc`.
+//! Every index in the class is then renumbered, and each `ldc` takes the width ASM would write for
+//! its renumbered entry (see [`ldc_width`]).
 
 mod index_slots;
+mod ldc_width;
 
 use crate::fx_hash::HashMap;
 use std::ops::Range;
@@ -70,8 +69,8 @@ pub(super) enum Unnamed {
 #[derive(Debug, PartialEq, Eq)]
 enum Kept {
     Unread(Unread),
-    /// An `ldc` operand whose entry would move past index 255.
-    NarrowOperand,
+    /// A method whose `ldc` widths cannot be changed.
+    Unresized(ldc_width::Unresized),
     TooManyEntries,
 }
 
@@ -614,15 +613,28 @@ fn rewrite(
             out[start + offset..start + offset + 2].copy_from_slice(&component.to_be_bytes());
         }
     }
-    let shift = out.len() as isize - read.pool_end as isize;
+    let pool_end = out.len();
+    let shift = pool_end as isize - read.pool_end as isize;
     out.extend_from_slice(&class[read.pool_end..]);
+    // The loads whose width the renumbered entry changes: ASM writes `ldc` exactly when the index
+    // fits in one byte.
+    let mut loads = Vec::new();
     for slot in &read.slots {
         let index = renumbered[usize::from(slot.index)];
         let at = (slot.at as isize + shift) as usize;
+        let fits = index <= 0xff;
         if slot.narrow {
-            out[at] = u8::try_from(index).map_err(|_| Kept::NarrowOperand)?;
+            match u8::try_from(index) {
+                Ok(index) => out[at] = index,
+                Err(_) => loads.push(ldc_width::Load { at, index }),
+            }
         } else {
             out[at..at + 2].copy_from_slice(&index.to_be_bytes());
+            let ldc_w =
+                matches!(slot.holder, Holder::Code(_, Part::Operand)) && out[at - 1] == LDC_W;
+            if ldc_w && fits {
+                loads.push(ldc_width::Load { at, index });
+            }
         }
     }
     if let Some(rows) = read.inner_class_rows {
@@ -635,8 +647,14 @@ fn rewrite(
             order_tied_rows(&mut out[rows..], &tied);
         }
     }
-    Ok(out)
+    if loads.is_empty() {
+        return Ok(out);
+    }
+    loads.sort_by_key(|load| load.at);
+    ldc_width::resized(&out, pool_end, &loads).map_err(Kept::Unresized)
 }
+
+const LDC_W: u8 = 0x13;
 
 /// Order the rows of the `InnerClasses` table starting at `table` (its row count) whose classes
 /// are `tied` by their classes' pool indices, each row keeping one of the places they held.
