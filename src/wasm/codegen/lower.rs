@@ -389,6 +389,7 @@ pub(super) fn carrier(ty: Ty) -> Result<Option<ValType>, Unsupported> {
         TyKind::DefinitelyNotNull(inner) if inner.is_ty_param() => REFERENCE,
         // A function value is an object (see `super::super::function_values`).
         TyKind::Fun(signature) if !signature.suspend => REFERENCE,
+        TyKind::Fun(_) => return Err("a suspend function value".into()),
         TyKind::Nullable(inner) if matches!(inner.kind(), TyKind::Fun(signature) if !signature.suspend) => {
             REFERENCE
         }
@@ -494,6 +495,9 @@ fn expression_type(
         {
             result
         }
+        // A SAM-converted lambda may have no checked type to ask about; it declines here as
+        // it does where it is lowered.
+        IrExpr::Lambda { sam: Some(_), .. } => return Err(function_values::SAM_CONVERSION.into()),
         node => ir
             .checked_type(id)
             .ok_or_else(|| format!("{} without a checked type", describe_node(node)))?,
@@ -1346,6 +1350,9 @@ impl<'a> Body<'a> {
                 &captures,
                 function_values::FunctionEquality::Identity,
             )?,
+            IrExpr::Lambda { sam: Some(_), .. } => {
+                return Err(function_values::SAM_CONVERSION.into());
+            }
             IrExpr::CallableReference(reference) if !reference.declaration_suspend => {
                 self.callable_reference(&reference)?
             }

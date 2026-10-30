@@ -10,6 +10,10 @@ use crate::wasm::encode::{CompositeType, SubType};
 use crate::wasm::function_values::INVOKE_FIELD;
 use crate::wasm::objects::immutable;
 
+/// Why a lambda or callable reference converted to a `fun interface` declines: SAM conversion
+/// has no Wasm representation yet.
+pub(super) const SAM_CONVERSION: &str = "a lambda converted to a `fun interface`";
+
 /// What `==` on a function value compares.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum FunctionEquality {
