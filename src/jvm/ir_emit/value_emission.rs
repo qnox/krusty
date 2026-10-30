@@ -1114,13 +1114,9 @@ impl super::Emitter<'_> {
                         let owner_identity = *owner;
                         // Array `clone` names the JVM array type. That decision reads the receiver's
                         // type; the dispatch classifier still selects every other owner.
-                        let semantic_receiver = self.value_ty(recv);
-                        let Some((owner, interface)) = self.source_virtual_call_owner(
-                            e,
-                            owner_identity,
-                            interface,
-                            semantic_receiver,
-                        ) else {
+                        let Some((owner, interface)) =
+                            self.source_virtual_call_owner(e, owner_identity, interface, recv)
+                        else {
                             return;
                         };
                         let mut name = name.clone();
