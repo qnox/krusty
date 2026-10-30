@@ -6348,6 +6348,10 @@ primitive/intrinsic priority. Native consumes its existing runtime getter plans.
 official-producer/JVM-oracle programs and malformed header/facet controls. Keep compiler-introduced
 block lowering as the independent #2811 follow-up.
 
+- [x] Retain nominal member declaration inputs and full owner bounds before receiver application;
+  use them for scalar and expanded-vararg admission and diagnostics with complete kotlinc ledgers.
+  Preserve invariant/in-projected inputs, named/default/non-last varargs and method-formal shadows.
+
 ## Lower serialized Elvis expression blocks
 
 Authenticate the producer's exact temporary/null-test/branch contract and lower it to the existing
