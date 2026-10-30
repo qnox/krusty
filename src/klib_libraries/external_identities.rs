@@ -64,7 +64,7 @@ impl ExternalIdentities {
                         )
                 }),
                 companion_receiver,
-                parameter_defaults: None,
+                parameter_defaults: Some(function.call_sig.param_defaults),
                 declaration_modifiers: Some(KlibBodyDeclarationModifiers::function(
                     &signed.declaration,
                 )),

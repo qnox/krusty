@@ -4,7 +4,8 @@ name: oss corpus
 # scripts/oss-corpus/projects.tsv. Each project builds twice from a pinned commit with its own
 # Gradle build: once with kotlinc, once with the krusty Gradle plugin applied by an init script. The
 # run reports, per project, how many Kotlin/JVM compilations krusty built, how many classes match
-# kotlinc's byte for byte, and why the rest missed. It needs full network access for the projects'
+# kotlinc's byte for byte, why the rest missed, and what both builds cost (compile time, wall and
+# CPU time, peak memory). It needs full network access for the projects'
 # dependencies and toolchains. It runs nightly on master and on demand; ordinary pushes and pull
 # requests never schedule it, and it gates nothing.
 #

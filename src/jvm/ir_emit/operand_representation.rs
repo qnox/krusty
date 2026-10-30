@@ -431,6 +431,12 @@ impl Emitter<'_> {
         })
     }
 
+    /// The declaration interface implemented by this exact generated physical carrier.
+    pub(super) fn annotation_implementation_interface(&self, physical: Ty) -> Option<TypeName> {
+        let owner = physical.non_null().obj_internal()?;
+        crate::jvm::annotation_constructions::implementation_interface(self.ir, owner)
+    }
+
     /// Materialize an erased reference or generated annotation value at its consumption type.
     pub(super) fn narrow_on_stack(&mut self, source: Ty, expected: Ty, code: &mut CodeBuilder) {
         let source = ir_ty_to_jvm(&source);
