@@ -1,5 +1,22 @@
 # krusty — a memory-lean Kotlin→JVM compiler PoC
 
+## JVM array clone result
+
+The JVM `Array<T>.clone()` declaration returns `Array<T>` with `T` keeping the classifier's own
+implicit `Any?` bound, so `Array<String?>.clone()` is `Array<String?>`. A non-null bound made it
+`Array<String>` and rejected moshi's `pathNames = copyFrom.pathNames.clone()`. Test:
+`array_member_reference_e2e::a_nullable_element_array_clone_keeps_its_element_type`.
+
+## Smart casts from `when` guards
+
+An arm's guard (`is Lit if e.type is Marker -> ...`) is checked with the arm's own condition facts
+and adds its true-branch facts to that arm's body, so `e.type` reads as `Marker` there. A guard
+`this is T` also refines the implicit receiver for that body, past the arm's own condition
+(`is Mid if this is Leaf -> needLeaf(this)`). The facts
+do not reach later arms: a guarded arm adds no fall-through facts, and a guard joined by `||`
+proves nothing. Tests: `box_regressions/whenGuardSmartCast.kt` and
+`when_null_guard_smartcast_e2e::a_when_guard_narrows_only_its_own_arm`.
+
 ## Smart casts from a non-null safe cast
 
 A non-null `operand as? T` result proves its stable operand is `T`, exactly where the result itself
@@ -12,16 +29,6 @@ result, so a nullable target narrows to its non-null form (`(x as? String?) ?: r
 smart-cast-impossible diagnostic. Tests: `tests/box_regressions/safeCastNonNullSmartCast.kt`,
 `resolver_regression_e2e::a_safe_cast_without_a_non_null_proof_does_not_smart_cast_like_kotlinc`
 and `elvis_return_smartcast_e2e`.
-
-## Smart casts from `when` guards
-
-An arm's guard (`is Lit if e.type is Marker -> ...`) is checked with the arm's own condition facts
-and adds its true-branch facts to that arm's body, so `e.type` reads as `Marker` there. A guard
-`this is T` also refines the implicit receiver for that body, past the arm's own condition
-(`is Mid if this is Leaf -> needLeaf(this)`). The facts
-do not reach later arms: a guarded arm adds no fall-through facts, and a guard joined by `||`
-proves nothing. Tests: `box_regressions/whenGuardSmartCast.kt` and
-`when_null_guard_smartcast_e2e::a_when_guard_narrows_only_its_own_arm`.
 
 ## Nested producers against dependent bounds
 
@@ -15219,6 +15226,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   identities between the passes; the temporaries pass does not infer the earlier pass from
   unrelated constants, jumps, or throws remaining in the method. Tests:
   `bytecode_passes::temporaries::tests` and `tests/safe_call_after_throw_e2e.rs`.
+- **A label right after a `goto` that stands beside a reached label is not one retained from
+  unreachable code.** kotlinc normalizes directly adjacent labels into one before it optimizes, so
+  such a run is reached when any of its labels is. An unreached label in it, like the first label
+  in front of a safe call's null path after the non-null path's `goto`, is not counted as retained,
+  and `options?.let { if (…) null else "x" }` keeps its receiver on the stack
+  (`aload; dup; ifnull`) as kotlinc does. After an `athrow` or a return the label still counts as
+  retained: kotlinc emits a dead continuation there (an inlined body's result path) that the
+  elimination deletes, which is why `lastException?.let { throw it }` keeps its temporary.
+  Tests: `constant_conditions::tests::a_label_beside_a_reached_jump_target_is_not_retained_from_deleted_code`,
+  `constant_conditions::tests::a_label_after_a_throw_beside_a_reached_jump_target_stays_retained`,
+  `tests/safe_call_dup_e2e.rs` and `tests/safe_call_after_throw_e2e.rs`.
 - **A `Boolean` compared with a `Boolean` literal is an ordinary two-operand comparison; only a
   negation is a polarity.** kotlinc's `Equals` sends two primitive `Boolean` operands to
   `BooleanComparison`, which materializes both and jumps with `if_icmp<cond>`; it never reads a
