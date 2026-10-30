@@ -9092,6 +9092,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   PARAMETER and wildcards inside it. Realized as a `Wildcards` mode threaded through the signature formatter. Test:
   `tests/generic_signature_e2e.rs::declaration_site_wildcards_appear_in_parameter_positions_only`
   and `tests/generic_signature_e2e.rs::a_java_type_keeps_invariant_parameters`.
+- **An enum argument is never final for the parameter wildcard rule.** A parameter position drops
+  an `out` wildcard whose argument cannot have subtypes (`List<String>` signs
+  `Ljava/util/List<Ljava/lang/String;>;`). kotlinc decides that with `isFinalClass`, which excludes
+  enum classes, so every enum keeps its wildcard: `fun f(a: List<Plain>)` over
+  `enum class Plain { A }` signs `Ljava/util/List<+LPlain;>;`, as does a nested enum, an enum with
+  entry bodies, a Java enum such as `TimeUnit`, and an enum below another `out` argument
+  (`List<Box<Plain>>` signs `Ljava/util/List<+LBox<+LPlain;>;>;`). krusty treated an enum without
+  entry bodies as final and dropped the wildcard. Test:
+  `tests/generic_argument_wildcards_e2e.rs::an_enum_argument_keeps_its_parameter_wildcard_like_kotlinc`.
 
 - **A classpath member's (function OR property) declared collection mutability survives at EVERY nesting
   level.** The JVM `Signature` attribute erases read-only vs mutable (`List`/`MutableList` both spell
