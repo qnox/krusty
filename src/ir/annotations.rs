@@ -137,6 +137,14 @@ impl DeclarationAnnotations {
         self.lowered += 1;
     }
 
+    /// Append an application a compiler plugin attaches after checking that Kotlin metadata
+    /// records as well, as kotlinc's metadata declaration registrar adds it: it follows the
+    /// checked applications and precedes the plugin's other ones.
+    pub(crate) fn push_metadata_visible(&mut self, annotation: RetainedAnnotation) {
+        let checked = self.retained.len() - self.lowered;
+        self.retained.insert(checked, annotation);
+    }
+
     pub fn iter(&self) -> std::slice::Iter<'_, RetainedAnnotation> {
         self.retained.iter()
     }
@@ -152,7 +160,7 @@ impl DeclarationAnnotations {
     }
 
     /// The checked applications Kotlin metadata records: [`Self::applications`] without the ones a
-    /// compiler plugin attached.
+    /// compiler plugin attached, save those it made metadata-visible.
     pub(crate) fn checked_applications(&self) -> impl Iterator<Item = &AppliedAnnotation> {
         self.retained[..self.retained.len() - self.lowered]
             .iter()
