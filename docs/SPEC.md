@@ -1,18 +1,11 @@
 # krusty — a memory-lean Kotlin→JVM compiler PoC
 
-## In-projected receiver formals meet their declared bound
+## JVM array clone result
 
-A formal that occurs only contravariantly in an extension receiver, and in no value parameter or
-result, receives only upper constraints: `Expr<T>` against `Expr<in S>` says `S <: T`, not
-`S = T`. Its declared bound is one more upper constraint, so when the call's binding violates the
-bound, the formal is solved at their intersection. In `fun <T, S : T?> Expr<in S>.wrap(value: T)`
-called as `wrap(t)` from `fun <T : CharSequence?, S : T> Expr<T>.param(t: S)`, the callee's `S`
-is `T & S'?`, and the call is accepted as kotlinc 2.4.21 accepts it. A formal that a value
-parameter also mentions keeps its exact binding, so `sink.put(t, n)` against
-`<T, S : T?> Sink<in S>.put(value: T, extra: S)` still reports kotlinc's argument mismatch, and
-`hold(::foo)` against `<T : Bound, U> hold(f: (T) -> U)` still cannot infer `T`. Tests: `tests/box_regressions/inProjectedReceiverUpperConstraint.kt`,
-`resolver_regression_e2e::an_in_projected_formal_with_an_ordinary_occurrence_keeps_its_exact_binding`
-and `diagnostics_inference_parity_e2e::callable_reference_bound_failure_is_inference_error`.
+The JVM `Array<T>.clone()` declaration returns `Array<T>` with `T` keeping the classifier's own
+implicit `Any?` bound, so `Array<String?>.clone()` is `Array<String?>`. A non-null bound made it
+`Array<String>` and rejected moshi's `pathNames = copyFrom.pathNames.clone()`. Test:
+`array_member_reference_e2e::a_nullable_element_array_clone_keeps_its_element_type`.
 
 ## Smart casts from `when` guards
 
@@ -58,6 +51,20 @@ caller's `T` rather than widening it to `Any`. A definitely-non-null target `S &
 source only when the source is a non-null subtype of `S` itself. Sharing `S`'s classifier bound is not
 that proof: under `<T : CharSequence, S : T?>`, `T` is not a subtype of `S & Any`. Test:
 `box_regressions/nullableFormalBoundPropagation.kt`.
+
+## In-projected receiver formals meet their declared bound
+
+A formal that occurs only contravariantly in an extension receiver, and in no value parameter or
+result, receives only upper constraints: `Expr<T>` against `Expr<in S>` says `S <: T`, not
+`S = T`. Its declared bound is one more upper constraint, so when the call's binding violates the
+bound, the formal is solved at their intersection. In `fun <T, S : T?> Expr<in S>.wrap(value: T)`
+called as `wrap(t)` from `fun <T : CharSequence?, S : T> Expr<T>.param(t: S)`, the callee's `S`
+is `T & S'?`, and the call is accepted as kotlinc 2.4.21 accepts it. A formal that a value
+parameter also mentions keeps its exact binding, so `sink.put(t, n)` against
+`<T, S : T?> Sink<in S>.put(value: T, extra: S)` still reports kotlinc's argument mismatch, and
+`hold(::foo)` against `<T : Bound, U> hold(f: (T) -> U)` still cannot infer `T`. Tests: `tests/box_regressions/inProjectedReceiverUpperConstraint.kt`,
+`resolver_regression_e2e::an_in_projected_formal_with_an_ordinary_occurrence_keeps_its_exact_binding`
+and `diagnostics_inference_parity_e2e::callable_reference_bound_failure_is_inference_error`.
 
 ## Contradicting generic arguments
 
@@ -15220,6 +15227,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   identities between the passes; the temporaries pass does not infer the earlier pass from
   unrelated constants, jumps, or throws remaining in the method. Tests:
   `bytecode_passes::temporaries::tests` and `tests/safe_call_after_throw_e2e.rs`.
+- **A label right after a `goto` that stands beside a reached label is not one retained from
+  unreachable code.** kotlinc normalizes directly adjacent labels into one before it optimizes, so
+  such a run is reached when any of its labels is. An unreached label in it, like the first label
+  in front of a safe call's null path after the non-null path's `goto`, is not counted as retained,
+  and `options?.let { if (…) null else "x" }` keeps its receiver on the stack
+  (`aload; dup; ifnull`) as kotlinc does. After an `athrow` or a return the label still counts as
+  retained: kotlinc emits a dead continuation there (an inlined body's result path) that the
+  elimination deletes, which is why `lastException?.let { throw it }` keeps its temporary.
+  Tests: `constant_conditions::tests::a_label_beside_a_reached_jump_target_is_not_retained_from_deleted_code`,
+  `constant_conditions::tests::a_label_after_a_throw_beside_a_reached_jump_target_stays_retained`,
+  `tests/safe_call_dup_e2e.rs` and `tests/safe_call_after_throw_e2e.rs`.
 - **A `Boolean` compared with a `Boolean` literal is an ordinary two-operand comparison; only a
   negation is a polarity.** kotlinc's `Equals` sends two primitive `Boolean` operands to
   `BooleanComparison`, which materializes both and jumps with `if_icmp<cond>`; it never reads a
