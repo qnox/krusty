@@ -1,5 +1,20 @@
 # `@kotlin.Metadata` — reverse-engineering notes (Phase 4b)
 
+## Null-pointer exception storage
+
+The platform NullPointerException declaration carries the existing runtime-exception storage role.
+Its metadata owns its superclass; a same-named foreign declaration or one with additional state
+receives no role. Wasm reference assertions use the authenticated hierarchy and base Throwable
+message/cause fields rather than manufacturing an untyped exception object.
+
+## Native reference identities and exported entry points
+
+A KLIB export's physical invocation alias is independent of its declaration marker. The Native
+export handoff carries the source key so a dependent module agrees with references created in the
+declaring source module. Dependency-support keys encode the exact module and Public/Accessor
+signature through the existing declaration-identity encoder, retaining every segment, member ID and
+mask. This changes target symbol publication without changing Kotlin metadata or runtime layout.
+
 ## Declaration-owned Class header IDs
 
 The common Class schema takes a mandatory resolved class ID. Its package and exact lexical
@@ -1319,10 +1334,46 @@ subtype relation. A typed function signature supplies its canonical classifier a
 the hierarchy walk checks the nominal value against that application. Reflective function types
 retain their nominal identity; no new metadata payload or physical JVM descriptor is introduced.
 
+## Superclass-argument receiver availability
+
+An inherited property declaration remains evidence for a name even while its dispatch instance is
+unavailable. The checker probes the normalized property model on that exact declared receiver to
+report the initialization diagnostic, without publishing a getter, field read, or capture. Inferred
+property result demand follows receiver selection; it cannot turn an instance member into a local
+value. No metadata shape or backend ABI changes accompany this frontend correction (#2658).
+
 ## Rejected constructor lambda constraints
 
 Normalized constructor signatures and the canonical source-argument mapping retain postponed
 function-expression expectations when an explicit class argument violates its bound. Reporting
 uses the same typed failure evidence for source and reference-produced dependency declarations;
 it does not reconstruct parameter types from constructor text. Metadata encoding and callable ABI
-are unchanged. Callable-reference selected-declaration diagnostic retention is tracked in #2776.
+are unchanged. Callable-reference publication retains its selected declaration's diagnostic
+projection before invocation adaptation. A rejected constructor constraint consumes that same
+projection and the mapped functional types, retaining the constructor heading, bound error and
+reference-candidate error in order. Top-level, member, extension, local and constructor providers
+share this checker boundary; reference revisits discard previous evidence. No diagnostic text
+becomes metadata, a callable identity or a backend target (#2776).
+The selected declaration also determines receiver-constraint wording. Constructor references retain
+their declaration diagnostic before adaptation: generic formals and the logical classifier result
+come from normalized constructor/classifier facts, while aliases retain their selected alias and
+outer-owner signature. The physical constructor return remains unchanged.
+
+## Serialized getter declaration contracts
+
+KLIB normalization tags a getter or setter from its actual property slot, retaining the property's
+opaque identity and decoded name. This KLIB-only facet survives both declaration projections and
+participates in declaration-contract equality; it grants no execution capability by itself.
+Ordinary getter linking authenticates the serialized property group and class header, including
+the raw dispatch classifier's signature mask and complete own-formal receiver application.
+Declared getter results remain distinct from the checked read's applied result. Native's runtime
+leaf capability reuses its existing accessor signature plans and does not import property bodies
+or reconstruct class storage. No metadata wire format changes.
+
+## Serialized Elvis provenance
+
+An `ELVIS` block supplies an immutable compiler variable followed by a two-branch conditional
+without its own origin. The selected equality signature and both reads must name the same exact
+temporary/null proof; names never correlate these declarations. Declared temporary storage remains
+separate from the present branch's proven type. Common IR retains Elvis provenance with the absent
+source-line sentinel; no synthetic source line or metadata wire change is introduced.

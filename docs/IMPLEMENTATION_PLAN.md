@@ -1,5 +1,22 @@
 # krusty — implementation plan
 
+## Wasm reference assertion exceptions
+
+Authenticate NullPointerException storage through the existing platform exception declaration
+normalizer and metadata parent chain. Failed reference assertions construct that exact class and
+throw through the shared Kotlin tag. Keep scalar-reference conversion outside this change; the
+generic numeric dependency ABI will consume this exception prerequisite separately.
+
+## Native dependency reference identity handoff
+
+Retain the canonical declaration marker in the existing Native dependency export registry. Source
+exports join their exact checked callable ID to the module-function key; dependency-support exports
+use the existing injective module-qualified KLIB identity encoding. Selected external references
+consume this retained key, while authenticated declarations without source exports use their KLIB
+key. Missing required identity on a known export declines explicitly. Invocation aliases, marker
+ownership and provider-local IDs remain distinct. Serialized rich-reference admission stays in its
+separate follow-up.
+
 ## Consume declaration names in metadata class headers
 
 Resolve selected declaration keys against the frozen name inventory and pass mandatory resolved
@@ -5088,6 +5105,20 @@ their declarations into an index-based model (`declarations`, `model`), lays rec
 - **Next.** Pointer, struct and callback crossings in direct C calls, and the cgo-mode thread
   start that lifts the linker's refusal of a program that imports and can start threads.
 
+## Native compiler command  ◐
+
+- **Programs (done for linux_x64).** `krusty kotlinc-native` takes Kotlin/Native's
+  `kotlinc-native` options, compiles the sources against the Native stdlib KLIB and the
+  `-library` KLIBs, and links a static `.kexe` (`native::compile_native`). Options krusty cannot
+  honor are refused by name (`crates/krusty-cli/src/kotlinc_native.rs` unit tests).
+  `tests/native_compiler_command_e2e.rs` checks the answer on the JVM lane, then compiles a
+  two-file program with the command, runs it, and asserts the complete diagnostics of a broken
+  source.
+- **Next.** `-produce library`, which needs the KLIB writer to serialize ordinary function and
+  class bodies into `default/ir`; until then a first-party library's sources are compiled into the
+  program. Programs reach further as dependency body emission grows (library member bodies, then
+  non-constant parameter defaults of third-party KLIBs).
+
 ## Byte-identical box conformance, item 1 — local-class naming  ◐
 
 Goal: every box test passes AND writes the same class files as kotlinc. The first mechanism is how
@@ -6226,8 +6257,13 @@ recovery share the function input layout, including contexts and anonymous recei
 source/dependency diagnostics and admitted-context controls cover #2587. For #2629, explicit bound
 rejection retains mapped, substituted postponed-lambda constraints before discarding the candidate.
 Reporting consumes those typed failure facts without redoing selection or assignability; fixed
-inputs and nested-producer isolation remain intact. Callable-reference winner diagnostics remain
-the separate #2776 follow-up.
+inputs and nested-producer isolation remain intact. For #2776, successful callable-reference
+publication also retains a checker-only diagnostic projection from the same selected declaration.
+Mapped rejected function arguments distinguish lambda assignability from reference-candidate
+diagnostics, preserving the reference's constructor heading and name span. Revisited references
+replace their evidence. Top-level publication helpers live in a dedicated owner; selection and
+backend targets are unchanged. Source, dependency, member, extension, adapted, local and constructor
+reference controls compare complete ordered reference diagnostics.
 
 Late extension admission now uses strict receiver assignability or the existing satisfiable
 postponed-frame trial. The common operation also serves unbound constructor-reference receivers;
@@ -6253,6 +6289,14 @@ Nominal function values use the shared subtype relation to reach the canonical f
 of the expected signature. Applied hierarchy traversal retains declared variance, nullability,
 arity and suspend kind. Owning semantic tests cover reflective and inherited function declarations
 and unrelated-callable rejection; the JVM round trip covers nominal and reflection interface slots.
+
+Superclass-argument name reads retain the unavailable dispatch receiver as diagnostic evidence,
+separate from the usable receiver tower. Both paths share its declared scope identity. After
+lexical values and available receivers fail, a pure member-selection probe diagnoses the missing
+initialized instance before inferred-type demand or checked-body construction. Pending dispatch
+properties demand through their selected available receiver instead of a bare declaration name.
+The name-demand operation is extracted from the resolver facade; receiver and capture coordinates
+are unchanged. Ordered kotlinc diagnostics and positive enclosing-value controls cover #2658.
 
 ## Compose compiler plugin  🚧
 
@@ -6280,3 +6324,21 @@ and the pass rejects every construct it does not cover yet.
 - [ ] The full body transform: control-flow groups, `remember`, early returns, inline composables.
 - [ ] The `$stable` field of classes.
 - [ ] Remove the partial marker and rerun the corpus for the Compose projects.
+
+## Link target-owned serialized getter leaves
+
+Retain normalized KLIB accessor identity and role through declaration and backend handoffs.
+Authenticate exact property membership and the raw/applied declaring-class receiver before
+admitting a target getter capability. Share that positive decision across closure planning,
+bodyless edge preparation and ordinary accessor linking; preserve retained exports and existing
+primitive/intrinsic priority. Native consumes its existing runtime getter plans. Prove real
+official-producer/JVM-oracle programs and malformed header/facet controls. Keep compiler-introduced
+block lowering as the independent #2811 follow-up.
+
+## Lower serialized Elvis expression blocks
+
+Authenticate the producer's exact temporary/null-test/branch contract and lower it to the existing
+common Elvis snapshot and conditional. Preserve single evaluation, lazy fallback, nested order,
+return targets and declared storage; leave generic operand and unrelated conditional admission
+unchanged. Validate malformed contracts and checked-FIR parity alongside the original full #2811
+official-producer program and independent JVM-oracle controls.
