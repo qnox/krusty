@@ -5653,8 +5653,6 @@ regressions/Kt2495Test.kt
 regressions/arrayLengthNPE.kt
 regressions/collectionSizeInInlineBody.kt
 regressions/collectionSizeOrDefault.kt
-regressions/conditionalArgumentBranchView.kt
-regressions/conditionalArgumentGenericBound.kt
 regressions/dataClassInInlineFunctionWithTypeParameters.kt
 regressions/dataClassInRegularFunctionWithTypeParameters.kt
 regressions/directInvokeDestructuring.kt
