@@ -1178,11 +1178,10 @@ impl<'a> Body<'a> {
                         "a not-null assertion requiring a scalar reference conversion".into(),
                     );
                 }
-                // A reference assertion alone supplies neither scalar unboxing nor a typed null
-                // failure. Keep the existing reference path without claiming either capability.
-                self.expression(operand)?;
-                if matches!(operand_carrier, Some(ValType::Ref { .. })) {
-                    self.code.ref_as_non_null();
+                if let Some(reference @ ValType::Ref { .. }) = operand_carrier {
+                    self.assert_nonnull_reference(operand, reference)?;
+                } else {
+                    self.expression(operand)?;
                 }
             }
             IrExpr::New {
