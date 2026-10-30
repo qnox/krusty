@@ -6339,6 +6339,9 @@ Project header receiver coordinates through checked declaration-role matches and
 projections only for forwarded values. Cover mixed vararg/ordinary nesting and same-typed receivers.
 Keep source diagnostic uses separate from class-owned capture evidence. Reconcile nested captures
 against the caller's original operands when their construction moves with a forwarded argument.
+Keep the nested-setter fixture and anonymous capture inventory intact. Assert the forwarded
+lambda's exact property declaration, receiver provenance and assigned value, then verify deferred
+execution against the Kotlin oracle and every backend with two distinct caller instances.
 The independent immediate-function-literal invocation ABI gap, proven byte-identical on the exact
 parent, retains its complete broader oracle in #2838 and uses a separate common-inlining follow-up.
 

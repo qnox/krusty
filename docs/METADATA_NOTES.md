@@ -1386,6 +1386,9 @@ an actual forward, in inner-to-outer order; constructor-resident closures keep t
 Receiver-use journals retain exact source sites. Capture retention and ordering exclude the current
 class's checked forwarded roots; diagnostic uses remain recorded. Nested constructions inside those
 roots reconnect to the original caller operands while retaining their class-body receiver coordinates.
+The nested setter's checked write names the original property and matches its lexical receiver
+capture; an anonymous constructor-prefix read is not a substitute for that caller-owned binding.
+This strengthens the ownership regression without changing metadata or the capture inventory.
 
 ## Serialized getter declaration contracts
 

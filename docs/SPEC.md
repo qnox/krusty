@@ -23310,6 +23310,9 @@ Forwarding preserves declared extension/context receiver identity across the una
 header rung, including nested receiver lambdas and mixed forwarded/constructor-resident closures.
 A receiver used only by a forwarded argument adds no anonymous-class storage. A receiver also read
 by a class-body method still has the ordinary capture field; both uses preserve the original value.
+Nested superclass setters preserve the same lexical instance after both anonymous objects have
+been constructed. `box_regressions/nestedAnonymousSuperSetter.kt` distinguishes two same-typed
+callers through the shared backend inventory; its JVM companion compares the complete class ABI.
 
 ## Runtime-owned dependency getter leaves
 
