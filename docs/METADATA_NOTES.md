@@ -1,5 +1,12 @@
 # `@kotlin.Metadata` — reverse-engineering notes (Phase 4b)
 
+## Annotation construction result carriers
+
+The JVM annotation implementation retains its exact declared interface in `annotation_impl_of`.
+Its allocation's physical stack type is the implementation, while common IR keeps the semantic
+annotation type. Receiver and default-parameter consumption use those existing facts to materialize
+the declared slot, without changing Kotlin metadata, constructor selection or common semantic types.
+
 ## Null-pointer exception storage
 
 The platform NullPointerException declaration carries the existing runtime-exception storage role.

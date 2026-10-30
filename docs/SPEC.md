@@ -23365,3 +23365,14 @@ read receives the non-null proof. Unrelated origin-less conditionals and unmodel
 still decline. Owning tests compare String, Int and Any IR with checked FIR, exercise malformed
 contracts, and execute the unchanged #2811 Pair program plus official-producer controls after JVM
 oracles in `klib_closure_frames_e2e::elvis_blocks`.
+
+## JVM annotation construction consumers
+
+A generated annotation value materializes at its consumer's declared reference type. Direct
+annotation receivers and typed constructor-default fills receive the same reference conversion as
+ordinary typed return, local and argument slots. Erased `Object` consumers and reference-array
+elements retain their existing representation. The generated implementation's exact annotation role
+owns this JVM conversion; ordinary class receivers keep their existing subtype behavior.
+`annotation_instantiation_e2e` compares the complete class inventories and raw artifacts with Kotlin
+for the consumer matrix and an ordinary inherited-property receiver, and runs each fixture after
+the Kotlin reference oracle.
