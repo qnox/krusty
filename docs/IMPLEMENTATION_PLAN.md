@@ -6342,6 +6342,11 @@ against the caller's original operands when their construction moves with a forw
 The independent immediate-function-literal invocation ABI gap, proven byte-identical on the exact
 parent, retains its complete broader oracle in #2838 and uses a separate common-inlining follow-up.
 
+Implement #2838 by selecting direct synchronous source-lambda invocations in common lowering,
+preflighting the existing declared-parameter splice contract, then consuming the retained template.
+Keep escaping and suspension operations on their existing paths. Restore the complete preserved
+oracle and validate capture/argument evaluation, local returns and the escaping implementation.
+
 ## Link target-owned serialized getter leaves
 
 Retain normalized KLIB accessor identity and role through declaration and backend handoffs.

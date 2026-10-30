@@ -23311,6 +23311,15 @@ header rung, including nested receiver lambdas and mixed forwarded/constructor-r
 A receiver used only by a forwarded argument adds no anonymous-class storage. A receiver also read
 by a class-body method still has the ordinary capture field; both uses preserve the original value.
 
+## Immediately invoked source lambdas
+
+A synchronous source lambda invoked directly uses its checked inline template at that call site.
+Capture operands precede context and value arguments, each is evaluated once, and local returns
+leave that lambda invocation. An escaping function value retains its implementation. The common
+lowering supplies this operation to all backends. Full ABI controls, including the complete #2838
+oracle, live in `immediate_lambda_invocation_e2e`; operand-order and return behavior share
+`box_regressions/immediateFunctionLiteralOperands.kt` across the backend matrix.
+
 ## Runtime-owned dependency getter leaves
 
 An ordinary serialized KLIB body may read a property through a getter the target implements.

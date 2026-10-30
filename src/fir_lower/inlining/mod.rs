@@ -20,10 +20,12 @@ use super::BodyLowering;
 mod converted_inline_lambda;
 mod escaping_anonymous;
 mod escaping_lambda;
+mod immediate_lambda;
 mod inline_callee;
 mod lambda_splice_contract;
 mod property_accessors;
 
+pub(super) use immediate_lambda::splice_immediate_lambda;
 pub(super) use inline_callee::InlineCallee;
 pub(super) use lambda_splice_contract::LambdaParameterBinding;
 

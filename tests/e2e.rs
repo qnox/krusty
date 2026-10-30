@@ -3008,3 +3008,6 @@ mod intersection_bound_metadata_order_e2e;
 mod type_safe_override_call_e2e;
 #[path = "where_bound_arguments_e2e.rs"]
 mod where_bound_arguments_e2e;
+
+#[path = "immediate_lambda_invocation_e2e.rs"]
+mod immediate_lambda_invocation_e2e;

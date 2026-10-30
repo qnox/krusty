@@ -1387,6 +1387,10 @@ Receiver-use journals retain exact source sites. Capture retention and ordering 
 class's checked forwarded roots; diagnostic uses remain recorded. Nested constructions inside those
 roots reconnect to the original caller operands while retaining their class-body receiver coordinates.
 
+Direct synchronous source-lambda invocation consumes the prepared inline body through the common
+splice contract. Parameter identities and receiver roles remain declaration-owned, and a consumed
+implementation is recorded as inline-only. Escaping values keep their ordinary function ABI.
+
 ## Serialized getter declaration contracts
 
 KLIB normalization tags a getter or setter from its actual property slot, retaining the property's
