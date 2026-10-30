@@ -893,6 +893,25 @@ fn outside_lane(file: &Path, result: &Outcome) -> bool {
         && matches!(result, Outcome::NotApplicable(reason) if *reason == TARGETED_AT_ANOTHER_BACKEND)
 }
 
+/// The selected cases within the lane, and how many owned fixtures were outside it.
+fn within_lane(outcomes: Vec<(&PathBuf, Outcome)>) -> (Vec<(&PathBuf, Outcome)>, usize) {
+    let selected = outcomes.len();
+    let within: Vec<_> = outcomes
+        .into_iter()
+        .filter(|(file, result)| !outside_lane(file, result))
+        .collect();
+    let outside = selected - within.len();
+    (within, outside)
+}
+
+/// The cases a lane's score counts: every scanned case it applies to.
+fn applicable_cases(scanned: &[(&PathBuf, Outcome)]) -> usize {
+    scanned
+        .iter()
+        .filter(|(_, result)| !matches!(result, Outcome::NotApplicable(_)))
+        .count()
+}
+
 fn checked_outcome(file: &Path, result: &Outcome) -> Result<box_ratchet::Outcome, String> {
     if super::box_inventory::owned(file)
         && matches!(
@@ -917,6 +936,36 @@ fn an_owned_fixture_for_other_backends_is_outside_the_lane() {
     assert!(!outside_lane(&owned, &Outcome::NotApplicable("muted")));
     assert!(!outside_lane(&owned, &Outcome::Pass));
     assert!(!outside_lane(Path::new("/upstream/a.kt"), &targeted));
+}
+
+#[test]
+fn cases_outside_the_lane_leave_the_scan_and_the_score() {
+    let regressions = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/box_regressions");
+    let jvm_only = regressions.join("inlineScopes/a.kt");
+    let jvm_only_too = regressions.join("inlineScopes/b.kt");
+    let portable = regressions.join("portable.kt");
+    let upstream_skip = PathBuf::from("/upstream/skip.kt");
+    let upstream = PathBuf::from("/upstream/case.kt");
+    let targeted = || Outcome::NotApplicable(TARGETED_AT_ANOTHER_BACKEND);
+
+    let (scanned, outside) = within_lane(vec![
+        (&jvm_only, targeted()),
+        (&portable, Outcome::Pass),
+        (&upstream_skip, targeted()),
+        (&upstream, Outcome::Declined("unsupported".into())),
+    ]);
+    assert_eq!(outside, 1);
+    assert_eq!(
+        scanned.iter().map(|(file, _)| *file).collect::<Vec<_>>(),
+        [&portable, &upstream_skip, &upstream]
+    );
+    assert_eq!(applicable_cases(&scanned), 2);
+
+    let (scanned, outside) =
+        within_lane(vec![(&jvm_only, targeted()), (&jvm_only_too, targeted())]);
+    assert_eq!(outside, 2);
+    assert!(scanned.is_empty());
+    assert_eq!(applicable_cases(&scanned), 0);
 }
 
 #[test]
@@ -1021,7 +1070,8 @@ fn outcome(lane: &dyn Lane, scratch: &Path, file: &Path) -> Outcome {
 
 /// The report line, in a stable machine-readable shape:
 /// `<lane> conformance: scanned S, passed P, declined D, frontend F, harness H, not-applicable N,
-/// compiler-panics Q, known-failures K, failed X`.
+/// compiler-panics Q, known-failures K, failed X, outside-lane E`. The `E` owned fixtures written
+/// for other backends are not among the `S` scanned cases.
 fn report_line(lane: &str, counts: &[(&str, usize)]) -> String {
     let fields = counts
         .iter()
@@ -1158,10 +1208,10 @@ pub fn run(lane: &dyn Lane) {
     let mut known_failures: Vec<(PathBuf, String)> = Vec::new();
     let mut failed: Vec<(PathBuf, String)> = Vec::new();
     let mut current = BTreeMap::new();
+    let (outcomes, outside) = within_lane(outcomes);
+    let scanned = outcomes.len();
+    let applicable = applicable_cases(&outcomes);
     for (file, result) in outcomes {
-        if outside_lane(file, &result) {
-            continue;
-        }
         let relative = relative(file);
         let observed = checked_outcome(file, &result).unwrap_or_else(|error| panic!("{error}"));
         assert!(
@@ -1224,11 +1274,10 @@ pub fn run(lane: &dyn Lane) {
     let declined_total: usize = declined.values().sum();
     let harness_total: usize = harness_reasons.values().sum();
     let not_applicable_total: usize = not_applicable.values().sum();
-    let applicable = files.len() - not_applicable_total;
     let report = report_line(
         platform.name(),
         &[
-            ("scanned", files.len()),
+            ("scanned", scanned),
             ("passed", passed),
             ("declined", declined_total),
             ("frontend", frontend),
@@ -1237,6 +1286,7 @@ pub fn run(lane: &dyn Lane) {
             ("compiler-panics", compiler_panics.len()),
             ("known-failures", known_failures.len()),
             ("failed", failed.len()),
+            ("outside-lane", outside),
         ],
     );
     eprintln!("{report} ({:.1}s)", started.elapsed().as_secs_f64());
