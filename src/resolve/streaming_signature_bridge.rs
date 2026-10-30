@@ -2823,6 +2823,7 @@ pub(crate) fn install_streamed_anonymous_capture_declarations(
                 flags: DeclarationFlags::default()
                     .with(DeclarationFlags::LOCAL_CLASS, true)
                     .with(DeclarationFlags::COMPILER_GENERATED, true)
+                    .with(DeclarationFlags::CAPTURE_STORAGE, true)
                     .with(DeclarationFlags::FINAL, true),
             });
             if let Some(property) = table

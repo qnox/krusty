@@ -1362,7 +1362,21 @@ impl BodyFirChecker<'_> {
             "fir",
             "anonymous body captures declaration={declaration:?} expression={expression:?} captures={captures:?}",
         );
-        let captures = self.checked_class_captures(declaration, span, origin, &captures)?;
+        let mut captures = self.checked_class_captures(declaration, span, origin, &captures)?;
+        if !captures.is_empty() {
+            let stored = self
+                .info
+                .local_class_capture_layouts
+                .stored
+                .get(&transient)
+                .filter(|stored| stored.len() == captures.len())
+                .ok_or_else(|| {
+                    self.failure(Some(span), BodyCheckFailureKind::MissingStableCallTarget)
+                })?;
+            for (capture, stored) in captures.iter_mut().zip(stored.iter().copied()) {
+                capture.stored = stored;
+            }
+        }
         crate::trace_compiler!(
             "fir",
             "anonymous checked captures declaration={declaration:?} captures={}",

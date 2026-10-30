@@ -122,6 +122,9 @@ impl DeclarationFlags {
     /// expression. kotlinc keeps it in a public field, and keeps no property for a value of type
     /// `Unit` or `Nothing`: the expression is then an ordinary statement.
     pub const SCRIPT_RESULT: u64 = 1 << 47;
+    /// Internal storage for a captured value in a retained body. Its stable signature supports
+    /// checked field access; it is not a Kotlin property declaration.
+    pub const CAPTURE_STORAGE: u64 = 1 << 48;
 
     pub const fn with(mut self, flag: u64, enabled: bool) -> Self {
         if enabled {

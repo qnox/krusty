@@ -601,6 +601,7 @@ pub(crate) fn build(ir: &IrFile, c: &IrClass) -> Option<ClassDeclarationRecord> 
         .properties
         .iter()
         .enumerate()
+        .filter(|(_, property)| property.origin != crate::ir::IrPropertyOrigin::CaptureStorage)
         .map(|(property_index, property)| {
             crate::trace_compiler!(
                 "metadata",

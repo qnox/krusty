@@ -38,6 +38,7 @@ pub(crate) fn field(name: &str, ty: Ty) -> IrField {
 
 pub(crate) fn stored_property(name: &str, ty: Ty, field: u32) -> IrProperty {
     IrProperty {
+        origin: crate::ir::IrPropertyOrigin::Declaration,
         name: name.to_string(),
         diagnostic_span: None,
         getter_diagnostic_span: None,

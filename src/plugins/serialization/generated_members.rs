@@ -212,6 +212,7 @@ pub(super) fn descriptor_property(
     source_order: u32,
 ) -> IrProperty {
     IrProperty {
+        origin: crate::ir::IrPropertyOrigin::Declaration,
         name: "descriptor".to_string(),
         diagnostic_span: None,
         getter_diagnostic_span: None,

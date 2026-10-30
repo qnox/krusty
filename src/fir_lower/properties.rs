@@ -1444,6 +1444,11 @@ fn materialize_member_property(
     }
     let property_index = ir.classes[class_id as usize].properties.len() as u32;
     ir.classes[class_id as usize].properties.push(IrProperty {
+        origin: if property.flags.has(DeclarationFlags::CAPTURE_STORAGE) {
+            crate::ir::IrPropertyOrigin::CaptureStorage
+        } else {
+            crate::ir::IrPropertyOrigin::Declaration
+        },
         name: property.name.clone(),
         diagnostic_span: property.diagnostic_span,
         getter_diagnostic_span: property.getter_diagnostic_span,
