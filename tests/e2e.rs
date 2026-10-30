@@ -3,9 +3,13 @@
 //! External corpus/reference-toolchain suites live in `conformance.rs`.
 
 mod constructor_boxing_casts_e2e;
+#[path = "constructor_type_argument_publication_e2e.rs"]
+mod constructor_type_argument_publication_e2e;
 #[path = "dependent_constructor_bounds_e2e.rs"]
 mod dependent_constructor_bounds_e2e;
 mod enclosing_formal_signatures_e2e;
+#[path = "inferred_alias_constructor_abbreviation_e2e.rs"]
+mod inferred_alias_constructor_abbreviation_e2e;
 #[path = "nested_signature_argument_layout_e2e.rs"]
 mod nested_signature_argument_layout_e2e;
 
@@ -13,6 +17,8 @@ mod nested_signature_argument_layout_e2e;
 mod abstract_serializable_e2e;
 #[path = "annotation_documented_mirror_e2e.rs"]
 mod annotation_documented_mirror_e2e;
+#[path = "assignment_plugin_e2e.rs"]
+mod assignment_plugin_e2e;
 #[path = "backticked_dotted_package_qualifier_e2e.rs"]
 mod backticked_dotted_package_qualifier_e2e;
 #[path = "bridge_result_cast_e2e.rs"]
@@ -284,6 +290,8 @@ mod caller_type_param_receiver_e2e;
 mod cannot_infer_cascade_e2e;
 #[path = "capture_first_use_order_e2e.rs"]
 mod capture_first_use_order_e2e;
+#[path = "captured_stable_binding_e2e.rs"]
+mod captured_stable_binding_e2e;
 #[path = "cast_evaluation_order_e2e.rs"]
 mod cast_evaluation_order_e2e;
 #[path = "catch_annotation_comma_e2e.rs"]
@@ -957,6 +965,8 @@ mod extension_receiver_property_smartcast_e2e;
 mod external_modifier_targets_e2e;
 #[path = "facade_emission_e2e.rs"]
 mod facade_emission_e2e;
+#[path = "facade_lateinit_setter_e2e.rs"]
+mod facade_lateinit_setter_e2e;
 #[path = "fallthrough_close_line_e2e.rs"]
 mod fallthrough_close_line_e2e;
 #[path = "feature_box_e2e.rs"]
@@ -1178,6 +1188,8 @@ mod inert_kotlinc_arguments_e2e;
 mod inferred_alias_abbreviation_e2e;
 #[path = "inferred_computed_prop_e2e.rs"]
 mod inferred_computed_prop_e2e;
+#[path = "inferred_constructor_argument_overload_e2e.rs"]
+mod inferred_constructor_argument_overload_e2e;
 #[path = "inferred_property_type_args_e2e.rs"]
 mod inferred_property_type_args_e2e;
 #[path = "inheritance_e2e.rs"]
@@ -1321,6 +1333,8 @@ mod local_class_capture_order_e2e;
 mod local_class_construction_capture_e2e;
 #[path = "local_function_reference_inference_e2e.rs"]
 mod local_function_reference_inference_e2e;
+#[path = "mutable_field_signature_e2e.rs"]
+mod mutable_field_signature_e2e;
 java_member_modules::declare!();
 mod java_nullability_modules;
 java_nullability_modules::declare!();
@@ -2257,6 +2271,7 @@ mod loop_backedge_narrowing_e2e;
 mod nested_data_class_tostring_recipe_e2e;
 #[path = "nested_inline_delegate_e2e.rs"]
 mod nested_inline_delegate_e2e;
+mod nominal_projected_input_e2e;
 #[path = "nullable_sam_e2e.rs"]
 mod nullable_sam_e2e;
 #[path = "open_serializable_write_self_e2e.rs"]
@@ -2988,7 +3003,11 @@ mod field_store_lines_e2e;
 #[path = "written_default_accessor_e2e.rs"]
 mod written_default_accessor_e2e;
 
+#[path = "erased_result_type_operator_e2e.rs"]
+mod erased_result_type_operator_e2e;
 #[path = "intersection_bound_metadata_order_e2e.rs"]
 mod intersection_bound_metadata_order_e2e;
+#[path = "type_safe_override_call_e2e.rs"]
+mod type_safe_override_call_e2e;
 #[path = "where_bound_arguments_e2e.rs"]
 mod where_bound_arguments_e2e;

@@ -1,5 +1,12 @@
 # krusty — implementation plan
 
+## Wasm reference assertion exceptions
+
+Authenticate NullPointerException storage through the existing platform exception declaration
+normalizer and metadata parent chain. Failed reference assertions construct that exact class and
+throw through the shared Kotlin tag. Keep scalar-reference conversion outside this change; the
+generic numeric dependency ABI will consume this exception prerequisite separately.
+
 ## Native dependency reference identity handoff
 
 Retain the canonical declaration marker in the existing Native dependency export registry. Source
@@ -6166,7 +6173,9 @@ results remain exact; shared outcomes and operand ABI ownership are unchanged.
 Canonical compact parent templates, including alias arguments, are computed once before signature
 inference and shared with classifier publication; parent diagnostics retain their publication order.
 Complete anonymous metadata parity stays in #2653/#2654 with its full retained fixture oracles.
-Parameterized alias superclass constructor argument inference remains a separate repair in #2655.
+Parameterized alias superclass arguments retain their enclosing lexical bindings. The original
+expanded #2655 fixture and both complete ABI/runtime controls are retained in
+`tests/typealias_constructor_inference_e2e/parameterized_parent_aliases.rs` alongside the minimal tests.
 
 ## Enclosing formal field signatures
 
@@ -6250,8 +6259,13 @@ recovery share the function input layout, including contexts and anonymous recei
 source/dependency diagnostics and admitted-context controls cover #2587. For #2629, explicit bound
 rejection retains mapped, substituted postponed-lambda constraints before discarding the candidate.
 Reporting consumes those typed failure facts without redoing selection or assignability; fixed
-inputs and nested-producer isolation remain intact. Callable-reference winner diagnostics remain
-the separate #2776 follow-up.
+inputs and nested-producer isolation remain intact. For #2776, successful callable-reference
+publication also retains a checker-only diagnostic projection from the same selected declaration.
+Mapped rejected function arguments distinguish lambda assignability from reference-candidate
+diagnostics, preserving the reference's constructor heading and name span. Revisited references
+replace their evidence. Top-level publication helpers live in a dedicated owner; selection and
+backend targets are unchanged. Source, dependency, member, extension, adapted, local and constructor
+reference controls compare complete ordered reference diagnostics.
 
 Late extension admission now uses strict receiver assignability or the existing satisfiable
 postponed-frame trial. The common operation also serves unbound constructor-reference receivers;
@@ -6296,13 +6310,30 @@ and the pass rejects every construct it does not cover yet.
 - [x] Parameterless `Unit` top-level composables: restart groups, skipping, durable keys,
   `@FunctionKeyMeta`, source information and trace markers; calls between them in one file.
 - [ ] Calls to composables of other files and modules, and the grouping annotations.
-- [ ] `@Composable` function types and lambdas, and the composable call checker's diagnostics.
+- [x] `@Composable () -> Unit` parameters: called with the composer and their own state bits,
+  compared by identity, passed on to composable calls, and their `@ComposableInferredTarget`
+  applier scheme inferred.
+- [ ] Composable lambdas (`ComposableSingletons`, `rememberComposableLambda`), other composable
+  function types, and the composable call checker's diagnostics.
 - [x] Primitive and `String` parameters: `$changed`/`$dirty` slot tracking with strong skipping,
   `Composer.changed` comparisons, and each call's argument bits (static, passed on, uncertain).
-- [ ] More parameters: `$default` masks, receivers, varargs, more than ten, stability inference.
+- [x] Constant default arguments: the `$default` mask, defaults assigned in the group, placeholders
+  and masks at calls, no `$default` synthetic.
+- [ ] More parameters: non-constant defaults (defaults groups), receivers, varargs, more than ten,
+  stability inference.
 - [ ] The full body transform: control-flow groups, `remember`, early returns, inline composables.
 - [ ] `ComposableSingletons` lambda holders and the `$stable` field of classes.
 - [ ] Remove the partial marker and rerun the corpus for the Compose projects.
+
+## Anonymous superclass closure captures
+
+Align shared constructor-use discovery with the checked retained-closure decision for #2657.
+Early read/write discovery provisions candidate lexical dependencies from lambda syntax; final
+publication admits closure roots from the checked lowering and non-error type. Preserve existing
+binding identities, forwarding rules and field reconciliation. Feed the existing FIR constructor-
+prefix and nested-capture operations rather than adding a new capture ABI or lookup in lowering.
+Validate both original issue programs, direct/nested generic lambdas, shared mutable storage and
+parameter shadowing against Kotlin, together with the existing constructor capture regressions.
 
 ## Link target-owned serialized getter leaves
 
@@ -6313,3 +6344,15 @@ bodyless edge preparation and ordinary accessor linking; preserve retained expor
 primitive/intrinsic priority. Native consumes its existing runtime getter plans. Prove real
 official-producer/JVM-oracle programs and malformed header/facet controls. Keep compiler-introduced
 block lowering as the independent #2811 follow-up.
+
+- [x] Retain nominal member declaration inputs and full owner bounds before receiver application;
+  use them for scalar and expanded-vararg admission and diagnostics with complete kotlinc ledgers.
+  Preserve invariant/in-projected inputs, named/default/non-last varargs and method-formal shadows.
+
+## Lower serialized Elvis expression blocks
+
+Authenticate the producer's exact temporary/null-test/branch contract and lower it to the existing
+common Elvis snapshot and conditional. Preserve single evaluation, lazy fallback, nested order,
+return targets and declared storage; leave generic operand and unrelated conditional admission
+unchanged. Validate malformed contracts and checked-FIR parity alongside the original full #2811
+official-producer program and independent JVM-oracle controls.

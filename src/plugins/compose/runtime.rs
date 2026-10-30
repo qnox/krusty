@@ -17,9 +17,16 @@ const RUNTIME: &str = "androidx/compose/runtime";
 const COMPOSER: &str = "androidx/compose/runtime/Composer";
 const SCOPE_UPDATE_SCOPE: &str = "androidx/compose/runtime/ScopeUpdateScope";
 const FUNCTION_KEY_META: &str = "androidx/compose/runtime/internal/FunctionKeyMeta";
+const COMPOSABLE_INFERRED_TARGET: &str = "androidx/compose/runtime/ComposableInferredTarget";
 
 pub(super) fn composer() -> Ty {
     Ty::obj(COMPOSER)
+}
+
+/// The type `ComposerParamTransformer` gives a composable `() -> Unit` value: a function of the
+/// caller's composer and `$changed`.
+pub(super) fn composable_lambda() -> Ty {
+    Ty::fun(vec![composer(), Ty::Int], Ty::Unit)
 }
 
 /// The runtime functions a restartable function calls.
@@ -37,6 +44,8 @@ pub(super) struct ComposeRuntime {
     /// `Composer.changed`, by the declared parameter type each overload compares: `Any?` and one
     /// for each primitive.
     pub(super) changed: Vec<(Ty, BoundRuntimeFunction)>,
+    /// `Composer.changedInstance`, which compares a function value by identity.
+    pub(super) changed_instance: BoundRuntimeFunction,
 }
 
 impl ComposeRuntime {
@@ -71,7 +80,7 @@ impl ComposeRuntime {
             update_scope: function(
                 RuntimeDeclaration::Member(type_name(SCOPE_UPDATE_SCOPE)),
                 "updateScope",
-                vec![Ty::fun(vec![composer, Ty::Int], Ty::Unit)],
+                vec![composable_lambda()],
                 Ty::Unit,
             )?,
             source_information: function(
@@ -96,6 +105,12 @@ impl ComposeRuntime {
                         .map(|bound| (compared, bound))
                 })
                 .collect::<Result<_, _>>()?,
+            changed_instance: function(
+                member,
+                "changedInstance",
+                vec![nullable_any()],
+                Ty::Boolean,
+            )?,
         })
     }
 
@@ -156,6 +171,21 @@ pub(super) fn call(
 
 /// `@FunctionKeyMeta(key = …, startOffset = …, endOffset = …)`, binary-retained like the runtime
 /// declares it.
+/// `@ComposableInferredTarget(scheme)`, the applier scheme inferred for a function's lambdas.
+pub(super) fn composable_inferred_target(scheme: &str) -> RetainedAnnotation {
+    RetainedAnnotation {
+        retention: AnnoRetention::Binary,
+        annotation: AppliedAnnotation {
+            internal: type_name(COMPOSABLE_INFERRED_TARGET),
+            values: vec![(
+                "scheme".to_string(),
+                AnnoValue::Const(IrConst::String(scheme.into())),
+            )],
+        },
+        facts: Default::default(),
+    }
+}
+
 pub(super) fn function_key_meta(function: &RestartableFunction) -> RetainedAnnotation {
     let (start, end) = function.offsets;
     RetainedAnnotation {
