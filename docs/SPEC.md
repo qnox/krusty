@@ -15258,8 +15258,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   method's constants began, in ASM's `MethodWriter` order (catch types, instruction operands in
   order, the local-variable tables, then the frames' classes, each entry after the entries it names).
   Every other entry keeps its relative place, including one another member or attribute also names.
-  A class holding an attribute the reader does not know keeps its pool; so does one whose `ldc`
-  operand would move past index 255, and an `ldc_w` whose entry moves below 256 stays `ldc_w`.
+  A class holding an attribute the reader does not know keeps its pool. Each `ldc` then takes the
+  width ASM writes for its renumbered entry: `ldc` when the index fits in one byte, `ldc_w` when it
+  does not, so an `ldc` whose entry moves past index 255 widens and an `ldc_w` whose entry moves
+  below 256 narrows (`classfile/pool_layout/ldc_width.rs`). The method's code changes length, so
+  its branch and switch targets, exception table, line and local-variable tables and stack map
+  frames move with it; a frame takes the compressed form ASM picks for its new distance. A `Code`
+  attribute holding any other attribute keeps the class's pool as interned.
   Tests: `classfile::pool_layout::tests`, `classfile::constant_pool_queries::tests`, and
   `tests/constant_pool_order_e2e.rs` (whole class files against kotlinc: a removed cast, casts of
   constants to their boxed types, and an unboxed generic read).
