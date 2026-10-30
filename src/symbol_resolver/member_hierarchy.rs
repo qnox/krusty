@@ -323,6 +323,9 @@ pub(crate) fn specialize_member_function(
     function: &mut FunctionInfo,
     classifier_bindings: &super::GSigBinds,
 ) {
+    if function.declaration_identity.is_none() {
+        function.declaration_identity = Some(Box::new(declaration_identity(function)));
+    }
     let mut bindings = classifier_bindings.clone();
     if let Some(signature) = &function.generic_sig {
         for formal in &signature.formals {
@@ -908,7 +911,11 @@ fn record_overridden_declarations(
                 if !overrides_in_family(source, inherited, implementation, intersection_parts) {
                     continue;
                 }
-                let identity = declaration_identity(inherited);
+                let identity = inherited
+                    .declaration_identity
+                    .as_deref()
+                    .cloned()
+                    .unwrap_or_else(|| declaration_identity(inherited));
                 if !overridden.contains(&identity) {
                     overridden.push(identity);
                 }
