@@ -1,5 +1,12 @@
 # krusty — a memory-lean Kotlin→JVM compiler PoC
 
+## JVM array clone result
+
+The JVM `Array<T>.clone()` declaration returns `Array<T>` with `T` keeping the classifier's own
+implicit `Any?` bound, so `Array<String?>.clone()` is `Array<String?>`. A non-null bound made it
+`Array<String>` and rejected moshi's `pathNames = copyFrom.pathNames.clone()`. Test:
+`array_member_reference_e2e::a_nullable_element_array_clone_keeps_its_element_type`.
+
 ## Smart casts from `when` guards
 
 An arm's guard (`is Lit if e.type is Marker -> ...`) is checked with the arm's own condition facts
@@ -15206,6 +15213,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   identities between the passes; the temporaries pass does not infer the earlier pass from
   unrelated constants, jumps, or throws remaining in the method. Tests:
   `bytecode_passes::temporaries::tests` and `tests/safe_call_after_throw_e2e.rs`.
+- **A label right after a `goto` that stands beside a reached label is not one retained from
+  unreachable code.** kotlinc normalizes directly adjacent labels into one before it optimizes, so
+  such a run is reached when any of its labels is. An unreached label in it, like the first label
+  in front of a safe call's null path after the non-null path's `goto`, is not counted as retained,
+  and `options?.let { if (…) null else "x" }` keeps its receiver on the stack
+  (`aload; dup; ifnull`) as kotlinc does. After an `athrow` or a return the label still counts as
+  retained: kotlinc emits a dead continuation there (an inlined body's result path) that the
+  elimination deletes, which is why `lastException?.let { throw it }` keeps its temporary.
+  Tests: `constant_conditions::tests::a_label_beside_a_reached_jump_target_is_not_retained_from_deleted_code`,
+  `constant_conditions::tests::a_label_after_a_throw_beside_a_reached_jump_target_stays_retained`,
+  `tests/safe_call_dup_e2e.rs` and `tests/safe_call_after_throw_e2e.rs`.
 - **A `Boolean` compared with a `Boolean` literal is an ordinary two-operand comparison; only a
   negation is a polarity.** kotlinc's `Equals` sends two primitive `Boolean` operands to
   `BooleanComparison`, which materializes both and jumps with `if_icmp<cond>`; it never reads a
@@ -22077,6 +22095,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `…::class_literals_inside_an_array_literal_resolve`,
   `…::an_array_literal_in_an_unemitted_position_stays_inert`.
 
+  A checked array factory folds each spread or named whole-array operand against the array type
+  and appends its elements once. Ordinary operands fold against the element type and retain their
+  position. The checker reuses the same recorded whole-array argument role as FIR lowering;
+  nested factories and empty arrays preserve this rule recursively. Complete class artifacts and
+  Kotlin-first execution are compared in `tests/annotation_array_spread_values_e2e.rs`.
+
 - **Class initializer inference selects declared members through the module symbol source.** A
   property such as `val parts = split(pattern)` may refer forward to an explicitly typed member,
   and the member receiver rung outranks a same-named top-level function. Signature collection now
@@ -23177,6 +23201,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Tests: `wasm::codegen::tests`, and the `wasm-js`/`wasm-wasi` box lanes
   (`tests/kotlin_box_wasm_conformance.rs`).
 
+- **Forwarded anonymous-super operands are constructor values, not captures.** Wasm admits a
+  non-inner constructor prefix only when each parameter retains its exact forwarded-super ordinal,
+  ordinary value provenance and absence of capture or field storage. The existing constructor
+  argument and selected-super-call paths consume those parameters. Unsupported capture roles still
+  decline. `nestedAnonymousConstructionOrder.kt` stays in the shared inventory for every backend.
+
 - **Wasm nullable scalar assertions require an unboxing contract.** `ref.as_non_null` retains a
   reference; it cannot produce the checked i32, i64, f32 or f64 result of a nullable scalar's `!!`.
   Such an assertion declines with `a not-null assertion requiring a scalar reference conversion`,
@@ -23428,6 +23458,15 @@ still decline. Owning tests compare String, Int and Any IR with checked FIR, exe
 contracts, and execute the unchanged #2811 Pair program plus official-producer controls after JVM
 oracles in `klib_closure_frames_e2e::elvis_blocks`.
 
+## Local classifiers in file-facade metadata
+
+A file facade records local classifier IDs using the same declaration-owned locality facts as class
+metadata, including anonymous objects and classifiers nested in local or enum-entry bodies. JVM
+function and backing-field signature records retain descriptors that a metadata reader cannot
+reconstruct from those local IDs. This changes serialization evidence rather than checked type
+arguments or declaration-result approximation. Tests compare the complete facade payload and
+class ABI with kotlinc in `tests/facade_local_classifier_metadata_e2e.rs`.
+
 ## Native bound callable-reference receiver storage
 
 A bound callable reference retains its receiver as a semantic object for equality and hashing,
@@ -23439,3 +23478,14 @@ Receiver expressions are evaluated once before the closure is allocated.
 The Native storage ABI regression establishes each program's kotlinc result before checking scalar,
 scalar-backed and reference-backed value-class equality, hashes, typed invocation and mixed capture
 ordering. The runtime reference-equality protocol and KType layout are unchanged.
+
+## JVM object methods on annotation interfaces
+
+A checked `toString`, `hashCode` or `equals` call on a freshly constructed annotation names its
+declared interface. The generated implementation is materialized at that interface slot before
+invocation. Reading a declared annotation parameter, or calling through `Any` or an ordinary
+interface, retains class-owned dispatch. The realized construction identity and selected semantic
+call role own this JVM choice.
+`annotation_impl_class_e2e` compares complete emitted class inventories and raw artifacts, and runs
+the same programs after Kotlin; the ordinary Java-interface controls remain in
+`interface_object_method_e2e`.
