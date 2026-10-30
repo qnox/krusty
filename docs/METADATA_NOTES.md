@@ -1362,6 +1362,15 @@ their declaration diagnostic before adaptation: generic formals and the logical 
 come from normalized constructor/classifier facts, while aliases retain their selected alias and
 outer-owner signature. The physical constructor return remains unchanged.
 
+## Anonymous superclass closure capture ownership
+
+Constructor-use inventory distinguishes candidate storage discovery from checked publication.
+An admitted retained lambda keeps lexical dependencies in its anonymous class; ordinary forwarded
+super arguments remain construction-site expressions. Final closure admission uses the same
+checked lowering/type facts as super-argument disposition. Existing lexical capture identities,
+shared-cell decisions and FIR constructor-prefix coordinates supply the resulting fields and
+closure parameters. No metadata naming, new capture identity or backend recovery is introduced.
+
 ## Serialized getter declaration contracts
 
 KLIB normalization tags a getter or setter from its actual property slot, retaining the property's
