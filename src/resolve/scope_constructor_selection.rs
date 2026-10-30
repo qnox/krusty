@@ -4,6 +4,9 @@
 
 use super::*;
 
+#[cfg(test)]
+mod tests;
+
 /// The syntax of a bare `Name(args)` constructor call reached on the file/import scope tower.
 pub(super) struct ScopeConstructorCall<'a> {
     pub(super) arg_names: Option<&'a [Option<String>]>,
