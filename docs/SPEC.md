@@ -13196,9 +13196,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   does not cover is an error at that construct (`krusty's Compose compiler plugin does not support
   <construct> yet; compile this module with kotlinc`), never a silent difference: a receiver, a
   default argument that is not a constant, a vararg, more than ten parameters, a parameter type other than a primitive or
-  `String`, a call argument that is not a constant, a parameter, or computed from a parameter, a
-  grouping annotation, a call to another file's composable, a name an overload with lambdas shares,
-  and a class kotlinc would give `$stable`. A nonempty `metricsDestination`/`reportsDestination` is an
+  `String` or `@Composable () -> Unit`, a call argument that is not a constant, a parameter, or
+  computed from a parameter, any other use of a composable lambda parameter, a grouping annotation
+  or explicit applier target, a call to another file's composable, a name an overload with lambdas
+  shares, a recursive function with composable lambda parameters, and a class kotlinc would give
+  `$stable`. A nonempty `metricsDestination`/`reportsDestination` is an
   `UnimplementedOption` error. The runtime functions the code calls are selected at the handoff by
   their Kotlin signatures, or the module is rejected. Covered:
   `Unit` top-level composables with a block body whose parameters are primitives or `String`. Each
@@ -13221,7 +13223,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `if ($default and bit != 0) p = <default>` (at the default's own line) before the trace start.
   A defaulted reference parameter becomes nullable (no check, `@Nullable`), since a call that omits
   it passes `null`; omitted primitives pass their zero. The group starts at the body's opening
-  brace's line and skips at the `fun` keyword's line. The
+  brace's line and skips at the `fun` keyword's line. A `@Composable () -> Unit` parameter becomes
+  `Function2<Composer, Int, Unit>` (the recompose lambda's copy carries no generic `Signature`, as
+  no lambda body's does), is compared with `Composer.changedInstance`, and is called
+  `invoke($composer, <bits>)` with its own slot's bits moved to slot 0, as an `invoke`'s dispatch
+  receiver follows its (here no) arguments; source information lists the call. kotlinc's applier
+  inference unifies a function's applier with each lambda parameter it calls and with what a callee's
+  scheme binds a passed lambda to; a scheme that binds anything is recorded as
+  `@ComposableInferredTarget(scheme = "[0[0][_]]")`, which, unlike `@FunctionKeyMeta`, Kotlin
+  metadata records too. The group key names such a parameter's type `ComposableFunction0`, the
+  frontend's type for it. The
   group key is the Java `hashCode` of
   `fun-<name>(<parameter types>)<result>/pkg-<package>/file-<file name>`, which `@FunctionKeyMeta`
   records with the UTF-16 offsets of the `fun` keyword and the body's end. That annotation lives in
@@ -13232,12 +13243,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   publishes its
   locals and no
   line, and the call's line starts at its dispatch, since kotlinc builds both arguments without
-  offsets. Tests: `tests/fixtures/compose/restartableFunctions.kt`, `trackedParameters.kt` and
-  `defaultArguments.kt`,
+  offsets. Tests: `tests/fixtures/compose/restartableFunctions.kt`, `trackedParameters.kt`,
+  `defaultArguments.kt` and `lambdaParameters.kt`,
   whose `box()` composes and recomposes the functions through a recording composer, and
   `kotlin_box_ir_jvm_conformance::compose_restartable_functions_are_byte_identical_to_kotlinc` and
-  `compose_tracked_parameters_are_byte_identical_to_kotlinc` and
-  `compose_default_arguments_are_byte_identical_to_kotlinc`, which require their class sets to
+  `compose_tracked_parameters_are_byte_identical_to_kotlinc`,
+  `compose_default_arguments_are_byte_identical_to_kotlinc` and
+  `compose_lambda_parameters_are_byte_identical_to_kotlinc`, which require their class sets to
   equal kotlinc's byte for byte;
   `cli_compiler_plugin_e2e::the_compose_pass_rejects_what_it_does_not_cover` and
   `compose_report_destinations_fail_the_compile`; and the `plugins::compose` and

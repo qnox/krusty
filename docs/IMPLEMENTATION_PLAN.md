@@ -6308,7 +6308,11 @@ and the pass rejects every construct it does not cover yet.
 - [x] Parameterless `Unit` top-level composables: restart groups, skipping, durable keys,
   `@FunctionKeyMeta`, source information and trace markers; calls between them in one file.
 - [ ] Calls to composables of other files and modules, and the grouping annotations.
-- [ ] `@Composable` function types and lambdas, and the composable call checker's diagnostics.
+- [x] `@Composable () -> Unit` parameters: called with the composer and their own state bits,
+  compared by identity, passed on to composable calls, and their `@ComposableInferredTarget`
+  applier scheme inferred.
+- [ ] Composable lambdas (`ComposableSingletons`, `rememberComposableLambda`), other composable
+  function types, and the composable call checker's diagnostics.
 - [x] Primitive and `String` parameters: `$changed`/`$dirty` slot tracking with strong skipping,
   `Composer.changed` comparisons, and each call's argument bits (static, passed on, uncertain).
 - [x] Constant default arguments: the `$default` mask, defaults assigned in the group, placeholders
