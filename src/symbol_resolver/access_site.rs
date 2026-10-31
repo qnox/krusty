@@ -114,16 +114,8 @@ impl SymbolResolver<'_> {
         self.lexical_classes.iter().copied().any(|owner| {
             inherited_nested_classifier_name(
                 simple,
-                direct_supertypes(&self.src, Ty::obj_name(owner))
-                    .into_iter()
-                    .filter_map(Ty::kotlin_class_internal)
-                    .collect(),
-                |candidate_owner| {
-                    direct_supertypes(&self.src, Ty::obj_name(candidate_owner))
-                        .into_iter()
-                        .filter_map(Ty::kotlin_class_internal)
-                        .collect()
-                },
+                nested_classifier_supertypes(&self.src, owner),
+                |candidate_owner| nested_classifier_supertypes(&self.src, candidate_owner),
                 |candidate| inherited_classifier_shape(&self.src, candidate, owner).is_some(),
             ) == InheritedNestedClassifier::Found(internal)
         })

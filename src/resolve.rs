@@ -38538,12 +38538,7 @@ impl<'a> Checker<'a> {
             let selected = crate::symbol_resolver::inherited_nested_classifier_name(
                 name,
                 vec![owner],
-                |current| {
-                    crate::symbol_resolver::direct_supertypes(&source, Ty::obj_name(current))
-                        .into_iter()
-                        .filter_map(Ty::kotlin_class_internal)
-                        .collect()
-                },
+                |current| crate::symbol_resolver::nested_classifier_supertypes(&source, current),
                 |candidate| {
                     crate::symbol_resolver::inherited_classifier_shape(&source, candidate, owner)
                         .is_some_and(|classifier| {
@@ -42549,25 +42544,19 @@ impl<'a> Checker<'a> {
         internal: TypeName,
     ) -> InheritedNestedClassifier {
         let source = self.fed_source();
-        let roots = <Self as crate::assignable::TypeOracle>::direct_supertypes(
-            self,
-            Ty::obj_name(internal),
-        )
-        .into_iter()
-        .filter_map(Ty::obj_internal)
-        .collect();
-        crate::symbol_resolver::inherited_nested_classifier_name(
-            name,
-            roots,
-            |owner| {
-                <Self as crate::assignable::TypeOracle>::direct_supertypes(
-                    self,
-                    Ty::obj_name(owner),
-                )
+        let inheriting_supertypes = |owner: TypeName| {
+            <Self as crate::assignable::TypeOracle>::direct_supertypes(self, Ty::obj_name(owner))
                 .into_iter()
                 .filter_map(Ty::obj_internal)
-                .collect()
-            },
+                .filter(|&supertype| {
+                    crate::symbol_resolver::inherits_nested_classifiers_through(&source, supertype)
+                })
+                .collect::<Vec<_>>()
+        };
+        crate::symbol_resolver::inherited_nested_classifier_name(
+            name,
+            inheriting_supertypes(internal),
+            inheriting_supertypes,
             |candidate| {
                 crate::symbol_resolver::inherited_classifier_shape(&source, candidate, internal)
                     .is_some()

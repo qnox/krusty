@@ -90,12 +90,12 @@ pub(crate) use member_hierarchy::{
     bound_inner_classifier_in_source, bound_inner_constructor_candidates,
     declared_member_callables, declared_member_declarations, function_input_shapes_match,
     function_override_input_slots_match, function_result_refines, imported_object_member_symbols,
-    inherited_nested_classifier_name, lexical_enclosing_classifier_names,
-    member_declarations_in_hierarchy, member_is_inheritable, members_in_hierarchy,
-    normalize_inherited_member_functions, override_input_shapes_match,
-    override_parameter_types_match, property_declaration_identity, specialize_member_function,
-    supertype_preorder, BoundInnerConstructorContext, InheritedNestedClassifier,
-    InnerAliasOuterApplication, OverrideInputShape,
+    inherited_nested_classifier_name, inherits_nested_classifiers_through,
+    lexical_enclosing_classifier_names, member_declarations_in_hierarchy, member_is_inheritable,
+    members_in_hierarchy, nested_classifier_supertypes, normalize_inherited_member_functions,
+    override_input_shapes_match, override_parameter_types_match, property_declaration_identity,
+    specialize_member_function, supertype_preorder, BoundInnerConstructorContext,
+    InheritedNestedClassifier, InnerAliasOuterApplication, OverrideInputShape,
 };
 pub(crate) use member_specialization::{
     apply_property_bindings, compose_position as compose_type_position, instantiate_input_slot,
@@ -989,12 +989,7 @@ impl<'a> SymbolResolver<'a> {
         match inherited_nested_classifier_name(
             name,
             vec![owner],
-            |candidate_owner| {
-                direct_supertypes(&self.src, Ty::obj_name(candidate_owner))
-                    .into_iter()
-                    .filter_map(Ty::kotlin_class_internal)
-                    .collect()
-            },
+            |candidate_owner| nested_classifier_supertypes(&self.src, candidate_owner),
             |candidate| self.classifier_accessible(candidate),
         ) {
             InheritedNestedClassifier::Found(classifier) => {
