@@ -97,6 +97,15 @@ calls report it alike. The `resolver_regression_e2e` tests for bound violations,
 fixation, their combination, structural parameters, a multi-formal structural argument and mixed
 variance cover it.
 
+## Cast targets without type arguments
+
+`x as Auto` and `x as? Auto` with a generic `Auto` and no type arguments take the arguments from the
+operand's type, as a type test does: `Gen<String>` casts to `Auto<String>`, and `Gen<*>` to
+`Auto<*>`. The result is never the raw classifier. The decision is made on the resolved target, not
+its spelling: an alias with a fixed application (`typealias IntAuto = Auto<Int>`) stays `Auto<Int>`,
+and a type-parameter target (`x as T`) is left as written. Tests:
+`box_regressions/bareCastTargetArguments.kt` and `bare_cast_target_e2e`.
+
 ## File policies under signature recovery
 
 A file's own annotations (`@file:Suppress`, opt-ins) are published before recovery diagnostics
