@@ -15,6 +15,7 @@ use crate::fx_hash::{HashMap, HashSet};
 
 mod arrays;
 mod blocks;
+mod callable_references;
 mod calls;
 mod class_initializers;
 mod class_literals;
@@ -67,6 +68,12 @@ pub(super) struct LinkedCallee {
     pub(super) class_type_parameters: Vec<String>,
 }
 
+pub(super) struct LinkedCallableReference {
+    pub(super) declaration: crate::fir::ExternalCallableId,
+    pub(super) kind: crate::libraries::ExternalCallableKind,
+    pub(super) call: LinkedCallee,
+}
+
 /// The declared shape of a member a range literal's membership calls.
 pub(super) struct RangeMembershipHeader {
     pub(super) receiver: Option<Ty>,
@@ -104,6 +111,14 @@ pub(super) trait CallLinker {
 
     /// The function a call of the public declaration `callee` invokes.
     fn link(&mut self, ir: &mut IrFile, callee: &KlibPublicIdSignature) -> Lowered<LinkedCallee>;
+
+    fn link_reference(
+        &mut self,
+        _ir: &mut IrFile,
+        _callee: &KlibPublicIdSignature,
+    ) -> Lowered<LinkedCallableReference> {
+        unsupported("a callable reference without an exact provider declaration")
+    }
 
     /// The dependency constructor a constructor call of the public declaration `callee` invokes.
     fn link_constructor(
@@ -317,6 +332,13 @@ impl<'a> BodyLowering<'a> {
                 origin,
                 ..
             } => {
+                if let Some(reference) =
+                    super::callable_references::unbound_reference(self.arena, expression)
+                {
+                    let ty = self.ty(expression, "callable reference")?;
+                    let lowered = self.callable_reference(reference, ty)?;
+                    return Ok(self.typed(lowered, ty));
+                }
                 if !super::closure_forms::unbound_rich_reference(&expression.kind) {
                     return unsupported("a bound or reflective rich function reference");
                 }

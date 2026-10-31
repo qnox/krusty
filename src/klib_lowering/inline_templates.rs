@@ -16,7 +16,8 @@
 //! template leaves the file as it was.
 
 use super::body_lowering::{
-    BodyLowering, CallLinker, LinkedAccessor, LinkedCallee, LinkedConstructor, LoweredFunction,
+    BodyLowering, CallLinker, LinkedAccessor, LinkedCallableReference, LinkedCallee,
+    LinkedConstructor, LoweredFunction,
 };
 use super::decline::{KlibBodyDecline, KlibBodyDeclineReason};
 use super::function_lowering::function_header;
@@ -513,6 +514,36 @@ impl CallLinker for TemplateCalls<'_> {
             singleton_dispatch: None,
             type_parameters: Vec::new(),
             class_type_parameters: Vec::new(),
+        })
+    }
+
+    fn link_reference(
+        &mut self,
+        ir: &mut IrFile,
+        callee: &KlibPublicIdSignature,
+    ) -> Result<LinkedCallableReference, KlibBodyDeclineReason> {
+        let signature = KlibDeclarationSignature::Public(callee.clone());
+        let binding = self.binding(&signature, callee)?;
+        let (declaration, realization) = self
+            .callees
+            .source
+            .external_callable_by_dependency(&binding.declaration)
+            .ok_or(KlibBodyDeclineReason::Unjoined)?;
+        if realization.dependency_callable.as_ref() != Some(&binding.declaration) {
+            return Err(KlibBodyDeclineReason::SignatureMismatch(
+                "a callable reference provider changed its exact declaration".to_owned(),
+            ));
+        }
+        let call = self.link(ir, callee)?;
+        if !matches!(&call.callee, Callee::External { target, .. } if *target == declaration) {
+            return Err(KlibBodyDeclineReason::SignatureMismatch(
+                "a callable reference changed its provider handle while linking".to_owned(),
+            ));
+        }
+        Ok(LinkedCallableReference {
+            declaration,
+            kind: realization.kind,
+            call,
         })
     }
 }
