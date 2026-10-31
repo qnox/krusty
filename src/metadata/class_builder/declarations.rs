@@ -222,7 +222,7 @@ pub struct ClassTail<'a> {
     /// serializer has no declaration source and must never guess a classifier's variance.
     pub intersection_approximation: Option<&'a dyn Fn(Ty) -> Option<Ty>>,
     /// Checked lookup of inner classifiers named by this declaration's metadata types.
-    pub inner_classifiers: crate::metadata::InnerClassifiers<'a>,
+    pub classifier_applications: crate::metadata::ClassifierApplications<'a>,
     /// How SOURCE spelled the CLASS HEADER's types: primary-constructor parameters and
     /// type-parameter bounds. Members carry their own on [`FnMeta`]/[`PropMeta`].
     pub spellings: crate::spelling::DeclaredSpellings,
@@ -316,7 +316,8 @@ impl Default for ClassTail<'_> {
     fn default() -> Self {
         ClassTail {
             intersection_approximation: None,
-            inner_classifiers: crate::metadata::MetadataTypeLookups::default().inner_classifiers,
+            classifier_applications: crate::metadata::MetadataTypeLookups::default()
+                .classifier_applications,
             supertype_spellings: &[],
             spellings: crate::spelling::DeclaredSpellings::default(),
             flags: DEFAULT_CLASS_FLAGS,

@@ -1767,8 +1767,9 @@ pub fn facade_package_metadata_from_ir(
                 .and_then(|declaration| declaration.type_param_variances.get(index).copied())
         })
     };
-    let inner_classifier =
-        |classifier| crate::metadata::inner_classifiers::inner_classifier(ir, symbols, classifier);
+    let classifier_application = |classifier| {
+        crate::metadata::classifier_applications::classifier_application(ir, symbols, classifier)
+    };
     build_facade_metadata(
         functions,
         properties,
@@ -1777,7 +1778,7 @@ pub fn facade_package_metadata_from_ir(
         param_assertions,
         crate::metadata::MetadataTypeLookups {
             intersection_approximation: Some(&approximate),
-            inner_classifiers: &inner_classifier,
+            classifier_applications: &classifier_application,
             local_classifiers,
             enum_entry_bodies,
         },

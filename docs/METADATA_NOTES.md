@@ -231,8 +231,14 @@ storage demand are separate facts. Anonymous construction consumes the existing 
 storage-use plan and constructor-parameter reads. Inline/default checking records that plan at the
 construction, while inspection records it after the authoritative class check.
 Tests: `tests/capture_storage_metadata_e2e.rs` and the FIR local-class owner tests.
-Own versus lexical-capture applications remain tracked by #2653 with its unchanged complete fixture
-oracles; ABI publication checks do not establish metadata payload parity.
+
+Classifier applications distinguish direct declarations, lexical capture frames and actual inner
+instances through one checked declaration lookup. JVM local applications serialize only their own
+argument prefix; captured formal references keep their existing IDs. Only an actual inner instance
+writes `outer_type`. KLIB retains its existing flattened lexical-application policy, and JVM inner
+types with a local outer retain their existing flat form. The complete #2653 fixture oracles,
+including the independently measured bounds program, are in
+`tests/local_metadata_applications_e2e.rs` with named-local, shadowing and ordinary-inner controls.
 
 Layout reads use class headers and builtin declaration tables, not the enclosing `LibraryType` or
 its members. Physical mapped Java requests keep invariant formals independently of a Kotlin view's

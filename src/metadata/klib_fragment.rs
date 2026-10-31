@@ -59,25 +59,25 @@ pub(crate) fn package_fragment(
     classes: &[KlibClass<'_>],
     annotations_in_metadata: bool,
 ) -> Vec<u8> {
-    package_fragment_with_inner_classifiers(
+    package_fragment_with_classifier_applications(
         package,
         file,
         classes,
         annotations_in_metadata,
-        crate::metadata::MetadataTypeLookups::default().inner_classifiers,
+        crate::metadata::MetadataTypeLookups::default().classifier_applications,
     )
     .expect("valid metadata fixture declarations")
 }
 
 /// Production KLIB fragment emission with the frozen classifier facts its metadata types require.
-pub(crate) fn package_fragment_with_inner_classifiers(
+pub(crate) fn package_fragment_with_classifier_applications(
     package: &[&str],
     file: &KlibFileMembers,
     classes: &[KlibClass<'_>],
     annotations_in_metadata: bool,
-    inner_classifiers: crate::metadata::InnerClassifiers<'_>,
+    classifier_applications: crate::metadata::ClassifierApplications<'_>,
 ) -> Result<Vec<u8>, crate::metadata::class_id::ClassIdError> {
-    let mut st = StringTable::klib(inner_classifiers);
+    let mut st = StringTable::klib(classifier_applications);
     let mut requirements = VersionRequirementTable::default();
     let mut contract_types = ContractTypeTable::default();
     let mut package_message = Pb::new();
@@ -235,6 +235,50 @@ mod tests {
     }
 
     #[test]
+    fn lexical_applications_keep_the_existing_klib_argument_policy() {
+        let local = crate::types::type_name("fixture/Local");
+        let mut members = file_members();
+        members.functions[0].ret = Ty::obj_args_name(local, &[Ty::Int, Ty::String]);
+        let lexical = |_| {
+            Ok(crate::metadata::ClassifierApplication::LexicalCapture {
+                own_arguments: 1,
+                captured_arguments: 1,
+            })
+        };
+        let direct = |_| Ok(crate::metadata::ClassifierApplication::Direct);
+        let actual = package_fragment_with_classifier_applications(
+            &["fixture"],
+            &members,
+            &[],
+            true,
+            &lexical,
+        )
+        .unwrap();
+        let expected = package_fragment_with_classifier_applications(
+            &["fixture"],
+            &members,
+            &[],
+            true,
+            &direct,
+        )
+        .unwrap();
+        assert_eq!(actual, expected);
+        let package = parse_package_fragment_checked(&actual).unwrap();
+        assert_eq!(
+            package.functions[0].ret,
+            KotlinType::Class {
+                internal: "fixture/Local".into(),
+                args: vec![
+                    KotlinType::class("kotlin/Int"),
+                    KotlinType::class("kotlin/String")
+                ],
+                nullable: false,
+                shape: Default::default(),
+            }
+        );
+    }
+
+    #[test]
     fn an_inner_type_round_trips_its_outer_arguments_through_the_fragment() {
         let outer = crate::types::type_name("fixture/Outer");
         let inner = outer.nested_child("Inner");
@@ -242,18 +286,25 @@ mod tests {
         members.functions[0].ret = Ty::obj_args_name(inner, &[Ty::Int, Ty::String]);
         let lookup = |classifier| {
             if classifier == inner {
-                Ok(Some(crate::metadata::InnerClassifier {
-                    outer,
-                    own_arguments: 1,
-                }))
+                Ok(crate::metadata::ClassifierApplication::Inner(
+                    crate::metadata::InnerClassifier {
+                        outer,
+                        own_arguments: 1,
+                    },
+                ))
             } else {
-                Ok(None)
+                Ok(crate::metadata::ClassifierApplication::Direct)
             }
         };
 
-        let fragment =
-            package_fragment_with_inner_classifiers(&["fixture"], &members, &[], true, &lookup)
-                .expect("valid declared metadata class names");
+        let fragment = package_fragment_with_classifier_applications(
+            &["fixture"],
+            &members,
+            &[],
+            true,
+            &lookup,
+        )
+        .expect("valid declared metadata class names");
         let package = parse_package_fragment_checked(&fragment).expect("a decodable fragment");
         assert_eq!(
             package.functions[0].ret,

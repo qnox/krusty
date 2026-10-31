@@ -21,7 +21,7 @@ use crate::metadata::id_signature::{
     MetadataClass, MetadataContainer,
 };
 use crate::metadata::klib_fragment::{
-    package_fragment_with_inner_classifiers, KlibClass, KlibFileMembers,
+    package_fragment_with_classifier_applications, KlibClass, KlibFileMembers,
 };
 use crate::metadata::semantic::parse_package_fragment_checked;
 
@@ -225,8 +225,12 @@ impl KlibBackend {
             .iter()
             .map(|record| record.enum_entries())
             .collect::<Vec<_>>();
-        let inner_classifier = |classifier| {
-            crate::metadata::inner_classifiers::inner_classifier(ir, &file.classifiers, classifier)
+        let classifier_application = |classifier| {
+            crate::metadata::classifier_applications::classifier_application(
+                ir,
+                &file.classifiers,
+                classifier,
+            )
         };
         let tails = records
             .iter()
@@ -238,7 +242,7 @@ impl KlibBackend {
                         annotations_in_metadata: self.annotations_in_metadata,
                         compiler_version_requirement: None,
                         intersection: None,
-                        inner_classifiers: &inner_classifier,
+                        classifier_applications: &classifier_application,
                         primary_ctor_annotations: None,
                     },
                     secondary,
@@ -286,12 +290,12 @@ impl KlibBackend {
                 },
             )
             .collect::<Vec<_>>();
-        let fragment = match package_fragment_with_inner_classifiers(
+        let fragment = match package_fragment_with_classifier_applications(
             &segments,
             &members,
             &declarations,
             self.annotations_in_metadata,
-            &inner_classifier,
+            &classifier_application,
         ) {
             Ok(fragment) => fragment,
             Err(error) => {

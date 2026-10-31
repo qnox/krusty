@@ -65,7 +65,7 @@ pub(crate) struct LambdaFunction<'a> {
     /// Checked declaration approximation for a non-denotable intersection in this signature.
     pub intersection_approximation: &'a dyn Fn(Ty) -> Option<Ty>,
     /// Checked lookup of inner classifiers named by this signature.
-    pub inner_classifiers: crate::metadata::InnerClassifiers<'a>,
+    pub classifier_applications: crate::metadata::ClassifierApplications<'a>,
 }
 
 /// `d1` (before its string packing) and `d2` for a lambda class.
@@ -80,7 +80,7 @@ pub(crate) fn build(lambda: &LambdaFunction<'_>) -> Result<(Vec<u8>, Vec<String>
         lambda.local_classifiers,
         lambda.enum_entry_bodies,
         Some(lambda.intersection_approximation),
-        lambda.inner_classifiers,
+        lambda.classifier_applications,
     );
     let mut named = Vec::new();
     type_parameters_named_by(lambda.result, &mut named);
