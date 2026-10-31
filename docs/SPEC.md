@@ -23455,6 +23455,19 @@ that remain in the specialized receiver are fixed types there: `Column<EntityID<
 the receiver leaves unbound stays rigid in this check, so it cannot make the receiver fit. Test:
 `box_regressions/extensionReceiverBindsCallerVariable.kt`.
 
+## Nullable type variables in extension receivers
+
+An extension declared on `Column<out E?>` applies to `Column<EntityID<U>>` where `U` is the
+caller's own type parameter: the callee's formal `E` binds `EntityID<U>`, and a non-null actual
+may stand for the nullable declared argument under `out`, or when the actual is itself nullable.
+A caller variable `V : EntityID<String>?` binds `E` to `V & Any`, and `E : EntityID<T>` reads
+`T = String` from `V`'s bound. Receiver lookup treats `E?` as the same wildcard as `E`;
+applicability decides the variance, so an invariant `Column<E?>` receiver rejects a non-null
+`Column<EntityID<U>>` and a `Column<V>` with kotlinc 2.4.21's "inapplicable because of a receiver
+type mismatch". Regressions: `tests/box_regressions/nullableProjectedReceiverVariable.kt`,
+`tests/box_regressions/nullableBoundedCallerReceiverVariable.kt` and
+`resolver_regression_e2e::an_invariant_nullable_receiver_variable_rejects_a_non_null_argument_like_kotlinc`.
+
 ## Extension results specialized to caller variables
 
 An extension's result is its declared return type with the call's bindings substituted. When a

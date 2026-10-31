@@ -2468,6 +2468,34 @@ fun box(): String = invoked.values.greeting() + invoked.values.suffix()
     assert_accepted_and_runs(src, "ResolverPackageQualifiedPropertyInvoke");
 }
 
+/// An invariant nullable formal (`Column<E?>`) is a candidate for the receiver's classifier, and
+/// applicability rejects a non-null argument (`Column<EntityID<U>>`) or a caller variable whose
+/// bound admits null with kotlinc's receiver mismatch, not an unresolved reference.
+#[test]
+fn an_invariant_nullable_receiver_variable_rejects_a_non_null_argument_like_kotlinc() {
+    let sources = [(
+        "Receiver.kt",
+        r#"open class EntityID<T : Any>(val value: T)
+class Column<T>(val name: String)
+
+fun <T : Any, E : EntityID<T>> Column<E?>.invariantTable(): T? = null
+
+fun <U : Any> nonNullColumn(column: Column<EntityID<U>>) = column.invariantTable()
+fun <V : EntityID<String>?> boundedColumn(column: Column<V>) = column.invariantTable()
+fun <U : Any> nullableColumn(column: Column<EntityID<U>?>) = column.invariantTable()
+"#,
+    )];
+    let reference_args = common::language_directives::kotlinc_args(sources[0].1);
+    assert_eq!(
+        common::reference_error_blocks(&sources, &reference_args),
+        [
+            "Receiver.kt:6:67: candidate 'fun <T : Any, E : EntityID<T>> Column<E?>.invariantTable(): T?' is inapplicable because of a receiver type mismatch.",
+            "Receiver.kt:7:71: candidate 'fun <T : Any, E : EntityID<T>> Column<E?>.invariantTable(): T?' is inapplicable because of a receiver type mismatch.",
+        ]
+    );
+    common::assert_error_blocks_match_kotlinc(&sources, &reference_args);
+}
+
 #[test]
 fn a_callable_import_keeps_the_default_imported_classifier_in_type_positions() {
     let sources = [
