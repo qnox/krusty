@@ -11,14 +11,18 @@
 //! Covered: `Unit` top-level composable functions with a block body whose parameters are
 //! primitives, `String` or `@Composable () -> Unit` values, with constant default arguments, made
 //! restartable and skippable with per-parameter change tracking, their calls to one another in the
-//! same file, and calls of their lambda parameters, whose applier scheme is inferred. Source
-//! information, trace markers and `@FunctionKeyMeta` follow the plugin's options.
+//! same file, and calls of their lambda parameters, whose applier scheme is inferred. A composable
+//! lambda such a call passes that captures nothing becomes a property of the file's
+//! `ComposableSingletons` object ([`singleton_lambdas`]), with a restartable group of its own; one
+//! that captures value parameters of its function is remembered in the composition at the call.
+//! Source information, trace markers and `@FunctionKeyMeta` follow the plugin's options.
 
 mod applier_targets;
 mod durable_keys;
 mod options;
 mod restart_groups;
 mod runtime;
+mod singleton_lambdas;
 mod source_facts;
 
 pub use options::ComposeOptions;

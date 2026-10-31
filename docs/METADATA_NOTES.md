@@ -1,5 +1,35 @@
 # `@kotlin.Metadata` — reverse-engineering notes (Phase 4b)
 
+## Classpath annotation query boundary
+
+`declaration_annotations` borrows the existing classpath for exact selected-method and all-method
+annotation queries. `class_entry_bytes` retains first-entry precedence and the existing directory
+`this_class` check, with the same archive, jimage and ct.sym reads. Neither collaborator creates a
+cache or changes metadata authority. Parsed class/field annotations stay with `ClassInfo`/`FieldSig`;
+classreader decodes arguments and JVM providers interpret them. No annotation interpretation or
+new lookup enters core or lowering.
+
+## Annotation classifier kind and JVM dispatch
+
+The JVM annotation realizer retains the exact declared interface in the generated carrier's
+`annotation_impl_of` identity. A fresh allocation exposes that representation to its consumer;
+reading a declared annotation parameter keeps the parameter's own slot contract. Existing selected
+Any-method roles and that construction evidence own interface dispatch and receiver materialization,
+without member spelling, generated-name checks, metadata changes or common semantic selection.
+
+Synthetic annotation method headers reserve their existing enabled nullability descriptors before
+body constants. Constructor parameter and equals annotations retain their payloads; shared toString
+finalization applies the same return contract to memberless implementations. The existing release
+policy and class-writer annotation filter own both reservation and attachment.
+
+## Native bound-receiver physical storage
+
+The common callable-reference record owns the bound-receiver capture coordinate. Native emission
+uses that coordinate to choose semantic object storage, even when a primitive or value class has
+an unboxed invocation carrier. Stored types and offsets jointly own the GC map and thunk loads.
+This representation choice changes no declaration identity, metadata or source-level type, and
+does not reconstruct receiver roles from a capture's spelling or machine carrier.
+
 ## Null-pointer exception storage
 
 The platform NullPointerException declaration carries the existing runtime-exception storage role.
@@ -74,14 +104,6 @@ prefix identities before later consumers run. Metadata class-ID encoding still n
 snapshot ownership lookup; publication alone does not supply authoritative negative nesting facts
 for every cached or cross-module identity.
 
-## Wasm function-value representation
-
-Function values consume the lambda's recorded implementation and capture list, and a callable
-reference's adapter, captures and bound receiver, as common lowering records them. No function
-type, `FunctionN` classifier or member is looked up by name; the arity alone selects the shared
-table and entry types, which are Wasm representation and change no metadata, provider identity or
-frontend decision.
-
 ## Wasm reference-array representation
 
 Reference-array reads consume the selected callable's frozen ArrayGet operation and the checked
@@ -155,6 +177,12 @@ raw qualified class name even though no physical classfile exists. Retain its pa
 exact segment before name-tree normalization, then publish that fact with the annotation shape.
 This preserves literal-dollar and nested names across separate metadata snapshots.
 
+## Closed annotation array operands
+
+Checked spreads and named whole-array operands contribute their elements to one annotation array
+payload. Both classfile annotation attributes and Kotlin metadata consume that same flattened value;
+ordinary operands remain individual elements. The recorded argument role owns this distinction.
+
 ## Serialization constructor handoff
 
 The serialization constructor's `named_params` retain nullable reference elements and the nullable
@@ -190,10 +218,14 @@ ordinary result denotability does not introduce a separate checking context.
 Parent templates are the same alias-expanded compact facts later published in classifier headers;
 metadata and anonymous exposure do not reconstruct arguments from transitional collector shapes.
 
-Complete anonymous-class metadata parity remains tracked by #2653 (own versus lexical-capture
-applications) and #2654 (package-local classifier facts and raw payloads). Their unchanged complete
-fixture oracles remain attached to those issues; ABI publication checks do not establish metadata
-payload parity.
+Package metadata retains the same authenticated local-classifier and enum-entry-body inventories as
+class metadata. Function and backing-field signature records use that locality evidence too: a
+reader cannot reconstruct a local classifier's physical JVM name from its metadata class ID.
+The original #2654 private-factory, explicitly typed getter and inferred-getter controls compare
+complete decoded and raw payloads; the inferred-getter and property-storage controls also compare
+the complete class ABI. Tests: `tests/facade_local_classifier_metadata_e2e.rs`.
+Own versus lexical-capture applications remain tracked by #2653 with its unchanged complete fixture
+oracles; ABI publication checks do not establish metadata payload parity.
 
 Layout reads use class headers and builtin declaration tables, not the enclosing `LibraryType` or
 its members. Physical mapped Java requests keep invariant formals independently of a Kotlin view's
@@ -255,6 +287,14 @@ dependency annotation payloads and preserves ordinary annotation defaults and en
 KLIB dependency-root classification retains authenticated intrinsic-support ownership independently
 of successful code emission. A declined wrapper does not become an ordinary body; its metadata and
 declaration identity remain unchanged, and ordinary roots retain their strict closure contracts.
+
+## Ordinary bottom-array values
+
+Finalized-expression array validity consumes already checked semantic types, including nested
+arguments, and changes no declaration or metadata layout. The class-literal feature policy remains
+separate; a suppressed bottom-array value retains its complete existing JVM method signature.
+JVM signature elements reuse the existing physical descriptor for `Nothing`, preventing a
+nonexistent `kotlin/Nothing` class from appearing in an otherwise nongeneric array signature.
 
 ## Constructor parameter annotation pool order
 
@@ -1435,3 +1475,11 @@ without its own origin. The selected equality signature and both reads must name
 temporary/null proof; names never correlate these declarations. Declared temporary storage remains
 separate from the present branch's proven type. Common IR retains Elvis provenance with the absent
 source-line sentinel; no synthetic source line or metadata wire change is introduced.
+
+## Unsigned constant value messages
+
+`annotation_value_pb` writes field 10 = 1 for the four unsigned `IrConst` variants. The kind remains
+BYTE, SHORT, INT or LONG and `int_value` remains the zigzag encoding of its signed carrier, including
+high-bit values. Signed constants have no flags field. Recursive annotation and array values use
+the same encoder. The complete compile-time-value messages of the pinned official Native producer
+are the byte oracle; this does not infer unsigned identity when an earlier semantic model lost it.
