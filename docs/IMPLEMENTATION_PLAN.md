@@ -1151,6 +1151,18 @@ compare the complete emitted class inventory and raw artifacts with Kotlin befor
 - ✅ `tests/annotations_e2e.rs` (annotation-class decl + `@Tag`/`@Suppress` uses on a function, a
   local, and a loop, run on the JVM). Box conformance **170 → 173 OK / 0 FAIL**.
 
+## Reserve materialized operand-holder storage
+
+Retain checked argument-evaluation holders as a subset of call-operand bindings, including when
+their code is cloned. Remove that purpose when an expansion adopts a holder as its formal receiver.
+Separate physical reservation from semantic publication for those JVM argument-order holders;
+expanded parameters and captures retain their existing binding timing.
+Preserve the existing CallOperand frame identity, compatible reuse, width and lexical scope, and
+leave deferred results, safe-call chains and grouped invocations on their owning paths. Validate
+complete ordinary-constructor/array artifacts and reference-first runtime, plus existing named,
+inline, capture, handler and suspend controls. Annotation-default evaluation normalization remains
+a separate common-lowering concern.
+
 ## Phase 62 — Named arguments  ✅
 - ✅ Top-level function calls accept named arguments (`f(b = 2, a = 5)`). The parser records a
   per-call `name =` label table on `File` (side-table keyed by the call's `ExprId`, no `Expr::Call`
