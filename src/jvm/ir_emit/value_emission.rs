@@ -222,6 +222,22 @@ impl super::Emitter<'_> {
                 defaults: default_parameters,
                 default_prefix_count,
             } => {
+                // A dependency construction realized through its `$default` constructor carries
+                // its placeholders, masks and marker as operands; the realization recorded which.
+                let synthesized: Vec<bool> = self
+                    .default_call_operands
+                    .matching(e, args)
+                    .map(|plan| {
+                        plan.iter()
+                            .map(|operand| {
+                                operand.origin
+                                    == crate::jvm::default_call_operands::DefaultOperandOrigin::Synthesized
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let synthesized_operand =
+                    |parameter: usize| synthesized.get(parameter).copied().unwrap_or(false);
                 // A local class takes its captures, which lead its arguments, in its physical order.
                 let args = capture_order::physical_for(self.ir, *internal, args.clone());
                 if self.emit_nullable_sam_wrapper_new(e, *internal, &args, code) {
@@ -354,7 +370,12 @@ impl super::Emitter<'_> {
                         .enumerate()
                     {
                         let omitted = omitted_parameter(parameter);
-                        self.mark_synthesized_run_start(e, omitted, &mut inside_run, code);
+                        self.mark_synthesized_run_start(
+                            e,
+                            omitted || synthesized_operand(parameter),
+                            &mut inside_run,
+                            code,
+                        );
                         if omitted {
                             push_zero(physical, code, self.cw);
                         } else {
@@ -407,7 +428,12 @@ impl super::Emitter<'_> {
                         .enumerate()
                     {
                         let omitted = omitted_parameter(parameter);
-                        self.mark_synthesized_run_start(e, omitted, &mut inside_run, code);
+                        self.mark_synthesized_run_start(
+                            e,
+                            omitted || synthesized_operand(parameter),
+                            &mut inside_run,
+                            code,
+                        );
                         if omitted {
                             push_zero(physical, code, self.cw);
                         } else {
