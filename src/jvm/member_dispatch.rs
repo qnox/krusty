@@ -36,13 +36,18 @@ pub(super) struct VirtualReceiver {
     pub(super) value_type: Option<crate::types::Ty>,
     pub(super) annotation_construction: Option<TypeName>,
     pub(super) semantic_role: Option<crate::types::SemanticCallRole>,
+    /// The selected callable's semantic declaration owner, when the provider recorded one.
+    pub(super) declaration_owner: Option<crate::types::SemanticCallableOwner>,
 }
 
 /// The class a virtual call names when the receiver's full static type is known.
 ///
-/// An array has no `kotlin/Array` or `kotlin/CharArray` class file. Its virtual calls name the JVM
-/// array type (`[Ljava/lang/String;`, `[C`), which is where `clone` is public. Naming the Kotlin
-/// classifier makes the runtime look up a class that does not exist.
+/// An array has no `kotlin/Array` or `kotlin/CharArray` class file. A member it inherits from
+/// `Any` is called, as kotlinc calls it, through the array classifier's fake override, whose class
+/// is the erased JVM array type: `[C` for `CharArray`, and `[Ljava/lang/Object;` for every
+/// `Array<T>`. The array's own `clone()` is realized where its provider declares it
+/// (`Object.clone`, kotlinc's `Clone` intrinsic). Naming the Kotlin classifier makes the runtime
+/// look up a class that does not exist.
 /// A fresh annotation construction retains its interface at an Any-method consumption boundary;
 /// declared annotation parameters and ordinary interface receivers keep class-owned invocation.
 pub(super) fn virtual_owner(
@@ -51,14 +56,17 @@ pub(super) fn virtual_owner(
     declared_interface: bool,
     receiver: VirtualReceiver,
 ) -> Result<(TypeName, bool), MissingClassifier> {
-    if let Some(array) = receiver.value_type.filter(|ty| {
-        ty.non_null().is_array()
-            && !ty
-                .non_null()
-                .obj_internal()
-                .is_some_and(|name| is_value_class(classifiers, name))
-    }) {
-        let internal = crate::jvm::names::type_descriptor(array.non_null());
+    let array_class = receiver
+        .value_type
+        .and_then(|ty| ty.non_null().obj_internal())
+        .filter(|&array| {
+            crate::types::Ty::obj_name(array).is_array()
+                && !is_value_class(classifiers, array)
+                && receiver.declaration_owner
+                    != Some(crate::types::SemanticCallableOwner::Classifier(array))
+        })
+        .and_then(crate::jvm::names::array_class_descriptor);
+    if let Some(internal) = array_class {
         return Ok((crate::types::type_name(&internal), false));
     }
     let annotation_object_method = matches!(
@@ -247,6 +255,7 @@ mod tests {
                             value_type: Some(crate::types::Ty::obj_name(annotation)),
                             annotation_construction: construction,
                             semantic_role: Some(role),
+                            declaration_owner: None,
                         },
                     ),
                     Ok(if construction.is_some() {

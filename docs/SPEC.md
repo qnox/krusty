@@ -3306,8 +3306,6 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   nested-local declarations, anonymous objects, enum-entry bodies, and generated classes—join the
   frozen module/dependency facts by exact identity at each JVM realization boundary. Their absence
   is not retried through a provider or inferred from a generated class name.
-  An array receiver names the JVM array type (`[Ljava/lang/String;`, `[C`), not `kotlin/Array`
-  or `kotlin/CharArray`, which have no class file (`tests/inherited_member_owner_e2e.rs`).
 - `enum class`: compiled as a `final` class extending `java/lang/Enum` with a `public static final`
   constant per entry, a synthetic `$VALUES` array, a private `(String name, int ordinal, …userArgs)`
   constructor calling `super(name, ordinal)`, a `<clinit>` that constructs entries in declaration

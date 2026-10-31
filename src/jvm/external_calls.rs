@@ -1194,6 +1194,7 @@ fn realize_expressions(
                                 value_type: ir.ext_call_source_receiver.get(&expression).copied(),
                                 annotation_construction: annotation_receiver,
                                 semantic_role,
+                                declaration_owner: callable.declaration_owner,
                             },
                         )
                         .map_err(|missing| {
@@ -1292,6 +1293,7 @@ fn realize_expressions(
                                         .copied(),
                                     annotation_construction: annotation_receiver,
                                     semantic_role,
+                                    declaration_owner: callable.declaration_owner,
                                 },
                             )
                             .map_err(|missing| ExternalDependencyTarget::DispatchClassifier {
@@ -1337,6 +1339,7 @@ fn realize_expressions(
                                         .copied(),
                                     annotation_construction: annotation_receiver,
                                     semantic_role,
+                                    declaration_owner: callable.declaration_owner,
                                 },
                             )
                             .map_err(|missing| ExternalDependencyTarget::DispatchClassifier {
