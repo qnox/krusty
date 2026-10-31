@@ -17,7 +17,9 @@ mod inline_templates;
 mod primitive_calls;
 mod range_membership_producers;
 mod returnable_blocks;
+mod safe_calls;
 mod target_calls;
+mod target_members;
 mod varargs;
 
 use super::*;

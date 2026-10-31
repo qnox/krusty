@@ -134,7 +134,7 @@ pub fn declared_registrars(entry: &str) -> Option<Vec<String>> {
             }
         }
     } else {
-        let mut archive = zip::ZipArchive::new(std::fs::File::open(path).ok()?).ok()?;
+        let mut archive = crate::archive::open_file(std::fs::File::open(path).ok()?).ok()?;
         for service in REGISTRAR_SERVICES {
             let Ok(mut file) = archive.by_name(service) else {
                 continue;
@@ -166,7 +166,7 @@ pub fn declared_release(entry: &str) -> Option<String> {
     let manifest = if path.is_dir() {
         std::fs::read_to_string(path.join(MANIFEST)).ok()?
     } else {
-        let mut archive = zip::ZipArchive::new(std::fs::File::open(path).ok()?).ok()?;
+        let mut archive = crate::archive::open_file(std::fs::File::open(path).ok()?).ok()?;
         let mut file = archive.by_name(MANIFEST).ok()?;
         let mut text = String::new();
         file.read_to_string(&mut text).ok()?;
