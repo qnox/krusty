@@ -1435,6 +1435,17 @@ Wasm constructor admission consumes `IrCtorArg`'s forwarded-super ordinal and pa
 separately from the total constructor-prefix count. Only field-free ordinary forwards are admitted
 by this extension; source metadata and capture storage retain their existing contracts.
 
+## Receiver binding and safe-cast storage
+
+Checked receiver coordinates and declaration paths authenticate own receiver parameters and lifted
+receiver captures. Common lowering publishes their immutable binding-read fact on the resulting
+`GetValue`; it does not infer stability from a slot number or the referenced object's mutability.
+The existing cloning contract carries that fact. Shared-cell reads remain mutable semantic values.
+For a marked safe-cast snapshot only, the JVM retains a reference cell's erased element slot through
+the type test; source locals, primitive cells and semantic metadata keep their original types.
+`implicit_receiver_stability_e2e` checks complete class inventories and bytes against Kotlin, then
+compares execution of the same whole programs. No metadata wire format or capture ABI changes.
+
 ## Serialized Elvis provenance
 
 An `ELVIS` block supplies an immutable compiler variable followed by a two-branch conditional
