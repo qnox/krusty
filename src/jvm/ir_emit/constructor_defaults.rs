@@ -174,7 +174,7 @@ pub(super) fn emit_ctor_default_stub_with_prefix(
             let skip = code.new_label();
             code.ifeq(skip);
             super::method_defaults::mark_default_fill(&mut e, *def_expr, &mut code);
-            e.emit_value(*def_expr, &mut code);
+            e.emit_value_as(*def_expr, pty, &mut code);
             store(pty, pslot, &mut code);
             code.bind(skip);
         }
