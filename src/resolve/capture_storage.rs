@@ -78,9 +78,6 @@ pub(super) fn anonymous_body_bound_value_names(
             .iter()
             .map(|property| property.name.clone()),
     );
-    for method in &class.methods {
-        names.extend(method.params.iter().map(|parameter| parameter.name.clone()));
-    }
     names
 }
 
@@ -306,47 +303,6 @@ pub(super) fn anonymous_descendants(
     ))
 }
 
-fn expression_has_member_call_named(file: &File, expression: ExprId, name: &str) -> bool {
-    // A nested lambda is another runtime closure, but a value from outside the anonymous class
-    // still has to cross the class boundary before that closure can capture it.
-    let matches = match file.expr(expression) {
-        Expr::SafeCall { name: member, .. } => member == name,
-        Expr::Call { callee, .. } => {
-            matches!(file.expr(*callee), Expr::Member { name: member, .. } if member == name)
-        }
-        _ => false,
-    };
-    if matches {
-        return true;
-    }
-    let mut expressions = Vec::new();
-    let mut statements = Vec::new();
-    file.any_child_expr(
-        expression,
-        &mut |child| {
-            expressions.push(child);
-            false
-        },
-        &mut |statement| {
-            statements.push(statement);
-            false
-        },
-    );
-    expressions
-        .into_iter()
-        .any(|child| expression_has_member_call_named(file, child, name))
-        || statements.into_iter().any(|statement| {
-            let mut children = Vec::new();
-            file.any_child_stmt(statement, &mut |child| {
-                children.push(child);
-                false
-            });
-            children
-                .into_iter()
-                .any(|child| expression_has_member_call_named(file, child, name))
-        })
-}
-
 fn anonymous_body_uses_name(
     file: &File,
     declaration: DeclId,
@@ -354,34 +310,36 @@ fn anonymous_body_uses_name(
     ty: Ty,
     constructor_uses: ConstructorArgumentUses<'_>,
 ) -> bool {
-    let expressions = anonymous_body_expressions(file, declaration, constructor_uses);
-    expressions
+    let Decl::Class(class) = file.decl(declaration) else {
+        return false;
+    };
+    let arguments = class
+        .base_args
         .iter()
-        .any(|expression| file.expr_uses_name_deep(*expression, name))
-        || matches!(ty.kind(), TyKind::Fun(signature) if signature.has_receiver)
-            && expressions
-                .into_iter()
-                .any(|expression| expression_has_member_call_named(file, expression, name))
+        .filter_map(|argument| {
+            anonymous_super_argument_constructor_use(file, *argument, constructor_uses)
+        })
+        .collect::<Vec<_>>();
+    let names = std::iter::once(name.to_string()).collect();
+    capture_analysis::anonymous_class_uses_any(
+        file,
+        class,
+        &arguments,
+        &names,
+        matches!(ty.kind(), TyKind::Fun(signature) if signature.has_receiver),
+    )
 }
 
 pub(super) fn anonymous_descendant_uses_name(
     file: &File,
     declaration: DeclId,
-    lexical_scope: &AnonymousLexicalClassScope,
     name: &str,
     ty: Ty,
     function_local: bool,
     constructor_uses: ConstructorArgumentUses<'_>,
 ) -> bool {
-    anonymous_descendants(declaration, lexical_scope).any(|candidate| {
-        enclosing_value_visible_beside_member(file, candidate, name, function_local)
-            && (anonymous_body_uses_name(file, candidate, name, ty, constructor_uses)
-                || candidate != declaration
-                    && matches!(file.decl(candidate), Decl::Class(class) if class
-                        .interface_delegations
-                        .iter()
-                        .any(|delegation| file.expr_uses_name_deep(delegation.value, name))))
-    })
+    enclosing_value_visible_beside_member(file, declaration, name, function_local)
+        && anonymous_body_uses_name(file, declaration, name, ty, constructor_uses)
 }
 
 /// Whether `name` still denotes an enclosing value inside `declaration`.

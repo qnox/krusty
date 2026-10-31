@@ -586,18 +586,6 @@ impl BodyFirChecker<'_> {
             })
     }
 
-    /// Publish a resolver-selected direct storage read with its stable owner and, inside a local
-    /// callable, the exact lifted dispatch receiver that supplies that storage.
-    pub(super) fn direct_class_storage_read_kind(
-        &mut self,
-        field: u32,
-        ty: ResolvedTy,
-        origin: OriginId,
-    ) -> Result<FirExprKind, BodyCheckFailure> {
-        let binding = self.direct_class_capture_binding(field, ty)?;
-        self.class_storage_read_kind(binding, origin)
-    }
-
     /// The binding of field `field` of the class whose storage this body reads directly.
     pub(super) fn direct_class_capture_binding(
         &self,
@@ -1362,7 +1350,21 @@ impl BodyFirChecker<'_> {
             "fir",
             "anonymous body captures declaration={declaration:?} expression={expression:?} captures={captures:?}",
         );
-        let captures = self.checked_class_captures(declaration, span, origin, &captures)?;
+        let mut captures = self.checked_class_captures(declaration, span, origin, &captures)?;
+        if !captures.is_empty() {
+            let stored = self
+                .info
+                .local_class_capture_layouts
+                .stored
+                .get(&transient)
+                .filter(|stored| stored.len() == captures.len())
+                .ok_or_else(|| {
+                    self.failure(Some(span), BodyCheckFailureKind::MissingStableCallTarget)
+                })?;
+            for (capture, stored) in captures.iter_mut().zip(stored.iter().copied()) {
+                capture.stored = stored;
+            }
+        }
         crate::trace_compiler!(
             "fir",
             "anonymous checked captures declaration={declaration:?} captures={}",

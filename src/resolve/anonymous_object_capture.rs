@@ -2,8 +2,8 @@
 //! contract with checked FIR, which turns each capture into a constructor parameter and field.
 
 use super::capture_storage::{
-    anonymous_body_expressions, anonymous_descendant_uses_name, anonymous_descendant_writes_name,
-    anonymous_descendants, enclosing_value_visible_beside_member, ConstructorArgumentUses,
+    anonymous_body_expressions, anonymous_descendant_uses_name, anonymous_descendants,
+    enclosing_value_visible_beside_member, ConstructorArgumentUses,
 };
 use super::scope::ContextReceiverKind;
 use super::{
@@ -1152,39 +1152,31 @@ pub(super) fn record_anonymous_construction_captures(
             // Enclosing-instance need was decided against the anonymous body's receiver uses.
             // It has no source variable name, so lexical bound/write/use filters do not apply.
             AnonymousObjectCaptureSource::EnclosingInstance { .. }
-            | AnonymousObjectCaptureSource::ImplicitReceiver { .. }
-            | AnonymousObjectCaptureSource::ClassStorage { .. } => true,
-            AnonymousObjectCaptureSource::LexicalValue => {
+            | AnonymousObjectCaptureSource::ImplicitReceiver { .. } => true,
+            AnonymousObjectCaptureSource::ClassStorage { .. } if candidate.receiver.is_some() => {
+                true
+            }
+            AnonymousObjectCaptureSource::LexicalValue
+            | AnonymousObjectCaptureSource::ClassStorage { .. } => {
                 enclosing_value_visible_beside_member(
                     file,
                     declaration,
                     &candidate.name,
                     candidate.function_local,
-                ) && (candidate.delegate_storage.is_some()
-                    || anonymous_descendant_uses_name(
-                        file,
-                        declaration,
-                        lexical_scope,
-                        &candidate.name,
-                        candidate.ty,
-                        candidate.function_local,
-                        selected_local_callables.constructor_arguments,
-                    )
-                    || anonymous_descendant_uses_selected_local_callable_capture(
-                        file,
-                        declaration,
-                        lexical_scope,
-                        &candidate.name,
-                        selected_local_callables,
-                    )
-                    || anonymous_descendant_writes_name(
-                        file,
-                        declaration,
-                        lexical_scope,
-                        &candidate.name,
-                        candidate.function_local,
-                        selected_local_callables.constructor_arguments,
-                    ))
+                ) && (anonymous_descendant_uses_name(
+                    file,
+                    declaration,
+                    &candidate.name,
+                    candidate.ty,
+                    candidate.function_local,
+                    selected_local_callables.constructor_arguments,
+                ) || anonymous_descendant_uses_selected_local_callable_capture(
+                    file,
+                    declaration,
+                    lexical_scope,
+                    &candidate.name,
+                    selected_local_callables,
+                ))
             }
         })
         .map(|(_, candidate)| AnonymousObjectCapture {

@@ -940,6 +940,7 @@ mod tests {
         let a = class(&mut ir, "A", "kotlin/Any", 0);
         ir.classes[a as usize].fields = vec![field("v", Ty::Int)];
         ir.classes[a as usize].properties = vec![IrProperty {
+            origin: crate::ir::IrPropertyOrigin::Declaration,
             name: "v".to_string(),
             diagnostic_span: None,
             getter_diagnostic_span: None,

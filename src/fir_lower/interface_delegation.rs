@@ -518,6 +518,7 @@ fn materialize_delegation(
                     continue;
                 }
                 ir.classes[class as usize].properties.push(IrProperty {
+                    origin: crate::ir::IrPropertyOrigin::Declaration,
                     name,
                     diagnostic_span: None,
                     getter_diagnostic_span: None,

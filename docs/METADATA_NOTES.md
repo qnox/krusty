@@ -224,6 +224,13 @@ reader cannot reconstruct a local classifier's physical JVM name from its metada
 The original #2654 private-factory, explicitly typed getter and inferred-getter controls compare
 complete decoded and raw payloads; the inferred-getter and property-storage controls also compare
 the complete class ABI. Tests: `tests/facade_local_classifier_metadata_e2e.rs`.
+Retained capture signatures carry `CAPTURE_STORAGE` into `IrPropertyOrigin::CaptureStorage`.
+The class metadata projection excludes only that role, after retaining each property's original IR
+index; ordinary and plugin-generated declarations remain properties. Physical fields and capture
+storage demand are separate facts. Anonymous construction consumes the existing declaration-keyed
+storage-use plan and constructor-parameter reads. Inline/default checking records that plan at the
+construction, while inspection records it after the authoritative class check.
+Tests: `tests/capture_storage_metadata_e2e.rs` and the FIR local-class owner tests.
 Own versus lexical-capture applications remain tracked by #2653 with its unchanged complete fixture
 oracles; ABI publication checks do not establish metadata payload parity.
 

@@ -400,6 +400,26 @@ fn nested_anonymous_objects_in_a_super_constructor_argument_read_the_constructor
 }
 
 #[test]
+fn a_forwarded_nested_object_uses_its_anonymous_storage_owners_final_prefix() {
+    const SOURCE: &str = "interface Callback { fun get(): String }\n\
+         interface Result { fun read(): String }\n\
+         open class Base(val fn: Callback)\n\
+         class Host(val unused: String) {\n\
+             fun make(value: String): Result = object : Result {\n\
+                 override fun read(): String {\n\
+                     val middle = object : Base(object : Callback {\n\
+                         override fun get() = value\n\
+                     }) {}\n\
+                     return middle.fn.get()\n\
+                 }\n\
+             }\n\
+         }\n\
+         fun box(): String = Host(\"unused\").make(\"OK\").read()\n";
+    assert_eq!(common::kotlinc_box_result(SOURCE), "OK");
+    run_ok("ForwardedAnonymousStorageOwner", SOURCE);
+}
+
+#[test]
 fn an_anonymous_object_in_a_local_function_forwards_the_shared_cell() {
     const SOURCE: &str = "interface C { fun i(): String }\n\
          fun box(): String {\n\
