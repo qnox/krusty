@@ -1553,6 +1553,9 @@ pub struct IrFile {
     /// constructor/value-class markers; a target also uses the owner to re-enter a suspend local
     /// without scanning classes or recovering ownership from its generated name.
     pub(crate) class_static_local_functions: crate::fx_hash::HashMap<FunId, TypeName>,
+    /// A multifile part's private functions, which the JVM names `<name>$<Part>`, by the name
+    /// they had before: a synthetic accessor of one is still named from it (`access$<name>`).
+    pub(crate) multifile_private_names: crate::fx_hash::HashMap<FunId, String>,
     pub classes: Vec<IrClass>,
     /// Exact generated-class identities keyed by their semantic role within a source owner.
     generated_classes: crate::fx_hash::HashMap<(TypeName, IrGeneratedClassRole), ClassId>,
@@ -1940,6 +1943,11 @@ pub struct IrFile {
     /// for evaluation order. This is provenance, not a storage decision; a backend decides how
     /// that role participates in its own frame or register allocation.
     pub call_operand_bindings: crate::fx_hash::HashSet<ExprId>,
+    /// Call-operand declarations introduced to preserve checked argument evaluation order, rather
+    /// than to bind an expanded callable's parameters or captures. A reused declaration leaves this
+    /// subset when an inline expansion adopts it as its own formal binding. This records purpose;
+    /// each backend still owns storage and lifetime decisions.
+    pub(crate) argument_evaluation_bindings: crate::fx_hash::HashSet<ExprId>,
     /// The call-operand holders of one inline lambda invocation, consecutive in its block: the
     /// invocation evaluates every operand before it binds any. A backend chooses the binding order.
     pub(crate) invocation_operand_bindings: crate::fx_hash::HashSet<ExprId>,
@@ -2551,6 +2559,25 @@ impl IrFile {
         self.fir_origins
             .get(&expression)
             .map(|origin| origin.fir_origin())
+    }
+
+    /// The name of `function` that its inline marker is named from: its own, or the name a
+    /// multifile part's private function had before the part suffixed it.
+    pub(crate) fn name_before_part_suffix(&self, function: FunId) -> &str {
+        self.multifile_private_names
+            .get(&function)
+            .map_or(&self.functions[function as usize].name, |name| name)
+    }
+
+    /// The name of `function` that its synthetic accessor is named from. kotlinc names a multifile
+    /// part's private function's accessor after its Kotlin name, except a suspend function's,
+    /// which follows the suffixed JVM name of the method its state machine is built on.
+    pub(crate) fn accessor_base_name(&self, function: FunId) -> &str {
+        if self.suspend_funs.contains(&function) {
+            &self.functions[function as usize].name
+        } else {
+            self.name_before_part_suffix(function)
+        }
     }
 
     /// A method's Kotlin declaration visibility. Public is the compact default for generated and

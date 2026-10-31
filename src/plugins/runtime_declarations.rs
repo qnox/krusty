@@ -18,6 +18,10 @@ pub struct RuntimeFunction {
     /// The declared value parameters, without the dispatch receiver.
     pub params: Vec<Ty>,
     pub ret: Ty,
+    /// The parameters the plugin's own transform appends to the declaration when it compiles it,
+    /// which every call passes after the declared ones: Compose's `$composer` and `$changed` for a
+    /// composable runtime function. The target checks them against the compiled declaration.
+    pub appended: Vec<Ty>,
 }
 
 /// Where a [`RuntimeFunction`] is declared.

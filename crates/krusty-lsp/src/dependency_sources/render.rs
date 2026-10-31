@@ -551,7 +551,7 @@ fn attached_source_in(
     member_descriptor: &str,
 ) -> Option<(String, Span)> {
     let file = std::fs::File::open(sources_jar).ok()?;
-    let mut archive = zip::ZipArchive::new(file).ok()?;
+    let mut archive = krusty::archive::open_file(file).ok()?;
     let (package, class_name) = internal.rsplit_once('/').unwrap_or(("", internal));
     let outer_name = class_name.split('$').next().unwrap_or(class_name);
     let mut names = vec![class_name];
