@@ -23284,6 +23284,17 @@ The standalone reader keeps its existing innermost-only interpretation and refus
 outer arguments it discards. This boundary supplies lossless evidence for the raw/captured application
 follow-ups; it does not itself publish new raw or captured application semantics.
 
+## Materialized operand-holder storage
+
+A JVM argument-evaluation holder reserves its physical slot before evaluating its initializer, so scratch
+storage used by an array builder follows the holder. The initializer still sees the previous
+semantic value map; the new binding becomes visible at the store. Named arguments retain source
+evaluation order and one evaluation. Common IR retains that holder's semantic purpose through
+cloning; an inline expansion that adopts it as its formal receiver records the changed purpose.
+Expanded parameters and captures retain operand-first binding. Deferred inline-return results, folded safe-call chains and
+grouped invocation operands retain their existing allocation contracts. Complete class and runtime
+controls in `named_argument_operands_e2e` cover ordinary constructors, effectful arrays and wide values.
+
 ## JVM boxing at declared operand slots
 
 A scalar consumed by a reference slot is boxed at its own wrapper type, then coerced to the
@@ -23475,14 +23486,3 @@ call role own this JVM choice.
 `annotation_impl_class_e2e` compares complete emitted class inventories and raw artifacts, and runs
 the same programs after Kotlin; the ordinary Java-interface controls remain in
 `interface_object_method_e2e`.
-
-## Materialized operand-holder storage
-
-A JVM argument-evaluation holder reserves its physical slot before evaluating its initializer, so scratch
-storage used by an array builder follows the holder. The initializer still sees the previous
-semantic value map; the new binding becomes visible at the store. Named arguments retain source
-evaluation order and one evaluation. Common IR retains that holder's semantic purpose through
-cloning; an inline expansion that adopts it as its formal receiver records the changed purpose.
-Expanded parameters and captures retain operand-first binding. Deferred inline-return results, folded safe-call chains and
-grouped invocation operands retain their existing allocation contracts. Complete class and runtime
-controls in `named_argument_operands_e2e` cover ordinary constructors, effectful arrays and wide values.
