@@ -52,7 +52,7 @@ use crate::types::{EqualityMode, Ty};
 
 use super::runtime::{self, ComposeRuntime};
 use super::source_facts::{
-    function_body, lambda_body, ArgumentState, RestartableFunction, SingletonLambda,
+    function_body, lambda_body, ArgumentState, ComposableLambda, Memoization, RestartableFunction,
     TrackedParameter,
 };
 
@@ -83,13 +83,16 @@ struct Slots {
 }
 
 impl Slots {
-    /// A composable lambda's: it takes nothing else, and decides on `$changed` alone.
-    const LAMBDA: Self = Self {
-        composer: 0,
-        changed: 1,
-        default: None,
-        dirty: None,
-    };
+    /// A composable lambda's, after the `captures` values it captures: it takes nothing else, and
+    /// decides on `$changed` alone.
+    fn lambda(captures: u32) -> Self {
+        Self {
+            composer: captures,
+            changed: captures + 1,
+            default: None,
+            dirty: None,
+        }
+    }
 
     fn of(facts: &RestartableFunction) -> Self {
         let parameters = facts.parameters.len() as u32;
@@ -159,17 +162,29 @@ pub(super) fn transform(ir: &mut IrFile) {
     for function in &facts.functions {
         add_composer_parameters(ir, function);
     }
-    // A lambda's calls are given their composer before its callers read it from the singletons.
+    // A lambda's calls are given their composer before its callers read it from the singletons
+    // or remember it.
     for lambda in &facts.lambdas {
         add_lambda_composer_parameters(ir, lambda);
+        let slots = Slots::lambda(lambda.captures);
         for site in &lambda.calls {
-            pass_composer(ir, Slots::LAMBDA, &callees, site.call, &site.arguments);
+            pass_composer(ir, slots, &callees, site.call, &site.arguments);
         }
         lambda_group(ir, &facts.runtime, lambda);
+        annotate_lambda(ir, lambda);
     }
     super::singleton_lambdas::memoize(ir, &facts.runtime, &facts.lambdas, facts.singletons);
     for function in &facts.functions {
         let slots = Slots::of(function);
+        for lambda in &facts.lambdas {
+            if lambda.memoization
+                == (Memoization::Remembered {
+                    caller: function.function,
+                })
+            {
+                remember(ir, &facts.runtime, lambda, slots);
+            }
+        }
         for site in &function.calls {
             pass_composer(ir, slots, &callees, site.call, &site.arguments);
         }
@@ -231,27 +246,31 @@ fn add_composer_parameters(ir: &mut IrFile, facts: &RestartableFunction) {
 }
 
 /// Give the function a composable lambda is lowered to the `$composer` and `$changed` its value
-/// is called with, and move its locals past them.
-fn add_lambda_composer_parameters(ir: &mut IrFile, lambda: &SingletonLambda) {
+/// is called with, after the values it captures, and move its locals past them.
+fn add_lambda_composer_parameters(ir: &mut IrFile, lambda: &ComposableLambda) {
     let function = lambda.implementation;
+    let captures = lambda.captures as usize;
     let declaration = &mut ir.functions[function as usize];
-    debug_assert!(
-        declaration.params.is_empty(),
-        "a `() -> Unit` lambda takes nothing"
+    debug_assert_eq!(
+        declaration.params.len(),
+        captures,
+        "a `() -> Unit` lambda takes only its captures"
     );
-    declaration.params = vec![runtime::composer(), Ty::Int];
-    declaration.param_checks = vec![None; 2];
+    declaration.params.extend([runtime::composer(), Ty::Int]);
+    declaration.param_checks.resize(captures + 2, None);
     let body = declaration.body.expect("a lambda has a body");
-    crate::ir::shift_value_indices(ir, body, 0, 2);
-    ir.fn_params.entry(function).or_default().identities = vec![
+    crate::ir::shift_value_indices(ir, body, lambda.captures, 2);
+    let identities = &mut ir.fn_params.entry(function).or_default().identities;
+    identities.truncate(captures);
+    identities.extend([
         IrParameterIdentity::producer_value("$composer"),
         IrParameterIdentity::producer_value("$changed"),
-    ];
+    ]);
     let IrExpr::Lambda {
         arity, inline_body, ..
     } = &mut ir.exprs[lambda.lambda as usize]
     else {
-        unreachable!("a singleton lambda is a lambda");
+        unreachable!("a composable lambda is a lambda");
     };
     *arity = 2;
     // The value is called through the runtime's wrapper, never inlined.
@@ -269,9 +288,10 @@ fn add_lambda_composer_parameters(ir: &mut IrFile, lambda: &SingletonLambda) {
 ///     $composer.skipToGroupEnd()
 /// }
 /// ```
-fn lambda_group(ir: &mut IrFile, runtime: &ComposeRuntime, lambda: &SingletonLambda) {
-    let body = lambda_body(ir, lambda.implementation).expect("a singleton lambda has a block body");
-    let slots = Slots::LAMBDA;
+fn lambda_group(ir: &mut IrFile, runtime: &ComposeRuntime, lambda: &ComposableLambda) {
+    let body =
+        lambda_body(ir, lambda.implementation).expect("a composable lambda has a block body");
+    let slots = Slots::lambda(lambda.captures);
     let mut statements = Vec::new();
     if let Some(information) = &lambda.source_information {
         let composer = ir.add_expr(IrExpr::GetValue(slots.composer));
@@ -325,6 +345,59 @@ fn lambda_group(ir: &mut IrFile, runtime: &ComposeRuntime, lambda: &SingletonLam
         .body
         .expect("a lambda has a body");
     ir.mark_positionless(root);
+}
+
+/// `@Composable`, and `@FunctionKeyMeta` when the option asks for it, on the lambda's function.
+fn annotate_lambda(ir: &mut IrFile, lambda: &ComposableLambda) {
+    let annotations = ir
+        .function_annotations
+        .entry(lambda.implementation)
+        .or_default();
+    annotations.push(runtime::composable());
+    if lambda.key_meta {
+        annotations.push(runtime::function_key_meta(lambda.key, lambda.offsets));
+    }
+}
+
+/// Pass `rememberComposableLambda(key, true, lambda, $composer, 0b110110)` in a capturing
+/// lambda's place: the runtime keeps one wrapper per call in the composition of the caller,
+/// whose `slots` give its composer, and updates the block the wrapper calls. Both constants are
+/// static, which the `$changed` argument says.
+fn remember(ir: &mut IrFile, runtime: &ComposeRuntime, lambda: &ComposableLambda, slots: Slots) {
+    let key = ir.add_expr(IrExpr::Const(IrConst::Int(lambda.key)));
+    let tracked = ir.add_expr(IrExpr::Const(IrConst::Boolean(true)));
+    let composer = ir.add_expr(IrExpr::GetValue(slots.composer));
+    let changed = ir.add_expr(IrExpr::Const(IrConst::Int(
+        bits_for_slot(STATIC, 0) | bits_for_slot(STATIC, 1),
+    )));
+    for argument in [tracked, composer, changed] {
+        ir.mark_positionless(argument);
+    }
+    let remembered = runtime::call(
+        ir,
+        &runtime.remember_composable_lambda,
+        None,
+        vec![key, tracked, lambda.lambda, composer, changed],
+    );
+    let value = ir.add_expr(IrExpr::TypeOp {
+        op: IrTypeOp::ImplicitCoercion,
+        arg: remembered,
+        type_operand: runtime::composable_lambda(),
+    });
+    // kotlinc builds the call at the lambda's offsets, so the lambda's line begins at its key.
+    if lambda.opening_line != 0 {
+        for expression in [key, remembered, value] {
+            ir.expr_source_lines.insert(expression, lambda.opening_line);
+        }
+    }
+    let IrExpr::Call { args, .. } = &mut ir.exprs[lambda.call as usize] else {
+        unreachable!("a composable lambda is a call's argument");
+    };
+    let argument = args
+        .iter_mut()
+        .find(|argument| **argument == lambda.lambda)
+        .expect("the call passes the lambda");
+    *argument = value;
 }
 
 /// The statements a group runs when it executes: `executed`, then `statements` between the trace
