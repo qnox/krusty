@@ -1,14 +1,5 @@
 # krusty — implementation plan
 
-## Wasm generic numeric call edges
-
-Exercise the shared primitive-box registry through authenticated dependency calls and ordinary
-source conversions. Keep declared export ABI and checked application roles separate, preserving
-receiver coordinates, argument counts and operand evaluation order. Complete portable controls
-cover numeric limits, nullable boundaries, nested source calls and cross-origin Int/Long identity.
-The existing general boxing implementation owns representation; no dependency-only registry is
-required. Typed reference null assertions remain the exception boundary.
-
 ## JVM annotation interface object methods
 
 Retain the realized construction's exact annotation interface at the JVM consumption boundary.

@@ -23440,22 +23440,6 @@ reconstruct from those local IDs. This changes serialization evidence rather tha
 arguments or declaration-result approximation. Tests compare the complete facade payload and
 class ABI with kotlinc in `tests/facade_local_classifier_metadata_e2e.rs`.
 
-## Wasm numeric dependency ABI
-
-Generic dependency calls and ordinary source conversions share each primitive's nominal box
-identity and full-width payload. The checked application owns the scalar type; the retained export
-owns the declared parameter/result ABI. Exact substitutions, argument counts and source/serialized
-receiver coordinates remain authenticated independently of representation. Operand evaluation
-order and source-cast rules retain their contracts.
-`genericNumericExtremes.kt` checks signed limits and reordered named arguments;
-`genericDependencyNullBoundaries.kt` checks nullable generic arguments and catchable null failures.
-The existing `genericDependencyAbi.kt` covers source and serialized extension receiver positions
-and evaluation counts. The unchanged nested source-call program lives in
-`genericDependencyNestedSource.kt`; `mixedPrimitiveBoxOrigins.kt` compares dependency inputs with
-ordinary Int/Long literals, including equal-valued distinct primitive types. Reference null
-failures use the separate typed assertion implementation. Every portable case uses the shared
-backend inventory and its JVM/reference oracle.
-
 ## Native bound callable-reference receiver storage
 
 A bound callable reference retains its receiver as a semantic object for equality and hashing,
