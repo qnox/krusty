@@ -137,7 +137,7 @@ impl Lane for WasmLane {
 
     fn not_applicable(&self, src: &str) -> Option<&'static str> {
         if !krusty::conformance::backend_targeted(src, &self.tokens()) {
-            return Some("targeted at another backend");
+            return Some(box_lane::TARGETED_AT_ANOTHER_BACKEND);
         }
         if krusty::conformance::backend_muted(src, &self.tokens()) {
             return Some("muted on this wasm target");
@@ -254,7 +254,7 @@ fn wasm_applicability_reads_both_the_family_and_the_exact_target() {
     assert_eq!(wasi.not_applicable(wasm_only), None);
     assert_eq!(
         js.not_applicable("// TARGET_BACKEND: JVM\nfun box() = \"OK\""),
-        Some("targeted at another backend")
+        Some(box_lane::TARGETED_AT_ANOTHER_BACKEND)
     );
     assert_eq!(
         js.not_applicable("// IGNORE_BACKEND: JVM\nfun box() = \"OK\""),
@@ -588,6 +588,34 @@ fn expect_wasm_decline(src: &str, stem: &str, reason: &str) {
             Outcome::Declined(reason.to_string()),
             "{stem} on {}",
             target.name()
+        );
+    }
+}
+
+// PLATFORM-SPECIFIC: exercise the shared box representation at Wasm's dependency call boundary.
+#[test]
+fn wasm_nested_source_and_dependency_arguments_share_boxing() {
+    let src = include_str!("box_regressions/genericDependencyNestedSource.kt");
+    super::box_reference_classes::checked_box(src, "numericDependencyNestedSource")
+        .expect("the exact Kotlin compiler must run the nested source-call fixture");
+    let modules = krusty::conformance::split_modules(src).expect("valid module fixture");
+    let units = krusty::conformance::module_units(&modules);
+    for target in WasmTarget::ALL {
+        let lane = WasmLane { target };
+        assert!(
+            focused_wasm_lane_available(&lane, "numericDependencyNestedSource"),
+            "the owned nested source-call fixture requires its Wasm lane"
+        );
+        assert_eq!(
+            lane.compile_modules_and_run(
+                &std::env::temp_dir(),
+                "numericDependencyNestedSource",
+                &units,
+                src,
+            ),
+            Outcome::Pass,
+            "nested source argument on {}",
+            target.name(),
         );
     }
 }

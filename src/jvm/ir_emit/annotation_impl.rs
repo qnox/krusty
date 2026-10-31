@@ -123,7 +123,20 @@ pub(super) fn emit_annotation_impl_class(
                 .map(|(_, jt)| type_descriptor(*jt))
                 .collect::<String>()
         );
-        cw.reserve_method_pool("<init>", &desc, None, &[]);
+        let carries_nullability = annotation_impl_carries_nullability();
+        let param_nullability = members
+            .iter()
+            .map(|(_, jt)| {
+                (carries_nullability && jt.is_reference())
+                    .then_some("Lorg/jetbrains/annotations/NotNull;")
+            })
+            .collect::<Vec<_>>();
+        let annotation_types = param_nullability
+            .iter()
+            .flatten()
+            .copied()
+            .collect::<Vec<_>>();
+        cw.reserve_method_pool("<init>", &desc, None, &annotation_types);
         let mut ctor = CodeBuilder::new(1 + params_words);
         // Every REFERENCE member is guarded at entry, before `super()` — kotlinc's shape, and the
         // same `Intrinsics.checkNotNullParameter` any non-null parameter gets. An annotation member
@@ -194,12 +207,7 @@ pub(super) fn emit_annotation_impl_class(
         // the synthesized `@NotNull` on each such parameter — the same annotation any non-null
         // parameter gets, and what a Java caller reads to know the contract. Kotlin 2.4.20 stamps
         // none anywhere in this synthetic class.
-        if annotation_impl_carries_nullability() {
-            let notnull = "Lorg/jetbrains/annotations/NotNull;";
-            let param_nullability: Vec<Option<&str>> = members
-                .iter()
-                .map(|(_, jt)| jt.is_reference().then_some(notnull))
-                .collect();
+        if carries_nullability {
             cw.set_method_nullability("<init>", &desc, None, &param_nullability);
         }
         // A default on any annotation member (`annotation class C(val i: Int = 1)`) → the same synthetic
@@ -312,7 +320,14 @@ fn emit_annotation_equals(
     // - The comparison is per type: `if_icmpeq` for the int-likes, `lcmp`, `Float`/`Double.compare`
     //   (not the wrapper's `equals`), `if_acmpeq` for an ENUM member, `Arrays.equals` for an array,
     //   and `Intrinsics.areEqual` for every other reference.
-    cw.reserve_method_pool("equals", "(Ljava/lang/Object;)Z", None, &[]);
+    let parameter_annotation =
+        annotation_impl_carries_nullability().then_some("Lorg/jetbrains/annotations/Nullable;");
+    cw.reserve_method_pool(
+        "equals",
+        "(Ljava/lang/Object;)Z",
+        None,
+        parameter_annotation.as_slice(),
+    );
     let mut cb = CodeBuilder::new(2); // this=0, o=1
     cb.ensure_locals(3); // +o-as-iface at local 2
     let icls = cw.class_ref(iface);
@@ -407,13 +422,8 @@ fn emit_annotation_equals(
     cw.set_method_debug("equals", "(Ljava/lang/Object;)Z", None, &locals);
     // `equals(Object?)` accepts null and answers false, so its parameter is `@Nullable` — kotlinc
     // stamps it, and a Java caller reads the contract from it.
-    if annotation_impl_carries_nullability() {
-        cw.set_method_nullability(
-            "equals",
-            "(Ljava/lang/Object;)Z",
-            None,
-            &[Some("Lorg/jetbrains/annotations/Nullable;")],
-        );
+    if let Some(annotation) = parameter_annotation {
+        cw.set_method_nullability("equals", "(Ljava/lang/Object;)Z", None, &[Some(annotation)]);
     }
 }
 
@@ -524,19 +534,20 @@ fn emit_annotation_tostring(
     stored: &[Ty],
     members: &[(String, Ty)],
 ) {
-    cw.reserve_method_pool("toString", "()Ljava/lang/String;", None, &[]);
+    let return_annotation =
+        annotation_impl_carries_nullability().then_some("Lorg/jetbrains/annotations/NotNull;");
+    cw.reserve_method_pool(
+        "toString",
+        "()Ljava/lang/String;",
+        None,
+        return_annotation.as_slice(),
+    );
     let mut cb = CodeBuilder::new(1);
     // A MEMBERLESS annotation renders to a constant, so kotlinc emits no `StringBuilder` at all.
     if members.is_empty() {
         cb.push_string(&format!("@{}()", iface.replace('/', ".")), cw);
         cb.areturn();
-        finish_code::<0x0011>(cw, "toString", "()Ljava/lang/String;", &mut cb, 1);
-        cw.set_method_debug(
-            "toString",
-            "()Ljava/lang/String;",
-            None,
-            &[("this".to_string(), format!("L{fq};"), 0)],
-        );
+        finish_annotation_tostring(cw, fq, &mut cb, return_annotation);
         return;
     }
     let sb = "java/lang/StringBuilder";
@@ -647,7 +658,16 @@ fn emit_annotation_tostring(
     let to_str = cw.methodref(sb, "toString", "()Ljava/lang/String;");
     cb.invokevirtual(to_str, 0, 1);
     cb.areturn();
-    finish_code::<0x0011>(cw, "toString", "()Ljava/lang/String;", &mut cb, 1);
+    finish_annotation_tostring(cw, fq, &mut cb, return_annotation);
+}
+
+fn finish_annotation_tostring(
+    cw: &mut ClassWriter,
+    fq: &str,
+    code: &mut CodeBuilder,
+    return_annotation: Option<&str>,
+) {
+    finish_code::<0x0011>(cw, "toString", "()Ljava/lang/String;", code, 1);
     cw.set_method_debug(
         "toString",
         "()Ljava/lang/String;",
@@ -656,12 +676,7 @@ fn emit_annotation_tostring(
     );
     // `toString()` returns a non-null String, and kotlinc stamps the synthesized `@NotNull` on it.
     // The member ACCESSORS carry none, even the reference-typed ones — measured, not assumed.
-    if annotation_impl_carries_nullability() {
-        cw.set_method_nullability(
-            "toString",
-            "()Ljava/lang/String;",
-            Some("Lorg/jetbrains/annotations/NotNull;"),
-            &[],
-        );
+    if let Some(annotation) = return_annotation {
+        cw.set_method_nullability("toString", "()Ljava/lang/String;", Some(annotation), &[]);
     }
 }

@@ -49,6 +49,9 @@ pub(super) struct ComposeRuntime {
     /// `composableLambdaInstance(key, tracked, block)`, the runtime's wrapper of a composable
     /// lambda that captures nothing.
     pub(super) composable_lambda_instance: BoundRuntimeFunction,
+    /// `rememberComposableLambda`, itself composable: it takes the caller's composer and
+    /// `$changed` after its declared parameters.
+    pub(super) remember_composable_lambda: BoundRuntimeFunction,
 }
 
 impl ComposeRuntime {
@@ -63,6 +66,7 @@ impl ComposeRuntime {
                 name,
                 params,
                 ret,
+                appended: Vec::new(),
             })
         };
         Ok(Self {
@@ -120,6 +124,14 @@ impl ComposeRuntime {
                 vec![Ty::Int, Ty::Boolean, Ty::obj("kotlin/Any")],
                 Ty::obj(COMPOSABLE_LAMBDA),
             )?,
+            // Itself composable: compiled with the transform's `$composer` and `$changed`.
+            remember_composable_lambda: runtime.function(&RuntimeFunction {
+                declaration: RuntimeDeclaration::Package(type_name(INTERNAL)),
+                name: "rememberComposableLambda",
+                params: vec![Ty::Int, Ty::Boolean, Ty::obj("kotlin/Any")],
+                ret: Ty::obj(COMPOSABLE_LAMBDA),
+                appended: vec![Ty::nullable(composer), Ty::Int],
+            })?,
         })
     }
 
