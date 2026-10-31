@@ -830,7 +830,6 @@ classes/overloadUnaryOperator.kt
 classes/privateOuterFunctions.kt
 classes/privateOuterProperty.kt
 classes/privateToThis.kt
-classes/selfcreate.kt
 closures/anonymousObjectAsLastExpressionInLambda.kt
 closures/captureExtensionReceiver.kt
 closures/captureExtensionReceiverX2.kt
@@ -1113,7 +1112,6 @@ contextParameters/suspendContextualWithExtension.kt
 contextParameters/typealiasOnTypeWithContext.kt
 contextParameters/unaryOperators.kt
 contextParameters/useFromAnotherModuleSuspending.kt
-contextParameters/useFromAnotherModuleWithDefaultParameterValues.kt
 contextParameters/withExtensionReceiverInSupertype.kt
 contracts/constructorArgument.kt
 contracts/contractForCast.kt
@@ -3030,7 +3028,6 @@ inline/kt66017_inlineFromTheSameModule.kt
 inline/kt67024.kt
 inline/kt67866.kt
 inline/kt69041.kt
-inline/kt82065.kt
 inline/lambdaAsAny.kt
 inline/lambdaInDefaultValue.kt
 inline/lambdaInLambda.kt
@@ -3929,7 +3926,6 @@ inlineEvaluationOrder/whileConditionExtracted.kt
 inlineSizeReduction/inlineImportCleanup.kt
 inlineSizeReduction/inlineLambdaCleanup.kt
 inlineSizeReduction/lastBreak.kt
-inlineSizeReduction/multiModuleDefaultArgsCleanup.kt
 inlineSizeReduction/noDuplicateVariableDeclaration.kt
 inlineSizeReduction/oneTopLevelReturn.kt
 inlineSizeReduction/propertyAssignment.kt
@@ -3983,7 +3979,6 @@ innerNested/superConstructorCall/objectExtendsInnerDefaultArgument.kt
 innerNested/superConstructorCall/objectExtendsInnerOfLocalVarargAndDefault.kt
 innerNested/superConstructorCall/objectExtendsInnerOfLocalWithCapture.kt
 innerNested/superConstructorCall/objectExtendsInnerWithDelegatingConstructor.kt
-innerNested/superConstructorCall/objectExtendsLocalCaptureInSuperCall.kt
 innerNested/superConstructorCall/objectExtendsLocalWithClosure.kt
 innerNested/superConstructorCall/objectOuterDiffersFromInnerOuter.kt
 instructions/swap/swapRefToSharedVarInt.kt
@@ -4265,7 +4260,6 @@ multiplatform/k2/defaultArguments/defaultArgumentInDelegatedFunction.kt
 multiplatform/k2/defaultArguments/delegatedExpectedInterface.kt
 multiplatform/k2/defaultArguments/extensionReceiverValue.kt
 multiplatform/k2/defaultArguments/function.kt
-multiplatform/k2/defaultArguments/functionFromOtherModule.kt
 multiplatform/k2/defaultArguments/inheritedFromCommonClass.kt
 multiplatform/k2/defaultArguments/inheritedFromExpectedClass.kt
 multiplatform/k2/defaultArguments/inheritedFromExpectedInterface.kt
@@ -6022,7 +6016,6 @@ typealias/kt45308.kt
 typealias/localTypeAliases.kt
 typealias/nestedTypeAliasesAndStaticScope.kt
 typealias/nestedTypeAliasesAndTypeArguments.kt
-typealias/objectLiteralConstructor.kt
 typealias/privateInKlib.kt
 typealias/simple.kt
 typealias/typeAliasAsBareType.kt

@@ -132,6 +132,40 @@ fn rewrite(op: u8, frame: FrameView<'_, ConstValue>) -> Option<Rewrite> {
     }
 }
 
+/// For each node, whether it is a label directly beside a reached one, with only labels between,
+/// right after a `goto`. kotlinc normalizes such a run into one label before it optimizes, and its
+/// own output has the same `goto` in front, so an unreached label there is the reached position
+/// itself, not one retained from deleted code. After an `athrow` or a return the run stays apart:
+/// kotlinc emits a dead continuation there (an inlined body's result path) that the elimination
+/// deletes, so the label in front of the jump target is one it retained.
+fn labels_sharing_a_reached_position(
+    method: &MethodNode,
+    reached: impl Fn(usize) -> bool,
+) -> Vec<bool> {
+    let mut shares = vec![false; method.nodes.len()];
+    let mut start = 0;
+    while start < method.nodes.len() {
+        if !matches!(method.nodes[start], Node::Label(_)) {
+            start += 1;
+            continue;
+        }
+        let end = method.nodes[start..]
+            .iter()
+            .position(|node| !matches!(node, Node::Label(_)))
+            .map_or(method.nodes.len(), |len| start + len);
+        let after_goto = start > 0
+            && matches!(
+                method.nodes[start - 1],
+                Node::Insn(Insn::Jump { op: GOTO, .. })
+            );
+        if after_goto && (start..end).any(&reached) {
+            shares[start..end].fill(true);
+        }
+        start = end;
+    }
+    shares
+}
+
 /// One round (`ConstantConditionsOptimization.run`); `true` when it changed the method.
 fn round(
     method: &mut MethodNode,
@@ -147,12 +181,16 @@ fn round(
         AnalyzerOptions::default(),
         |_, node| matches!(node, Node::Insn(Insn::Jump { .. })),
     )?;
+    let shares_reached_position =
+        labels_sharing_a_reached_position(method, |at| frames.is_reached(at));
     let mut changed = false;
     let mut nodes = Vec::with_capacity(method.nodes.len());
     for (at, node) in std::mem::take(&mut method.nodes).into_iter().enumerate() {
         if !frames.is_reached(at) {
             if let Node::Label(label) = node {
-                preserved_unreachable_labels.insert(label);
+                if !shares_reached_position[at] {
+                    preserved_unreachable_labels.insert(label);
+                }
                 nodes.push(node);
             } else {
                 changed = true;
