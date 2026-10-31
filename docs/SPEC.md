@@ -17,6 +17,16 @@ do not reach later arms: a guarded arm adds no fall-through facts, and a guard j
 proves nothing. Tests: `box_regressions/whenGuardSmartCast.kt` and
 `when_null_guard_smartcast_e2e::a_when_guard_narrows_only_its_own_arm`.
 
+## Expected results against solved bounds
+
+A call's expected result is checked against its formals' bounds restated over the evidence already
+solved. In `xs.filterTo(mutableSetOf())` with `xs: List<Sub>` and an expected `MutableSet<Base>`,
+the receiver fixes `T = Sub`, so the bound of `C : MutableCollection<in T>` is
+`MutableCollection<in Sub>`; it admits `MutableSet<Base>`, which then types the producer as
+`mutableSetOf<Base>()`. Checking the bound with `T` still open erased it to
+`MutableCollection<in Any?>` and dropped the expectation. Test:
+`box_regressions/destinationProducerExpectedResult.kt`.
+
 ## Nested producers against dependent bounds
 
 A postponed generic producer passed where the outer variable is still open is solved against that
