@@ -213,7 +213,7 @@ mod tests {
                 (compiler.artifact.as_str(), compiler.version.as_str()),
                 ("kotlin-compiler-embeddable", version.as_str())
             );
-            assert_eq!(classpath.len(), 8, "{version}");
+            assert_eq!(classpath.len(), 10, "{version}");
             for pin in classpath {
                 assert_eq!(pin.sha256.len(), 64, "{pin:?}");
                 assert!(pin.sha256.bytes().all(|b| b.is_ascii_hexdigit()), "{pin:?}");

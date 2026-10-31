@@ -294,6 +294,7 @@ fn unit_options<'a>(
     if !refusals.is_empty() {
         return Err(refusals.join("\n"));
     }
+    options.inline_scopes_numbers = configuration.inline_scopes_numbers;
     if configuration.language_version.is_some() || configuration.api_version.is_some() {
         let language_version = configuration
             .language_version
@@ -1415,6 +1416,31 @@ fn compose_restartable_functions_are_byte_identical_to_kotlinc() {
 #[test]
 fn compose_tracked_parameters_are_byte_identical_to_kotlinc() {
     assert_compose_fixture_matches_kotlinc("trackedParameters");
+}
+
+#[test]
+fn compose_default_arguments_are_byte_identical_to_kotlinc() {
+    assert_compose_fixture_matches_kotlinc("defaultArguments");
+}
+
+#[test]
+fn compose_lambda_parameters_are_byte_identical_to_kotlinc() {
+    assert_compose_fixture_matches_kotlinc("lambdaParameters");
+}
+
+#[test]
+fn compose_lambda_applier_schemes_are_byte_identical_to_kotlinc() {
+    assert_compose_fixture_matches_kotlinc("lambdaSchemes");
+}
+
+#[test]
+fn compose_singleton_lambdas_are_byte_identical_to_kotlinc() {
+    assert_compose_fixture_matches_kotlinc("singletonLambdas");
+}
+
+#[test]
+fn compose_remembered_lambdas_are_byte_identical_to_kotlinc() {
+    assert_compose_fixture_matches_kotlinc("rememberedLambdas");
 }
 
 fn assert_compose_fixture_matches_kotlinc(stem: &str) {

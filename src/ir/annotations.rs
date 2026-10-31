@@ -72,6 +72,25 @@ pub struct DeclarationAnnotations {
 }
 
 impl DeclarationAnnotations {
+    /// These annotations without the applications of `annotation`.
+    pub(crate) fn without(&self, annotation: TypeName) -> Self {
+        let checked = self.retained.len() - self.lowered;
+        let mut retained = Vec::with_capacity(self.retained.len());
+        let mut lowered = 0;
+        for (index, application) in self.retained.iter().enumerate() {
+            if application.annotation.internal == annotation {
+                continue;
+            }
+            lowered += usize::from(index >= checked);
+            retained.push(application.clone());
+        }
+        Self {
+            retained,
+            lowered,
+            ..self.clone()
+        }
+    }
+
     pub fn new(annotations: Vec<RetainedAnnotation>) -> Self {
         Self {
             retained: annotations,
@@ -137,6 +156,14 @@ impl DeclarationAnnotations {
         self.lowered += 1;
     }
 
+    /// Append an application a compiler plugin attaches after checking that Kotlin metadata
+    /// records as well, as kotlinc's metadata declaration registrar adds it: it follows the
+    /// checked applications and precedes the plugin's other ones.
+    pub(crate) fn push_metadata_visible(&mut self, annotation: RetainedAnnotation) {
+        let checked = self.retained.len() - self.lowered;
+        self.retained.insert(checked, annotation);
+    }
+
     pub fn iter(&self) -> std::slice::Iter<'_, RetainedAnnotation> {
         self.retained.iter()
     }
@@ -152,7 +179,7 @@ impl DeclarationAnnotations {
     }
 
     /// The checked applications Kotlin metadata records: [`Self::applications`] without the ones a
-    /// compiler plugin attached.
+    /// compiler plugin attached, save those it made metadata-visible.
     pub(crate) fn checked_applications(&self) -> impl Iterator<Item = &AppliedAnnotation> {
         self.retained[..self.retained.len() - self.lowered]
             .iter()

@@ -17,6 +17,7 @@ pub(super) fn normalize(
         RuntimeExceptionKind::Exception,
         RuntimeExceptionKind::RuntimeException,
         RuntimeExceptionKind::IndexOutOfBounds,
+        RuntimeExceptionKind::NullPointer,
     ]
     .into_iter()
     .find(|kind| kind.classifier() == identity)?;
@@ -71,5 +72,23 @@ mod tests {
             .supertypes
             .push_name(RuntimeExceptionKind::RuntimeException.classifier());
         assert_eq!(normalize(identity, true, &shape, true), None);
+    }
+
+    #[test]
+    fn null_pointer_storage_requires_the_platform_owner_and_declared_parent() {
+        let identity = RuntimeExceptionKind::NullPointer.classifier();
+        let parent = RuntimeExceptionKind::RuntimeException.classifier();
+        let mut shape = LibraryType::declaration_header();
+        assert_eq!(normalize(identity, true, &shape, false), None);
+        shape.supertypes.push_name(parent);
+        assert_eq!(normalize(identity, false, &shape, false), None);
+        assert_eq!(normalize(identity, true, &shape, true), None);
+        assert_eq!(
+            normalize(identity, true, &shape, false),
+            Some(RuntimeExceptionLayout {
+                kind: RuntimeExceptionKind::NullPointer,
+                parent: Some(parent),
+            }),
+        );
     }
 }

@@ -4332,7 +4332,7 @@ pub(crate) fn finalized_streamed_signature_index(
         super::plugin_status::OpenByDefault::collect(headers, table, &classifier_types);
     super::plugin_noarg::NoArgConstructors::collect(headers, table, &classifier_types, diags)
         .publish(&mut index);
-    index.publish_sam_with_receiver_annotations(&table.sam_with_receiver_annotations);
+    index.publish_annotation_conventions(&table.annotation_conventions);
     for stub in &headers.stubs {
         let anchor = headers
             .declarations

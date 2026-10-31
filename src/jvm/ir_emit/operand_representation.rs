@@ -154,11 +154,7 @@ impl Emitter<'_> {
         else {
             return false;
         };
-        !matches!(
-            self.ir.expr(call),
-            IrExpr::Call { callee, .. }
-                if matches!(&**callee, crate::ir::Callee::Static { inline, .. } if inline.can_inline())
-        ) && self.ir.compiled_inline_call(call).is_none()
+        crate::jvm::call_result_boundaries::emits_as_call(self.ir, call)
             && self.transformed_result(call).is_none()
     }
 
@@ -433,6 +429,12 @@ impl Emitter<'_> {
         ty.non_null().obj_internal().is_some_and(|fq_name| {
             crate::jvm::value_classes::is_boxed_value_class(self.ir, fq_name)
         })
+    }
+
+    /// The declaration interface implemented by this exact generated physical carrier.
+    pub(super) fn annotation_implementation_interface(&self, physical: Ty) -> Option<TypeName> {
+        let owner = physical.non_null().obj_internal()?;
+        crate::jvm::annotation_constructions::implementation_interface(self.ir, owner)
     }
 
     /// Narrow an erased reference on top of the stack to its consumption type.

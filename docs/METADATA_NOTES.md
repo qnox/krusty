@@ -1,5 +1,33 @@
 # `@kotlin.Metadata` — reverse-engineering notes (Phase 4b)
 
+## Annotation classifier kind and JVM dispatch
+
+The JVM annotation realizer retains the exact declared interface in the generated carrier's
+`annotation_impl_of` identity. A fresh allocation exposes that representation to its consumer;
+reading a declared annotation parameter keeps the parameter's own slot contract. Existing selected
+Any-method roles and that construction evidence own interface dispatch and receiver materialization,
+without member spelling, generated-name checks, metadata changes or common semantic selection.
+
+Synthetic annotation method headers reserve their existing enabled nullability descriptors before
+body constants. Constructor parameter and equals annotations retain their payloads; shared toString
+finalization applies the same return contract to memberless implementations. The existing release
+policy and class-writer annotation filter own both reservation and attachment.
+
+## Native bound-receiver physical storage
+
+The common callable-reference record owns the bound-receiver capture coordinate. Native emission
+uses that coordinate to choose semantic object storage, even when a primitive or value class has
+an unboxed invocation carrier. Stored types and offsets jointly own the GC map and thunk loads.
+This representation choice changes no declaration identity, metadata or source-level type, and
+does not reconstruct receiver roles from a capture's spelling or machine carrier.
+
+## Null-pointer exception storage
+
+The platform NullPointerException declaration carries the existing runtime-exception storage role.
+Its metadata owns its superclass; a same-named foreign declaration or one with additional state
+receives no role. Wasm reference assertions use the authenticated hierarchy and base Throwable
+message/cause fields rather than manufacturing an untyped exception object.
+
 ## Native reference identities and exported entry points
 
 A KLIB export's physical invocation alias is independent of its declaration marker. The Native
@@ -140,6 +168,12 @@ raw qualified class name even though no physical classfile exists. Retain its pa
 exact segment before name-tree normalization, then publish that fact with the annotation shape.
 This preserves literal-dollar and nested names across separate metadata snapshots.
 
+## Closed annotation array operands
+
+Checked spreads and named whole-array operands contribute their elements to one annotation array
+payload. Both classfile annotation attributes and Kotlin metadata consume that same flattened value;
+ordinary operands remain individual elements. The recorded argument role owns this distinction.
+
 ## Serialization constructor handoff
 
 The serialization constructor's `named_params` retain nullable reference elements and the nullable
@@ -152,8 +186,11 @@ official serialization plugin. This updates test coverage without changing metad
 Base expressions of an anonymous object are checked before its dispatch-property scope exists.
 The selected lexical value and complete applied parent flow through ordinary constructor checking;
 an inherited property of the same spelling does not change generic inference. Complete JVM class
-headers and member tables are compared with kotlinc in the constructor-alias regression. No metadata
-wire fields, declaration identities or backend-specific substitutions change at this boundary.
+headers and member tables are compared with kotlinc in the constructor-alias regression. The original
+expanded #2655 program and both ABI/runtime controls live in
+`tests/typealias_constructor_inference_e2e/parameterized_parent_aliases.rs`, alongside the separate
+minimal controls. No metadata wire fields, declaration identities or backend-specific substitutions
+change at this boundary.
 
 ## Class formal layouts before member publication
 
@@ -248,6 +285,14 @@ dependency annotation payloads and preserves ordinary annotation defaults and en
 KLIB dependency-root classification retains authenticated intrinsic-support ownership independently
 of successful code emission. A declined wrapper does not become an ordinary body; its metadata and
 declaration identity remain unchanged, and ordinary roots retain their strict closure contracts.
+
+## Ordinary bottom-array values
+
+Finalized-expression array validity consumes already checked semantic types, including nested
+arguments, and changes no declaration or metadata layout. The class-literal feature policy remains
+separate; a suppressed bottom-array value retains its complete existing JVM method signature.
+JVM signature elements reuse the existing physical descriptor for `Nothing`, preventing a
+nonexistent `kotlin/Nothing` class from appearing in an otherwise nongeneric array signature.
 
 ## Constructor parameter annotation pool order
 
@@ -1352,7 +1397,25 @@ Normalized constructor signatures and the canonical source-argument mapping reta
 function-expression expectations when an explicit class argument violates its bound. Reporting
 uses the same typed failure evidence for source and reference-produced dependency declarations;
 it does not reconstruct parameter types from constructor text. Metadata encoding and callable ABI
-are unchanged. Callable-reference selected-declaration diagnostic retention is tracked in #2776.
+are unchanged. Callable-reference publication retains its selected declaration's diagnostic
+projection before invocation adaptation. A rejected constructor constraint consumes that same
+projection and the mapped functional types, retaining the constructor heading, bound error and
+reference-candidate error in order. Top-level, member, extension, local and constructor providers
+share this checker boundary; reference revisits discard previous evidence. No diagnostic text
+becomes metadata, a callable identity or a backend target (#2776).
+The selected declaration also determines receiver-constraint wording. Constructor references retain
+their declaration diagnostic before adaptation: generic formals and the logical classifier result
+come from normalized constructor/classifier facts, while aliases retain their selected alias and
+outer-owner signature. The physical constructor return remains unchanged.
+
+## Anonymous superclass closure capture ownership
+
+Constructor-use inventory distinguishes candidate storage discovery from checked publication.
+An admitted retained lambda keeps lexical dependencies in its anonymous class; ordinary forwarded
+super arguments remain construction-site expressions. Final closure admission uses the same
+checked lowering/type facts as super-argument disposition. Existing lexical capture identities,
+shared-cell decisions and FIR constructor-prefix coordinates supply the resulting fields and
+closure parameters. No metadata naming, new capture identity or backend recovery is introduced.
 
 ## Serialized getter declaration contracts
 
@@ -1364,3 +1427,33 @@ the raw dispatch classifier's signature mask and complete own-formal receiver ap
 Declared getter results remain distinct from the checked read's applied result. Native's runtime
 leaf capability reuses its existing accessor signature plans and does not import property bodies
 or reconstruct class storage. No metadata wire format changes.
+
+## Applied member input declarations
+
+`FunctionInfo` retains a common declaration-input facet before nominal specialization: the raw
+logical signature, exact receiver bindings, and complete owner-bound lists. Member extensions,
+inner constructors and checked body-local methods preserve the same evidence. Suspend inputs use
+the existing logical continuation normalization. Applied callable/physical parameter vectors keep
+their existing ABI and packing roles; the facet does not add class formals to callable arity.
+
+## Wasm constructor-prefix roles
+
+Wasm constructor admission consumes `IrCtorArg`'s forwarded-super ordinal and parameter provenance
+separately from the total constructor-prefix count. Only field-free ordinary forwards are admitted
+by this extension; source metadata and capture storage retain their existing contracts.
+
+## Serialized Elvis provenance
+
+An `ELVIS` block supplies an immutable compiler variable followed by a two-branch conditional
+without its own origin. The selected equality signature and both reads must name the same exact
+temporary/null proof; names never correlate these declarations. Declared temporary storage remains
+separate from the present branch's proven type. Common IR retains Elvis provenance with the absent
+source-line sentinel; no synthetic source line or metadata wire change is introduced.
+
+## Unsigned constant value messages
+
+`annotation_value_pb` writes field 10 = 1 for the four unsigned `IrConst` variants. The kind remains
+BYTE, SHORT, INT or LONG and `int_value` remains the zigzag encoding of its signed carrier, including
+high-bit values. Signed constants have no flags field. Recursive annotation and array values use
+the same encoder. The complete compile-time-value messages of the pinned official Native producer
+are the byte oracle; this does not infer unsigned identity when an earlier semantic model lost it.

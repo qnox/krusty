@@ -76,3 +76,34 @@ fn safe_call_duplication_and_its_refusals_match_kotlinc() {
         result.unwrap_or_else(|difference| panic!("{method}: {difference}"));
     }
 }
+
+/// An inlined `let` whose lambda branches gives the method an `int` jump and constant, so the
+/// constant-condition pass runs over it. The label in front of the safe call's null path still
+/// stands beside the reached jump target, and the receiver stays on the stack as kotlinc keeps it.
+const BRANCHING_LET: &str = "\
+class Options(val config: Set<String>)\n\
+fun picked(name: String, options: Options?): String? =\n\
+    options?.let {\n\
+        when {\n\
+            name in it.config -> \"config\"\n\
+            else -> null\n\
+        }\n\
+    }\n\
+fun inline(options: Options?): String? = options?.let { if (it.config.isEmpty()) null else \"x\" }\n\
+fun stored(options: Options?): String? {\n\
+    val result = options?.let { if (it.config.isEmpty()) null else \"x\" }\n\
+    return result\n\
+}\n\
+";
+
+#[test]
+fn a_safe_call_let_whose_lambda_branches_keeps_its_receiver_on_the_stack() {
+    common::byte_diff_against_kotlinc_cp(
+        "SafeCallBranchingLet",
+        BRANCHING_LET,
+        "SafeCallBranchingLetKt",
+        &[common::stdlib_jar()],
+    )
+    .expect("reference kotlinc is provisioned")
+    .unwrap_or_else(|diff| panic!("SafeCallBranchingLetKt differs from kotlinc: {diff}"));
+}
