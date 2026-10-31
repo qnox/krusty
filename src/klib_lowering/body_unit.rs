@@ -816,7 +816,7 @@ impl CallLinker for Linker<'_, '_> {
                 declaration,
                 Some(self.sources.bodies),
             )
-            .map_err(&callee_declined)?;
+            .map_err(callee_declined)?;
             self.cross_check_intrinsic(callee, selected, intrinsic)?;
             // A target intrinsic stays an ordinary call of its declaration; only the target's
             // emitter realizes it, through the provider fact frozen on the external handle. The
@@ -879,7 +879,7 @@ impl CallLinker for Linker<'_, '_> {
                 declaration,
                 Some(self.sources.bodies),
             )
-            .map_err(&callee_declined)?;
+            .map_err(callee_declined)?;
             // A member of a generic class the target represents is read at its class's type
             // arguments, which the call binds from its dispatch receiver.
             let class = match selected {
@@ -891,7 +891,7 @@ impl CallLinker for Linker<'_, '_> {
                 {
                     Some(
                         super::class_headers::authenticate(selected, self.sources.bodies)
-                            .map_err(&callee_declined)?,
+                            .map_err(callee_declined)?,
                     )
                 }
                 _ => None,
@@ -903,7 +903,7 @@ impl CallLinker for Linker<'_, '_> {
                         class.arena,
                         class.function,
                     )
-                    .map_err(&callee_declined)?;
+                    .map_err(callee_declined)?;
                     let header = super::function_lowering::raw_function_header_with_class(
                         selected,
                         purpose,
@@ -911,12 +911,12 @@ impl CallLinker for Linker<'_, '_> {
                         class.function,
                         class.types,
                     )
-                    .map_err(&callee_declined)?;
+                    .map_err(callee_declined)?;
                     (header, class.formals)
                 }
                 None => (
                     raw_function_header(selected, purpose, arena, declaration)
-                        .map_err(&callee_declined)?,
+                        .map_err(callee_declined)?,
                     Vec::new(),
                 ),
             };
@@ -952,7 +952,7 @@ impl CallLinker for Linker<'_, '_> {
             ));
         }
         let selected = selected_callable_for_header(selected, None, arena, declaration)
-            .map_err(&callee_declined)?;
+            .map_err(callee_declined)?;
         let function = match self.functions.get(&identity) {
             Some(function) => {
                 // The function was declared under another lowering's selection, or from its
