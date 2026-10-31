@@ -25,6 +25,7 @@ mod constructions;
 mod elvis_blocks;
 mod loops;
 mod range_membership;
+mod safe_calls;
 mod string_templates;
 mod try_catch;
 mod type_operators;
@@ -173,6 +174,8 @@ pub(super) struct BodyLowering<'a> {
     /// Compiler temporaries that name another immutable value, by the initializer each read of
     /// them lowers as.
     compiler_aliases: HashMap<KlibIrSymbol, KlibIrExprId>,
+    /// Safe-call receiver temporaries, inside the selector their `null` test guards.
+    null_proven: HashSet<KlibIrSymbol>,
     /// All enclosing return-target declarations, including tail-only blocks without a frame.
     returnable_targets: Vec<KlibIrSymbol>,
     /// Enclosing serialized returnable blocks, whose exact symbols own their local exits.
@@ -206,6 +209,7 @@ impl<'a> BodyLowering<'a> {
             linker,
             locals: LocalValues::after(header.parameter_count()),
             compiler_aliases: HashMap::default(),
+            null_proven: HashSet::default(),
             returnable_targets: Vec::new(),
             returnable_frames: Vec::new(),
             loops: Vec::new(),
@@ -376,6 +380,13 @@ impl<'a> BodyLowering<'a> {
             {
                 let ty = self.ty(expression, "compiler expression block")?;
                 return self.temporary_expression_block(statements, ty);
+            }
+            KlibIrExprKind::Block {
+                statements,
+                origin: Some(origin),
+            } if origin == "SAFE_CALL" => {
+                let ty = self.ty(expression, "safe call")?;
+                return self.safe_call_block(statements, ty);
             }
             KlibIrExprKind::Block {
                 statements,

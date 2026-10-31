@@ -91,6 +91,7 @@ pub(super) fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, env:
         return;
     }
     delegated_property_array::declare(env, env.facade_class, cw);
+    let mut facade_constants = Vec::new();
     for &(static_index, s) in &facade_statics {
         // A delegate evaluated in place has no storage.
         if ir.is_retired_jvm_delegate_static(static_index) {
@@ -144,6 +145,18 @@ pub(super) fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, env:
             .init
             .filter(|_| s.is_const)
             .and_then(|init| constant_value(ir, init));
+        // A multifile part's visible `const val` is a field of its facade alone.
+        if env.multifile_facade.is_some() && s.is_const && !s.visibility.is_private() {
+            facade_constants.push(super::multifile_facades::FacadeConstant {
+                access: acc,
+                name: ir.static_field_jvm_name(static_index).to_string(),
+                desc,
+                signature: signature.filter(|_| !s.property_delegate),
+                value: cv,
+                annotation: field_ann.map(str::to_string),
+            });
+            continue;
+        }
         cw.add_field_late_sig(
             acc,
             ir.static_field_jvm_name(static_index),
@@ -152,7 +165,11 @@ pub(super) fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, env:
             cv,
             field_ann,
         );
+        if let Some(annotations) = ir.package_static_field_annotations(static_index) {
+            cw.set_last_late_field_annotations(annotations);
+        }
     }
+    env.run.multifile_part.record_constants(facade_constants);
     // kotlinc visits `<clinit>` (name + descriptor) before the initializer constants its body
     // interns. Every initializer that is not folded into a `ConstantValue` gives the facade a
     // `<clinit>`, even when its store is elided above (`var x = 0` leaves a lone `return`); a
@@ -366,6 +383,7 @@ pub(super) fn emit_default_static_accessor(
                 signature: signatures.setter.as_deref(),
                 nullability: acc_ann,
                 annotations: declared.map(|declared| &declared.setter),
+                parameter_annotations: declared.map(|declared| &declared.setter_parameter),
             },
             // The guard checks the stored value: a non-null `N` over a `String?` carrier admits
             // null there, so kotlinc emits none.
@@ -478,6 +496,7 @@ struct DefaultSetterHeader<'a> {
     signature: Option<&'a str>,
     nullability: Option<&'a str>,
     annotations: Option<&'a crate::ir::DeclarationAnnotations>,
+    parameter_annotations: Option<&'a crate::ir::DeclarationAnnotations>,
 }
 
 /// A static property's compiler-default `setX`; see [`emit_default_static_accessor`].
@@ -495,6 +514,7 @@ fn emit_default_static_setter(
         signature,
         nullability: acc_ann,
         annotations,
+        parameter_annotations,
     } = header;
     let jt = jvm_declared_ty(&s.ty);
     let field_descriptor = type_descriptor(jt);
@@ -506,6 +526,9 @@ fn emit_default_static_setter(
     if let Some(annotations) = annotations {
         reserve_default_accessor_pool(cw, name, descriptor, signature, None, Some(annotations));
     }
+    let unannotated = crate::ir::DeclarationAnnotations::default();
+    let parameter_annotations = std::slice::from_ref(parameter_annotations.unwrap_or(&unannotated));
+    cw.reserve_method_parameter_annotation_pool(None, parameter_annotations, &[acc_ann], true);
     let words = slot_words(jt);
     let mut st = CodeBuilder::new(words);
     // kotlinc guards a non-null reference setter parameter with checkNotNullParameter("<set-?>").
@@ -547,6 +570,7 @@ fn emit_default_static_setter(
     cw.seed_utf8("<set-?>");
     finish_code_sig::<0x0019>(cw, name, descriptor, &mut st, words, signature);
     cw.set_method_nullability(name, descriptor, None, &[acc_ann]);
+    cw.set_method_param_annotations(name, descriptor, parameter_annotations);
     if let Some(annotations) = annotations {
         super::function_annotations::emit_declared(cw, annotations, name, descriptor);
     }

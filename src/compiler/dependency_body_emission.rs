@@ -105,6 +105,8 @@ pub(super) fn emit_dependencies<B: Backend>(
     let target_realizes_getter = |signature: crate::backend::DependencyGetterSignature<'_>| {
         backend.realizes_dependency_getter(signature)
     };
+    let target_represents_classifier =
+        |classifier| backend.represents_dependency_classifier(classifier);
     let mut ordinary = match emitted_roots::ordinary_roots(
         source,
         bodies,
@@ -149,6 +151,7 @@ pub(super) fn emit_dependencies<B: Backend>(
             target_realizes_bodyless: backend.realizes_bodyless_dependency_support(),
             target_realizes_intrinsic: &target_realizes_intrinsic,
             target_realizes_getter: &target_realizes_getter,
+            target_represents_classifier: &target_represents_classifier,
         };
         let declarations = match emitted_roots::declarations(
             platform,
@@ -181,6 +184,7 @@ pub(super) fn emit_dependencies<B: Backend>(
             target_realizes_bodyless: backend.realizes_bodyless_dependency_support(),
             target_realizes_intrinsic: &target_realizes_intrinsic,
             target_realizes_getter: &target_realizes_getter,
+            target_represents_classifier: &target_represents_classifier,
         };
         if !prepare_bodyless_externals(
             platform,
@@ -416,6 +420,7 @@ struct DependencyLeafCapabilities<'a> {
     target_realizes_bodyless: bool,
     target_realizes_intrinsic: &'a dyn Fn(crate::libraries::CompilerIntrinsic) -> bool,
     target_realizes_getter: &'a dyn Fn(crate::backend::DependencyGetterSignature<'_>) -> bool,
+    target_represents_classifier: &'a dyn Fn(crate::types::TypeName) -> bool,
 }
 
 impl DependencyLeafCapabilities<'_> {
@@ -568,6 +573,29 @@ fn prepare_bodyless_externals(
                     diags.error(
                         Span::new(0, 0),
                         format!("invalid target KLIB getter: {reason:?}"),
+                    );
+                    return false;
+                }
+            }
+            match capabilities
+                .callees
+                .target_member(&callee, capabilities.target_represents_classifier)
+            {
+                Ok(true) => {
+                    let Some(external) = provider_external(platform, &callee, diags) else {
+                        return false;
+                    };
+                    externals.insert(
+                        callee,
+                        EmittedDependencyCallable::target_member(external.target()),
+                    );
+                    continue;
+                }
+                Ok(false) => {}
+                Err(reason) => {
+                    diags.error(
+                        Span::new(0, 0),
+                        format!("invalid target KLIB member: {reason:?}"),
                     );
                     return false;
                 }

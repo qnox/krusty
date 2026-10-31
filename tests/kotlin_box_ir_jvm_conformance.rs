@@ -294,6 +294,7 @@ fn unit_options<'a>(
     if !refusals.is_empty() {
         return Err(refusals.join("\n"));
     }
+    options.inline_scopes_numbers = configuration.inline_scopes_numbers;
     if configuration.language_version.is_some() || configuration.api_version.is_some() {
         let language_version = configuration
             .language_version

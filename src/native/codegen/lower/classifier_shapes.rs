@@ -150,6 +150,21 @@ pub(super) fn is_string_builder(internal: TypeName) -> bool {
     is_identity(internal, &["kotlin/text/StringBuilder"])
 }
 
+/// Whether the runtime, not a library class body, lays out `internal`: the root class, text, the
+/// arrays, the throwables and builder it constructs, and the standard collection implementations. A dependency
+/// body's call of such a member is lowered here as a source call of it is.
+pub(in super::super) fn represents_dependency_classifier(internal: TypeName) -> bool {
+    super::super::super::intrinsics::is_any(internal)
+        || internal == crate::types::wk::string()
+        || is_char_sequence(internal)
+        || is_string_builder(internal)
+        || Ty::obj_name(internal).is_array()
+        || super::super::super::intrinsics::throwable_descriptor(internal).is_some()
+        || is_pair(internal)
+        || is_indexed_value(internal)
+        || standard_collection_implementation(internal).is_some()
+}
+
 pub(super) fn is_sequence(internal: TypeName) -> bool {
     is_identity(internal, &["kotlin/sequences/Sequence"])
 }

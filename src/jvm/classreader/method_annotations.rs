@@ -86,6 +86,7 @@ mod tests {
         RetainedAnnotation {
             retention,
             annotation: AppliedAnnotation {
+                written_order: None,
                 internal: type_name(class),
                 values,
             },
