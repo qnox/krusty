@@ -2579,6 +2579,28 @@ fun <T : CharSequence> plainName(): T = 1
     common::assert_error_blocks_match_kotlinc(&sources, &reference_args);
 }
 
+/// Only a formal constrained from above meets its declared bound. `S` of `put` also occurs in an
+/// ordinary value parameter here, so its binding is exact and `T`'s mismatch is kotlinc's error.
+#[test]
+fn an_in_projected_formal_with_an_ordinary_occurrence_keeps_its_exact_binding() {
+    let sources = [(
+        "Sink.kt",
+        r#"class Sink<T>
+fun <T, S : T?> Sink<in S>.put(value: T, extra: S): Int = 1
+
+fun <T : Number?, S : T> both(sink: Sink<T>, t: S, n: Int): Int = sink.put(t, n)
+"#,
+    )];
+    let reference_args = common::language_directives::kotlinc_args(sources[0].1);
+    assert_eq!(
+        common::reference_error_blocks(&sources, &reference_args),
+        [
+            "Sink.kt:4:79: argument type mismatch: actual type is 'Int', but 'T (of fun <T : Number?, S : T> both)' was expected.",
+        ]
+    );
+    common::assert_error_blocks_match_kotlinc(&sources, &reference_args);
+}
+
 /// The builder shape from a SQL library: a member extension's defaulted `separator` rejects the
 /// builder that a top-level extension of the same name accepts, and a trailing receiver lambda
 /// follows. kotlinc selects the top-level extension; the classes match its output.
