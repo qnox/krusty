@@ -131,6 +131,11 @@ a classpath record with the same physical identity. Preserve local/coroutine/ref
 and exact table order. This slice leaves source identity publication and metadata class-ID encoding
 for subsequent changes; the complete literal-dollar classfile regression remains open there.
 
+Consume the existing source declaration order at the JVM table boundary for equal-name source
+rows owned by each writer. Preserve referenced/generated row slots and ancestor constraints, and
+reapply that policy after final pool relayout. Nested-construction ABI/runtime and mixed
+continuation controls pin the distinction from emitted allocation order.
+
 ## Builtin declaration-name producers
 
 Populate the existing declaration-name fact from admitted core/function/array factories and raw

@@ -254,6 +254,11 @@ Anonymous classes, reference carriers and checked body-local naming keep their s
 Complete table comparisons cover top-level and nested literal-dollar names in both source orders.
 Metadata class-ID encoding and source-name publication remain separate follow-ups.
 
+Equal-name rows for source classes declared by the current JVM writer retain declaration
+visitation order, independently of constructor-operand evaluation. Referenced and generated rows
+keep constant-pool priority, including after coroutine pool relayout; declaring ancestors still
+precede descendants. Nested anonymous construction has complete class ABI and runtime controls.
+
 ## Builtin declaration names
 
 Language-owned classifier factories retain their admitted package and exact segment. Function
