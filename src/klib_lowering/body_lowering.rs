@@ -372,6 +372,7 @@ impl<'a> BodyLowering<'a> {
             } if matches!(
                 origin.as_str(),
                 "INLINE_ARGS_CONTAINER"
+                    | "WHEN"
                     | "POSTFIX_INCR"
                     | "POSTFIX_DECR"
                     | "PREFIX_INCR"

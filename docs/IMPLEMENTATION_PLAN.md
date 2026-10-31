@@ -5074,8 +5074,13 @@ code is the one the code generator already names: provider-owned bodies through 
   target is that classifier with any arguments, or a subtype of its star projection, since
   kotlinc erases the checked arguments. On Native an `is` against a read-only collection interface
   tests the runtime marker the interface carries, which program classes implementing it also wear
-  (`collection_check_descriptor`). `map` and `filter` now link through their stdlib bodies. Next
-  stops: `IntRange` accessors and primitive iterators, generic calls, object values and callee
+  (`collection_check_descriptor`). `map` and `filter` now link through their stdlib bodies.
+- **Lowering: generic calls.** A call of a generic function the unit lowers itself binds the
+  call's type arguments as a source call of a module generic function does, and a member of a
+  generic runtime class (a target member or intrinsic such as `Array.get`) binds its class's type
+  parameters from the class header. A `WHEN` subject block lowers as the source `when (subject)`.
+  `plus` on a list and `single` on text now link through their stdlib bodies. Next stops: object
+  values (`EmptySet`, `naturalOrder`), `IntRange` accessors and primitive iterators, and callee
   parameter defaults.
 - Tests: the unit tests in `metadata/klib_ir/tree_decoding.rs`, `metadata/id_signature/` and
   `klib_lowering/` (whose stdlib checks run when `KRUSTY_KOTLIN_NATIVE` is set). End-to-end coverage comes through
