@@ -8,6 +8,9 @@
 //! names alone gets backwards.
 use super::common;
 
+#[path = "inner_class_declaration_order_e2e/anonymous_construction.rs"]
+mod anonymous_construction;
+
 fn assert_module_inner_class_rows(sources: &[(&str, &str)]) {
     let classes = common::classes_against_kotlinc_module(sources);
     assert_eq!(
