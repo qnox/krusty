@@ -6366,7 +6366,9 @@ and the pass rejects every construct it does not cover yet.
 - [ ] More parameters: non-constant defaults (defaults groups), receivers, varargs, more than ten,
   stability inference.
 - [ ] The full body transform: control-flow groups, `remember`, early returns, inline composables.
-- [ ] The `$stable` field of classes.
+- [x] The `$stable` field and `@StabilityInferred` of classes whose stability their file decides.
+- [ ] Run-time stability (`Other.$stable` of another file or a Compose library), generic classes
+  and value-class fields.
 - [ ] Remove the partial marker and rerun the corpus for the Compose projects.
 
 ## Anonymous superclass closure captures

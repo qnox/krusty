@@ -2,18 +2,37 @@
 //! came from, the declarations its calls selected, and the runtime declarations the plugin's
 //! generated code calls, selected through the compilation's symbol source.
 
-use crate::backend::CheckedBackendCallables;
+use crate::backend::{BackendClassifierFact, BackendClassifierSource, CheckedBackendCallables};
 use crate::diag::Span;
 use crate::fir::{ExternalCallableId, OriginStore, SourceFileId};
 use crate::ir::{ExprId, IrFile};
 use crate::libraries::FnKind;
 use crate::plugins::runtime_declarations::{
-    BoundRuntimeFunction, PluginRuntime, RuntimeDeclaration, RuntimeFunction,
+    BoundRuntimeFunction, PluginClassifier, PluginRuntime, RuntimeDeclaration, RuntimeFunction,
 };
 use crate::plugins::CheckedSourceFacts;
 use crate::symbol_resolver::declared_member_callables;
 use crate::symbol_source::{SymbolNamespace, SymbolSource};
-use crate::types::{Ty, TypeName};
+use crate::types::{ClassifierDeclarationName, Ty, TypeName};
+
+/// A Kotlin builtin realized by a platform class, which carries no Kotlin metadata of its own: a
+/// classifier declared in package `kotlin` or `kotlin.collections` (`CharSequence`, `List`,
+/// `Map.Entry`), where no Java class is declared.
+fn is_mapped_builtin(
+    classifiers: &dyn BackendClassifierSource,
+    fact: &BackendClassifierFact,
+) -> bool {
+    match &fact.declaration_name {
+        Some(ClassifierDeclarationName::TopLevel { package, .. }) => {
+            *package == crate::types::wk::kotlin_package()
+                || *package == crate::types::type_name("kotlin/collections")
+        }
+        Some(ClassifierDeclarationName::Nested { owner, .. }) => classifiers
+            .classifier(*owner)
+            .is_some_and(|owner| is_mapped_builtin(classifiers, &owner)),
+        None => false,
+    }
+}
 
 /// One file's checked origins and frozen dependency declarations.
 pub(super) struct HandoffSourceFacts<'a> {
@@ -39,14 +58,20 @@ impl CheckedSourceFacts for HandoffSourceFacts<'_> {
 /// The runtime declarations one file's plugins selected, by the declarations the compilation sees.
 pub(super) struct HandoffRuntime<'a> {
     source: &'a dyn SymbolSource,
+    /// The classifiers of the module and its dependencies, as the backend receives them.
+    classifiers: &'a dyn BackendClassifierSource,
     /// Each selected declaration, with the parameters the selecting plugin's transform appends.
     bound: Vec<(ExternalCallableId, Box<[Ty]>)>,
 }
 
 impl<'a> HandoffRuntime<'a> {
-    pub(super) fn new(source: &'a dyn SymbolSource) -> Self {
+    pub(super) fn new(
+        source: &'a dyn SymbolSource,
+        classifiers: &'a dyn BackendClassifierSource,
+    ) -> Self {
         Self {
             source,
+            classifiers,
             bound: Vec::new(),
         }
     }
@@ -98,7 +123,17 @@ impl PluginRuntime for HandoffRuntime<'_> {
         })
     }
 
-    fn declares_classifier(&self, classifier: TypeName) -> bool {
-        self.source.classifier(classifier).is_some()
+    fn classifier(&self, classifier: TypeName) -> Option<PluginClassifier> {
+        let fact = self.classifiers.classifier(classifier)?;
+        Some(PluginClassifier {
+            kind: fact.kind.into(),
+            is_kotlin: fact.is_kotlin || is_mapped_builtin(self.classifiers, &fact),
+            is_final: !fact.is_extensible,
+            is_value: fact.value_declaration.is_some(),
+            in_module: fact.source,
+            type_parameters: fact.own_type_parameter_count,
+            supertypes: fact.supertypes.to_vec(),
+            annotations: fact.annotations.to_vec(),
+        })
     }
 }

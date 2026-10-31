@@ -626,6 +626,34 @@ fn the_compose_pass_rejects_what_it_does_not_cover() {
         "4:1: error: krusty's Compose compiler plugin does not support a call to a composable \
          function from another file yet",
     );
+    assert_compose_rejects(
+        "compose-generic-class",
+        "class Box<T>(val value: T)\n",
+        &[],
+        "3:1: error: krusty's Compose compiler plugin does not support a generic class, whose \
+         stability depends on its type arguments yet",
+    );
+    assert_compose_rejects(
+        "compose-value-class-field",
+        "@JvmInline value class Id(val raw: Int)\nclass User(val id: Id)\n",
+        &[],
+        "4:1: error: krusty's Compose compiler plugin does not support a class with a value-class \
+         field yet",
+    );
+    assert_compose_rejects(
+        "compose-other-file-class-field",
+        "class Card(val point: Point)\n",
+        &[("Point.kt", "package probe\nclass Point(val x: Int)\n")],
+        "3:1: error: krusty's Compose compiler plugin does not support a class whose stability \
+         depends on a class of another file or a Compose library yet",
+    );
+    assert_compose_rejects(
+        "compose-library-class-field",
+        "class Clock(val clock: androidx.compose.runtime.BroadcastFrameClock)\n",
+        &[],
+        "3:1: error: krusty's Compose compiler plugin does not support a class whose stability \
+         depends on a class of another file or a Compose library yet",
+    );
 }
 
 /// Compose's metrics and reports name files krusty does not write yet: a nonempty destination fails
