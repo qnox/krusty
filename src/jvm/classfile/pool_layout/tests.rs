@@ -366,27 +366,94 @@ fn transformation_class_entries_lead_the_rewritten_body() {
     assert!(position("Ljava/lang/String;") < position("body"));
 }
 
-#[test]
-fn an_ldc_whose_entry_would_move_past_one_byte_keeps_the_pool() {
+/// A class whose `ldc` loads branch around each other, with a line and a local-variable table and
+/// stack map frames whose offsets the loads' widths move.
+fn branching_loads() -> Vec<u8> {
     let mut writer = ClassWriter::new("T", "java/lang/Object");
-    add_static(&mut writer, "f", "()Ljava/lang/Object;", |code, writer| {
-        code.push_string("a", writer);
-        code.areturn();
-    });
-    let class = with_integers(&writer.finish(), 300);
-    let read = index_slots::read(&class).expect("the class reads");
-    let loaded = read
-        .slots
+    let mut code = CodeBuilder::new(1);
+    let (second, joined) = (code.new_label(), code.new_label());
+    code.mark_line(3);
+    code.iload(0);
+    code.ifne(second);
+    code.mark_line(4);
+    code.push_string("a", &mut writer);
+    code.areturn();
+    code.bind(second);
+    code.mark_line(5);
+    code.iload(0);
+    code.push_int(1, &mut writer);
+    code.if_icmpeq(joined);
+    code.push_string("b", &mut writer);
+    code.areturn();
+    code.bind(joined);
+    code.mark_line(6);
+    code.push_string("c", &mut writer);
+    code.areturn();
+    code.link();
+    writer.add_method(ACC_PUBLIC | ACC_STATIC, "f", "(I)Ljava/lang/Object;", &code);
+    writer.set_method_debug(
+        "f",
+        "(I)Ljava/lang/Object;",
+        None,
+        &[("x".to_string(), "I".to_string(), 0)],
+    );
+    writer.finish()
+}
+
+/// The loaded entries of `class`'s `ldc` and `ldc_w` instructions, with whether each is narrow.
+fn loads(class: &[u8]) -> Vec<(String, bool)> {
+    let read = index_slots::read(class).expect("the class reads");
+    read.slots
         .iter()
-        .find(|slot| slot.narrow)
-        .expect("the ldc operand")
-        .index;
-    let mut order: Vec<u16> = (1..read.entries.len() as u16).collect();
-    order.retain(|&index| index != loaded);
-    order.push(loaded);
+        .filter(|slot| matches!(slot.holder, Holder::Code(_, Part::Operand)))
+        .filter(|slot| slot.narrow || class[slot.at - 1] == LDC_W)
+        .map(|slot| (spelled(class, &read, slot.index), slot.narrow))
+        .collect()
+}
+
+#[test]
+fn an_ldc_whose_entry_moves_past_one_byte_widens_and_narrows_back() {
+    let class = with_integers(&branching_loads(), 300);
+    let read = index_slots::read(&class).expect("the class reads");
     assert_eq!(
-        rewrite(&class, &read, &order, &[]),
-        Err(Kept::NarrowOperand)
+        loads(&class),
+        [
+            ("String a".to_string(), true),
+            ("String b".to_string(), true),
+            ("String c".to_string(), true),
+        ]
+    );
+    // Every string moves past the integers.
+    let strings: Vec<u16> = (1..read.entries.len() as u16)
+        .filter(|&index| spelled(&class, &read, index).starts_with("String "))
+        .collect();
+    let mut order: Vec<u16> = (1..read.entries.len() as u16)
+        .filter(|index| !strings.contains(index))
+        .collect();
+    order.extend(&strings);
+    let widened = rewrite(&class, &read, &order, &[]).expect("the loads widen");
+    assert_eq!(
+        loads(&widened),
+        [
+            ("String a".to_string(), false),
+            ("String b".to_string(), false),
+            ("String c".to_string(), false),
+        ]
+    );
+    assert_eq!(widened.len(), class.len() + 3);
+    // Laying the pool out as it was narrows every load again and carries each jump, switch,
+    // line, local and frame back to where it was.
+    let read_widened = index_slots::read(&widened).expect("the widened class reads");
+    let mut renumbered = vec![0u16; read.entries.len()];
+    for (at, &index) in order.iter().enumerate() {
+        renumbered[usize::from(index)] = at as u16 + 1;
+    }
+    let restored: Vec<u16> = (1..read.entries.len())
+        .map(|index| renumbered[index])
+        .collect();
+    assert_eq!(
+        rewrite(&widened, &read_widened, &restored, &[]).expect("the loads narrow"),
+        class
     );
 }
 
