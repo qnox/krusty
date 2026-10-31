@@ -5079,9 +5079,16 @@ code is the one the code generator already names: provider-owned bodies through 
   call's type arguments as a source call of a module generic function does, and a member of a
   generic runtime class (a target member or intrinsic such as `Array.get`) binds its class's type
   parameters from the class header. A `WHEN` subject block lowers as the source `when (subject)`.
-  `plus` on a list and `single` on text now link through their stdlib bodies. Next stops: object
-  values (`EmptySet`, `naturalOrder`), `IntRange` accessors and primitive iterators, and callee
-  parameter defaults.
+  `plus` on a list and `single` on text now link through their stdlib bodies.
+- **Lowering: target-owned objects.** A body's read of an object whose representation the target
+  owns (on Native `Unit`, the built-in types' companions and the stdlib's `EmptySet`) is the
+  target's singleton value, typed as checked FIR types the source reference; any other object
+  value still declines. A bodyless member of a generic class, such as `Collection.iterator`, binds
+  its class's type parameters from the class header as a target member does. `setOf()` and
+  `emptySet()` now link through their stdlib bodies. Next stops: generic calls whose result is a
+  bounded type parameter (`toCollection`), the file-private `EmptyMap` and `EmptyList`,
+  compiler-introduced array blocks (`asList`), `IntRange` accessors and primitive iterators, and
+  callee parameter defaults.
 - Tests: the unit tests in `metadata/klib_ir/tree_decoding.rs`, `metadata/id_signature/` and
   `klib_lowering/` (whose stdlib checks run when `KRUSTY_KOTLIN_NATIVE` is set). End-to-end coverage comes through
   the box harness rather than a separate KLIB suite: the Native lane gains the `// MODULE:`

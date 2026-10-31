@@ -680,7 +680,12 @@ impl CallLinker for Linker<'_, '_> {
             .constructor_bound(parameters, argument, bound)
     }
 
-    fn singleton(&self, _classifier: TypeName) -> Result<(), KlibBodyDeclineReason> {
+    fn singleton(&self, classifier: TypeName) -> Result<(), KlibBodyDeclineReason> {
+        // The target realizes the value of an object whose representation it owns, as it does for
+        // a source reference of that object. Any other object would need its class materialized.
+        if self.sources.callees.target_represents(classifier) {
+            return Ok(());
+        }
         Err(KlibBodyDeclineReason::UnsupportedOperation(
             "an object value",
         ))
@@ -880,11 +885,12 @@ impl CallLinker for Linker<'_, '_> {
                 Some(self.sources.bodies),
             )
             .map_err(&callee_declined)?;
-            // A member of a generic class the target represents is read at its class's type
-            // arguments, which the call binds from its dispatch receiver.
+            // A member of a generic class realized outside this unit, by the target or by its
+            // provider, is read at its class's type arguments, which the call binds from its
+            // dispatch receiver.
             let class = match selected {
                 Some(selected)
-                    if emitted.is_target_member()
+                    if matches!(purpose, HeaderPurpose::External)
                         && selected
                             .class_contract()
                             .is_some_and(|class| !class.parameters.formals.is_empty()) =>

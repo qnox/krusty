@@ -20675,6 +20675,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `klib_lowering::tests::inline_templates::a_member_of_a_generic_class_is_called_at_its_receiver_type_arguments`,
   `klib_lowering::tests::control_forms::stdlib_star_projected_smart_cast_lowers_as_a_cast`,
   `native_compiler_command_e2e::a_program_calls_generic_stdlib_functions_through_their_bodies`.
+- **A dependency body reads a target-owned object as the target's own value.** An object value of
+  a classifier whose representation the target owns (`Backend::represents_dependency_classifier`;
+  on Native `Unit`, the companions of the built-in types and the stdlib's `EmptySet`) lowers as
+  the source reference of the singleton, typed as checked FIR types it (`Unit` is the builtin
+  `Unit` type), so `setOf<String>() === emptySet<Int>()` holds as on kotlinc. An object the
+  library lays out still declines as "an object value". Tests:
+  `klib_lowering::tests::target_members::klib_object_value_of_a_target_classifier_is_the_targets_singleton`,
+  `klib_lowering::tests::target_members::klib_object_value_of_a_library_laid_out_object_declines`,
+  `native_compiler_command_e2e::a_program_reads_library_objects_through_the_stdlib_bodies`.
 - **The Native backend realizes what an expanded library body reaches.** A KLIB member's builtin
   operation (`Int.and`, `Long.times`, `Int.inv`, `Array.size`, `String.length`) is attached when
   the provider publishes the member, before its identity is assigned, so a template's call of it
