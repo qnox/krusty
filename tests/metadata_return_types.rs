@@ -280,11 +280,12 @@ fun d(m: Map<String, Int>): List<Int> = m.entries.map { (k, v) -> if (k.isEmpty(
 }
 
 /// `MutableList.removeAt(Int)` is `java.util.List.remove(int)`, so a class implementing `MutableList`
-/// gets a `remove(int)` bridge to its `removeAt` override. That renaming exists ONLY on the mutable
-/// side: a READ-ONLY `List` implementation declaring an unrelated `removeAt` must get no such bridge,
-/// or an unrelated method silently becomes the `java.util.List.remove(int)` implementation.
+/// gets a `remove(int)` bridge to its `removeAt` override. A read-only `List` implementation gets
+/// one too, as kotlinc writes it: its own `removeAt` effectively overrides the `MutableList.removeAt`
+/// read-only stub, so it implements `java.util.List.remove(int)` rather than leaving the throwing
+/// stub there (`tests/read_only_list_face_stubs_e2e.rs` compares those bytes with kotlinc).
 #[test]
-fn read_only_list_impl_gets_no_remove_bridge() {
+fn list_impls_realize_remove_at_as_remove_int() {
     let jar = common::stdlib_jar();
     let jdk = common::jdk_modules();
     let cp = [jar];
@@ -302,14 +303,14 @@ fn read_only_list_impl_gets_no_remove_bridge() {
             .any(|m| m.name == "remove" && m.descriptor.starts_with("(I)"))
     };
     assert!(
-        !bridge_of(
+        bridge_of(
             r#"
 abstract class Ro : List<String> {
     fun removeAt(index: Int): String = "x"
 }
 "#
         ),
-        "a read-only List implementation must not get a remove(int) bridge"
+        "a read-only List implementation's removeAt implements remove(int), as in kotlinc"
     );
     assert!(
         bridge_of(
