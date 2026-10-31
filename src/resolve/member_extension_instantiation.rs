@@ -198,6 +198,12 @@ pub(super) fn instantiate_member_extension_with(
         let mut evidence = crate::symbol_resolver::GSigBinds::default();
         crate::symbol_resolver::unify_ty(declared, actual, &mut evidence);
         for formal in &covariant_receiver_formals {
+            // Only a covariant occurrence is another lower bound; `(T) -> Unit` bounds T above.
+            if crate::symbol_resolver::formal_variance_in_type(symbols, declared, formal)
+                != Some(crate::types::TypeVariance::Out)
+            {
+                continue;
+            }
             if let (Some(&receiver), Some(&argument)) =
                 (bindings.get(*formal), evidence.get(*formal))
             {

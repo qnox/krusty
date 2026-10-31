@@ -13,7 +13,9 @@ A member extension's formal that its receiver reaches only covariantly (`Assert<
 lower bound from the receiver, not an equality. An argument's type joins it at their common
 supertype, as for a top-level extension: inside a class declaring
 `fun <T : Any> Assert<T>.same(expected: T)`, `assertThat(c: Class<*>).same(t: Type)` solves
-`T = Type`. An invariant receiver still fixes the formal exactly and reports the argument mismatch.
+`T = Type`. Only an argument that reaches the formal covariantly joins; `(T) -> Unit` bounds it above
+and leaves the receiver's binding. An invariant receiver still fixes the formal exactly and reports
+the argument mismatch.
 Tests: `box_regressions/memberExtensionCovariantReceiverJoin.kt` and
 `resolver_regression_e2e::an_invariant_member_extension_receiver_keeps_its_exact_binding`.
 
