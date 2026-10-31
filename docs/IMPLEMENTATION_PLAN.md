@@ -5056,39 +5056,6 @@ code is the one the code generator already names: provider-owned bodies through 
   kotlin-test's assertions and `kotlin.text.trim` still decline inside their library bodies
   (`Asserter` interface dispatch, accessor calls); the generic fix is compiling those member
   bodies, not intercepting the calls. Next: final library member bodies as ordinary roots.
-- **Lowering: safe calls and target-represented members.** A `SAFE_CALL` block (one compiler
-  temporary, then an origin-less `when` whose first branch tests that exact temporary against
-  `null`) lowers as checked FIR lowers `a?.f()`: the temporary, its null test and the selector over
-  a plain read of it (`klib_lowering/body_lowering/safe_calls.rs`); any other shape declines as a
-  disagreeing serialized declaration. A member of a classifier whose representation the target
-  owns (`Backend::represents_dependency_classifier`; on Native the root class, text, arrays, the
-  runtime's throwables, `StringBuilder`, `Pair`, `IndexedValue` and the standard collection
-  implementations) is a `TargetMember` external: its KLIB body reads a class layout the runtime
-  object does not have, so the target realizes the call at its dispatch receiver as it does a
-  source call, and an unsupported member declines there by name. This is not interception:
-  members of library-laid-out classes still need their bodies compiled. `println` and `print`
-  now link through their stdlib bodies.
-- **Lowering: accessor leaves and collection checks.** A property getter whose owner the target
-  represents, or whose provider supplies the leaf, links as an accessor like an emitted getter
-  (`realizes_getter`). A serialized type operator narrows a value of a generic classifier when the
-  target is that classifier with any arguments, or a subtype of its star projection, since
-  kotlinc erases the checked arguments. On Native an `is` against a read-only collection interface
-  tests the runtime marker the interface carries, which program classes implementing it also wear
-  (`collection_check_descriptor`). `map` and `filter` now link through their stdlib bodies.
-- **Lowering: generic calls.** A call of a generic function the unit lowers itself binds the
-  call's type arguments as a source call of a module generic function does, and a member of a
-  generic runtime class (a target member or intrinsic such as `Array.get`) binds its class's type
-  parameters from the class header. A `WHEN` subject block lowers as the source `when (subject)`.
-  `plus` on a list and `single` on text now link through their stdlib bodies.
-- **Lowering: target-owned objects.** A body's read of an object whose representation the target
-  owns (on Native `Unit`, the built-in types' companions and the stdlib's `EmptySet`) is the
-  target's singleton value, typed as checked FIR types the source reference; any other object
-  value still declines. A bodyless member of a generic class, such as `Collection.iterator`, binds
-  its class's type parameters from the class header as a target member does. `setOf()` and
-  `emptySet()` now link through their stdlib bodies. Next stops: generic calls whose result is a
-  bounded type parameter (`toCollection`), the file-private `EmptyMap` and `EmptyList`,
-  compiler-introduced array blocks (`asList`), `IntRange` accessors and primitive iterators, and
-  callee parameter defaults.
 - Tests: the unit tests in `metadata/klib_ir/tree_decoding.rs`, `metadata/id_signature/` and
   `klib_lowering/` (whose stdlib checks run when `KRUSTY_KOTLIN_NATIVE` is set). End-to-end coverage comes through
   the box harness rather than a separate KLIB suite: the Native lane gains the `// MODULE:`
