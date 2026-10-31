@@ -332,12 +332,18 @@ impl<'a> JvmSignatureFormatter<'a> {
         )
     }
 
+    /// kotlinc's `isFinalClass`: a final classifier that is not an enum class. An enum is never
+    /// closed here, even one whose entries have no bodies, so `List<SomeEnum>` keeps its
+    /// `? extends` wildcard.
     fn classifier_is_closed(&self, owner: TypeName) -> Option<bool> {
         if let Some(classifier) = self.current_class(owner) {
             return Some(
                 classifier.is_object
                     || classifier.is_annotation
-                    || (!classifier.is_interface && !classifier.is_abstract && !classifier.is_open),
+                    || (!classifier.is_enum
+                        && !classifier.is_interface
+                        && !classifier.is_abstract
+                        && !classifier.is_open),
             );
         }
         let Some(classifier) = self.symbols.classifier(owner) else {
@@ -352,8 +358,7 @@ impl<'a> JvmSignatureFormatter<'a> {
             crate::libraries::TypeKind::Class => {
                 !classifier.is_abstract && !classifier.is_extensible
             }
-            crate::libraries::TypeKind::Enum => !classifier.is_extensible,
-            crate::libraries::TypeKind::Interface => false,
+            crate::libraries::TypeKind::Enum | crate::libraries::TypeKind::Interface => false,
         })
     }
 
@@ -608,7 +613,7 @@ impl<'a> JvmSignatureFormatter<'a> {
         match ty.kind() {
             TyKind::STRING => Some("Ljava/lang/String;".to_string()),
             TyKind::Unit => Some("Lkotlin/Unit;".to_string()),
-            TyKind::Nothing => Some("Lkotlin/Nothing;".to_string()),
+            TyKind::Nothing => Some(ir_type_desc(ty)),
             TyKind::InProjection(inner) => Some(format!("-{}", self.ty_at(&inner, wildcards)?)),
             TyKind::OutProjection(inner) => Some(format!("+{}", self.ty_at(&inner, wildcards)?)),
             TyKind::Fun(signature) => self.function_ty(signature, wildcards),

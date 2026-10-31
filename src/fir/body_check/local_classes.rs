@@ -586,18 +586,6 @@ impl BodyFirChecker<'_> {
             })
     }
 
-    /// Publish a resolver-selected direct storage read with its stable owner and, inside a local
-    /// callable, the exact lifted dispatch receiver that supplies that storage.
-    pub(super) fn direct_class_storage_read_kind(
-        &mut self,
-        field: u32,
-        ty: ResolvedTy,
-        origin: OriginId,
-    ) -> Result<FirExprKind, BodyCheckFailure> {
-        let binding = self.direct_class_capture_binding(field, ty)?;
-        self.class_storage_read_kind(binding, origin)
-    }
-
     /// The binding of field `field` of the class whose storage this body reads directly.
     pub(super) fn direct_class_capture_binding(
         &self,

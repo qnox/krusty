@@ -2468,6 +2468,34 @@ fun box(): String = invoked.values.greeting() + invoked.values.suffix()
     assert_accepted_and_runs(src, "ResolverPackageQualifiedPropertyInvoke");
 }
 
+/// An invariant nullable formal (`Column<E?>`) is a candidate for the receiver's classifier, and
+/// applicability rejects a non-null argument (`Column<EntityID<U>>`) or a caller variable whose
+/// bound admits null with kotlinc's receiver mismatch, not an unresolved reference.
+#[test]
+fn an_invariant_nullable_receiver_variable_rejects_a_non_null_argument_like_kotlinc() {
+    let sources = [(
+        "Receiver.kt",
+        r#"open class EntityID<T : Any>(val value: T)
+class Column<T>(val name: String)
+
+fun <T : Any, E : EntityID<T>> Column<E?>.invariantTable(): T? = null
+
+fun <U : Any> nonNullColumn(column: Column<EntityID<U>>) = column.invariantTable()
+fun <V : EntityID<String>?> boundedColumn(column: Column<V>) = column.invariantTable()
+fun <U : Any> nullableColumn(column: Column<EntityID<U>?>) = column.invariantTable()
+"#,
+    )];
+    let reference_args = common::language_directives::kotlinc_args(sources[0].1);
+    assert_eq!(
+        common::reference_error_blocks(&sources, &reference_args),
+        [
+            "Receiver.kt:6:67: candidate 'fun <T : Any, E : EntityID<T>> Column<E?>.invariantTable(): T?' is inapplicable because of a receiver type mismatch.",
+            "Receiver.kt:7:71: candidate 'fun <T : Any, E : EntityID<T>> Column<E?>.invariantTable(): T?' is inapplicable because of a receiver type mismatch.",
+        ]
+    );
+    common::assert_error_blocks_match_kotlinc(&sources, &reference_args);
+}
+
 #[test]
 fn a_callable_import_keeps_the_default_imported_classifier_in_type_positions() {
     let sources = [
@@ -2551,6 +2579,28 @@ fun <T : CharSequence> plainName(): T = 1
     common::assert_error_blocks_match_kotlinc(&sources, &reference_args);
 }
 
+/// Only a formal constrained from above meets its declared bound. `S` of `put` also occurs in an
+/// ordinary value parameter here, so its binding is exact and `T`'s mismatch is kotlinc's error.
+#[test]
+fn an_in_projected_formal_with_an_ordinary_occurrence_keeps_its_exact_binding() {
+    let sources = [(
+        "Sink.kt",
+        r#"class Sink<T>
+fun <T, S : T?> Sink<in S>.put(value: T, extra: S): Int = 1
+
+fun <T : Number?, S : T> both(sink: Sink<T>, t: S, n: Int): Int = sink.put(t, n)
+"#,
+    )];
+    let reference_args = common::language_directives::kotlinc_args(sources[0].1);
+    assert_eq!(
+        common::reference_error_blocks(&sources, &reference_args),
+        [
+            "Sink.kt:4:79: argument type mismatch: actual type is 'Int', but 'T (of fun <T : Number?, S : T> both)' was expected.",
+        ]
+    );
+    common::assert_error_blocks_match_kotlinc(&sources, &reference_args);
+}
+
 /// The builder shape from a SQL library: a member extension's defaulted `separator` rejects the
 /// builder that a top-level extension of the same name accepts, and a trailing receiver lambda
 /// follows. kotlinc selects the top-level extension; the classes match its output.
@@ -2622,4 +2672,114 @@ fun render(items: List<String>): Unit = with(Builder()) {
         ]
     );
     common::assert_error_blocks_match_kotlinc(&sources, &reference_args);
+}
+
+#[test]
+fn a_bound_violating_only_argument_leaves_the_formal_uninferred() {
+    // kotlinc rejects the argument's constraint at the argument; with no other evidence left, it
+    // first reports that `T` cannot be inferred.
+    let source = r#"
+open class Shape
+class Square : Shape()
+class Keep<T : Square>(item: T)
+fun <T : Square> keep(item: T): Int = 1
+fun shape(): Shape = Shape()
+fun call(): Int = keep(shape())
+fun construct(): Keep<*> = Keep(shape())
+"#;
+    assert_rejection_same_as_kotlinc("BoundViolatingOnlyArgument", source);
+}
+
+#[test]
+fn a_bound_violation_after_valid_evidence_blames_the_later_argument() {
+    let source = r#"
+open class Shape
+class Square : Shape()
+class KeepTwo<T : Square>(first: T, second: T)
+fun <T : Square> keepTwo(first: T, second: T): Int = 1
+fun shape(): Shape = Shape()
+fun call(): Int = keepTwo(Square(), shape())
+fun construct(): KeepTwo<*> = KeepTwo(Square(), shape())
+"#;
+    assert_rejection_same_as_kotlinc("BoundViolationAfterValidEvidence", source);
+}
+
+#[test]
+fn an_invariant_argument_fixes_the_formal_before_a_later_argument() {
+    // `MutableList<Square>` fixes `T` to `Square`, so the `Shape` argument is the contradiction;
+    // joining both inputs to `Shape` would blame the list instead.
+    let source = r#"
+open class Shape
+class Square : Shape()
+class Same<T>(items: MutableList<T>, item: T)
+fun <T> same(items: MutableList<T>, item: T): Int = items.size
+fun shape(): Shape = Shape()
+fun call(): Int = same(mutableListOf<Square>(), shape())
+fun construct(): Same<*> = Same(mutableListOf<Square>(), shape())
+"#;
+    assert_rejection_same_as_kotlinc("InvariantArgumentFixesFormal", source);
+}
+
+#[test]
+fn a_mixed_variance_parameter_does_not_fix_its_formal() {
+    // `(T) -> T` mentions `T` in both directions, which is not an equality constraint: `T` solves
+    // to `Any` from the function's `Any` input bound together with the `Int` argument.
+    let src = r#"
+class Apply<T>(val f: (T) -> T, val value: T)
+fun <T> apply(f: (T) -> T, value: T): T = f(value)
+fun box(): String {
+    val f: (Any) -> String = { "OK" }
+    val constructed = Apply(f, 1)
+    return if (apply(f, 1) == "OK" && constructed.f(constructed.value) == "OK") "OK" else "FAIL"
+}
+"#;
+    assert_accepted_and_runs(src, "MixedVarianceParameter");
+}
+
+#[test]
+fn a_bound_and_an_invariant_contradiction_reject_every_argument() {
+    // The list's `Circle` leaves `T : Square`, so it fixes nothing; `shape` is then checked
+    // against the bound alone and rejected too. With no evidence left, `T` is uninferred and the
+    // list parameter renders it so.
+    let source = r#"
+open class Shape
+class Square : Shape()
+class Circle : Shape()
+class Keep<T : Square>(items: MutableList<T>, item: T)
+fun <T : Square> keep(items: MutableList<T>, item: T) {}
+fun call(shape: Shape) {
+    keep(mutableListOf<Circle>(), shape)
+}
+fun construct(shape: Shape): Keep<*> = Keep(mutableListOf<Circle>(), shape)
+"#;
+    assert_rejection_same_as_kotlinc("BoundAndInvariantContradictions", source);
+}
+
+#[test]
+fn a_rejected_structural_argument_renders_its_uninferred_formal() {
+    let source = r#"
+open class Shape
+class Square : Shape()
+class KeepAll<T : Square>(items: List<T>)
+fun <T : Square> keepAll(items: List<T>): Int = 1
+fun shape(): Shape = Shape()
+fun call(): Int = keepAll(listOf(shape()))
+fun construct(): KeepAll<*> = KeepAll(listOf(shape()))
+"#;
+    assert_rejection_same_as_kotlinc("RejectedStructuralArgument", source);
+}
+
+#[test]
+fn one_structural_argument_rejects_each_formal_it_contradicts() {
+    // kotlinc reports every formal the one argument leaves uninferred, then the argument once.
+    let source = r#"
+class Duo<A, B>
+fun <A : Number, B : CharSequence> take(value: Duo<A, B>) {}
+class Sink<A : Number, B : CharSequence>(value: Duo<A, B>)
+fun test(value: Duo<String, Int>) {
+    take(value)
+    Sink(value)
+}
+"#;
+    assert_rejection_same_as_kotlinc("StructuralArgumentRejectsEachFormal", source);
 }

@@ -246,4 +246,3 @@ fun box(): String { val value = make(); return value.own }
 "#,
     )]));
 }
-
