@@ -673,7 +673,7 @@ pub fn package_resources(jar: &std::path::Path, groups: &[ResourceGroup]) -> Res
     let existing = {
         let file = std::fs::File::open(jar)
             .map_err(|error| format!("cannot open {}: {error}", jar.display()))?;
-        let archive = zip::ZipArchive::new(file)
+        let archive = krusty::archive::open_file(file)
             .map_err(|error| format!("cannot read {}: {error}", jar.display()))?;
         archive
             .file_names()

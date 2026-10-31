@@ -87,6 +87,7 @@ impl Checker<'_> {
                     extension,
                     member_mapping_failure: failure,
                     rejected_candidates: candidates,
+                    ..
                 } => (extension, candidates, failure.map(|failure| *failure)),
             }
         } else {

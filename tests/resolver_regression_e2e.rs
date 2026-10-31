@@ -2468,6 +2468,34 @@ fun box(): String = invoked.values.greeting() + invoked.values.suffix()
     assert_accepted_and_runs(src, "ResolverPackageQualifiedPropertyInvoke");
 }
 
+/// An invariant nullable formal (`Column<E?>`) is a candidate for the receiver's classifier, and
+/// applicability rejects a non-null argument (`Column<EntityID<U>>`) or a caller variable whose
+/// bound admits null with kotlinc's receiver mismatch, not an unresolved reference.
+#[test]
+fn an_invariant_nullable_receiver_variable_rejects_a_non_null_argument_like_kotlinc() {
+    let sources = [(
+        "Receiver.kt",
+        r#"open class EntityID<T : Any>(val value: T)
+class Column<T>(val name: String)
+
+fun <T : Any, E : EntityID<T>> Column<E?>.invariantTable(): T? = null
+
+fun <U : Any> nonNullColumn(column: Column<EntityID<U>>) = column.invariantTable()
+fun <V : EntityID<String>?> boundedColumn(column: Column<V>) = column.invariantTable()
+fun <U : Any> nullableColumn(column: Column<EntityID<U>?>) = column.invariantTable()
+"#,
+    )];
+    let reference_args = common::language_directives::kotlinc_args(sources[0].1);
+    assert_eq!(
+        common::reference_error_blocks(&sources, &reference_args),
+        [
+            "Receiver.kt:6:67: candidate 'fun <T : Any, E : EntityID<T>> Column<E?>.invariantTable(): T?' is inapplicable because of a receiver type mismatch.",
+            "Receiver.kt:7:71: candidate 'fun <T : Any, E : EntityID<T>> Column<E?>.invariantTable(): T?' is inapplicable because of a receiver type mismatch.",
+        ]
+    );
+    common::assert_error_blocks_match_kotlinc(&sources, &reference_args);
+}
+
 #[test]
 fn a_callable_import_keeps_the_default_imported_classifier_in_type_positions() {
     let sources = [
@@ -2551,29 +2579,23 @@ fun <T : CharSequence> plainName(): T = 1
     common::assert_error_blocks_match_kotlinc(&sources, &reference_args);
 }
 
-/// A member extension's formal reached only through another formal's bound is the receiver's own
-/// type argument, so a conflicting expected result is reported against that argument
-/// (`Table<U>`), not against the bound's fallback (`Table<Any>`), as kotlinc reports.
+/// Only a formal constrained from above meets its declared bound. `S` of `put` also occurs in an
+/// ordinary value parameter here, so its binding is exact and `T`'s mismatch is kotlinc's error.
 #[test]
-fn a_member_extension_bound_only_formal_reports_the_receiver_argument_like_kotlinc() {
+fn an_in_projected_formal_with_an_ordinary_occurrence_keeps_its_exact_binding() {
     let sources = [(
-        "Tables.kt",
-        r#"class Column<T>(val name: String)
-class Table<T : Any>(val name: String)
-open class Entity<T : Any>(val id: T)
+        "Sink.kt",
+        r#"class Sink<T>
+fun <T, S : T?> Sink<in S>.put(value: T, extra: S): Int = 1
 
-class Tables {
-    fun <T : Any, E : Entity<T>> Column<out E>.table(): Table<T> = Table(name)
-
-    fun <U : Any> wrongTable(column: Column<Entity<U>>): Table<String> = column.table()
-}
+fun <T : Number?, S : T> both(sink: Sink<T>, t: S, n: Int): Int = sink.put(t, n)
 "#,
     )];
     let reference_args = common::language_directives::kotlinc_args(sources[0].1);
     assert_eq!(
         common::reference_error_blocks(&sources, &reference_args),
         [
-            "Tables.kt:8:74: return type mismatch: expected 'Table<String>', actual 'Table<U (of fun <U : Any> wrongTable)>'.",
+            "Sink.kt:4:79: argument type mismatch: actual type is 'Int', but 'T (of fun <T : Number?, S : T> both)' was expected.",
         ]
     );
     common::assert_error_blocks_match_kotlinc(&sources, &reference_args);
@@ -2760,4 +2782,32 @@ fun test(value: Duo<String, Int>) {
 }
 "#;
     assert_rejection_same_as_kotlinc("StructuralArgumentRejectsEachFormal", source);
+}
+
+/// A member extension's formal reached only through another formal's bound is the receiver's own
+/// type argument, so a conflicting expected result is reported against that argument
+/// (`Table<U>`), not against the bound's fallback (`Table<Any>`), as kotlinc reports.
+#[test]
+fn a_member_extension_bound_only_formal_reports_the_receiver_argument_like_kotlinc() {
+    let sources = [(
+        "Tables.kt",
+        r#"class Column<T>(val name: String)
+class Table<T : Any>(val name: String)
+open class Entity<T : Any>(val id: T)
+
+class Tables {
+    fun <T : Any, E : Entity<T>> Column<out E>.table(): Table<T> = Table(name)
+
+    fun <U : Any> wrongTable(column: Column<Entity<U>>): Table<String> = column.table()
+}
+"#,
+    )];
+    let reference_args = common::language_directives::kotlinc_args(sources[0].1);
+    assert_eq!(
+        common::reference_error_blocks(&sources, &reference_args),
+        [
+            "Tables.kt:8:74: return type mismatch: expected 'Table<String>', actual 'Table<U (of fun <U : Any> wrongTable)>'.",
+        ]
+    );
+    common::assert_error_blocks_match_kotlinc(&sources, &reference_args);
 }

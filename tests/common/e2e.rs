@@ -385,7 +385,7 @@ fn krusty_cli_diagnostics_in_process(
             .diags
             .retain(|diagnostic| diagnostic.severity == Severity::Error);
         diags.module_warnings.clear();
-        let count = diags.diags.len();
+        let count = diags.error_count();
         return (
             1,
             String::new(),

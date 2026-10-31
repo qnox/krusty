@@ -74,6 +74,7 @@ mod method_descriptors;
 pub mod method_node;
 mod method_parameters;
 mod module_calls;
+mod multifile_facades;
 pub mod names;
 mod operation_relocation;
 mod optional_annotations;
