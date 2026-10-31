@@ -1361,6 +1361,13 @@ JVM annotation interfaces use the same retained `InnerClasses` inventory as othe
 classifiers. Declared children and enclosing rows remain discoverable without a method or element
 referencing them. This changes the JVM class table, not Kotlin metadata or annotation values.
 
+## Declaration-result source provenance
+
+Declaration-result conversions retain the checked source position on their original producer and
+selected operand-bound call. Existing positions, return endpoints and inline origins remain intact;
+zero source positions stay absent. This is common debug provenance for target emission and changes
+neither semantic substitution nor a metadata wire format.
+
 ## Initializer inline debug ranges
 
 Class-initializer entry establishes the implicit callable frame. Initializer expressions record

@@ -2099,14 +2099,7 @@ impl BodyLowering<'_> {
         if suspend {
             self.ir.suspend_calls.insert(call, signature.result.get());
         }
-        Some(Ok(if statements.is_empty() {
-            call
-        } else {
-            self.ir.add_expr(IrExpr::Block {
-                stmts: statements,
-                value: Some(call),
-            })
-        }))
+        Some(Ok(self.wrap_call_statements(statements, call)))
     }
 
     /// Consume the checker's parameter mapping once for all ordinary source calls. This is the

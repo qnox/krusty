@@ -23554,3 +23554,12 @@ annotations over every supported release read from the manifest.
 `annotation_impl_class_e2e` compares complete emitted class inventories and raw artifacts, and runs
 the same programs after Kotlin; the ordinary Java-interface controls remain in
 `interface_object_method_e2e`.
+
+## Source positions through declaration-result conversions
+
+A checked property's or call's source position survives conversion from a declaration result to
+its applied result. Common lowering retains that position on the original producer and the selected
+call within an operand-evaluation block, preserving any existing origin. The JVM restores a real
+call's position at its invoke after inline operands reset the active line. Return endpoints, inline
+origins and positionless expressions keep their existing contracts. Complete class artifacts and
+runtime controls cover expression/explicit returns, reordered operands and source/compiled inlining.
