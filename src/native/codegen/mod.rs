@@ -20,6 +20,9 @@
 use crate::compilation_target::CompilationTarget;
 mod dependency_intrinsics;
 mod lower;
+mod reference_identity;
+
+use reference_identity::ReferenceDeclaration;
 
 use crate::backend::{Artifact, Backend, CheckedIrFile};
 use crate::diag::DiagSink;
@@ -33,10 +36,15 @@ use super::target::NativeTarget;
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct DependencyExport {
     symbol: String,
+    /// The declaration's marker key, distinct from this export's invocation alias.
+    reference_declaration: Option<ReferenceDeclaration>,
     signature: crate::backend::DependencyFunctionSignature,
     member_receiver: Option<crate::backend::DependencyMemberReceiver>,
     singleton_member_receiver: Option<crate::backend::SingletonMemberReceiver>,
     singleton_extension_receiver: Option<crate::backend::SingletonExtensionUnreadReceiver>,
+    /// The entry filling this declaration's omitted defaults, when it declares any: every operand
+    /// of [`Self::signature`], then one `Int` mask per 32 of them with a bit per omitted operand.
+    default_entry: Option<String>,
 }
 
 /// One source function this target must publish for dependent source modules.
@@ -45,6 +53,7 @@ struct DependencyExportDefinition {
     symbol: String,
     signature: crate::backend::DependencyFunctionSignature,
     member_receiver: Option<crate::backend::DependencyMemberReceiver>,
+    default_entry: Option<String>,
 }
 
 /// The symbol every program object must define for the runtime's `_start` to call.
@@ -177,6 +186,13 @@ impl Backend for CraneliftBackend {
         dependency_intrinsics::operation_plan(operation).is_some()
     }
 
+    fn realizes_dependency_getter(
+        &self,
+        signature: crate::backend::DependencyGetterSignature<'_>,
+    ) -> bool {
+        lower::realizes_dependency_getter(signature)
+    }
+
     fn lower_ir_file(
         &self,
         mut file: CheckedIrFile<'_>,
@@ -290,8 +306,28 @@ impl Backend for CraneliftBackend {
             };
             let symbol = format!("kt_klib_export_{}", state.next_dependency_symbol);
             state.next_dependency_symbol += 1;
+            // A later module calling this declaration with arguments left out reaches the
+            // declaring file's default entry through an export of its own.
+            let default_entry = lower::exports_default_entry(&file.ir, callable)
+                .then(|| format!("{symbol}__defaults"));
+            let reference_declaration = match file.kind {
+                crate::backend::CheckedIrUnitKind::Source => {
+                    match ReferenceDeclaration::source_export(&file.ir, file.module_name, callable)
+                    {
+                        Ok(identity) => identity,
+                        Err(error) => {
+                            diags.error(crate::diag::Span::new(0, 0), error);
+                            return Vec::new();
+                        }
+                    }
+                }
+                crate::backend::CheckedIrUnitKind::DependencySupport => {
+                    Some(ReferenceDeclaration::dependency(identity))
+                }
+            };
             let export = DependencyExport {
                 symbol: symbol.clone(),
+                reference_declaration,
                 signature: signature.clone(),
                 member_receiver: file.dependency_exports.member_receiver(callable),
                 singleton_member_receiver: file
@@ -300,6 +336,7 @@ impl Backend for CraneliftBackend {
                 singleton_extension_receiver: file
                     .dependency_exports
                     .singleton_extension_unread_receiver(callable),
+                default_entry: default_entry.clone(),
             };
             if state
                 .dependency_symbols
@@ -318,6 +355,7 @@ impl Backend for CraneliftBackend {
                     symbol,
                     signature,
                     member_receiver: file.dependency_exports.member_receiver(callable),
+                    default_entry,
                 },
             );
         }

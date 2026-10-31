@@ -154,7 +154,7 @@ pub use local_property_references::IrLocalPropertyReference;
 pub use module_records::{
     IrCallableTypeParameter, IrClassifierKind, IrHeaderAnnotation, IrModuleCallable,
     IrModuleClassifier, IrModuleConstructions, IrModuleConstructor, IrModuleMemberAccess,
-    IrModuleSource,
+    IrModuleSource, IrOverriddenFunction,
 };
 pub use null_checks::NullCheck;
 pub use operators::{IrBinOp, IrTypeOp};
@@ -1753,6 +1753,10 @@ pub struct IrFile {
     /// left value). Recorded where they are lowered, so a backend lays the guard out as its platform
     /// compiler does without recognizing the shape again.
     pub null_guards: crate::fx_hash::HashSet<ExprId>,
+    /// The temporary `value as? T` evaluates its operand into, keyed by its `Variable`. Only the
+    /// `is T` test and the matching branch's cast read it, so a backend may store the operand's
+    /// physical value without first converting it to the operand's semantic type.
+    pub safe_cast_temporaries: crate::fx_hash::HashSet<ExprId>,
     /// `::prop.isInitialized`, recorded when lowering `LateinitFieldRead`. The probe compares the
     /// property with null and does not throw. A backend chooses the raw field, getter, or bridge.
     pub lateinit_initialization_probes: crate::fx_hash::HashSet<ExprId>,
@@ -2067,6 +2071,10 @@ pub struct IrFile {
     /// Internal names of classes kotlinc marks `ACC_SYNTHETIC` (0x1000) on the class itself — e.g. a
     /// `@Serializable` class's generated `$$serializer` object.
     synthetic_classes: crate::fx_hash::HashSet<TypeName>,
+    /// Internal names of classes a compiler plugin generates with no Kotlin declaration behind
+    /// them, such as Compose's `ComposableSingletons$<File>Kt`. No declaration record describes
+    /// them, and kotlinc writes them a synthetic-class `@Metadata`.
+    declarationless_classes: crate::fx_hash::HashSet<TypeName>,
     /// Provenance and initialization placement for statics generated without a Kotlin declaration.
     generated_static_facts: crate::fx_hash::HashMap<u32, generated_members::GeneratedStaticFacts>,
     /// `FunId`s of methods carrying a `Deprecated` classfile attribute (from `@Deprecated`) — e.g. a
@@ -2207,7 +2215,8 @@ pub struct IrFile {
     pub secondary_ctor_lines:
         crate::fx_hash::HashMap<crate::fir::DeclarationId, IrSecondaryCtorLines>,
     /// Declared PRIMARY-constructor visibility per class (`class C protected constructor(…)`);
-    /// absent = public. It sets `@Metadata` `Constructor.flags` and the JVM access.
+    /// absent = public, or private for a singleton, whose constructor only a generated singleton
+    /// records as public. It sets `@Metadata` `Constructor.flags` and the JVM access.
     pub ctor_visibilities: crate::fx_hash::HashMap<TypeName, crate::types::Visibility>,
     /// A declared function's `vararg` parameter — class `@Metadata` must emit
     /// `ValueParameter.vararg_element_type` (f4) or a consumer demands one literal array (`too many
@@ -2364,6 +2373,10 @@ pub struct IrFile {
     /// where it was lowered, not from its shape: an adaptation or widening over the same call is
     /// another coercion. A target decides whether the conversion crosses a physical result slot.
     pub declaration_result_coercions: crate::fx_hash::HashSet<ExprId>,
+    /// The `ImplicitCoercion` JVM dependency-call realization places between a provider's physical
+    /// result and the checked semantic result, keyed by that coercion. Like
+    /// `declaration_result_coercions`, the mark comes from where the boundary was made.
+    pub jvm_external_result_coercions: crate::fx_hash::HashSet<ExprId>,
     /// Call-owned supplied-argument edges whose declaration parameters mention type parameters.
     /// A target may adapt only these exact edges, and only when its own carrier rules select them.
     pub declaration_argument_boundaries:

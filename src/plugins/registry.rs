@@ -21,17 +21,18 @@
 //!   - kapt's plugin without options (the Kotlin Gradle plugin passes its jar to every compile of a
 //!     kapt project) → nothing: it acts only once its options configure stubs or processing; with
 //!     options → ERROR, as below;
-//!   - a PARTIALLY reimplemented plugin (Compose) → INFO for a compilation, which runs the native
+//!   - a PARTIALLY reimplemented plugin (Compose, assignment) → INFO for a compilation, which runs the native
 //!     pass and fails on any construct the pass does not cover yet, and a REFUSAL for `krusty
 //!     refusals`, so a build still hands such a module to kotlinc;
 //!   - an `-Xplugin` jar krusty neither reimplements nor can host (any third-party FIR/IR plugin)
 //!     → ERROR. Silently ignoring it would emit wrong bytecode, so a drop-in must fail loudly.
 
 use crate::plugins::allopen::AllOpenPlugin;
+use crate::plugins::assignment::AssignmentPlugin;
 use crate::plugins::cli::{
-    PluginConfig, PluginOption, ALLOPEN_PLUGIN_ID, COMPOSE_PLUGIN_ID, KAPT_PLUGIN_ID,
-    KSP_PLUGIN_ID, NOARG_PLUGIN_ID, SAM_WITH_RECEIVER_PLUGIN_ID, SCRIPTING_PLUGIN_ID,
-    SERIALIZATION_PLUGIN_ID,
+    PluginConfig, PluginOption, ALLOPEN_PLUGIN_ID, ASSIGNMENT_PLUGIN_ID, COMPOSE_PLUGIN_ID,
+    KAPT_PLUGIN_ID, KSP_PLUGIN_ID, NOARG_PLUGIN_ID, SAM_WITH_RECEIVER_PLUGIN_ID,
+    SCRIPTING_PLUGIN_ID, SERIALIZATION_PLUGIN_ID,
 };
 use crate::plugins::compose::{ComposeOptions, ComposePlugin};
 use crate::plugins::noarg::NoArgPlugin;
@@ -400,6 +401,15 @@ fn build_sam_with_receiver(
     Box::new(SamWithReceiverPlugin::from_options(options))
 }
 
+/// Build the native assignment plugin from the compilation's options for it.
+fn build_assignment(
+    _act: &Activation,
+    _release: Option<&str>,
+    options: &[PluginOption],
+) -> Box<dyn IrPlugin> {
+    Box::new(AssignmentPlugin::from_options(options))
+}
+
 /// The set of extensions krusty knows about — independent of any compilation.
 #[derive(Default)]
 pub struct PluginRegistry {
@@ -440,6 +450,13 @@ impl PluginRegistry {
             plugin_id: SAM_WITH_RECEIVER_PLUGIN_ID,
             registrar: "org.jetbrains.kotlin.samWithReceiver.SamWithReceiverComponentRegistrar",
             kind: ExtensionKind::Native(build_sam_with_receiver),
+            option_keys: Some(&["annotation"]),
+            unimplemented_options: &[],
+        });
+        r.register(RegisteredExtension {
+            plugin_id: ASSIGNMENT_PLUGIN_ID,
+            registrar: "org.jetbrains.kotlin.assignment.plugin.AssignmentComponentRegistrar",
+            kind: ExtensionKind::PartialNative(build_assignment),
             option_keys: Some(&["annotation"]),
             unimplemented_options: &[],
         });
@@ -806,6 +823,33 @@ mod tests {
                 },
                 PluginDiagnostic::UnimplementedOption {
                     option: option("reportsDestination", "build/reports"),
+                },
+                PluginDiagnostic::PartialSubstitution {
+                    plugin_id: COMPOSE_PLUGIN_ID.to_string(),
+                },
+            ]
+        );
+    }
+
+    /// A named runtime version replaces the runtime features the pass detects on the classpath
+    /// (such as parameter names in source information), so the pass refuses it; none is the
+    /// default.
+    #[test]
+    fn a_compose_target_runtime_version_is_refused() {
+        let c = cfg(&[
+            "-P",
+            "plugin:androidx.compose.compiler.plugins.kotlin:targetRuntimeVersion=1.8",
+        ]);
+        let resolved = PluginRegistry::with_builtins().resolve(&activation(&c, &[]));
+        assert_eq!(
+            resolved.diagnostics,
+            vec![
+                PluginDiagnostic::UnimplementedOption {
+                    option: PluginOption {
+                        id: COMPOSE_PLUGIN_ID.to_string(),
+                        key: "targetRuntimeVersion".to_string(),
+                        value: "1.8".to_string(),
+                    },
                 },
                 PluginDiagnostic::PartialSubstitution {
                     plugin_id: COMPOSE_PLUGIN_ID.to_string(),

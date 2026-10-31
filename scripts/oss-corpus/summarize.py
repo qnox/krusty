@@ -6,7 +6,8 @@ usage: summarize.py [--stars <stars.tsv>] [--plugins <dir>] [--json <out.json>] 
 
 `--stars` lists `<name>\t<stars>` per project. `--plugins` is searched for the `<name>.plugins.tsv`
 plugin surveys the reference builds wrote. The report has the per-project table, the reasons for
-every missed compilation, and the Gradle and Kotlin compiler plugins the corpus uses most.
+every missed compilation, what each build cost, and the Gradle and Kotlin compiler plugins the
+corpus uses most.
 """
 import argparse
 import collections
@@ -114,6 +115,58 @@ def measured_cell(project):
     return f"[{text}]({m['run']})" if m.get('run') else text
 
 
+def seconds(value):
+    return f'{value:,.1f} s'
+
+
+def pair(kotlinc, krusty, unit, speedup=False):
+    """`kotlinc / krusty`, and with `speedup` how many times faster krusty is."""
+    text = f'{unit(kotlinc)} / {unit(krusty)}'
+    if speedup and kotlinc and krusty:
+        text += f' ({kotlinc / krusty:.1f}×)'
+    return text
+
+
+def megabytes(value):
+    return f'{value:,} MB' if value else '—'
+
+
+def cost_section(projects):
+    """The cost of both builds of every project measured with them: compile time, the compiler's and
+    the whole build's peak memory, and the whole build's wall and CPU time."""
+    measured = [p for p in projects if p.get('cost') and p['cost'].get('kotlinc') and p['cost'].get('krusty')]
+    if not measured:
+        return []
+    out = ['', '## Build cost', '',
+           'Each build runs alone on its own runner. Compile time sums the compile tasks: kotlinc\'s Kotlin task, and',
+           'krusty\'s replacement, support check and Kotlin task (kotlinc\'s compile when a compilation is left to it).',
+           'Peak memory sums every process the build started, daemons included; the compiler\'s is the Kotlin daemon\'s',
+           'in the reference build and the krusty processes\' in the krusty build. A warm-up build downloads everything',
+           'first, and both measured builds run offline from the same caches.',
+           '',
+           '| Project | Compile time, compilations krusty built (kotlinc / krusty) | Compile time, all compilations |'
+           ' Compiler peak RSS | Build peak RSS | Build wall time | Build CPU time |',
+           '| --- | ---: | ---: | ---: | ---: | ---: | ---: |']
+    totals = collections.Counter()
+    for p in measured:
+        k, r = p['cost']['kotlinc'], p['cost']['krusty']
+        out.append(
+            f"| {p['name']} | {pair(k['built_compile_seconds'], r['built_compile_seconds'], seconds, True)} | "
+            f"{pair(k['compile_seconds'], r['compile_seconds'], seconds)} | "
+            f"{pair(k['peak_rss_mb']['kotlin_daemon'], r['peak_rss_mb']['krusty'], megabytes)} | "
+            f"{pair(k['peak_rss_mb']['total'], r['peak_rss_mb']['total'], megabytes)} | "
+            f"{pair(k['wall_seconds'], r['wall_seconds'], seconds)} | "
+            f"{pair(k['cpu_seconds'], r['cpu_seconds'], seconds)} |")
+        for key in ('built_compile_seconds', 'compile_seconds', 'wall_seconds', 'cpu_seconds'):
+            totals['kotlinc', key] += k[key]
+            totals['krusty', key] += r[key]
+    total = {key: pair(totals['kotlinc', key], totals['krusty', key], seconds, key == 'built_compile_seconds')
+             for key in ('built_compile_seconds', 'compile_seconds', 'wall_seconds', 'cpu_seconds')}
+    out.append(f"| **Total** | **{total['built_compile_seconds']}** | **{total['compile_seconds']}** | | | "
+               f"**{total['wall_seconds']}** | **{total['cpu_seconds']}** |")
+    return out
+
+
 def report(projects, stars, surveys, title):
     out = []
     if title:
@@ -151,6 +204,8 @@ def report(projects, stars, surveys, title):
             out.append(f'  - {count} × {reason}')
     if not any_miss:
         out.append('None.')
+
+    out += cost_section(projects)
 
     for kind, heading in (('gradle', 'Gradle plugins'), ('compiler', 'Kotlin compiler plugins'),
                           ('compiler-arg', 'Compiler plugin arguments')):

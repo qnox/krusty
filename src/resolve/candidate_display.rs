@@ -81,7 +81,7 @@ impl Checker<'_> {
         function: &crate::libraries::FunctionInfo,
         constructor: impl Fn(&crate::libraries::GenericSig, &crate::libraries::LibraryMember) -> String,
     ) -> String {
-        match function.bound_inner_constructor {
+        match function.bound_inner_constructor() {
             Some(_) if function.constructor_alias.is_some() => {
                 let signature = &function
                     .constructor_alias

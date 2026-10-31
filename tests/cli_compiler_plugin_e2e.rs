@@ -540,11 +540,65 @@ fn refusals_lists_the_arguments_and_plugins_krusty_refuses() {
 #[test]
 fn the_compose_pass_rejects_what_it_does_not_cover() {
     assert_compose_rejects(
-        "compose-parameters",
-        "@Composable fun Greeting(name: String) {}\n",
+        "compose-default-argument",
+        "@Composable fun Greeting(name: String = \"a\".repeat(2)) {}\n",
         &[],
         "3:13: error: krusty's Compose compiler plugin does not support a composable function \
-         with parameters yet",
+         with a default argument that is not a constant yet",
+    );
+    assert_compose_rejects(
+        "compose-inferred-stability",
+        "@Composable fun Greeting(names: List<String>) {}\n",
+        &[],
+        "3:13: error: krusty's Compose compiler plugin does not support a composable function \
+         parameter whose stability kotlinc infers yet",
+    );
+    assert_compose_rejects(
+        "compose-local-argument",
+        "@Composable fun Show(text: String) {}\n@Composable fun Greeting() {\nval text = \"a\"\nShow(text)\n}\n",
+        &[],
+        "6:1: error: krusty's Compose compiler plugin does not support a composable call argument \
+         that is not a constant, a parameter, or computed from a parameter yet",
+    );
+    assert_compose_rejects(
+        "compose-lambda-value",
+        "@Composable fun Greeting(content: @Composable () -> Unit) {\nval saved = content\n}\n",
+        &[],
+        "3:13: error: krusty's Compose compiler plugin does not support a composable lambda \
+         parameter used other than by calling it or passing it to a composable call yet",
+    );
+    assert_compose_rejects(
+        "compose-recursive-lambda",
+        "@Composable fun Greeting(content: @Composable () -> Unit) {\nGreeting(content)\n}\n",
+        &[],
+        "3:13: error: krusty's Compose compiler plugin does not support a recursive composable \
+         function whose lambda parameters' applier kotlinc infers yet",
+    );
+    let frame = "@Composable fun Frame(content: @Composable () -> Unit) {\ncontent()\n}\n";
+    assert_compose_rejects(
+        "compose-capturing-lambda",
+        &format!(
+            "{frame}@Composable fun Greeting(text: String) {{\nFrame {{ println(text) }}\n}}\n"
+        ),
+        &[],
+        "6:13: error: krusty's Compose compiler plugin does not support a composable lambda that \
+         captures a value yet",
+    );
+    assert_compose_rejects(
+        "compose-nested-lambda",
+        &format!(
+            "{frame}@Composable fun Greeting() {{\nFrame {{\nFrame {{ Frame {{ }} }}\n}}\n}}\n"
+        ),
+        &[],
+        "6:13: error: krusty's Compose compiler plugin does not support a lambda in a composable \
+         lambda yet",
+    );
+    assert_compose_rejects(
+        "compose-empty-lambda",
+        &format!("{frame}@Composable fun Greeting() {{\nFrame {{ }}\n}}\n"),
+        &[],
+        "7:7: error: krusty's Compose compiler plugin does not support an empty composable lambda \
+         yet",
     );
     assert_compose_rejects(
         "compose-non-skippable",

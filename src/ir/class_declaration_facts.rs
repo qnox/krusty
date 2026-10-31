@@ -13,6 +13,14 @@ impl IrFile {
         self.synthetic_classes.contains(&internal)
     }
 
+    pub(crate) fn mark_declarationless_class(&mut self, internal: TypeName) {
+        self.declarationless_classes.insert(internal);
+    }
+
+    pub(crate) fn is_declarationless_class(&self, internal: TypeName) -> bool {
+        self.declarationless_classes.contains(&internal)
+    }
+
     pub fn mark_deprecated_class(&mut self, internal: TypeName) {
         self.deprecated_classes.insert(internal);
     }

@@ -17,6 +17,30 @@ pub use crate::libraries::ClassifierDeclarationKey;
 use crate::libraries::{FunctionSet, LibraryType, PropertySet, ResolvedSymbols};
 use crate::types::{Ty, TypeName};
 
+/// Call conventions that kotlinc's frontend plugins configure with annotations. Each list holds
+/// the qualified identities of the annotation classes the compilation names for that plugin.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AnnotationConventions {
+    /// sam-with-receiver: an interface carrying one directly converts a lambda with its abstract
+    /// method's first parameter as the receiver.
+    pub sam_with_receiver: Vec<TypeName>,
+    /// assignment: an assignment to a `val` property whose type's class, or one of its supertypes,
+    /// carries one calls `assign` with the assigned value.
+    pub assignment: Vec<TypeName>,
+}
+
+/// The conventions of a compilation that configures none.
+pub static NO_ANNOTATION_CONVENTIONS: AnnotationConventions = AnnotationConventions {
+    sam_with_receiver: Vec::new(),
+    assignment: Vec::new(),
+};
+
+impl AnnotationConventions {
+    pub fn is_empty(&self) -> bool {
+        self.sam_with_receiver.is_empty() && self.assignment.is_empty()
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum SymbolNamespace {
     /// A package namespace. [`TypeName::ROOT`] represents the default package; it is not absence.
@@ -209,11 +233,10 @@ pub trait SymbolSource {
         None
     }
 
-    /// The annotations kotlinc's sam-with-receiver plugin is configured with: an interface carrying
-    /// one directly converts a lambda with its abstract method's first parameter as the receiver.
-    /// A compilation fact, published by the current-module provider.
-    fn sam_with_receiver_annotations(&self) -> &[TypeName] {
-        &[]
+    /// The annotation-configured call conventions the compilation's frontend plugins select. A
+    /// compilation fact, published by the current-module provider.
+    fn annotation_conventions(&self) -> &AnnotationConventions {
+        &NO_ANNOTATION_CONVENTIONS
     }
 
     /// Whether `companion` declares the exact serialization-plugin accessor shape. This reads a
@@ -318,12 +341,12 @@ impl SymbolSource for CompositeSource<'_> {
             .find_map(|child| child.serializable_class_elements(classifier))
     }
 
-    fn sam_with_receiver_annotations(&self) -> &[TypeName] {
+    fn annotation_conventions(&self) -> &AnnotationConventions {
         self.children
             .iter()
-            .map(|child| child.sam_with_receiver_annotations())
-            .find(|annotations| !annotations.is_empty())
-            .unwrap_or_default()
+            .map(|child| child.annotation_conventions())
+            .find(|conventions| !conventions.is_empty())
+            .unwrap_or(&NO_ANNOTATION_CONVENTIONS)
     }
 
     /// Only the child that assigned `identity` answers for it; the module's own declarations
@@ -582,8 +605,8 @@ impl SymbolSource for CachedCompositeSource<'_> {
         self.source.serializable_class_elements(classifier)
     }
 
-    fn sam_with_receiver_annotations(&self) -> &[TypeName] {
-        self.source.sam_with_receiver_annotations()
+    fn annotation_conventions(&self) -> &AnnotationConventions {
+        self.source.annotation_conventions()
     }
 }
 

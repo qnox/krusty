@@ -15,12 +15,14 @@ pub(crate) mod interface_identity;
 pub(crate) mod local_properties;
 mod module_facts;
 
-pub(crate) use dependency_call_shape::{DependencyCallShape, DependencyExportCall};
+pub(crate) use dependency_call_shape::{
+    DeclaredOperandRoles, DependencyCallShape, DependencyExportCall,
+};
 #[cfg(test)]
 pub(crate) use dependency_facts::referenced_dependencies;
 pub use dependency_facts::{
     BackendCallableFact, BackendCompilerIntrinsic, BackendPropertyFact, BackendSemanticCallRole,
-    CheckedBackendCallables, DependencyFactError,
+    CheckedBackendCallables, DependencyFactError, DependencyGetterSignature,
 };
 pub(crate) use dependency_metadata::KlibDependencyCallable;
 pub(crate) use dependency_metadata::{
@@ -131,6 +133,12 @@ pub trait Backend {
     /// A positive target implementation of a provider-authenticated declaration. This does not
     /// authorize common folding or replace a retained dependency export.
     fn realizes_dependency_intrinsic(&self, _operation: BackendCompilerIntrinsic) -> bool {
+        false
+    }
+
+    /// A positive target implementation of a complete authenticated getter declaration. This
+    /// never authorizes an ordinary class body or displaces a retained dependency export.
+    fn realizes_dependency_getter(&self, _signature: DependencyGetterSignature<'_>) -> bool {
         false
     }
 
