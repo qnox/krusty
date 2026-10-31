@@ -6400,3 +6400,10 @@ common Elvis snapshot and conditional. Preserve single evaluation, lazy fallback
 return targets and declared storage; leave generic operand and unrelated conditional admission
 unchanged. Validate malformed contracts and checked-FIR parity alongside the original full #2811
 official-producer program and independent JVM-oracle controls.
+
+## Preserve checked call positions across result conversion
+
+Retain checked source positions before introducing declaration-result coercions, including the exact
+selected call under an operand-evaluation block. Retire the compiled-inline-operand source probe.
+Validate complete JVM artifacts and execution for source/compiled inline operands and reordered
+calls, alongside the existing complete line-table, generic-result and operand-copy controls.
