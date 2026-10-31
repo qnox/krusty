@@ -1437,3 +1437,11 @@ without its own origin. The selected equality signature and both reads must name
 temporary/null proof; names never correlate these declarations. Declared temporary storage remains
 separate from the present branch's proven type. Common IR retains Elvis provenance with the absent
 source-line sentinel; no synthetic source line or metadata wire change is introduced.
+
+## Compound member singleton identity
+
+Checked FIR already records singleton declaration identity in `SingletonValue`. Compound member
+updates reuse that identity through `CompoundMemberReceiver::StableRead`, preserving the selected
+getter/setter and source facts. Repeated reads initialize the same declaration once; runtime calls
+and mutable receiver reads remain explicit snapshots. No metadata payload or compiler/plugin wire
+field changes are needed. Full raw JVM artifacts pin the eliminated receiver-local storage.

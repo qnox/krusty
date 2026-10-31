@@ -23485,3 +23485,12 @@ call role own this JVM choice.
 `annotation_impl_class_e2e` compares complete emitted class inventories and raw artifacts, and runs
 the same programs after Kotlin; the ordinary Java-interface controls remain in
 `interface_object_method_e2e`.
+
+## Singleton receivers in compound member updates
+
+A checked singleton declaration supplies a stable receiver identity for a compound member update.
+The selected getter and setter reuse that resolved read through the existing stable-receiver
+substitution. The first access initializes the singleton before the right operand; calls, property
+reads and mutable bindings keep their once-only snapshots. Compound index operands retain their
+existing binding strategy. `compound_receiver_reuse_e2e` compares complete singleton receiver/index
+modules and checks initialization order, one getter and one setter against Kotlin.

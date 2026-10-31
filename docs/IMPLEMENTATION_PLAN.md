@@ -6400,3 +6400,11 @@ common Elvis snapshot and conditional. Preserve single evaluation, lazy fallback
 return targets and declared storage; leave generic operand and unrelated conditional admission
 unchanged. Validate malformed contracts and checked-FIR parity alongside the original full #2811
 official-producer program and independent JVM-oracle controls.
+
+## Reuse checked singleton member receivers
+
+Admit authenticated `SingletonValue` reads to the compound member assignment's existing stable-read
+substitution. Keep the index-operand classifier and computed/mutable receiver snapshots unchanged.
+Validate complete class inventories and bytes for singleton member/index programs, initialization
+before the right operand, and existing immutable/captured/mutable receiver controls. Treat this
+receiver correction separately from annotation declaration-default operand normalization.
