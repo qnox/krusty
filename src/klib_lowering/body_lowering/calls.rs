@@ -842,10 +842,7 @@ impl BodyLowering<'_> {
                         .receiver
                         .is_some_and(|receiver| names(receiver, name))
                     && !names(bound, name)
-                    && !bound.mentions_ty_param()
-                    && self
-                        .linker
-                        .is_subtype(self.header.type_parameters(), read, bound);
+                    && self.admits_every_declared_bound(linked, name, read);
                 if !sole {
                     return Err(mismatch(
                         "a call captures a projection its other operands or bounds also constrain",
@@ -854,6 +851,30 @@ impl BodyLowering<'_> {
             }
         }
         Ok(captured)
+    }
+}
+
+impl BodyLowering<'_> {
+    /// Whether the captured read type `read` satisfies every upper bound the selected declaration
+    /// declares for its type parameter `name`: the complete authenticated ledger, not only the
+    /// first bound a type-parameter type carries. A bound naming a type parameter, or a selection
+    /// with no ledger, is no proof.
+    fn admits_every_declared_bound(&self, linked: &LinkedCallee, name: &str, read: Ty) -> bool {
+        let Some(bounds) = linked.type_parameter_bounds.as_ref().and_then(|bounds| {
+            let ordinal = linked
+                .type_parameters
+                .iter()
+                .position(|parameter| parameter == name)?;
+            bounds.get(ordinal)
+        }) else {
+            return false;
+        };
+        bounds.iter().all(|&bound| {
+            !bound.mentions_ty_param()
+                && self
+                    .linker
+                    .is_subtype(self.header.type_parameters(), read, bound)
+        })
     }
 }
 

@@ -296,14 +296,17 @@ fn stdlib_array_copy_binds_its_captured_type_argument() {
     assert_eq!(copies, [(array, vec![*projected], Some(array))]);
 }
 
-/// A class model in which `String` is an `Any` and `List` declares its parameter `out`, so
-/// `List<String>` is a subtype of `List<Any?>`.
+/// A class model in which `String` is a `CharSequence`, `Int` and `CharSequence` are `Any`, and
+/// `List` declares its parameter `out`, so `List<String>` is a subtype of `List<Any?>`.
 struct CovariantLists;
 
 impl TypeOracle for CovariantLists {
     fn direct_supertypes(&self, ty: Ty) -> Vec<Ty> {
-        if ty == Ty::String {
-            vec![Ty::obj("kotlin/Any")]
+        let any = T::Any.semantic();
+        if ty == T::String.semantic() {
+            vec![T::CharSequence.semantic(), any]
+        } else if ty == T::Int.semantic() || ty == T::CharSequence.semantic() {
+            vec![any]
         } else {
             Vec::new()
         }
@@ -442,4 +445,72 @@ fn a_capture_another_operand_also_constrains_declines() {
     assert_eq!(g, fresh_g);
     assert_eq!(unit.ir().exprs.len(), fresh.ir().exprs.len());
     assert_eq!(lowered_body(&unit, g), lowered_body(&fresh, fresh_g));
+}
+
+/// `take(a: Array<Q>)`, generic in `Q : Any, Q : CharSequence`, with `h(a: Array<out Int>)`
+/// calling `take(a)` at `Q = Int` and `k(a: Array<out String>)` calling it at `Q = String`.
+fn bounded_calls() -> Demo {
+    demo(
+        &[
+            ("take", &[T::ArrayQ], T::Unit),
+            ("h", &[T::ArrayOutInt], T::Unit),
+            ("k", &[T::ArrayOutString], T::Unit),
+        ],
+        |name, body| {
+            let type_argument = match name {
+                "h" => T::Int,
+                "k" => T::String,
+                _ => return Some(Vec::new()),
+            };
+            let a = body.param(0);
+            let call = body.generic_call("take", vec![a], type_argument, T::Unit);
+            Some(vec![
+                crate::metadata::klib_ir::tree::KlibIrStatement::Expression(call),
+            ])
+        },
+    )
+}
+
+const BOUNDED_SOURCE: &str = "fun <Q> take(a: Array<Q>) where Q : Any, Q : CharSequence {\n}\n";
+
+#[test]
+fn a_capture_every_declared_bound_admits_binds_as_the_source_call_does() {
+    // kotlinc accepts `take(a)` on an `a: Array<out String>`: the captured `String` is both an
+    // `Any` and a `CharSequence`.
+    let demo = bounded_calls();
+    let mut unit = DependencyBodyUnit::default();
+    let k = lower_two_input(&demo, &mut unit, "k", "take")
+        .unwrap_or_else(|decline| panic!("{decline}"));
+    validated(unit.ir());
+    let source = format!("{BOUNDED_SOURCE}fun k(a: Array<out String>) {{\n take(a)\n}}\n");
+    assert_eq!(
+        lowered_body(&unit, k),
+        super::demo_package::source_body_with_stdlib(&source, "k", 1)
+    );
+}
+
+#[test]
+fn a_capture_a_secondary_bound_rejects_declines() {
+    // kotlinc rejects `take(a)` on an `a: Array<out Int>` (an `Int` is not a `CharSequence`)
+    // although the first bound `Any` admits it and the serialized header matches the selected
+    // declaration. The call is not one checked FIR records, so the body declines and publishes
+    // nothing.
+    let demo = bounded_calls();
+    let mut unit = DependencyBodyUnit::default();
+    let decline = lower_two_input(&demo, &mut unit, "h", "take").expect_err("the body declines");
+    super::demo_package::assert_unit_is_empty(&unit);
+    assert_eq!(
+        decline.to_string(),
+        "the KLIB body of `demo.h` \
+         (its serialized declaration disagrees with the selected one: \
+         a call captures a projection its other operands or bounds also constrain)"
+    );
+    let k = lower_two_input(&demo, &mut unit, "k", "take")
+        .unwrap_or_else(|decline| panic!("{decline}"));
+    let mut fresh = DependencyBodyUnit::default();
+    let fresh_k = lower_two_input(&demo, &mut fresh, "k", "take")
+        .unwrap_or_else(|decline| panic!("{decline}"));
+    assert_eq!(k, fresh_k);
+    assert_eq!(unit.ir().exprs.len(), fresh.ir().exprs.len());
+    assert_eq!(lowered_body(&unit, k), lowered_body(&fresh, fresh_k));
 }

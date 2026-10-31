@@ -520,6 +520,7 @@ impl CallLinker for TemplateCalls<'_> {
             context_count,
             singleton_dispatch: None,
             type_parameters: Vec::new(),
+            type_parameter_bounds: Some(Vec::new()),
             class_type_parameters: Vec::new(),
         })
     }
@@ -577,6 +578,11 @@ fn generic_call(
         context_count,
         singleton_dispatch: None,
         type_parameters: formals,
+        type_parameter_bounds: realization
+            .callable
+            .generic_sig
+            .as_ref()
+            .map(|signature| signature.formal_bounds.clone()),
         class_type_parameters: Vec::new(),
     })
 }
@@ -664,6 +670,7 @@ fn member_call(
         context_count: realization.callable.context_count,
         singleton_dispatch: None,
         type_parameters: Vec::new(),
+        type_parameter_bounds: Some(Vec::new()),
         class_type_parameters,
     })
 }

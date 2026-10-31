@@ -64,6 +64,23 @@ pub(super) enum T {
     ArrayOutString,
     /// `Array<out Any?>`.
     ArrayOutNullableAny,
+    /// `CharSequence`.
+    CharSequence,
+    /// The type parameter `Q : Any, Q : CharSequence` of a generic `demo` function.
+    Q,
+    /// `Array<Q>`.
+    ArrayQ,
+    /// `Array<out Int>`.
+    ArrayOutInt,
+}
+
+/// A generic `demo` function's one type parameter: its spelling, metadata identity, serialized
+/// symbol slot and complete declared upper bounds.
+struct Formal {
+    name: &'static str,
+    id: u64,
+    slot: u32,
+    bounds: &'static [T],
 }
 
 impl T {
@@ -85,8 +102,11 @@ impl T {
             T::NullableString => "String",
             T::NullableNothing => "Nothing",
             T::ListString | T::ListNullableAny => "List",
-            T::ArrayP | T::ArrayOutString | T::ArrayOutNullableAny => "Array",
-            T::P => unreachable!("a type parameter is not a class"),
+            T::ArrayP | T::ArrayOutString | T::ArrayOutNullableAny | T::ArrayQ | T::ArrayOutInt => {
+                "Array"
+            }
+            T::CharSequence => "CharSequence",
+            T::P | T::Q => unreachable!("a type parameter is not a class"),
         }
     }
 
@@ -107,6 +127,8 @@ impl T {
             T::ArrayP => Some(T::P),
             T::ArrayOutString => Some(T::String),
             T::ArrayOutNullableAny => Some(T::NullableAny),
+            T::ArrayQ => Some(T::Q),
+            T::ArrayOutInt => Some(T::Int),
             _ => None,
         }
     }
@@ -114,14 +136,34 @@ impl T {
     /// The variance the type argument is applied with.
     fn variance(self) -> KlibIrVariance {
         match self {
-            T::ArrayOutString | T::ArrayOutNullableAny => KlibIrVariance::Out,
+            T::ArrayOutString | T::ArrayOutNullableAny | T::ArrayOutInt => KlibIrVariance::Out,
             _ => KlibIrVariance::Invariant,
         }
     }
 
-    /// Whether the type names the generic function's type parameter `P`.
-    fn mentions_p(self) -> bool {
-        self == T::P || self.argument().is_some_and(T::mentions_p)
+    /// The type parameter this type is.
+    fn formal(self) -> Option<Formal> {
+        match self {
+            T::P => Some(Formal {
+                name: "P",
+                id: 0,
+                slot: 900,
+                bounds: &[T::NullableAny],
+            }),
+            T::Q => Some(Formal {
+                name: "Q",
+                id: 1,
+                slot: 901,
+                bounds: &[T::Any, T::CharSequence],
+            }),
+            _ => None,
+        }
+    }
+
+    /// The type parameter this type names, itself or as its type argument.
+    fn mentioned_formal(self) -> Option<Formal> {
+        self.formal()
+            .or_else(|| self.argument().and_then(T::mentioned_formal))
     }
 
     pub(super) fn nullable(self) -> bool {
@@ -136,10 +178,10 @@ impl T {
     }
 
     pub(super) fn kotlin(self) -> KotlinType {
-        if self == T::P {
+        if let Some(formal) = self.formal() {
             return KotlinType::Param {
-                name: "P".to_owned(),
-                id: KotlinTypeParameterId(0),
+                name: formal.name.to_owned(),
+                id: KotlinTypeParameterId(formal.id),
                 nullable: false,
             };
         }
@@ -159,8 +201,17 @@ impl T {
     }
 
     pub(super) fn semantic(self) -> Ty {
-        let any = semantic_ty(&T::NullableAny.kotlin(), &HashMap::default());
-        let bounds = [(KotlinTypeParameterId(0), any)].into_iter().collect();
+        // A type-parameter type carries its first declared bound.
+        let bounds = [T::P, T::Q]
+            .map(|parameter| {
+                let formal = parameter.formal().expect("a type parameter");
+                (
+                    KotlinTypeParameterId(formal.id),
+                    semantic_ty(&formal.bounds[0].kotlin(), &HashMap::default()),
+                )
+            })
+            .into_iter()
+            .collect();
         semantic_ty(&self.kotlin(), &bounds)
     }
 
@@ -212,18 +263,17 @@ pub(super) fn declaration((name, params, ret): Shape) -> KotlinFunction {
         receiver: None,
         params: params.iter().map(|param| param.kotlin()).collect(),
         ret: ret.kotlin(),
-        formals: if is_generic((name, params, ret)) {
-            vec![KotlinTypeParameter {
-                id: KotlinTypeParameterId(0),
-                name: "P".to_owned(),
-                bounds: vec![T::NullableAny.kotlin()],
+        formals: generic_formal((name, params, ret))
+            .map(|formal| KotlinTypeParameter {
+                id: KotlinTypeParameterId(formal.id),
+                name: formal.name.to_owned(),
+                bounds: formal.bounds.iter().map(|bound| bound.kotlin()).collect(),
                 variance: crate::types::TypeVariance::Invariant,
                 only_input: false,
                 reified: false,
-            }]
-        } else {
-            Vec::new()
-        },
+            })
+            .into_iter()
+            .collect(),
         param_names: PARAMETER_NAMES[..params.len()]
             .iter()
             .map(|name| (*name).to_owned())
@@ -251,14 +301,15 @@ pub(super) fn declaration((name, params, ret): Shape) -> KotlinFunction {
     }
 }
 
-/// Whether the function declares the type parameter `P`, which its parameters or result name.
-fn is_generic((_, params, ret): Shape) -> bool {
-    ret.mentions_p() || params.iter().any(|param| param.mentions_p())
+/// The one type parameter a generic function declares, which its parameters or result name.
+fn generic_formal((_, params, ret): Shape) -> Option<Formal> {
+    ret.mentioned_formal()
+        .or_else(|| params.iter().find_map(|param| param.mentioned_formal()))
 }
 
-/// The serialized symbol of the type parameter `P` of a generic `demo` function.
-fn type_parameter_p() -> KlibIrSymbol {
-    local_symbol(KlibIrSymbolKind::TypeParameter, 900)
+/// The serialized symbol of a generic `demo` function's type parameter.
+fn type_parameter_symbol(formal: &Formal) -> KlibIrSymbol {
+    local_symbol(KlibIrSymbolKind::TypeParameter, formal.slot)
 }
 
 /// The signature of a built-in operator declared in package `package`, inside `class` if any.
@@ -369,9 +420,9 @@ impl Body {
         if let Some((_, id)) = self.types.iter().find(|(known, _)| *known == ty) {
             return *id;
         }
-        if ty == T::P {
+        if let Some(formal) = ty.formal() {
             let id = self.arena.push_type(KlibIrType::Simple {
-                classifier: type_parameter_p(),
+                classifier: type_parameter_symbol(&formal),
                 nullability: KlibIrNullability::NotSpecified,
                 arguments: Vec::new(),
                 annotations: Vec::new(),
@@ -806,8 +857,8 @@ fn demo_module(
     let facts = shapes
         .iter()
         .map(|&(name, params, ret)| {
-            let params = if is_generic((name, params, ret)) {
-                // A generic declaration's parameters name its declaration-owned `P`.
+            let params = if generic_formal((name, params, ret)).is_some() {
+                // A generic declaration's parameters name its declaration-owned formal.
                 let symbols = crate::symbol_source::SymbolSource::symbols(
                     &libraries,
                     crate::symbol_source::SymbolNamespace::Package(crate::types::type_name("demo")),
@@ -871,19 +922,17 @@ fn demo_module(
                 })
                 .collect();
             let return_type = body.ty(ret);
-            let type_parameters = if is_generic((name, params_shape, ret)) {
-                let bound = body.ty(T::NullableAny);
-                vec![KlibIrTypeParameter {
+            let type_parameters = generic_formal((name, params_shape, ret))
+                .map(|formal| KlibIrTypeParameter {
                     base: crate::metadata::klib_ir::tree::KlibIrDeclarationBase {
                         flags: 4, // Serialized IrFlags: invariant, non-reified.
-                        ..base(type_parameter_p())
+                        ..base(type_parameter_symbol(&formal))
                     },
-                    name: "P".to_owned(),
-                    supertypes: vec![bound],
-                }]
-            } else {
-                Vec::new()
-            };
+                    name: formal.name.to_owned(),
+                    supertypes: formal.bounds.iter().map(|bound| body.ty(*bound)).collect(),
+                })
+                .into_iter()
+                .collect();
             let mut arena = body.arena;
             let function = arena.push_function(KlibIrFunction {
                 base: base(function),
