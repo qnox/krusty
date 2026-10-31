@@ -209,6 +209,10 @@ pub struct DiagSink {
     /// Warnings about the compilation's configuration rather than a source position, such as an
     /// unresolved `-opt-in` marker. Each message is kept once, in first-report order.
     pub module_warnings: Vec<String>,
+    /// Errors about the module as a whole rather than a source position, such as two files of one
+    /// JVM multifile class declaring the same method. They render last, unlocated, as kotlinc
+    /// reports its backend's module-wide errors.
+    pub module_errors: Vec<String>,
 }
 
 impl DiagSink {
@@ -218,6 +222,7 @@ impl DiagSink {
             current_file: 0,
             authoritative_ranges: None,
             module_warnings: Vec::new(),
+            module_errors: Vec::new(),
         }
     }
 
@@ -227,6 +232,20 @@ impl DiagSink {
         if !self.module_warnings.contains(&message) {
             self.module_warnings.push(message);
         }
+    }
+
+    /// Report an error about the module as a whole, in report order.
+    pub fn module_error(&mut self, message: impl Into<String>) {
+        self.module_errors.push(message.into());
+    }
+
+    /// How many errors the module reports, located and unlocated.
+    pub fn error_count(&self) -> usize {
+        self.diags
+            .iter()
+            .filter(|diagnostic| diagnostic.severity == Severity::Error)
+            .count()
+            + self.module_errors.len()
     }
 
     fn accepts(&self, span: Span) -> bool {
@@ -439,7 +458,7 @@ impl DiagSink {
     }
 
     pub fn has_errors(&self) -> bool {
-        self.diags.iter().any(|d| d.severity == Severity::Error)
+        !self.module_errors.is_empty() || self.diags.iter().any(|d| d.severity == Severity::Error)
     }
 
     /// Render `path:line:col: severity: msg` lines against the original source. Single-file callers:
@@ -448,6 +467,11 @@ impl DiagSink {
         let mut out = String::new();
         for d in &self.diags {
             out.push_str(&self.render_one(d, path, src));
+        }
+        for error in &self.module_errors {
+            out.push_str("error: ");
+            out.push_str(error);
+            out.push('\n');
         }
         out
     }
@@ -469,6 +493,11 @@ impl DiagSink {
                 .or_else(|| files.first().copied())
                 .unwrap_or(("<unknown>", ""));
             out.push_str(&self.render_one(d, path, src));
+        }
+        for error in &self.module_errors {
+            out.push_str("error: ");
+            out.push_str(error);
+            out.push('\n');
         }
         out
     }

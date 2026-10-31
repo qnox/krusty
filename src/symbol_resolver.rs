@@ -49,7 +49,9 @@ mod resolved_symbol;
 mod sam;
 mod scope_level_callables;
 mod selected_call_instantiation;
-pub(crate) use selected_call_instantiation::selected_default_callable;
+pub(crate) use selected_call_instantiation::{
+    declaration_default_callable, selected_default_callable,
+};
 pub(crate) mod selected_constructor;
 pub(crate) use selected_constructor::SelectedConstructorDeclaration;
 pub(crate) use top_level_selection::{CandidateCall, TopLevelArguments, TopLevelSelection};
@@ -2291,7 +2293,7 @@ impl<'a> SymbolResolver<'a> {
         // `$$forInline` variant is what kotlinc splices); calling `$default` threads the `Continuation`
         // through the ordinary suspend machinery instead of splicing a suspend body. Splice (MUST-INLINE)
         // only when there is NO `$default` synthetic — a genuine `@InlineOnly` callee with no call target.
-        if let Some(c) = selected_default_callable(o) {
+        if let Some(c) = selected_default_callable(o).or_else(|| declaration_default_callable(o)) {
             crate::trace_compiler!(
                 "resolve",
                 "extension defaulted ($default) {name} recv={receiver:?} args={args:?} -> {}.{}{} ret={ret_ty:?}",
@@ -2464,7 +2466,7 @@ impl<'a> SymbolResolver<'a> {
             o,
             bind_defaulted_ext_ret_slots(&self.src, o, binding_receiver, slots, type_args),
         );
-        if let Some(c) = selected_default_callable(o) {
+        if let Some(c) = selected_default_callable(o).or_else(|| declaration_default_callable(o)) {
             crate::trace_compiler!(
                 "resolve",
                 "extension defaulted slots ($default) {name} recv={receiver:?} slots={slots:?} -> {}.{}{} ret={ret_ty:?}",
@@ -3066,7 +3068,7 @@ fn receiver_allows_member_dispatch(receiver: Ty) -> bool {
     }
 }
 
-fn select_instance_reference_from_functions(
+pub(crate) fn select_instance_reference_from_functions(
     recv: Ty,
     functions: &[FunctionInfo],
 ) -> Option<LibraryMember> {
