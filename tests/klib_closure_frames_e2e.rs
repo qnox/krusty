@@ -23,25 +23,6 @@ fun box(): String {
 fn official_receiver_captures_preserve_values_and_once_only_inputs() {
     let library = include_str!("fixtures/klib_closure_frames/ReceiverCapture.kt");
     let consumer = include_str!("fixtures/klib_closure_frames/ReceiverCaptureConsumer.kt");
-    let consumer_source = format!("package fixture\n{consumer}");
-    let classes = common::classes_against_kotlinc_module(&[
-        ("ReceiverCapture.kt", library),
-        ("ReceiverCaptureConsumer.kt", &consumer_source),
-    ]);
-    assert_eq!(
-        classes.krusty.keys().collect::<Vec<_>>(),
-        classes.reference.keys().collect::<Vec<_>>(),
-        "complete receiver capture class inventory"
-    );
-    let differences = classes
-        .reference
-        .iter()
-        .filter_map(|(name, reference)| {
-            let ours = &classes.krusty[name];
-            (reference != ours).then(|| common::exact_class_difference(name, reference, ours))
-        })
-        .collect::<Vec<_>>();
-    assert!(differences.is_empty(), "{}", differences.join("\n\n"));
     assert_official_dependency_closures(
         library,
         consumer,

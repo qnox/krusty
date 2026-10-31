@@ -7,7 +7,11 @@ const BARE_CAST: &str = include_str!("box_regressions/bareCastTargetArguments.kt
 const RECEIVER_READS: &str = include_str!("fixtures/implicit_receiver_stability/ReceiverReads.kt");
 
 fn assert_complete_module(file: &str, source: &str) {
-    let classes = common::classes_against_kotlinc_module(&[(file, source)]);
+    assert_complete_sources(&[(file, source)]);
+}
+
+fn assert_complete_sources(sources: &[(&str, &str)]) {
+    let classes = common::classes_against_kotlinc_module(sources);
     assert_eq!(
         classes.krusty.keys().collect::<Vec<_>>(),
         classes.reference.keys().collect::<Vec<_>>(),
@@ -42,4 +46,15 @@ fn own_captured_and_inline_receiver_artifacts_match_kotlin() {
 #[test]
 fn receiver_snapshots_and_shared_cells_run_like_kotlin() {
     common::expect_box_same_as_kotlinc(RECEIVER_READS, "ReceiverReads");
+}
+
+#[test]
+fn serialized_receiver_capture_artifacts_match_kotlin() {
+    let library = include_str!("fixtures/klib_closure_frames/ReceiverCapture.kt");
+    let consumer = include_str!("fixtures/klib_closure_frames/ReceiverCaptureConsumer.kt");
+    let consumer_source = format!("package fixture\n{consumer}");
+    assert_complete_sources(&[
+        ("ReceiverCapture.kt", library),
+        ("ReceiverCaptureConsumer.kt", &consumer_source),
+    ]);
 }
