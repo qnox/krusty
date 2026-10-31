@@ -52298,7 +52298,7 @@ impl<'a> Checker<'a> {
                                 Some(name),
                             )
                         } else {
-                            self.check_lambda_with_types(scope, x, pt)
+                            self.check_lambda_with_types_labeled(scope, x, pt, Some(name))
                         }
                     }
                     _ => {
