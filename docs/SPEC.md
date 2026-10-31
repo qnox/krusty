@@ -21210,9 +21210,30 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   property or function with no checked body (a `lateinit var`, an `external fun`) still hands its
   checked annotations to lowering through a body-less metadata group, as a body-less classifier does,
   so `@set:JvmName("assignNamed") lateinit var named: String` declares and is called as
-  `assignNamed` (`tests/facade_lateinit_setter_e2e.rs`). Known gaps: a `@JvmStatic` companion
-  property has no outer static wrapper, and a top-level property's retained `PROPERTY`-targeted annotation gets no `$annotations` marker at all
-  (with or without `@JvmName`); only a suppressed SOURCE application's empty marker is emitted there.
+  `assignNamed` (`tests/facade_lateinit_setter_e2e.rs`). A package property's checked annotation
+  payload crosses the same stable property identity as its accessors: retained PROPERTY applications
+  get a JVM marker carrying those applications, FIELD applications stay on the backing field, and
+  both sites have their own metadata records. Only checked PROPERTY/FIELD destinations contribute
+  the property's annotation flag; getter, setter and setter-parameter annotations keep their own
+  metadata flags. `package_owner_and_accessor_annotation_flags_follow_their_checked_destinations`
+  compares isolated and mixed destinations using user-defined annotations and complete class files.
+  A SOURCE application, including genuinely suppressed SOURCE provenance, keeps an empty marker
+  without metadata's annotation flag; an erased optional expectation retains the flag without a
+  marker. Extension and context markers consume the checked getter parameter frame, with generic
+  erasure at the JVM boundary, and metadata names the complete realized descriptor. Tests:
+  `tests/package_property_annotations_e2e.rs`. A `@JvmStatic` companion property still has no outer
+  static wrapper.
+
+  A compiler-default setter retains its checked value-parameter annotations in both the physical
+  parameter attributes and the metadata setter parameter. The complete annotation payload pool is
+  reserved before the setter body, including nested values, arrays and synthesized nullability.
+  `default_setter_parameter_payloads_match_every_reference_class` compares the complete artifacts.
+
+  The PROPERTY record list contains only that site's applications, independently of FIELD presence.
+  All recorded marker identities participate in marker debug tables and
+  value-class naming. Independent facade marker collision groups follow retained source order;
+  the first group publishes the generated header diagnostic and each source declaration publishes
+  its own complete diagnostic.
   Tests: `accessor_jvm_name_e2e`.
 
 - **`@JvmName` on a top-level function names the emitted method.** The annotation's constant
