@@ -5056,20 +5056,6 @@ code is the one the code generator already names: provider-owned bodies through 
   kotlin-test's assertions and `kotlin.text.trim` still decline inside their library bodies
   (`Asserter` interface dispatch, accessor calls); the generic fix is compiling those member
   bodies, not intercepting the calls. Next: final library member bodies as ordinary roots.
-- **Lowering: safe calls and target-represented members.** A `SAFE_CALL` block (one compiler
-  temporary, then an origin-less `when` whose first branch tests that exact temporary against
-  `null`) lowers as checked FIR lowers `a?.f()`: the temporary, its null test and the selector over
-  a plain read of it (`klib_lowering/body_lowering/safe_calls.rs`); any other shape declines as a
-  disagreeing serialized declaration. A member of a classifier whose representation the target
-  owns (`Backend::represents_dependency_classifier`; on Native the root class, text, arrays, the
-  runtime's throwables, `StringBuilder`, `Pair`, `IndexedValue` and the standard collection
-  implementations) is a `TargetMember` external: its KLIB body reads a class layout the runtime
-  object does not have, so the target realizes the call at its dispatch receiver as it does a
-  source call, and an unsupported member declines there by name. This is not interception:
-  members of library-laid-out classes still need their bodies compiled. `println` and `print`
-  now link through their stdlib bodies. Next stops on the stdlib: `IntRange` accessors and
-  primitive iterators, calls through accessor signatures, generic calls, object values and
-  callee parameter defaults.
 - Tests: the unit tests in `metadata/klib_ir/tree_decoding.rs`, `metadata/id_signature/` and
   `klib_lowering/` (whose stdlib checks run when `KRUSTY_KOTLIN_NATIVE` is set). End-to-end coverage comes through
   the box harness rather than a separate KLIB suite: the Native lane gains the `// MODULE:`
