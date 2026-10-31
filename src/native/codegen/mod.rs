@@ -193,6 +193,13 @@ impl Backend for CraneliftBackend {
         lower::realizes_dependency_getter(signature)
     }
 
+    fn represents_dependency_classifier(
+        &self,
+        classifier: crate::backend::DependencyClassifier,
+    ) -> bool {
+        lower::represents_dependency_classifier(classifier)
+    }
+
     fn lower_ir_file(
         &self,
         mut file: CheckedIrFile<'_>,

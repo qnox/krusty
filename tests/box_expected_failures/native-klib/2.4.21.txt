@@ -69,7 +69,6 @@ basics/unchecked_cast11.kt
 basics/unchecked_cast12.kt
 basics/unchecked_cast13.kt
 basics/unchecked_cast2.kt
-basics/unchecked_cast3.kt
 basics/unchecked_cast4.kt
 basics/unchecked_cast5.kt
 basics/unchecked_cast6.kt
@@ -327,7 +326,6 @@ compileKotlinAgainstKotlin/jvm8/defaults/enable/superCallFromInterface2.kt
 compileKotlinAgainstKotlin/jvm8/defaults/enable/superPropAccess.kt
 compileKotlinAgainstKotlin/jvm8/defaults/enable/superPropAccessFromInterface.kt
 compileKotlinAgainstKotlin/jvm8/defaults/enable/superPropAccessFromInterface2.kt
-compileKotlinAgainstKotlin/jvm8/defaults/interop/likeSpecialization.kt
 compileKotlinAgainstKotlin/jvm8/defaults/superCall.kt
 compileKotlinAgainstKotlin/jvm8/defaults/superCallFromInterface.kt
 compileKotlinAgainstKotlin/jvm8/defaults/superPropAccess.kt
@@ -340,7 +338,6 @@ compileKotlinAgainstKotlin/jvm8/jvm8against6/simpleCallWithHierarchy.kt
 compileKotlinAgainstKotlin/jvm8/jvm8against6/simpleProp.kt
 compileKotlinAgainstKotlin/jvm8/jvm8against6/simplePropWithHierarchy.kt
 compileKotlinAgainstKotlin/kt14012.kt
-compileKotlinAgainstKotlin/kt21775.kt
 compileKotlinAgainstKotlin/nestedClass.kt
 compileKotlinAgainstKotlin/nestedClassAsBound.kt
 compileKotlinAgainstKotlin/nestedEnum.kt
@@ -1111,10 +1108,7 @@ funInterface/nonTrivialProjectionInSuperType.kt
 funInterface/subtypeOfFunctionalTypeToFunInterfaceConversion.kt
 funInterface/suspendFunInterfaceConversionCodegen.kt
 funInterface/suspendFunctionAndFunInterfaceSharedClassSplit.kt
-function/defaults.kt
-function/defaults1.kt
 function/defaults10.kt
-function/defaults2.kt
 function/defaults4.kt
 function/defaults5.kt
 function/defaults6.kt
@@ -1603,7 +1597,6 @@ multiplatform/k2/basic/removeExpectDeclarationsFromMetadata.kt
 multiplatform/k2/basic/substitutionOverrideInCommonModule.kt
 multiplatform/k2/basic/transitiveSuperclassActualization.kt
 multiplatform/k2/basic/widerVisibilityInActualClassifier.kt
-multiplatform/k2/complexMatchings/expectCtorlessFinalToActualUnit.kt
 multiplatform/k2/defaultArguments/constructor.kt
 multiplatform/k2/defaultArguments/defaultArgumentInDelegatedFunction.kt
 multiplatform/k2/defaultArguments/function.kt
@@ -1625,7 +1618,6 @@ multiplatform/k2/expectStatic.kt
 multiplatform/k2/expectValueClassWithNoPrimaryConstructor.kt
 multiplatform/k2/extensionPropertiesOverloads.kt
 multiplatform/k2/hmpp/abstractExpectedActual2-2.kt
-multiplatform/k2/hmpp/aliasToExpectGeneric.kt
 multiplatform/k2/hmpp/arrayDequeExtension.kt
 multiplatform/k2/hmpp/defaultImplsMultiInheritance.kt
 multiplatform/k2/hmpp/defaultImplsMultiInheritanceConflict.kt
@@ -1712,7 +1704,6 @@ objects/companionObjectAccess/multipleCompanionsWithAccessors/withCompanionObjec
 objects/companionObjectAccess/multipleCompanionsWithAccessors/withMultipleNestedCompanionObjectBases.kt
 objects/interfaceCompanionObjectReference.kt
 objects/kt32351.kt
-objects/kt32749.kt
 objects/kt52540.kt
 operatorConventions/compareTo/comparable.kt
 operatorConventions/kt20387.kt

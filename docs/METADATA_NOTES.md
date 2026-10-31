@@ -1,5 +1,15 @@
 # `@kotlin.Metadata` — reverse-engineering notes (Phase 4b)
 
+## Declared class receivers and checked member applications
+
+Source KLIB method exports retain the complete declared self application recorded during FIR
+lowering, in the checker's own-and-captured parameter order, including captured-only inner classes.
+The exported receiver and parameters keep declaration-owned formals. A dependent checked call
+already carries its applied parameter/result types, including applications selected through an
+inherited receiver. The common dependency-signature boundary consumes those types for
+class-dependent slots while authenticating fixed types and callable type-argument records.
+This preserves one declared ABI for distinct Int, String, Long and nullable applications.
+
 ## Classpath annotation query boundary
 
 `declaration_annotations` borrows the existing classpath for exact selected-method and all-method
@@ -1501,6 +1511,17 @@ Wasm constructor admission consumes `IrCtorArg`'s forwarded-super ordinal and pa
 separately from the total constructor-prefix count. Only field-free ordinary forwards are admitted
 by this extension; source metadata and capture storage retain their existing contracts.
 
+## Receiver binding and safe-cast storage
+
+Checked receiver coordinates and declaration paths authenticate own receiver parameters and lifted
+receiver captures. Common lowering publishes their immutable binding-read fact on the resulting
+`GetValue`; it does not infer stability from a slot number or the referenced object's mutability.
+The existing cloning contract carries that fact. Shared-cell reads remain mutable semantic values.
+For a marked safe-cast snapshot only, the JVM retains a reference cell's erased element slot through
+the type test; source locals, primitive cells and semantic metadata keep their original types.
+`implicit_receiver_stability_e2e` checks complete class inventories and bytes against Kotlin, then
+compares execution of the same whole programs. No metadata wire format or capture ABI changes.
+
 ## Package property annotation records
 
 Package property annotation presence follows checked PROPERTY/FIELD destinations. Getter, setter
@@ -1519,6 +1540,19 @@ metadata uses the same declaration flag/record model as class properties. JVM re
 file extensions intern before annotation records, while constant payloads intern afterward. The
 official Native property-message golden includes both integral and string constants to retain this
 ordering independently of JVM marker realization.
+
+## Annotation argument order
+
+An applied annotation retains declaration-ordered element values and the checker's written indices
+separately. The shared metadata encoder emits written values first and any materialized unwritten
+values afterward, recursively through nested annotations and arrays. A provider or generated
+application without source provenance keeps its stored order. JVM annotation attributes continue
+to use the declaration-ordered values. The complete annotation-order fixture covers declaration,
+constructor, function, parameter and property metadata alongside grouped and explicit vararg arrays.
+Method parameter annotation payloads intern at the JVM header boundary before body constants,
+with all visible parameters before invisible parameters and their nullability annotations.
+The parameter-payload oracle compares the entire module, including ordinary members, static
+companion forwards and interface compatibility holders with mixed retentions and nested values.
 
 ## Serialized Elvis provenance
 
