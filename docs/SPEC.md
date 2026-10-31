@@ -5655,9 +5655,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `-1` where nothing maps. A lambda's scope takes the mapped line of its `invoke`, and an
   invoked-again lambda is numbered from the names its previous expansion gave it, as kotlinc renames
   the lambda's node in place (`src/jvm/inliner/inline_scopes.rs`). The ported bytecode inliner
-  numbers library calls; the command line still refuses the argument until every inlining path
-  does, and the box harness selects it with `// USE_INLINE_SCOPES_NUMBERS`
-  (`tests/box_regressions/inlineScopes/`).
+  numbers library calls as it places them. An inline body expanded in IR (a same-module inline
+  function, `forEach`, `let`/`run`/`also`) is numbered from the frames its markers open, as each
+  inlining closes: the callee's scopes in the order they start, then each lambda it placed, whose
+  body numbered its own scopes while it was emitted and is renumbered after them; an `@InlineOnly`
+  callee has no scopes, so its lambda takes the call's line. The table spells the names once it is
+  complete (`src/jvm/classfile/inline_scope_frames.rs`), and a marker's call-site line moves from
+  the method's lines into the class's with the method's line table, as kotlinc's
+  `SourceMapCopyingMethodVisitor` copies it. The command line still refuses the argument until
+  every inlining path numbers its scopes, and the box harness selects it with
+  `// USE_INLINE_SCOPES_NUMBERS` (`tests/box_regressions/inlineScopes/`).
 - **A block's local slots are reused after the block ends**, as kotlinc's `FrameMap` reuses them:
   its block end leaves each variable the block declared, and a variable left from the top of the
   frame hands its slot back. A sibling branch, the next loop, a later catch parameter and the
