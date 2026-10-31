@@ -592,6 +592,34 @@ fn expect_wasm_decline(src: &str, stem: &str, reason: &str) {
     }
 }
 
+// PLATFORM-SPECIFIC: exercise the shared box representation at Wasm's dependency call boundary.
+#[test]
+fn wasm_nested_source_and_dependency_arguments_share_boxing() {
+    let src = include_str!("box_regressions/genericDependencyNestedSource.kt");
+    super::box_reference_classes::checked_box(src, "numericDependencyNestedSource")
+        .expect("the exact Kotlin compiler must run the nested source-call fixture");
+    let modules = krusty::conformance::split_modules(src).expect("valid module fixture");
+    let units = krusty::conformance::module_units(&modules);
+    for target in WasmTarget::ALL {
+        let lane = WasmLane { target };
+        assert!(
+            focused_wasm_lane_available(&lane, "numericDependencyNestedSource"),
+            "the owned nested source-call fixture requires its Wasm lane"
+        );
+        assert_eq!(
+            lane.compile_modules_and_run(
+                &std::env::temp_dir(),
+                "numericDependencyNestedSource",
+                &units,
+                src,
+            ),
+            Outcome::Pass,
+            "nested source argument on {}",
+            target.name(),
+        );
+    }
+}
+
 // PLATFORM-SPECIFIC: Wasm's checked-access default and host trap are independent of the portable
 // reference-array value/identity/effect-order case in the shared box inventory.
 const REFERENCE_ARRAY_BOUNDS: &str = r#"fun captured(index: Int): Throwable? {
