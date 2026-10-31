@@ -1653,6 +1653,7 @@ fn build_state_machine(
                 &physical_parameters(ir, fid, &ir.functions[fid as usize].params),
                 &ir.functions[fid as usize].ret,
             ),
+            enclosing_function: Some(fid),
         };
         continuation_metadata.insert(cont_internal.clone(), metadata);
     }

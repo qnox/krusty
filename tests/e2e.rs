@@ -109,6 +109,7 @@ mod annotated_class_decl_line_e2e;
 mod annotated_setter_parameter_e2e;
 #[path = "annotation_array_literal_e2e.rs"]
 mod annotation_array_literal_e2e;
+mod annotation_array_spread_values_e2e;
 #[path = "annotation_class_element_e2e.rs"]
 mod annotation_class_element_e2e;
 #[path = "annotation_cross_file_defaults_e2e.rs"]
@@ -168,6 +169,8 @@ mod backtick_identifier_e2e;
 mod backtick_keyword_identifier_e2e;
 #[path = "bare_accessor_and_setter_bridge_e2e.rs"]
 mod bare_accessor_and_setter_bridge_e2e;
+#[path = "bare_cast_target_e2e.rs"]
+mod bare_cast_target_e2e;
 #[path = "bazel_cli_contract_e2e.rs"]
 mod bazel_cli_contract_e2e;
 #[path = "bazel_module_release_e2e.rs"]
@@ -1128,6 +1131,8 @@ mod generic_vararg_inference_e2e;
 mod getter_return_line_e2e;
 #[path = "hidden_mapped_member_e2e.rs"]
 mod hidden_mapped_member_e2e;
+#[path = "hidden_member_extension_e2e.rs"]
+mod hidden_member_extension_e2e;
 #[path = "hides_members_overload_e2e.rs"]
 mod hides_members_overload_e2e;
 #[path = "iconsapi_byte_residue_e2e.rs"]
@@ -1356,6 +1361,8 @@ mod js_backend_coverage_e2e;
 mod js_backend_e2e;
 #[path = "jvm_default_mode_e2e.rs"]
 mod jvm_default_mode_e2e;
+#[path = "jvm_multifile_class_e2e.rs"]
+mod jvm_multifile_class_e2e;
 #[path = "jvm_name_e2e.rs"]
 mod jvm_name_e2e;
 #[path = "jvm_name_toplevel_e2e.rs"]
@@ -2993,3 +3000,6 @@ mod intersection_bound_metadata_order_e2e;
 mod type_safe_override_call_e2e;
 #[path = "where_bound_arguments_e2e.rs"]
 mod where_bound_arguments_e2e;
+
+#[path = "facade_local_classifier_metadata_e2e.rs"]
+mod facade_local_classifier_metadata_e2e;

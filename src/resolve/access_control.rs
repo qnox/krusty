@@ -159,6 +159,159 @@ impl SourceMemberSite for Checker<'_> {
 }
 
 impl<'a> Checker<'a> {
+    pub(super) fn source_callable_visible(
+        &self,
+        candidate: &crate::libraries::FunctionInfo,
+    ) -> bool {
+        if self.suppresses_diagnostic("INVISIBLE_REFERENCE")
+            || self.suppresses_diagnostic("INVISIBLE_MEMBER")
+        {
+            return true;
+        }
+        if !matches!(
+            candidate.kind,
+            crate::libraries::FnKind::TopLevel | crate::libraries::FnKind::Extension
+        ) {
+            return true;
+        }
+        crate::callable_access::source_callable_accessible(
+            candidate.visibility,
+            candidate.source_file,
+            Some(self.file_index),
+            || {
+                self.libraries
+                    .dependency_access_policy()
+                    .internal_callable_accessible(
+                        candidate.callable.external_identity,
+                        candidate.callable.owner,
+                    )
+            },
+        )
+    }
+
+    /// Whether a member function the call found on `receiver` is hidden from this site. Kotlin
+    /// ranks a hidden member below every visible candidate: an applicable extension takes the
+    /// call (`clone()` declared beside the protected `Object.clone`), and the member is reported
+    /// as inaccessible only when nothing visible applies. `internal` ownership stays with the
+    /// selected-member check.
+    pub(super) fn member_hidden_from_site(
+        &self,
+        candidate: &crate::libraries::FunctionInfo,
+        receiver: Option<Ty>,
+    ) -> bool {
+        let Some(receiver) = receiver else {
+            return false;
+        };
+        matches!(
+            candidate.visibility,
+            Visibility::Private | Visibility::Protected | Visibility::PackagePrivate
+        ) && !self.receiver_callable_accessible(
+            candidate.visibility,
+            candidate.callable.owner,
+            crate::symbol_resolver::member_scope_receiver(receiver),
+            candidate.callable.external_identity,
+        )
+    }
+
+    /// An instance member the reference site cannot see does not shadow an applicable extension:
+    /// `Col::clone` names the extension when `Object.clone` is protected. Without an extension the
+    /// member stays, so the reference reports the member's visibility.
+    pub(super) fn hidden_members_yield_to_extensions(
+        &self,
+        receiver: Ty,
+        mut candidates: CallableRefCandidates,
+    ) -> CallableRefCandidates {
+        if self.drop_members_hidden_by_extensions(receiver, &mut candidates.overloads) {
+            candidates.method = crate::symbol_resolver::select_instance_reference_from_functions(
+                receiver,
+                &candidates.overloads,
+            );
+        }
+        candidates
+    }
+
+    /// Drop the members of `receiver` the site cannot see when a visible extension of the same
+    /// name is a candidate too, so the extension is selected instead of the member's access error.
+    /// Returns whether a member was dropped.
+    pub(super) fn drop_members_hidden_by_extensions(
+        &self,
+        receiver: Ty,
+        overloads: &mut Vec<crate::libraries::FunctionInfo>,
+    ) -> bool {
+        if !overloads
+            .iter()
+            .any(|candidate| candidate.is_extension() && self.source_callable_visible(candidate))
+        {
+            return false;
+        }
+        let before = overloads.len();
+        overloads.retain(|candidate| {
+            candidate.kind != crate::libraries::FnKind::Member
+                || !self.member_hidden_from_site(candidate, Some(receiver))
+        });
+        overloads.len() != before
+    }
+
+    /// Drop the hidden members of `receiver` only when one of the visible extensions applies to
+    /// this operator call. An extension of the same name that does not apply (`b + 1` against
+    /// `B.plus(String)`) leaves the hidden member to report its visibility; an applicable but
+    /// ambiguous extension family still takes the call, so the ambiguity is what is reported.
+    pub(super) fn drop_members_hidden_by_applicable_extensions(
+        &self,
+        receiver: Ty,
+        overloads: &mut Vec<crate::libraries::FunctionInfo>,
+        call: OperatorCallShape<'_>,
+    ) {
+        let mut visible = overloads.clone();
+        if !self.drop_members_hidden_by_extensions(receiver, &mut visible) {
+            return;
+        }
+        let extensions = crate::libraries::Callables::Functions(crate::libraries::FunctionSet {
+            overloads: visible
+                .iter()
+                .filter(|candidate| candidate.is_extension())
+                .cloned()
+                .collect(),
+        });
+        let resolver = self.resolver();
+        let applies = match call {
+            OperatorCallShape::Call { name, args } => !matches!(
+                resolver.select_receiver_function_with_params_tracking(
+                    receiver,
+                    name,
+                    args,
+                    &[],
+                    &extensions,
+                    None,
+                ),
+                crate::symbol_resolver::CandidateSelection::None
+            ),
+            OperatorCallShape::IndexedGet { args } => !matches!(
+                resolver.select_receiver_indexed_get_function_with_params(
+                    receiver,
+                    "get",
+                    args,
+                    &[],
+                    &extensions,
+                ),
+                crate::symbol_resolver::CandidateSelection::None
+            ),
+            OperatorCallShape::IndexedSet { args } => !matches!(
+                resolver.select_receiver_indexed_set_function_with_params(
+                    receiver,
+                    "set",
+                    args,
+                    &[],
+                    &extensions,
+                ),
+                crate::symbol_resolver::CandidateSelection::None
+            ),
+        };
+        if applies {
+            *overloads = visible;
+        }
+    }
+
     /// Reject an inaccessible selected constructor after diagnosing its local inference result.
     /// Evidence from the rejected call is never published into the committed-call sidecar.
     pub(super) fn reject_ctor_access(
@@ -182,6 +335,71 @@ impl<'a> Checker<'a> {
             diagnostics::constructor_message(&self.fed_source(), owner, member),
         );
         true
+    }
+
+    pub(super) fn source_callable_visible(
+        &self,
+        candidate: &crate::libraries::FunctionInfo,
+    ) -> bool {
+        if self.suppresses_diagnostic("INVISIBLE_REFERENCE")
+            || self.suppresses_diagnostic("INVISIBLE_MEMBER")
+        {
+            return true;
+        }
+        if !matches!(
+            candidate.kind,
+            crate::libraries::FnKind::TopLevel | crate::libraries::FnKind::Extension
+        ) {
+            return true;
+        }
+        crate::callable_access::source_callable_accessible(
+            candidate.visibility,
+            candidate.source_file,
+            Some(self.file_index),
+            || {
+                self.libraries
+                    .dependency_access_policy()
+                    .internal_callable_accessible(
+                        candidate.callable.external_identity,
+                        candidate.callable.owner,
+                    )
+            },
+        )
+    }
+
+    /// Whether a member candidate is accessible through the call's receiver. Top-level and
+    /// extension candidates are filtered by [`Self::source_callable_visible`] before applicability,
+    /// and constructors keep their own access diagnostic.
+    pub(super) fn member_candidate_accessible(
+        &self,
+        candidate: &crate::libraries::FunctionInfo,
+        receiver: Option<Ty>,
+    ) -> bool {
+        if candidate.kind != crate::libraries::FnKind::Member || self.visibility_access_suppressed()
+        {
+            return true;
+        }
+        let owner = candidate.callable.owner_type();
+        let identity = candidate.callable.external_identity;
+        match receiver {
+            Some(receiver) => {
+                self.receiver_callable_accessible(candidate.visibility, owner, receiver, identity)
+            }
+            None => self.callable_accessible(candidate.visibility, owner, identity),
+        }
+    }
+
+    pub(super) fn selected_member_accessible(
+        &self,
+        selected: &crate::symbol_resolver::ResolvedMember,
+        owner: TypeName,
+    ) -> bool {
+        self.receiver_callable_accessible(
+            selected.member.visibility,
+            owner,
+            selected.receiver,
+            selected.member.external_identity,
+        )
     }
 
     /// Whether one already-selected dependency callable is visible from the current site.
@@ -290,6 +508,44 @@ impl<'a> Checker<'a> {
         } else {
             false
         }
+    }
+
+    /// Report a selected member the site cannot see with kotlinc's complete declaration message
+    /// (`cannot access 'fun get(i: Int): String': it is protected in 'B'.`). Returns whether the
+    /// member was rejected.
+    pub(super) fn reject_inaccessible_selected_member(
+        &mut self,
+        span: Span,
+        selected: &crate::symbol_resolver::ResolvedMember,
+    ) -> bool {
+        let Some(owner) = selected.member.owner else {
+            return false;
+        };
+        if self.receiver_callable_accessible(
+            selected.member.visibility,
+            owner,
+            selected.receiver,
+            selected.member.external_identity,
+        ) || self.suppresses_diagnostic("INVISIBLE_REFERENCE")
+        {
+            return false;
+        }
+        let visibility = match selected.member.visibility {
+            Visibility::Private => "private",
+            Visibility::Internal => "internal",
+            Visibility::PackagePrivate => "package-private",
+            Visibility::Protected => "protected",
+            Visibility::Public => "public",
+        };
+        let message = member_callable_message(
+            &self.fed_source(),
+            self.resolved_index,
+            &selected.member,
+            owner,
+            visibility,
+        );
+        self.diags.error(span, message);
+        true
     }
 
     /// Emit an access rejection for one already-selected semantic function declaration.
@@ -460,4 +716,20 @@ mod tests {
             None,
         ));
     }
+}
+
+/// The operator convention a hidden member competes for, so extension applicability is checked
+/// with the same selection the call itself uses.
+#[derive(Clone, Copy)]
+pub(super) enum OperatorCallShape<'a> {
+    Call {
+        name: &'a str,
+        args: &'a [crate::symbol_resolver::CallArgKind],
+    },
+    IndexedGet {
+        args: &'a [crate::symbol_resolver::CallArgKind],
+    },
+    IndexedSet {
+        args: &'a [crate::symbol_resolver::CallArgKind],
+    },
 }

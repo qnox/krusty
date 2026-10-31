@@ -22,11 +22,21 @@ enum Declaration {
     },
 }
 
+type SignatureGroups = Vec<((String, String), Vec<Declaration>)>;
+
 pub(super) fn report(
     ir: &IrFile,
     override_results: &crate::jvm::override_results::OverrideResults,
 ) -> Result<ClashRows, ClashRows> {
-    let mut groups: Vec<((String, String), Vec<Declaration>)> = Vec::new();
+    report_groups(ir, signature_groups(ir, override_results)?)
+}
+
+/// Every physical method the package facade declares, grouped by its JVM name and descriptor.
+fn signature_groups(
+    ir: &IrFile,
+    override_results: &crate::jvm::override_results::OverrideResults,
+) -> Result<SignatureGroups, ClashRows> {
+    let mut groups: SignatureGroups = Vec::new();
     for (index, declaration) in ir.package_functions.iter().enumerate() {
         if declaration.companion {
             continue;
@@ -170,7 +180,10 @@ pub(super) fn report(
             },
         );
     }
+    Ok(groups)
+}
 
+fn report_groups(ir: &IrFile, groups: SignatureGroups) -> Result<ClashRows, ClashRows> {
     let mut clashes = Vec::new();
     let mut reported_delegate_header = false;
     for ((name, descriptor), members) in groups {
@@ -221,6 +234,90 @@ pub(super) fn report(
     }
     clashes.sort_by_key(|(span, _)| span.lo);
     Ok(clashes)
+}
+
+/// A method a multifile part's facade forwards to, with the declaration it realizes: its JVM
+/// slot, kotlinc's ordering key for a clash listing, and kotlinc's rendering of the declaration.
+#[derive(Clone, Debug)]
+pub(crate) struct FacadeSlot {
+    pub(super) name: String,
+    pub(super) descriptor: String,
+    pub(super) order: (String, String, Vec<String>, usize),
+    pub(super) rendered: String,
+    /// A `$default` stub, which kotlinc reports only beside a method that is not one.
+    pub(super) default_stub: bool,
+}
+
+/// The package facade methods a multifile facade forwards: the non-private functions, their
+/// `$default` stubs and the non-private property accessors.
+pub(super) fn facade_slots(
+    ir: &IrFile,
+    override_results: &crate::jvm::override_results::OverrideResults,
+) -> Result<Vec<FacadeSlot>, ClashRows> {
+    let undetermined = |declaration: Declaration, kind| {
+        vec![(
+            declaration_span(ir, declaration),
+            super::undetermined_type_message(kind),
+        )]
+    };
+    let mut slots = Vec::new();
+    for ((name, descriptor), members) in signature_groups(ir, override_results)? {
+        for declaration in members {
+            let forwarded = match declaration {
+                Declaration::Function(index) => {
+                    !ir.package_functions[index].visibility.is_private()
+                }
+                Declaration::PropertyAccessor {
+                    property, setter, ..
+                } => {
+                    let property = &ir.package_properties[property];
+                    let visibility = if setter {
+                        property.setter_visibility
+                    } else {
+                        property.visibility
+                    };
+                    !visibility.is_private()
+                }
+                Declaration::PropertyAnnotationMarker(_) | Declaration::InPlaceDelegate { .. } => {
+                    false
+                }
+            };
+            if !forwarded {
+                continue;
+            }
+            slots.push(FacadeSlot {
+                name: name.clone(),
+                descriptor: descriptor.clone(),
+                order: declaration_order(ir, declaration)
+                    .map_err(|kind| undetermined(declaration, kind))?,
+                rendered: render(ir, declaration)
+                    .map_err(|kind| undetermined(declaration, kind))?,
+                default_stub: false,
+            });
+            if let Declaration::Function(index) = declaration {
+                let function = &ir.package_functions[index];
+                if function.param_defaults.iter().any(|&default| default) {
+                    let masks = crate::jvm::ir_emit::default_stub_mask_count(ir, function.function);
+                    let mut order =
+                        function_order(function).map_err(|kind| undetermined(declaration, kind))?;
+                    order.0.push_str("$default");
+                    slots.push(FacadeSlot {
+                        name: format!("{name}$default"),
+                        descriptor: crate::jvm::ir_emit::default_stub_descriptor(
+                            ir,
+                            function.function,
+                            crate::types::Ty::obj("java/lang/Object"),
+                        ),
+                        order,
+                        rendered: render_default_stub(function, ir, masks)
+                            .map_err(|kind| undetermined(declaration, kind))?,
+                        default_stub: true,
+                    });
+                }
+            }
+        }
+    }
+    Ok(slots)
 }
 
 fn push(
@@ -424,14 +521,66 @@ fn render_function(
     }
     rendered.push_str(&super::rendered_callable_name(&function.name));
     rendered.push('(');
-    for (index, (name, ty)) in value_parameters(function)?.iter().enumerate() {
-        if index > 0 {
-            rendered.push_str(", ");
-        }
-        rendered.push_str(name);
-        rendered.push_str(": ");
-        rendered.push_str(&super::source_type_name(*ty)?);
+    rendered.push_str(&rendered_value_parameters(function)?.join(", "));
+    rendered.push_str("): ");
+    rendered.push_str(&super::source_type_name(function.ret)?);
+    rendered.push_str(" defined in ");
+    rendered.push_str(owner(ir));
+    Ok(rendered)
+}
+
+/// A function's value parameters as kotlinc renders them: `name: Type`, and ` = ...` after one
+/// that declares a default value.
+fn rendered_value_parameters(
+    function: &crate::ir::IrPackageFunction,
+) -> Result<Vec<String>, UndeterminedDiagnosticType> {
+    value_parameters(function)?
+        .iter()
+        .enumerate()
+        .map(|(index, (name, ty))| {
+            let mut rendered = format!("{name}: {}", super::source_type_name(*ty)?);
+            if function
+                .param_defaults
+                .get(function.context_count + index)
+                .copied()
+                .unwrap_or(false)
+            {
+                rendered.push_str(" = ...");
+            }
+            Ok(rendered)
+        })
+        .collect()
+}
+
+/// kotlinc's rendering of a function's `$default` stub: the function's parameters, one `$maskN`
+/// word per 32 of them and the `$handler` marker.
+fn render_default_stub(
+    function: &crate::ir::IrPackageFunction,
+    ir: &IrFile,
+    masks: usize,
+) -> Result<String, UndeterminedDiagnosticType> {
+    let mut parameters = rendered_value_parameters(function)?;
+    parameters.extend((0..masks).map(|mask| {
+        format!(
+            "{}: Int",
+            super::rendered_callable_name(&format!("$mask{mask}"))
+        )
+    }));
+    parameters.push(format!(
+        "{}: Any?",
+        super::rendered_callable_name("$handler")
+    ));
+    let mut rendered = String::from("fun ");
+    if let Some(receiver) = function.receiver {
+        rendered.push_str(&super::source_type_name(receiver)?);
+        rendered.push('.');
     }
+    rendered.push_str(&super::rendered_callable_name(&format!(
+        "{}$default",
+        function.name
+    )));
+    rendered.push('(');
+    rendered.push_str(&parameters.join(", "));
     rendered.push_str("): ");
     rendered.push_str(&super::source_type_name(function.ret)?);
     rendered.push_str(" defined in ");
