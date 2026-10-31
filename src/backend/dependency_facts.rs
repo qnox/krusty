@@ -586,6 +586,8 @@ pub enum DependencyFactError {
     UnknownProperty(ExternalPropertyId),
     InvalidPropertyConstant(ExternalPropertyId),
     InvalidSingletonDispatch(crate::ir::ExprId),
+    /// Two plugin selections of one runtime declaration append different parameters to it.
+    PluginRuntimeAbi(ExternalCallableId),
 }
 
 /// The frozen dependency facts of one checked file. It holds a fact for every dependency callable
@@ -596,14 +598,23 @@ pub struct CheckedBackendCallables {
     properties: HashMap<ExternalPropertyId, BackendPropertyFact>,
     singleton_dispatches: HashMap<crate::ir::ExprId, SingletonDispatch>,
     singleton_selections: HashMap<ExternalCallableId, Vec<SingletonDispatch>>,
-    /// The runtime declarations native plugins selected at the handoff for their generated code.
-    plugin_runtime: crate::fx_hash::HashSet<ExternalCallableId>,
+    /// The runtime declarations native plugins selected at the handoff for their generated code,
+    /// with the parameters a plugin's transform appended to each.
+    plugin_runtime: HashMap<ExternalCallableId, Box<[Ty]>>,
 }
 
 impl CheckedBackendCallables {
     /// Whether native plugins selected `identity` at the handoff for the code they generate.
     pub(crate) fn is_plugin_runtime_callable(&self, identity: ExternalCallableId) -> bool {
-        self.plugin_runtime.contains(&identity)
+        self.plugin_runtime.contains_key(&identity)
+    }
+
+    /// The parameters a native plugin's transform appended to the runtime declaration `identity`,
+    /// which its generated calls pass after the declared ones; empty for any other declaration.
+    pub(crate) fn plugin_runtime_appended(&self, identity: ExternalCallableId) -> &[Ty] {
+        self.plugin_runtime
+            .get(&identity)
+            .map_or(&[], |appended| appended)
     }
 
     /// The exact declaration view for one emitted edge, retaining only its checked singleton.
@@ -739,15 +750,28 @@ impl CheckedBackendCallables {
     }
 
     /// Freeze the runtime declarations native plugins selected at the handoff for the code they
-    /// generate (see [`crate::plugins::runtime_declarations`]).
+    /// generate (see [`crate::plugins::runtime_declarations`]), each with the parameters a plugin's
+    /// transform appended to it.
     pub(crate) fn freeze_plugin_runtime_callables(
         &mut self,
-        identities: Vec<ExternalCallableId>,
+        selected: Vec<(ExternalCallableId, Box<[Ty]>)>,
         provider: impl FnMut(
             ExternalCallableId,
         ) -> Option<crate::libraries::ExternalCallableRealization>,
     ) -> Result<(), DependencyFactError> {
-        self.plugin_runtime.extend(identities.iter().copied());
+        let mut identities = Vec::with_capacity(selected.len());
+        for (target, appended) in selected {
+            match self.plugin_runtime.entry(target) {
+                Entry::Occupied(known) if *known.get() != appended => {
+                    return Err(DependencyFactError::PluginRuntimeAbi(target));
+                }
+                Entry::Occupied(_) => {}
+                Entry::Vacant(slot) => {
+                    slot.insert(appended);
+                }
+            }
+            identities.push(target);
+        }
         self.freeze_callables(identities, provider)
     }
 

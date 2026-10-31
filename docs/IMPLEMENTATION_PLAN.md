@@ -582,6 +582,12 @@ expansion and adds no backend capabilities, outcome allowances or metadata field
   explicitly rejected for now (skipped, not miscompiled). Box conformance: 27 / 27 OK / 0 FAIL
   (nullable is foundational; it compounds once collections/`?.`/char literals land).
 
+## Checked annotation array operand values
+
+Reuse the checked whole-array argument role when folding selected array factories for annotation
+values. Preserve nested spread order, named arrays, empty contributions and ordinary elements;
+compare the complete emitted class inventory and raw artifacts with Kotlin before runtime controls.
+
 ## Phase 14 — Modifiers, annotations & conformance fixes  ✅
 - ✅ Data-driven (scanned the "expected a top-level declaration" bucket): **leading declaration
   modifiers** (`public`/`private`/`open`/`abstract`/`inline`/`operator`/`override`/`suspend`/
@@ -5955,6 +5961,9 @@ non-inline callers, still reads the field directly. Test:
 - `src/wasm/` lowers checked common IR to one WasmGC module per program for both kotlinc Wasm
   targets; the targets share every instruction and differ only in the host write function and the
   Node.js loader. Unsupported constructs decline the whole compilation by name.
+- Constructor-prefix admission distinguishes recorded anonymous-super forwards from unsupported
+  captures. Existing typed parameter/super-call lowering executes field-free forwarded operands;
+  both Wasm hosts run the same portable nested-construction fixture as JVM and Native.
 - First slice: top-level functions and properties over primitives and `String` (locals, `when`,
   loops with labels, arithmetic with Kotlin's promotion and narrowing, equality, templates,
   same-file calls).
@@ -6212,7 +6221,10 @@ retain declaration-name spans for exact ambiguous-parent diagnostics. Private an
 results remain exact; shared outcomes and operand ABI ownership are unchanged.
 Canonical compact parent templates, including alias arguments, are computed once before signature
 inference and shared with classifier publication; parent diagnostics retain their publication order.
-Complete anonymous metadata parity stays in #2653/#2654 with its full retained fixture oracles.
+File-facade metadata now carries the existing local/enum-body classifier inventories into both
+package class-ID encoding and JVM signature-record decisions. The original three #2654 complete
+metadata oracles are restored, with an additional complete property-storage ABI/metadata control.
+Own versus lexical-capture metadata applications stay in #2653 with their full retained oracles.
 Parameterized alias superclass arguments retain their enclosing lexical bindings. The original
 expanded #2655 fixture and both complete ABI/runtime controls are retained in
 `tests/typealias_constructor_inference_e2e/parameterized_parent_aliases.rs` alongside the minimal tests.
@@ -6355,8 +6367,11 @@ and the pass rejects every construct it does not cover yet.
   applier scheme inferred.
 - [x] Composable lambdas that capture nothing, passed to a composable call: `ComposableSingletons`
   properties made by `composableLambdaInstance`, each body a skippable group.
-- [ ] Capturing composable lambdas (`rememberComposableLambda`), nested and empty ones, other
-  composable function types, and the composable call checker's diagnostics.
+- [x] Composable lambdas that capture value parameters of their function, passed to a composable
+  call: remembered by `rememberComposableLambda`, with the captures leading the implementation's
+  parameters.
+- [ ] Composable lambdas that capture locals or composable lambda parameters, nested and empty
+  ones, other composable function types, and the composable call checker's diagnostics.
 - [x] Primitive and `String` parameters: `$changed`/`$dirty` slot tracking with strong skipping,
   `Composer.changed` comparisons, and each call's argument bits (static, passed on, uncertain).
 - [x] Constant default arguments: the `$default` mask, defaults assigned in the group, placeholders

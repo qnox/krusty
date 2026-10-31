@@ -18,15 +18,20 @@ use crate::ir::{
 use crate::types::{TypeName, Visibility};
 
 use super::runtime::{self, ComposeRuntime};
-use super::source_facts::SingletonLambda;
+use super::source_facts::{ComposableLambda, Memoization};
 
-/// Hold `lambdas` in the file's singletons class `singletons` and read each one from it.
+/// Hold those of `lambdas` that capture nothing in the file's singletons class `singletons` and
+/// read each one from it.
 pub(super) fn memoize(
     ir: &mut IrFile,
     runtime: &ComposeRuntime,
-    lambdas: &[SingletonLambda],
+    lambdas: &[ComposableLambda],
     singletons: TypeName,
 ) {
+    let lambdas = lambdas
+        .iter()
+        .filter(|lambda| lambda.memoization == Memoization::Singleton)
+        .collect::<Vec<_>>();
     if lambdas.is_empty() {
         return;
     }
@@ -75,7 +80,6 @@ pub(super) fn memoize(
             index,
             IrEnclosure::ClassInitializer(class_id),
         );
-        annotate(ir, lambda);
     }
     let init = ir.add_expr(IrExpr::Block {
         stmts: stores,
@@ -85,7 +89,7 @@ pub(super) fn memoize(
 }
 
 /// `composableLambdaInstance(key, false, lambda)`, cast to the composable calling convention.
-fn instance(ir: &mut IrFile, runtime: &ComposeRuntime, lambda: &SingletonLambda) -> ExprId {
+fn instance(ir: &mut IrFile, runtime: &ComposeRuntime, lambda: &ComposableLambda) -> ExprId {
     let key = ir.add_expr(IrExpr::Const(IrConst::Int(lambda.key)));
     let tracked = ir.add_expr(IrExpr::Const(IrConst::Boolean(false)));
     let created = runtime::call(
@@ -139,7 +143,7 @@ fn property(name: &str, field: u32, initializer: ExprId) -> IrProperty {
 /// Pass the singleton's property in the lambda's place. kotlinc builds the read without offsets.
 fn read_from_singletons(
     ir: &mut IrFile,
-    lambda: &SingletonLambda,
+    lambda: &ComposableLambda,
     singletons: TypeName,
     name: &str,
 ) {
@@ -164,16 +168,4 @@ fn read_from_singletons(
         .find(|argument| **argument == lambda.lambda)
         .expect("the call passes the lambda");
     *argument = read;
-}
-
-/// `@Composable`, and `@FunctionKeyMeta` when the option asks for it, on the lambda's function.
-fn annotate(ir: &mut IrFile, lambda: &SingletonLambda) {
-    let annotations = ir
-        .function_annotations
-        .entry(lambda.implementation)
-        .or_default();
-    annotations.push(runtime::composable());
-    if lambda.key_meta {
-        annotations.push(runtime::function_key_meta(lambda.key, lambda.offsets));
-    }
 }
