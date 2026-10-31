@@ -6390,3 +6390,11 @@ common Elvis snapshot and conditional. Preserve single evaluation, lazy fallback
 return targets and declared storage; leave generic operand and unrelated conditional admission
 unchanged. Validate malformed contracts and checked-FIR parity alongside the original full #2811
 official-producer program and independent JVM-oracle controls.
+
+## Preserve sparse constructor-default line tables
+
+Publish the default stub's existing curated expression marks independently of its owner's
+declaration line. Keep entry/close guards and source provenance unchanged. Validate complete
+synthetic implementation artifacts, reference-first runtime and source-less dependency defaults,
+alongside ordinary primary/secondary and value-class constructor controls. Header prerequisite
+#2879 remains separate; this change adds no annotation-default metadata or allocation policy.

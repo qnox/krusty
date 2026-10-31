@@ -1426,3 +1426,11 @@ without its own origin. The selected equality signature and both reads must name
 temporary/null proof; names never correlate these declarations. Declared temporary storage remains
 separate from the present branch's proven type. Common IR retains Elvis provenance with the absent
 source-line sentinel; no synthetic source line or metadata wire change is introduced.
+
+## Generated constructor-default source marks
+
+The JVM class writer clears constructor line tables before the owning emitter publishes its
+curation. Default-stub emission always supplies its recorded expression marks, including an empty
+set when no source positions exist. A zero owner declaration line suppresses entry/closing marks
+without discarding retained default-expression lines. Kotlin metadata and default payloads are
+unchanged; complete class artifacts pin the resulting debug attributes and constant-pool order.

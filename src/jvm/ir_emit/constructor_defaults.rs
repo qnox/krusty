@@ -228,16 +228,14 @@ pub(super) fn emit_ctor_default_stub_with_prefix(
         access
     };
     e.cw.add_method(access, "<init>", &desc, &code);
-    // `add_method` curates every `<init>`'s line table from its class's declarations; this stub's is
-    // the one its emission marked.
-    if entry_line != 0 {
-        let lines = code
-            .line_marks()
-            .iter()
-            .map(|&(pc, line)| (pc, u32::from(line)))
-            .collect::<Vec<_>>();
-        e.cw.set_method_lines("<init>", &desc, &lines);
-    }
+    // Default expressions can retain source positions even when the generated owner has no
+    // declaration line. Publish exactly the stub's curated marks, including an empty table.
+    let lines = code
+        .line_marks()
+        .iter()
+        .map(|&(pc, line)| (pc, u32::from(line)))
+        .collect::<Vec<_>>();
+    e.cw.set_method_lines("<init>", &desc, &lines);
     if deprecated {
         e.cw.mark_method_deprecated("<init>", &desc);
     }
