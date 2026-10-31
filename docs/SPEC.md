@@ -7,18 +7,6 @@ implicit `Any?` bound, so `Array<String?>.clone()` is `Array<String?>`. A non-nu
 `Array<String>` and rejected moshi's `pathNames = copyFrom.pathNames.clone()`. Test:
 `array_member_reference_e2e::a_nullable_element_array_clone_keeps_its_element_type`.
 
-## Member extensions on covariant receivers
-
-A member extension's formal that its receiver reaches only covariantly (`Assert<out T>`) takes a
-lower bound from the receiver, not an equality. An argument's type joins it at their common
-supertype, as for a top-level extension: inside a class declaring
-`fun <T : Any> Assert<T>.same(expected: T)`, `assertThat(c: Class<*>).same(t: Type)` solves
-`T = Type`. Only an argument that reaches the formal covariantly joins; `(T) -> Unit` bounds it above
-and leaves the receiver's binding. An invariant receiver still fixes the formal exactly and reports
-the argument mismatch.
-Tests: `box_regressions/memberExtensionCovariantReceiverJoin.kt` and
-`resolver_regression_e2e::an_invariant_member_extension_receiver_keeps_its_exact_binding`.
-
 ## Smart casts from `when` guards
 
 An arm's guard (`is Lit if e.type is Marker -> ...`) is checked with the arm's own condition facts
