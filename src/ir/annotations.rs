@@ -72,6 +72,25 @@ pub struct DeclarationAnnotations {
 }
 
 impl DeclarationAnnotations {
+    /// These annotations without the applications of `annotation`.
+    pub(crate) fn without(&self, annotation: TypeName) -> Self {
+        let checked = self.retained.len() - self.lowered;
+        let mut retained = Vec::with_capacity(self.retained.len());
+        let mut lowered = 0;
+        for (index, application) in self.retained.iter().enumerate() {
+            if application.annotation.internal == annotation {
+                continue;
+            }
+            lowered += usize::from(index >= checked);
+            retained.push(application.clone());
+        }
+        Self {
+            retained,
+            lowered,
+            ..self.clone()
+        }
+    }
+
     pub fn new(annotations: Vec<RetainedAnnotation>) -> Self {
         Self {
             retained: annotations,

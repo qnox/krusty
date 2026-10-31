@@ -2468,6 +2468,34 @@ fun box(): String = invoked.values.greeting() + invoked.values.suffix()
     assert_accepted_and_runs(src, "ResolverPackageQualifiedPropertyInvoke");
 }
 
+/// An invariant nullable formal (`Column<E?>`) is a candidate for the receiver's classifier, and
+/// applicability rejects a non-null argument (`Column<EntityID<U>>`) or a caller variable whose
+/// bound admits null with kotlinc's receiver mismatch, not an unresolved reference.
+#[test]
+fn an_invariant_nullable_receiver_variable_rejects_a_non_null_argument_like_kotlinc() {
+    let sources = [(
+        "Receiver.kt",
+        r#"open class EntityID<T : Any>(val value: T)
+class Column<T>(val name: String)
+
+fun <T : Any, E : EntityID<T>> Column<E?>.invariantTable(): T? = null
+
+fun <U : Any> nonNullColumn(column: Column<EntityID<U>>) = column.invariantTable()
+fun <V : EntityID<String>?> boundedColumn(column: Column<V>) = column.invariantTable()
+fun <U : Any> nullableColumn(column: Column<EntityID<U>?>) = column.invariantTable()
+"#,
+    )];
+    let reference_args = common::language_directives::kotlinc_args(sources[0].1);
+    assert_eq!(
+        common::reference_error_blocks(&sources, &reference_args),
+        [
+            "Receiver.kt:6:67: candidate 'fun <T : Any, E : EntityID<T>> Column<E?>.invariantTable(): T?' is inapplicable because of a receiver type mismatch.",
+            "Receiver.kt:7:71: candidate 'fun <T : Any, E : EntityID<T>> Column<E?>.invariantTable(): T?' is inapplicable because of a receiver type mismatch.",
+        ]
+    );
+    common::assert_error_blocks_match_kotlinc(&sources, &reference_args);
+}
+
 #[test]
 fn a_callable_import_keeps_the_default_imported_classifier_in_type_positions() {
     let sources = [
@@ -2551,36 +2579,23 @@ fun <T : CharSequence> plainName(): T = 1
     common::assert_error_blocks_match_kotlinc(&sources, &reference_args);
 }
 
-/// A safe cast proves its operand only where its result is known non-null: an elvis whose right
-/// side completes normally, an `if` that only guards a statement, and a chain compared with
-/// `false` leave the operand unnarrowed, as kotlinc reports.
+/// Only a formal constrained from above meets its declared bound. `S` of `put` also occurs in an
+/// ordinary value parameter here, so its binding is exact and `T`'s mismatch is kotlinc's error.
 #[test]
-fn a_safe_cast_without_a_non_null_proof_does_not_smart_cast_like_kotlinc() {
+fn an_in_projected_formal_with_an_ordinary_occurrence_keeps_its_exact_binding() {
     let sources = [(
-        "Cast.kt",
-        r#"fun fallsThrough(value: Any?): Int {
-    (value as? String) ?: println("miss")
-    return value.length
-}
+        "Sink.kt",
+        r#"class Sink<T>
+fun <T, S : T?> Sink<in S>.put(value: T, extra: S): Int = 1
 
-fun checksOtherwise(value: Any?): Int {
-    if ((value as? String) != null) println("hit")
-    return value.length
-}
-
-fun comparesFalse(value: Any): Int {
-    if ((value as? String)?.isEmpty() == false) println("hit")
-    return value.length
-}
+fun <T : Number?, S : T> both(sink: Sink<T>, t: S, n: Int): Int = sink.put(t, n)
 "#,
     )];
     let reference_args = common::language_directives::kotlinc_args(sources[0].1);
     assert_eq!(
         common::reference_error_blocks(&sources, &reference_args),
         [
-            "Cast.kt:3:18: unresolved reference 'length' on receiver of type 'Any?'.",
-            "Cast.kt:8:18: unresolved reference 'length' on receiver of type 'Any?'.",
-            "Cast.kt:13:18: unresolved reference 'length' on receiver of type 'Any'.",
+            "Sink.kt:4:79: argument type mismatch: actual type is 'Int', but 'T (of fun <T : Number?, S : T> both)' was expected.",
         ]
     );
     common::assert_error_blocks_match_kotlinc(&sources, &reference_args);
@@ -2767,4 +2782,39 @@ fun test(value: Duo<String, Int>) {
 }
 "#;
     assert_rejection_same_as_kotlinc("StructuralArgumentRejectsEachFormal", source);
+}
+
+/// A safe cast proves its operand only where its result is known non-null: an elvis whose right
+/// side completes normally, an `if` that only guards a statement, and a chain compared with
+/// `false` leave the operand unnarrowed, as kotlinc reports.
+#[test]
+fn a_safe_cast_without_a_non_null_proof_does_not_smart_cast_like_kotlinc() {
+    let sources = [(
+        "Cast.kt",
+        r#"fun fallsThrough(value: Any?): Int {
+    (value as? String) ?: println("miss")
+    return value.length
+}
+
+fun checksOtherwise(value: Any?): Int {
+    if ((value as? String) != null) println("hit")
+    return value.length
+}
+
+fun comparesFalse(value: Any): Int {
+    if ((value as? String)?.isEmpty() == false) println("hit")
+    return value.length
+}
+"#,
+    )];
+    let reference_args = common::language_directives::kotlinc_args(sources[0].1);
+    assert_eq!(
+        common::reference_error_blocks(&sources, &reference_args),
+        [
+            "Cast.kt:3:18: unresolved reference 'length' on receiver of type 'Any?'.",
+            "Cast.kt:8:18: unresolved reference 'length' on receiver of type 'Any?'.",
+            "Cast.kt:13:18: unresolved reference 'length' on receiver of type 'Any'.",
+        ]
+    );
+    common::assert_error_blocks_match_kotlinc(&sources, &reference_args);
 }

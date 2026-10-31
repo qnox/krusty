@@ -168,6 +168,7 @@ mod implicit_receiver_calls;
 mod implicit_rungs;
 mod inline_access;
 mod inner_constructor_calls;
+mod member_call_bindings;
 mod member_slot_calls;
 mod nested_producer_bindings;
 use inner_constructor_calls::BoundInnerConstruction;
@@ -15187,6 +15188,9 @@ impl<'a> Checker<'a> {
                             }) {
                                 if let Some(receiver) = applied_sup {
                                     self.apply_checked_source_callable_result(receiver, &mut m);
+                                    self.specialize_super_member(
+                                        scope, call, receiver, &arg_kinds, &mut m,
+                                    );
                                 }
                                 if !self.expect_selected_call_args(
                                     scope,
@@ -15258,6 +15262,13 @@ impl<'a> Checker<'a> {
                         if let [(iface, applied, selected)] = matches.as_slice() {
                             let mut member = selected.clone();
                             self.apply_checked_source_callable_result(*applied, &mut member);
+                            self.specialize_super_member(
+                                scope,
+                                call,
+                                *applied,
+                                &arg_kinds,
+                                &mut member,
+                            );
                             if !self.expect_selected_call_args(
                                 scope,
                                 CallArgs {
@@ -16040,6 +16051,7 @@ impl<'a> Checker<'a> {
                 // therefore handled by their own rungs below before the imported-extension family.
                 let mut member_mapping_failure = None;
                 let mut extension_rung = None;
+                let mut inaccessible_member = None;
                 let mut rejected_member_candidates = receiver_callables.functions().to_vec();
                 if crate::symbol_resolver::supports_member_lookup(rt) {
                     match self.record_member_call_with_slots(
@@ -16056,10 +16068,12 @@ impl<'a> Checker<'a> {
                             extension,
                             member_mapping_failure: failure,
                             rejected_candidates,
+                            inaccessible_member: inaccessible,
                         } => {
                             member_mapping_failure = failure;
                             rejected_member_candidates = rejected_candidates;
                             extension_rung = Some(extension);
+                            inaccessible_member = inaccessible;
                         }
                     }
                 }
@@ -16138,6 +16152,11 @@ impl<'a> Checker<'a> {
                         &receiver_callables,
                     ),
                 };
+                if let Some(member) =
+                    inaccessible_member.filter(|_| extension_rung.selection.is_none())
+                {
+                    return self.commit_inaccessible_member_call(scope, call, args, *member);
+                }
                 // A member that exists but rejected the arguments owns the failure, reported below
                 // alone or joined with these extensions, unless the target release hands it to a
                 // more specific extension (`rejected_call_owner`).
@@ -31070,6 +31089,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         resolved_stmt_builtin_operator_accesses: HashMap::default(),
         resolved_stmt_operator_arg_slots: HashMap::default(),
         indexed_operator_ambiguous: false,
+        binary_operator_reported: false,
         resolved_inc_dec: HashMap::default(),
         resolved_index_store_get_returns: HashMap::default(),
         resolved_destructure_components: HashMap::default(),
@@ -33663,6 +33683,8 @@ struct Checker<'a> {
     resolved_stmt_operator_arg_slots: HashMap<(StmtId, SyntheticOperatorCall), Vec<Option<ExprId>>>,
     /// Set by indexed operator selection so assignment never retries `put` after an ambiguous `set`.
     indexed_operator_ambiguous: bool,
+    /// Set when binary operator selection already reported its access or ambiguity diagnostic.
+    binary_operator_reported: bool,
     resolved_inc_dec: HashMap<IncDecSite, ResolvedIncDec>,
     resolved_index_store_get_returns: HashMap<StmtId, Ty>,
     resolved_destructure_components: HashMap<(StmtId, usize), DestructureComponentTarget>,
@@ -33879,6 +33901,10 @@ enum MemberSlotCall {
         /// terminal diagnostic consumes these exact declarations instead of querying providers a
         /// second time after selection has failed.
         rejected_candidates: Vec<crate::libraries::FunctionInfo>,
+        /// An explicit receiver's member that applies but is inaccessible. kotlinc ranks it below
+        /// every resolved candidate of a later rung, so it is committed, with its access error,
+        /// only when no later rung resolves the call.
+        inaccessible_member: Option<Box<crate::symbol_resolver::ResolvedMember>>,
     },
 }
 
@@ -37584,6 +37610,16 @@ impl<'a> Checker<'a> {
                 applicable.last().unwrap().5.callable.ret,
             );
         }
+        // kotlinc ranks a visibility error below every resolved candidate, on any tower rung: an
+        // inaccessible member leaves the call to an accessible extension and is reported only
+        // when nothing accessible applies.
+        if applicable.iter().any(|(_, _, _, _, _, candidate, _, _)| {
+            self.member_candidate_accessible(candidate, extension_receiver)
+        }) {
+            applicable.retain(|(_, _, _, _, _, candidate, _, _)| {
+                self.member_candidate_accessible(candidate, extension_receiver)
+            });
+        }
         // Applicability is evaluated one callable-tower rung at a time. A declaration from a
         // farther import/lexical rung must not beat an applicable nearer extension merely because
         // its receiver or value parameters are more specific. Likewise, receiver distance only
@@ -37596,7 +37632,12 @@ impl<'a> Checker<'a> {
             if candidate.is_extension() && candidate.callable.annotations.contains(&hides_members) {
                 (0_u8, (0_u8, 0_u32), candidate.receiver_rank)
             } else if candidate.kind == crate::libraries::FnKind::Member {
-                (1_u8, (0_u8, 0_u32), candidate.receiver_rank)
+                let hidden = self.member_hidden_from_site(candidate, extension_receiver);
+                (
+                    if hidden { 3 } else { 1 },
+                    (0_u8, 0_u32),
+                    candidate.receiver_rank,
+                )
             } else {
                 (
                     2_u8,
@@ -37991,7 +38032,7 @@ impl<'a> Checker<'a> {
             };
         let (_, members, contains_body_local) = self.body_local_member_overload_rung(recv, name);
         if !contains_body_local {
-            return candidates;
+            return self.hidden_members_yield_to_extensions(recv, candidates);
         }
         candidates
             .overloads
@@ -38453,33 +38494,6 @@ impl<'a> Checker<'a> {
         self.module.legacy_symbols().is_some_and(|symbols| {
             symbols.props.contains_key(name) || symbols.context_prop_names.contains(name)
         })
-    }
-
-    fn source_callable_visible(&self, candidate: &crate::libraries::FunctionInfo) -> bool {
-        if self.suppresses_diagnostic("INVISIBLE_REFERENCE")
-            || self.suppresses_diagnostic("INVISIBLE_MEMBER")
-        {
-            return true;
-        }
-        if !matches!(
-            candidate.kind,
-            crate::libraries::FnKind::TopLevel | crate::libraries::FnKind::Extension
-        ) {
-            return true;
-        }
-        crate::callable_access::source_callable_accessible(
-            candidate.visibility,
-            candidate.source_file,
-            Some(self.file_index),
-            || {
-                self.libraries
-                    .dependency_access_policy()
-                    .internal_callable_accessible(
-                        candidate.callable.external_identity,
-                        candidate.callable.owner,
-                    )
-            },
-        )
     }
 
     fn implicit_receivers(&self, scope: &CheckerScope<'_>) -> Vec<ImplicitReceiver> {
@@ -53255,6 +53269,11 @@ impl<'a> Checker<'a> {
                     && (candidate.kind != crate::libraries::FnKind::Member
                         || candidate.context_count == 0)
             });
+            self.drop_members_hidden_by_applicable_extensions(
+                at,
+                &mut functions.overloads,
+                access_control::OperatorCallShape::IndexedGet { args: &index_kinds },
+            );
             let mut members = functions.clone();
             members
                 .overloads
@@ -53438,6 +53457,11 @@ impl<'a> Checker<'a> {
                             .to_vec(),
                     })
                 };
+                if let ResolvedCall::Member(member) = &target {
+                    if self.reject_inaccessible_selected_member(self.span(e), member) {
+                        return self.set(e, Ty::Error);
+                    }
+                }
                 self.mark_source_call(e, selected.source_key);
                 self.resolved_calls.insert(e, target);
                 return self.set(e, ret);
@@ -53733,12 +53757,7 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            if ty.name == "Array" && ty.targs.is_empty() && ty.arg.is_none() {
-                self.diags.error(
-                    ty.span,
-                    "one type argument expected. Use 'Array<*>' if you do not intend to pass type arguments."
-                        .to_string(),
-                );
+            if self.reject_bare_array_type_ref(&ty) {
                 return self.set(e, Ty::Error);
             }
             if ty.name == "Array"
@@ -53857,16 +53876,11 @@ impl<'a> Checker<'a> {
         nullable: bool,
     ) -> Ty {
         let t = {
-            self.expr(scope, operand);
+            let operand_ty = self.expr(scope, operand);
             let tt = self.with_unchecked_outermost_bounds(&ty, |checker| {
                 checker.runtime_type_ref_ty(scope, &ty)
             });
-            if ty.name == "Array" && ty.targs.is_empty() && ty.arg.is_none() {
-                self.diags.error(
-                    ty.span,
-                    "one type argument expected. Use 'Array<*>' if you do not intend to pass type arguments."
-                        .to_string(),
-                );
+            if self.reject_bare_array_type_ref(&ty) {
                 return self.set(e, Ty::Error);
             }
             if ty.name == "Array"
@@ -53897,6 +53911,7 @@ impl<'a> Checker<'a> {
             // must fail in lowering instead of making the frontend reject Kotlin (`42 as T`).
             // A safe cast `x as? T` has type `T?` — `null` on a runtime mismatch. For a primitive `T`
             // (`as? Int`) that nullable form is the boxed wrapper (`Int?`). A plain `x as T` keeps `T`.
+            let tt = self.cast_target_with_operand_arguments(operand_ty, tt);
             if nullable {
                 Ty::nullable(tt)
             } else {
@@ -54464,6 +54479,7 @@ impl<'a> Checker<'a> {
                                 extension,
                                 member_mapping_failure,
                                 rejected_candidates,
+                                inaccessible_member,
                             } => {
                                 let result = self
                                     .record_scope_level_receiver_call(
@@ -54484,6 +54500,13 @@ impl<'a> Checker<'a> {
                                             args: a,
                                             arg_tys,
                                         };
+                                        if let Some(member) = inaccessible_member
+                                            .filter(|_| extension.selection.is_none())
+                                        {
+                                            return Some(self.commit_inaccessible_member_call(
+                                                scope, e, a, *member,
+                                            ));
+                                        }
                                         let owned = match member_mapping_failure {
                                             Some(failure) if extension.selection.is_none() => self
                                                 .report_owned_member_failure(
@@ -54533,6 +54556,7 @@ impl<'a> Checker<'a> {
                                 extension,
                                 member_mapping_failure,
                                 rejected_candidates,
+                                inaccessible_member,
                             } => {
                                 let result = self
                                     .record_scope_level_receiver_call(
@@ -54553,6 +54577,13 @@ impl<'a> Checker<'a> {
                                             args: a,
                                             arg_tys,
                                         };
+                                        if let Some(member) = inaccessible_member
+                                            .filter(|_| extension.selection.is_none())
+                                        {
+                                            return Some(self.commit_inaccessible_member_call(
+                                                scope, e, a, *member,
+                                            ));
+                                        }
                                         let owned = match member_mapping_failure {
                                             Some(failure) if extension.selection.is_none() => self
                                                 .report_owned_member_failure(
@@ -59406,26 +59437,8 @@ impl<'a> Checker<'a> {
         args: &[ExprId],
         mut selected: crate::symbol_resolver::ResolvedMember,
     ) -> Option<Ty> {
-        let owner = selected.member.owner?;
-        if !self.selected_member_accessible(&selected, owner)
-            && !self.suppresses_diagnostic("INVISIBLE_REFERENCE")
-        {
-            let visibility = match selected.member.visibility {
-                Visibility::Private => "private",
-                Visibility::Internal => "internal",
-                Visibility::PackagePrivate => "package-private",
-                Visibility::Protected => "protected",
-                Visibility::Public => "public",
-            };
-            let source = self.fed_source();
-            let message = access_control::member_callable_message(
-                &source,
-                self.resolved_index,
-                &selected.member,
-                owner,
-                visibility,
-            );
-            self.diags.error(self.call_callee_name_span(call), message);
+        selected.member.owner?;
+        if self.reject_inaccessible_selected_member(self.call_callee_name_span(call), &selected) {
             return Some(Ty::Error);
         }
         self.check_data_class_copy_usage(self.call_callee_name_span(call), &selected.member);
@@ -59618,19 +59631,6 @@ impl<'a> Checker<'a> {
         Some(ret)
     }
 
-    fn selected_member_accessible(
-        &self,
-        selected: &crate::symbol_resolver::ResolvedMember,
-        owner: TypeName,
-    ) -> bool {
-        self.receiver_callable_accessible(
-            selected.member.visibility,
-            owner,
-            selected.receiver,
-            selected.member.external_identity,
-        )
-    }
-
     fn inferred_member_ret(&self, receiver: Ty, name: &str, params: &[Ty]) -> Option<Ty> {
         let internal = receiver.obj_internal()?;
         self.inferred_method_rets
@@ -59707,6 +59707,11 @@ impl<'a> Checker<'a> {
         let selected = {
             let resolver = self.resolver();
             let (mut functions, _) = callables.clone().into_parts();
+            self.drop_members_hidden_by_applicable_extensions(
+                recv,
+                &mut functions.overloads,
+                access_control::OperatorCallShape::Call { name, args: &[] },
+            );
             functions.overloads.retain(|candidate| {
                 candidate.kind == kind
                     && (kind == crate::libraries::FnKind::Member
@@ -60778,112 +60783,6 @@ impl<'a> Checker<'a> {
             }
         }
         None
-    }
-
-    fn applied_member_call_params(
-        &self,
-        receiver: Ty,
-        member: &crate::libraries::LibraryMember,
-        call: MemberCallArguments<'_>,
-    ) -> Result<Option<Vec<Ty>>, CallArgMappingFailure> {
-        let Some(signature) = member.generic_sig.as_ref() else {
-            return Ok(Some(member.params.clone()));
-        };
-        let mut bindings = self.member_receiver_type_bindings(receiver, member);
-        for (formal, actual) in
-            crate::symbol_resolver::seeded_gsig_binds(signature, call.type_arguments)
-        {
-            bindings.insert(formal, actual);
-        }
-        if let Some(fixed) = call.fixed_bindings {
-            bindings.extend(
-                fixed
-                    .iter()
-                    .map(|(formal, actual)| (formal.clone(), *actual)),
-            );
-        }
-        let context_count = member.context_count.min(signature.params.len());
-        let explicitly_named = |parameter: usize| {
-            self.file.explicit_context_arguments
-                && member
-                    .call_sig
-                    .param_names
-                    .get(parameter)
-                    .is_some_and(|parameter| {
-                        call.names.is_some_and(|names| {
-                            names.iter().flatten().any(|argument| argument == parameter)
-                        })
-                    })
-        };
-        let visible_parameters = (context_count..signature.params.len())
-            .chain((0..context_count).filter(|&parameter| explicitly_named(parameter)))
-            .collect::<Vec<_>>();
-        let visible_call_sig = member.call_sig.select_parameters(&visible_parameters);
-        let parameter_indices = call_argument_parameter_indices_result(
-            call.values.len(),
-            visible_parameters.len(),
-            call.names,
-            call.trailing_lambda,
-            &visible_call_sig,
-        )?
-        .into_iter()
-        .map(|parameter| visible_parameters[parameter])
-        .collect::<Vec<_>>();
-        let mut inferred = crate::symbol_resolver::infer_generic_call_bindings_from_symbols(
-            &self.fed_source(),
-            signature,
-            parameter_indices
-                .iter()
-                .copied()
-                .zip(call.values)
-                .enumerate()
-                .filter_map(|(source, (parameter, argument))| {
-                    let declared = *signature.params.get(parameter)?;
-                    let named_whole_array = member.call_sig.vararg_index == Some(parameter)
-                        && call
-                            .names
-                            .and_then(|names| names.get(source))
-                            .is_some_and(Option::is_some);
-                    (!argument.is_expected_type_callable()).then(|| {
-                        (
-                            parameter,
-                            argument.type_for(declared),
-                            argument.is_spread() || named_whole_array,
-                        )
-                    })
-                }),
-            member.call_sig.vararg_index,
-        );
-        if let Some(fixed) = call.fixed_bindings {
-            inferred.retain(|formal, _| !fixed.contains_key(formal));
-        }
-        crate::trace_compiler!(
-            "expected_call",
-            "member generic arguments formals={:?} signature_params={:?} arguments={:?} receiver_bindings={bindings:?} inferred={inferred:?}",
-            signature.formals,
-            signature.params,
-            call.values,
-        );
-        crate::symbol_resolver::merge_generic_bindings(
-            signature,
-            call.type_arguments.len(),
-            &mut bindings,
-            inferred,
-        );
-        Ok(crate::symbol_resolver::generic_bindings_satisfy_bounds(
-            signature,
-            &bindings,
-            |actual, bound| self.generic_bound_admits(actual, bound),
-        )
-        .then(|| {
-            signature
-                .params
-                .iter()
-                .map(|parameter| {
-                    crate::symbol_resolver::ty_subst_keep_unbound(*parameter, &bindings)
-                })
-                .collect()
-        }))
     }
 
     /// Bind the declaring class's type parameters from the applied receiver while leaving the
