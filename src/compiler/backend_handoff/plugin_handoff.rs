@@ -112,6 +112,7 @@ impl PluginRuntime for HandoffRuntime<'_> {
             is_final: !fact.is_extensible,
             is_value: fact.value_declaration.is_some(),
             in_module: fact.source,
+            is_inner: fact.outer_instance.is_some(),
             type_parameters: fact.own_type_parameter_count,
             supertypes: fact.supertypes.to_vec(),
             annotations: fact.annotations.to_vec(),
