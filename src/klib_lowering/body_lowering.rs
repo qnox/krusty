@@ -127,6 +127,10 @@ pub(super) trait CallLinker {
     /// producer-checked body uses a value of the one where the other is expected for.
     fn is_subtype(&self, parameters: &KlibTypeParameters, sub: Ty, sup: Ty) -> bool;
 
+    /// Whether `left` and `right` are one type in the calling compilation's class model, apart
+    /// from projections that restate their parameter's declaration-site variance.
+    fn same_type(&self, left: Ty, right: Ty) -> bool;
+
     /// Constructor generic bounds consume explicit hierarchy/full-formal evidence without
     /// changing the independent operand-coercion capability.
     fn constructor_bound(&self, parameters: &KlibTypeParameters, argument: Ty, bound: Ty) -> bool;

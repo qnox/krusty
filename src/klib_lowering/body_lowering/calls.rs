@@ -617,9 +617,11 @@ impl BodyLowering<'_> {
         // A result read through a projected receiver argument (`Array<out T>.get`) is that
         // projection's read type, as a source call's result is.
         let ret = substitute(callee.ret).projection_read_ty();
-        if ty != ret {
+        let ret = if self.linker.same_type(ret, ty) {
+            ty
+        } else {
             return Err(mismatch("a call is typed apart from its callee's result"));
-        }
+        };
         let params = callee
             .params
             .iter()

@@ -251,7 +251,6 @@ collectionLiterals/stdlibCollections.kt
 collectionLiterals/stdlibSequence.kt
 collectionLiterals/unsignedArrays.kt
 collections/clashWithInternalMapMethod.kt
-collections/inSetWithSmartCast.kt
 collections/inheritFromAbstractMutableListInt.kt
 companion/protectedConstValFromSuperCompanion.kt
 companionBlocksAndExtensions/callableReferences.kt
@@ -874,8 +873,6 @@ cycles/cycle.kt
 cycles/cycle_do.kt
 cycles/cycle_for.kt
 dataClasses/components/kt49812.kt
-dataClasses/doubleParam.kt
-dataClasses/floatParam.kt
 dataClasses/fromOtherModule.kt
 dataClasses/kt49715.kt
 dataObjects/equals.kt
@@ -1328,7 +1325,6 @@ inlineClasses/kt27096.kt
 inlineClasses/kt27096Generic.kt
 inlineClasses/kt27113.kt
 inlineClasses/kt28405.kt
-inlineClasses/kt28585.kt
 inlineClasses/kt32793.kt
 inlineClasses/kt44141.kt
 inlineClasses/kt44867.kt
@@ -1463,7 +1459,6 @@ ir/serializationRegressions/anonFakeOverride.kt
 ir/serializationRegressions/innerClassInEnumEntryClass.kt
 ir/serializationRegressions/useImportedMember.kt
 ir/serializationRegressions/varAsFunctionCall.kt
-jdk/hashMap.kt
 jdk/iteratingOverHashMap.kt
 jdk/noStringToCharArray.kt
 jvmInlineMultiFieldValueClasses/valueClassInValueClass.kt
@@ -1516,7 +1511,6 @@ lower/forLoopsLowering/withIndexUInt.kt
 lower/localDelegatedProperty.kt
 mangling/internal.kt
 mangling/multipleConstructors.kt
-multiDecl/kt9828_hashMap.kt
 multiplatform/k2/aliasSuperTypeInLazy.kt
 multiplatform/k2/annotations/expectAnnotationCallInLibrary.kt
 multiplatform/k2/anonymousObjectAndSpecificImplementationInDeserializedIr.kt
@@ -1745,7 +1739,6 @@ ranges/contains/inRangeWithCustomContains.kt
 ranges/contains/inRangeWithImplicitReceiver.kt
 ranges/contains/inRangeWithNonmatchingArguments.kt
 ranges/contains/inRangeWithSmartCast.kt
-ranges/contains/kt20106.kt
 ranges/contains/smartCastOnBothEnds.kt
 ranges/contains/smartCastOnBothEndsGeneric.kt
 ranges/evaluationOrder/forInDownTo.kt
@@ -2633,7 +2626,6 @@ unsignedTypes/unsignedRangeIterator.kt
 unsignedTypes/varargsOfUnsignedTypes.kt
 vararg/inlineClassArraysAsNamedArgumentInVararg.kt
 vararg/kt37715.kt
-vararg/kt581.kt
 vararg/referenceToContainsFromVarargParameter.kt
 vararg/spreadCopiesArray.kt
 vararg/useSuspendFunResultAsVararg.kt
