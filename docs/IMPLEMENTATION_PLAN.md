@@ -6397,3 +6397,15 @@ common Elvis snapshot and conditional. Preserve single evaluation, lazy fallback
 return targets and declared storage; leave generic operand and unrelated conditional admission
 unchanged. Validate malformed contracts and checked-FIR parity alongside the original full #2811
 official-producer program and independent JVM-oracle controls.
+
+## Reserve materialized operand-holder storage
+
+Retain checked argument-evaluation holders as a subset of call-operand bindings, including when
+their code is cloned. Remove that purpose when an expansion adopts a holder as its formal receiver.
+Separate physical reservation from semantic publication for those JVM argument-order holders;
+expanded parameters and captures retain their existing binding timing.
+Preserve the existing CallOperand frame identity, compatible reuse, width and lexical scope, and
+leave deferred results, safe-call chains and grouped invocations on their owning paths. Validate
+complete ordinary-constructor/array artifacts and reference-first runtime, plus existing named,
+inline, capture, handler and suspend controls. Annotation-default evaluation normalization remains
+a separate common-lowering concern.

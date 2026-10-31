@@ -1437,3 +1437,13 @@ without its own origin. The selected equality signature and both reads must name
 temporary/null proof; names never correlate these declarations. Declared temporary storage remains
 separate from the present branch's proven type. Common IR retains Elvis provenance with the absent
 source-line sentinel; no synthetic source line or metadata wire change is introduced.
+
+## Operand-holder physical reservation
+
+Common IR distinguishes an argument-evaluation holder from an expanded parameter or capture by
+semantic purpose, including through expression cloning and formal-receiver adoption. The JVM frame
+reserves an argument-order holder before its initializer uses scratch storage. Expanded formal
+bindings retain their existing timing. The holder keeps its CallOperand identity, while its semantic binding
+is published at the store. Before assignment, frame snapshots see the unpublished reservation as
+Top. Debug-local lifetimes still begin after the store; checked types, parameter metadata, argument
+evaluation order and the compiler/plugin wire model are unchanged.
