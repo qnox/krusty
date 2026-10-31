@@ -22,13 +22,14 @@ use crate::metadata::klib_ir::tree::{
     KlibIrArena, KlibIrArguments, KlibIrBody, KlibIrBranch, KlibIrExprId, KlibIrExprKind,
     KlibIrFunction, KlibIrLoop, KlibIrMember, KlibIrMemberAccess, KlibIrNullability,
     KlibIrParameter, KlibIrStatement, KlibIrType, KlibIrTypeArgument, KlibIrTypeId,
-    KlibIrTypeOperator, KlibIrVariable, KlibIrVariance,
+    KlibIrTypeOperator, KlibIrTypeParameter, KlibIrVariable, KlibIrVariance,
 };
 use crate::metadata::klib_ir::{
     KlibIrConstant, KlibIrDeclarationTree, KlibIrModuleTrees, KlibIrSymbol, KlibIrSymbolKind,
 };
 use crate::metadata::semantic::{
     semantic_ty, KotlinFunction, KotlinFunctionTypeShape, KotlinPackage, KotlinType,
+    KotlinTypeParameter, KotlinTypeParameterId,
 };
 use crate::types::{Ty, Visibility};
 
@@ -55,6 +56,14 @@ pub(super) enum T {
     ListString,
     /// `List<Any?>`.
     ListNullableAny,
+    /// The type parameter `P : Any?` of a generic `demo` function.
+    P,
+    /// `Array<P>`.
+    ArrayP,
+    /// `Array<out String>`.
+    ArrayOutString,
+    /// `Array<out Any?>`.
+    ArrayOutNullableAny,
 }
 
 impl T {
@@ -76,6 +85,8 @@ impl T {
             T::NullableString => "String",
             T::NullableNothing => "Nothing",
             T::ListString | T::ListNullableAny => "List",
+            T::ArrayP | T::ArrayOutString | T::ArrayOutNullableAny => "Array",
+            T::P => unreachable!("a type parameter is not a class"),
         }
     }
 
@@ -93,8 +104,24 @@ impl T {
         match self {
             T::ListString => Some(T::String),
             T::ListNullableAny => Some(T::NullableAny),
+            T::ArrayP => Some(T::P),
+            T::ArrayOutString => Some(T::String),
+            T::ArrayOutNullableAny => Some(T::NullableAny),
             _ => None,
         }
+    }
+
+    /// The variance the type argument is applied with.
+    fn variance(self) -> KlibIrVariance {
+        match self {
+            T::ArrayOutString | T::ArrayOutNullableAny => KlibIrVariance::Out,
+            _ => KlibIrVariance::Invariant,
+        }
+    }
+
+    /// Whether the type names the generic function's type parameter `P`.
+    fn mentions_p(self) -> bool {
+        self == T::P || self.argument().is_some_and(T::mentions_p)
     }
 
     pub(super) fn nullable(self) -> bool {
@@ -109,16 +136,32 @@ impl T {
     }
 
     pub(super) fn kotlin(self) -> KotlinType {
+        if self == T::P {
+            return KotlinType::Param {
+                name: "P".to_owned(),
+                id: KotlinTypeParameterId(0),
+                nullable: false,
+            };
+        }
         KotlinType::Class {
             internal: format!("{}/{}", self.package(), self.class()),
-            args: self.argument().map(T::kotlin).into_iter().collect(),
+            args: self
+                .argument()
+                .map(|argument| match self.variance() {
+                    KlibIrVariance::Out => KotlinType::OutProjection(Box::new(argument.kotlin())),
+                    _ => argument.kotlin(),
+                })
+                .into_iter()
+                .collect(),
             nullable: self.nullable(),
             shape: KotlinFunctionTypeShape::default(),
         }
     }
 
     pub(super) fn semantic(self) -> Ty {
-        semantic_ty(&self.kotlin(), &HashMap::default())
+        let any = semantic_ty(&T::NullableAny.kotlin(), &HashMap::default());
+        let bounds = [(KotlinTypeParameterId(0), any)].into_iter().collect();
+        semantic_ty(&self.kotlin(), &bounds)
     }
 
     pub(super) fn klib(self) -> KlibIrType {
@@ -169,7 +212,18 @@ pub(super) fn declaration((name, params, ret): Shape) -> KotlinFunction {
         receiver: None,
         params: params.iter().map(|param| param.kotlin()).collect(),
         ret: ret.kotlin(),
-        formals: Vec::new(),
+        formals: if is_generic((name, params, ret)) {
+            vec![KotlinTypeParameter {
+                id: KotlinTypeParameterId(0),
+                name: "P".to_owned(),
+                bounds: vec![T::NullableAny.kotlin()],
+                variance: crate::types::TypeVariance::Invariant,
+                only_input: false,
+                reified: false,
+            }]
+        } else {
+            Vec::new()
+        },
         param_names: PARAMETER_NAMES[..params.len()]
             .iter()
             .map(|name| (*name).to_owned())
@@ -195,6 +249,16 @@ pub(super) fn declaration((name, params, ret): Shape) -> KotlinFunction {
         return_value_status: Default::default(),
         contract: None,
     }
+}
+
+/// Whether the function declares the type parameter `P`, which its parameters or result name.
+fn is_generic((_, params, ret): Shape) -> bool {
+    ret.mentions_p() || params.iter().any(|param| param.mentions_p())
+}
+
+/// The serialized symbol of the type parameter `P` of a generic `demo` function.
+fn type_parameter_p() -> KlibIrSymbol {
+    local_symbol(KlibIrSymbolKind::TypeParameter, 900)
 }
 
 /// The signature of a built-in operator declared in package `package`, inside `class` if any.
@@ -305,10 +369,21 @@ impl Body {
         if let Some((_, id)) = self.types.iter().find(|(known, _)| *known == ty) {
             return *id;
         }
+        if ty == T::P {
+            let id = self.arena.push_type(KlibIrType::Simple {
+                classifier: type_parameter_p(),
+                nullability: KlibIrNullability::NotSpecified,
+                arguments: Vec::new(),
+                annotations: Vec::new(),
+                abbreviation: None,
+            });
+            self.types.push((ty, id));
+            return id;
+        }
         let arguments = ty
             .argument()
             .map(|argument| KlibIrTypeArgument::Type {
-                variance: KlibIrVariance::Invariant,
+                variance: ty.variance(),
                 ty: self.ty(argument),
             })
             .into_iter()
@@ -371,6 +446,31 @@ impl Body {
     pub(super) fn call(&mut self, name: &str, arguments: Vec<KlibIrExprId>, ty: T) -> KlibIrExprId {
         let signature = self.signatures[name].clone();
         self.call_signature(signature, arguments, None, ty)
+    }
+
+    /// A call of the generic `demo` function `name` with the serialized type argument
+    /// `type_argument` for its `P`.
+    pub(super) fn generic_call(
+        &mut self,
+        name: &str,
+        arguments: Vec<KlibIrExprId>,
+        type_argument: T,
+        ty: T,
+    ) -> KlibIrExprId {
+        let signature = self.signatures[name].clone();
+        let type_argument = self.ty(type_argument);
+        self.expr(
+            ty,
+            KlibIrExprKind::Call {
+                access: KlibIrMemberAccess {
+                    symbol: public_symbol(KlibIrSymbolKind::Function, signature),
+                    arguments: KlibIrArguments::Flat(arguments.into_iter().map(Some).collect()),
+                    type_arguments: vec![Some(type_argument)],
+                    origin: None,
+                },
+                super_qualifier: None,
+            },
+        )
     }
 
     pub(super) fn builtin(
@@ -705,13 +805,26 @@ fn demo_module(
     .expect("the declarations are signable");
     let facts = shapes
         .iter()
-        .map(|(name, params, _)| {
-            let params = params
-                .iter()
-                .map(|param| param.semantic())
-                .collect::<Vec<_>>();
+        .map(|&(name, params, ret)| {
+            let params = if is_generic((name, params, ret)) {
+                // A generic declaration's parameters name its declaration-owned `P`.
+                let symbols = crate::symbol_source::SymbolSource::symbols(
+                    &libraries,
+                    crate::symbol_source::SymbolNamespace::Package(crate::types::type_name("demo")),
+                    name,
+                );
+                let [function] = symbols.callables.functions() else {
+                    panic!("one generic `{name}`")
+                };
+                function.semantic_params().to_vec()
+            } else {
+                params
+                    .iter()
+                    .map(|param| param.semantic())
+                    .collect::<Vec<_>>()
+            };
             (
-                *name,
+                name,
                 frozen_function(&libraries, "demo", name, None, &params),
             )
         })
@@ -728,6 +841,7 @@ fn demo_module(
         .iter()
         .filter(|&&(name, _, _)| serialize(name))
         .map(|&(name, params, ret)| {
+            let params_shape = params;
             let function = public_symbol(KlibIrSymbolKind::Function, signatures[name].clone());
             let params = params
                 .iter()
@@ -757,12 +871,25 @@ fn demo_module(
                 })
                 .collect();
             let return_type = body.ty(ret);
+            let type_parameters = if is_generic((name, params_shape, ret)) {
+                let bound = body.ty(T::NullableAny);
+                vec![KlibIrTypeParameter {
+                    base: crate::metadata::klib_ir::tree::KlibIrDeclarationBase {
+                        flags: 4, // Serialized IrFlags: invariant, non-reified.
+                        ..base(type_parameter_p())
+                    },
+                    name: "P".to_owned(),
+                    supertypes: vec![bound],
+                }]
+            } else {
+                Vec::new()
+            };
             let mut arena = body.arena;
             let function = arena.push_function(KlibIrFunction {
                 base: base(function),
                 name: name.to_owned(),
                 constructor: false,
-                type_parameters: Vec::new(),
+                type_parameters,
                 dispatch_receiver: None,
                 context_parameters: Vec::new(),
                 extension_receiver: None,

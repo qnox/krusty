@@ -2,8 +2,8 @@
 //! member or generic function declared over `Array<T>`, on the Kotlin/Native stdlib bodies.
 
 use super::super::*;
-use super::demo_package::{demo, T};
-use super::{distribution_root, frozen_function, stdlib, validated};
+use super::demo_package::{demo, source_body, Demo, T};
+use super::{distribution_root, frozen_function, lowered_body, stdlib, validated};
 use crate::assignable::TypeOracle;
 use crate::ir::IrExpr;
 use crate::klib_libraries::KlibLibraries;
@@ -355,4 +355,91 @@ fn a_call_typed_as_a_wider_application_of_its_result_declines() {
          (its serialized declaration disagrees with the selected one: \
          a call is typed apart from its callee's result)"
     );
+}
+
+/// `exchange(a: Array<P>, b: Array<P>)` and `first(a: Array<P>, b: Int)`, generic in `P`, with
+/// `f(a: Array<out String>, b: Array<out Any?>)` calling `exchange(a, b)` at `P = Any?` and
+/// `g(a: Array<out String>, b: Int)` calling `first(a, b)` at `P = String`.
+fn two_input_calls() -> Demo {
+    demo(
+        &[
+            ("exchange", &[T::ArrayP, T::ArrayP], T::Unit),
+            ("first", &[T::ArrayP, T::Int], T::Unit),
+            ("f", &[T::ArrayOutString, T::ArrayOutNullableAny], T::Unit),
+            ("g", &[T::ArrayOutString, T::Int], T::Unit),
+        ],
+        |name, body| {
+            let call = match name {
+                "f" => {
+                    let (a, b) = (body.param(0), body.param(1));
+                    body.generic_call("exchange", vec![a, b], T::NullableAny, T::Unit)
+                }
+                "g" => {
+                    let (a, b) = (body.param(0), body.param(1));
+                    body.generic_call("first", vec![a, b], T::String, T::Unit)
+                }
+                _ => return Some(Vec::new()),
+            };
+            Some(vec![
+                crate::metadata::klib_ir::tree::KlibIrStatement::Expression(call),
+            ])
+        },
+    )
+}
+
+const TWO_INPUT_SOURCE: &str = "fun <P> first(a: Array<P>, b: Int) {\n}\n";
+
+/// Lower `name` of [`two_input_calls`] into `unit` with its callee, in the class model where
+/// `String` is an `Any` and `Array` is invariant.
+fn lower_two_input(
+    demo: &Demo,
+    unit: &mut DependencyBodyUnit,
+    name: &str,
+    callee: &str,
+) -> Result<crate::ir::FunId, KlibBodyDecline> {
+    let facts = demo
+        .callees(&[name, callee])
+        .with_type_oracle(&CovariantLists);
+    unit.lower_function(demo.callable(name), &demo.bodies, &facts)
+}
+
+#[test]
+fn a_capture_from_one_of_several_operands_binds_as_the_source_call_does() {
+    // kotlinc accepts `first(a, b)` on an `a: Array<out String>`: `P` is captured from `a` alone.
+    let demo = two_input_calls();
+    let mut unit = DependencyBodyUnit::default();
+    let g = lower_two_input(&demo, &mut unit, "g", "first")
+        .unwrap_or_else(|decline| panic!("{decline}"));
+    validated(unit.ir());
+    let source =
+        format!("{TWO_INPUT_SOURCE}fun g(a: Array<out String>, b: Int) {{\n first(a, b)\n}}\n");
+    assert_eq!(lowered_body(&unit, g), source_body(&source, "g", 2));
+}
+
+#[test]
+fn a_capture_another_operand_also_constrains_declines() {
+    // kotlinc rejects `exchange(a, b)` (and `exchange(a, a)`): each projected argument is
+    // captured apart, so no single `P` admits both. The serialized call cannot be the one checked
+    // FIR records, so the body declines and publishes nothing.
+    let demo = two_input_calls();
+    let mut unit = DependencyBodyUnit::default();
+    let decline =
+        lower_two_input(&demo, &mut unit, "f", "exchange").expect_err("the body declines");
+    super::demo_package::assert_unit_is_empty(&unit);
+    assert_eq!(
+        decline.to_string(),
+        "the KLIB body of `demo.f` \
+         (its serialized declaration disagrees with the selected one: \
+         a call captures a projection its other operands or bounds also constrain)"
+    );
+    // The declined lowering leaves no expression behind: the next root numbers its expressions
+    // exactly as in an empty unit.
+    let g = lower_two_input(&demo, &mut unit, "g", "first")
+        .unwrap_or_else(|decline| panic!("{decline}"));
+    let mut fresh = DependencyBodyUnit::default();
+    let fresh_g = lower_two_input(&demo, &mut fresh, "g", "first")
+        .unwrap_or_else(|decline| panic!("{decline}"));
+    assert_eq!(g, fresh_g);
+    assert_eq!(unit.ir().exprs.len(), fresh.ir().exprs.len());
+    assert_eq!(lowered_body(&unit, g), lowered_body(&fresh, fresh_g));
 }

@@ -687,14 +687,21 @@ impl BodyLowering<'_> {
         }
         let captured = self.captured_type_arguments(&linked, access)?;
         // A captured projection is serialized approximated to its bound; the call binds the
-        // projection itself, as checked FIR lowering records a source call that captures it.
-        let bound = |parameter: &String, value: Ty| {
-            captured
-                .get(parameter)
-                .copied()
-                .filter(|projection| projection.projection_read_ty() == value)
-                .unwrap_or(value)
-        };
+        // projection itself, as checked FIR lowering records a source call that captures it. A
+        // serialized argument that is not that bound is another call than the one captured.
+        for (parameter, argument) in linked.type_parameters.iter().zip(&access.type_arguments) {
+            let (Some(projection), Some(argument)) = (captured.get(parameter), argument) else {
+                continue;
+            };
+            let value = semantic_type(self.arena, self.header.type_parameters(), *argument)?;
+            if projection.projection_read_ty() != value {
+                return Err(mismatch(
+                    "a captured projection disagrees with the call's serialized type argument",
+                ));
+            }
+        }
+        let bound =
+            |parameter: &String, value: Ty| captured.get(parameter).copied().unwrap_or(value);
         if let Callee::Local(_) = linked.callee {
             // A call of a function the unit declares binds its type parameters as checked FIR
             // lowers a source call of a module generic function: the arguments are read at the
@@ -773,23 +780,34 @@ impl BodyLowering<'_> {
     /// parameter declared as a class applied to the bare type parameter `P`, passed a value whose
     /// serialized type applies an `out` projection in that slot that the class's own variance does
     /// not restate, binds `P` to that projection (`copyOf()` on an `Array<out T>`).
+    ///
+    /// Kotlin captures each projected argument apart, so a capture is published only when it is
+    /// the call's sole use of `P`: no other slot, operand, receiver or type-parameter bound of the
+    /// declaration names `P`. Any other shape declines; nothing is bound.
     fn captured_type_arguments(
         &self,
         linked: &LinkedCallee,
         access: &KlibIrMemberAccess,
     ) -> Lowered<crate::fx_hash::HashMap<String, Ty>> {
-        let mut captured = crate::fx_hash::HashMap::default();
         let values = arguments(access)
             .into_iter()
             .skip(usize::from(linked.receiver.is_some()));
+        let mut operands = Vec::with_capacity(linked.params.len());
         for (&declared, argument) in linked.params.iter().zip(values) {
-            let Some(serialized) = argument.and_then(|argument| self.arena.expr(argument).ty)
-            else {
-                continue;
+            let actual = match argument.and_then(|argument| self.arena.expr(argument).ty) {
+                Some(serialized) => Some(semantic_type(
+                    self.arena,
+                    self.header.type_parameters(),
+                    serialized,
+                )?),
+                None => None,
             };
-            let actual = semantic_type(self.arena, self.header.type_parameters(), serialized)?;
+            operands.push((declared, actual));
+        }
+        let mut captured = crate::fx_hash::HashMap::default();
+        for (operand, &(declared, actual)) in operands.iter().enumerate() {
             let (Some((owner, formals)), Some((actual_owner, actuals))) =
-                (declared.obj_parts(), actual.obj_parts())
+                (declared.obj_parts(), actual.and_then(Ty::obj_parts))
             else {
                 continue;
             };
@@ -797,23 +815,85 @@ impl BodyLowering<'_> {
                 continue;
             }
             for (slot, (formal, &projected)) in formals.iter().zip(actuals).enumerate() {
-                let (TyKind::TyParam(name, _), TyKind::OutProjection(bound)) =
+                let (TyKind::TyParam(name, bound), TyKind::OutProjection(read)) =
                     (formal.kind(), projected.kind())
                 else {
                     continue;
                 };
-                let mut read = actuals.to_vec();
-                read[slot] = bound;
-                if !self
-                    .linker
-                    .same_type(actual, Ty::obj_args_name(owner, &read))
-                {
-                    captured.insert(name.as_str().to_owned(), projected);
+                let mut restated = actuals.to_vec();
+                restated[slot] = read;
+                if self.linker.same_type(
+                    actual.expect("matched above"),
+                    Ty::obj_args_name(owner, &restated),
+                ) {
+                    continue;
+                }
+                let name = name.as_str();
+                let sole = captured.insert(name.to_owned(), projected).is_none()
+                    && formals
+                        .iter()
+                        .enumerate()
+                        .all(|(other, formal)| other == slot || !names(*formal, name))
+                    && operands
+                        .iter()
+                        .enumerate()
+                        .all(|(other, (declared, _))| other == operand || !names(*declared, name))
+                    && !linked
+                        .receiver
+                        .is_some_and(|receiver| names(receiver, name))
+                    && !names(bound, name)
+                    && !bound.mentions_ty_param()
+                    && self
+                        .linker
+                        .is_subtype(self.header.type_parameters(), read, bound);
+                if !sole {
+                    return Err(mismatch(
+                        "a call captures a projection its other operands or bounds also constrain",
+                    ));
                 }
             }
         }
         Ok(captured)
     }
+}
+
+/// Whether `ty` names the type parameter `name` anywhere, including through the declared bound
+/// of another type parameter it names.
+fn names(ty: Ty, name: &str) -> bool {
+    fn walk(ty: Ty, name: &str, seen: &mut Vec<String>) -> bool {
+        match ty.kind() {
+            TyKind::TyParam(parameter, bound) => {
+                let parameter = parameter.as_str();
+                if parameter == name {
+                    return true;
+                }
+                if seen.iter().any(|visited| visited == parameter) {
+                    return false;
+                }
+                seen.push(parameter.to_owned());
+                walk(bound, name, seen)
+            }
+            TyKind::Nullable(inner)
+            | TyKind::PlatformNullable(inner)
+            | TyKind::MutabilityFlexible(inner)
+            | TyKind::DefinitelyNotNull(inner)
+            | TyKind::InProjection(inner)
+            | TyKind::OutProjection(inner)
+            | TyKind::StarProjection(inner)
+            | TyKind::RawProjection(inner) => walk(inner, name, seen),
+            TyKind::Intersection(parts) => parts.iter().any(|part| walk(*part, name, seen)),
+            TyKind::Obj(_, args) => args.iter().any(|arg| walk(*arg, name, seen)),
+            TyKind::Fun(signature) => {
+                walk(signature.ret, name, seen)
+                    || signature
+                        .params
+                        .iter()
+                        .any(|param| walk(*param, name, seen))
+            }
+            _ => false,
+        }
+    }
+    walk(ty, name, &mut Vec::new())
 }
 
 /// The declared signature a call's operands are read at.
