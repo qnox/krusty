@@ -53769,12 +53769,7 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            if ty.name == "Array" && ty.targs.is_empty() && ty.arg.is_none() {
-                self.diags.error(
-                    ty.span,
-                    "one type argument expected. Use 'Array<*>' if you do not intend to pass type arguments."
-                        .to_string(),
-                );
+            if self.reject_bare_array_type_ref(&ty) {
                 return self.set(e, Ty::Error);
             }
             if ty.name == "Array"
@@ -53893,16 +53888,11 @@ impl<'a> Checker<'a> {
         nullable: bool,
     ) -> Ty {
         let t = {
-            self.expr(scope, operand);
+            let operand_ty = self.expr(scope, operand);
             let tt = self.with_unchecked_outermost_bounds(&ty, |checker| {
                 checker.runtime_type_ref_ty(scope, &ty)
             });
-            if ty.name == "Array" && ty.targs.is_empty() && ty.arg.is_none() {
-                self.diags.error(
-                    ty.span,
-                    "one type argument expected. Use 'Array<*>' if you do not intend to pass type arguments."
-                        .to_string(),
-                );
+            if self.reject_bare_array_type_ref(&ty) {
                 return self.set(e, Ty::Error);
             }
             if ty.name == "Array"
@@ -53933,6 +53923,7 @@ impl<'a> Checker<'a> {
             // must fail in lowering instead of making the frontend reject Kotlin (`42 as T`).
             // A safe cast `x as? T` has type `T?` — `null` on a runtime mismatch. For a primitive `T`
             // (`as? Int`) that nullable form is the boxed wrapper (`Int?`). A plain `x as T` keeps `T`.
+            let tt = self.cast_target_with_operand_arguments(operand_ty, tt);
             if nullable {
                 Ty::nullable(tt)
             } else {
