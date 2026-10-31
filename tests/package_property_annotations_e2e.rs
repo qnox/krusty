@@ -10,6 +10,20 @@ fn package_property_annotations_match_every_reference_class() {
 }
 
 #[test]
+fn package_owner_and_accessor_annotation_flags_follow_their_checked_destinations() {
+    let source = include_str!("fixtures/package_property_annotations/UseSites.kt");
+    let classes = common::classes_against_kotlinc_module(&[("UseSites.kt", source)]);
+    assert_eq!(classes.differences(), Vec::<String>::new());
+}
+
+#[test]
+fn default_setter_parameter_payloads_match_every_reference_class() {
+    let source = include_str!("fixtures/package_property_annotations/SetterPayloads.kt");
+    let classes = common::classes_against_kotlinc_module(&[("SetterPayloads.kt", source)]);
+    assert_eq!(classes.differences(), Vec::<String>::new());
+}
+
+#[test]
 fn parameterized_property_markers_report_complete_method_clashes() {
     common::assert_error_blocks_match_kotlinc(
         &[(

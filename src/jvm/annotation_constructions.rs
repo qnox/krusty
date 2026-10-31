@@ -12,6 +12,21 @@ use crate::ir::{
 };
 use crate::types::{type_name, Ty, TypeName};
 
+/// The declared interface carried by an already-realized annotation implementation.
+pub(super) fn implementation_interface(ir: &IrFile, implementation: TypeName) -> Option<TypeName> {
+    let class = ir.class_id_by_name(implementation)?;
+    ir.classes[class as usize].annotation_impl_of
+}
+
+/// A freshly allocated annotation still has its generated implementation as its stack type.
+/// Reads from declared variables and results of other expressions retain their own slot types.
+pub(super) fn construction_interface(ir: &IrFile, expression: ExprId) -> Option<TypeName> {
+    let IrExpr::New { internal, .. } = ir.expr(expression) else {
+        return None;
+    };
+    implementation_interface(ir, *internal)
+}
+
 pub(crate) fn lower_annotation_constructions(ir: &mut IrFile, facade: &str) {
     let sites = std::mem::take(&mut ir.annotation_constructions);
     if sites.is_empty() {
@@ -428,5 +443,9 @@ mod tests {
         assert!(ir.classes.iter().any(|class| {
             class.fq_name_id() == *internal && class.annotation_impl_of == Some(interface)
         }));
+        assert_eq!(construction_interface(&ir, construction), Some(interface));
+        let parameter = ir.add_expr(IrExpr::GetValue(0));
+        ir.logical_types.insert(parameter, Ty::obj_name(interface));
+        assert_eq!(construction_interface(&ir, parameter), None);
     }
 }
