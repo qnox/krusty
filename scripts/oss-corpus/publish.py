@@ -52,12 +52,18 @@ def publish(results, tree, names, commit, date, run):
         target = os.path.join(projects_dir, name)
         shutil.rmtree(target, ignore_errors=True)
         os.makedirs(target)
-        with open(os.path.join(target, 'compare.json'), 'w') as f:
-            json.dump(project, f, indent=1)
-        # The artifact holds out/<name>/compare.json beside logs/<name>.plugins.tsv.
-        survey = os.path.join(os.path.dirname(path), '..', '..', 'logs', f'{name}.plugins.tsv')
+        # The artifact holds out/<name>/compare.json beside logs/<name>.plugins.tsv and, for a
+        # sampled krusty build, logs/<name>.krusty.svg.
+        logs = os.path.join(os.path.dirname(path), '..', '..', 'logs')
+        survey = os.path.join(logs, f'{name}.plugins.tsv')
         if os.path.isfile(survey):
             shutil.copy(survey, os.path.join(target, f'{name}.plugins.tsv'))
+        graph = os.path.join(logs, f'{name}.krusty.svg')
+        if os.path.isfile(graph):
+            shutil.copy(graph, os.path.join(target, 'krusty-flamegraph.svg'))
+            project['flame_graph'] = 'krusty-flamegraph.svg'
+        with open(os.path.join(target, 'compare.json'), 'w') as f:
+            json.dump(project, f, indent=1)
         measured.append(project)
     for entry in os.listdir(projects_dir):
         if entry not in names:
