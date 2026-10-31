@@ -146,6 +146,156 @@ fn stdlib_array_walk_reads_its_captured_iterator() {
     );
 }
 
+/// The provider realization of the `kotlin.collections` function `name` over an object array,
+/// or with no receiver, that takes `arity` value parameters.
+fn collections_function(
+    libraries: &KlibLibraries,
+    name: &str,
+    over_array: bool,
+    arity: usize,
+) -> crate::libraries::ExternalCallableRealization {
+    let symbols = libraries.symbols(
+        SymbolNamespace::Package(type_name("kotlin/collections")),
+        name,
+    );
+    let matching = symbols
+        .callables
+        .functions()
+        .iter()
+        .filter(|function| {
+            function
+                .semantic_receiver()
+                .map(|receiver| receiver.kotlin_class_internal())
+                == over_array.then_some(Some(type_name("kotlin/Array")))
+                && function.semantic_params().len() == arity
+                && function.callable.vararg_index.is_none()
+                && function.semantic_params().iter().all(|param| {
+                    // `listOf(element)`, not the `listOf(vararg elements)` array parameter.
+                    matches!(param.kind(), crate::types::TyKind::TyParam(..))
+                })
+        })
+        .collect::<Vec<_>>();
+    let [function] = matching.as_slice() else {
+        panic!("one `{name}`, found {}", matching.len())
+    };
+    libraries
+        .external_callable(function.callable.external_identity.unwrap())
+        .unwrap()
+}
+
+#[test]
+fn stdlib_array_copy_binds_its_captured_type_argument() {
+    let Some(root) = distribution_root() else {
+        return;
+    };
+    let libraries = stdlib(&root);
+    let to_list = collections_function(&libraries, "toList", true, 0);
+    let root = to_list.klib_body_callable().expect("signed");
+    let providers = [
+        collections_function(&libraries, "copyOf", true, 0),
+        collections_function(&libraries, "asList", true, 0),
+        collections_function(&libraries, "emptyList", false, 0),
+        collections_function(&libraries, "listOf", false, 1),
+    ];
+    let array = libraries.classifier(type_name("kotlin/Array")).unwrap();
+    let size = libraries
+        .external_callable(
+            array.declared_callables["size"].properties()[0]
+                .getter
+                .external_identity
+                .unwrap(),
+        )
+        .unwrap();
+    let size = size.klib_body_callable().unwrap();
+    let get = member(&libraries, "kotlin/Array", "get");
+    let get = get.klib_body_callable().unwrap();
+    let leaves = providers
+        .each_ref()
+        .map(|provider| provider.klib_body_callable().unwrap());
+    let externals = leaves
+        .iter()
+        .enumerate()
+        .map(|(index, leaf)| {
+            (
+                leaf.identity().clone(),
+                super::super::EmittedDependencyCallable::new(
+                    crate::fir::ExternalCallableId::from_raw(80 + index as u32),
+                    None,
+                    None,
+                ),
+            )
+        })
+        .chain([
+            (
+                size.identity().clone(),
+                super::super::EmittedDependencyCallable::target_member(
+                    crate::fir::ExternalCallableId::from_raw(90),
+                ),
+            ),
+            (
+                get.identity().clone(),
+                super::super::EmittedDependencyCallable::target_member(
+                    crate::fir::ExternalCallableId::from_raw(91),
+                ),
+            ),
+        ])
+        .collect();
+    let oracle = crate::symbol_resolver::SourceOracle(&libraries);
+    let facts = KlibCalleeFacts::with_declarations([root], leaves.into_iter().chain([size, get]))
+        .with_type_oracle(&oracle);
+    let mut unit = DependencyBodyUnit::default();
+    let lowered = unit
+        .lower_function_with_intrinsics_and_externals(
+            root,
+            libraries.declaration_bodies(),
+            &facts,
+            crate::klib_libraries::KlibIntrinsicFacts::empty(),
+            &externals,
+        )
+        .unwrap_or_else(|decline| panic!("{decline}"));
+    validated(unit.ir());
+    // `copyOf()` on the `Array<out T>` receiver captures the projection: kotlinc serializes the
+    // type argument approximated to `T`, and the call binds `out T` and answers `Array<out T>`, as
+    // checked FIR lowering records `x.copyOf()` on an `x: Array<out T>`.
+    let ir = unit.ir();
+    let [receiver] = ir.functions[lowered as usize].params.as_slice() else {
+        panic!("`toList` takes its receiver alone")
+    };
+    let [projected] = receiver.type_args() else {
+        panic!("an array of one element type: {receiver:?}")
+    };
+    assert!(matches!(
+        projected.kind(),
+        crate::types::TyKind::OutProjection(..)
+    ));
+    let copies = ir
+        .exprs
+        .iter()
+        .enumerate()
+        .filter_map(|(index, expression)| match expression {
+            IrExpr::Call { callee, .. } => match &**callee {
+                crate::ir::Callee::External {
+                    target,
+                    ret,
+                    substitutions,
+                    ..
+                } if target.raw() == 80 => Some((
+                    *ret,
+                    substitutions
+                        .iter()
+                        .map(|substitution| substitution.value)
+                        .collect::<Vec<_>>(),
+                    ir.checked_type(index as u32),
+                )),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let array = Ty::obj_args("kotlin/Array", &[*projected]);
+    assert_eq!(copies, [(array, vec![*projected], Some(array))]);
+}
+
 /// A class model in which `String` is an `Any` and `List` declares its parameter `out`, so
 /// `List<String>` is a subtype of `List<Any?>`.
 struct CovariantLists;
