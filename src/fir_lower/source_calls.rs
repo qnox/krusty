@@ -2255,6 +2255,7 @@ impl BodyLowering<'_> {
             named: false,
         });
         self.ir.call_operand_bindings.insert(declaration);
+        self.ir.argument_evaluation_bindings.insert(declaration);
         statements.push(declaration);
         let read = self.ir.add_expr(IrExpr::GetValue(temporary));
         // This read is generated while normalizing checked argument evaluation order, so it has no

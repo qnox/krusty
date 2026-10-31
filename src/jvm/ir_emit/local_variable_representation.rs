@@ -1,4 +1,4 @@
-//! JVM storage for source locals whose declaration omits an initializer.
+//! JVM local storage and initializer slot ownership.
 //!
 //! Common IR retains the declared semantic type and the parser-supplied zero placeholder. An inline
 //! expansion may specialize the local's semantic type, but that does not change the JVM erasure of
@@ -128,16 +128,25 @@ impl Emitter<'_> {
                 *existing == slot_ty || (is_reference(*existing) && is_reference(slot_ty))
             })
             .map(|(slot, _)| slot);
-        // Enter before evaluating the initializer, as kotlinc does. A call-operand holder is the
-        // exception: its value is materialized first and the slot is entered afterwards.
+        // Reserve source declarations and argument-order holders before evaluating the initializer.
+        // An expanded callable's formal binding instead starts after its operand is evaluated.
+        // A pending argument-order holder has no semantic binding until its store, so initialization
+        // still sees the previous value map.
         let holds_operand = self.ir.call_operand_bindings.contains(&declaration);
-        // So is the receiver temporary of a folded safe-call chain (`a?.b?.c`): kotlinc's chain
+        let holds_evaluation = self.ir.argument_evaluation_bindings.contains(&declaration);
+        // The receiver temporary of a folded safe-call chain (`a?.b?.c`) is also delayed: the chain
         // folding declares the inner receiver's temporary first and keeps it until the chain
         // ends, so this one takes the slot above it.
         let chained_receiver = self.is_chained_receiver(index);
         let entered = reused.or_else(|| {
-            (!holds_operand && !chained_receiver)
-                .then(|| self.enter_unassigned_value(index, slot_ty, false))
+            (!chained_receiver && (!holds_operand || holds_evaluation)).then(|| {
+                if holds_operand {
+                    self.frame
+                        .enter(super::frame_map::FrameKey::CallOperand(index), slot_ty)
+                } else {
+                    self.enter_unassigned_value(index, slot_ty, false)
+                }
+            })
         });
 
         if let Some(cell) = initializer.and_then(|value| self.stored_shared_cell(value)) {

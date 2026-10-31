@@ -190,6 +190,16 @@ serialization marker independently of the erased constructor parameter vector. T
 checks both exact vectors; the generated owner is also compared byte-for-byte with the matching
 official serialization plugin. This updates test coverage without changing metadata encoding.
 
+## Operand-holder physical reservation
+
+Common IR distinguishes an argument-evaluation holder from an expanded parameter or capture by
+semantic purpose, including through expression cloning and formal-receiver adoption. The JVM frame
+reserves an argument-order holder before its initializer uses scratch storage. Expanded formal
+bindings retain their existing timing. The holder keeps its CallOperand identity, while its semantic binding
+is published at the store. Before assignment, frame snapshots see the unpublished reservation as
+Top. Debug-local lifetimes still begin after the store; checked types, parameter metadata, argument
+evaluation order and the compiler/plugin wire model are unchanged.
+
 ## Anonymous superclass argument bindings
 
 Base expressions of an anonymous object are checked before its dispatch-property scope exists.
