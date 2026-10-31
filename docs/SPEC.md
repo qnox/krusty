@@ -23263,6 +23263,15 @@ runtime controls check values and single argument evaluation. Dependency inner-c
 receiver specialization is supplied by the landed #2593 frontend change; the owned dependency
 controls here retain their independently bounded declarations.
 
+## Sparse constructor-default expression lines
+
+A JVM constructor-default realization publishes the exact source marks retained while evaluating
+its defaults, even when its generated owner has no declaration line. Entry, mask and closing marks
+still require their own source evidence. A dependency default without positions adds no synthetic
+declaration or consumer-use-site line. `constructor_default_expression_lines_e2e` compares complete
+generated implementation classes and module inventories, and runs literal, multiline, partial and
+reference-built dependency defaults against Kotlin.
+
 ## Constructor declarations survive receiver specialization
 
 A selected constructor retains its original declaration parameters independently of the types used
@@ -23436,12 +23445,3 @@ annotations over every supported release read from the manifest.
 `annotation_impl_class_e2e` compares complete emitted class inventories and raw artifacts, and runs
 the same programs after Kotlin; the ordinary Java-interface controls remain in
 `interface_object_method_e2e`.
-
-## Sparse constructor-default expression lines
-
-A JVM constructor-default realization publishes the exact source marks retained while evaluating
-its defaults, even when its generated owner has no declaration line. Entry, mask and closing marks
-still require their own source evidence. A dependency default without positions adds no synthetic
-declaration or consumer-use-site line. `constructor_default_expression_lines_e2e` compares complete
-generated implementation classes and module inventories, and runs literal, multiline, partial and
-reference-built dependency defaults against Kotlin.
