@@ -348,7 +348,6 @@ contextParameters/kt58476.kt
 contextParameters/suspendContextParemetersWithExtension.kt
 contextParameters/suspendContextualWithExtension.kt
 contextParameters/useFromAnotherModuleSuspending.kt
-contextParameters/useFromAnotherModuleWithDefaultParameterValues.kt
 contracts/contractForCast.kt
 contracts/isNullString.kt
 contracts/kt39374.kt
@@ -1182,8 +1181,6 @@ inline/crossModuleTypeOf.kt
 inline/crossinlineLambdaAllocation.kt
 inline/defaultArgs.kt
 inline/defaultArgsLateinitLowering.kt
-inline/defaultArgsLowering.kt
-inline/defaultArgsLoweringWithIntraModuleInliner.kt
 inline/defaultArgsMultipleModules.kt
 inline/dontInlineFunctionCall.kt
 inline/expressionBodyWithLambdaCall.kt
@@ -1238,7 +1235,6 @@ inline/innerInlineFunCapturesOuter.kt
 inline/iteratorOnInlineFunctionResult.kt
 inline/kt26117.kt
 inline/kt66017.kt
-inline/kt82065.kt
 inline/lambdaInLambda.kt
 inline/lambdaReassignment.kt
 inline/lambdaReassignmentWithCapture.kt
@@ -1443,7 +1439,6 @@ inlineEvaluationOrder/while.kt
 inlineEvaluationOrder/whileComplex.kt
 inlineEvaluationOrder/whileConditionExtracted.kt
 inlineSizeReduction/lastBreak.kt
-inlineSizeReduction/multiModuleDefaultArgsCleanup.kt
 inlineSizeReduction/oneTopLevelReturn.kt
 inlineSizeReduction/propertyAssignment.kt
 inlineSizeReduction/propertyReferenceDoesNotProduceSideEffect.kt
@@ -1564,7 +1559,6 @@ multiplatform/k2/basic/widerVisibilityInActualClassifier.kt
 multiplatform/k2/defaultArguments/constructor.kt
 multiplatform/k2/defaultArguments/defaultArgumentInDelegatedFunction.kt
 multiplatform/k2/defaultArguments/function.kt
-multiplatform/k2/defaultArguments/functionFromOtherModule.kt
 multiplatform/k2/defaultArguments/inheritedFromCommonClass.kt
 multiplatform/k2/defaultArguments/inheritedFromExpectedClass.kt
 multiplatform/k2/defaultArguments/inheritedFromExpectedMethod.kt

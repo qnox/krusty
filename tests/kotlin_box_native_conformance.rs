@@ -40,7 +40,7 @@ fn not_applicable(src: &str) -> Option<&'static str> {
     // "when the native target grows its own frontend semantics (klib ingestion, phase 7)" — which
     // is what the klib provider is.
     if !krusty::conformance::backend_targeted(src, &["NATIVE"]) {
-        return Some("targeted at another backend");
+        return Some(box_lane::TARGETED_AT_ANOTHER_BACKEND);
     }
     // Backend mutes are target-specific. A JVM mute cannot hide a shared-frontend or common-IR
     // failure from the Native lane; that failure belongs in this lane's exact outcome ratchet.
@@ -66,7 +66,7 @@ fn native_applicability_uses_native_directives_not_jvm_mutes() {
     );
     assert_eq!(
         not_applicable("// TARGET_BACKEND: JVM\nfun box() = \"OK\""),
-        Some("targeted at another backend")
+        Some(box_lane::TARGETED_AT_ANOTHER_BACKEND)
     );
     assert_eq!(
         not_applicable("// TARGET_BACKEND: ANY\nfun box() = \"OK\""),

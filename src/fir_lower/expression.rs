@@ -1059,6 +1059,8 @@ impl BodyLowering<'_> {
                 self.safe_call_expression(expression_id, receiver, *selector, expression.ty.get())?
             }
             FirExprKind::Elvis { lhs, rhs } => {
+                // Set only while this elvis is the next link of an enclosing chain.
+                let chain_start = self.elvis_chain_start.take();
                 let lhs_value = self.expression(*lhs)?;
                 let temporary = self.allocate_temporary();
                 let variable = self.ir.add_expr(IrExpr::Variable {
@@ -1072,8 +1074,10 @@ impl BodyLowering<'_> {
                     init: Some(lhs_value),
                     named: false,
                 });
-                // fir2ir declares the temporary where the elvis starts.
-                let start = self.body.expression_debug_lines(expression_id).start;
+                // fir2ir declares the temporary where the elvis starts: for a later link of a
+                // chain, where the chain starts.
+                let start = chain_start
+                    .unwrap_or_else(|| self.body.expression_debug_lines(expression_id).start);
                 if start != 0 {
                     self.ir.elvis_temporaries.insert(variable, start);
                 }
@@ -1084,11 +1088,17 @@ impl BodyLowering<'_> {
                     lhs: condition_lhs,
                     rhs: null,
                 });
-                let chained = matches!(
-                    self.body.expr(*rhs).map(|rhs| &rhs.kind),
-                    Some(FirExprKind::Elvis { .. })
-                );
-                let rhs = self.expression(*rhs)?;
+                let next_link = match self.body.expr(*rhs).map(|rhs| &rhs.kind) {
+                    Some(FirExprKind::Elvis { lhs: next, .. }) => Some(*next),
+                    _ => None,
+                };
+                let chained = next_link.is_some();
+                if chained && start != 0 {
+                    self.elvis_chain_start = Some(start);
+                }
+                let rhs = self.expression(*rhs);
+                self.elvis_chain_start = None;
+                let rhs = rhs?;
                 if chained {
                     // `a ?: b ?: c` is one chain that begins with `a`, as kotlinc folds it: the
                     // later elvis does not state a start line of its own.
@@ -1101,7 +1111,14 @@ impl BodyLowering<'_> {
                     branches: vec![(Some(condition), rhs), (None, lhs)],
                 });
                 self.ir.logical_types.insert(result, expression.ty.get());
-                let line = self.body.expression_debug_lines(expression_id).source;
+                // The fold's right-side condition marks the elvis's line. Where the right side is
+                // the chain's next link, kotlinc's chain marks that link's operand line there
+                // instead, and the last link marks the line the chain started on.
+                let line = match (next_link, chain_start) {
+                    (Some(next), _) => self.body.expression_debug_lines(next).start,
+                    (None, Some(chain_start)) => chain_start,
+                    (None, None) => self.body.expression_debug_lines(expression_id).source,
+                };
                 self.ir.whens.elvises.insert(result, line);
                 // An elvis over a safe call is one more guard of that call's chain: its left
                 // value's null check joins the chain's, and every `null` reaches the right side.

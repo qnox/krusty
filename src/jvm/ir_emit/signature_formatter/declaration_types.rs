@@ -1,7 +1,6 @@
 //! Generic type-use attributes on fields and declaration-backed property accessors.
 
 use super::{JvmSignatureFormatter, Wildcards};
-use crate::jvm::classfile::ACC_FINAL;
 use crate::types::{Ty, TyKind};
 
 pub(in crate::jvm::ir_emit) struct JvmPropertySignatures {
@@ -48,23 +47,25 @@ impl JvmSignatureFormatter<'_> {
         (signature != super::super::ir_method_desc(params, ret)).then_some(signature)
     }
 
-    /// A backing field's generic `Signature`. kotlinc maps a field's type in its return-type mode
-    /// when the field is final and in its value-parameter mode otherwise (`mapFieldSignature`): a
-    /// `val xs: List<CharSequence>` signs `Ljava/util/List<Ljava/lang/CharSequence;>;`, a `var`
-    /// `Ljava/util/List<+Ljava/lang/CharSequence;>;`.
+    /// A backing field's generic `Signature`. kotlinc's `mapFieldSignature` maps the type in its
+    /// value-parameter mode when the field backs a `var` property and in its return-type mode
+    /// otherwise: a `val xs: List<CharSequence>` signs `Ljava/util/List<Ljava/lang/CharSequence;>;`,
+    /// a `var` `Ljava/util/List<+Ljava/lang/CharSequence;>;`. The property decides, not the field's
+    /// finality: a plugin's non-final field behind a `val`, or one with no property at all, signs
+    /// like a return type.
     pub(in crate::jvm::ir_emit) fn field_signature(
         &self,
         ty: &Ty,
         type_parameter: Option<&str>,
-        access: u16,
+        backs_var: bool,
     ) -> Option<String> {
         if let Some(parameter) = type_parameter {
             return Some(format!("T{parameter};"));
         }
-        let wildcards = if access & ACC_FINAL != 0 {
-            Wildcards::Suppressed
-        } else {
+        let wildcards = if backs_var {
             Wildcards::Declared
+        } else {
+            Wildcards::Suppressed
         };
         self.declaration_type_use(ty, wildcards)
     }
