@@ -244,6 +244,7 @@ fn binary(annotation: &str, values: Vec<(String, AnnoValue)>) -> RetainedAnnotat
     RetainedAnnotation {
         retention: AnnoRetention::Binary,
         annotation: AppliedAnnotation {
+            written_order: None,
             internal: type_name(annotation),
             values,
         },
