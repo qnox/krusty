@@ -82,14 +82,6 @@ declaration-owned name operation. Preserve exact segments, owner edges, visibili
 non-local exclusions without interning undeclared prefixes. This producer correction is separate
 from the remaining metadata class-ID encoder and dependency/alias-name fact handoff.
 
-## Wasm function values
-
-Lower non-suspend lambdas and callable references to per-site structs over an arity-shared table
-whose extra field is a reference-only entry, and call them through that entry. Captures and bound
-receivers come from the checked IR in its order; boxing at the entry reuses the primitive box
-forms. Follow-ups: callable-reference equality by declaration, function-value `hashCode` and
-`toString`, suspend function values, and SAM conversion to `fun interface` types.
-
 ## Wasm reference-array reads
 
 Realize reference-element literals and reads in the Wasm storage boundary, using the checked array

@@ -90,14 +90,6 @@ prefix identities before later consumers run. Metadata class-ID encoding still n
 snapshot ownership lookup; publication alone does not supply authoritative negative nesting facts
 for every cached or cross-module identity.
 
-## Wasm function-value representation
-
-Function values consume the lambda's recorded implementation and capture list, and a callable
-reference's adapter, captures and bound receiver, as common lowering records them. No function
-type, `FunctionN` classifier or member is looked up by name; the arity alone selects the shared
-table and entry types, which are Wasm representation and change no metadata, provider identity or
-frontend decision.
-
 ## Wasm reference-array representation
 
 Reference-array reads consume the selected callable's frozen ArrayGet operation and the checked

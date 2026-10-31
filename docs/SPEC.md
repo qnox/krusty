@@ -159,29 +159,6 @@ classifier or owner. Publication retains visibility and declaration order, and e
 anonymous classifiers as before. Header-boundary regressions check the complete published inventory,
 absence of invented prefixes, and exact nesting for literal-dollar owner/member names.
 
-## Wasm function values
-
-A non-suspend lambda or callable reference is a Wasm object. Its struct is a subtype of the common
-object struct, holding the dispatch table, then the captured values in the order common lowering
-lists them: a reference's declaration captures, then its bound receiver. The table extends
-`$AnyTable` with one field after the interface table, the entry a call enters. Every function value
-of one arity shares that table type and the entry type `(this, argument…) -> result`, every operand
-a reference, as `FunctionN.invoke` is on the JVM. The entry unboxes each argument to the type the
-implementation declares and boxes its result. Two `Unit`s meet there: the implementation's
-`Unit` result has no Wasm value, and the entry hands back the object-valued `kotlin.Unit` singleton
-in its place; the call site then converts that reference to the invocation's checked result type,
-so a semantic `Unit` result is dropped again and never read as an object. A lambda's `==` is
-identity. Two references to one declaration are equal in Kotlin, which this backend does not
-compare yet, so their `==` traps instead of answering `false`; `hashCode` and `toString` of a
-function value trap as well.
-
-Suspend function values and `fun interface` (SAM) conversions of a lambda or a callable reference
-have no Wasm representation yet and decline the compilation, with `a suspend function value` and
-``a lambda converted to a `fun interface` `` respectively. Test: `functionValueCalls.kt` against
-the JVM reference and every backend, and `wasm_suspend_function_values_decline` and
-`wasm_sam_converted_function_values_decline`, which check the JVM reference before the exact Wasm
-decline.
-
 ## Wasm reference-array literals and reads
 
 Reference-element `Array<T>` literals without spreads preserve element evaluation order and array
