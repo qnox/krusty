@@ -845,6 +845,14 @@ compare the complete emitted class inventory and raw artifacts with Kotlin befor
 - ✅ `tests/try_catch_e2e.rs` (try-as-expression + multi-catch hierarchy on the JVM; stack-nonempty
   and `finally` rejection). Box conformance **91 OK / 0 FAIL** (up from 86).
 
+## Reuse checked singleton member receivers
+
+Admit authenticated `SingletonValue` reads to the compound member assignment's existing stable-read
+substitution. Keep the index-operand classifier and computed/mutable receiver snapshots unchanged.
+Validate complete class inventories and bytes for singleton member/index programs, initialization
+before the right operand, and existing immutable/captured/mutable receiver controls. Treat this
+receiver correction separately from annotation declaration-default operand normalization.
+
 ## Phase 34 — Explicit `this` + member assignment  ✅
 - ✅ `this` resolves to the enclosing class type (the checker tracks `this_ty`); codegen loads it as
   `aload 0` in instance context. Usable as a value (`return this`), a receiver (`this.foo()`), and a

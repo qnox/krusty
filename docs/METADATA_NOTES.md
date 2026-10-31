@@ -1435,6 +1435,14 @@ Declared getter results remain distinct from the checked read's applied result. 
 leaf capability reuses its existing accessor signature plans and does not import property bodies
 or reconstruct class storage. No metadata wire format changes.
 
+## Compound member singleton identity
+
+Checked FIR already records singleton declaration identity in `SingletonValue`. Compound member
+updates reuse that identity through `CompoundMemberReceiver::StableRead`, preserving the selected
+getter/setter and source facts. Repeated reads initialize the same declaration once; runtime calls
+and mutable receiver reads remain explicit snapshots. No metadata payload or compiler/plugin wire
+field changes are needed. Full raw JVM artifacts pin the eliminated receiver-local storage.
+
 ## Applied member input declarations
 
 `FunctionInfo` retains a common declaration-input facet before nominal specialization: the raw
