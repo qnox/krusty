@@ -1348,6 +1348,10 @@ impl super::IrFile {
         for alias in &mut self.package_type_aliases {
             type_alias(alias, names);
         }
+        for applied in self.package_property_annotations.values_mut() {
+            annotations(&mut applied.property, names);
+            annotations(&mut applied.field, names);
+        }
         for properties in self.member_ext_props.values_mut() {
             for property in properties {
                 property.receiver = ty(property.receiver, names);
