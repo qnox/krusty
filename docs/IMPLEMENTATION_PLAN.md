@@ -6354,8 +6354,11 @@ and the pass rejects every construct it does not cover yet.
   applier scheme inferred.
 - [x] Composable lambdas that capture nothing, passed to a composable call: `ComposableSingletons`
   properties made by `composableLambdaInstance`, each body a skippable group.
-- [ ] Capturing composable lambdas (`rememberComposableLambda`), nested and empty ones, other
-  composable function types, and the composable call checker's diagnostics.
+- [x] Composable lambdas that capture value parameters of their function, passed to a composable
+  call: remembered by `rememberComposableLambda`, with the captures leading the implementation's
+  parameters.
+- [ ] Composable lambdas that capture locals or composable lambda parameters, nested and empty
+  ones, other composable function types, and the composable call checker's diagnostics.
 - [x] Primitive and `String` parameters: `$changed`/`$dirty` slot tracking with strong skipping,
   `Composer.changed` comparisons, and each call's argument bits (static, passed on, uncertain).
 - [x] Constant default arguments: the `$default` mask, defaults assigned in the group, placeholders
