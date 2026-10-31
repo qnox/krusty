@@ -745,11 +745,7 @@ pub fn compile(opts: &cli::Options) -> Result<usize, String> {
                 .retain(|diagnostic| diagnostic.severity == krusty::diag::Severity::Error);
             diags.module_warnings.clear();
         }
-        let errors = diags
-            .diags
-            .iter()
-            .filter(|diagnostic| diagnostic.severity == krusty::diag::Severity::Error)
-            .count();
+        let errors = diags.error_count();
         return Err(format!(
             "{}krusty: {errors} error(s)\n",
             diags.render_all(&rendered)

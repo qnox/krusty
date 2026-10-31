@@ -139,6 +139,38 @@ class Summary(unittest.TestCase):
             '**300.0 s / 200.0 s** |',
         ])
 
+    def test_hotspots_rank_functions_across_the_sampled_projects(self):
+        with tempfile.TemporaryDirectory() as work:
+            reports = []
+            for name, functions, graph in (
+                ('zeta', [dict(function='zip::find', self=60, total=60),
+                          dict(function='krusty::resolve', self=20, total=70)], True),
+                ('Alpha', [dict(function='krusty::resolve', self=15, total=20)], False),
+            ):
+                p = project(name, [row(':a:compileKotlin', True, 1, 1)])
+                p['hotspots'] = dict(samples=100, functions=functions)
+                if graph:
+                    p['flame_graph'] = 'krusty-flamegraph.svg'
+                path = os.path.join(work, name + '.json')
+                with open(path, 'w') as f:
+                    json.dump(p, f)
+                reports.append(path)
+            text = subprocess.run([sys.executable, os.path.join(HERE, 'summarize.py'), *reports],
+                                  check=True, capture_output=True, text=True).stdout
+        self.assertEqual(text[text.index('## krusty hotspots'):].splitlines(), [
+            '## krusty hotspots',
+            '',
+            'Sampled call stacks of the krusty processes of every krusty build (200 samples at 99 Hz).',
+            '*Self* counts the samples in the function itself, *total* those with it anywhere on the stack.',
+            '',
+            'Flame graphs: [zeta](projects/zeta/krusty-flamegraph.svg).',
+            '',
+            '| Function | Self | Total | Projects |',
+            '| --- | ---: | ---: | --- |',
+            '| `zip::find` | 30.0% | 30.0% | zeta |',
+            '| `krusty::resolve` | 17.5% | 45.0% | Alpha, zeta |',
+        ])
+
 
 if __name__ == '__main__':
     unittest.main()

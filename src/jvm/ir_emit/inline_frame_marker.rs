@@ -28,9 +28,11 @@ impl Emitter<'_> {
             );
             return;
         }
+        let parent = self.active_inline_frame_identity();
         let Some(frame) = self.open_declared_local(declaration, slot, Ty::Int, code) else {
             return;
         };
+        self.open_inline_scope_frame(declaration, frame, parent, code);
         // Operands are evaluated and opened before the frame marker, but semantically belong to
         // the frame it starts. Bind both their range start and their table-order identity here.
         // Only this expansion's own operands are bound: an operand already bound while a later

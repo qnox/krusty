@@ -19,9 +19,8 @@ pub(super) fn attach_declared_function_debug(
         return;
     };
     if ir
-        .property_annotation_markers
-        .values()
-        .any(|&marker| marker == fid)
+        .jvm_property_annotation_markers()
+        .any(|marker| marker == fid)
     {
         attach_property_annotation_marker_debug(ir, fid, cw);
         return;
