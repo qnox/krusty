@@ -2551,6 +2551,18 @@ fun <T : CharSequence> plainName(): T = 1
     common::assert_error_blocks_match_kotlinc(&sources, &reference_args);
 }
 
+#[test]
+fn conditional_argument_branches_leave_bounded_overloads_ambiguous() {
+    // Each branch is a lower bound on `T`, and `Long` and `Int` satisfy both bounds, so neither
+    // overload is more specific.
+    let source = r#"
+fun <T : Number> pick(x: T): String = "number"
+fun <T : Comparable<*>> pick(x: T): String = "comparable"
+fun use(c: Boolean): String = pick(if (c) 1L else 2)
+"#;
+    assert_rejection_same_as_kotlinc("ConditionalArgumentOverloadAmbiguity", source);
+}
+
 /// The builder shape from a SQL library: a member extension's defaulted `separator` rejects the
 /// builder that a top-level extension of the same name accepts, and a trailing receiver lambda
 /// follows. kotlinc selects the top-level extension; the classes match its output.
@@ -2717,6 +2729,36 @@ fun call(): Int = keepAll(listOf(shape()))
 fun construct(): KeepAll<*> = KeepAll(listOf(shape()))
 "#;
     assert_rejection_same_as_kotlinc("RejectedStructuralArgument", source);
+}
+
+#[test]
+fn a_bound_violating_conditional_branch_rejects_the_whole_argument() {
+    // kotlinc constrains the formal by the conditional as one argument: the `Circle` branch puts
+    // the conditional's `Shape` outside the bound, and no other argument is left to infer `T`.
+    let source = r#"
+open class Shape
+class Square : Shape()
+class Circle : Shape()
+class Keep<T : Square>(item: T)
+fun <T : Square> keep(item: T): Int = 1
+fun call(c: Boolean): Int = keep(if (c) Square() else Circle())
+fun construct(c: Boolean): Keep<*> = Keep(if (c) Square() else Circle())
+"#;
+    assert_rejection_same_as_kotlinc("ConditionalBranchViolatesBound", source);
+}
+
+#[test]
+fn an_invariant_argument_fixes_the_formal_before_a_conditional_argument() {
+    let source = r#"
+open class Shape
+class Square : Shape()
+class Circle : Shape()
+class Same<T>(items: MutableList<T>, item: T)
+fun <T> same(items: MutableList<T>, item: T): Int = items.size
+fun call(c: Boolean): Int = same(mutableListOf<Square>(), if (c) Square() else Circle())
+fun construct(c: Boolean): Same<*> = Same(mutableListOf<Square>(), if (c) Square() else Circle())
+"#;
+    assert_rejection_same_as_kotlinc("InvariantFormalBeforeConditional", source);
 }
 
 #[test]

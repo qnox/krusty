@@ -134,6 +134,22 @@ imports and default imports and binds the default-imported `kotlin.Metadata` (ko
 The signature-collection name universe and the checker's classifier tower apply the same rule.
 `tests/box_regressions/callableImportKeepsDefaultClassifier.kt` covers it.
 
+## Conditional arguments as inference inputs
+
+Each branch of an `if` expression passed directly to a generic parameter is its own lower bound
+on the formal. `widen(if (c) long else int)` against `fun <T : Number> widen(x: T)` solves `T`
+from `Long` and `Int` and satisfies the bound, where the branches' approximated join `Any` would
+violate it (kotlinc 2.4.21 accepts the call). Function and constructor selection apply the same
+rule, and each branch receives the argument view a whole argument would: an integer literal still
+adapts (`sameAs(mutableListOf<Long>(), if (c) long else 2)` fixes `T` to `Long`), and a callable
+reference still converts to a fun interface (`read(if (c) ::one else ::two)`). When both bounded
+overloads accept every branch, the call stays ambiguous, as in kotlinc. A branch that contradicts
+a declared bound or an earlier invariant fixation rejects the conditional as one argument, reported
+with the conditional's joined type, under the rules of "Contradicting generic arguments".
+The box fixtures `conditionalArgumentGenericBound.kt` and `conditionalArgumentBranchView.kt` cover
+it, with the `resolver_regression_e2e` controls for overload ambiguity, a bound-violating branch,
+and invariant fixation before a conditional.
+
 ## Bound declaration-name evidence
 
 A query for an already-bound classifier or alias key projects the selected declaration's own
