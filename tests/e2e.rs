@@ -1087,6 +1087,8 @@ mod generic_arity_overload_e2e;
 mod generic_base_member_type_e2e;
 #[path = "generic_bound_projection_e2e.rs"]
 mod generic_bound_projection_e2e;
+#[path = "generic_call_line_marks_e2e.rs"]
+mod generic_call_line_marks_e2e;
 #[path = "generic_cast_number_e2e.rs"]
 mod generic_cast_number_e2e;
 #[path = "generic_constructor_parameter_scope_e2e.rs"]
@@ -2791,6 +2793,8 @@ mod unreachable_trailing_block_ty_e2e;
 mod unresolved_label_diagnostic_e2e;
 #[path = "unresolved_supertype_diag_e2e.rs"]
 mod unresolved_supertype_diag_e2e;
+#[path = "unsigned_annotation_values_e2e.rs"]
+mod unsigned_annotation_values_e2e;
 #[path = "unsigned_array_e2e.rs"]
 mod unsigned_array_e2e;
 #[path = "unsigned_bitwise_e2e.rs"]

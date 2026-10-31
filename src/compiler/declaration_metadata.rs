@@ -158,20 +158,9 @@ fn accessor_site_annotations(
     }
 }
 
-pub(super) fn top_level_property_retains_suppressed_source_application(
-    property: &ast::PropDecl,
-    info: &TypeInfo,
-) -> bool {
-    property
-        .annotations
-        .iter()
-        .any(|annotation| info.retains_suppressed_source_property_application(annotation))
-}
-
-/// The PROPERTY-targeted applications declared on a separately hoisted `companion { ... }`
-/// property. The property is not part of its classifier's ordinary AST property lists, so its
-/// checked applications cross the metadata handoff with that declaration itself.
-pub(super) fn companion_block_property_annotations(
+/// PROPERTY-targeted applications crossing metadata handoff with their stable declaration,
+/// including package properties and separately hoisted companion-block properties.
+pub(super) fn property_declaration_annotations(
     property: &ast::PropDecl,
     info: &TypeInfo,
 ) -> crate::ir::DeclarationAnnotations {
@@ -182,10 +171,9 @@ pub(super) fn companion_block_property_annotations(
     )
 }
 
-/// The FIELD-targeted applications declared on a separately hoisted `companion { ... }`
-/// property. They belong to the block property's exact static storage declaration, not to an
-/// ordinary same-named field of the classifier.
-pub(super) fn companion_block_field_annotations(
+/// FIELD-targeted applications crossing with their exact package or companion-block property.
+/// A target joins that stable declaration to its backing storage.
+pub(super) fn property_field_annotations(
     property: &ast::PropDecl,
     info: &TypeInfo,
 ) -> crate::ir::DeclarationAnnotations {
