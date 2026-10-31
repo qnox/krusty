@@ -5085,10 +5085,16 @@ code is the one the code generator already names: provider-owned bodies through 
   target's singleton value, typed as checked FIR types the source reference; any other object
   value still declines. A bodyless member of a generic class, such as `Collection.iterator`, binds
   its class's type parameters from the class header as a target member does. `setOf()` and
-  `emptySet()` now link through their stdlib bodies. Next stops: generic calls whose result is a
-  bounded type parameter (`toCollection`), the file-private `EmptyMap` and `EmptyList`,
-  compiler-introduced array blocks (`asList`), `IntRange` accessors and primitive iterators, and
-  callee parameter defaults.
+  `emptySet()` now link through their stdlib bodies.
+- **Lowering: captured results and set copies.** A call whose serialized result is a supertype of
+  the same classifier as its substituted result is the approximation kotlinc writes after
+  capturing a projected receiver (`iterator()` on an `Array<out T>` is the `Iterator<T>` it
+  equals) and is typed as serialized. On Native the runtime's growable sets and maps take an
+  initial capacity, and a set's `size` read through its KLIB getter is the runtime's. `toSet` on
+  arrays and lists now links through its stdlib bodies. Next stops: an argument passed through a
+  captured projection (`copyOf` on an `Array<out T>`), object literals in library bodies
+  (`asList`), the file-private `EmptyMap` and `EmptyList`, `IntRange` accessors and primitive
+  iterators, and callee parameter defaults.
 - Tests: the unit tests in `metadata/klib_ir/tree_decoding.rs`, `metadata/id_signature/` and
   `klib_lowering/` (whose stdlib checks run when `KRUSTY_KOTLIN_NATIVE` is set). End-to-end coverage comes through
   the box harness rather than a separate KLIB suite: the Native lane gains the `// MODULE:`

@@ -20684,6 +20684,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `klib_lowering::tests::target_members::klib_object_value_of_a_target_classifier_is_the_targets_singleton`,
   `klib_lowering::tests::target_members::klib_object_value_of_a_library_laid_out_object_declines`,
   `native_compiler_command_e2e::a_program_reads_library_objects_through_the_stdlib_bodies`.
+- **A captured result is typed as kotlinc approximates it.** When a dependency body calls a member
+  through a projected receiver (`Array<out T>.iterator()`), kotlinc captures the projection and
+  writes the call's result approximated: a supertype of the substituted result with the same
+  classifier (`Iterator<T>`, which `Iterator<out T>` equals because `Iterator` is covariant). The
+  call is typed as serialized; a result of another classifier, or one that is not a supertype,
+  still declines as a disagreeing declaration. Tests:
+  `klib_lowering::tests::captured_projections::stdlib_array_walk_reads_its_captured_iterator`,
+  `native_compiler_command_e2e::a_program_copies_collections_into_sets_through_the_stdlib_bodies`.
 - **The Native backend realizes what an expanded library body reaches.** A KLIB member's builtin
   operation (`Int.and`, `Long.times`, `Int.inv`, `Array.size`, `String.length`) is attached when
   the provider publishes the member, before its identity is assigned, so a template's call of it

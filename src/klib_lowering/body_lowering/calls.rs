@@ -617,9 +617,11 @@ impl BodyLowering<'_> {
         // A result read through a projected receiver argument (`Array<out T>.get`) is that
         // projection's read type, as a source call's result is.
         let ret = substitute(callee.ret).projection_read_ty();
-        if ty != ret {
+        let ret = if ty == ret || self.approximates_captured_result(ret, ty) {
+            ty
+        } else {
             return Err(mismatch("a call is typed apart from its callee's result"));
-        }
+        };
         let params = callee
             .params
             .iter()
@@ -639,6 +641,18 @@ impl BodyLowering<'_> {
             params,
             ret,
         })
+    }
+
+    /// Whether `serialized` is the type kotlinc approximates a call's result `ret` to after
+    /// capturing a projected receiver argument: the same classifier, and a supertype of `ret`
+    /// (`iterator()` on an `Array<out T>` answers `Iterator<out T>`, written as the `Iterator<T>`
+    /// it equals because `Iterator` is covariant).
+    fn approximates_captured_result(&self, ret: Ty, serialized: Ty) -> bool {
+        ret.kotlin_class_internal().is_some()
+            && ret.kotlin_class_internal() == serialized.kotlin_class_internal()
+            && self
+                .linker
+                .is_subtype(self.header.type_parameters(), ret, serialized)
     }
 
     /// The generic class `declared` names, applied to the type arguments the dispatch receiver
