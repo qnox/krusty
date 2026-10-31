@@ -25,43 +25,6 @@ pub(super) fn inaccessible_classifier_message(
 }
 
 impl Checker<'_> {
-    /// Render one member-level candidate as kotlinc lists it in an overload diagnostic: its
-    /// source declaration when there is one, otherwise its resolved signature.
-    pub(super) fn member_candidate_display(
-        &self,
-        name: &str,
-        candidate: &crate::libraries::FunctionInfo,
-    ) -> String {
-        self.source_callable_display(candidate).unwrap_or_else(|| {
-            // An extension's `callable.params` prepends the receiver while `call_sig` does
-            // not; skip it so names and types stay parallel.
-            let (params, receiver) = match candidate.kind {
-                crate::libraries::FnKind::Extension => (
-                    &candidate.callable.params[1.min(candidate.callable.params.len())..],
-                    candidate.receiver,
-                ),
-                _ => (candidate.callable.params.as_slice(), None),
-            };
-            let parameters = Self::callable_ref_parameters(params, &candidate.call_sig.param_names);
-            let suspend = if candidate.callable.suspend {
-                "suspend "
-            } else {
-                ""
-            };
-            match receiver {
-                Some(receiver) => format!(
-                    "{suspend}fun {}.{name}({parameters}): {}",
-                    receiver.source_name(),
-                    candidate.callable.ret.source_name()
-                ),
-                None => format!(
-                    "{suspend}fun {name}({parameters}): {}",
-                    candidate.callable.ret.source_name()
-                ),
-            }
-        })
-    }
-
     /// Render a callable directly from its semantic record. The receiver is an attribute of an
     /// extension, never positional parameter zero.
     pub(super) fn callable_candidate_display(
