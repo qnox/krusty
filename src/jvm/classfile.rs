@@ -26,6 +26,7 @@ mod field_annotations;
 mod inline_call_stacks;
 pub(crate) mod inline_scope_frames;
 mod inner_classes;
+mod kotlin_metadata;
 mod late_fields;
 mod line_numbers;
 mod local_variables;
@@ -792,48 +793,6 @@ impl ClassWriter {
         });
     }
 
-    /// Attach a `@kotlin.Metadata` annotation (RuntimeVisibleAnnotations) describing the file facade.
-    /// `d1`/`d2` are the encoded protobuf payload + string table.
-    pub fn set_kotlin_metadata(
-        &mut self,
-        k: i32,
-        stamp: MetadataStamp,
-        xi: i32,
-        d1: &[String],
-        d2: &[String],
-    ) {
-        // The field-table visit precedes the class annotations in kotlinc's writer.
-        self.intern_late_fields();
-        // kotlinc interns each element's KEY immediately before that element's VALUE constants (mv key
-        // then the mv integers, then k key then its integer, …) rather than all keys up front — so the
-        // constant pool interleaves keys and values. Match that by interning each key inline.
-        let anno_type = self.cp.utf8("Lkotlin/Metadata;");
-        // One `annotation` structure (type_index + element_value_pairs) — appended to the shared list so
-        // `finish` writes a single `RuntimeVisibleAnnotations` attribute even alongside user annotations.
-        let mut body = Vec::new();
-        u2(&mut body, anno_type);
-        let has_payload = !d1.is_empty() || !d2.is_empty();
-        u2(&mut body, if has_payload { 5 } else { 3 });
-        let n_mv = self.cp.utf8("mv");
-        u2(&mut body, n_mv);
-        self.ev_int_array(&mut body, &stamp.version);
-        let n_k = self.cp.utf8("k");
-        u2(&mut body, n_k);
-        self.ev_int(&mut body, k);
-        let n_xi = self.cp.utf8("xi");
-        u2(&mut body, n_xi);
-        self.ev_int(&mut body, stamp.xi(xi));
-        if has_payload {
-            let n_d1 = self.cp.utf8("d1");
-            u2(&mut body, n_d1);
-            self.ev_str_array(&mut body, d1);
-            let n_d2 = self.cp.utf8("d2");
-            u2(&mut body, n_d2);
-            self.ev_str_array(&mut body, d2);
-        }
-        self.runtime_annotations.push(body);
-    }
-
     /// Queue the applied annotations for the class's `RuntimeVisibleAnnotations` (JVMS §4.7.16). They join
     /// any `@Metadata` in the shared list; `finish` writes exactly ONE attribute.
     pub fn set_runtime_annotations(&mut self, anns: &[crate::ir::AppliedAnnotation]) {
@@ -948,6 +907,19 @@ impl ClassWriter {
     /// An `InvokeDynamic` constant binding a bootstrap entry to a call-site name+descriptor.
     pub fn invoke_dynamic(&mut self, bootstrap: u16, name: &str, desc: &str) -> u16 {
         self.cp.invoke_dynamic(bootstrap, name, desc)
+    }
+
+    /// The name and descriptor of every method declared so far, in declaration order.
+    pub(crate) fn declared_methods(&self) -> Vec<(String, String)> {
+        self.methods
+            .iter()
+            .filter_map(|method| {
+                Some((
+                    self.cp.utf8_at(method.name)?.to_string(),
+                    self.cp.utf8_at(method.desc)?.to_string(),
+                ))
+            })
+            .collect()
     }
 
     /// Whether a method with exactly this name+descriptor has already been added (used to avoid

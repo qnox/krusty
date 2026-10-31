@@ -169,6 +169,8 @@ mod backtick_identifier_e2e;
 mod backtick_keyword_identifier_e2e;
 #[path = "bare_accessor_and_setter_bridge_e2e.rs"]
 mod bare_accessor_and_setter_bridge_e2e;
+#[path = "bare_cast_target_e2e.rs"]
+mod bare_cast_target_e2e;
 #[path = "bazel_cli_contract_e2e.rs"]
 mod bazel_cli_contract_e2e;
 #[path = "bazel_module_release_e2e.rs"]
@@ -1129,6 +1131,8 @@ mod generic_vararg_inference_e2e;
 mod getter_return_line_e2e;
 #[path = "hidden_mapped_member_e2e.rs"]
 mod hidden_mapped_member_e2e;
+#[path = "hidden_member_extension_e2e.rs"]
+mod hidden_member_extension_e2e;
 #[path = "hides_members_overload_e2e.rs"]
 mod hides_members_overload_e2e;
 #[path = "iconsapi_byte_residue_e2e.rs"]
@@ -1359,6 +1363,8 @@ mod js_backend_coverage_e2e;
 mod js_backend_e2e;
 #[path = "jvm_default_mode_e2e.rs"]
 mod jvm_default_mode_e2e;
+#[path = "jvm_multifile_class_e2e.rs"]
+mod jvm_multifile_class_e2e;
 #[path = "jvm_name_e2e.rs"]
 mod jvm_name_e2e;
 #[path = "jvm_name_toplevel_e2e.rs"]

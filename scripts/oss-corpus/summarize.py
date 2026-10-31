@@ -167,6 +167,34 @@ def cost_section(projects):
     return out
 
 
+def hotspot_section(projects):
+    """The functions the sampled krusty builds spend the most CPU time in across the corpus, as a
+    share of every krusty sample, and each project's flame graph."""
+    sampled = [p for p in projects if p.get('hotspots') and p['hotspots']['samples']]
+    if not sampled:
+        return []
+    samples = sum(p['hotspots']['samples'] for p in sampled)
+    own, total, where = collections.Counter(), collections.Counter(), collections.defaultdict(set)
+    for p in sampled:
+        for f in p['hotspots']['functions']:
+            own[f['function']] += f['self']
+            total[f['function']] += f['total']
+            where[f['function']].add(p['name'])
+    out = ['', '## krusty hotspots', '',
+           f'Sampled call stacks of the krusty processes of every krusty build ({samples:,} samples at 99 Hz).',
+           '*Self* counts the samples in the function itself, *total* those with it anywhere on the stack.', '']
+    graphs = [p['name'] for p in sampled if p.get('flame_graph')]
+    if graphs:
+        out += ['Flame graphs: ' + ', '.join(
+            f"[{name}](projects/{name}/krusty-flamegraph.svg)" for name in graphs) + '.', '']
+    out += ['| Function | Self | Total | Projects |', '| --- | ---: | ---: | --- |']
+    for name, count in sorted(own.items(), key=lambda kv: (-kv[1], kv[0]))[:20]:
+        cell = name.replace('|', '\\|')
+        out.append(f"| `{cell}` | {100 * count / samples:.1f}% | "
+                   f"{100 * total[name] / samples:.1f}% | {', '.join(sorted(where[name]))} |")
+    return out
+
+
 def report(projects, stars, surveys, title):
     out = []
     if title:
@@ -206,6 +234,7 @@ def report(projects, stars, surveys, title):
         out.append('None.')
 
     out += cost_section(projects)
+    out += hotspot_section(projects)
 
     for kind, heading in (('gradle', 'Gradle plugins'), ('compiler', 'Kotlin compiler plugins'),
                           ('compiler-arg', 'Compiler plugin arguments')):

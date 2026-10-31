@@ -1,5 +1,14 @@
 # `@kotlin.Metadata` — reverse-engineering notes (Phase 4b)
 
+## Classpath annotation query boundary
+
+`declaration_annotations` borrows the existing classpath for exact selected-method and all-method
+annotation queries. `class_entry_bytes` retains first-entry precedence and the existing directory
+`this_class` check, with the same archive, jimage and ct.sym reads. Neither collaborator creates a
+cache or changes metadata authority. Parsed class/field annotations stay with `ClassInfo`/`FieldSig`;
+classreader decodes arguments and JVM providers interpret them. No annotation interpretation or
+new lookup enters core or lowering.
+
 ## Annotation classifier kind and JVM dispatch
 
 The JVM annotation realizer retains the exact declared interface in the generated carrier's
@@ -7,6 +16,11 @@ The JVM annotation realizer retains the exact declared interface in the generate
 reading a declared annotation parameter keeps the parameter's own slot contract. Existing selected
 Any-method roles and that construction evidence own interface dispatch and receiver materialization,
 without member spelling, generated-name checks, metadata changes or common semantic selection.
+
+Synthetic annotation method headers reserve their existing enabled nullability descriptors before
+body constants. Constructor parameter and equals annotations retain their payloads; shared toString
+finalization applies the same return contract to memberless implementations. The existing release
+policy and class-writer annotation filter own both reservation and attachment.
 
 ## Native bound-receiver physical storage
 
@@ -400,6 +414,11 @@ An interface's generated compatibility holder uses the shared `InnerClasses` ret
 for constant-pool publication. Its nesting relation and Kotlin metadata remain unchanged. Removing
 the earlier explicit class seed lets annotation-only references and declared children precede it
 when the ordinary table order requires that position.
+
+Equal qualified-name source rows use their retained declaration visitation order within the
+declaring writer's slots. Common lowering may evaluate a nested constructor operand first;
+that does not change the table's declaration order. Final pool relayout preserves this source
+order while retaining pool movement for generated and referenced rows and ancestor constraints.
 
 ## Module file — part ordering
 
@@ -1437,3 +1456,11 @@ without its own origin. The selected equality signature and both reads must name
 temporary/null proof; names never correlate these declarations. Declared temporary storage remains
 separate from the present branch's proven type. Common IR retains Elvis provenance with the absent
 source-line sentinel; no synthetic source line or metadata wire change is introduced.
+
+## Unsigned constant value messages
+
+`annotation_value_pb` writes field 10 = 1 for the four unsigned `IrConst` variants. The kind remains
+BYTE, SHORT, INT or LONG and `int_value` remains the zigzag encoding of its signed carrier, including
+high-bit values. Signed constants have no flags field. Recursive annotation and array values use
+the same encoder. The complete compile-time-value messages of the pinned official Native producer
+are the byte oracle; this does not infer unsigned identity when an earlier semantic model lost it.

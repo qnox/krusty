@@ -15,6 +15,7 @@ use crate::jvm::classfile::{
 use crate::jvm::classreader::{MethodCode, C};
 use crate::jvm::constructor_debug::{primary_constructor_line, property_line};
 use crate::jvm::inline::MethodBodies;
+use crate::jvm::multifile_facades;
 use crate::jvm::names::{
     mapped_builtin_virtual_name, method_descriptor, property_getter_name, property_setter_name,
     type_descriptor,
@@ -127,7 +128,9 @@ mod metadata_policy;
 mod method_access;
 pub(crate) use method_access::is_reifiable;
 mod method_defaults;
-pub(in crate::jvm) use method_defaults::body_has_reified_markers;
+pub(in crate::jvm) use method_defaults::{
+    body_has_reified_markers, default_stub_descriptor, default_stub_mask_count,
+};
 mod method_entry;
 mod method_signatures;
 mod must_inline_lambdas;
@@ -150,6 +153,7 @@ mod safe_calls;
 mod sam_wrapper_class;
 mod scalar_coercion;
 mod script_main;
+mod sealed_subtypes;
 mod shared_cell_declaration;
 mod signature_formatter;
 mod singleton_instance;
@@ -306,6 +310,8 @@ fn marker_accessor_emitted_last(ir: &IrFile, class: &IrClass) -> bool {
 /// (a backend bug to fix) from an unsupported construct (skip the file).
 #[derive(Default)]
 pub(crate) struct EmitRun {
+    /// What a multifile part leaves its facade.
+    pub(crate) multifile_part: multifile_facades::EmittedPart,
     /// Complete physical instance-field names, built at most once for each class touched by this
     /// emission run and reused by every field declaration, accessor, metadata, and bytecode use.
     instance_field_names: std::cell::RefCell<instance_field_names::InstanceFieldNamePlans>,
@@ -454,6 +460,8 @@ pub(super) struct EmitEnv<'a> {
     /// The file facade class's identity; the `facade` spelling threaded beside it is its class-file
     /// name.
     facade_class: TypeName,
+    /// The public facade a multifile part's non-private members are invoked through.
+    multifile_facade: Option<&'a str>,
     bodies: &'a dyn MethodBodies,
     run: &'a EmitRun,
     continuation_metadata: &'a crate::jvm::suspend::ContinuationMetadataMap,
@@ -1109,51 +1117,6 @@ fn emit_jvm_interface_companion_surface(
     }
 }
 
-fn register_sealed_subtypes(cw: &mut ClassWriter, ir: &IrFile, c: &IrClass, emit_permitted: bool) {
-    use crate::jvm::classfile::InnerClassSpec;
-    // The IR records subtype relationships for EVERY class; only a SEALED classifier turns them
-    // into PermittedSubclasses + nest entries (a plain interface with an anonymous implementor was
-    // seeding that implementor's class constant into its own pool). A nested subclass's entry
-    // interns where the `InnerClasses` table is written, after `@Metadata`, unless the class body
-    // names it first.
-    if !c.is_sealed {
-        return;
-    }
-    let self_identity = c.fq_name_id();
-    let subs = c.sorted_sealed_subclasses();
-    if subs.is_empty() {
-        return;
-    }
-    for &sub in &subs {
-        if sub != self_identity && sub.same_or_nested_within(self_identity) {
-            let rendered = sub.render();
-            cw.add_inner_class(InnerClassSpec {
-                inner: rendered,
-                outer: Some(self_identity.render()),
-                name: Some(
-                    sub.nested_segment_within(self_identity)
-                        .expect("a nested sealed subtype must have a relative segment")
-                        .to_string(),
-                ),
-                access: ir
-                    .classes
-                    .iter()
-                    .find(|candidate| candidate.fq_name_id() == sub)
-                    .map_or(0x0019, |candidate| {
-                        crate::jvm::inner_classes::class_access(ir, candidate)
-                    }),
-            });
-        }
-    }
-    if emit_permitted {
-        let rendered: Vec<String> = subs.iter().map(|subclass| subclass.render()).collect();
-        for sub in &rendered {
-            cw.seed_class(sub);
-        }
-        cw.set_permitted_subclasses(rendered);
-    }
-}
-
 /// Construct a `ClassWriter` with the per-file [`EmitOptions`] stamped on — the single place emission
 /// builds a writer, so class version + `SourceFile` reach every class (incl. synthetics) explicitly.
 fn new_writer(internal: &str, super_internal: &str, opts: &EmitOptions) -> ClassWriter {
@@ -1255,6 +1218,7 @@ pub(crate) fn emit_all_with_checked_classifiers(
 ) -> Option<Vec<(String, Vec<u8>)>> {
     let env = EmitEnv {
         facade_class,
+        multifile_facade: opts.multifile_facade.as_deref(),
         bodies: &bytecode_inline_call::ModuleClassBodies::new(bodies, run),
         run,
         continuation_metadata: facts.metadata.continuations,
@@ -1618,6 +1582,11 @@ fn emit_pass(
             );
         }
     }
+    // A multifile facade forwards to the part's declared members and their `$default` stubs,
+    // never to the synthetic accessors emitted below.
+    if env.multifile_facade.is_some() {
+        env.run.multifile_part.record_members(cw.declared_methods());
+    }
     // A facade's accessors map to the file's first line.
     static_accessors::emit(
         ir,
@@ -1634,9 +1603,13 @@ fn emit_pass(
     // empty one is an ABI divergence (spurious extra class). A facade static is owner-less.
     let facade_has_static = ir.statics.iter().any(|s| s.is_facade_owned());
     if facade_has_method || facade_has_static || metadata.is_some() {
-        cw.set_class_annotations(&ir.file_annotations);
-        if let Some(m) = metadata {
-            cw.set_kotlin_metadata(m.k, m.stamp, m.xi, &m.d1, &m.d2);
+        if let Some(multifile_facade) = env.multifile_facade {
+            multifile_facades::write_part_header(&mut cw, ir, metadata, multifile_facade);
+        } else {
+            cw.set_class_annotations(&ir.file_annotations);
+            if let Some(m) = metadata {
+                cw.set_kotlin_metadata(m.k, m.stamp, m.xi, &m.d1, &m.d2);
+            }
         }
         out.push((facade.to_string(), env.run.finish_class(cw)));
         out.extend(drain_lambda_classes(env, opts));
@@ -2262,7 +2235,7 @@ fn emit_class(
             &metadata.enclosing_descriptor,
         );
     }
-    register_sealed_subtypes(
+    sealed_subtypes::register(
         &mut cw,
         ir,
         c,
@@ -3137,7 +3110,7 @@ fn emit_interface_class(
     let mut cw = new_classifier_writer(ir, c, "java/lang/Object", env, opts);
     cw.set_access(class_public_bit(ir, c) | 0x0200 | 0x0400); // [PUBLIC |] INTERFACE | ABSTRACT
     supertype_markers::add_interfaces(&mut cw, ir, c);
-    register_sealed_subtypes(
+    sealed_subtypes::register(
         &mut cw,
         ir,
         c,
@@ -4692,7 +4665,7 @@ fn emit_placed_method(
     // kotlinc writes it even when no other local is recorded. The table's strings intern when the
     // method is added, right after this body (kotlinc's per-method visit order).
     if let Some((slot, start)) = inline_marker {
-        let marker_name = format!("$i$f${}", f.name);
+        let marker_name = format!("$i$f${}", ir.name_before_part_suffix(fid));
         code.add_local_entry(start, None, slot, &marker_name, "I");
     }
     // Method locals precede `this` and parameters in kotlinc's table order.
@@ -5074,6 +5047,8 @@ struct Emitter<'a> {
     dispatch_classifiers: std::rc::Rc<crate::jvm::member_dispatch::CheckedDispatchClassifiers<'a>>,
     owner: String,
     facade: String,
+    /// The public facade a multifile part's non-private members are invoked through.
+    multifile_facade: Option<String>,
     slots: HashMap<u32, (u16, Ty)>,
     /// The slots the backend owns, leased and released by `backend_temporaries`. They are not
     /// semantic locals and deliberately do not live in `slots`, which is keyed by real value ids.
@@ -5276,6 +5251,7 @@ impl<'a> Emitter<'a> {
             dispatch_classifiers: env.dispatch_classifiers.clone(),
             owner: owner.to_string(),
             facade: facade.to_string(),
+            multifile_facade: env.multifile_facade.map(str::to_string),
             slots: HashMap::default(),
             temporaries: backend_temporaries::BackendTemporaries::default(),
             unassigned_values: HashSet::default(),
