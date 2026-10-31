@@ -6460,6 +6460,15 @@ Retain SOURCE presence separately from payload and metadata flags for property m
 Default setters consume their checked parameter annotations through the complete shared payload
 reservation API and the existing metadata parameter writer.
 
+## Preserve checked annotation argument order
+
+Carry the checker's written indices into applied IR annotations and consume them at metadata
+encoding, including annotations nested in grouped varargs. Remove the type-use publisher's syntax
+remapping and preserve declaration-ordered values for physical annotation attributes. Validate
+complete reference classes and raw metadata with `tests/type_use_annotation_metadata_e2e.rs`.
+Reserve complete JVM parameter annotation payloads before code emission, sharing the classfile
+value encoder rather than seeding descriptors alone.
+
 ## Lower serialized Elvis expression blocks
 
 Authenticate the producer's exact temporary/null-test/branch contract and lower it to the existing

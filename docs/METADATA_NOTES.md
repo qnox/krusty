@@ -1501,6 +1501,19 @@ file extensions intern before annotation records, while constant payloads intern
 official Native property-message golden includes both integral and string constants to retain this
 ordering independently of JVM marker realization.
 
+## Annotation argument order
+
+An applied annotation retains declaration-ordered element values and the checker's written indices
+separately. The shared metadata encoder emits written values first and any materialized unwritten
+values afterward, recursively through nested annotations and arrays. A provider or generated
+application without source provenance keeps its stored order. JVM annotation attributes continue
+to use the declaration-ordered values. The complete annotation-order fixture covers declaration,
+constructor, function, parameter and property metadata alongside grouped and explicit vararg arrays.
+Method parameter annotation payloads intern at the JVM header boundary before body constants,
+with all visible parameters before invisible parameters and their nullability annotations.
+The parameter-payload oracle compares the entire module, including ordinary members, static
+companion forwards and interface compatibility holders with mixed retentions and nested values.
+
 ## Serialized Elvis provenance
 
 An `ELVIS` block supplies an immutable compiler variable followed by a two-branch conditional

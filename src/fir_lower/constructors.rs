@@ -820,6 +820,7 @@ fn push_no_arg_constructors(index: &ResolvedModuleIndex, ir: &mut IrFile) {
         let deprecated = crate::ir::RetainedAnnotation {
             retention: crate::types::AnnotationRetention::Runtime,
             annotation: crate::ir::AppliedAnnotation {
+                written_order: None,
                 internal: crate::types::type_name("kotlin/Deprecated"),
                 values: vec![
                     (
@@ -846,6 +847,7 @@ fn push_no_arg_constructors(index: &ResolvedModuleIndex, ir: &mut IrFile) {
         let java_deprecated = crate::ir::RetainedAnnotation {
             retention: crate::types::AnnotationRetention::Runtime,
             annotation: crate::ir::AppliedAnnotation {
+                written_order: None,
                 internal: crate::types::type_name("java/lang/Deprecated"),
                 values: Vec::new(),
             },
