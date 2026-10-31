@@ -1449,6 +1449,25 @@ Wasm constructor admission consumes `IrCtorArg`'s forwarded-super ordinal and pa
 separately from the total constructor-prefix count. Only field-free ordinary forwards are admitted
 by this extension; source metadata and capture storage retain their existing contracts.
 
+## Package property annotation records
+
+Package property annotation presence follows checked PROPERTY/FIELD destinations. Getter, setter
+and setter-parameter applications keep independent accessor flags; their source prefix does not
+make the property's own metadata annotated. Optional expectations and SOURCE retention keep the
+same policy as each checked declaration partition.
+
+SOURCE presence survives independently of its dropped payload and false metadata annotation bit;
+an erased optional expectation gains no source carrier. JVM property markers consume that retained
+presence. An annotated default setter writes its value-parameter metadata like a class property's
+setter, and parameter annotation payloads intern before the physical method body.
+
+Package properties retain checked PROPERTY and FIELD payloads under their stable property identity;
+metadata uses the same declaration flag/record model as class properties. JVM records use fields
+14 and 34; KLIB records use 170 and 181. Accessor strings intern before the property records. KLIB
+file extensions intern before annotation records, while constant payloads intern afterward. The
+official Native property-message golden includes both integral and string constants to retain this
+ordering independently of JVM marker realization.
+
 ## Serialized Elvis provenance
 
 An `ELVIS` block supplies an immutable compiler variable followed by a two-branch conditional
