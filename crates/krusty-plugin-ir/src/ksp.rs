@@ -131,6 +131,23 @@ pub enum KspMember {
         owner: String,
         declaration: Box<KspDeclaration>,
     },
+    /// The member KSP2 makes for the classifier `owner` (a qualified name) where members of two
+    /// of its supertypes with one signature meet, described here. `file` is the path of the source
+    /// file declaring the member it is made from, which it answers `containingFile` and `location`
+    /// with; `None` when that member is a library's.
+    Intersection {
+        owner: String,
+        file: Option<String>,
+        declaration: Box<KspDeclaration>,
+    },
+    /// The member at `position` of the properties (`property`) or functions the module's own
+    /// classifier `owner` lists: an intersection member made for that classifier, which another
+    /// one inherits.
+    Listed {
+        owner: String,
+        property: bool,
+        position: u32,
+    },
 }
 
 /// What `findOverridee` answers for a function or property.
@@ -378,6 +395,10 @@ pub enum KspValue {
     Short(i16),
     Int(i32),
     Long(i64),
+    UByte(u8),
+    UShort(u16),
+    UInt(u32),
+    ULong(u64),
     Char(u16),
     /// The value's bits, so that every NaN and `-0.0` survive.
     Float(u32),

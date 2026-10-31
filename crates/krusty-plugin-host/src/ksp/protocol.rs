@@ -15,7 +15,7 @@ use crate::protocol::{malformed, put_list, put_str, read_frame, utf8, write_fram
 
 use super::{GeneratedKind, KspGenerated, KspLoad, KspOutcome};
 
-pub(crate) const PROTOCOL: u32 = 14;
+pub(crate) const PROTOCOL: u32 = 16;
 
 const HELLO: u8 = 0;
 const LOAD: u8 = 1;
@@ -200,8 +200,12 @@ fn put_library_class(payload: &mut Vec<u8>, library: &KspLibraryClass) {
 }
 
 /// Members a classifier lists: 0 and the index of one of its own declarations; 1, the qualified
-/// name of the classifier that declares one described here, and that declaration; or 2, the
-/// qualified name of a source classifier and the index of one of its declarations.
+/// name of the classifier that declares one described here, and that declaration; 2, the
+/// qualified name of a source classifier and the index of one of its declarations; or 3, the
+/// qualified name of the classifier an intersection member is made for, the path of the source
+/// file declaring the member it is made from, if any, and its declaration; or 4, the qualified
+/// name of a source classifier, whether its properties (else its functions) are meant, and the
+/// position of a member it lists.
 fn put_members(payload: &mut Vec<u8>, members: &[KspMember]) {
     put_list(payload, members, put_member);
 }
@@ -221,6 +225,26 @@ fn put_member(payload: &mut Vec<u8>, member: &KspMember) {
             payload.push(2);
             put_str(payload, owner);
             payload.extend_from_slice(&index.to_be_bytes());
+        }
+        KspMember::Intersection {
+            owner,
+            file,
+            declaration,
+        } => {
+            payload.push(3);
+            put_str(payload, owner);
+            put_option(payload, file, |payload, path| put_str(payload, path));
+            put_declaration(payload, declaration);
+        }
+        KspMember::Listed {
+            owner,
+            property,
+            position,
+        } => {
+            payload.push(4);
+            put_str(payload, owner);
+            payload.push(u8::from(*property));
+            payload.extend_from_slice(&position.to_be_bytes());
         }
     }
 }
@@ -367,7 +391,8 @@ fn put_argument(payload: &mut Vec<u8>, argument: &KspArgument) {
 }
 
 /// A value: a tag byte (0 boolean, 1 byte, 2 short, 3 int, 4 long, 5 char, 6 float bits,
-/// 7 double bits, 8 string, 9 enum entry, 10 type, 11 annotation, 12 array), then the value.
+/// 7 double bits, 8 string, 9 enum entry, 10 type, 11 annotation, 12 array,
+/// 13 unsigned byte, 14 unsigned short, 15 unsigned int, 16 unsigned long), then the value.
 fn put_value(payload: &mut Vec<u8>, value: &KspValue) {
     match value {
         KspValue::Boolean(value) => {
@@ -388,6 +413,22 @@ fn put_value(payload: &mut Vec<u8>, value: &KspValue) {
         }
         KspValue::Long(value) => {
             payload.push(4);
+            payload.extend_from_slice(&value.to_be_bytes());
+        }
+        KspValue::UByte(value) => {
+            payload.push(13);
+            payload.extend_from_slice(&value.to_be_bytes());
+        }
+        KspValue::UShort(value) => {
+            payload.push(14);
+            payload.extend_from_slice(&value.to_be_bytes());
+        }
+        KspValue::UInt(value) => {
+            payload.push(15);
+            payload.extend_from_slice(&value.to_be_bytes());
+        }
+        KspValue::ULong(value) => {
+            payload.push(16);
             payload.extend_from_slice(&value.to_be_bytes());
         }
         KspValue::Char(value) => {

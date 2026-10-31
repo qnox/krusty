@@ -2707,6 +2707,7 @@ impl BodyFirChecker<'_> {
                 Some(
                     StmtLowering::LocalFunction(_)
                     | StmtLowering::PlusAssign(_)
+                    | StmtLowering::OverloadedAssignment { .. }
                     | StmtLowering::BackingFieldWrite { .. }
                     | StmtLowering::DeferredPropertyWrite { .. }
                     | StmtLowering::SuperPropertyWrite { .. }

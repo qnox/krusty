@@ -18,6 +18,7 @@ use crate::types::{Ty, TypeName};
 pub(crate) struct BoundInnerConstructorContext {
     outer: Ty,
     bindings: crate::symbol_resolver::GSigBinds,
+    input_bounds: crate::libraries::ReceiverInputBounds,
     rank: u32,
 }
 
@@ -38,29 +39,51 @@ impl BoundInnerConstructorContext {
         // hidden by an own formal in a complete enclosing layout. A selective capture layout
         // instead retains the captured declarations' semantic identities. An unapplied enclosing
         // type contributes only its existing bindings, without inventing argument evidence.
-        let bindings = if captured.len() == outer_declaration.type_params().len() {
-            captured
+        let identities: crate::fx_hash::HashMap<&str, &str> =
+            if captured.len() == outer_declaration.type_params().len() {
+                captured
+                    .iter()
+                    .zip(outer_declaration.type_params())
+                    .map(|(capture, formal)| (formal.as_str(), capture.as_str()))
+                    .collect()
+            } else {
+                captured
+                    .iter()
+                    .map(|capture| (capture.as_str(), capture.as_str()))
+                    .collect()
+            };
+        let bindings = identities
+            .iter()
+            .filter_map(|(&formal, &capture)| {
+                outer_bindings
+                    .get(formal)
+                    .map(|&actual| (capture.to_owned(), actual))
+            })
+            .collect();
+        let renamed = identities
+            .iter()
+            .map(|(&formal, &capture)| (formal, crate::types::intern(capture)))
+            .collect();
+        let input_bounds = crate::libraries::ReceiverInputBounds::from_declared(
+            outer_declaration
+                .type_params()
                 .iter()
-                .zip(outer_declaration.type_params())
-                .filter_map(|(capture, formal)| {
-                    outer_bindings
-                        .get(formal)
-                        .map(|&actual| (capture.clone(), actual))
-                })
-                .collect()
-        } else {
-            captured
-                .iter()
-                .filter_map(|capture| {
-                    outer_bindings
-                        .get(capture)
-                        .map(|&actual| (capture.clone(), actual))
-                })
-                .collect()
-        };
+                .zip(outer_declaration.type_param_bounds())
+                .filter_map(|(formal, bounds)| {
+                    let capture = identities.get(formal.as_str())?;
+                    Some((
+                        (*capture).to_owned(),
+                        bounds
+                            .iter()
+                            .map(|&bound| crate::types::ty_rename_params(bound, &renamed))
+                            .collect(),
+                    ))
+                }),
+        );
         Some(Self {
             outer: applied,
             bindings,
+            input_bounds,
             rank: u32::try_from(rank).expect("receiver hierarchy depth exceeds callable rank"),
         })
     }
@@ -83,7 +106,13 @@ impl BoundInnerConstructorContext {
     ) -> Option<FunctionInfo> {
         let mut candidate =
             FunctionInfo::receiver_bound_constructor(inner, classifier, constructor)?;
-        specialize_member_function(source, receiver, &mut candidate, &self.bindings);
+        specialize_member_function(
+            source,
+            receiver,
+            &mut candidate,
+            &self.bindings,
+            &self.input_bounds,
+        );
         if let Some(signature) = &mut candidate.generic_sig {
             // Receiver specialization changes declared bounds; refresh symbolic occurrences too
             // so ordinary argument contextualization sees the same bound as the constraint solver.
@@ -163,6 +192,51 @@ mod tests {
 
     struct EmptySource;
     impl SymbolSource for EmptySource {}
+
+    #[test]
+    fn captured_receiver_frame_renames_every_bound_component_with_its_formal() {
+        struct OuterSource(TypeName, std::sync::Arc<LibraryType>);
+        impl SymbolSource for OuterSource {
+            fn classifier(&self, owner: TypeName) -> Option<std::sync::Arc<LibraryType>> {
+                (owner == self.0).then(|| self.1.clone())
+            }
+        }
+        let outer = crate::types::type_name("sample/BoundedOuter");
+        let any = Ty::nullable(Ty::obj("kotlin/Any"));
+        let formal = Ty::ty_param("owner:T", any);
+        let bound = Ty::obj_args("sample/Recursive", &[formal]);
+        let marker = Ty::obj("sample/Marker");
+        let mut declaration = LibraryType::declaration_header();
+        declaration.own_type_parameter_count = 1;
+        declaration.type_parameters = crate::types::TypeParameters::invariant(
+            vec!["owner:T".into()],
+            vec![vec![bound, marker]],
+        );
+        let source = OuterSource(outer, std::sync::Arc::new(declaration));
+        let mut inner = LibraryType::declaration_header();
+        inner.outer_instance = Some(outer);
+        inner.own_type_parameter_count = 1;
+        inner.type_parameters = crate::types::TypeParameters::invariant(
+            vec!["inner:T".into(), "captured:T".into()],
+            vec![vec![any], vec![any]],
+        );
+        let context = BoundInnerConstructorContext::new(
+            &source,
+            Ty::obj_args_name(outer, &[Ty::out_projection(Ty::String)]),
+            &inner,
+        )
+        .unwrap();
+        let renamed = Ty::obj_args("sample/Recursive", &[Ty::ty_param("captured:T", any)]);
+        assert_eq!(
+            context.input_bounds.get("captured:T"),
+            Some([renamed, marker].as_slice())
+        );
+        assert_eq!(context.input_bounds.get("owner:T"), None);
+        assert_eq!(
+            context.bindings().get("captured:T"),
+            Some(&Ty::out_projection(Ty::String))
+        );
+    }
 
     #[test]
     fn captured_bindings_use_the_inner_layout_when_an_own_formal_shadows_the_outer() {
@@ -288,6 +362,10 @@ mod tests {
         let context = BoundInnerConstructorContext {
             outer: applied_outer,
             bindings: [("outer:O".into(), Ty::Int)].into_iter().collect(),
+            input_bounds: crate::libraries::ReceiverInputBounds::from_declared([(
+                "outer:O".into(),
+                vec![number],
+            )]),
             rank: 0,
         };
         let candidate = context

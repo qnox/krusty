@@ -187,6 +187,8 @@ fn a_caller_owned_variable_does_not_defer_a_definite_bound_violation() {
             argument: 0,
             expected: bound,
             actual,
+            formal: 0,
+            uninferred: true,
         })
     );
 }
@@ -217,6 +219,8 @@ fn an_open_dependent_bound_does_not_hide_a_concrete_bound_violation() {
             argument: 0,
             expected: Ty::Int,
             actual: Ty::String,
+            formal: 1,
+            uninferred: true,
         })
     );
 }
@@ -246,6 +250,8 @@ fn bound_violation_retains_the_prior_valid_argument_solution() {
             argument: 1,
             expected: Ty::Int,
             actual: Ty::String,
+            formal: 0,
+            uninferred: false,
         })
     );
 }
@@ -1036,6 +1042,8 @@ fn mixed_nullable_and_bare_any_bound_keeps_the_bound_violation() {
             argument: 0,
             expected: Ty::obj("kotlin/Any"),
             actual: caller,
+            formal: 0,
+            uninferred: false,
         })
     );
 }

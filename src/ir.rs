@@ -111,6 +111,7 @@ pub use crate::enclosing_declarations::EnclosingDeclaration;
 pub use crate::fir::{CallableId, ExternalCallableId, SourceFileId};
 pub use crate::spelling::{Spelled, TypeUseAnnotation};
 pub use crate::types::EqualityMode;
+pub(crate) use annotations::PackagePropertyAnnotations;
 pub use annotations::{
     AccessorAnnotations, AnnoRetention, AnnoValue, AppliedAnnotation, DeclarationAnnotations,
     FieldAnnotations, PropertyAnnotations, RetainedAnnotation,
@@ -154,7 +155,7 @@ pub use local_property_references::IrLocalPropertyReference;
 pub use module_records::{
     IrCallableTypeParameter, IrClassifierKind, IrHeaderAnnotation, IrModuleCallable,
     IrModuleClassifier, IrModuleConstructions, IrModuleConstructor, IrModuleMemberAccess,
-    IrModuleSource,
+    IrModuleSource, IrOverriddenFunction,
 };
 pub use null_checks::NullCheck;
 pub use operators::{IrBinOp, IrTypeOp};
@@ -1551,6 +1552,9 @@ pub struct IrFile {
     /// constructor/value-class markers; a target also uses the owner to re-enter a suspend local
     /// without scanning classes or recovering ownership from its generated name.
     pub(crate) class_static_local_functions: crate::fx_hash::HashMap<FunId, TypeName>,
+    /// A multifile part's private functions, which the JVM names `<name>$<Part>`, by the name
+    /// they had before: a synthetic accessor of one is still named from it (`access$<name>`).
+    pub(crate) multifile_private_names: crate::fx_hash::HashMap<FunId, String>,
     pub classes: Vec<IrClass>,
     /// Exact generated-class identities keyed by their semantic role within a source owner.
     generated_classes: crate::fx_hash::HashMap<(TypeName, IrGeneratedClassRole), ClassId>,
@@ -1753,6 +1757,10 @@ pub struct IrFile {
     /// left value). Recorded where they are lowered, so a backend lays the guard out as its platform
     /// compiler does without recognizing the shape again.
     pub null_guards: crate::fx_hash::HashSet<ExprId>,
+    /// The temporary `value as? T` evaluates its operand into, keyed by its `Variable`. Only the
+    /// `is T` test and the matching branch's cast read it, so a backend may store the operand's
+    /// physical value without first converting it to the operand's semantic type.
+    pub safe_cast_temporaries: crate::fx_hash::HashSet<ExprId>,
     /// `::prop.isInitialized`, recorded when lowering `LateinitFieldRead`. The probe compares the
     /// property with null and does not throw. A backend chooses the raw field, getter, or bridge.
     pub lateinit_initialization_probes: crate::fx_hash::HashSet<ExprId>,
@@ -1934,6 +1942,11 @@ pub struct IrFile {
     /// for evaluation order. This is provenance, not a storage decision; a backend decides how
     /// that role participates in its own frame or register allocation.
     pub call_operand_bindings: crate::fx_hash::HashSet<ExprId>,
+    /// Call-operand declarations introduced to preserve checked argument evaluation order, rather
+    /// than to bind an expanded callable's parameters or captures. A reused declaration leaves this
+    /// subset when an inline expansion adopts it as its own formal binding. This records purpose;
+    /// each backend still owns storage and lifetime decisions.
+    pub(crate) argument_evaluation_bindings: crate::fx_hash::HashSet<ExprId>,
     /// The call-operand holders of one inline lambda invocation, consecutive in its block: the
     /// invocation evaluates every operand before it binds any. A backend chooses the binding order.
     pub(crate) invocation_operand_bindings: crate::fx_hash::HashSet<ExprId>,
@@ -1974,6 +1987,10 @@ pub struct IrFile {
     /// Annotations written on a source property's accessors, by property. A declared accessor's
     /// also land in [`Self::function_annotations`]; a default one exists only in a backend.
     pub accessor_annotations: crate::fx_hash::HashMap<crate::fir::PropertyId, AccessorAnnotations>,
+    /// Checked PROPERTY-targeted applications on package declarations, including retention and
+    /// erased/suppressed provenance. Storage and accessor identities do not own these payloads.
+    pub(crate) package_property_annotations:
+        crate::fx_hash::HashMap<crate::fir::PropertyId, PackagePropertyAnnotations>,
     /// FIELD-targeted applications on parser-hoisted `companion { ... }` properties. Metadata
     /// handoff publishes them under stable property identity before common lowering realizes the
     /// exact static storage that will own them.
@@ -2067,6 +2084,10 @@ pub struct IrFile {
     /// Internal names of classes kotlinc marks `ACC_SYNTHETIC` (0x1000) on the class itself — e.g. a
     /// `@Serializable` class's generated `$$serializer` object.
     synthetic_classes: crate::fx_hash::HashSet<TypeName>,
+    /// Internal names of classes a compiler plugin generates with no Kotlin declaration behind
+    /// them, such as Compose's `ComposableSingletons$<File>Kt`. No declaration record describes
+    /// them, and kotlinc writes them a synthetic-class `@Metadata`.
+    declarationless_classes: crate::fx_hash::HashSet<TypeName>,
     /// Provenance and initialization placement for statics generated without a Kotlin declaration.
     generated_static_facts: crate::fx_hash::HashMap<u32, generated_members::GeneratedStaticFacts>,
     /// `FunId`s of methods carrying a `Deprecated` classfile attribute (from `@Deprecated`) — e.g. a
@@ -2207,7 +2228,8 @@ pub struct IrFile {
     pub secondary_ctor_lines:
         crate::fx_hash::HashMap<crate::fir::DeclarationId, IrSecondaryCtorLines>,
     /// Declared PRIMARY-constructor visibility per class (`class C protected constructor(…)`);
-    /// absent = public. It sets `@Metadata` `Constructor.flags` and the JVM access.
+    /// absent = public, or private for a singleton, whose constructor only a generated singleton
+    /// records as public. It sets `@Metadata` `Constructor.flags` and the JVM access.
     pub ctor_visibilities: crate::fx_hash::HashMap<TypeName, crate::types::Visibility>,
     /// A declared function's `vararg` parameter — class `@Metadata` must emit
     /// `ValueParameter.vararg_element_type` (f4) or a consumer demands one literal array (`too many
@@ -2364,6 +2386,10 @@ pub struct IrFile {
     /// where it was lowered, not from its shape: an adaptation or widening over the same call is
     /// another coercion. A target decides whether the conversion crosses a physical result slot.
     pub declaration_result_coercions: crate::fx_hash::HashSet<ExprId>,
+    /// The `ImplicitCoercion` JVM dependency-call realization places between a provider's physical
+    /// result and the checked semantic result, keyed by that coercion. Like
+    /// `declaration_result_coercions`, the mark comes from where the boundary was made.
+    pub jvm_external_result_coercions: crate::fx_hash::HashSet<ExprId>,
     /// Call-owned supplied-argument edges whose declaration parameters mention type parameters.
     /// A target may adapt only these exact edges, and only when its own carrier rules select them.
     pub declaration_argument_boundaries:
@@ -2532,6 +2558,25 @@ impl IrFile {
         self.fir_origins
             .get(&expression)
             .map(|origin| origin.fir_origin())
+    }
+
+    /// The name of `function` that its inline marker is named from: its own, or the name a
+    /// multifile part's private function had before the part suffixed it.
+    pub(crate) fn name_before_part_suffix(&self, function: FunId) -> &str {
+        self.multifile_private_names
+            .get(&function)
+            .map_or(&self.functions[function as usize].name, |name| name)
+    }
+
+    /// The name of `function` that its synthetic accessor is named from. kotlinc names a multifile
+    /// part's private function's accessor after its Kotlin name, except a suspend function's,
+    /// which follows the suffixed JVM name of the method its state machine is built on.
+    pub(crate) fn accessor_base_name(&self, function: FunId) -> &str {
+        if self.suspend_funs.contains(&function) {
+            &self.functions[function as usize].name
+        } else {
+            self.name_before_part_suffix(function)
+        }
     }
 
     /// A method's Kotlin declaration visibility. Public is the compact default for generated and

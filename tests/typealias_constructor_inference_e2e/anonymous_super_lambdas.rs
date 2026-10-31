@@ -1,5 +1,21 @@
 use super::{assert_complete_class_abi, common};
 
+const NESTED_SETTER: &str = include_str!("../box_regressions/nestedAnonymousSuperSetter.kt");
+
+#[test]
+fn nested_super_lambdas_write_to_their_original_caller_instances() {
+    common::expect_box_same_as_kotlinc(NESTED_SETTER, "nested_super_lambda_setter");
+}
+
+// PLATFORM: compare the full emitted class inventory, headers and field/method ABI.
+#[test]
+fn nested_super_lambda_receivers_keep_the_complete_reference_class_abi() {
+    assert_complete_class_abi(&common::classes_against_kotlinc_module(&[(
+        "NestedSetter.kt",
+        NESTED_SETTER,
+    )]));
+}
+
 const PLACEMENT: &str = r#"
 open class Carrier<T>(val stored: () -> T)
 fun captureless() = object : Carrier<String>({ "OK" }) {}

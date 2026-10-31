@@ -19,9 +19,11 @@
 use crate::fx_hash::{HashMap, HashSet};
 
 mod arrays;
+mod boxing;
 mod default_arguments;
 mod dependency_exports;
 mod exceptions;
+mod function_values;
 mod intrinsic_operations;
 mod objects;
 mod scalar_instructions;
@@ -331,7 +333,7 @@ pub(super) fn lower_file(
     } else {
         None
     };
-    callable_registry.publish(ir, dependency_exports, &indices)?;
+    callable_registry.publish(ir, dependency_exports, &indices, &default_indices)?;
     Ok(LoweredFile {
         functions: indices,
         initializer,
@@ -385,6 +387,12 @@ pub(super) fn carrier(ty: Ty) -> Result<Option<ValType>, Unsupported> {
         // frontend checked, cast to its class where one is read (see `super::super::objects`).
         TyKind::Obj(..) | TyKind::TyParam(..) => REFERENCE,
         TyKind::DefinitelyNotNull(inner) if inner.is_ty_param() => REFERENCE,
+        // A function value is an object (see `super::super::function_values`).
+        TyKind::Fun(signature) if !signature.suspend => REFERENCE,
+        TyKind::Fun(_) => return Err("a suspend function value".into()),
+        TyKind::Nullable(inner) if matches!(inner.kind(), TyKind::Fun(signature) if !signature.suspend) => {
+            REFERENCE
+        }
         TyKind::Nullable(inner)
             if matches!(inner.kind(), TyKind::Obj(..) | TyKind::TyParam(..)) =>
         {
@@ -487,6 +495,9 @@ fn expression_type(
         {
             result
         }
+        // A SAM-converted lambda may have no checked type to ask about; it declines here as
+        // it does where it is lowered.
+        IrExpr::Lambda { sam: Some(_), .. } => return Err(function_values::SAM_CONVERSION.into()),
         node => ir
             .checked_type(id)
             .ok_or_else(|| format!("{} without a checked type", describe_node(node)))?,
@@ -811,6 +822,11 @@ impl<'a> Body<'a> {
             return Ok(());
         };
         let Some(source) = carrier(source)? else {
+            if source == Ty::Unit && target == REFERENCE {
+                let unit = self.runtime.unit_object(self.module);
+                self.code.global_get(unit);
+                return Ok(());
+            }
             return Err("a `Unit` value where a value is expected".to_string());
         };
         if source == target {
@@ -843,6 +859,11 @@ impl<'a> Body<'a> {
             }
             return Ok(());
         }
+        match (source, target) {
+            (ValType::Ref { .. }, _) => return self.unbox(target_ty),
+            (_, ValType::Ref { .. }) if target == REFERENCE => return self.box_value(source_ty),
+            _ => {}
+        }
         match (rank(source), rank(target)) {
             (Some(from), Some(to)) if from < to => {
                 widen(&mut self.code, source, target);
@@ -867,8 +888,15 @@ impl<'a> Body<'a> {
                 return Err("a shared cell read as a value".to_string());
             }
             IrExpr::GetValue(slot) => {
-                if let Some((local, _)) = self.values.get(&slot) {
-                    self.code.local_get(*local);
+                if let Some(&(local, declared)) = self.values.get(&slot) {
+                    self.code.local_get(local);
+                    // A smart cast reads the slot at a narrower type: `Int` out of an `Int?`
+                    // local holding a box.
+                    if let Some(read) = self.type_of(id)? {
+                        if carrier(read)? != carrier(declared)? {
+                            self.coerce_emitted_value(declared, read)?;
+                        }
+                    }
                 } else if !self.unit_values.contains(&slot) {
                     return Err(format!("a read of value {slot} before its declaration"));
                 }
@@ -1156,6 +1184,8 @@ impl<'a> Body<'a> {
                                     (source, target),
                                     (ValType::Ref { .. }, ValType::Ref { .. })
                                 )
+                                && !(op == IrTypeOp::ImplicitCoercion
+                                    && (rank(source).is_none() || rank(target).is_none()))
                         }) =>
                     {
                         if op != IrTypeOp::ImplicitCoercion {
@@ -1178,11 +1208,10 @@ impl<'a> Body<'a> {
                         "a not-null assertion requiring a scalar reference conversion".into(),
                     );
                 }
-                // A reference assertion alone supplies neither scalar unboxing nor a typed null
-                // failure. Keep the existing reference path without claiming either capability.
-                self.expression(operand)?;
-                if matches!(operand_carrier, Some(ValType::Ref { .. })) {
-                    self.code.ref_as_non_null();
+                if let Some(reference @ ValType::Ref { .. }) = operand_carrier {
+                    self.assert_nonnull_reference(operand, reference)?;
+                } else {
+                    self.expression(operand)?;
                 }
             }
             IrExpr::New {
@@ -1311,6 +1340,28 @@ impl<'a> Body<'a> {
                     self.code.unreachable();
                 }
             }
+            IrExpr::Lambda {
+                impl_fn,
+                captures,
+                sam: None,
+                ..
+            } => self.function_value(
+                impl_fn,
+                &captures,
+                function_values::FunctionEquality::Identity,
+            )?,
+            IrExpr::Lambda { sam: Some(_), .. } => {
+                return Err(function_values::SAM_CONVERSION.into());
+            }
+            IrExpr::CallableReference(reference) if !reference.declaration_suspend => {
+                self.callable_reference(&reference)?
+            }
+            IrExpr::InvokeFunction {
+                func,
+                args,
+                params,
+                ret,
+            } => self.invoke_function(func, &args, &params, ret)?,
             IrExpr::Call { callee, .. } => {
                 return Err(format!("a call to {}", callee_kind(&callee)));
             }

@@ -8,6 +8,8 @@ use super::common;
 
 #[path = "typealias_constructor_inference_e2e/anonymous_super_lambdas.rs"]
 mod anonymous_super_lambdas;
+#[path = "typealias_constructor_inference_e2e/parameterized_parent_aliases.rs"]
+mod parameterized_parent_aliases;
 
 #[test]
 fn a_generic_typealias_constructor_types_an_inferred_declaration() {

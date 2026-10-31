@@ -2222,10 +2222,18 @@ impl BodyFirChecker<'_> {
             self.body.direct_suspension = true;
         }
         let origin = self.statement_origin(statement)?;
-        if let Some(StmtLowering::PlusAssign(target)) =
-            self.info.stmt_lowers.get(&statement).cloned()
-        {
-            return self.compound_assignment_statement(statement, target, origin);
+        match self.info.stmt_lowers.get(&statement).cloned() {
+            Some(StmtLowering::PlusAssign(target)) => {
+                return self.compound_assignment_statement(statement, target, origin);
+            }
+            Some(StmtLowering::OverloadedAssignment { call }) => {
+                let call = self.expression(call)?;
+                return Ok(self.body.add_statement(FirStatement {
+                    origin,
+                    kind: FirStatementKind::Expression(call),
+                }));
+            }
+            _ => {}
         }
         let custom_range_loop = match self.file.stmt(statement) {
             Stmt::For {
