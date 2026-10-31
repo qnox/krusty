@@ -36781,7 +36781,7 @@ impl<'a> Checker<'a> {
             let expected_result_bindings = expected.and_then(|expected| {
                 crate::symbol_resolver::infer_generic_return_bindings_from_symbols(
                     &source,
-                    &result_signature,
+                    &nested_producer_bindings::solved_bound_signature(&result_signature, &bindings),
                     expected,
                     |actual, bound| self.receiver_is_assignable(actual, bound),
                 )
