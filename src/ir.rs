@@ -111,6 +111,7 @@ pub use crate::enclosing_declarations::EnclosingDeclaration;
 pub use crate::fir::{CallableId, ExternalCallableId, SourceFileId};
 pub use crate::spelling::{Spelled, TypeUseAnnotation};
 pub use crate::types::EqualityMode;
+pub(crate) use annotations::PackagePropertyAnnotations;
 pub use annotations::{
     AccessorAnnotations, AnnoRetention, AnnoValue, AppliedAnnotation, DeclarationAnnotations,
     FieldAnnotations, PropertyAnnotations, RetainedAnnotation,
@@ -1551,6 +1552,9 @@ pub struct IrFile {
     /// constructor/value-class markers; a target also uses the owner to re-enter a suspend local
     /// without scanning classes or recovering ownership from its generated name.
     pub(crate) class_static_local_functions: crate::fx_hash::HashMap<FunId, TypeName>,
+    /// A multifile part's private functions, which the JVM names `<name>$<Part>`, by the name
+    /// they had before: a synthetic accessor of one is still named from it (`access$<name>`).
+    pub(crate) multifile_private_names: crate::fx_hash::HashMap<FunId, String>,
     pub classes: Vec<IrClass>,
     /// Exact generated-class identities keyed by their semantic role within a source owner.
     generated_classes: crate::fx_hash::HashMap<(TypeName, IrGeneratedClassRole), ClassId>,
@@ -1978,6 +1982,10 @@ pub struct IrFile {
     /// Annotations written on a source property's accessors, by property. A declared accessor's
     /// also land in [`Self::function_annotations`]; a default one exists only in a backend.
     pub accessor_annotations: crate::fx_hash::HashMap<crate::fir::PropertyId, AccessorAnnotations>,
+    /// Checked PROPERTY-targeted applications on package declarations, including retention and
+    /// erased/suppressed provenance. Storage and accessor identities do not own these payloads.
+    pub(crate) package_property_annotations:
+        crate::fx_hash::HashMap<crate::fir::PropertyId, PackagePropertyAnnotations>,
     /// FIELD-targeted applications on parser-hoisted `companion { ... }` properties. Metadata
     /// handoff publishes them under stable property identity before common lowering realizes the
     /// exact static storage that will own them.
@@ -2545,6 +2553,25 @@ impl IrFile {
         self.fir_origins
             .get(&expression)
             .map(|origin| origin.fir_origin())
+    }
+
+    /// The name of `function` that its inline marker is named from: its own, or the name a
+    /// multifile part's private function had before the part suffixed it.
+    pub(crate) fn name_before_part_suffix(&self, function: FunId) -> &str {
+        self.multifile_private_names
+            .get(&function)
+            .map_or(&self.functions[function as usize].name, |name| name)
+    }
+
+    /// The name of `function` that its synthetic accessor is named from. kotlinc names a multifile
+    /// part's private function's accessor after its Kotlin name, except a suspend function's,
+    /// which follows the suffixed JVM name of the method its state machine is built on.
+    pub(crate) fn accessor_base_name(&self, function: FunId) -> &str {
+        if self.suspend_funs.contains(&function) {
+            &self.functions[function as usize].name
+        } else {
+            self.name_before_part_suffix(function)
+        }
     }
 
     /// A method's Kotlin declaration visibility. Public is the compact default for generated and

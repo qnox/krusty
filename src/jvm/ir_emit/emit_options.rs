@@ -30,6 +30,8 @@ pub struct EmitOptions {
     pub java_parameters: bool,
     /// `-Xstring-concat=inline`: always use `StringBuilder`, regardless of class-file version.
     pub inline_string_concat: bool,
+    /// `-Xuse-inline-scopes-numbers`: name inlined locals by their inline scope's number.
+    pub inline_scopes_numbers: bool,
     /// `-language-version X.Y`: the `@kotlin.Metadata` and `.kotlin_module` version stamp.
     pub metadata_version: Option<[i32; 3]>,
     /// Whether language settings enable declaration annotation records in Kotlin metadata.
@@ -39,6 +41,9 @@ pub struct EmitOptions {
     /// The compilation's plugins, asked for their class metadata extensions as each record is
     /// written.
     pub(crate) plugins: std::rc::Rc<crate::plugins::PluginHost>,
+    /// The public facade's internal name when the file is a `@file:JvmMultifileClass` part: the
+    /// file class is the part, and its non-private members are invoked through the facade.
+    pub(crate) multifile_facade: Option<String>,
 }
 
 /// The `mv` written without `-language-version`: kotlinc's default-language-version stamp.
@@ -91,6 +96,11 @@ impl EmitOptions {
         self
     }
 
+    pub fn with_inline_scopes_numbers(mut self, enabled: bool) -> Self {
+        self.inline_scopes_numbers = enabled;
+        self
+    }
+
     /// `-Xno-param-assertions` passes `false`.
     pub fn with_param_assertions(mut self, enabled: bool) -> Self {
         self.param_assertions = enabled;
@@ -109,6 +119,7 @@ impl Default for EmitOptions {
             param_assertions: true,
             java_parameters: false,
             inline_string_concat: false,
+            inline_scopes_numbers: false,
             lambda_modes: LambdaModes::default(),
             inner_class_resolver: None,
             value_classes: std::rc::Rc::default(),
@@ -116,6 +127,7 @@ impl Default for EmitOptions {
             annotations_in_metadata: true,
             pre_release_metadata: false,
             plugins: std::rc::Rc::default(),
+            multifile_facade: None,
         }
     }
 }
