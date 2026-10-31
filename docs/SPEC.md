@@ -7,6 +7,14 @@ implicit `Any?` bound, so `Array<String?>.clone()` is `Array<String?>`. A non-nu
 `Array<String>` and rejected moshi's `pathNames = copyFrom.pathNames.clone()`. Test:
 `array_member_reference_e2e::a_nullable_element_array_clone_keeps_its_element_type`.
 
+## Smart casts from safe casts
+
+A safe cast `x as? T` is `null` exactly when `x` is not a `T`, so a proof that its result is
+non-null also proves `x is T` for a stable `x`: `(x as? T) != null`, `(x as? T) ?: return`,
+`(x as? T) ?: error(...)`, and a safe-call chain rooted at the cast (`(x as? T)?.p ?: return`).
+The proof is the non-null test even when the written target is nullable (`x as? T?`), since `null`
+casts to `null`. Test: `box_regressions/safeCastProvesTypeTest.kt`.
+
 ## Smart casts from `when` guards
 
 An arm's guard (`is Lit if e.type is Marker -> ...`) is checked with the arm's own condition facts
