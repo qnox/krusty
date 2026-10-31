@@ -627,11 +627,11 @@ fn the_compose_pass_rejects_what_it_does_not_cover() {
          function from another file yet",
     );
     assert_compose_rejects(
-        "compose-generic-class",
-        "class Box<T>(val value: T)\n",
+        "compose-generic-class-field",
+        "class Box<T>(val value: T)\nclass User(val box: Box<Int>)\n",
         &[],
-        "3:1: error: krusty's Compose compiler plugin does not support a generic class, whose \
-         stability depends on its type arguments yet",
+        "4:1: error: krusty's Compose compiler plugin does not support a class whose stability \
+         depends on a generic class yet",
     );
     assert_compose_rejects(
         "compose-value-class-field",
