@@ -50,7 +50,6 @@ annotations/selfReferentialAnnotation.kt
 annotations/spreadOperatorInAnnotationArguments.kt
 annotations/spreadOperatorInArrayOf.kt
 annotations/typeAnnotations/checkingNotincorporatedInputTypes.kt
-argumentOrder/argumentOrderInObjectSuperCall.kt
 argumentOrder/arguments.kt
 argumentOrder/captured.kt
 argumentOrder/capturedInExtension.kt
