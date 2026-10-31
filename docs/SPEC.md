@@ -20652,19 +20652,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `C::class`, `T::class` and `value::class` are the source class literals. A member of a generic
   class is called at the type arguments its receiver applies to the class (by the calling
   compilation's subtyping), so its parameters and result are substituted as a source member call
-  is; a result read through a projected receiver argument (`Array<out T>.get`) is that
-  projection's read type. A member of a generic class the target represents, or that it realizes
-  as an intrinsic, binds its class's type parameters from the serialized class header. A call of
-  a generic function the unit lowers itself reads its arguments at the substituted parameters and
-  coerces the declared result to the substituted one, as checked FIR lowers a call of a module
-  generic function, with no substitutions on the call. A `WHEN` block (the subject temporary, then
-  the `when`) is the source `when (subject)`. A value used as one of its supertypes, by an implicit
-  cast, a branch or an argument, is the
+  is. A value used as one of its supertypes, by an implicit cast, a branch or an argument, is the
   value itself, with the coercion checked FIR places for a nullable target. An implicit cast to a
-  subtype, to another parameterization of the same classifier, or to a subtype of the value's
-  star projection (kotlinc erases the checked arguments, so `this is Collection<*>` narrows an
-  `Iterable<T>`), is the smart cast kotlinc proved and lowers as a cast; any other implicit cast
-  declines. A prepared copy erases the type
+  subtype, or to another parameterization of the same classifier, is the smart cast kotlinc proved
+  and lowers as a cast; any other implicit cast declines. A prepared copy erases the type
   parameters of the inline functions it already expanded to their bounds, so a value typed with a
   supertype of the declared type, passed to a function value or produced by one, is that erased
   value. A `FOR_LOOP` block is the source `for` over an iterator: an unnamed iterator local and a
@@ -20672,9 +20663,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   source `try`, each `catch` parameter bound to the next value slot under its source name, each
   branch of a non-`Unit` `try` converted to its type as a conditional's branches are. Tests:
   `klib_lowering::tests::control_forms::try_lowers_as_the_source_try_does`,
-  `klib_lowering::tests::inline_templates::a_member_of_a_generic_class_is_called_at_its_receiver_type_arguments`,
-  `klib_lowering::tests::control_forms::stdlib_star_projected_smart_cast_lowers_as_a_cast`,
-  `native_compiler_command_e2e::a_program_calls_generic_stdlib_functions_through_their_bodies`.
+  `klib_lowering::tests::inline_templates::a_member_of_a_generic_class_is_called_at_its_receiver_type_arguments`.
 - **The Native backend realizes what an expanded library body reaches.** A KLIB member's builtin
   operation (`Int.and`, `Long.times`, `Int.inv`, `Array.size`, `String.length`) is attached when
   the provider publishes the member, before its identity is assigned, so a template's call of it
