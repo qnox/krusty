@@ -91,6 +91,7 @@ pub(super) fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, env:
         return;
     }
     delegated_property_array::declare(env, env.facade_class, cw);
+    let mut facade_constants = Vec::new();
     for &(static_index, s) in &facade_statics {
         // A delegate evaluated in place has no storage.
         if ir.is_retired_jvm_delegate_static(static_index) {
@@ -144,6 +145,18 @@ pub(super) fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, env:
             .init
             .filter(|_| s.is_const)
             .and_then(|init| constant_value(ir, init));
+        // A multifile part's visible `const val` is a field of its facade alone.
+        if env.multifile_facade.is_some() && s.is_const && !s.visibility.is_private() {
+            facade_constants.push(super::multifile_facades::FacadeConstant {
+                access: acc,
+                name: ir.static_field_jvm_name(static_index).to_string(),
+                desc,
+                signature: signature.filter(|_| !s.property_delegate),
+                value: cv,
+                annotation: field_ann.map(str::to_string),
+            });
+            continue;
+        }
         cw.add_field_late_sig(
             acc,
             ir.static_field_jvm_name(static_index),
@@ -153,6 +166,7 @@ pub(super) fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, env:
             field_ann,
         );
     }
+    env.run.multifile_part.record_constants(facade_constants);
     // kotlinc visits `<clinit>` (name + descriptor) before the initializer constants its body
     // interns. Every initializer that is not folded into a `ConstantValue` gives the facade a
     // `<clinit>`, even when its store is elided above (`var x = 0` leaves a lone `return`); a

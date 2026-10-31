@@ -47,6 +47,7 @@ impl Checker<'_> {
         let callee = match self.file.expr(call) {
             Expr::Call { callee, .. } => callee,
             Expr::SafeCall { name, .. } => return self.member_name_span(call, name),
+            Expr::Binary { operator_span, .. } => return *operator_span,
             _ => return self.span(call),
         };
         match self.file.expr(*callee) {

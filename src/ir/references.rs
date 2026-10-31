@@ -203,6 +203,9 @@ pub struct FuncRef {
     pub reflection_signature: Option<String>,
     /// What the reflected declaration is, which decides how a backend realizes its reflected name.
     pub reflected: ReflectedCallable,
+    /// The in-file function a [`ReflectedCallable::Source`] reference reflects, so a backend that
+    /// gives that function another JVM name reflects it under that name.
+    pub reflected_function: Option<FunId>,
     /// A backend renamed the carrier's own `invoke` (a value-class signature mangles it), so the
     /// erased `FunctionN.invoke` bridges to it even when their descriptors agree.
     pub invoke_renamed: bool,
