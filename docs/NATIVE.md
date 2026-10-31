@@ -256,6 +256,21 @@ unchanged.
   program link time. Its declarations reach the frontend through the ordinary KLIB provider,
   which authenticates each `@CCall.Direct`.
 
+## The compiler command
+
+`krusty kotlinc-native` is the user's entry to the Native backend. It takes Kotlin/Native's
+`kotlinc-native` options (`-library`/`-l`, `-produce program`, `-output`/`-o`, `-target`,
+`-module-name`, `-no-default-libs`) and refuses the rest by name. It compiles the sources against
+the Kotlin/Native distribution's stdlib KLIB and the `-library` KLIBs (`NativeKlibInputs`), with
+`Entry::Main`, and links a static `.kexe` with krusty's linker and the shared libraries the
+interop KLIBs' link facts name. Diagnostics are rendered as the JVM driver renders them, and no
+program is written when there is an error.
+
+`-produce library` is refused for now: krusty's KLIB writer serializes declarations and the inline
+templates it supports, not ordinary function bodies, so a program could not link a library krusty
+wrote. Until it does, a first-party library's sources are compiled into the program in the same
+invocation, and third-party KLIBs (with their kotlinc-written IR) are passed with `-library`.
+
 ## Other operating systems
 
 Linux (ELF) is the only operating system today. macOS and Windows reuse everything above the

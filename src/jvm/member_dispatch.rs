@@ -24,9 +24,18 @@ pub(super) fn call_owner(
     receiver: Option<TypeName>,
 ) -> Result<(TypeName, bool), MissingClassifier> {
     Ok(
-        receiver_owner(classifiers, declared, declared_interface, receiver)?
+        receiver_owner(classifiers, declared, declared_interface, receiver, false)?
             .unwrap_or((declared, declared_interface)),
     )
+}
+
+/// Checked dispatch and physical value evidence for one JVM receiver.
+#[derive(Clone, Copy, Default)]
+pub(super) struct VirtualReceiver {
+    pub(super) dispatch: Option<TypeName>,
+    pub(super) value_type: Option<crate::types::Ty>,
+    pub(super) annotation_construction: Option<TypeName>,
+    pub(super) semantic_role: Option<crate::types::SemanticCallRole>,
 }
 
 /// The class a virtual call names when the receiver's full static type is known.
@@ -34,14 +43,15 @@ pub(super) fn call_owner(
 /// An array has no `kotlin/Array` or `kotlin/CharArray` class file. Its virtual calls name the JVM
 /// array type (`[Ljava/lang/String;`, `[C`), which is where `clone` is public. Naming the Kotlin
 /// classifier makes the runtime look up a class that does not exist.
+/// A fresh annotation construction retains its interface at an Any-method consumption boundary;
+/// declared annotation parameters and ordinary interface receivers keep class-owned invocation.
 pub(super) fn virtual_owner(
     classifiers: &CheckedDispatchClassifiers<'_>,
     declared: TypeName,
     declared_interface: bool,
-    dispatch: Option<TypeName>,
-    receiver: Option<crate::types::Ty>,
+    receiver: VirtualReceiver,
 ) -> Result<(TypeName, bool), MissingClassifier> {
-    if let Some(array) = receiver.filter(|ty| {
+    if let Some(array) = receiver.value_type.filter(|ty| {
         ty.non_null().is_array()
             && !ty
                 .non_null()
@@ -51,7 +61,23 @@ pub(super) fn virtual_owner(
         let internal = crate::jvm::names::type_descriptor(array.non_null());
         return Ok((crate::types::type_name(&internal), false));
     }
-    call_owner(classifiers, declared, declared_interface, dispatch)
+    let annotation_object_method = matches!(
+        receiver.semantic_role,
+        Some(
+            crate::types::SemanticCallRole::KotlinAnyToString
+                | crate::types::SemanticCallRole::KotlinAnyHashCode
+                | crate::types::SemanticCallRole::KotlinAnyEquals
+        )
+    ) && receiver.annotation_construction.is_some()
+        && receiver.annotation_construction == receiver.dispatch;
+    Ok(receiver_owner(
+        classifiers,
+        declared,
+        declared_interface,
+        receiver.dispatch,
+        annotation_object_method,
+    )?
+    .unwrap_or((declared, declared_interface)))
 }
 
 /// Whether `classifier` is declared a value class. An unsigned array is one over a primitive
@@ -71,6 +97,7 @@ fn receiver_owner(
     declared: TypeName,
     declared_interface: bool,
     receiver: Option<TypeName>,
+    annotation_object_method: bool,
 ) -> Result<Option<(TypeName, bool)>, MissingClassifier> {
     let Some(receiver) = receiver else {
         return Ok(None);
@@ -88,7 +115,10 @@ fn receiver_owner(
         .classifier(receiver)
         .ok_or(MissingClassifier(receiver))?;
     let interface = class.interface;
-    if !class.nameable || class.value_class || (!declared_interface && interface) {
+    if !class.nameable
+        || class.value_class
+        || (!declared_interface && interface && !annotation_object_method)
+    {
         return Ok(None);
     }
     Ok(inherits(classifiers, receiver, declared)?.then_some((receiver, interface)))
@@ -166,6 +196,7 @@ mod tests {
             declaration_name: None,
             access: ClassifierAccess::Public,
             is_kotlin: true,
+            mapped_builtin: false,
             source: true,
             outer_instance: None,
             kind: crate::libraries::TypeKind::Class,
@@ -181,6 +212,80 @@ mod tests {
             companion: None,
             enum_entries_accessor: None,
         })
+    }
+
+    #[test]
+    fn fresh_annotations_keep_interface_dispatch_while_declared_slots_keep_object() {
+        use crate::types::SemanticCallRole;
+
+        let declared = crate::types::type_name("java/lang/Object");
+        let annotation = crate::types::type_name("review/AnnotationContract");
+        let interface = crate::types::type_name("review/OrdinaryContract");
+        let mut facts = Facts::default();
+        for (owner, kind) in [
+            (annotation, crate::libraries::TypeKind::Annotation),
+            (interface, crate::libraries::TypeKind::Interface),
+        ] {
+            let mut fact = (*class(&[declared])).clone();
+            fact.kind = kind;
+            facts.0.insert(owner, Arc::new(fact));
+        }
+        let ir = crate::ir::IrFile::default();
+        let classifiers = CheckedDispatchClassifiers::new(&ir, &facts);
+        for role in [
+            SemanticCallRole::KotlinAnyToString,
+            SemanticCallRole::KotlinAnyHashCode,
+            SemanticCallRole::KotlinAnyEquals,
+        ] {
+            for construction in [Some(annotation), None] {
+                assert_eq!(
+                    virtual_owner(
+                        &classifiers,
+                        declared,
+                        false,
+                        VirtualReceiver {
+                            dispatch: Some(annotation),
+                            value_type: Some(crate::types::Ty::obj_name(annotation)),
+                            annotation_construction: construction,
+                            semantic_role: Some(role),
+                        },
+                    ),
+                    Ok(if construction.is_some() {
+                        (annotation, true)
+                    } else {
+                        (declared, false)
+                    }),
+                );
+            }
+            assert_eq!(
+                virtual_owner(
+                    &classifiers,
+                    declared,
+                    false,
+                    VirtualReceiver {
+                        dispatch: Some(interface),
+                        value_type: Some(crate::types::Ty::obj_name(interface)),
+                        semantic_role: Some(role),
+                        ..VirtualReceiver::default()
+                    },
+                ),
+                Ok((declared, false)),
+            );
+        }
+        assert_eq!(
+            virtual_owner(
+                &classifiers,
+                declared,
+                false,
+                VirtualReceiver {
+                    dispatch: Some(annotation),
+                    value_type: Some(crate::types::Ty::obj_name(annotation)),
+                    annotation_construction: Some(annotation),
+                    ..VirtualReceiver::default()
+                },
+            ),
+            Ok((declared, false)),
+        );
     }
 
     #[test]

@@ -20,7 +20,7 @@ pub(super) fn emit(
             Some((
                 index as u32,
                 property,
-                static_fields::clinit_initializer(ir, property)?,
+                static_fields::stored_clinit_initializer(ir, property)?,
             ))
         })
         .collect();
@@ -256,8 +256,12 @@ fn add_late_member_field(
         .and_then(|signatures| signatures.iter().find(|(name, _)| *name == field.name))
         .map(|(_, parameter)| parameter.as_str())
         .or(field.type_param.as_deref());
-    let field_sig = property_jvm_signatures(signature_formatter, &field.ty, type_parameter)
-        .field
+    let field_sig = signature_formatter
+        .field_signature(
+            &field.ty,
+            type_parameter,
+            field_visibility::backs_var_property(c, field_index),
+        )
         .filter(|_| !field.is_property_delegate());
     let physical_name = instance_field_jvm_name(ir, run, c, field_index);
     let descriptor = ir_type_desc(&field.ty);

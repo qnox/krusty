@@ -1,9 +1,11 @@
-//! JVM storage for source locals whose declaration omits an initializer.
+//! JVM local storage and initializer slot ownership.
 //!
 //! Common IR retains the declared semantic type and the parser-supplied zero placeholder. An inline
 //! expansion may specialize the local's semantic type, but that does not change the JVM erasure of
 //! the declaration that owns its slot. This boundary chooses both the erased slot and its matching
 //! physical zero; common lowering never rewrites a semantic type to encode either decision.
+//! A safe-cast snapshot of a reference cell likewise retains the holder field's erased slot until
+//! the type test chooses its result. Ordinary source declarations still materialize their type.
 
 use super::*;
 use crate::ir::{ExprId, IrExpr};
@@ -15,6 +17,9 @@ use crate::types::TyKind;
 /// entered, and the body-wide declaration table ([`super::collect_body_var_types`]) once its scope has
 /// closed or before it opens.
 pub(super) fn slot_type(ir: &IrFile, declaration: ExprId, semantic: Ty) -> Ty {
+    if let Some((_, _, slot)) = shared_cell_snapshot(ir, declaration) {
+        return slot;
+    }
     let declared = ir
         .deferred_local_types
         .get(&declaration)
@@ -24,12 +29,35 @@ pub(super) fn slot_type(ir: &IrFile, declaration: ExprId, semantic: Ty) -> Ty {
     erased_inline_parameter_slot(ir, declaration, semantic).unwrap_or(slot)
 }
 
+/// A safe cast snapshots an object cell's field before testing it, without narrowing that field
+/// to the captured variable's semantic type. Named locals and primitive cells keep their storage.
+fn shared_cell_snapshot(ir: &IrFile, declaration: ExprId) -> Option<(ExprId, Ty, Ty)> {
+    if !ir.safe_cast_temporaries.contains(&declaration) {
+        return None;
+    }
+    let IrExpr::Variable {
+        init: Some(initializer),
+        named: false,
+        ..
+    } = ir.expr(declaration)
+    else {
+        return None;
+    };
+    let IrExpr::RefGet { holder, elem } = ir.expr(*initializer) else {
+        return None;
+    };
+    let (_, descriptor) = crate::jvm::shared_captures::holder_class(elem);
+    let slot = crate::jvm::physical_type::descriptor_operand_ty(descriptor);
+    (ir_ty_to_jvm(elem).is_reference() && slot.is_reference()).then_some((*holder, *elem, slot))
+}
+
 /// The verifier type of an inlined type-parameter value.
 ///
 /// kotlinc stores that parameter as its erased bound (`T : AutoCloseable?` is `AutoCloseable`) and
 /// `checkcast`s back to the call-site type at each use. An unconstrained `T` stays the specialized
-/// reference: its bound erases to `Object`, and no cast is emitted. A primitive specialization
-/// stays unboxed.
+/// reference: its bound erases to `Object`, and no cast is emitted. A primitive specialization is
+/// boxed into the erased bound, as kotlinc boxes `true.also { }`'s receiver and unboxes it for
+/// each use; the redundant-boxing pass removes the pair when every use unboxes.
 fn erased_inline_parameter_slot(ir: &IrFile, declaration: ExprId, semantic: Ty) -> Option<Ty> {
     let declared = ir.inline_declared_type(declaration)?;
     if !declared.non_null().is_ty_param() {
@@ -37,8 +65,14 @@ fn erased_inline_parameter_slot(ir: &IrFile, declaration: ExprId, semantic: Ty) 
     }
     let erased = ir_ty_to_jvm(&stored_value_ty(declared));
     let specialized = ir_ty_to_jvm(&stored_value_ty(semantic));
-    if !erased.is_reference() || !specialized.is_reference() || erased == specialized {
+    if !erased.is_reference() || erased == specialized {
         return None;
+    }
+    if !specialized.is_reference() {
+        // Only a built-in primitive boxes to its wrapper; an unsigned or value class specialization
+        // has its own box class.
+        let primitive = stored_value_ty(semantic);
+        return (primitive.scalar_value_repr() == Some(primitive)).then_some(erased);
     }
     let top = erased
         .obj_internal()
@@ -48,6 +82,14 @@ fn erased_inline_parameter_slot(ir: &IrFile, declaration: ExprId, semantic: Ty) 
     } else {
         Some(erased)
     }
+}
+
+/// The built-in primitive a declaration holds boxed in its erased inline type-parameter slot.
+pub(super) fn boxed_scalar_slot(ir: &IrFile, declaration: ExprId, semantic: Ty) -> Option<Ty> {
+    let primitive = ir_ty_to_jvm(&stored_value_ty(semantic));
+    (primitive.scalar_value_repr() == Some(primitive)
+        && slot_type(ir, declaration, semantic).is_reference())
+    .then_some(primitive)
 }
 
 fn emit_deferred_zero(
@@ -113,16 +155,25 @@ impl Emitter<'_> {
                 *existing == slot_ty || (is_reference(*existing) && is_reference(slot_ty))
             })
             .map(|(slot, _)| slot);
-        // Enter before evaluating the initializer, as kotlinc does. A call-operand holder is the
-        // exception: its value is materialized first and the slot is entered afterwards.
+        // Reserve source declarations and argument-order holders before evaluating the initializer.
+        // An expanded callable's formal binding instead starts after its operand is evaluated.
+        // A pending argument-order holder has no semantic binding until its store, so initialization
+        // still sees the previous value map.
         let holds_operand = self.ir.call_operand_bindings.contains(&declaration);
-        // So is the receiver temporary of a folded safe-call chain (`a?.b?.c`): kotlinc's chain
+        let holds_evaluation = self.ir.argument_evaluation_bindings.contains(&declaration);
+        // The receiver temporary of a folded safe-call chain (`a?.b?.c`) is also delayed: the chain
         // folding declares the inner receiver's temporary first and keeps it until the chain
         // ends, so this one takes the slot above it.
         let chained_receiver = self.is_chained_receiver(index);
         let entered = reused.or_else(|| {
-            (!holds_operand && !chained_receiver)
-                .then(|| self.enter_unassigned_value(index, slot_ty, false))
+            (!chained_receiver && (!holds_operand || holds_evaluation)).then(|| {
+                if holds_operand {
+                    self.frame
+                        .enter(super::frame_map::FrameKey::CallOperand(index), slot_ty)
+                } else {
+                    self.enter_unassigned_value(index, slot_ty, false)
+                }
+            })
         });
 
         if let Some(cell) = initializer.and_then(|value| self.stored_shared_cell(value)) {
@@ -306,6 +357,8 @@ impl Emitter<'_> {
                     let source = self.emit_consumed_operand(initializer, code);
                     self.declared_try = outer_try;
                     source
+                } else if let Some((holder, elem, _)) = shared_cell_snapshot(self.ir, declaration) {
+                    self.emit_shared_cell_read(holder, elem, false, code)
                 } else {
                     self.emit_consumed_operand(initializer, code)
                 }
@@ -365,6 +418,28 @@ impl Emitter<'_> {
                     self.mark_expression_line(declaration, line, code);
                 }
             }
+        }
+    }
+}
+
+impl Emitter<'_> {
+    /// The primitive a read of a boxed value unboxes to, unless its consumer takes the box.
+    pub(super) fn unboxed_scalar_read(&self, read: ExprId, index: u32) -> Option<Ty> {
+        if self.boxed_scalar_reads.contains(&read) {
+            return None;
+        }
+        self.boxed_scalar_values.get(&index).copied()
+    }
+
+    /// The read that produces `value`'s result, through the values of nested blocks, when it reads
+    /// a local. A reference consumer of an inlined frame's boxed result takes it unchanged.
+    pub(super) fn trailing_value_read(&self, value: ExprId) -> Option<ExprId> {
+        match self.ir.expr(value) {
+            IrExpr::GetValue(_) => Some(value),
+            IrExpr::Block {
+                value: Some(inner), ..
+            } => self.trailing_value_read(*inner),
+            _ => None,
         }
     }
 }

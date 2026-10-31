@@ -49,6 +49,9 @@ enum DependencyExternalRealization {
     EmittedBody,
     TargetIntrinsic(crate::libraries::CompilerIntrinsic),
     Constructor,
+    PropertyGetter,
+    TargetMember,
+    ProviderLeaf,
 }
 
 impl EmittedDependencyCallable {
@@ -86,11 +89,50 @@ impl EmittedDependencyCallable {
         }
     }
 
+    pub(crate) fn property_getter(target: ExternalCallableId) -> Self {
+        Self {
+            realization: DependencyExternalRealization::PropertyGetter,
+            ..Self::new(target, None, None)
+        }
+    }
+
+    /// A member of a classifier whose representation the target owns: the target realizes the
+    /// call at its dispatch receiver, so the KLIB body, written against the library's own class
+    /// layout, is never lowered.
+    pub(crate) fn target_member(target: ExternalCallableId) -> Self {
+        Self {
+            realization: DependencyExternalRealization::TargetMember,
+            ..Self::new(target, None, None)
+        }
+    }
+
+    pub(crate) fn provider_leaf(target: ExternalCallableId) -> Self {
+        Self {
+            realization: DependencyExternalRealization::ProviderLeaf,
+            ..Self::new(target, None, None)
+        }
+    }
+
+    fn realizes_getter(self) -> bool {
+        matches!(
+            self.realization,
+            DependencyExternalRealization::EmittedBody
+                | DependencyExternalRealization::PropertyGetter
+        )
+    }
+
     fn target_intrinsic(self) -> Option<crate::libraries::CompilerIntrinsic> {
         match self.realization {
             DependencyExternalRealization::TargetIntrinsic(operation) => Some(operation),
             _ => None,
         }
+    }
+
+    fn is_target_member(self) -> bool {
+        matches!(
+            self.realization,
+            DependencyExternalRealization::TargetMember
+        )
     }
 
     fn is_constructor(self) -> bool {
@@ -562,9 +604,13 @@ impl CallLinker for Linker<'_, '_> {
         }))
     }
 
-    fn is_subtype(&self, sub: Ty, sup: Ty) -> bool {
-        // A support unit has no semantic model of the classes its body names.
-        sub == sup
+    fn is_subtype(
+        &self,
+        parameters: &super::klib_types::KlibTypeParameters,
+        sub: Ty,
+        sup: Ty,
+    ) -> bool {
+        self.sources.callees.is_subtype(parameters, sub, sup)
     }
 
     fn link_constructor(
@@ -645,11 +691,51 @@ impl CallLinker for Linker<'_, '_> {
 
     fn link_accessor(
         &mut self,
-        _callee: &KlibAccessorIdSignature,
+        callee: &KlibAccessorIdSignature,
     ) -> Result<LinkedAccessor, KlibBodyDeclineReason> {
-        Err(KlibBodyDeclineReason::UnsupportedOperation(
-            "a call through a property accessor signature",
-        ))
+        let unsupported = || {
+            KlibBodyDeclineReason::UnsupportedOperation(
+                "a call through a property accessor signature",
+            )
+        };
+        let signature = KlibDeclarationSignature::Accessor(callee.clone());
+        let identity = match self
+            .sources
+            .bodies
+            .callee_origin(&self.active_module, &signature)
+        {
+            KlibCalleeOrigin::Exact(identity) => identity,
+            KlibCalleeOrigin::Missing => return Err(unsupported()),
+            KlibCalleeOrigin::Ambiguous => {
+                return Err(KlibBodyDeclineReason::AmbiguousCalleeOrigin(Box::new(
+                    callee.property().clone(),
+                )))
+            }
+        };
+        // A complete retained export or positive target plan owns this edge. Other accessors
+        // retain the explicit unsupported boundary instead of acquiring a header-only body path.
+        if !self
+            .sources
+            .externals
+            .get(&identity)
+            .is_some_and(|external| external.realizes_getter())
+        {
+            return Err(unsupported());
+        }
+        let selected = match self.sources.callees.get(&identity) {
+            Some(KlibCalleeFact::Selected(callables)) => callables[0],
+            Some(KlibCalleeFact::Ambiguous) => {
+                return Err(KlibBodyDeclineReason::SignatureMismatch(
+                    "conflicting provider contracts for a getter declaration".to_owned(),
+                ))
+            }
+            None => return Err(KlibBodyDeclineReason::Unjoined),
+        };
+        super::accessor_calls::authenticate(selected, self.sources.bodies)?.ok_or(
+            KlibBodyDeclineReason::UnsupportedOperation(
+                "a dependency property accessor without a getter contract",
+            ),
+        )
     }
 
     fn requires_declaration(
@@ -775,7 +861,10 @@ impl CallLinker for Linker<'_, '_> {
                     )));
                 }
             }
-            let purpose = if emitted.target_intrinsic().is_some() || declaration.body.is_none() {
+            let purpose = if emitted.target_intrinsic().is_some()
+                || emitted.is_target_member()
+                || declaration.body.is_none()
+            {
                 HeaderPurpose::External
             } else {
                 HeaderPurpose::Body(emitted.singleton_dispatch())

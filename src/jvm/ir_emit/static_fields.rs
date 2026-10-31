@@ -91,6 +91,7 @@ pub(super) fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, env:
         return;
     }
     delegated_property_array::declare(env, env.facade_class, cw);
+    let mut facade_constants = Vec::new();
     for &(static_index, s) in &facade_statics {
         // A delegate evaluated in place has no storage.
         if ir.is_retired_jvm_delegate_static(static_index) {
@@ -116,9 +117,9 @@ pub(super) fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, env:
             };
             visibility | 0x0018 // [PRIVATE | PUBLIC] | STATIC | FINAL
         } else if s.is_var {
-            // A public or internal `lateinit var` is `public static`: `isInitialized` and other
-            // raw reads `getstatic` it. A private one, and every plain `var`, stays private.
-            if s.is_lateinit && !s.visibility.is_private() {
+            // A public or internal `lateinit var` with a setter method is `public static`; every
+            // plain `var` stays private.
+            if crate::jvm::private_static_access::lateinit_field_is_public(ir, static_index) {
                 0x0009 // PUBLIC | STATIC
             } else {
                 0x000A // PRIVATE | STATIC
@@ -130,7 +131,7 @@ pub(super) fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, env:
         // A PARAMETERIZED type (`val xs: List<String>`) carries its full generic `Signature`, exactly
         // as the same property declared inside a class does — the facade's field table is a different
         // emitter, and without this a top-level property's element type was lost to erasure.
-        let signatures = property_jvm_signatures(&signature_formatter, &s.ty, None);
+        let signature = signature_formatter.field_signature(&s.ty, None, s.is_var);
         // A reference-typed facade static carries kotlinc's nullability annotation like any other
         // backing field, except a `lateinit` one, which holds null until assigned.
         let field_ann = (!s.is_lateinit)
@@ -144,15 +145,31 @@ pub(super) fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, env:
             .init
             .filter(|_| s.is_const)
             .and_then(|init| constant_value(ir, init));
+        // A multifile part's visible `const val` is a field of its facade alone.
+        if env.multifile_facade.is_some() && s.is_const && !s.visibility.is_private() {
+            facade_constants.push(super::multifile_facades::FacadeConstant {
+                access: acc,
+                name: ir.static_field_jvm_name(static_index).to_string(),
+                desc,
+                signature: signature.filter(|_| !s.property_delegate),
+                value: cv,
+                annotation: field_ann.map(str::to_string),
+            });
+            continue;
+        }
         cw.add_field_late_sig(
             acc,
             ir.static_field_jvm_name(static_index),
             &desc,
-            signatures.field.as_deref().filter(|_| !s.property_delegate),
+            signature.as_deref().filter(|_| !s.property_delegate),
             cv,
             field_ann,
         );
+        if let Some(annotations) = ir.package_static_field_annotations(static_index) {
+            cw.set_last_late_field_annotations(annotations);
+        }
     }
+    env.run.multifile_part.record_constants(facade_constants);
     // kotlinc visits `<clinit>` (name + descriptor) before the initializer constants its body
     // interns. Every initializer that is not folded into a `ConstantValue` gives the facade a
     // `<clinit>`, even when its store is elided above (`var x = 0` leaves a lone `return`); a
@@ -366,6 +383,7 @@ pub(super) fn emit_default_static_accessor(
                 signature: signatures.setter.as_deref(),
                 nullability: acc_ann,
                 annotations: declared.map(|declared| &declared.setter),
+                parameter_annotations: declared.map(|declared| &declared.setter_parameter),
             },
             // The guard checks the stored value: a non-null `N` over a `String?` carrier admits
             // null there, so kotlinc emits none.
@@ -396,7 +414,15 @@ pub(super) fn emit_default_static_accessor(
     }
     let fref = cw.fieldref(owner, field_name, &desc);
     g.getstatic(fref, slot_words(jt) as i32);
-    if s.is_lateinit {
+    // kotlinc emits no guard in the getter of a property another class probes with
+    // `isInitialized`: that getter returns the raw field.
+    let guarded = s.is_lateinit
+        && !env
+            .run
+            .static_accessor_plan
+            .borrow()
+            .probed_from_another_class(static_index);
+    if guarded {
         // kotlinc's getter: return the value, or throw and then `aconst_null; areturn` so the
         // null path has a reference for the verifier.
         g.dup();
@@ -470,6 +496,7 @@ struct DefaultSetterHeader<'a> {
     signature: Option<&'a str>,
     nullability: Option<&'a str>,
     annotations: Option<&'a crate::ir::DeclarationAnnotations>,
+    parameter_annotations: Option<&'a crate::ir::DeclarationAnnotations>,
 }
 
 /// A static property's compiler-default `setX`; see [`emit_default_static_accessor`].
@@ -487,6 +514,7 @@ fn emit_default_static_setter(
         signature,
         nullability: acc_ann,
         annotations,
+        parameter_annotations,
     } = header;
     let jt = jvm_declared_ty(&s.ty);
     let field_descriptor = type_descriptor(jt);
@@ -498,6 +526,9 @@ fn emit_default_static_setter(
     if let Some(annotations) = annotations {
         reserve_default_accessor_pool(cw, name, descriptor, signature, None, Some(annotations));
     }
+    let unannotated = crate::ir::DeclarationAnnotations::default();
+    let parameter_annotations = std::slice::from_ref(parameter_annotations.unwrap_or(&unannotated));
+    cw.reserve_method_parameter_annotation_pool(None, parameter_annotations, &[acc_ann], true);
     let words = slot_words(jt);
     let mut st = CodeBuilder::new(words);
     // kotlinc guards a non-null reference setter parameter with checkNotNullParameter("<set-?>").
@@ -539,6 +570,7 @@ fn emit_default_static_setter(
     cw.seed_utf8("<set-?>");
     finish_code_sig::<0x0019>(cw, name, descriptor, &mut st, words, signature);
     cw.set_method_nullability(name, descriptor, None, &[acc_ann]);
+    cw.set_method_param_annotations(name, descriptor, parameter_annotations);
     if let Some(annotations) = annotations {
         super::function_annotations::emit_declared(cw, annotations, name, descriptor);
     }
@@ -617,8 +649,8 @@ pub(super) fn declare(
         let ann = (!synthetic && !s.is_lateinit)
             .then(|| super::declared_static_annotation(s))
             .flatten();
-        let signature = property_jvm_signatures(signature_formatter, &s.ty, None)
-            .field
+        let signature = signature_formatter
+            .field_signature(&s.ty, None, s.is_var)
             .filter(|_| !s.property_delegate);
         cw.add_field_late_sig(
             acc,
@@ -717,7 +749,7 @@ pub(super) fn emit_enum_static_fields(
         // A PARAMETERIZED static keeps its generic `Signature` (the delegate is a
         // `Lazy<KSerializer<Object>>`), and a reference-typed one carries kotlinc's nullability
         // annotation — the same treatment the class and facade field tables give their statics.
-        let signatures = property_jvm_signatures(signature_formatter, &s.ty, None);
+        let signature = signature_formatter.field_signature(&s.ty, None, s.is_var);
         let ann = super::declared_static_annotation(s).filter(|_| !s.is_lateinit);
         // A folded `const val` is its `ConstantValue`; `<clinit>` does not store it.
         let constant = (s.init)
@@ -727,7 +759,7 @@ pub(super) fn emit_enum_static_fields(
             acc,
             ir.static_field_jvm_name(index),
             &ir_type_desc(&s.ty),
-            signatures.field.as_deref().filter(|_| !s.property_delegate),
+            signature.as_deref().filter(|_| !s.property_delegate),
             constant,
             ann,
         );
@@ -1078,9 +1110,12 @@ impl Emitter<'_> {
         // A PRIVATE property's field, or the backing field of a source-declared getter, read from
         // another class, goes through its owner's accessor. Calling the declared getter would
         // re-enter it: the read is inside that getter.
-        if let Some(storage) = crate::jvm::private_static_access::bridged_getter(self.ir, i)
-            .or_else(|| crate::jvm::private_static_access::declared_backing_getter(self.ir, i))
-            .filter(|storage| self.static_owner != Some(storage.owner) || self.export_private_calls)
+        if let Some(storage) =
+            crate::jvm::private_static_access::bridged_getter_read(self.ir, i, expr)
+                .or_else(|| crate::jvm::private_static_access::declared_backing_getter(self.ir, i))
+                .filter(|storage| {
+                    self.static_owner != Some(storage.owner) || self.export_private_calls
+                })
         {
             let m = static_accessors::static_methodref(
                 self.cw,
@@ -1190,7 +1225,7 @@ impl Emitter<'_> {
         } else {
             let m = self.cw.methodref(
                 &facade,
-                &property_getter_name(&name),
+                &self.ir.statics[i as usize].default_getter_jvm_name(),
                 &format!("(){}", type_descriptor(jt)),
             );
             code.invokestatic(m, 0, slot_words(jt) as i32);
@@ -1276,6 +1311,13 @@ impl Emitter<'_> {
             return;
         }
         super::debug_lines::restore_initializer_store_line(initializer_line, code);
+        // An inlined value leaves its own line in effect; kotlinc marks the statement's line
+        // again at the store, as an instance field store does.
+        if self.ir.expr_source_lines.contains_key(&value) {
+            if let Some(&statement_line) = self.ir.expr_lines.get(&statement) {
+                self.mark_expression_line(statement, statement_line, code);
+            }
+        }
         // A PRIVATE property's field, or the backing field of a source-declared setter, written
         // from another class, goes through its owner's accessor.
         if let Some(storage) = crate::jvm::private_static_access::bridged_setter(self.ir, index)
@@ -1330,7 +1372,9 @@ impl Emitter<'_> {
                 );
                 code.invokestatic(m, slot_words(jt) as i32, 0);
             }
-        } else if self.static_owner == Some(StaticOwner::Facade) || is_const {
+        } else if (self.static_owner == Some(StaticOwner::Facade) || is_const)
+            && !self.calls_facade_lateinit_setter(index)
+        {
             let fref = self.cw.fieldref(
                 &facade,
                 self.ir.static_field_jvm_name(index),
@@ -1340,11 +1384,18 @@ impl Emitter<'_> {
         } else {
             let m = self.cw.methodref(
                 &facade,
-                &property_setter_name(&name),
+                &self.ir.statics[index as usize].default_setter_jvm_name(),
                 &format!("({})V", type_descriptor(jt)),
             );
             code.invokestatic(m, slot_words(jt) as i32, 0);
         }
+    }
+
+    /// kotlinc keeps a `lateinit` property's default accessors even inside the facade that owns
+    /// its field (`JvmPropertiesLowering` never replaces them with field access), so a write in
+    /// that facade calls `setX` just as a read calls `getX`.
+    fn calls_facade_lateinit_setter(&self, index: u32) -> bool {
+        self.ir.statics[index as usize].is_lateinit && self.ir.has_jvm_default_static_setter(index)
     }
 
     /// Emit one checked static initializer through its declared JVM storage boundary. Facade,

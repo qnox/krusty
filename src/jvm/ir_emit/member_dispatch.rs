@@ -52,14 +52,19 @@ impl Emitter<'_> {
         expression: crate::ir::ExprId,
         declared: crate::types::TypeName,
         declared_interface: bool,
-        receiver: crate::types::Ty,
+        receiver: crate::ir::ExprId,
     ) -> Option<(String, bool)> {
         match crate::jvm::member_dispatch::virtual_owner(
             self.dispatch_classifiers.as_ref(),
             declared,
             declared_interface,
-            self.ir.dispatch_classes.get(&expression).copied(),
-            Some(receiver),
+            crate::jvm::member_dispatch::VirtualReceiver {
+                dispatch: self.ir.dispatch_classes.get(&expression).copied(),
+                value_type: Some(self.value_ty(receiver)),
+                annotation_construction:
+                    crate::jvm::annotation_constructions::construction_interface(self.ir, receiver),
+                semantic_role: self.ir.semantic_call_roles.get(&expression).copied(),
+            },
         ) {
             Ok((owner, interface)) => Some((owner.render(), interface)),
             Err(missing) => {

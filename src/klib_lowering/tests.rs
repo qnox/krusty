@@ -3,6 +3,7 @@
 
 use std::path::PathBuf;
 
+mod accessor_calls;
 mod body_forms;
 mod callee_headers;
 mod closure_frames;
@@ -11,11 +12,14 @@ mod constructor_calls;
 mod constructor_contracts;
 mod control_forms;
 mod demo_package;
+mod elvis_blocks;
 mod inline_templates;
 mod primitive_calls;
 mod range_membership_producers;
 mod returnable_blocks;
+mod safe_calls;
 mod target_calls;
+mod target_members;
 mod varargs;
 
 use super::*;
@@ -1053,7 +1057,7 @@ const INT_COERCE_AT_LEAST: &str = "fun Int.coerceAtLeast(minimumValue: Int): Int
      }\n";
 
 const LOWERED_INT_COERCE_AT_LEAST: &str = "scope {scope {return@Some(0) when[\
-     Lt(v0: Int, v1!: Int): Boolean -> v1!: Int, else -> v0: Int]: Int: Nothing}: Nothing}";
+     Lt(v0!: Int, v1!: Int): Boolean -> v1!: Int, else -> v0!: Int]: Int: Nothing}: Nothing}";
 
 #[test]
 fn a_built_in_relation_lowers_as_the_source_comparison_does() {
@@ -1615,8 +1619,8 @@ fn stdlib_coerce_bodies_lower_as_their_source_does() {
     );
     assert_eq!(
         lowered_stdlib_body(&libraries, bodies, &mut unit, "coerceAtMost", Ty::Double),
-        "scope {scope {return@Some(0) when[Gt(v0: Double, v1!: Double): Boolean -> v1!: Double, \
-         else -> v0: Double]: Double: Nothing}: Nothing}"
+        "scope {scope {return@Some(0) when[Gt(v0!: Double, v1!: Double): Boolean -> v1!: Double, \
+         else -> v0!: Double]: Double: Nothing}: Nothing}"
     );
     assert_eq!(unit.ir().functions.len(), 8);
 }

@@ -41,7 +41,11 @@ fn const_property_flags_preserve_visibility() {
 #[test]
 fn empty_class_metadata_byte_matches_kotlinc() {
     let (d1, d2) = build_class(
-        crate::types::type_name("demo/E"),
+        &crate::metadata::class_id::ResolvedClassId::declared(
+            crate::types::type_name("demo/E"),
+            crate::types::type_name("demo"),
+            &["E"],
+        ),
         &[],
         &[],
         &[],
@@ -54,7 +58,8 @@ fn empty_class_metadata_byte_matches_kotlinc() {
             }),
             ..Default::default()
         },
-    );
+    )
+    .expect("valid declared metadata class name");
     assert_eq!(
         d2,
         vec![
@@ -80,7 +85,11 @@ fn empty_class_metadata_byte_matches_kotlinc() {
 #[test]
 fn one_property_class_metadata_byte_matches_kotlinc() {
     let (d1, d2) = build_class(
-        crate::types::type_name("demo/C"),
+        &crate::metadata::class_id::ResolvedClassId::declared(
+            crate::types::type_name("demo/C"),
+            crate::types::type_name("demo"),
+            &["C"],
+        ),
         &[("x".into(), Ty::Int)],
         &[PropMeta {
             return_value_status: Default::default(),
@@ -118,7 +127,8 @@ fn one_property_class_metadata_byte_matches_kotlinc() {
             }],
             ..Default::default()
         },
-    );
+    )
+    .expect("valid declared metadata class name");
     assert_eq!(
         d2,
         vec!["Ldemo/C;", "", "x", "", "<init>", "(I)V", "getX", "()I"]
@@ -146,7 +156,11 @@ fn one_property_class_metadata_byte_matches_kotlinc() {
 #[test]
 fn private_setter_records_value_parameter_before_the_property_name() {
     let (d1, d2) = build_class(
-        crate::types::type_name("app/A"),
+        &crate::metadata::class_id::ResolvedClassId::declared(
+            crate::types::type_name("app/A"),
+            crate::types::type_name("app"),
+            &["A"],
+        ),
         &[],
         &[PropMeta {
             spellings: crate::spelling::DeclaredSpellings::default(),
@@ -184,7 +198,8 @@ fn private_setter_records_value_parameter_before_the_property_name() {
             }],
             ..Default::default()
         },
-    );
+    )
+    .expect("valid declared metadata class name");
     assert_eq!(
         d2,
         vec!["Lapp/A;", "", "<init>", "()V", "value", "", "x", "getX", "()I"]
@@ -390,7 +405,11 @@ fn data_class_metadata_byte_matches_kotlinc() {
         },
     ];
     let (d1, _d2) = build_class(
-        crate::types::type_name("demo/Point"),
+        &crate::metadata::class_id::ResolvedClassId::declared(
+            crate::types::type_name("demo/Point"),
+            crate::types::type_name("demo"),
+            &["Point"],
+        ),
         &[("x".into(), Ty::Int), ("y".into(), Ty::String)],
         &props,
         &methods,
@@ -420,7 +439,8 @@ fn data_class_metadata_byte_matches_kotlinc() {
             ],
             ..Default::default()
         },
-    );
+    )
+    .expect("valid declared metadata class name");
     assert_eq!(
         d1,
         vec![
@@ -453,7 +473,11 @@ fn data_class_metadata_byte_matches_kotlinc() {
 fn generic_property_and_default_ctor_param() {
     let list_string = Ty::obj_args("kotlin/collections/List", &[Ty::String]);
     let (_d1, d2) = build_class(
-        crate::types::type_name("demo/D"),
+        &crate::metadata::class_id::ResolvedClassId::declared(
+            crate::types::type_name("demo/D"),
+            crate::types::type_name("demo"),
+            &["D"],
+        ),
         &[("r".into(), list_string)],
         &[PropMeta {
             return_value_status: Default::default(),
@@ -494,7 +518,8 @@ fn generic_property_and_default_ctor_param() {
             }],
             ..Default::default()
         },
-    );
+    )
+    .expect("valid declared metadata class name");
     // `List` is a builtin (predefinedIndex 32) → an EMPTY d2 slot, never the literal descriptor.
     assert!(
         !d2.iter()
@@ -514,7 +539,11 @@ fn generic_property_and_default_ctor_param() {
 #[test]
 fn regular_method_class_metadata_byte_matches_kotlinc() {
     let (d1, _d2) = build_class(
-        crate::types::type_name("demo/S"),
+        &crate::metadata::class_id::ResolvedClassId::declared(
+            crate::types::type_name("demo/S"),
+            crate::types::type_name("demo"),
+            &["S"],
+        ),
         &[],
         &[],
         &[FnMeta::plain(
@@ -531,7 +560,8 @@ fn regular_method_class_metadata_byte_matches_kotlinc() {
             }),
             ..Default::default()
         },
-    );
+    )
+    .expect("valid declared metadata class name");
     assert_eq!(
         d1,
         vec![
@@ -550,7 +580,11 @@ fn regular_method_class_metadata_byte_matches_kotlinc() {
 #[test]
 fn companion_object_metadata_byte_matches_kotlinc() {
     let (d1, d2) = build_class(
-        crate::types::type_name("demo/C"),
+        &crate::metadata::class_id::ResolvedClassId::declared(
+            crate::types::type_name("demo/C"),
+            crate::types::type_name("demo"),
+            &["C"],
+        ),
         &[],
         &[],
         &[],
@@ -567,7 +601,8 @@ fn companion_object_metadata_byte_matches_kotlinc() {
             }),
             ..Default::default()
         },
-    );
+    )
+    .expect("valid declared metadata class name");
     assert_eq!(
         d2,
         vec!["Ldemo/C;", "", "<init>", "()V", "Companion"]
@@ -594,7 +629,11 @@ fn companion_object_metadata_byte_matches_kotlinc() {
 #[test]
 fn no_compatibility_compiler_requirement_matches_kotlinc() {
     let (d1, _) = build_class(
-        crate::types::type_name("demo/I"),
+        &crate::metadata::class_id::ResolvedClassId::declared(
+            crate::types::type_name("demo/I"),
+            crate::types::type_name("demo"),
+            &["I"],
+        ),
         &[],
         &[],
         &[],
@@ -613,7 +652,8 @@ fn no_compatibility_compiler_requirement_matches_kotlinc() {
             }),
             ..Default::default()
         },
-    );
+    )
+    .expect("valid declared metadata class name");
     let requirement_and_flags = [
         0xf8, 0x01, 0x00, // Class.versionRequirement = table index 0
         0x82, 0x02, 0x06, 0x0a, 0x04, 0x08, 0x21, 0x30, 0x01, // table: compiler 1.4.0
@@ -631,7 +671,11 @@ fn no_compatibility_compiler_requirement_matches_kotlinc() {
 #[test]
 fn module_name_metadata_byte_matches_kotlinc() {
     let (d1, d2) = build_class(
-        crate::types::type_name("demo/C"),
+        &crate::metadata::class_id::ResolvedClassId::declared(
+            crate::types::type_name("demo/C"),
+            crate::types::type_name("demo"),
+            &["C"],
+        ),
         &[("x".into(), Ty::Int)],
         &[PropMeta {
             return_value_status: Default::default(),
@@ -672,7 +716,8 @@ fn module_name_metadata_byte_matches_kotlinc() {
             }],
             ..Default::default()
         },
-    );
+    )
+    .expect("valid declared metadata class name");
     assert_eq!(
         d2,
         vec!["Ldemo/C;", "", "x", "", "<init>", "(I)V", "getX", "()I", "mymod"]
@@ -699,7 +744,11 @@ fn module_name_metadata_byte_matches_kotlinc() {
 #[test]
 fn secondary_ctor_metadata_byte_matches_kotlinc() {
     let (d1, d2) = build_class(
-        crate::types::type_name("demo/C"),
+        &crate::metadata::class_id::ResolvedClassId::declared(
+            crate::types::type_name("demo/C"),
+            crate::types::type_name("demo"),
+            &["C"],
+        ),
         &[("x".into(), Ty::Int)],
         &[PropMeta {
             return_value_status: Default::default(),
@@ -751,7 +800,8 @@ fn secondary_ctor_metadata_byte_matches_kotlinc() {
             }],
             ..Default::default()
         },
-    );
+    )
+    .expect("valid declared metadata class name");
     assert_eq!(
         d2,
         vec!["Ldemo/C;", "", "x", "", "<init>", "(I)V", "()V", "getX", "()I"]
@@ -777,7 +827,11 @@ fn secondary_ctor_metadata_byte_matches_kotlinc() {
 #[test]
 fn class_metadata_has_expected_strings() {
     let (d1, d2) = build_class(
-        crate::types::type_name("demo/Point"),
+        &crate::metadata::class_id::ResolvedClassId::declared(
+            crate::types::type_name("demo/Point"),
+            crate::types::type_name("demo"),
+            &["Point"],
+        ),
         &[("x".into(), Ty::Int), ("y".into(), Ty::String)],
         &[
             PropMeta {
@@ -850,7 +904,8 @@ fn class_metadata_has_expected_strings() {
             ],
             ..Default::default()
         },
-    );
+    )
+    .expect("valid declared metadata class name");
     // The class id descriptor and the JVM signatures must all appear verbatim in d2.
     assert!(d2.contains(&"Ldemo/Point;".to_string()));
     assert!(d2.contains(&"getX".to_string()));
