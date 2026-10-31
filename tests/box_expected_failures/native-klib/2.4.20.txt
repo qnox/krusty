@@ -211,8 +211,6 @@ callableReference/function/genericCallableReferencesWithOverload.kt
 callableReference/function/kt32462.kt
 callableReference/function/local/enumExtendsTrait.kt
 callableReference/function/sortListOfStrings.kt
-callableReference/kt49526.kt
-callableReference/kt49526b.kt
 callableReference/kt50172.kt
 callableReference/kt52270.kt
 callableReference/property/accessorForPropertyWithPrivateSetter.kt
@@ -995,7 +993,6 @@ delegation/withDefaultsMultipleFilesOrder.kt
 devirtualization/anonymousObject.kt
 devirtualization/inline_getter.kt
 devirtualization/lateinitInterface.kt
-diagnostics/functions/tailRecursion/recursiveCallInInlineLambdaWithCapture.kt
 elvis/ofNonNullableResultType.kt
 enum/defaultCtor/noPrimaryConstructor.kt
 enum/enumEntriesMultimoduleNoMappings.kt
@@ -1158,8 +1155,6 @@ inference/pcla/issues/kt48633.kt
 inference/pcla/issues/kt49887.kt
 inference/pcla/issues/kt54767a.kt
 inference/pcla/issues/kt54767b.kt
-inference/pcla/issues/kt60291a.kt
-inference/pcla/issues/kt63840a.kt
 inference/pcla/issues/kt64066.kt
 inference/pcla/issues/kt64069.kt
 inference/pcla/issues/kt66229.kt
@@ -1716,7 +1711,6 @@ primitiveTypes/booleanHashCode.kt
 primitiveTypes/conversions.kt
 primitiveTypes/equalsHashCodeToString.kt
 primitiveTypes/kt13023.kt
-primitiveTypes/kt16732.kt
 primitiveTypes/kt3517.kt
 primitiveTypes/kt3576.kt
 primitiveTypes/kt79977.kt

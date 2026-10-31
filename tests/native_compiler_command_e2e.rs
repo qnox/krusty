@@ -239,6 +239,52 @@ fn a_program_maps_and_checks_collections_through_the_stdlib_bodies() {
     std::fs::remove_dir_all(&scratch).expect("remove the compiler command's directory");
 }
 
+/// `plus` on a list and `single` on text reach generic stdlib functions the program lowers
+/// itself, a `when (subject)` block, and `Array<out T>.get` read through a projection.
+const GENERIC_CALLS: &str = "\
+fun box(): String {
+    val joined = listOf(1) + 2
+    val sole = \"K\".single()
+    return if (joined == listOf(1, 2) && sole == 'K') \"OK\" else \"fail: $joined $sole\"
+}
+
+fun main() {
+    println(listOf(\"a\") + \"b\")
+    println(\"x\".single())
+}
+";
+
+#[test]
+fn a_program_calls_generic_stdlib_functions_through_their_bodies() {
+    if !native_compiler_available() {
+        return;
+    }
+    assert_eq!(common::kotlinc_box_result(GENERIC_CALLS), "OK");
+    common::expect_box_ok_with_stdlib(GENERIC_CALLS, "compilerCommandGenericCalls");
+
+    let scratch = common::scratch_dir().expect("allocate the compiler command's directory");
+    let main = scratch.join("main.kt");
+    std::fs::write(&main, GENERIC_CALLS).expect("write main.kt");
+    let compiled = Command::new(common::krusty_binary())
+        .args(["kotlinc-native", "-o"])
+        .arg(scratch.join("app"))
+        .arg(&main)
+        .output()
+        .expect("run krusty kotlinc-native");
+    assert_eq!(
+        completed(compiled),
+        (Some(0), String::new(), String::new()),
+        "the program compiles and links silently"
+    );
+    let run = common::run_freshly_written(&mut Command::new(scratch.join("app.kexe")))
+        .expect("run the Native program");
+    assert_eq!(
+        completed(run),
+        (Some(0), "[a, b]\nx\n".to_owned(), String::new())
+    );
+    std::fs::remove_dir_all(&scratch).expect("remove the compiler command's directory");
+}
+
 #[test]
 fn a_source_error_is_reported_and_no_program_is_written() {
     if !native_compiler_available() {
