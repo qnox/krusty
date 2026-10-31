@@ -19550,6 +19550,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   and inline receivers, computed operands and reassigned captured cells, including the complete
   `bareCastTargetArguments.kt` regression.
 
+  Authenticated serialized receiver parameters publish the same immutable binding fact, including
+  prepared-inline, initializer and lifted closure frames. Declaration-role agreement still gates
+  those direct value reads; locals, mutable cells and structural receiver field reads retain their
+  separate stability decisions. Complete KLIB/source IR comparisons cover the retained fact.
+
   In the 2.4.20 box
   corpus 8 more files become byte-identical to kotlinc (302 to 310: `array_to_any`, `fullForm`,
   `iterator`, `kt6434_2`, `multiDeclaration`, `nonNullArray`, `shortForm`,
