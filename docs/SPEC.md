@@ -7,12 +7,6 @@ implicit `Any?` bound, so `Array<String?>.clone()` is `Array<String?>`. A non-nu
 `Array<String>` and rejected moshi's `pathNames = copyFrom.pathNames.clone()`. Test:
 `array_member_reference_e2e::a_nullable_element_array_clone_keeps_its_element_type`.
 
-## Implicit labels through safe calls
-
-A lambda argument of a safe call takes the callee's name as its implicit label, exactly as through
-an ordinary call: `s?.let { if (x) return@let; ... }` returns from the lambda. Test:
-`box_regressions/safeCallLambdaImplicitLabel.kt`.
-
 ## Smart casts from `when` guards
 
 An arm's guard (`is Lit if e.type is Marker -> ...`) is checked with the arm's own condition facts
