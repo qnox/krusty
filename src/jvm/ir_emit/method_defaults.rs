@@ -503,6 +503,44 @@ fn publish_exported_private_access(emitter: &mut Emitter<'_>, fid: u32) {
     emitter.export_private_calls = exports;
 }
 
+/// The receivers a `$default` stub takes ahead of its logical parameters.
+fn default_stub_receiver_prefix(ir: &IrFile, fid: u32) -> usize {
+    let function = &ir.functions[fid as usize];
+    usize::from(function.is_static && function.dispatch_receiver.is_some())
+        + usize::from(ir.extension_receiver_fns.contains(&fid))
+}
+
+/// How many `$default` mask words the stub of `fid` takes.
+pub(in crate::jvm) fn default_stub_mask_count(ir: &IrFile, fid: u32) -> usize {
+    let logical_param_count = jvm_function_params(ir, fid)
+        .len()
+        .checked_sub(default_stub_receiver_prefix(ir, fid))
+        .expect("callable receivers are leading physical parameters");
+    default_mask_count(logical_param_count)
+}
+
+/// The descriptor of a static function's `$default` stub: its parameters as the stub stores them,
+/// the mask words, then the `marker`.
+pub(in crate::jvm) fn default_stub_descriptor(ir: &IrFile, fid: u32, marker: Ty) -> String {
+    let stub_param_tys = jvm_function_params(ir, fid)
+        .iter()
+        .enumerate()
+        .map(|(index, parameter)| stub_parameter_type(ir, fid, index, *parameter))
+        .collect::<Vec<_>>();
+    method_descriptor(
+        &stub_param_tys
+            .iter()
+            .copied()
+            .chain(std::iter::repeat_n(
+                Ty::Int,
+                default_stub_mask_count(ir, fid),
+            ))
+            .chain(std::iter::once(marker))
+            .collect::<Vec<_>>(),
+        jvm_declared_ty(&ir.functions[fid as usize].ret),
+    )
+}
+
 /// Emit a facade-style static function `$default` synthetic.
 pub(super) fn emit_facade_default_stub(
     source: DefaultStubSource<'_>,
@@ -523,27 +561,14 @@ pub(super) fn emit_facade_default_stub(
         .map(|(index, parameter)| stub_parameter_type(ir, fid, index, *parameter))
         .collect::<Vec<_>>();
     let ret = jvm_declared_ty(&function.ret);
-    let receiver_prefix = usize::from(function.is_static && function.dispatch_receiver.is_some())
-        + usize::from(ir.extension_receiver_fns.contains(&fid));
+    let receiver_prefix = default_stub_receiver_prefix(ir, fid);
     let extension_prefix = usize::from(ir.extension_receiver_fns.contains(&fid));
     let logical_param_count = real_params
         .len()
         .checked_sub(receiver_prefix)
         .expect("callable receivers are leading physical parameters");
-    {
-        let mask_words = default_mask_count(logical_param_count);
-        let descriptor = method_descriptor(
-            &stub_param_tys
-                .iter()
-                .copied()
-                .chain(std::iter::repeat_n(Ty::Int, mask_words))
-                .chain(std::iter::once(marker))
-                .collect::<Vec<_>>(),
-            ret,
-        );
-        cw.seed_utf8(&format!("{method_name}$default"));
-        cw.seed_utf8(&descriptor);
-    }
+    cw.seed_utf8(&format!("{method_name}$default"));
+    cw.seed_utf8(&default_stub_descriptor(ir, fid, marker));
     let mut emitter = Emitter::new(
         ir,
         cw,
@@ -632,7 +657,7 @@ pub(super) fn emit_facade_default_stub(
             code.ret_void();
         }
         if let Some(Some((slot, start))) = inline_marker {
-            let marker_name = format!("$i$f${}", ir.functions[fid as usize].name);
+            let marker_name = format!("$i$f${}", ir.name_before_part_suffix(fid));
             code.add_local_entry(start, None, slot, &marker_name, "I");
         }
         if inline_body.is_some() {
@@ -656,7 +681,12 @@ pub(super) fn emit_facade_default_stub(
         }
         let argument_words = real_params.iter().map(|ty| slot_words(*ty) as i32).sum();
         let descriptor = method_descriptor(&real_params, ret);
-        let method = emitter.cw.methodref(facade, &method_name, &descriptor);
+        let owner = if static_owner == StaticOwner::Facade {
+            emitter.file_function_owner(fid)
+        } else {
+            facade.to_string()
+        };
+        let method = emitter.cw.methodref(&owner, &method_name, &descriptor);
         code.invokestatic(method, argument_words, slot_words(ret) as i32);
         emit_return(ret, &mut code);
     }

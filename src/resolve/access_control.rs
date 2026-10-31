@@ -337,6 +337,71 @@ impl<'a> Checker<'a> {
         true
     }
 
+    pub(super) fn source_callable_visible(
+        &self,
+        candidate: &crate::libraries::FunctionInfo,
+    ) -> bool {
+        if self.suppresses_diagnostic("INVISIBLE_REFERENCE")
+            || self.suppresses_diagnostic("INVISIBLE_MEMBER")
+        {
+            return true;
+        }
+        if !matches!(
+            candidate.kind,
+            crate::libraries::FnKind::TopLevel | crate::libraries::FnKind::Extension
+        ) {
+            return true;
+        }
+        crate::callable_access::source_callable_accessible(
+            candidate.visibility,
+            candidate.source_file,
+            Some(self.file_index),
+            || {
+                self.libraries
+                    .dependency_access_policy()
+                    .internal_callable_accessible(
+                        candidate.callable.external_identity,
+                        candidate.callable.owner,
+                    )
+            },
+        )
+    }
+
+    /// Whether a member candidate is accessible through the call's receiver. Top-level and
+    /// extension candidates are filtered by [`Self::source_callable_visible`] before applicability,
+    /// and constructors keep their own access diagnostic.
+    pub(super) fn member_candidate_accessible(
+        &self,
+        candidate: &crate::libraries::FunctionInfo,
+        receiver: Option<Ty>,
+    ) -> bool {
+        if candidate.kind != crate::libraries::FnKind::Member || self.visibility_access_suppressed()
+        {
+            return true;
+        }
+        let owner = candidate.callable.owner_type();
+        let identity = candidate.callable.external_identity;
+        match receiver {
+            Some(receiver) => {
+                self.receiver_callable_accessible(candidate.visibility, owner, receiver, identity)
+            }
+            None => self.callable_accessible(candidate.visibility, owner, identity),
+        }
+    }
+
+    pub(super) fn selected_member_accessible(
+        &self,
+        selected: &crate::symbol_resolver::ResolvedMember,
+        owner: TypeName,
+    ) -> bool {
+        self.receiver_callable_accessible(
+            selected.member.visibility,
+            owner,
+            selected.receiver,
+            selected.member.external_identity,
+        )
+    }
+
     /// Whether one already-selected dependency callable is visible from the current site.
     pub(super) fn callable_accessible(
         &self,

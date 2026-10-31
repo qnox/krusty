@@ -40,6 +40,9 @@ use super::super::interface_dispatch::ClassRef;
 use super::super::objects::{immutable, ObjectRoot, ITABLE_FIELD, REFERENCE};
 use super::lower::{carrier, Unsupported};
 
+#[cfg(test)]
+mod constructor_prefix_tests;
+
 /// How the WasmGC form carries values, as the shared tables ask it.
 struct WasmRepresentation;
 
@@ -176,8 +179,9 @@ fn check_supported(class: &IrClass) -> Result<(), Unsupported> {
         "a value class"
     // An inner class's enclosing instance is already an ordinary constructor-prefix argument and
     // field in checked IR, which this object form can carry like every other reference field.
+    // Anonymous superclass operands are also ordinary parameters, without capture storage.
     // Other captured classes still need their broader closure construction semantics.
-    } else if class.constructor_prefix_count > 0 && !class.is_inner_class {
+    } else if unsupported_constructor_prefix(class) {
         "a class capturing its surroundings"
     } else if class.companion_class.is_some() {
         "a class with a companion object"
@@ -191,6 +195,26 @@ fn check_supported(class: &IrClass) -> Result<(), Unsupported> {
         return Ok(());
     };
     Err(format!("{construct} (`{name}`)"))
+}
+
+fn unsupported_constructor_prefix(class: &IrClass) -> bool {
+    if class.is_inner_class {
+        return false;
+    }
+    let Some(prefix) = class
+        .ctor_args
+        .get(..class.constructor_prefix_count as usize)
+    else {
+        return true;
+    };
+    prefix.iter().enumerate().any(|(index, argument)| {
+        argument.provenance != crate::ir::IrCtorParameterProvenance::Value
+            || argument.anonymous_super_forward != Some(index as u32 + 1)
+            || argument.capture.is_some()
+            || argument.capture_identity.is_some()
+            || argument.is_field
+            || argument.field_index.is_some()
+    })
 }
 
 /// Lay out every class of `ir` in `module`: types, constructors' and accessors' indices, and the

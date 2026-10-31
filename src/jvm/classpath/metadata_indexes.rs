@@ -565,10 +565,7 @@ mod tests {
     #[test]
     fn metadata_index_scans_cataloged_and_conventional_facades() {
         let module = crate::metadata::module::build_kotlin_module(
-            &[(
-                "p".to_string(),
-                vec!["Utils".to_string(), "HelpersKt".to_string()],
-            )],
+            &[("p".to_string(), vec!["Utils".into(), "HelpersKt".into()])],
             [2, 4, 0],
         );
         let mut packages = JarPackages::default();

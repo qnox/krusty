@@ -40,9 +40,10 @@ pub(crate) struct IrLiftingEntry {
 
 impl super::IrFile {
     /// Place `implementation`, a lambda a compiler plugin generates in a declaration's body, as the
-    /// only callable lifted out of that declaration's sequence, so a target names it as it names
-    /// a source lambda there (kotlinc's IR plugins run before its lowering lifts lambdas). The
-    /// caller makes sure the sequence holds no source callable.
+    /// last callable lifted out of that declaration's sequence, so a target names it as it names
+    /// a source lambda written after the others there (kotlinc's IR plugins run before its
+    /// lowering lifts lambdas). The caller makes sure every callable already in the sequence is
+    /// one of the declaration's own lambdas, numbered directly by the sequence.
     pub(crate) fn place_generated_lambda(
         &mut self,
         sequence: IrLiftingSequence,
@@ -52,18 +53,24 @@ impl super::IrFile {
     ) {
         let entries = self.lifting_sequences.entry(sequence.clone()).or_default();
         assert!(
-            entries.is_empty(),
-            "a generated lambda is placed only in an otherwise empty lifting sequence"
+            entries.values().all(|entry| entry.scope.is_none()),
+            "a generated lambda is placed after the lambdas a sequence numbers itself"
         );
+        let position = entries.keys().max().map_or(0, |last| last + 1);
+        let order = entries
+            .values()
+            .map(|entry| entry.order + 1)
+            .max()
+            .unwrap_or(0);
         entries.insert(
-            0,
+            position,
             IrLiftingEntry {
                 kind: crate::lifting_provenance::LiftingCallableKind::Lambda,
                 name: None,
                 lifted: true,
                 scope: None,
                 container: Some(container),
-                order: 0,
+                order,
             },
         );
         self.lifting_sequence_source_order
@@ -79,7 +86,7 @@ impl super::IrFile {
                     path: Box::new([crate::fir::FirLiftingStep {
                         kind: crate::lifting_provenance::LiftingCallableKind::Lambda,
                         name: None,
-                        position: 0,
+                        position,
                     }]),
                     lifted: true,
                 },

@@ -39,7 +39,8 @@ impl CheckedSourceFacts for HandoffSourceFacts<'_> {
 /// The runtime declarations one file's plugins selected, by the declarations the compilation sees.
 pub(super) struct HandoffRuntime<'a> {
     source: &'a dyn SymbolSource,
-    bound: Vec<ExternalCallableId>,
+    /// Each selected declaration, with the parameters the selecting plugin's transform appends.
+    bound: Vec<(ExternalCallableId, Box<[Ty]>)>,
 }
 
 impl<'a> HandoffRuntime<'a> {
@@ -51,7 +52,7 @@ impl<'a> HandoffRuntime<'a> {
     }
 
     /// The identities selected, for the file's frozen dependency declarations.
-    pub(super) fn into_bound(self) -> Vec<ExternalCallableId> {
+    pub(super) fn into_bound(self) -> Vec<(ExternalCallableId, Box<[Ty]>)> {
         self.bound
     }
 }
@@ -88,7 +89,8 @@ impl PluginRuntime for HandoffRuntime<'_> {
             .callable
             .external_identity
             .ok_or_else(|| format!("`{}` has no dependency identity", function.described()))?;
-        self.bound.push(target);
+        self.bound
+            .push((target, function.appended.clone().into_boxed_slice()));
         Ok(BoundRuntimeFunction {
             target,
             params: function.params.clone(),
