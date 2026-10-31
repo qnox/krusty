@@ -1,5 +1,14 @@
 # `@kotlin.Metadata` — reverse-engineering notes (Phase 4b)
 
+## Classpath annotation query boundary
+
+`declaration_annotations` borrows the existing classpath for exact selected-method and all-method
+annotation queries. `class_entry_bytes` retains first-entry precedence and the existing directory
+`this_class` check, with the same archive, jimage and ct.sym reads. Neither collaborator creates a
+cache or changes metadata authority. Parsed class/field annotations stay with `ClassInfo`/`FieldSig`;
+classreader decodes arguments and JVM providers interpret them. No annotation interpretation or
+new lookup enters core or lowering.
+
 ## Annotation classifier kind and JVM dispatch
 
 The JVM annotation realizer retains the exact declared interface in the generated carrier's
@@ -180,6 +189,16 @@ The serialization constructor's `named_params` retain nullable reference element
 serialization marker independently of the erased constructor parameter vector. The handoff test
 checks both exact vectors; the generated owner is also compared byte-for-byte with the matching
 official serialization plugin. This updates test coverage without changing metadata encoding.
+
+## Operand-holder physical reservation
+
+Common IR distinguishes an argument-evaluation holder from an expanded parameter or capture by
+semantic purpose, including through expression cloning and formal-receiver adoption. The JVM frame
+reserves an argument-order holder before its initializer uses scratch storage. Expanded formal
+bindings retain their existing timing. The holder keeps its CallOperand identity, while its semantic binding
+is published at the store. Before assignment, frame snapshots see the unpublished reservation as
+Top. Debug-local lifetimes still begin after the store; checked types, parameter metadata, argument
+evaluation order and the compiler/plugin wire model are unchanged.
 
 ## Anonymous superclass argument bindings
 
@@ -405,6 +424,11 @@ An interface's generated compatibility holder uses the shared `InnerClasses` ret
 for constant-pool publication. Its nesting relation and Kotlin metadata remain unchanged. Removing
 the earlier explicit class seed lets annotation-only references and declared children precede it
 when the ordinary table order requires that position.
+
+Equal qualified-name source rows use their retained declaration visitation order within the
+declaring writer's slots. Common lowering may evaluate a nested constructor operand first;
+that does not change the table's declaration order. Final pool relayout preserves this source
+order while retaining pool movement for generated and referenced rows and ancestor constraints.
 
 ## Module file — part ordering
 
@@ -1361,6 +1385,13 @@ JVM annotation interfaces use the same retained `InnerClasses` inventory as othe
 classifiers. Declared children and enclosing rows remain discoverable without a method or element
 referencing them. This changes the JVM class table, not Kotlin metadata or annotation values.
 
+## Declaration-result source provenance
+
+Declaration-result conversions retain the checked source position on their original producer and
+selected operand-bound call. Existing positions, return endpoints and inline origins remain intact;
+zero source positions stay absent. This is common debug provenance for target emission and changes
+neither semantic substitution nor a metadata wire format.
+
 ## Initializer inline debug ranges
 
 Class-initializer entry establishes the implicit callable frame. Initializer expressions record
@@ -1375,6 +1406,14 @@ Provider-normalized function classifiers supply their declared generic supertype
 subtype relation. A typed function signature supplies its canonical classifier application, and
 the hierarchy walk checks the nominal value against that application. Reflective function types
 retain their nominal identity; no new metadata payload or physical JVM descriptor is introduced.
+
+## Generated constructor-default source marks
+
+The JVM class writer clears constructor line tables before the owning emitter publishes its
+curation. Default-stub emission always supplies its recorded expression marks, including an empty
+set when no source positions exist. A zero owner declaration line suppresses entry/closing marks
+without discarding retained default-expression lines. Kotlin metadata and default payloads are
+unchanged; complete class artifacts pin the resulting debug attributes and constant-pool order.
 
 ## Superclass-argument receiver availability
 
@@ -1421,6 +1460,14 @@ Declared getter results remain distinct from the checked read's applied result. 
 leaf capability reuses its existing accessor signature plans and does not import property bodies
 or reconstruct class storage. No metadata wire format changes.
 
+## Compound member singleton identity
+
+Checked FIR already records singleton declaration identity in `SingletonValue`. Compound member
+updates reuse that identity through `CompoundMemberReceiver::StableRead`, preserving the selected
+getter/setter and source facts. Repeated reads initialize the same declaration once; runtime calls
+and mutable receiver reads remain explicit snapshots. No metadata payload or compiler/plugin wire
+field changes are needed. Full raw JVM artifacts pin the eliminated receiver-local storage.
+
 ## Applied member input declarations
 
 `FunctionInfo` retains a common declaration-input facet before nominal specialization: the raw
@@ -1446,6 +1493,25 @@ the type test; source locals, primitive cells and semantic metadata keep their o
 `implicit_receiver_stability_e2e` checks complete class inventories and bytes against Kotlin, then
 compares execution of the same whole programs. No metadata wire format or capture ABI changes.
 
+## Package property annotation records
+
+Package property annotation presence follows checked PROPERTY/FIELD destinations. Getter, setter
+and setter-parameter applications keep independent accessor flags; their source prefix does not
+make the property's own metadata annotated. Optional expectations and SOURCE retention keep the
+same policy as each checked declaration partition.
+
+SOURCE presence survives independently of its dropped payload and false metadata annotation bit;
+an erased optional expectation gains no source carrier. JVM property markers consume that retained
+presence. An annotated default setter writes its value-parameter metadata like a class property's
+setter, and parameter annotation payloads intern before the physical method body.
+
+Package properties retain checked PROPERTY and FIELD payloads under their stable property identity;
+metadata uses the same declaration flag/record model as class properties. JVM records use fields
+14 and 34; KLIB records use 170 and 181. Accessor strings intern before the property records. KLIB
+file extensions intern before annotation records, while constant payloads intern afterward. The
+official Native property-message golden includes both integral and string constants to retain this
+ordering independently of JVM marker realization.
+
 ## Serialized Elvis provenance
 
 An `ELVIS` block supplies an immutable compiler variable followed by a two-branch conditional
@@ -1461,3 +1527,16 @@ BYTE, SHORT, INT or LONG and `int_value` remains the zigzag encoding of its sign
 high-bit values. Signed constants have no flags field. Recursive annotation and array values use
 the same encoder. The complete compile-time-value messages of the pinned official Native producer
 are the byte oracle; this does not infer unsigned identity when an earlier semantic model lost it.
+
+## Checked unsigned annotation identity
+
+The common annotation value model retains all four unsigned widths. Checked source literals and
+constant references publish those values; the latter interpret bits using the constant's semantic
+type before applying the declared element width. Common IR keeps the matching unsigned constant.
+The metadata type-annotation adapter accepts exactly `IS_UNSIGNED` on BYTE, SHORT, INT and LONG
+with valid signed carriers, and rejects other flags and incompatible kinds.
+
+KSP protocol 16 transports four unsigned value tags. Its JVM adapter boxes their declared carriers
+as Kotlin unsigned wrapper objects, matching KSP2's runtime classes and full values. The class
+reader and build ABI fingerprint remain physical JVM contracts. Raw dependency annotation-default
+normalization remains a declaration-type-owned provider follow-up.
