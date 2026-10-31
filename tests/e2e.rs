@@ -1149,6 +1149,8 @@ mod implicit_any_super_method_e2e;
 mod implicit_integer_coercion_e2e;
 #[path = "e2e/implicit_receiver.rs"]
 mod implicit_receiver;
+#[path = "implicit_receiver_stability_e2e.rs"]
+mod implicit_receiver_stability_e2e;
 #[path = "implicit_this_callable_ref_e2e.rs"]
 mod implicit_this_callable_ref_e2e;
 #[path = "implicit_this_member_hof_lambda_e2e.rs"]

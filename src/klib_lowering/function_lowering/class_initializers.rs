@@ -17,7 +17,7 @@ pub(in super::super) fn initializer_header(
         receiver.base.symbol.clone(),
         ParameterValue {
             index: 0,
-            stable_read: false,
+            stable_read: true,
             erased: None,
         },
     );
