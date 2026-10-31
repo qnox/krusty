@@ -23529,6 +23529,14 @@ The Native storage ABI regression establishes each program's kotlinc result befo
 scalar-backed and reference-backed value-class equality, hashes, typed invocation and mixed capture
 ordering. The runtime reference-equality protocol and KType layout are unchanged.
 
+## Unsigned metadata constant values
+
+Metadata values retain the IR constant's unsigned identity in `Annotation.Argument.Value.flags`
+(`IS_UNSIGNED`, field 10). Their kind and zigzag payload still use the corresponding signed carrier;
+signed constants omit the flag. The owning encoder test compares complete messages for zero, the
+high bit and the maximum of every unsigned width, plus signed contrasts, against official Kotlin
+Native output from `tests/fixtures/unsigned_metadata_constants/UnsignedConstants.kt`.
+
 ## JVM object methods on annotation interfaces
 
 A checked `toString`, `hashCode` or `equals` call on a freshly constructed annotation names its
