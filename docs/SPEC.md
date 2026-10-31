@@ -19540,7 +19540,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
     value index.
 
   The stability test is the read stability common IR publishes for each `GetValue`
-  (`IrFile::binding_read_stability`), not the shape of the FIR expression. In the 2.4.20 box
+  (`IrFile::binding_read_stability`), not the shape of the FIR expression. Reads authenticated as
+  a body's own receiver parameters or its by-value receiver captures publish this same immutable
+  binding fact. The referenced object may remain mutable; computed receivers and captured mutable
+  cells still require a snapshot. A JVM safe-cast snapshot of an object cell keeps the erased
+  `ObjectRef.element` slot until the type test, without an intermediate cast to the variable's
+  semantic type. Named declarations and primitive cells retain their existing storage rules.
+  `implicit_receiver_stability_e2e` compares complete modules and runtime results for own, captured
+  and inline receivers, computed operands and reassigned captured cells, including the complete
+  `bareCastTargetArguments.kt` regression.
+
+  In the 2.4.20 box
   corpus 8 more files become byte-identical to kotlinc (302 to 310: `array_to_any`, `fullForm`,
   `iterator`, `kt6434_2`, `multiDeclaration`, `nonNullArray`, `shortForm`,
   `typeAliasConstructorForArray`). Open: kotlinc folds a constant `when` subject, names the
