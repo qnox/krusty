@@ -5744,8 +5744,6 @@ super/innerClassLabeledSuperProperty2.kt
 super/innerClassQualifiedFunctionCall.kt
 super/innerClassQualifiedPropertyAccess.kt
 super/interfaceHashCode.kt
-super/kt14243.kt
-super/kt14243_2.kt
 super/kt14243_class.kt
 super/kt14243_prop.kt
 super/kt3492ClassFun.kt

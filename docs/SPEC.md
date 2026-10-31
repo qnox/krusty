@@ -23541,6 +23541,15 @@ tower to consider an applicable extension. Diagnostics render the original decla
 A method-owned formal remains separate from class formals.
 Tests: `nominal_projected_input_e2e`.
 
+## Generic super calls
+
+`super.name(args)` dispatches to the selected declaration, but that declaration's own type
+parameters are still inferred from the call's arguments and explicit type arguments, as for any
+member call. `super.wrap(e)` with `fun <T> wrap(e: Expr<T>): Expr<T>` and `e: Expr<U>` checks
+`e` against `Expr<U>` and types the call as `Expr<U>`. Tests:
+`box_regressions/superCallInfersMethodTypeParameters.kt` and
+`generic_super_call_e2e::super_call_infers_the_method_type_parameters_like_kotlinc`.
+
 ## Serialized Elvis expression blocks
 
 A serialized Elvis expression retains its immutable compiler temporary and exact null proof.
