@@ -360,7 +360,7 @@ impl<'a> FileLowering<'a> {
         Ok(())
     }
 
-    fn define_module_default_entry(
+    pub(super) fn define_module_default_entry(
         &mut self,
         function: u32,
         id: FuncId,

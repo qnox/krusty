@@ -43,12 +43,13 @@ impl BodyLowering<'_, '_, '_> {
             ret,
             substitutions,
             extension_receiver_parameter,
+            defaults,
             ..
         } = callee
         else {
             return Err("an emitted dependency call without a checked external identity".into());
         };
-        if args.len() != params.len() {
+        if args.len() + defaults.len() != params.len() {
             return Err(
                 "a dependency call whose operands disagree with its checked parameters".into(),
             );
@@ -102,7 +103,7 @@ impl BodyLowering<'_, '_, '_> {
         }
         .authenticate()
         .map_err(Unsupported::from)?;
-        let abi = export.signature.parameters();
+        let declared = export.signature.parameters();
         let inserts_receiver = matches!(
             call,
             DependencyExportCall::Member
@@ -111,6 +112,16 @@ impl BodyLowering<'_, '_, '_> {
                 | DependencyExportCall::SourceSingletonExtension { .. }
                 | DependencyExportCall::ClassifierAssociated { .. }
         );
+        let omitted = omitted_operands(call, defaults, *extension_receiver_parameter)?;
+        // The operands the call supplies, in the export's order; an omitted one is filled by the
+        // declaration's default entry.
+        let supplied = declared
+            .iter()
+            .enumerate()
+            .filter(|(ordinal, _)| !omitted.contains(ordinal))
+            .map(|(_, ty)| *ty)
+            .collect::<Vec<_>>();
+        let abi = supplied.as_slice();
         if abi.len() != args.len() + usize::from(inserts_receiver) {
             return Err(
                 "a dependency export whose declared operand count disagrees with its call".into(),
@@ -233,14 +244,117 @@ impl BodyLowering<'_, '_, '_> {
         if self.terminated {
             return Ok(None);
         }
+        let (symbol, arguments, signature) = if omitted.is_empty() {
+            (&export.symbol, arguments, declared.to_vec())
+        } else {
+            let symbol = export.default_entry.as_ref().ok_or_else(|| {
+                declined!(
+                    "a top-level dependency call with omitted arguments and no exported default bridge"
+                )
+            })?;
+            let mut signature = declared.to_vec();
+            signature.extend(super::super::defaults::module_default_masks(declared.len()));
+            let mut masks = vec![0u32; declared.len().div_ceil(32)];
+            let mut supplied = arguments.into_iter();
+            let mut operands = Vec::with_capacity(signature.len());
+            for (ordinal, ty) in declared.iter().enumerate() {
+                if omitted.contains(&ordinal) {
+                    masks[ordinal / 32] |= 1 << (ordinal % 32);
+                    operands.push(self.zero_of(*ty));
+                } else {
+                    operands.push(supplied.next().expect("counted above"));
+                }
+            }
+            for mask in masks {
+                operands.push(
+                    self.builder
+                        .ins()
+                        .iconst(types::I32, i64::from(mask as i32)),
+                );
+            }
+            (symbol, operands, signature)
+        };
         let id = self
             .file
-            .import(&export.symbol, abi, export.signature.result())?;
+            .import(symbol, &signature, export.signature.result())?;
         let func_ref = self.func_ref(id);
         let call = self.emit_call(func_ref, &arguments)?;
         match self.builder.inst_results(call).first().copied() {
             Some(value) => self.convert(value, Some(export.signature.result()), *ret),
             None => Ok(None),
         }
+    }
+}
+
+/// The export operands a call leaves out, from the value-parameter ordinals it omits. Only a
+/// function whose receivers precede its value parameters takes its defaults through the entry.
+fn omitted_operands(
+    call: DependencyExportCall,
+    defaults: &[u32],
+    extension_receiver_parameter: Option<u32>,
+) -> Result<Vec<usize>, Unsupported> {
+    if defaults.is_empty() {
+        return Ok(Vec::new());
+    }
+    let inserted = match call {
+        DependencyExportCall::TopLevel | DependencyExportCall::SerializedExtension => None,
+        DependencyExportCall::SourceExtension {
+            receiver_position, ..
+        } => Some(receiver_position),
+        _ => return Err(declined!("a dependency member call with omitted arguments")),
+    };
+    defaults
+        .iter()
+        .map(|&ordinal| {
+            // The ordinal counts value parameters only; the checked parameter list holds a member
+            // extension's receiver at its own slot.
+            let parameter = match extension_receiver_parameter {
+                Some(receiver) if ordinal >= receiver => ordinal + 1,
+                _ => ordinal,
+            } as usize;
+            match inserted {
+                Some(position) if parameter < position => Err(declined!(
+                    "a dependency call omitting an operand before its receiver"
+                )),
+                Some(_) => Ok(parameter + 1),
+                None => Ok(parameter),
+            }
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn omitted_value_parameters_follow_the_receivers_of_the_export() {
+        // `fun f(a, b = …)`: the value ordinals are the export's.
+        assert_eq!(
+            omitted_operands(DependencyExportCall::TopLevel, &[1], None)
+                .map_err(|decline| decline.construct().to_owned()),
+            Ok(vec![1])
+        );
+        // `fun C.f(a, b = …)` called as `c.f(a)`: the receiver the call inserts precedes them.
+        let extension = DependencyExportCall::SourceExtension {
+            receiver: Ty::String,
+            receiver_position: 0,
+        };
+        assert_eq!(
+            omitted_operands(extension, &[0, 1], None)
+                .map_err(|decline| decline.construct().to_owned()),
+            Ok(vec![1, 2])
+        );
+        // A member extension's checked parameters hold its receiver at its own slot.
+        assert_eq!(
+            omitted_operands(DependencyExportCall::SerializedExtension, &[0], Some(0))
+                .map_err(|decline| decline.construct().to_owned()),
+            Ok(vec![1])
+        );
+        assert_eq!(
+            omitted_operands(DependencyExportCall::Member, &[0], None)
+                .map_err(|decline| decline.construct().to_owned()),
+            Err("a dependency member call with omitted arguments".to_owned())
+        );
     }
 }

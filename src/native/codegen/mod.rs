@@ -42,6 +42,9 @@ struct DependencyExport {
     member_receiver: Option<crate::backend::DependencyMemberReceiver>,
     singleton_member_receiver: Option<crate::backend::SingletonMemberReceiver>,
     singleton_extension_receiver: Option<crate::backend::SingletonExtensionUnreadReceiver>,
+    /// The entry that fills omitted arguments from the declaration's own defaults: the frame,
+    /// then a mask of the omitted ordinals, as a module default entry takes them.
+    default_entry: Option<String>,
 }
 
 /// One source function this target must publish for dependent source modules.
@@ -50,6 +53,7 @@ struct DependencyExportDefinition {
     symbol: String,
     signature: crate::backend::DependencyFunctionSignature,
     member_receiver: Option<crate::backend::DependencyMemberReceiver>,
+    default_entry: Option<String>,
 }
 
 /// The symbol every program object must define for the runtime's `_start` to call.
@@ -324,7 +328,23 @@ impl Backend for CraneliftBackend {
                     Some(ReferenceDeclaration::dependency(identity))
                 }
             };
+            // A support body publishes its declared defaults; a static one exports the entry that
+            // evaluates them, which a later module's call leaving arguments out goes through.
+            let default_entry = (matches!(
+                file.kind,
+                crate::backend::CheckedIrUnitKind::DependencySupport
+            ) && file.ir.functions[callable as usize]
+                .dispatch_receiver
+                .is_none()
+                && file
+                    .ir
+                    .fn_params
+                    .get(&callable)
+                    .and_then(|info| info.defaults.as_ref())
+                    .is_some_and(|defaults| defaults.iter().any(Option::is_some)))
+            .then(|| format!("{symbol}_defaults"));
             let export = DependencyExport {
+                default_entry: default_entry.clone(),
                 symbol: symbol.clone(),
                 reference_declaration,
                 signature: signature.clone(),
@@ -351,6 +371,7 @@ impl Backend for CraneliftBackend {
                 callable,
                 DependencyExportDefinition {
                     symbol,
+                    default_entry,
                     signature,
                     member_receiver: file.dependency_exports.member_receiver(callable),
                 },

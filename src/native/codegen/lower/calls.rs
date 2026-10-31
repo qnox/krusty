@@ -23,7 +23,7 @@ fn direct_dependency_export<'a>(
     let Some(export) = export else {
         return Ok(None);
     };
-    if !defaults.is_empty() {
+    if !defaults.is_empty() && export.default_entry.is_none() {
         return Err(declined!(
             "a top-level dependency call with omitted arguments and no exported default bridge"
         ));
@@ -1019,7 +1019,7 @@ mod tests {
     }
 
     #[test]
-    fn an_exact_dependency_export_never_receives_too_few_arguments() {
+    fn a_dependency_export_takes_omitted_arguments_only_through_its_default_entry() {
         let export = DependencyExport {
             symbol: "kt_klib_export_0".to_string(),
             reference_declaration: None,
@@ -1039,6 +1039,7 @@ mod tests {
             member_receiver: None,
             singleton_member_receiver: None,
             singleton_extension_receiver: None,
+            default_entry: None,
         };
         assert_eq!(
             direct_dependency_export(Some(&export), &[])
@@ -1050,6 +1051,15 @@ mod tests {
                 .expect_err("an omission needs a provider-owned default bridge")
                 .construct(),
             "a top-level dependency call with omitted arguments and no exported default bridge"
+        );
+        let defaulted = DependencyExport {
+            default_entry: Some("kt_klib_export_0_defaults".to_owned()),
+            ..export.clone()
+        };
+        assert_eq!(
+            direct_dependency_export(Some(&defaulted), &[0])
+                .expect("an omission goes through the exported default entry"),
+            Some(&defaulted)
         );
         assert_eq!(
             direct_dependency_export(None, &[0])

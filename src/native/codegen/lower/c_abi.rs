@@ -43,7 +43,32 @@ impl<'a> FileLowering<'a> {
             function,
             &export.symbol,
             export.signature.parameters().to_vec(),
-        )
+        )?;
+        if let Some(symbol) = &export.default_entry {
+            self.define_dependency_default_entry(file_init, function, symbol)?;
+        }
+        Ok(())
+    }
+
+    /// Export the entry a later module's call that leaves arguments out goes through: the file's
+    /// initializer first, since a default may read this file's state, then the default entry.
+    fn define_dependency_default_entry(
+        &mut self,
+        file_init: FuncId,
+        function: u32,
+        symbol: &str,
+    ) -> Result<(), Unsupported> {
+        let declared = &self.ir.functions[function as usize];
+        let mut params = declared.params.clone();
+        params.extend(super::defaults::module_default_masks(declared.params.len()));
+        let signature = self.signature_of(&params, declared.ret)?;
+        let local = format!("{symbol}_local");
+        let entry = self
+            .module
+            .declare_function(&local, Linkage::Local, &signature)
+            .map_err(|error| format!("declaring `{local}` ({error})"))?;
+        self.define_module_default_entry(function, entry)?;
+        self.define_trampoline(file_init, entry, symbol, params, declared.ret)
     }
 
     pub(super) fn define_c_exports(
@@ -81,16 +106,28 @@ impl<'a> FileLowering<'a> {
         symbol: &str,
         params: Vec<Ty>,
     ) -> Result<(), Unsupported> {
-        let declared = &self.ir.functions[function as usize];
-        let ret = declared.ret;
+        let ret = self.ir.functions[function as usize].ret;
+        let Some(target) = self.functions[function as usize] else {
+            return Err(declined!("`{symbol}` has no body"));
+        };
+        self.define_trampoline(file_init, target, symbol, params, ret)
+    }
+
+    /// An exported `symbol` that runs the file's initializer, then calls `target` with its own
+    /// operands.
+    fn define_trampoline(
+        &mut self,
+        file_init: FuncId,
+        target: FuncId,
+        symbol: &str,
+        params: Vec<Ty>,
+        ret: Ty,
+    ) -> Result<(), Unsupported> {
         let signature = self.signature_of(&params, ret)?;
         let id = self
             .module
             .declare_function(symbol, Linkage::Export, &signature)
             .map_err(|error| format!("declaring `{symbol}` ({error})"))?;
-        let Some(target) = self.functions[function as usize] else {
-            return Err(declined!("`{symbol}` has no body"));
-        };
         self.emit_function(id, signature, ret, symbol, &mut |body, arguments| {
             let init = body.func_ref(file_init);
             body.emit_call(init, &[])?;

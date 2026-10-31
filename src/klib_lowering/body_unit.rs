@@ -499,9 +499,26 @@ impl DependencyBodyUnit {
             }
             .map_err(|reason| match reason {
                 KlibBodyDeclineReason::CalleeDeclined(decline) => *decline,
-                reason => KlibBodyDecline::new(body.identity.declaration, reason),
+                reason => KlibBodyDecline::new(body.identity.declaration.clone(), reason),
             })?;
             self.ir.functions[body.function as usize].body = Some(lowered);
+            if body.initialization.is_none() {
+                BodyLowering::publish_defaults(
+                    body.arena,
+                    LoweredFunction {
+                        symbol: body.symbol,
+                        function: body.function,
+                    },
+                    &body.header,
+                    &self.builtins,
+                    &mut self.ir,
+                    &mut linker,
+                )
+                .map_err(|reason| match reason {
+                    KlibBodyDeclineReason::CalleeDeclined(decline) => *decline,
+                    reason => KlibBodyDecline::new(body.identity.declaration, reason),
+                })?;
+            }
         }
         Ok(root)
     }

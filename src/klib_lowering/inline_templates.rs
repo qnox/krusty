@@ -175,32 +175,17 @@ fn lower(
     )
     .body(statements)?;
     ir.functions[template as usize].body = Some(body);
-    let mut defaults = Vec::with_capacity(header.params().len());
-    for (default, &declared) in header.defaults().iter().zip(header.params()) {
-        defaults.push(match *default {
-            Some(default) => Some(
-                BodyLowering::new(
-                    arena,
-                    LoweredFunction {
-                        symbol: &function.base.symbol,
-                        function: template,
-                    },
-                    &header,
-                    &builtins,
-                    ir,
-                    &mut calls,
-                )
-                .default_value(default, declared)?,
-            ),
-            None => None,
-        });
-    }
-    if defaults.iter().any(Option::is_some) {
-        ir.fn_params
-            .get_mut(&template)
-            .expect("a declared function publishes its parameters")
-            .defaults = Some(defaults);
-    }
+    BodyLowering::publish_defaults(
+        arena,
+        LoweredFunction {
+            symbol: &function.base.symbol,
+            function: template,
+        },
+        &header,
+        &builtins,
+        ir,
+        &mut calls,
+    )?;
     ir.inline_fns.insert(template);
     ir.inline_only_fns.insert(template);
     Ok(template)
