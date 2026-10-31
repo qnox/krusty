@@ -19,6 +19,9 @@ use std::collections::hash_map::Entry;
 use crate::fir::{ExternalCallableId, ExternalPropertyId};
 pub use crate::libraries::CompilerIntrinsic as BackendCompilerIntrinsic;
 pub use crate::libraries::DependencyGetterSignature;
+/// A dependency classifier a target may represent itself
+/// ([`super::Backend::represents_dependency_classifier`]).
+pub type DependencyClassifier = crate::types::TypeName;
 use crate::libraries::{
     DefaultCallRealization, DirectCFunction, ExternalCallableKind, GenericSig, InlineKind,
     KlibBodyCompanionReceiver, KlibDeclarationSignature, KlibDependencyCallable, MemberRealization,
