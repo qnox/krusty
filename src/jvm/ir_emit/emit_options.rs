@@ -30,6 +30,8 @@ pub struct EmitOptions {
     pub java_parameters: bool,
     /// `-Xstring-concat=inline`: always use `StringBuilder`, regardless of class-file version.
     pub inline_string_concat: bool,
+    /// `-Xuse-inline-scopes-numbers`: name inlined locals by their inline scope's number.
+    pub inline_scopes_numbers: bool,
     /// `-language-version X.Y`: the `@kotlin.Metadata` and `.kotlin_module` version stamp.
     pub metadata_version: Option<[i32; 3]>,
     /// Whether language settings enable declaration annotation records in Kotlin metadata.
@@ -91,6 +93,11 @@ impl EmitOptions {
         self
     }
 
+    pub fn with_inline_scopes_numbers(mut self, enabled: bool) -> Self {
+        self.inline_scopes_numbers = enabled;
+        self
+    }
+
     /// `-Xno-param-assertions` passes `false`.
     pub fn with_param_assertions(mut self, enabled: bool) -> Self {
         self.param_assertions = enabled;
@@ -109,6 +116,7 @@ impl Default for EmitOptions {
             param_assertions: true,
             java_parameters: false,
             inline_string_concat: false,
+            inline_scopes_numbers: false,
             lambda_modes: LambdaModes::default(),
             inner_class_resolver: None,
             value_classes: std::rc::Rc::default(),

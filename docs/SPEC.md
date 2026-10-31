@@ -5563,6 +5563,22 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   tables. Metadata string tables merge consecutive plain records, and method attribute names use
   ASM's `StackMapTable`-before-debug-table order. Remaining byte-parity differences include dead
   slot reuse, branch fall-through elimination, and inline-local name mangling.
+- **Inline scope numbers (`-Xuse-inline-scopes-numbers`, kotlinc's `USE_INLINE_SCOPES_NUMBERS`)**
+  rename an inlined body's debug locals by scope instead of by `$iv` depth. Each inline marker
+  (`$i$f$…`, `$i$a$…`) opens a scope numbered in the order the method inlines it; its locals end with
+  `\<scope>`, a marker also with `\<call-site line>` and a lambda's marker with
+  `\<surrounding scope>` (`0` for the method itself), and `this` becomes `this_\<scope>`. A
+  declaring inline function's own `$i$f$` marker stays unnumbered. The numbers are per JVM method:
+  a lambda's node numbers its own scopes, which the inliner renumbers when it places the node. A
+  callee is numbered as kotlinc's `InlineScopesGenerator` numbers it: from its scope numbers when
+  it declares one unnumbered marker, else from its `$iv` suffixes, nested markers taking the line
+  in effect where they start; every nested call-site line is then mapped into the caller's lines,
+  `-1` where nothing maps. A lambda's scope takes the mapped line of its `invoke`, and an
+  invoked-again lambda is numbered from the names its previous expansion gave it, as kotlinc renames
+  the lambda's node in place (`src/jvm/inliner/inline_scopes.rs`). The ported bytecode inliner
+  numbers library calls; the command line still refuses the argument until every inlining path
+  does, and the box harness selects it with `// USE_INLINE_SCOPES_NUMBERS`
+  (`tests/box_regressions/inlineScopes/`).
 - **A block's local slots are reused after the block ends**, as kotlinc's `FrameMap` reuses them:
   its block end leaves each variable the block declared, and a variable left from the top of the
   frame hands its slot back. A sibling branch, the next loop, a later catch parameter and the
