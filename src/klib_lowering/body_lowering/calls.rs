@@ -685,6 +685,16 @@ impl BodyLowering<'_> {
         if linked.type_parameters.is_empty() {
             return Ok(linked);
         }
+        let captured = self.captured_type_arguments(&linked, access)?;
+        // A captured projection is serialized approximated to its bound; the call binds the
+        // projection itself, as checked FIR lowering records a source call that captures it.
+        let bound = |parameter: &String, value: Ty| {
+            captured
+                .get(parameter)
+                .copied()
+                .filter(|projection| projection.projection_read_ty() == value)
+                .unwrap_or(value)
+        };
         if let Callee::Local(_) = linked.callee {
             // A call of a function the unit declares binds its type parameters as checked FIR
             // lowers a source call of a module generic function: the arguments are read at the
@@ -696,7 +706,7 @@ impl BodyLowering<'_> {
                     "a call that leaves a type argument unset",
                 ))?;
                 let value = semantic_type(self.arena, self.header.type_parameters(), argument)?;
-                bindings.insert(parameter.clone(), value);
+                bindings.insert(parameter.clone(), bound(parameter, value));
             }
             for param in &mut linked.params {
                 *param = param.substitute_erased(&bindings);
@@ -727,7 +737,10 @@ impl BodyLowering<'_> {
             let argument = argument.ok_or(KlibBodyDeclineReason::UnsupportedOperation(
                 "a call that leaves a type argument unset",
             ))?;
-            let value = semantic_type(self.arena, self.header.type_parameters(), argument)?;
+            let value = bound(
+                parameter,
+                semantic_type(self.arena, self.header.type_parameters(), argument)?,
+            );
             bindings.insert(parameter.clone(), value);
             substitutions.push(IrCheckedSubstitution {
                 parameter: FirTypeParameterRef::External {
@@ -752,6 +765,54 @@ impl BodyLowering<'_> {
             .receiver
             .map(|receiver| receiver.substitute_erased(&bindings));
         Ok(linked)
+    }
+}
+
+impl BodyLowering<'_> {
+    /// The type parameters of `linked` that a call captures from a projected argument: a value
+    /// parameter declared as a class applied to the bare type parameter `P`, passed a value whose
+    /// serialized type applies an `out` projection in that slot that the class's own variance does
+    /// not restate, binds `P` to that projection (`copyOf()` on an `Array<out T>`).
+    fn captured_type_arguments(
+        &self,
+        linked: &LinkedCallee,
+        access: &KlibIrMemberAccess,
+    ) -> Lowered<crate::fx_hash::HashMap<String, Ty>> {
+        let mut captured = crate::fx_hash::HashMap::default();
+        let values = arguments(access)
+            .into_iter()
+            .skip(usize::from(linked.receiver.is_some()));
+        for (&declared, argument) in linked.params.iter().zip(values) {
+            let Some(serialized) = argument.and_then(|argument| self.arena.expr(argument).ty)
+            else {
+                continue;
+            };
+            let actual = semantic_type(self.arena, self.header.type_parameters(), serialized)?;
+            let (Some((owner, formals)), Some((actual_owner, actuals))) =
+                (declared.obj_parts(), actual.obj_parts())
+            else {
+                continue;
+            };
+            if owner != actual_owner || formals.len() != actuals.len() {
+                continue;
+            }
+            for (slot, (formal, &projected)) in formals.iter().zip(actuals).enumerate() {
+                let (TyKind::TyParam(name, _), TyKind::OutProjection(bound)) =
+                    (formal.kind(), projected.kind())
+                else {
+                    continue;
+                };
+                let mut read = actuals.to_vec();
+                read[slot] = bound;
+                if !self
+                    .linker
+                    .same_type(actual, Ty::obj_args_name(owner, &read))
+                {
+                    captured.insert(name.as_str().to_owned(), projected);
+                }
+            }
+        }
+        Ok(captured)
     }
 }
 
