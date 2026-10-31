@@ -1,39 +1,59 @@
-// A destination producer (`filterTo(mutableSetOf())`) is solved against the call's expected result
-// when the receiver already fixed the element type: `C : MutableCollection<in Sub>` admits the
-// expected `MutableSet<Base>`, so the producer becomes `mutableSetOf<Base>()`.
+// A destination producer (`filterInto(bagOf(), …)`) is solved against the call's expected
+// result when the receiver already fixed the element type: `C : Sink<in Sub>` admits the expected
+// `Bag<Base>`, so the producer becomes `bagOf<Base>()`.
 open class Base(val name: String)
 class Sub(name: String) : Base(name)
 
-fun <T, C : MutableCollection<in T>> into(xs: List<T>, destination: C): C {
-    destination.addAll(xs)
+interface Sink<T> {
+    fun put(item: T)
+}
+
+class Bag<T : Base> : Sink<T> {
+    var count = 0
+    var names = ""
+
+    override fun put(item: T) {
+        count += 1
+        names += item.name
+    }
+}
+
+fun <T : Base> bagOf(): Bag<T> = Bag()
+
+class Source<T>(val first: T, val second: T, val third: T)
+
+fun <T, C : Sink<in T>> Source<T>.filterInto(destination: C, skip: Any?): C {
+    if (first != skip) destination.put(first)
+    if (second != skip) destination.put(second)
+    if (third != skip) destination.put(third)
     return destination
 }
 
-fun filtered(xs: List<Sub>): MutableSet<Base> = xs.filterTo(mutableSetOf()) { it.name != "skip" }
+fun <T, C : Sink<in T>> Source<T>.copyTo(destination: C): C = filterInto(destination, null)
 
-fun returned(xs: List<Sub>): MutableSet<Base> {
-    return xs.filterTo(mutableSetOf()) { true }
+fun <T, C : Sink<in T>> into(xs: Source<T>, destination: C): C = xs.copyTo(destination)
+
+fun filtered(xs: Source<Sub>, skip: Sub): Bag<Base> = xs.filterInto(bagOf(), skip)
+
+fun returned(xs: Source<Sub>): Bag<Base> {
+    return xs.filterInto(bagOf(), null)
 }
 
-fun initialized(xs: List<Sub>): MutableSet<Base> {
-    val result: MutableSet<Base> = xs.toCollection(mutableSetOf())
+fun initialized(xs: Source<Sub>): Bag<Base> {
+    val result: Bag<Base> = xs.copyTo(bagOf())
     return result
 }
 
-fun mapped(xs: List<Sub>): MutableList<Base> = xs.mapTo(mutableListOf()) { it }
-
-fun topLevel(xs: List<Sub>): MutableSet<Base> = into(xs, mutableSetOf())
+fun topLevel(xs: Source<Sub>): Bag<Base> = into(xs, bagOf())
 
 fun box(): String {
-    val xs = listOf(Sub("a"), Sub("skip"), Sub("b"))
-    val set = filtered(xs)
-    set.add(Base("c"))
-    if (set.map { it.name } != listOf("a", "b", "c")) return "filtered"
-    if (returned(xs).size != 3) return "returned"
-    if (initialized(xs).size != 3) return "initialized"
-    val list = mapped(xs)
-    list.add(Base("d"))
-    if (list.size != 4) return "mapped"
-    if (topLevel(xs).size != 3) return "topLevel"
+    val skip = Sub("skip")
+    val xs = Source(Sub("a"), skip, Sub("b"))
+    val bag = filtered(xs, skip)
+    bag.put(Base("c"))
+    if (bag.names != "abc") return "filtered: ${bag.names}"
+    if (returned(xs).count != 3) return "returned"
+    if (initialized(xs).count != 3) return "initialized"
+    if (topLevel(xs).count != 3) return "topLevel"
     return "OK"
 }
