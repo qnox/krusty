@@ -28,6 +28,14 @@ impl Checker<'_> {
         })
     }
 
+    /// `ty` when it is an array the compiler constructs itself: the size constructor of an
+    /// `IntArray` or `Array<T>` has no declaration of its own. A value class over an array
+    /// (`UIntArray`) declares its constructors in metadata, and kotlinc calls them
+    /// (`UIntArray.constructor-impl(I)[I`), so it is not one.
+    pub(super) fn compiler_constructed_array(&self, ty: Option<Ty>) -> Option<Ty> {
+        ty.filter(|ty| ty.is_array() && !self.ty_is_value_class(*ty))
+    }
+
     /// The element a single-index read `receiver[i]` yields as the built-in array operation, or
     /// `None` when the subscript is a `get` convention call.
     ///

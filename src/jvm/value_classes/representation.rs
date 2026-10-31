@@ -90,12 +90,6 @@ pub(crate) fn boxed_value_class_carrier(ir: &IrFile, classifier: TypeName) -> Op
     Some(super::erase(&underlying, &declarations))
 }
 
-/// Every value class this IR knows that the JVM boxes through its own `box-impl`.
-pub(crate) fn boxed_value_class_names(ir: &IrFile) -> impl Iterator<Item = TypeName> + '_ {
-    ir.value_class_names()
-        .filter(|&classifier| !has_native_carrier(classifier))
-}
-
 /// A value class whose own name is a primitive-array classifier and whose declared carrier is an
 /// array. The semantic name and the carrier are different JVM classes that share one descriptor
 /// (`kotlin/UIntArray` and `int[]` are both `[I`). The rewrite map is the authority: a signed
@@ -214,10 +208,6 @@ mod tests {
         assert_eq!(boxed_value_class_underlying(&ir, uint), None);
         assert!(is_boxed_value_class(&ir, count));
         assert_eq!(boxed_value_class_underlying(&ir, count), Some(Ty::Int));
-        assert_eq!(
-            boxed_value_class_names(&ir).collect::<Vec<_>>(),
-            vec![count]
-        );
     }
 
     #[test]

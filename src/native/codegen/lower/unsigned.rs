@@ -119,28 +119,60 @@ impl BodyLowering<'_, '_, '_> {
         }
     }
 
+    /// A construction of an unsigned array, which this target stores with its signed carrier's
+    /// layout under the unsigned array's own type.
+    ///
+    /// The class declares two constructors with one parameter each, and the selected one decides:
+    /// `constructor(size: Int)` allocates the array, as its own type so that it does not answer
+    /// `is IntArray`, and the primary constructor over the carrier is the carrier itself.
+    pub(super) fn unsigned_array_carrier_construction(
+        &mut self,
+        internal: crate::types::TypeName,
+        args: &[u32],
+        selected: Option<&[Ty]>,
+    ) -> Option<Result<Option<Value>, Unsupported>> {
+        let carrier = self.unsigned_array_carrier(internal)?;
+        Some(match (args, selected) {
+            ([size], Some([Ty::Int])) => self.new_array(Ty::obj_name(internal), *size),
+            ([storage], Some([parameter])) if *parameter == carrier => {
+                self.coerce(*storage, carrier)
+            }
+            _ => Err(declined!(
+                "construction of `{}` from {} arguments",
+                internal.render(),
+                args.len()
+            )),
+        })
+    }
+
     /// The unsigned element of `owner` when it is an unsigned array stored as a signed carrier.
+    fn unsigned_array_carrier_element(&self, owner: crate::types::TypeName) -> Option<Ty> {
+        self.unsigned_array_carrier(owner)?;
+        Ty::obj_name(owner).array_elem()
+    }
+
+    /// The signed carrier array of `owner` when it is an unsigned array.
     ///
     /// That classifier's frozen value-class declaration must store a signed primitive array: the
     /// declaration, not the classifier's spelling, is what makes the carrier's operation the
     /// answer to the class's own member.
-    fn unsigned_array_carrier_element(&self, owner: crate::types::TypeName) -> Option<Ty> {
-        let element = Ty::obj_name(owner)
+    fn unsigned_array_carrier(&self, owner: crate::types::TypeName) -> Option<Ty> {
+        Ty::obj_name(owner)
             .array_elem()
             .filter(|ty| ty.is_unsigned())?;
-        self.file
+        let carrier = self
+            .file
             .classifiers
             .classifier(owner)
-            .and_then(|fact| fact.value_declaration.clone())
-            .is_some_and(|declaration| {
-                matches!(
-                    declaration.underlying.kind(),
-                    crate::types::TyKind::Obj(carrier, _)
-                        if crate::types::prim_array_element(carrier)
-                            .is_some_and(|element| !element.is_unsigned())
-                )
-            })
-            .then_some(element)
+            .and_then(|fact| fact.value_declaration.clone())?
+            .underlying;
+        matches!(
+            carrier.kind(),
+            crate::types::TyKind::Obj(name, _)
+                if crate::types::prim_array_element(name)
+                    .is_some_and(|element| !element.is_unsigned())
+        )
+        .then_some(carrier)
     }
 
     /// Whether `target` reads the value an unsigned type wraps — the property its value-class

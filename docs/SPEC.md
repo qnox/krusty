@@ -15163,6 +15163,34 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   the elements the array holds. A top-level `UIntArray` position keeps its carrier `[I`.
   (`tests/unsigned_array_type_argument_signature_e2e.rs`.)
 
+- **An unsigned array is allocated through its own declarations.** `UIntArray` (and each
+  unsigned width) is a value class, not a compiler-provided array, so neither size form is in
+  the compiler's array-factory tables. `UIntArray(n)` selects the class's declared
+  `constructor(size: Int)` and emits it as any value-class constructor
+  (`UIntArray.constructor-impl(I)[I`); `UIntArray(n) { init }` selects the library's inline
+  function `kotlin.UIntArray(size, init)`, which is inlined from its bytecode: it allocates the
+  signed carrier, fills it with `init(index).toInt()` and wraps it with the primary constructor
+  (`constructor-impl([I)[I`). A typealias of `UIntArray` takes the same constructors, so
+  `Cells(n) { … }` through `typealias Cells = UIntArray` is rejected as kotlinc rejects it
+  (the inline function is reached only by its own name); the compiler-constructed array path
+  applies to an alias only when its target is not a value class.
+  The initializer's result reaches the inlined body boxed through `Function1` (`UInt.box-impl`)
+  and is unboxed at once. kotlinc's redundant-boxing pass removes the pair for every value class
+  its metadata declares, so the pass's value-class table holds the native unsigned scalars
+  (`kotlin/UInt` → `I`) as well as the classes krusty itself boxes.
+  Open: a nested inline call inside such an inlined lambda (`{ it.toUInt() }`) still lacks
+  kotlinc's trailing `nop` and its line entry, as it does in any bytecode-inlined lambda
+  (`fold { … x.toUInt() … }`), so the byte fixture uses captured and constant initializers and
+  the box run covers the computed ones.
+  Native stores an unsigned array with its signed carrier's layout under its own type, and
+  realizes the selected constructor by its declared parameter: `constructor(size: Int)`
+  allocates the array as the unsigned array's type (so it does not answer `is IntArray`), and
+  the primary constructor over the carrier is the carrier itself. Open on Native: the
+  initializer form is the library's inline function, which this target has no splice of yet, so
+  it declines that call by its declaration instead of allocating through the compiler's array
+  construction as it did while the call was mistaken for one.
+  (`tests/unsigned_array_allocation_e2e.rs`, `tests/native_unsigned_e2e.rs`.)
+
 - **A `checkcast` right before an `aastore` is removed, as kotlinc's
   `RedundantCheckcastsBeforeAastoreMethodTransformer` does.** The pass runs after jump negation and
   before the final dead-code elimination (`bytecode_passes/checkcasts_before_aastore.rs`, step
@@ -19458,8 +19486,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   corpus 8 more files become byte-identical to kotlinc (302 to 310: `array_to_any`, `fullForm`,
   `iterator`, `kt6434_2`, `multiDeclaration`, `nonNullArray`, `shortForm`,
   `typeAliasConstructorForArray`). Open: kotlinc folds a constant `when` subject, names the
-  destructured loop element `$dest$…`, and inlines stdlib inline array constructors such as
-  `UIntArray(size) { … }`, whose lambda parameter keeps a local there.
+  destructured loop element `$dest$…`. (`UIntArray(size) { … }` is no longer a case of this
+  lowering: it is the library's inline function, below.)
 
   Tests: `fir_lower::tests::lowering_temporaries` checks each lowered shape, and
   `tests/block_slot_reuse_e2e.rs` compares full class bytes for destructuring, a `when`

@@ -2031,6 +2031,11 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         if let Some(constructed) = self.value_construction(internal, args) {
             return constructed;
         }
+        if let Some(constructed) =
+            self.unsigned_array_carrier_construction(internal, args, selected)
+        {
+            return constructed;
+        }
         if let Some(constructed) = self.range_class_construction(internal, args) {
             return constructed;
         }

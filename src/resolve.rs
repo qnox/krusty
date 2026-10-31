@@ -17263,7 +17263,7 @@ impl<'a> Checker<'a> {
                 });
                 if unshadowed_name && !self.module_declares(&fname) && !classifier_shadows_synthetic
                 {
-                    if let Some(alias_ty) = bare_alias_target.filter(|ty| ty.is_array()) {
+                    if let Some(alias_ty) = self.compiler_constructed_array(bare_alias_target) {
                         let element = alias_ty
                             .array_elem()
                             .expect("an array alias has a semantic element type");
