@@ -413,6 +413,12 @@ mod tests {
         ir.annotation_constructions.insert(
             construction,
             crate::ir::IrAnnotationConstruction {
+                arguments: crate::libraries::AnnotationArgumentProvenance::from_selected(
+                    1,
+                    &[0],
+                    &[],
+                )
+                .unwrap(),
                 interface,
                 members: vec![("value".into(), Ty::String)],
                 defaults: vec![None],

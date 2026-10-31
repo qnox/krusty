@@ -7,7 +7,9 @@ use super::local_delegated_properties::{
 };
 use crate::fx_hash::{HashMap, HashSet};
 
+mod annotation_constructions;
 mod context_parameters;
+pub use annotation_constructions::{FirAnnotationConstruction, FirAnnotationDefaultValue};
 pub(super) mod value_parameters;
 pub use value_parameters::{FirDefaultValue, FirValueParameter, FirVarargParameter};
 pub(crate) mod debug_lines;
@@ -473,37 +475,6 @@ impl DelegateStorage {
 /// A constructor declaration identity after overload selection. Module constructors use their
 /// stable callable identity. Dependency constructors retain a backend-neutral classifier and
 /// semantic parameter signature; a backend maps that exact declaration to physical linkage.
-/// Compact declaration default retained only for an annotation-construction plan. Ordinary source
-/// defaults remain checked retained bodies; dependency metadata contributes only these closed values.
-#[derive(Clone, Debug, PartialEq)]
-pub enum FirAnnotationDefaultValue {
-    Constant(FirConstant),
-    Singleton(TypeName),
-    EnumEntry {
-        classifier: TypeName,
-        name: Box<str>,
-    },
-    KClass(Ty),
-    Array {
-        array_type: Ty,
-        elements: Vec<Self>,
-    },
-    Annotation {
-        classifier: TypeName,
-        members: Vec<(String, Ty)>,
-        values: Vec<Self>,
-    },
-}
-
-/// Complete checked declaration shape needed to realize an annotation value. This is Kotlin
-/// semantics rather than a platform implementation detail: a backend may allocate a concrete value,
-/// synthesize an implementation, or use a native annotation representation without new lookup.
-#[derive(Clone, Debug, PartialEq)]
-pub struct FirAnnotationConstruction {
-    pub members: Box<[(Box<str>, ResolvedTy)]>,
-    pub defaults: Box<[Option<FirAnnotationDefaultValue>]>,
-}
-
 #[derive(Clone, Debug, PartialEq)]
 pub enum FirConstructorTarget {
     Module {
@@ -526,16 +497,9 @@ pub enum FirConstructorTarget {
 impl FirConstructorTarget {
     fn storage_payload_bytes(&self) -> usize {
         match self {
-            Self::Module { annotation, .. } => annotation.as_ref().map_or(0, |annotation| {
-                annotation.members.len() * std::mem::size_of::<(Box<str>, ResolvedTy)>()
-                    + annotation
-                        .members
-                        .iter()
-                        .map(|(name, _)| name.len())
-                        .sum::<usize>()
-                    + annotation.defaults.len()
-                        * std::mem::size_of::<Option<FirAnnotationDefaultValue>>()
-            }),
+            Self::Module { annotation, .. } => annotation
+                .as_ref()
+                .map_or(0, |annotation| annotation.storage_payload_bytes()),
             Self::External {
                 parameters,
                 declared_parameters,
@@ -543,16 +507,9 @@ impl FirConstructorTarget {
                 ..
             } => {
                 (parameters.len() + declared_parameters.len()) * std::mem::size_of::<ResolvedTy>()
-                    + annotation.as_ref().map_or(0, |annotation| {
-                        annotation.members.len() * std::mem::size_of::<(Box<str>, ResolvedTy)>()
-                            + annotation
-                                .members
-                                .iter()
-                                .map(|(name, _)| name.len())
-                                .sum::<usize>()
-                            + annotation.defaults.len()
-                                * std::mem::size_of::<Option<FirAnnotationDefaultValue>>()
-                    })
+                    + annotation
+                        .as_ref()
+                        .map_or(0, |annotation| annotation.storage_payload_bytes())
             }
         }
     }
