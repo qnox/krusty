@@ -61,8 +61,11 @@ impl Checker<'_> {
                 }
             });
             if let Some(span) = span {
-                self.diags
-                    .error(span, PARENTHESIZED_PACKAGE_QUALIFIER.to_string());
+                self.diags.error_named(
+                    span,
+                    crate::diag::names::PARENTHESIZED_PACKAGE_QUALIFIER_ERROR,
+                    PARENTHESIZED_PACKAGE_QUALIFIER,
+                );
             }
         }
     }

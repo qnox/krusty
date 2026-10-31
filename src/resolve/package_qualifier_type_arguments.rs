@@ -118,7 +118,10 @@ impl Checker<'_> {
             list.span,
             forbidden,
             warning.as_deref(),
-            crate::diag::names::TYPE_ARGUMENTS_NOT_ALLOWED_WARNING,
+            DeprecationNames {
+                error: crate::diag::names::TYPE_ARGUMENTS_NOT_ALLOWED,
+                warning: crate::diag::names::TYPE_ARGUMENTS_NOT_ALLOWED_WARNING,
+            },
             MESSAGE,
         );
     }
