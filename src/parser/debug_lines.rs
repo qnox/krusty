@@ -150,10 +150,12 @@ pub(super) fn attach(file: &mut File, src: &str) {
         }
     };
     // A bodiless (abstract) function still ends somewhere: its declaration's last line, where a
-    // generated forwarder of it (a `$DefaultImpls` stub) returns.
+    // generated forwarder of it (a `$DefaultImpls` stub) returns. An expression body ends there
+    // too: parentheses leave no node, so the closing `)` of `= !(\n  a\n)` lies past the body
+    // expression's own span but is still the body's last character.
     let function_lines = |body: &FunBody, span: Span| {
         let mut lines = body_lines(body);
-        if lines.end == 0 && span.hi != 0 {
+        if (lines.end == 0 || matches!(body, FunBody::Expr(_))) && span.hi != 0 {
             lines.end = line_at(span.hi.saturating_sub(1));
         }
         lines

@@ -18,6 +18,9 @@ use crate::metadata::type_encoder::{
 use crate::metadata::{property_flags, protobuf::Pb};
 use crate::types::Ty;
 
+#[cfg(test)]
+mod constant_values_tests;
+
 /// One top-level function to describe in the package metadata.
 pub struct FnMeta {
     pub name: String,
@@ -391,8 +394,8 @@ fn annotation_value_pb(st: &mut StringTable<'_>, value: &crate::ir::AnnoValue) -
     let mut out = Pb::new();
     match value {
         AnnoValue::Const(constant) => match constant {
-            // kotlinc records an unsigned annotation argument under the SIGNED width it is
-            // carried in, which is the same slot its value class wraps.
+            // Unsigned constants retain their signed carrier kind and payload; the value's
+            // IS_UNSIGNED flag below distinguishes their declared interpretation.
             IrConst::UByte(value) => {
                 out.field_varint(1, 0);
                 out.field_varint(2, zigzag_i64(i64::from(*value as i8)));
@@ -483,6 +486,14 @@ fn annotation_value_pb(st: &mut StringTable<'_>, value: &crate::ir::AnnoValue) -
                 out.repeated_message(9, &annotation_value_pb(st, value));
             }
         }
+    }
+    if matches!(
+        value,
+        AnnoValue::Const(
+            IrConst::UByte(_) | IrConst::UShort(_) | IrConst::UInt(_) | IrConst::ULong(_)
+        )
+    ) {
+        out.field_varint(10, 1); // IS_UNSIGNED
     }
     out
 }
@@ -1334,7 +1345,9 @@ pub(crate) fn build_package_with_intersection_approximation(
     // source-language feature set.
     annotations_in_metadata: bool,
 ) -> (Vec<u8>, Vec<String>) {
-    let mut st = StringTable::with_intersection_approximation(
+    let mut st = StringTable::with_local_classifiers(
+        &lookups.local_classifiers,
+        &lookups.enum_entry_bodies,
         lookups.intersection_approximation,
         lookups.inner_classifiers,
     );

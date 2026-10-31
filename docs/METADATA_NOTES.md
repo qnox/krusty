@@ -639,3 +639,11 @@ wrong shifts every abbreviation onto the neighbouring supertype.
 Both lists lead with the superclass. The emitter then moves it to the slot that resolution recorded
 in `ResolvedClassifierHeader` and lowering published as `IrFile::class_superclass_positions`, so the
 spellings move with it. Tests: `tests/metadata_supertype_order_e2e.rs`.
+
+## Unsigned constant value messages
+
+`annotation_value_pb` writes field 10 = 1 for the four unsigned `IrConst` variants. The kind remains
+BYTE, SHORT, INT or LONG and `int_value` remains the zigzag encoding of its signed carrier, including
+high-bit values. Signed constants have no flags field. Recursive annotation and array values use
+the same encoder. The complete compile-time-value messages of the pinned official Native producer
+are the byte oracle; this does not infer unsigned identity when an earlier semantic model lost it.

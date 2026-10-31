@@ -4354,10 +4354,7 @@ mod fq_tests {
     #[test]
     fn package_catalog_records_jvmname_facades() {
         let module = crate::metadata::module::build_kotlin_module(
-            &[(
-                "p".to_string(),
-                vec!["Utils".to_string(), "HelpersKt".to_string()],
-            )],
+            &[("p".to_string(), vec!["Utils".into(), "HelpersKt".into()])],
             [2, 4, 0],
         );
         let mut packages = JarPackages::default();
