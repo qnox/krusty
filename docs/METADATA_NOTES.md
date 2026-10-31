@@ -1390,6 +1390,14 @@ subtype relation. A typed function signature supplies its canonical classifier a
 the hierarchy walk checks the nominal value against that application. Reflective function types
 retain their nominal identity; no new metadata payload or physical JVM descriptor is introduced.
 
+## Generated constructor-default source marks
+
+The JVM class writer clears constructor line tables before the owning emitter publishes its
+curation. Default-stub emission always supplies its recorded expression marks, including an empty
+set when no source positions exist. A zero owner declaration line suppresses entry/closing marks
+without discarding retained default-expression lines. Kotlin metadata and default payloads are
+unchanged; complete class artifacts pin the resulting debug attributes and constant-pool order.
+
 ## Superclass-argument receiver availability
 
 An inherited property declaration remains evidence for a name even while its dispatch instance is

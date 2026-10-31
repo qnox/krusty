@@ -6254,6 +6254,14 @@ Next, declaration-header layouts (#2576) must authenticate complete captured app
 omissions for #2537/#2532. Raw scope erasure must follow symbolic inheritance specialization, as the
 reference compiler demonstrates; it cannot independently erase a superclass from its own bounds.
 
+## Preserve sparse constructor-default line tables
+
+Publish the default stub's existing curated expression marks independently of its owner's
+declaration line. Keep entry/close guards and source provenance unchanged. Validate complete
+synthetic implementation artifacts, reference-first runtime and source-less dependency defaults,
+alongside ordinary primary/secondary and value-class constructor controls. Header prerequisite
+#2879 remains separate; this change adds no annotation-default metadata or allocation policy.
+
 ## Declared JVM constructor boxing slots
 
 Physical call operands and implicit coercions share scalar boxing followed by ordinary reference
