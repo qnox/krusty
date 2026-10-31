@@ -341,6 +341,15 @@ Named whole-array varargs retain their array slot during recovery. Complete diff
 live in `tests/projected_receiver_extension_e2e.rs`; captured vararg admission and nested captured
 type identities remain separate follow-ups in #2648 and #2649.
 
+## Contravariant receiver formals against out-projected arguments
+
+An extension on `Expr<in S>` applies to an `Expr<out Any>` or `Expr<*>` receiver. The projected
+argument is a captured type whose lower bound is `Nothing`, so it gives `S` only the solution
+`S = Nothing`, never its upper bound `Any`. `fun <T, S : T?> Expr<in S>.wrap(value: T)` therefore
+applies to `Expr<out Any>`, and `fun <S> Expr<in S>.sel(): List<S>` on it returns `List<Nothing>`,
+as kotlinc reports. Tests: `box_regressions/inProjectedReceiverOutArgument.kt` and
+`projected_receiver_extension_e2e::an_in_projected_receiver_formal_reads_nothing_from_an_out_projected_argument`.
+
 ## Selected alias references and receiver captures
 
 An alias constructor selected through an extension lookup facet publishes a constructor reference
