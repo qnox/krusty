@@ -469,6 +469,68 @@ pub(crate) fn resolve_bound_violating_bindings(
             }
         }
     }
+    meet_upper_constrained_bindings(source, generic_sig, bindings, explicit);
+}
+
+/// A formal that occurs only contravariantly in the extension receiver receives only upper
+/// constraints from the call: `ExprCol<T>` against `ExprCol<in S>` says `S <: T`, not `S = T`. Its
+/// declared bound is one more upper constraint, so when the call's binding violates that bound the
+/// solution is their intersection (`T & S'?` for `<T, S : T?>`), as kotlinc solves it. A formal
+/// that a value parameter or the result also mentions keeps its binding: an argument such as a
+/// callable reference is resolved against the formal's fixed value, not intersected with it.
+fn meet_upper_constrained_bindings(
+    source: &dyn SymbolSource,
+    generic_sig: &GenericSig,
+    bindings: &mut GSigBinds,
+    explicit: impl ExplicitTypeArgumentFixity,
+) {
+    let oracle = SourceOracle(source);
+    let Some(receiver) = generic_sig.receiver else {
+        return;
+    };
+    for (index, (formal, bounds)) in generic_sig
+        .formals
+        .iter()
+        .zip(&generic_sig.formal_bounds)
+        .enumerate()
+    {
+        let mentioned_elsewhere = std::iter::once(generic_sig.ret)
+            .chain(generic_sig.params.iter().copied())
+            .any(|shape| crate::types::ty_mentions_param(shape, std::slice::from_ref(formal)));
+        if explicit.fixes(index)
+            || mentioned_elsewhere
+            || formal_variance_in_type(source, receiver, formal)
+                != Some(crate::types::TypeVariance::In)
+        {
+            continue;
+        }
+        let Some(actual) = bindings.get(formal).copied() else {
+            continue;
+        };
+        let applied_bounds = bounds
+            .iter()
+            .map(|bound| ty_subst_keep_unbound(*bound, bindings))
+            .collect::<Vec<_>>();
+        if applied_bounds.iter().any(|&bound| {
+            bound == Ty::Error
+                || bound.mentions_pending()
+                || solution_mentions_open_formal(generic_sig, bindings, bound)
+        }) {
+            continue;
+        }
+        let mut parts = vec![actual];
+        parts.extend(applied_bounds.into_iter().filter(|&bound| {
+            !crate::assignable::is_assignable(
+                &crate::assignable::TyCtx::new(),
+                &oracle,
+                actual,
+                bound,
+            )
+        }));
+        if parts.len() > 1 {
+            bindings.insert(formal.clone(), Ty::intersection(&parts));
+        }
+    }
 }
 
 pub(crate) fn generic_bindings_satisfy_bounds(

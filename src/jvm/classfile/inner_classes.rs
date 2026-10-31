@@ -36,6 +36,8 @@ pub(super) struct LocalDeclarations {
     /// The internal name of the class each is declared in, by its own: kotlinc's `ClassCodegen`
     /// lists every class it generates from its own code, whether or not that code names it.
     declaring: Rc<HashMap<String, String>>,
+    /// Stable source visitation, available only for authenticated source declarations.
+    source_orders: Rc<HashMap<String, u32>>,
     /// Specialized suspend lambdas regenerated into a caller. The caller references them without
     /// an `InnerClasses` row; the class itself and classes it encloses still list the row.
     call_sites: Rc<crate::fx_hash::HashSet<String>>,
@@ -63,6 +65,13 @@ pub(super) struct LocalDeclarations {
 #[derive(Default)]
 pub(crate) struct TableOrders {
     known: std::cell::RefCell<Vec<TableOrder>>,
+}
+
+/// One equal-name group at the constant-pool boundary. Generated and referenced rows follow
+/// final pool order; the current writer's source declarations keep visitation order in their slots.
+pub(super) struct TiedInnerRows {
+    pub(super) rows: Vec<u16>,
+    pub(super) declarations: Vec<u16>,
 }
 
 struct TableOrder {
@@ -197,6 +206,12 @@ impl ClassWriter {
     pub(crate) fn set_declaring_classes(&mut self, declaring: Rc<HashMap<String, String>>) {
         if let InnerClassTable::Referenced(own) = &mut self.inner_class_table {
             own.declaring = declaring;
+        }
+    }
+
+    pub(crate) fn set_declaration_source_orders(&mut self, orders: Rc<HashMap<String, u32>>) {
+        if let InnerClassTable::Referenced(own) = &mut self.inner_class_table {
+            own.source_orders = orders;
         }
     }
 
@@ -464,7 +479,8 @@ impl ClassWriter {
                     (key, rank, spec)
                 })
                 .collect();
-            let ordered = declaration_order(rows, &local.declaring);
+            let own_orders = own_source_orders(local, &self.internal_name);
+            let ordered = declaration_order(rows, &local.declaring, &own_orders);
             if tied {
                 let groups = tied_groups(&ordered, &local.declaring);
                 self.inner_class_candidates =
@@ -500,21 +516,41 @@ impl ClassWriter {
 
 impl ClassWriter {
     /// The pool indices of the classes of each group of tied rows (see [`LocalDeclarations`]).
-    pub(super) fn tied_inner_rows(&self) -> Vec<Vec<u16>> {
+    pub(super) fn tied_inner_rows(&self) -> Vec<TiedInnerRows> {
         let InnerClassTable::Referenced(local) = &self.inner_class_table else {
             return Vec::new();
         };
+        let own_orders = own_source_orders(local, &self.internal_name);
         local
             .tied
             .iter()
             .map(|group| {
-                group
+                let mut declarations = group
                     .iter()
-                    .filter_map(|inner| self.cp.lookup_class(inner))
-                    .collect()
+                    .filter_map(|inner| {
+                        Some((own_orders.get(inner)?, self.cp.lookup_class(inner)?))
+                    })
+                    .collect::<Vec<_>>();
+                declarations.sort_by_key(|(order, _)| **order);
+                TiedInnerRows {
+                    rows: group
+                        .iter()
+                        .filter_map(|inner| self.cp.lookup_class(inner))
+                        .collect(),
+                    declarations: declarations.into_iter().map(|(_, index)| index).collect(),
+                }
             })
             .collect()
     }
+}
+
+fn own_source_orders(local: &LocalDeclarations, owner: &str) -> HashMap<String, u32> {
+    local
+        .source_orders
+        .iter()
+        .filter(|(inner, _)| local.declaring.get(*inner).map(String::as_str) == Some(owner))
+        .map(|(inner, order)| (inner.clone(), *order))
+        .collect()
 }
 
 /// The rows of `ordered` sharing a qualified name with another, by name, leaving out each row
@@ -565,10 +601,29 @@ fn tied_groups(
 fn declaration_order(
     mut rows: Vec<(String, usize, Rc<InnerClassSpec>)>,
     declaring: &HashMap<String, String>,
+    source_orders: &HashMap<String, u32>,
 ) -> Vec<(String, usize, Rc<InnerClassSpec>)> {
     rows.sort_by(|(key, rank, _), (other_key, other_rank, _)| {
         key.cmp(other_key).then(rank.cmp(other_rank))
     });
+    // Only permute slots owned by source declarations in this writer. Other rows retain their
+    // pool priority. Do this before the ancestor walk so visitation cannot violate its constraints.
+    let mut groups: HashMap<String, Vec<usize>> = HashMap::default();
+    for (index, (key, _, spec)) in rows.iter().enumerate() {
+        if source_orders.contains_key(&spec.inner) {
+            groups.entry(key.clone()).or_default().push(index);
+        }
+    }
+    for places in groups.values().filter(|places| places.len() > 1) {
+        let mut declarations = places
+            .iter()
+            .map(|&index| rows[index].clone())
+            .collect::<Vec<_>>();
+        declarations.sort_by_key(|(_, _, spec)| source_orders[&spec.inner]);
+        for (&place, declaration) in places.iter().zip(declarations) {
+            rows[place] = declaration;
+        }
+    }
     let by_inner: HashMap<&str, usize> = rows
         .iter()
         .enumerate()
@@ -722,12 +777,36 @@ mod tests {
         let rows = vec![row("z", "Parent"), row("a", "Child"), row("m", "Unrelated")];
         let declaring = HashMap::from_iter([("Child".to_string(), "Parent".to_string())]);
 
-        let ordered = declaration_order(rows, &declaring)
+        let ordered = declaration_order(rows, &declaring, &HashMap::default())
             .into_iter()
             .map(|(_, _, spec)| spec.inner.clone())
             .collect::<Vec<_>>();
 
         assert_eq!(ordered, ["Unrelated", "Parent", "Child"]);
+    }
+
+    #[test]
+    fn source_visitation_priorities_preserve_referenced_slots_and_declaring_constraints() {
+        let mut rows = vec![
+            row("same", "Second"),
+            row("same", "Child"),
+            row("same", "First"),
+        ];
+        for (rank, row) in rows.iter_mut().enumerate() {
+            row.1 = rank;
+        }
+        let declaring = HashMap::from_iter([("Child".to_string(), "First".to_string())]);
+        let orders = HashMap::from_iter([("First".to_string(), 1), ("Second".to_string(), 2)]);
+        let ordered = declaration_order(rows.clone(), &declaring, &orders)
+            .into_iter()
+            .map(|(_, _, spec)| spec.inner.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(ordered, ["First", "Child", "Second"]);
+        let referenced = declaration_order(rows, &HashMap::default(), &HashMap::default())
+            .into_iter()
+            .map(|(_, _, spec)| spec.inner.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(referenced, ["Second", "Child", "First"]);
     }
 
     #[test]
@@ -738,7 +817,7 @@ mod tests {
             ("Intermediate".to_string(), "Root".to_string()),
         ]);
 
-        let ordered = declaration_order(rows, &declaring)
+        let ordered = declaration_order(rows, &declaring, &HashMap::default())
             .into_iter()
             .map(|(_, _, spec)| spec.inner.clone())
             .collect::<Vec<_>>();

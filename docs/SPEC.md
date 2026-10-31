@@ -18,6 +18,15 @@ implicit `Any?` bound, so `Array<String?>.clone()` is `Array<String?>`. A non-nu
 `Array<String>` and rejected moshi's `pathNames = copyFrom.pathNames.clone()`. Test:
 `array_member_reference_e2e::a_nullable_element_array_clone_keeps_its_element_type`.
 
+## Classpath declaration annotation queries
+
+Method annotation queries read the selected classpath definition and retain the exact method
+name, descriptor, resolved annotation identities and arguments. Classpath entry order, Kotlin/JVM
+class mapping and directory class-name authentication are unchanged. Classreader owns decoding;
+JVM providers own interpretation. Existing class and field annotation records remain in their
+cached class declarations. Covered by the classreader/classpath/provider unit tests and the
+serialization-parent, Java annotation-element and annotation-emission differential E2Es.
+
 ## Smart casts from `when` guards
 
 An arm's guard (`is Lit if e.type is Marker -> ...`) is checked with the arm's own condition facts
@@ -63,6 +72,20 @@ source only when the source is a non-null subtype of `S` itself. Sharing `S`'s c
 that proof: under `<T : CharSequence, S : T?>`, `T` is not a subtype of `S & Any`. Test:
 `box_regressions/nullableFormalBoundPropagation.kt`.
 
+## In-projected receiver formals meet their declared bound
+
+A formal that occurs only contravariantly in an extension receiver, and in no value parameter or
+result, receives only upper constraints: `Expr<T>` against `Expr<in S>` says `S <: T`, not
+`S = T`. Its declared bound is one more upper constraint, so when the call's binding violates the
+bound, the formal is solved at their intersection. In `fun <T, S : T?> Expr<in S>.wrap(value: T)`
+called as `wrap(t)` from `fun <T : CharSequence?, S : T> Expr<T>.param(t: S)`, the callee's `S`
+is `T & S'?`, and the call is accepted as kotlinc 2.4.21 accepts it. A formal that a value
+parameter also mentions keeps its exact binding, so `sink.put(t, n)` against
+`<T, S : T?> Sink<in S>.put(value: T, extra: S)` still reports kotlinc's argument mismatch, and
+`hold(::foo)` against `<T : Bound, U> hold(f: (T) -> U)` still cannot infer `T`. Tests: `tests/box_regressions/inProjectedReceiverUpperConstraint.kt`,
+`resolver_regression_e2e::an_in_projected_formal_with_an_ordinary_occurrence_keeps_its_exact_binding`
+and `diagnostics_inference_parity_e2e::callable_reference_bound_failure_is_inference_error`.
+
 ## Contradicting generic arguments
 
 kotlinc adds argument constraints in argument order and rejects every argument whose constraint
@@ -82,6 +105,15 @@ then the argument once against `Duo<uninferred A (…), uninferred B (…)>`. Fu
 calls report it alike. The `resolver_regression_e2e` tests for bound violations, invariant
 fixation, their combination, structural parameters, a multi-formal structural argument and mixed
 variance cover it.
+
+## Cast targets without type arguments
+
+`x as Auto` and `x as? Auto` with a generic `Auto` and no type arguments take the arguments from the
+operand's type, as a type test does: `Gen<String>` casts to `Auto<String>`, and `Gen<*>` to
+`Auto<*>`. The result is never the raw classifier. The decision is made on the resolved target, not
+its spelling: an alias with a fixed application (`typealias IntAuto = Auto<Int>`) stays `Auto<Int>`,
+and a type-parameter target (`x as T`) is left as written. Tests:
+`box_regressions/bareCastTargetArguments.kt` and `bare_cast_target_e2e`.
 
 ## File policies under signature recovery
 
@@ -222,6 +254,11 @@ Anonymous classes, reference carriers and checked body-local naming keep their s
 Complete table comparisons cover top-level and nested literal-dollar names in both source orders.
 Metadata class-ID encoding and source-name publication remain separate follow-ups.
 
+Equal-name rows for source classes declared by the current JVM writer retain declaration
+visitation order, independently of constructor-operand evaluation. Referenced and generated rows
+keep constant-pool priority, including after coroutine pool relayout; declaring ancestors still
+precede descendants. Nested anonymous construction has complete class ABI and runtime controls.
+
 ## Builtin declaration names
 
 Language-owned classifier factories retain their admitted package and exact segment. Function
@@ -340,6 +377,15 @@ receiver projection, and explicit type arguments retain their receiver-mismatch 
 Named whole-array varargs retain their array slot during recovery. Complete differential controls
 live in `tests/projected_receiver_extension_e2e.rs`; captured vararg admission and nested captured
 type identities remain separate follow-ups in #2648 and #2649.
+
+## Contravariant receiver formals against out-projected arguments
+
+An extension on `Expr<in S>` applies to an `Expr<out Any>` or `Expr<*>` receiver. The projected
+argument is a captured type whose lower bound is `Nothing`, so it gives `S` only the solution
+`S = Nothing`, never its upper bound `Any`. `fun <T, S : T?> Expr<in S>.wrap(value: T)` therefore
+applies to `Expr<out Any>`, and `fun <S> Expr<in S>.sel(): List<S>` on it returns `List<Nothing>`,
+as kotlinc reports. Tests: `box_regressions/inProjectedReceiverOutArgument.kt` and
+`projected_receiver_extension_e2e::an_in_projected_receiver_formal_reads_nothing_from_an_out_projected_argument`.
 
 ## Selected alias references and receiver captures
 
@@ -5609,9 +5655,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `-1` where nothing maps. A lambda's scope takes the mapped line of its `invoke`, and an
   invoked-again lambda is numbered from the names its previous expansion gave it, as kotlinc renames
   the lambda's node in place (`src/jvm/inliner/inline_scopes.rs`). The ported bytecode inliner
-  numbers library calls; the command line still refuses the argument until every inlining path
-  does, and the box harness selects it with `// USE_INLINE_SCOPES_NUMBERS`
-  (`tests/box_regressions/inlineScopes/`).
+  numbers library calls as it places them. An inline body expanded in IR (a same-module inline
+  function, `forEach`, `let`/`run`/`also`) is numbered from the frames its markers open, as each
+  inlining closes: the callee's scopes in the order they start, then each lambda it placed, whose
+  body numbered its own scopes while it was emitted and is renumbered after them; an `@InlineOnly`
+  callee has no scopes, so its lambda takes the call's line. The table spells the names once it is
+  complete (`src/jvm/classfile/inline_scope_frames.rs`), and a marker's call-site line moves from
+  the method's lines into the class's with the method's line table, as kotlinc's
+  `SourceMapCopyingMethodVisitor` copies it. The command line still refuses the argument until
+  every inlining path numbers its scopes, and the box harness selects it with
+  `// USE_INLINE_SCOPES_NUMBERS` (`tests/box_regressions/inlineScopes/`).
 - **A block's local slots are reused after the block ends**, as kotlinc's `FrameMap` reuses them:
   its block end leaves each variable the block declared, and a variable left from the top of the
   frame hands its slot back. A sibling branch, the next loop, a later catch parameter and the
@@ -23426,6 +23479,21 @@ unbound outer receiver in a constructor reference. Tests: `builder_inference_rec
 `postponed_bound_inference_e2e` and the exact wrong-receiver ledgers in
 `bound_inner_alias_inference_e2e`.
 
+## Invisible members yield to extensions
+
+A private, protected, or package-private member the call site cannot see does not shadow an
+applicable extension with the same name. kotlinc ranks the invisible member below every visible
+candidate, so `c.clone()` with `fun Col.clone()` in scope calls the extension instead of the
+protected `Object.clone`. This holds for plain, safe, implicit-receiver, operator, and
+callable-reference uses. An extension of the same name that does not apply to the arguments
+(`b[0]` against `B.get(String)`, or the wrong arity) leaves the member selected, and the call
+reports its visibility, an indexed `get` included. An applicable but ambiguous family of visible
+extensions still takes the call, so `b + Both()` reports the extensions' ambiguity rather than the
+member's visibility. A binary operator reports either diagnostic at its operator token, with
+kotlinc's complete declaration rendering. A callable reference `B::f` names the visible extension.
+Tests: `box_regressions/hiddenMemberYieldsToExtension.kt` and
+`hidden_member_extension_e2e`.
+
 ## Nominal function values
 
 A nominal value conforms to a function type when its declared applied hierarchy reaches that
@@ -23454,6 +23522,19 @@ that remain in the specialized receiver are fixed types there: `Column<EntityID<
 `Column<out E?>` for `<T : Any, E : EntityID<T>>` once `E := EntityID<X>`. A callee formal that
 the receiver leaves unbound stays rigid in this check, so it cannot make the receiver fit. Test:
 `box_regressions/extensionReceiverBindsCallerVariable.kt`.
+
+## Nullable type variables in extension receivers
+
+An extension declared on `Column<out E?>` applies to `Column<EntityID<U>>` where `U` is the
+caller's own type parameter: the callee's formal `E` binds `EntityID<U>`, and a non-null actual
+may stand for the nullable declared argument under `out`, or when the actual is itself nullable.
+A caller variable `V : EntityID<String>?` binds `E` to `V & Any`, and `E : EntityID<T>` reads
+`T = String` from `V`'s bound. Receiver lookup treats `E?` as the same wildcard as `E`;
+applicability decides the variance, so an invariant `Column<E?>` receiver rejects a non-null
+`Column<EntityID<U>>` and a `Column<V>` with kotlinc 2.4.21's "inapplicable because of a receiver
+type mismatch". Regressions: `tests/box_regressions/nullableProjectedReceiverVariable.kt`,
+`tests/box_regressions/nullableBoundedCallerReceiverVariable.kt` and
+`resolver_regression_e2e::an_invariant_nullable_receiver_variable_rejects_a_non_null_argument_like_kotlinc`.
 
 ## Extension results specialized to caller variables
 
@@ -23495,6 +23576,15 @@ for every written scalar or expanded element; an inapplicable member permits the
 tower to consider an applicable extension. Diagnostics render the original declaration inputs.
 A method-owned formal remains separate from class formals.
 Tests: `nominal_projected_input_e2e`.
+
+## Generic super calls
+
+`super.name(args)` dispatches to the selected declaration, but that declaration's own type
+parameters are still inferred from the call's arguments and explicit type arguments, as for any
+member call. `super.wrap(e)` with `fun <T> wrap(e: Expr<T>): Expr<T>` and `e: Expr<U>` checks
+`e` against `Expr<U>` and types the call as `Expr<U>`. Tests:
+`box_regressions/superCallInfersMethodTypeParameters.kt` and
+`generic_super_call_e2e::super_call_infers_the_method_type_parameters_like_kotlinc`.
 
 ## Serialized Elvis expression blocks
 

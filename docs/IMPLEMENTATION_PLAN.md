@@ -1,5 +1,15 @@
 # krusty — implementation plan
 
+## Classpath declaration annotation query ownership
+
+Extract selected-method and all-method annotation queries into `classpath/declaration_annotations`.
+The borrowing `class_entry_bytes` collaborator owns mapped and physical class-file acquisition shared
+with compiled bodies and class locations. Keep class/field annotation records, snapshot ownership,
+entry caches, classreader parsing and JVM provider interpretation unchanged. This scoped #2647
+migration reduces the classpath facade from 6,317 to 6,277 lines; unrelated facade responsibilities
+remain separate work. Validate unchanged annotation and serialization inventories, class bytes,
+JSON comparisons and refusal controls before and after extraction.
+
 ## JVM annotation interface object methods
 
 Retain the realized construction's exact annotation interface at the JVM consumption boundary.
@@ -120,6 +130,11 @@ cross-file module resolver. Keep top-level and unavailable module records from b
 a classpath record with the same physical identity. Preserve local/coroutine/reference provenance
 and exact table order. This slice leaves source identity publication and metadata class-ID encoding
 for subsequent changes; the complete literal-dollar classfile regression remains open there.
+
+Consume the existing source declaration order at the JVM table boundary for equal-name source
+rows owned by each writer. Preserve referenced/generated row slots and ancestor constraints, and
+reapply that policy after final pool relayout. Nested-construction ABI/runtime and mixed
+continuation controls pin the distinction from emitted allocation order.
 
 ## Builtin declaration-name producers
 
