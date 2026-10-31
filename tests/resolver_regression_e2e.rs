@@ -2733,3 +2733,17 @@ fun test(value: Duo<String, Int>) {
 "#;
     assert_rejection_same_as_kotlinc("StructuralArgumentRejectsEachFormal", source);
 }
+
+/// An invariant receiver (`Inv<T>`) fixes a member extension's formal exactly; only a covariant
+/// receiver joins it with an argument's type (`box_regressions/memberExtensionCovariantReceiverJoin.kt`).
+#[test]
+fn an_invariant_member_extension_receiver_keeps_its_exact_binding() {
+    let source = "open class Base\n\
+                  class Sub : Base()\n\
+                  class Inv<T>(val v: T)\n\
+                  class K {\n    \
+                  fun <T : Any> Inv<T>.same(expected: T): Boolean = v == expected\n    \
+                  fun c(i: Inv<Sub>, x: Base): Boolean = i.same(x)\n\
+                  }\n";
+    assert_rejection_same_as_kotlinc("InvariantMemberExtensionReceiver", source);
+}
