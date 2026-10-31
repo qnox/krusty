@@ -18,6 +18,15 @@ implicit `Any?` bound, so `Array<String?>.clone()` is `Array<String?>`. A non-nu
 `Array<String>` and rejected moshi's `pathNames = copyFrom.pathNames.clone()`. Test:
 `array_member_reference_e2e::a_nullable_element_array_clone_keeps_its_element_type`.
 
+## Classpath declaration annotation queries
+
+Method annotation queries read the selected classpath definition and retain the exact method
+name, descriptor, resolved annotation identities and arguments. Classpath entry order, Kotlin/JVM
+class mapping and directory class-name authentication are unchanged. Classreader owns decoding;
+JVM providers own interpretation. Existing class and field annotation records remain in their
+cached class declarations. Covered by the classreader/classpath/provider unit tests and the
+serialization-parent, Java annotation-element and annotation-emission differential E2Es.
+
 ## Smart casts from `when` guards
 
 An arm's guard (`is Lit if e.type is Marker -> ...`) is checked with the arm's own condition facts
