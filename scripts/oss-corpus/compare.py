@@ -8,13 +8,17 @@ Reads <work dir>/out/<name>/{kotlinc,krusty}, <work dir>/logs/<name>.kotlinc.com
 reference build's compile tasks and their output directories), <work dir>/logs/<name>.krusty.log
 (fallback reasons and the first error of each failed compile), and each build's
 <work dir>/logs/<name>.<mode>.metrics.json and <name>.<mode>.tasks.tsv (what the build cost, and when
-each task ran). Writes <work dir>/out/<name>/compare.json and prints one line per compilation.
+each task ran), and <work dir>/logs/<name>.krusty.folded when the krusty build was sampled (its
+call stacks, ranked into the functions krusty spends the most time in). Writes
+<work dir>/out/<name>/compare.json and prints one line per compilation.
 """
 import glob
 import json
 import os
 import re
 import sys
+
+import hotspots
 
 
 def fallbacks(log_path):
@@ -141,6 +145,14 @@ def build_cost(work, name, mode, rows):
     return cost
 
 
+def sampled_hotspots(folded):
+    """The functions the sampled krusty build spent the most time in, or None when it was not
+    sampled."""
+    if not os.path.exists(folded):
+        return None
+    return hotspots.rank(hotspots.read_folded(folded))
+
+
 def files(d):
     return {os.path.relpath(p, d): p for p in glob.glob(d + '/**/*', recursive=True) if os.path.isfile(p)}
 
@@ -217,6 +229,7 @@ def main():
         classes=sum(r['classes'] for r in rows),
         identical=sum(r['identical'] for r in rows),
         cost={mode: build_cost(work, name, mode, rows) for mode in ('kotlinc', 'krusty')},
+        hotspots=sampled_hotspots(os.path.join(work, 'logs', f'{name}.krusty.folded')),
         rows=rows,
         no_reference_classes=empty,
     )
