@@ -710,11 +710,7 @@ pub(crate) fn lower_value_classes(
     // `(owner-internal, plain name, arity)` → mangled name for declaration-owned JVM synthetics:
     // annotation markers and override bridges that name their own target method.
     let mut mangle_map: HashMap<(TypeName, String, usize), String> = HashMap::default();
-    let property_annotation_markers = ir
-        .property_annotation_markers
-        .values()
-        .copied()
-        .collect::<HashSet<_>>();
+    let property_annotation_markers = ir.jvm_property_annotation_markers().collect::<HashSet<_>>();
     // `(fid, param idx, boxed value-class Ty)` for DEFAULTED nullable-underlying value-class params —
     // the base method unboxes them (below), but its `$default` stub + call site keep them boxed.
     let mut default_boxed: Vec<(u32, usize, Ty)> = Vec::new();

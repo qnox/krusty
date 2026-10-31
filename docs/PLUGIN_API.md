@@ -186,7 +186,11 @@ that captures nothing is memoized as kotlinc's `ComposerLambdaMemoization` does:
 `composableLambdaInstance(key, false, …)` property of the file's `ComposableSingletons$<file>Kt`
 object, a class the plugin declares itself (`IrFile::mark_declarationless_class` gives it
 kotlinc's synthetic-class `@Metadata`), read at the call; the lambda's body is a skippable group
-of its own. Durable group keys,
+of its own. One that captures value parameters of its function is remembered in the composition
+by `rememberComposableLambda` instead, with its implementation left in the file class. That runtime
+function is itself composable, so its `RuntimeFunction` declares the `$composer` and `$changed`
+parameters the transform appends (`appended`), and the target checks them against the compiled
+declaration's tail before it realizes the call. Durable group keys,
 `sourceInformation` strings, trace markers and `@FunctionKeyMeta` (class file only, never Kotlin
 metadata, as kotlinc's IR plugin adds it after FIR serialization) follow kotlinc's formulas. Every
 other mode is an explicit decline at its declaration or call: a function with a receiver, a default
@@ -194,7 +198,8 @@ argument that is not a constant, a vararg, more than ten parameters, a parameter
 result, any other composable function type or use of a composable lambda parameter, recursion
 through lambda parameters, an explicit applier target, a call argument the pass cannot classify as constant, passed on or computed, a grouping annotation (`@NonRestartableComposable`, `@NonSkippableComposable`,
 `@ReadOnlyComposable`, `@ExplicitGroupsComposable`), a call to a composable of another file or
-module, a composable lambda that captures a value, holds another lambda or is empty, a composable
+module, a composable lambda that captures a local value or a composable lambda parameter, holds
+another lambda or is empty, a composable
 whose lambda numbering another lambda or overload shares, and any class kotlinc would give
 `$stable` and `@StabilityInferred`.
 
