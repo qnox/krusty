@@ -23440,15 +23440,6 @@ reconstruct from those local IDs. This changes serialization evidence rather tha
 arguments or declaration-result approximation. Tests compare the complete facade payload and
 class ABI with kotlinc in `tests/facade_local_classifier_metadata_e2e.rs`.
 
-## Serialized top-level callable references
-
-An unbound, non-generic, non-suspend top-level reference in a KLIB body retains its exact provider
-declaration identity independently of its invocation adapter. Admission proves the entire serialized
-wrapper forwards its own parameters once and in order to the reflected declaration, with the same
-parameter/result ABI and no captures, adaptation, defaults or receiver binding. Other shapes decline.
-Preparation and ordinary lowering use the same admission. The public fixture establishes the Kotlin
-reference answer before requiring Native identity, invocation and evaluation-order agreement.
-
 ## Native bound callable-reference receiver storage
 
 A bound callable reference retains its receiver as a semantic object for equality and hashing,
