@@ -1,13 +1,5 @@
 # krusty — implementation plan
 
-## JVM annotation value materialization
-
-Consume a generated annotation implementation at the declared reference type of a receiver or
-default-parameter slot. Reuse the existing physical allocation type, exact annotation implementation
-role and shared reference materializer. Keep ordinary known-subtype receivers and reference array
-elements on their existing paths. Compare complete artifacts and reference-first runtime results for
-direct receivers, locals, returns, arguments, typed defaults, erased results and arrays.
-
 ## JVM annotation interface object methods
 
 Retain the realized construction's exact annotation interface at the JVM consumption boundary.

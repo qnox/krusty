@@ -23506,17 +23506,6 @@ reconstruct from those local IDs. This changes serialization evidence rather tha
 arguments or declaration-result approximation. Tests compare the complete facade payload and
 class ABI with kotlinc in `tests/facade_local_classifier_metadata_e2e.rs`.
 
-## JVM annotation construction consumers
-
-A generated annotation value materializes at its consumer's declared reference type. Direct
-annotation receivers and typed constructor-default fills receive the same reference conversion as
-ordinary typed return, local and argument slots. Erased `Object` consumers and reference-array
-elements retain their existing representation. The generated implementation's exact annotation role
-owns this JVM conversion; ordinary class receivers keep their existing subtype behavior.
-`annotation_instantiation_e2e` compares the complete class inventories and raw artifacts with Kotlin
-for the consumer matrix and an ordinary inherited-property receiver, and runs each fixture after
-the Kotlin reference oracle.
-
 ## Native bound callable-reference receiver storage
 
 A bound callable reference retains its receiver as a semantic object for equality and hashing,

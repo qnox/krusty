@@ -1,12 +1,5 @@
 # `@kotlin.Metadata` — reverse-engineering notes (Phase 4b)
 
-## Annotation construction result carriers
-
-The JVM annotation implementation retains its exact declared interface in `annotation_impl_of`.
-Its allocation's physical stack type is the implementation, while common IR keeps the semantic
-annotation type. Receiver and default-parameter consumption use those existing facts to materialize
-the declared slot, without changing Kotlin metadata, constructor selection or common semantic types.
-
 ## Annotation classifier kind and JVM dispatch
 
 The JVM annotation realizer retains the exact declared interface in the generated carrier's
