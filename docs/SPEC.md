@@ -18,6 +18,15 @@ implicit `Any?` bound, so `Array<String?>.clone()` is `Array<String?>`. A non-nu
 `Array<String>` and rejected moshi's `pathNames = copyFrom.pathNames.clone()`. Test:
 `array_member_reference_e2e::a_nullable_element_array_clone_keeps_its_element_type`.
 
+## Classpath declaration annotation queries
+
+Method annotation queries read the selected classpath definition and retain the exact method
+name, descriptor, resolved annotation identities and arguments. Classpath entry order, Kotlin/JVM
+class mapping and directory class-name authentication are unchanged. Classreader owns decoding;
+JVM providers own interpretation. Existing class and field annotation records remain in their
+cached class declarations. Covered by the classreader/classpath/provider unit tests and the
+serialization-parent, Java annotation-element and annotation-emission differential E2Es.
+
 ## Smart casts from `when` guards
 
 An arm's guard (`is Lit if e.type is Marker -> ...`) is checked with the arm's own condition facts
@@ -244,6 +253,11 @@ missing ownership evidence does not authorize a stale classpath declaration to r
 Anonymous classes, reference carriers and checked body-local naming keep their separate contracts.
 Complete table comparisons cover top-level and nested literal-dollar names in both source orders.
 Metadata class-ID encoding and source-name publication remain separate follow-ups.
+
+Equal-name rows for source classes declared by the current JVM writer retain declaration
+visitation order, independently of constructor-operand evaluation. Referenced and generated rows
+keep constant-pool priority, including after coroutine pool relayout; declaring ancestors still
+precede descendants. Nested anonymous construction has complete class ABI and runtime controls.
 
 ## Builtin declaration names
 
@@ -5641,9 +5655,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `-1` where nothing maps. A lambda's scope takes the mapped line of its `invoke`, and an
   invoked-again lambda is numbered from the names its previous expansion gave it, as kotlinc renames
   the lambda's node in place (`src/jvm/inliner/inline_scopes.rs`). The ported bytecode inliner
-  numbers library calls; the command line still refuses the argument until every inlining path
-  does, and the box harness selects it with `// USE_INLINE_SCOPES_NUMBERS`
-  (`tests/box_regressions/inlineScopes/`).
+  numbers library calls as it places them. An inline body expanded in IR (a same-module inline
+  function, `forEach`, `let`/`run`/`also`) is numbered from the frames its markers open, as each
+  inlining closes: the callee's scopes in the order they start, then each lambda it placed, whose
+  body numbered its own scopes while it was emitted and is renumbered after them; an `@InlineOnly`
+  callee has no scopes, so its lambda takes the call's line. The table spells the names once it is
+  complete (`src/jvm/classfile/inline_scope_frames.rs`), and a marker's call-site line moves from
+  the method's lines into the class's with the method's line table, as kotlinc's
+  `SourceMapCopyingMethodVisitor` copies it. The command line still refuses the argument until
+  every inlining path numbers its scopes, and the box harness selects it with
+  `// USE_INLINE_SCOPES_NUMBERS` (`tests/box_regressions/inlineScopes/`).
 - **A block's local slots are reused after the block ends**, as kotlinc's `FrameMap` reuses them:
   its block end leaves each variable the block declared, and a variable left from the top of the
   frame hands its slot back. A sibling branch, the next loop, a later catch parameter and the
