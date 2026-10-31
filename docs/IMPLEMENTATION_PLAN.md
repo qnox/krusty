@@ -1,5 +1,14 @@
 # krusty — implementation plan
 
+## Class-generic dependency method exports
+
+Retain the complete declared self type, including captured parameters, at FIR lowering and consume
+it when source class methods publish KLIB export identities.
+Share consumption of FIR-checked class applications across Native and Wasm dependency calls,
+retaining exact fixed-type and callable-substitution validation. Exercise the existing method
+export path with one portable multimodule fixture and JVM-first Native validation. Backing-field
+getter materialization remains a subsequent consumer of this signature boundary.
+
 ## Classpath declaration annotation query ownership
 
 Extract selected-method and all-method annotation queries into `classpath/declaration_annotations`.
@@ -5365,7 +5374,11 @@ shadow with no output change.
   nothing (`removeUnnecessaryTemporaryVariables`, `irLetS`); the array constructor declares the
   index, size, array, function value and element index in `ArrayConstructorLowering`'s order and
   binds a lambda's parameter to the element index; a `::Array` adapter numbers its temporaries
-  after its parameters. Stability comes from the published `binding_read_stability`. A survey of
+  after its parameters. Stability comes from the published `binding_read_stability`, including
+  authenticated immutable receiver parameters and their by-value captures. Computed operands and
+  mutable captured cells remain snapshots; the JVM stores a safe cast's object-cell snapshot in
+  its erased field slot until the type test. Complete module/runtime controls live in
+  `implicit_receiver_stability_e2e`. A survey of
   the 4e corpus ranked the non-inline, non-coroutine local-variable mismatches: `for`-loop
   temporaries dominate (about 580 of 640 slot-only methods, mostly krusty's iterator local and
   kotlinc's progression first/last/step locals) and belong to the `for`-loop port, then the

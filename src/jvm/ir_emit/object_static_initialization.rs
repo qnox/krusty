@@ -20,7 +20,7 @@ pub(super) fn emit(
             Some((
                 index as u32,
                 property,
-                static_fields::clinit_initializer(ir, property)?,
+                static_fields::stored_clinit_initializer(ir, property)?,
             ))
         })
         .collect();

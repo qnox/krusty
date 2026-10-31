@@ -1149,6 +1149,8 @@ mod implicit_any_super_method_e2e;
 mod implicit_integer_coercion_e2e;
 #[path = "e2e/implicit_receiver.rs"]
 mod implicit_receiver;
+#[path = "implicit_receiver_stability_e2e.rs"]
+mod implicit_receiver_stability_e2e;
 #[path = "implicit_this_callable_ref_e2e.rs"]
 mod implicit_this_callable_ref_e2e;
 #[path = "implicit_this_member_hof_lambda_e2e.rs"]
@@ -1203,6 +1205,8 @@ mod initializer_inline_local_scopes_e2e;
 mod inline;
 #[path = "inline_member_super_arguments_e2e.rs"]
 mod inline_member_super_arguments_e2e;
+#[path = "inline_scopes_numbers_flag_e2e.rs"]
+mod inline_scopes_numbers_flag_e2e;
 #[path = "inlined_code_inner_classes_e2e.rs"]
 mod inlined_code_inner_classes_e2e;
 #[path = "inlined_lambda_stack_spill_e2e.rs"]

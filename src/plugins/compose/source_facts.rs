@@ -175,7 +175,7 @@ pub(super) fn record(
         },
         rejections,
     );
-    reject_stability_inferred_classes(ir, source, rejections);
+    super::class_stability::declare(ir, source, runtime, rejections);
     if ir.file_annotations.applications().any(|annotation| {
         GROUP_ANNOTATIONS[4..]
             .iter()
@@ -230,7 +230,9 @@ pub(super) fn record(
             .or_else(|| {
                 (options.source_information
                     && !declaration.params.is_empty()
-                    && !runtime.declares_classifier(crate::types::type_name(SOURCE_INFORMATION)))
+                    && runtime
+                        .classifier(crate::types::type_name(SOURCE_INFORMATION))
+                        .is_none())
                 .then_some(
                     "the source information of a composable function with parameters for a \
                      runtime that predates parameter names in it",
@@ -562,28 +564,16 @@ pub(super) fn record(
     }
 }
 
-/// kotlinc's plugin gives every class of a Compose module, composable or not, a `$stable` field
-/// and `@StabilityInferred`; krusty's pass does not infer stability yet. An interface, an
-/// annotation and an enum get neither.
-fn reject_stability_inferred_classes(
-    ir: &IrFile,
+/// A decline of `class`, reported at the start of its declaration's line.
+pub(super) fn class_rejection(
     source: &PluginSourceView<'_>,
-    rejections: &mut Vec<PluginRejection>,
-) {
-    for class in &ir.classes {
-        if !class.is_source_declared
-            || class.is_interface
-            || class.is_annotation
-            || class.is_enum
-            || class.is_enum_entry
-        {
-            continue;
-        }
-        let start = line_start(source.text, class.decl_line);
-        rejections.push(PluginRejection {
-            span: crate::diag::Span::new(start, start),
-            message: unsupported("a class in a Compose module, whose stability kotlinc infers"),
-        });
+    class: &crate::ir::IrClass,
+    what: &str,
+) -> PluginRejection {
+    let start = line_start(source.text, class.decl_line);
+    PluginRejection {
+        span: crate::diag::Span::new(start, start),
+        message: unsupported(what),
     }
 }
 
