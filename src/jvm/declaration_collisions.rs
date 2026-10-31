@@ -12,6 +12,56 @@ mod local_function_diagnostics;
 mod package_method_diagnostics;
 mod property_marker_diagnostics;
 
+pub(crate) use package_method_diagnostics::FacadeSlot;
+
+/// The methods `ir`'s multifile part leaves its facade to forward, with their declarations.
+pub(crate) fn facade_slots(
+    ir: &IrFile,
+    override_results: &crate::jvm::override_results::OverrideResults,
+    diags: &mut DiagSink,
+) -> Result<Vec<FacadeSlot>, ()> {
+    package_method_diagnostics::facade_slots(ir, override_results).map_err(|errors| {
+        for (span, message) in errors {
+            diags.error(span, message);
+        }
+    })
+}
+
+/// One physical `(name, descriptor)` slot and the part-indexed declarations occupying it.
+type SlotGroup<'a> = ((&'a str, &'a str), Vec<(usize, &'a FacadeSlot)>);
+
+/// kotlinc's platform declaration clashes between the parts of one multifile facade, in its
+/// order: a signature that more than one part declares is one module error listing every
+/// declaration. Each part's own clashes are reported where the part is checked. A signature only
+/// `$default` stubs share follows from their functions' clash, so it is not reported again.
+pub(crate) fn facade_clashes<'a>(parts: impl IntoIterator<Item = &'a [FacadeSlot]>) -> Vec<String> {
+    let mut groups: Vec<SlotGroup<'a>> = Vec::new();
+    for (part, slots) in parts.into_iter().enumerate() {
+        for slot in slots {
+            let key = (slot.name.as_str(), slot.descriptor.as_str());
+            match groups.iter_mut().find(|(candidate, _)| *candidate == key) {
+                Some((_, members)) => members.push((part, slot)),
+                None => groups.push((key, vec![(part, slot)])),
+            }
+        }
+    }
+    groups
+        .into_iter()
+        .filter(|(_, members)| {
+            members.iter().any(|(part, _)| *part != members[0].0)
+                && members.iter().any(|(_, slot)| !slot.default_stub)
+        })
+        .map(|((name, descriptor), mut members)| {
+            members.sort_by(|(_, left), (_, right)| left.order.cmp(&right.order));
+            let listed = members
+                .iter()
+                .map(|(_, slot)| slot.rendered.clone())
+                .collect::<Vec<_>>();
+            clash_message(name, descriptor, &listed)
+        })
+        .collect()
+}
+
 pub(super) fn validate(
     ir: &IrFile,
     override_results: &crate::jvm::override_results::OverrideResults,
