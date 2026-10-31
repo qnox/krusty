@@ -8,6 +8,11 @@ reading a declared annotation parameter keeps the parameter's own slot contract.
 Any-method roles and that construction evidence own interface dispatch and receiver materialization,
 without member spelling, generated-name checks, metadata changes or common semantic selection.
 
+Synthetic annotation method headers reserve their existing enabled nullability descriptors before
+body constants. Constructor parameter and equals annotations retain their payloads; shared toString
+finalization applies the same return contract to memberless implementations. The existing release
+policy and class-writer annotation filter own both reservation and attachment.
+
 ## Native bound-receiver physical storage
 
 The common callable-reference record owns the bound-receiver capture coordinate. Native emission

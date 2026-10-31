@@ -1357,6 +1357,8 @@ mod js_backend_coverage_e2e;
 mod js_backend_e2e;
 #[path = "jvm_default_mode_e2e.rs"]
 mod jvm_default_mode_e2e;
+#[path = "jvm_multifile_class_e2e.rs"]
+mod jvm_multifile_class_e2e;
 #[path = "jvm_name_e2e.rs"]
 mod jvm_name_e2e;
 #[path = "jvm_name_toplevel_e2e.rs"]

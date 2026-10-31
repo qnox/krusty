@@ -1,5 +1,16 @@
 # krusty — a memory-lean Kotlin→JVM compiler PoC
 
+## Inaccessible members against accessible extensions
+
+A member the call site cannot access ranks below every resolved candidate, as kotlinc's visibility
+error applicability does. It loses to an applicable accessible member or extension of the same rung,
+and an explicit receiver's inaccessible member also yields to later rungs: the enclosing classes'
+member extensions, then top-level and imported extensions, for plain and safe calls alike. It is
+committed, with its access error, only when no later rung resolves the call. Exposed's
+`column.clone()` therefore selects `Alias`'s private `Column<T>.clone()` over the protected
+`java.lang.Object.clone()`. Tests: `box_regressions/inaccessibleMemberYieldsToExtension.kt` and
+`classpath_protected_member_e2e::inaccessible_object_clone_yields_to_a_member_extension`.
+
 ## JVM array clone result
 
 The JVM `Array<T>.clone()` declaration returns `Array<T>` with `T` keeping the classifier's own
@@ -1493,9 +1504,31 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   source's checked file-annotation applications in Pass 1; the JVM backend reads the `JvmName`
   value by its resolved identity, so every cross-file call, reference and default stub names the
   same facade, and the facade carries the file's BINARY/RUNTIME annotations as kotlinc writes them
-  (`tests/file_jvm_name_e2e.rs`). `@file:JvmMultifileClass` is rejected in the frontend until the
-  JVM handoff carries two physical owners per source, emission can aggregate each public facade in
-  module finalization, and the metadata/module-index writers represent its part-to-facade mapping.
+  (`tests/file_jvm_name_e2e.rs`).
+- **Multifile classes — `@file:JvmMultifileClass`.** kotlinc honors the annotation only beside a
+  `@file:JvmName`; without one the file stays an ordinary package part. Each source of a multifile class compiles to
+  a synthetic final part `Facade__FooKt` (metadata `k=5`, `xs` naming the facade; the part keeps
+  the file's annotations except `@JvmName`), and module finalization writes one public facade per
+  class (`k=4`, `d1` = the part internal names in JVM string order, `SourceFile` only for a
+  single part). The facade declares, part by part, a static forwarder for every public method the
+  part declares before its synthetic accessors (copying the part method's flags, generic
+  signature, annotations and parameter names; one line, the parameters as its only locals), then
+  the parts' non-private `const val` fields, which the parts do not declare. Every call to a
+  non-private top-level function or accessor of a part names the facade, even from inside the
+  part; fields, private members and `access$` accessors stay on the part. A private static method
+  of a part (function, accessor, lambda body) is named `<name>$<Part>` unless `@JvmName` names it;
+  its `access$` accessor, inline marker and reference name keep the Kotlin name, while a
+  reference's reflected signature uses the JVM name. `kotlin_module` groups the parts by facade
+  (field 3 = 1-based facade ids, field 4 = facade names). `@JvmField` on a top-level property of a
+  multifile file is kotlinc's frontend error at the annotation. Every method a facade forwards
+  (non-private functions, their `$default` stubs, non-private accessors) keeps its JVM name and
+  descriptor with its checked declaration; when two parts of one facade take the same slot, the
+  module fails before any class is written with kotlinc's unlocated platform declaration clash
+  per slot, in part order, listing the declarations in kotlinc's order (a slot only `$default`
+  stubs share is not reported again). A package function's clash rendering marks a defaulted
+  parameter ` = ...`
+  (`tests/box_regressions/jvmMultifileClass*.kt`, `tests/jvm_multifile_class_e2e.rs`,
+  `tests/file_jvm_name_e2e.rs`).
 - **`@Metadata` writer — plain top-level PROPERTY records.** The facade `Package` proto used to
   record extension properties only; plain top-level `val`/`var`s resolved through krusty's OWN
   static-field fallback, but the REAL kotlinc resolves an `import demo.greeting` exclusively from a
@@ -2758,6 +2791,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   moves to the source trampoline; the body-owned close line stays on the `$suspendImpl` carrier.
   A republished inherited member has no source here and keeps no line.
   Test: `tests/default_impls_forward_lines_e2e.rs`.
+
+  An expression body's last line is the line of its last character, closing parentheses included:
+  `= !(\n  a\n)` and `= a +\n  (\n    b\n  )` end on the `)` line. Parentheses leave no AST node,
+  so the body expression's own span stops before them; the function declaration's span, which ends
+  on the body's last token, gives the end line. Test:
+  `default_impls_forward_returns_on_the_closing_parenthesis_line` in
+  `tests/default_impls_forward_lines_e2e.rs`.
 
   A `$DefaultImpls` forward of the interface's OWN member also copies that member's declared
   annotations and its parameters' annotations, as kotlinc does. The constant pool is reserved in
@@ -5556,6 +5596,22 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   tables. Metadata string tables merge consecutive plain records, and method attribute names use
   ASM's `StackMapTable`-before-debug-table order. Remaining byte-parity differences include dead
   slot reuse, branch fall-through elimination, and inline-local name mangling.
+- **Inline scope numbers (`-Xuse-inline-scopes-numbers`, kotlinc's `USE_INLINE_SCOPES_NUMBERS`)**
+  rename an inlined body's debug locals by scope instead of by `$iv` depth. Each inline marker
+  (`$i$f$…`, `$i$a$…`) opens a scope numbered in the order the method inlines it; its locals end with
+  `\<scope>`, a marker also with `\<call-site line>` and a lambda's marker with
+  `\<surrounding scope>` (`0` for the method itself), and `this` becomes `this_\<scope>`. A
+  declaring inline function's own `$i$f$` marker stays unnumbered. The numbers are per JVM method:
+  a lambda's node numbers its own scopes, which the inliner renumbers when it places the node. A
+  callee is numbered as kotlinc's `InlineScopesGenerator` numbers it: from its scope numbers when
+  it declares one unnumbered marker, else from its `$iv` suffixes, nested markers taking the line
+  in effect where they start; every nested call-site line is then mapped into the caller's lines,
+  `-1` where nothing maps. A lambda's scope takes the mapped line of its `invoke`, and an
+  invoked-again lambda is numbered from the names its previous expansion gave it, as kotlinc renames
+  the lambda's node in place (`src/jvm/inliner/inline_scopes.rs`). The ported bytecode inliner
+  numbers library calls; the command line still refuses the argument until every inlining path
+  does, and the box harness selects it with `// USE_INLINE_SCOPES_NUMBERS`
+  (`tests/box_regressions/inlineScopes/`).
 - **A block's local slots are reused after the block ends**, as kotlinc's `FrameMap` reuses them:
   its block end leaves each variable the block declared, and a variable left from the top of the
   frame hands its slot back. A sibling branch, the next loop, a later catch parameter and the
@@ -13307,20 +13363,30 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   of `fun-$anonymous$()Unit/arg-<parameter>/call-<callee>[:<n>]/fun-<caller signature>/pkg-…/file-…`,
   where `n` counts the caller's earlier calls of the same name; its source information has no
   name (`C<calls>:<file>#<hash>`) and its trace names
-  `<object>.lambda$<key>.<anonymous> (<file>:<first statement's 0-based line>)`. A capturing,
-  nested or empty composable lambda is declined.
+  `<object>.lambda$<key>.<anonymous> (<file>:<first statement's 0-based line>)`. A composable
+  lambda that captures value parameters of its function is remembered instead: the call passes
+  `(Function2) rememberComposableLambda(<key>, true, <lambda>, $composer, 54)` (both slots
+  static), whose key, call and cast start the lambda's opening line. Its body stays in the file
+  class as `private static final Unit <caller>$lambda$<n>(<captures>, Composer $composer, int
+  $changed)`, captures named `$<parameter>` and passed on to its calls with uncertain bits; its
+  source information is listed in the caller's before the call it is passed to, and its trace names
+  `<fq caller>.<anonymous> (<file>:<first statement's 0-based line>)`. The caller's recompose lambda
+  is numbered after these lambdas and is emitted after them. A lambda that captures a local value
+  or a composable lambda parameter, or is nested or empty, is declined.
   The recompose lambda `<name>$lambda$0(<parameters>, $$changed, [$$default,] $composer, $force)`
   publishes its
   locals and no
   line, and the call's line starts at its dispatch, since kotlinc builds both arguments without
   offsets. Tests: `tests/fixtures/compose/restartableFunctions.kt`, `trackedParameters.kt`,
-  `defaultArguments.kt`, `lambdaParameters.kt` and `singletonLambdas.kt`,
+  `defaultArguments.kt`, `lambdaParameters.kt`, `singletonLambdas.kt` and
+  `rememberedLambdas.kt`,
   whose `box()` composes and recomposes the functions through a recording composer, and
   `kotlin_box_ir_jvm_conformance::compose_restartable_functions_are_byte_identical_to_kotlinc` and
   `compose_tracked_parameters_are_byte_identical_to_kotlinc`,
   `compose_default_arguments_are_byte_identical_to_kotlinc`,
-  `compose_lambda_parameters_are_byte_identical_to_kotlinc` and
-  `compose_singleton_lambdas_are_byte_identical_to_kotlinc`, which require their class sets to
+  `compose_lambda_parameters_are_byte_identical_to_kotlinc`,
+  `compose_singleton_lambdas_are_byte_identical_to_kotlinc` and
+  `compose_remembered_lambdas_are_byte_identical_to_kotlinc`, which require their class sets to
   equal kotlinc's byte for byte;
   `cli_compiler_plugin_e2e::the_compose_pass_rejects_what_it_does_not_cover` and
   `compose_report_destinations_fail_the_compile`; and the `plugins::compose` and
@@ -15299,8 +15365,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   method's constants began, in ASM's `MethodWriter` order (catch types, instruction operands in
   order, the local-variable tables, then the frames' classes, each entry after the entries it names).
   Every other entry keeps its relative place, including one another member or attribute also names.
-  A class holding an attribute the reader does not know keeps its pool; so does one whose `ldc`
-  operand would move past index 255, and an `ldc_w` whose entry moves below 256 stays `ldc_w`.
+  A class holding an attribute the reader does not know keeps its pool. Each `ldc` then takes the
+  width ASM writes for its renumbered entry: `ldc` when the index fits in one byte, `ldc_w` when it
+  does not, so an `ldc` whose entry moves past index 255 widens and an `ldc_w` whose entry moves
+  below 256 narrows (`classfile/pool_layout/ldc_width.rs`). The method's code changes length, so
+  its branch and switch targets, exception table, line and local-variable tables and stack map
+  frames move with it; a frame takes the compressed form ASM picks for its new distance. A `Code`
+  attribute holding any other attribute keeps the class's pool as interned.
   Tests: `classfile::pool_layout::tests`, `classfile::constant_pool_queries::tests`, and
   `tests/constant_pool_order_e2e.rs` (whole class files against kotlinc: a removed cast, casts of
   constants to their boxed types, and an unboxed generic read).
@@ -23486,6 +23557,13 @@ declared interface. The generated implementation is materialized at that interfa
 invocation. Reading a declared annotation parameter, or calling through `Any` or an ordinary
 interface, retains class-owned dispatch. The realized construction identity and selected semantic
 call role own this JVM choice.
+
+Synthetic annotation implementations reserve enabled nullability descriptors at their method
+headers, before body constants. A memberless `toString` has the same version-enabled non-null
+return annotation as a member-bearing implementation. Constructor guards and annotation payloads
+retain their contracts. Complete artifact controls cover primitive, reference-valued and memberless
+annotations over every supported release read from the manifest.
+
 `annotation_impl_class_e2e` compares complete emitted class inventories and raw artifacts, and runs
 the same programs after Kotlin; the ordinary Java-interface controls remain in
 `interface_object_method_e2e`.
