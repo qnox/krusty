@@ -67,12 +67,12 @@ fn settings_warnings(
     warnings
 }
 
-/// kotlinc's `checkProgressiveMode` warning, which has no diagnostic name, so `-Xwarning-level`
-/// does not reach it.
+/// kotlinc's `checkProgressiveMode` warning, its generic `COMPILER_ARGUMENTS_WARNING`.
 fn progressive_warning(settings: &LanguageSettings) -> Option<CliWarning> {
     let latest_stable = settings.features.versions().latest_stable();
     (settings.language_version < latest_stable).then(|| CliWarning {
-        name: None,
+        name: Some(krusty::diag::names::COMPILER_ARGUMENTS_WARNING),
+        leveled: true,
         message: format!(
             "'-progressive' is meaningful only for the latest language version ({latest_stable}), \
              while this build uses {}\nCompiler behavior in such mode is undefined; consider \
@@ -95,9 +95,10 @@ fn version_warnings(settings: &LanguageSettings) -> Vec<CliWarning> {
         .unwrap_or_else(|| panic!("version {version} is outside the release's policy"))
     };
     let deprecated = |version, api: bool| {
-        let kind = if api { "API" } else { "language" };
+        let kind = if api { "API" } else { "Language" };
         CliWarning {
             name: Some(krusty::diag::names::DEPRECATED_LANGUAGE_VERSION),
+            leveled: true,
             message: format!(
                 "{kind} version {version} is deprecated and its support will be removed in a \
                  future version of Kotlin. Update the version to {}.",
@@ -114,8 +115,9 @@ fn version_warnings(settings: &LanguageSettings) -> Vec<CliWarning> {
     if !status(settings.language_version, false).stable {
         warnings.push(CliWarning {
             name: Some(krusty::diag::names::EXPERIMENTAL_LANGUAGE_VERSION),
+            leveled: true,
             message: format!(
-                "language version {} is experimental, there are no backwards compatibility \
+                "Language version {} is experimental, there are no backwards compatibility \
                  guarantees for new language and library features. Use the stable version {} \
                  instead.",
                 settings.language_version,
@@ -267,6 +269,13 @@ pub(super) fn apply(
         "-progressive" => parsed.progressive = flag,
         "-Werror" => parsed.all_warnings_as_errors = flag,
         "-nowarn" => parsed.suppress_warnings = flag,
+        "-Xrender-internal-diagnostic-names" => {
+            opts.diagnostic_names = if flag {
+                krusty::diag::DiagnosticNames::Rendered
+            } else {
+                krusty::diag::DiagnosticNames::Hidden
+            }
+        }
         "-Xmetadata-version" => match parse_metadata_level(text) {
             Some(version) => opts.metadata_version = Some(version),
             None => opts.errors.push(format!(

@@ -520,17 +520,22 @@ fn configuration_report(opts: &cli::Options) -> Result<String, String> {
         failed = true;
     }
     for warning in &opts.warnings {
-        match opts.warning_policy.command_line_disposition(warning.name) {
+        let message =
+            krusty::diag::render_message(warning.name, &warning.message, opts.diagnostic_names);
+        match opts
+            .warning_policy
+            .command_line_disposition(warning.level_name())
+        {
             cli::WarningDisposition::Warning => {
-                report.push_str(&format!("warning: {}\n", warning.message));
+                report.push_str(&format!("warning: {message}\n"));
             }
             cli::WarningDisposition::Error => {
-                report.push_str(&format!("error: {}\n", warning.message));
+                report.push_str(&format!("error: {message}\n"));
                 failed = true;
             }
             cli::WarningDisposition::Disabled => {}
             cli::WarningDisposition::WarningAndFail => {
-                report.push_str(&format!("warning: {}\n", warning.message));
+                report.push_str(&format!("warning: {message}\n"));
                 unconfigured_warning_under_werror = true;
             }
         }
@@ -665,15 +670,15 @@ pub fn compile(opts: &cli::Options) -> Result<usize, String> {
     // promoted by `-Xwarning-level=<NAME>:error` is an ordinary source error; an explicit
     // `warning` level exempts that diagnostic from global `-Werror`, and `disabled` removes it.
     let mut compiler_warning_under_werror = false;
-    diags.diags.retain_mut(|diagnostic| {
-        if diagnostic.severity != krusty::diag::Severity::Warning {
+    let mut keep = |name, severity: &mut krusty::diag::Severity| {
+        if *severity != krusty::diag::Severity::Warning {
             return true;
         }
-        match opts.warning_policy.compiler_disposition(diagnostic.name) {
+        match opts.warning_policy.compiler_disposition(name) {
             cli::WarningDisposition::Disabled => false,
             cli::WarningDisposition::Warning => true,
             cli::WarningDisposition::Error => {
-                diagnostic.severity = krusty::diag::Severity::Error;
+                *severity = krusty::diag::Severity::Error;
                 true
             }
             cli::WarningDisposition::WarningAndFail => {
@@ -681,27 +686,26 @@ pub fn compile(opts: &cli::Options) -> Result<usize, String> {
                 true
             }
         }
-    });
-    match opts.warning_policy.compiler_disposition(None) {
-        cli::WarningDisposition::Disabled => diags.module_warnings.clear(),
-        cli::WarningDisposition::WarningAndFail if !diags.module_warnings.is_empty() => {
-            compiler_warning_under_werror = true;
-        }
-        cli::WarningDisposition::Warning
-        | cli::WarningDisposition::WarningAndFail
-        | cli::WarningDisposition::Error => {}
-    }
+    };
+    diags
+        .diags
+        .retain_mut(|diagnostic| keep(diagnostic.name, &mut diagnostic.severity));
+    diags
+        .module_diagnostics
+        .retain_mut(|diagnostic| keep(Some(diagnostic.name), &mut diagnostic.severity));
 
     if diags.has_errors() {
         // Like kotlinc, a failed compilation reports its errors only.
         diags
             .diags
             .retain(|diagnostic| diagnostic.severity == krusty::diag::Severity::Error);
-        diags.module_warnings.clear();
+        diags
+            .module_diagnostics
+            .retain(|diagnostic| diagnostic.severity == krusty::diag::Severity::Error);
         return Err(format!(
             "{}krusty: {} error(s)\n",
-            diags.render_all(&rendered),
-            diags.diags.len()
+            diags.render_all(&rendered, opts.diagnostic_names),
+            diags.diags.len() + diags.module_diagnostics.len()
         ));
     }
     // The same typed policy owns ordinary compiler and module warnings. Unlike command-line
@@ -712,18 +716,18 @@ pub fn compile(opts: &cli::Options) -> Result<usize, String> {
         // source warnings. Keep those three ledger segments distinct instead of prepending the
         // summary to the generic renderer (which owns module-before-source order for an ordinary
         // successful compilation).
-        let module_warnings = std::mem::take(&mut diags.module_warnings);
+        let module_warnings = std::mem::take(&mut diags.module_diagnostics);
         let mut report = String::new();
         for warning in module_warnings {
             report.push_str("warning: ");
-            report.push_str(&warning);
+            report.push_str(&warning.message(opts.diagnostic_names));
             report.push('\n');
         }
         report.push_str("error: warnings found and -Werror specified\n");
-        report.push_str(&diags.render_all(&rendered));
+        report.push_str(&diags.render_all(&rendered, opts.diagnostic_names));
         return Err(report);
     }
-    eprint!("{}", diags.render_all(&rendered));
+    eprint!("{}", diags.render_all(&rendered, opts.diagnostic_names));
 
     output.commit().map_err(|error| {
         format!(
@@ -740,4 +744,75 @@ fn file_stem(path: &str) -> String {
         .and_then(|s| s.to_str())
         .unwrap_or("File")
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const PROGRESSIVE: &str = "'-progressive' is meaningful only for the latest language version \
+                               (2.4), while this build uses 2.3\nCompiler behavior in such mode \
+                               is undefined; consider moving to the latest stable version or \
+                               turning off progressive mode.";
+
+    fn report(arguments: &[&str]) -> Result<String, String> {
+        let mut argv = vec!["-progressive", "-language-version", "2.3"];
+        argv.extend(arguments);
+        argv.push("f.kt");
+        let opts = cli::parse(argv.into_iter().map(str::to_string));
+        // The boundary: krusty refuses the compilation itself.
+        assert_eq!(
+            opts.refusals,
+            ["krusty does not implement the language feature \
+              'ForbidExposingLessVisibleTypesInInline' selected by '-progressive'"],
+            "{arguments:?}"
+        );
+        configuration_report(&opts)
+    }
+
+    /// The `-progressive` warning goes through the command-line warning policy under its kotlinc
+    /// name. Each expected report is kotlinc 2.4.21's complete stderr for `fun main() {}` with the
+    /// same arguments, and an `Err` is kotlinc's exit status 1 (measured). krusty itself refuses a
+    /// `-progressive` build below the latest language version (it does not model every progressive
+    /// feature), so this proves the policy over the report, not a compilation.
+    #[test]
+    fn the_progressive_warning_follows_its_named_level() {
+        let warning = format!("warning: {PROGRESSIVE}\n");
+        for (arguments, expected) in [
+            (vec![], Ok(warning.clone())),
+            (
+                vec!["-Xwarning-level=COMPILER_ARGUMENTS_WARNING:disabled"],
+                Ok(String::new()),
+            ),
+            (
+                vec!["-Xwarning-level=COMPILER_ARGUMENTS_WARNING:warning"],
+                Ok(warning.clone()),
+            ),
+            (
+                vec!["-Xwarning-level=COMPILER_ARGUMENTS_WARNING:error"],
+                Err(format!("error: {PROGRESSIVE}\n")),
+            ),
+            (
+                vec!["-Werror"],
+                Err(format!(
+                    "{warning}error: warnings found and -Werror specified\n"
+                )),
+            ),
+            (
+                vec![
+                    "-Werror",
+                    "-Xwarning-level=COMPILER_ARGUMENTS_WARNING:warning",
+                ],
+                Ok(warning.clone()),
+            ),
+            (
+                vec!["-Xrender-internal-diagnostic-names"],
+                Ok(format!(
+                    "warning: [COMPILER_ARGUMENTS_WARNING] {PROGRESSIVE}\n"
+                )),
+            ),
+        ] {
+            assert_eq!(report(&arguments), expected, "{arguments:?}");
+        }
+    }
 }

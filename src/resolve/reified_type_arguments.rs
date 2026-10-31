@@ -322,7 +322,7 @@ impl Checker<'_> {
                     self.diags.error(
                         span,
                         format!(
-                            "cannot use '{name}' as reified type parameter, since the array type \
+                            "Cannot use '{name}' as reified type parameter, since the array type \
                              parameter is not reified."
                         ),
                     );
@@ -332,11 +332,11 @@ impl Checker<'_> {
             }
             ReifiedProblem::ForbiddenSubstitution(rendered) => self.diags.error(
                 span,
-                format!("cannot use '{rendered}' as reified type parameter."),
+                format!("Cannot use '{rendered}' as reified type parameter."),
             ),
             ReifiedProblem::DefinitelyNonNullable => self.diags.error(
                 span,
-                "cannot use definitely-non-nullable type as a reified type argument.",
+                "Cannot use definitely-non-nullable type as a reified type argument.",
             ),
             ReifiedProblem::Intersection {
                 parts,
@@ -408,7 +408,7 @@ fn array_type_arguments(ty: Ty) -> Option<&'static [Ty]> {
 }
 
 fn type_parameter_as_reified(name: &str) -> String {
-    format!("cannot use '{name}' as reified type parameter. Use a class instead.")
+    format!("Cannot use '{name}' as reified type parameter. Use a class instead.")
 }
 
 fn intersection_as_reified(formal: &str, parts: &[Ty]) -> String {
@@ -426,7 +426,7 @@ fn intersection_as_reified(formal: &str, parts: &[Ty]) -> String {
         .collect::<Vec<_>>()
         .join(" & ");
     format!(
-        "type argument for reified type parameter '{formal}' was inferred to the intersection of \
+        "Type argument for reified type parameter '{formal}' was inferred to the intersection of \
          [{parts}]. Reification of an intersection type results in the common supertype being \
          used. This may lead to subtle issues and an explicit type argument is encouraged."
     )

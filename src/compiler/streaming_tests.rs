@@ -145,7 +145,7 @@ fn unattributed_signature_failure_reports_one_deterministic_internal_error() {
     );
     assert!(diagnostic.identity.is_none());
     assert_eq!(
-        diagnostics.render_all(&[("Recovery.kt", "")]),
+        diagnostics.render_all(&[("Recovery.kt", "")], crate::diag::DiagnosticNames::Hidden),
         "Recovery.kt:1:1: error: internal error: module signatures were not finalized and no source diagnostic explains it\n"
     );
 }

@@ -439,7 +439,11 @@ fn emit_in_process<B: krusty::compiler::Backend>(
         diagnostics: diags
             .diags
             .into_iter()
-            .map(|diagnostic| diagnostic.msg)
+            .map(|diagnostic| {
+                diagnostic
+                    .message(krusty::diag::DiagnosticNames::Hidden)
+                    .into_owned()
+            })
             .collect(),
         has_errors,
     }
@@ -820,7 +824,14 @@ where
         &mut diags,
     );
     let _ = krusty::compiler::check_frontend_only(analysis, &mut diags);
-    diags.diags.iter().map(|d| d.msg.clone()).collect()
+    diags
+        .diags
+        .iter()
+        .map(|d| {
+            d.message(krusty::diag::DiagnosticNames::Hidden)
+                .into_owned()
+        })
+        .collect()
 }
 
 /// Multi-file checker diagnostics WITH module facade registration (`prepare_module_symbols`,
@@ -2137,7 +2148,7 @@ fn krusty_lib_out(sources: &[(&str, &str)]) -> Result<Option<PathBuf>, String> {
     let mut diags = DiagSink::new();
     let render = |diags: &krusty::diag::DiagSink| {
         let named: Vec<(&str, &str)> = sources.iter().map(|(n, s)| (*n, *s)).collect();
-        diags.render_all(&named)
+        diags.render_all(&named, krusty::diag::DiagnosticNames::Hidden)
     };
     let stems: Vec<String> = sources
         .iter()
@@ -2633,7 +2644,14 @@ pub fn inspect_checker_with_classpath<T>(
         .expect("retained inspection analysis must check its source file");
     let inspected = inspect(file, info, &analysis.symbols);
     (
-        diags.diags.iter().map(|m| m.msg.clone()).collect(),
+        diags
+            .diags
+            .iter()
+            .map(|m| {
+                m.message(krusty::diag::DiagnosticNames::Hidden)
+                    .into_owned()
+            })
+            .collect(),
         inspected,
     )
 }

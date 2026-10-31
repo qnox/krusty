@@ -7,8 +7,8 @@
 
 use super::*;
 
-const MESSAGE: &str = "type arguments are not allowed when static member is accessed.";
-const PROPERTY_ACCESS_MESSAGE: &str = "property access cannot have explicit type arguments.";
+const MESSAGE: &str = "Type arguments are not allowed when static member is accessed.";
+const PROPERTY_ACCESS_MESSAGE: &str = "Property access cannot have explicit type arguments.";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum QualifierAccessKind {

@@ -4,7 +4,7 @@
 //! [`File::external_modifier_uses`].
 
 use crate::ast::File;
-use crate::diag::DiagSink;
+use crate::diag::{names, DiagSink};
 use crate::features::LangFeatures;
 
 const FEATURE: &str = "ForbidExternalEnumEntriesAndPrimaryConstructorProperties";
@@ -19,18 +19,24 @@ pub(super) fn check(file: &File, features: &LangFeatures, diagnostics: &mut Diag
         }
         reported.push(modifier.span);
         if modifier.repeated {
-            diagnostics.error(modifier.span, "repeated 'external'.");
+            diagnostics.error_named(
+                modifier.span,
+                names::REPEATED_MODIFIER,
+                "Repeated 'external'.",
+            );
         } else if forbidden {
             let target = modifier.target.description();
-            diagnostics.error(
+            diagnostics.error_named(
                 modifier.span,
-                format!("modifier 'external' is not applicable to '{target}'."),
+                names::WRONG_MODIFIER_TARGET,
+                format!("Modifier 'external' is not applicable to '{target}'."),
             );
         } else {
             let target = modifier.target.description();
-            diagnostics.warning(
+            diagnostics.warning_named(
                 modifier.span,
-                format!("modifier 'external' is deprecated for '{target}'."),
+                names::DEPRECATED_MODIFIER_FOR_TARGET,
+                format!("Modifier 'external' is deprecated for '{target}'."),
             );
         }
     }

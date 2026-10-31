@@ -86,7 +86,10 @@ pub fn diagnostic_locations(src: &str, records: &[krusty::diag::Diagnostic]) -> 
                 krusty::diag::Severity::Error => "error",
                 _ => "warning",
             };
-            format!("{line}:{column}: {severity}: {}", diagnostic.msg)
+            format!(
+                "{line}:{column}: {severity}: {}",
+                diagnostic.message(krusty::diag::DiagnosticNames::Hidden)
+            )
         })
         .collect()
 }

@@ -266,7 +266,7 @@ fn an_authenticated_direct_c_pointer_declines_its_nullable_boxed_carrier_exactly
     assert!(artifacts.is_empty(), "a declined file must emit no object");
     assert_eq!(diags.diags.len(), 1, "one selected call declines once");
     assert_eq!(
-        diags.render_all(&[("directPointer.kt", POINTER_SOURCE)]),
+        diags.render_all(&[("directPointer.kt", POINTER_SOURCE)], krusty::diag::DiagnosticNames::Hidden),
         "directPointer.kt:5:5: error: krusty: the native backend does not support a call of the C function `krusty_fixture_pointer` passing `kotlinx.cinterop.CValuesRef?`, which has no C representation here yet\n"
     );
 }
@@ -434,7 +434,13 @@ fn a_program_against_a_krusty_built_interop_klib_links_and_calls_its_shared_libr
     );
     let artifacts =
         krusty::compiler::emit_analyzed(analysis, &stems, &backend, "shared", &mut diags);
-    assert_eq!(diags.render_all(&[("sharedCall.kt", SHARED_SOURCE)]), "");
+    assert_eq!(
+        diags.render_all(
+            &[("sharedCall.kt", SHARED_SOURCE)],
+            krusty::diag::DiagnosticNames::Hidden
+        ),
+        ""
+    );
     let objects = artifacts
         .iter()
         .filter(|(name, _)| name.ends_with(".o"))

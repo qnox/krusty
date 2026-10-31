@@ -405,7 +405,7 @@ fn run_kotlin_first(kotlin: &str, java: &[(&str, &str)]) -> String {
         diagnostics
             .diags
             .iter()
-            .map(|diagnostic| diagnostic.msg.as_str())
+            .map(|diagnostic| diagnostic.message(krusty::diag::DiagnosticNames::Hidden))
             .collect::<Vec<_>>()
     );
     let kotlin_classes = outputs

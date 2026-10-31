@@ -138,7 +138,7 @@ impl Checker<'_> {
             match self.value_class_recursion(&record, underlying, &mut HashSet::new()) {
                 Some(Recursion::Plain) => {
                     self.diags
-                        .error(parameter.ty.span, "value class cannot be recursive.");
+                        .error(parameter.ty.span, "Value class cannot be recursive.");
                 }
                 Some(Recursion::ViaTypeParameters) => {
                     // The warning is inside the parameter declaration, so the parameter's own
@@ -155,7 +155,7 @@ impl Checker<'_> {
                             .value_class_recursion_via_type_parameters_warning
                             .as_deref(),
                         crate::diag::names::VALUE_CLASS_CANNOT_BE_RECURSIVE_VIA_TYPE_PARAMETERS_WARNING,
-                        "value class cannot be recursive.",
+                        "Value class cannot be recursive.",
                     );
                     self.active_lexical_policies.truncate(depth);
                 }
