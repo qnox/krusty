@@ -6068,8 +6068,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   backend (`IrFile::compiled_inline_call`) only when the callee is a non-suspend function in this
   module (public, or declared in the caller's own file), top-level or a member of a class, object
   or companion, with no suspend function-typed parameter or receiver, no
-  `crossinline` parameter, and a template without local classes
-  or a subject `when` that switches on an enum's keys (`IrFile::enum_switch_when`),
+  `crossinline` parameter, and a template without
+  a subject `when` that switches on an enum's keys (`IrFile::enum_switch_when`),
   called with every argument from any body: a named function, an inline function (whose compiled
   body then holds the nested callee's code, as kotlinc's does), a lambda's method, a local function,
   a property initializer, an `init` block, a constructor or an accessor, as kotlinc inlines wherever
@@ -6327,7 +6327,33 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   transformation's `reifiedTypeParametersUsages`), so its load keeps the marker and a call site
   specializes it again. A copy is public ABI when the code it is written in is: a non-private
   inline function, a lambda class that function's ABI publishes, or, for a nested copy, its root
-  call's scope (`RegeneratedClassContext` keeps the root `callSiteInfo`). Tests:
+  call's scope (`RegeneratedClassContext` keeps the root `callSiteInfo`), whatever the original's
+  flag: an object a private inline function creates is outside the public ABI, and its copies are
+  regenerated all the same (`writeTransformedMetadata` replaces the flag, it does not require it).
+  A copied constructor keeps a read of a captured field from `this` that follows the field's
+  store (an initializer reading the captured value back): the copy declares the same field and
+  stores it before the copied body runs, as kotlinc's field remapper leaves such a read; a read of
+  a lambda field the copy inlines away is refused
+  (`anonymous_object::constructor::tests::a_captured_field_read_from_this_stays_in_the_body`,
+  `reified_anonymous_object_e2e::a_reified_anonymous_object_copies_property_accessors_like_kotlinc`).
+  A callee body that creates an object of an anonymous class is therefore inlined from its
+  compiled body like any other (`tests/inline_same_module_local_classes_e2e.rs`: an object reused
+  by two call sites, an object a body keeps in a local, and a private reified function's object
+  regenerated per call site, against kotlinc's bytes and as a run). Inside a copy, every object a
+  method or the constructor creates is regenerated with it (`capturedOuterRegenerated`, kotlinc's
+  `classRegeneration`): the constructor is transformed first, so its objects are the copy's first,
+  enclosed by `<init>`; a nested object that captures the copy is planned from its original
+  constructor's descriptor; a suspend method's continuation (`isContinuationNotLambda`) is copied
+  without a machine of its own or its `@DebugMetadata`; and once a method is transformed every
+  reference in it names the copies, the continuation's `instanceof` before its `new` included.
+  A copy's method has its returns normalized (`LocalReturnsNormalizer`) as an inlined body does.
+  kotlinc declares a copy's fields before the constructor's objects are regenerated, so a field of
+  an anonymous type keeps the original's type while the constructor stores the copy, and the
+  program fails with `NoSuchFieldError` under both compilers. An anonymous object anywhere in an
+  inline function's scope has a public constructor (`inInlineFunctionScope`), and only a class
+  whose own scope is the inline function's code carries the identity source map, written over its
+  declaring file's lines when another file declares it (same file: an object in a regenerated
+  constructor, its anonymous-type failure, and a suspend method's continuation). Tests:
   `tests/inline_same_module_lambda_bodies_e2e.rs` (same-file and cross-file lambdas reused and
   regenerated, a reified lambda marked at its load, a reified default lambda, a reified `when`
   join, a lambda whose function type names a reified parameter, a reified lambda nested in a
