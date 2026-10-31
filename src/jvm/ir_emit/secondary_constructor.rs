@@ -181,7 +181,6 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
         let mut sctor = CodeBuilder::new(1 + sc_words);
         let sec_max;
         let mut sec_diverges = false;
-        let body_locals;
         {
             let mut e = Emitter::new(
                 ir,
@@ -454,7 +453,10 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
                 sctor.mark_line(sc.lines.decl_end_line);
             }
             sec_max = e.frame.max();
-            body_locals = std::mem::take(&mut e.open_locals);
+            // Body locals precede `this` and the parameters in kotlinc's table, as in a method,
+            // and stay in scope through the return.
+            let body_locals = std::mem::take(&mut e.open_locals);
+            e.record_open_locals(body_locals, |_| None, &mut sctor);
         }
         if !sec_diverges {
             if sc.generated_debug.fallthrough_line().is_some() {
@@ -463,11 +465,6 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
             } else {
                 sctor.ret_void();
             }
-        }
-        // Body locals precede `this` and the parameters in kotlinc's table, as in a method, and
-        // stay in scope through the return.
-        for local in body_locals {
-            local.record(None, &mut sctor);
         }
         if !generated {
             sctor.add_local_entry(0, None, 0, "this", &format!("L{fq_name};"));
@@ -526,7 +523,7 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
         let body_ranged_locals = if generated && debug_locals.is_some() {
             let code_length = sctor.bytes.len();
             sctor
-                .local_entries()
+                .named_local_entries()
                 .iter()
                 .filter(|&&(start, ..)| usize::from(start) < code_length)
                 .map(|&(start, length, slot, ref name, ref desc)| {
@@ -545,6 +542,10 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
             cw.reserve_method_lvt(locals);
         }
         let body_line_marks = sctor.line_marks().to_vec();
+        let restated_pcs = sctor
+            .inlined_line_marks()
+            .map(|(pc, _)| pc)
+            .collect::<Vec<_>>();
         cw.add_method_sig(
             sc_access,
             "<init>",
@@ -584,14 +585,18 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
                 .map(|line| (0u16, line));
             // Consecutive entries for the SAME line collapse, exactly as `CodeBuilder::mark_line`
             // collapses them within one body: the opening entry and the body's first mark are both
-            // the declaration's line, and kotlinc writes it once.
+            // the declaration's line, and kotlinc writes it once. An inlined line, or the caller's
+            // line restated after an inlined body, keeps its entry beside an equal one, as it does in
+            // any other body.
             let mut entries: Vec<(u16, u32)> = Vec::new();
             for (pc, line) in opening.into_iter().chain(
                 body_line_marks
                     .iter()
                     .map(|&(pc, line)| (pc, u32::from(line))),
             ) {
-                if entries.last().is_some_and(|&(_, last)| last == line) {
+                if entries.last().is_some_and(|&(_, last)| last == line)
+                    && !restated_pcs.contains(&pc)
+                {
                     continue;
                 }
                 entries.push((pc, line));

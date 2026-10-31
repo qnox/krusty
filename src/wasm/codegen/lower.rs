@@ -23,7 +23,6 @@ mod default_arguments;
 mod dependency_exports;
 mod exceptions;
 mod intrinsic_operations;
-mod numeric_references;
 mod objects;
 mod scalar_instructions;
 mod shared_cells;
@@ -48,6 +47,7 @@ use crate::ir::{
 };
 use crate::types::{EqualityMode, Ty, TyKind};
 
+use super::super::boxes::BOX_VALUE_FIELD;
 use super::super::encode::{BlockType, Code, Function, HeapType, Module, ValType};
 use super::super::objects::REFERENCE;
 use super::super::runtime::*;
@@ -332,7 +332,7 @@ pub(super) fn lower_file(
     } else {
         None
     };
-    callable_registry.publish(ir, dependency_exports, &indices)?;
+    callable_registry.publish(ir, dependency_exports, &indices, &default_indices)?;
     Ok(LoweredFile {
         functions: indices,
         initializer,
@@ -844,6 +844,11 @@ impl<'a> Body<'a> {
             }
             return Ok(());
         }
+        match (source, target) {
+            (ValType::Ref { .. }, _) => return self.unbox(target_ty),
+            (_, ValType::Ref { .. }) if target == REFERENCE => return self.box_value(source_ty),
+            _ => {}
+        }
         match (rank(source), rank(target)) {
             (Some(from), Some(to)) if from < to => {
                 widen(&mut self.code, source, target);
@@ -853,6 +858,43 @@ impl<'a> Body<'a> {
                 "a value carried as {source:?} where {target:?} is expected"
             )),
         }
+    }
+
+    /// Box the `ty` value on the stack (see `super::super::boxes`).
+    fn box_value(&mut self, ty: Ty) -> Result<(), Unsupported> {
+        let form = self
+            .runtime
+            .box_form(self.module, ty)
+            .ok_or_else(|| format!("a `{}` value carried as a reference", describe(ty)))?;
+        if let Some([no, yes]) = form.booleans {
+            self.code
+                .if_(BlockType::Value(REFERENCE))
+                .global_get(yes)
+                .else_()
+                .global_get(no)
+                .end();
+            return Ok(());
+        }
+        let value = carrier(ty)?.expect("a boxed primitive has a value");
+        let local = self.local(value);
+        self.code
+            .local_set(local)
+            .global_get(form.table)
+            .local_get(local)
+            .struct_new(form.structure);
+        Ok(())
+    }
+
+    /// Read the `ty` value out of the box the frontend checked the reference on the stack is.
+    fn unbox(&mut self, ty: Ty) -> Result<(), Unsupported> {
+        let form = self
+            .runtime
+            .box_form(self.module, ty)
+            .ok_or_else(|| format!("a reference read as a `{}` value", describe(ty)))?;
+        self.code
+            .ref_cast(false, HeapType::Concrete(form.structure))
+            .struct_get(form.structure, BOX_VALUE_FIELD);
+        Ok(())
     }
 
     /// Emit `id`, leaving its value on the stack when it has one.
@@ -868,8 +910,15 @@ impl<'a> Body<'a> {
                 return Err("a shared cell read as a value".to_string());
             }
             IrExpr::GetValue(slot) => {
-                if let Some((local, _)) = self.values.get(&slot) {
-                    self.code.local_get(*local);
+                if let Some(&(local, declared)) = self.values.get(&slot) {
+                    self.code.local_get(local);
+                    // A smart cast reads the slot at a narrower type: `Int` out of an `Int?`
+                    // local holding a box.
+                    if let Some(read) = self.type_of(id)? {
+                        if carrier(read)? != carrier(declared)? {
+                            self.coerce_emitted_value(declared, read)?;
+                        }
+                    }
                 } else if !self.unit_values.contains(&slot) {
                     return Err(format!("a read of value {slot} before its declaration"));
                 }
@@ -1157,6 +1206,8 @@ impl<'a> Body<'a> {
                                     (source, target),
                                     (ValType::Ref { .. }, ValType::Ref { .. })
                                 )
+                                && !(op == IrTypeOp::ImplicitCoercion
+                                    && (rank(source).is_none() || rank(target).is_none()))
                         }) =>
                     {
                         if op != IrTypeOp::ImplicitCoercion {

@@ -66,6 +66,7 @@ pub(crate) fn package_fragment(
         annotations_in_metadata,
         crate::metadata::MetadataTypeLookups::default().inner_classifiers,
     )
+    .expect("valid metadata fixture declarations")
 }
 
 /// Production KLIB fragment emission with the frozen classifier facts its metadata types require.
@@ -75,7 +76,7 @@ pub(crate) fn package_fragment_with_inner_classifiers(
     classes: &[KlibClass<'_>],
     annotations_in_metadata: bool,
     inner_classifiers: crate::metadata::InnerClassifiers<'_>,
-) -> Vec<u8> {
+) -> Result<Vec<u8>, crate::metadata::class_id::ClassIdError> {
     let mut st = StringTable::klib(inner_classifiers);
     let mut requirements = VersionRequirementTable::default();
     let mut contract_types = ContractTypeTable::default();
@@ -100,15 +101,19 @@ pub(crate) fn package_fragment_with_inner_classifiers(
                 let file_name = st.local(&file.file_name);
                 record.field_varint(172, u64::from(file_name)); // functionFile = 172
             }
-            PackageMember::Property(index) => {
+            PackageMember::Property(_) => {
                 let file_name = st.local(&file.file_name);
                 record.field_varint(176, u64::from(file_name)); // propertyFile = 176
+            }
+            PackageMember::Alias(_) => {}
+        },
+        &mut |st, member, record| {
+            if let PackageMember::Property(index) = member {
                 if let Some(Some(constant)) = file.constants.get(index) {
                     let value = super::builder::constant_value_pb(st, constant);
                     record.field_message(173, &value); // compileTimeValue = 173
                 }
             }
-            PackageMember::Alias(_) => {}
         },
     );
     if let Some(table) = st.close_type_table() {
@@ -127,8 +132,10 @@ pub(crate) fn package_fragment_with_inner_classifiers(
             source_file: class.in_source_file.then_some(file.file_name.as_str()),
             constants: class.constants,
         };
-        class_messages.push(class_message(&mut st, &class.declaration, &carrier));
-        class_names.push(u64::from(st.class_id(class.declaration.name)));
+        class_messages.push(class_message(&mut st, &class.declaration, &carrier)?);
+        class_names.push(u64::from(
+            st.declaration_class_id(class.declaration.class_id)?,
+        ));
     }
 
     let mut fragment = Pb::new();
@@ -141,7 +148,7 @@ pub(crate) fn package_fragment_with_inner_classifiers(
     fragment.field_varint(172, 0); // isEmpty = 172
     fragment.field_bytes(173, package.join(".").as_bytes()); // fqName = 173
     fragment.field_packed_varints(174, &class_names); // className = 174, packed
-    fragment.canonical().into_bytes()
+    Ok(fragment.canonical().into_bytes())
 }
 
 #[cfg(test)]
@@ -170,8 +177,9 @@ mod tests {
             has_backing_field: true,
             modifiers: crate::ir::IrPropertyModifiers::default(),
             setter_visibility: crate::types::Visibility::Public,
-            declares_annotations: false,
+            annotations: Default::default(),
             annotation_method: None,
+            field_annotations: Default::default(),
             companion: false,
             accessor_annotations: Default::default(),
             field_name: None,
@@ -232,6 +240,96 @@ mod tests {
     }
 
     #[test]
+    fn package_property_annotation_records_match_the_official_klib_producer() {
+        let stamp = |text: &str| {
+            crate::metadata::MetadataAnnotations::of(&crate::ir::DeclarationAnnotations::new(vec![
+                crate::ir::RetainedAnnotation {
+                    retention: crate::types::AnnotationRetention::Binary,
+                    annotation: crate::ir::AppliedAnnotation {
+                        internal: crate::types::type_name("store/Stamp"),
+                        values: vec![(
+                            "value".into(),
+                            crate::ir::AnnoValue::Const(crate::ir::IrConst::String(text.into())),
+                        )],
+                    },
+                    facts: Default::default(),
+                },
+            ]))
+        };
+        let mut answer = constant_property("answer");
+        answer.annotations = stamp("property");
+        answer.field_annotations = stamp("field");
+        let mut label = constant_property("label");
+        label.ty = Ty::String;
+        label.decl_order = 2;
+        label.annotations = stamp("string-property");
+        label.field_annotations = stamp("string-field");
+        let fragment = package_fragment(
+            &["store"],
+            &KlibFileMembers {
+                file_name: "KlibAnnotations.kt".into(),
+                functions: Vec::new(),
+                properties: vec![answer, label],
+                constants: vec![
+                    Some(crate::ir::IrConst::Int(42)),
+                    Some(crate::ir::IrConst::String("constant".into())),
+                ],
+                aliases: Vec::new(),
+            },
+            &[],
+            true,
+        );
+        let decoded = crate::metadata::decode::decode_package_fragment(&fragment).unwrap();
+        assert_eq!(
+            decoded.strings,
+            [
+                "answer",
+                "kotlin",
+                "Int",
+                "KlibAnnotations.kt",
+                "store",
+                "Stamp",
+                "value",
+                "property",
+                "field",
+                "label",
+                "String",
+                "string-property",
+                "string-field",
+                "constant"
+            ]
+        );
+        let mut cursor = crate::metadata::decode::Cursor::new(decoded.package.unwrap(), 0);
+        let mut records = Vec::new();
+        while !cursor.at_end() {
+            let (field, wire) = crate::metadata::decode::field(&mut cursor, "package").unwrap();
+            if field == 4 && wire == 2 {
+                let (record, _) = cursor.length_delimited("property").unwrap();
+                records.push(
+                    record
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect::<String>(),
+                );
+            } else {
+                cursor.skip(wire, "package field").unwrap();
+            }
+        }
+        let reference =
+            include_str!("../../tests/fixtures/package_property_annotations/klib-properties.hex");
+        assert_eq!(records, reference.lines().collect::<Vec<_>>());
+        let semantic = parse_package_fragment_checked(&fragment).unwrap();
+        assert_eq!(
+            semantic
+                .properties
+                .iter()
+                .map(|property| property.annotations.clone())
+                .collect::<Vec<_>>(),
+            vec![vec![crate::types::type_name("store/Stamp")]; 2]
+        );
+    }
+
+    #[test]
     fn an_inner_type_round_trips_its_outer_arguments_through_the_fragment() {
         let outer = crate::types::type_name("fixture/Outer");
         let inner = outer.nested_child("Inner");
@@ -249,7 +347,8 @@ mod tests {
         };
 
         let fragment =
-            package_fragment_with_inner_classifiers(&["fixture"], &members, &[], true, &lookup);
+            package_fragment_with_inner_classifiers(&["fixture"], &members, &[], true, &lookup)
+                .expect("valid declared metadata class names");
         let package = parse_package_fragment_checked(&fragment).expect("a decodable fragment");
         assert_eq!(
             package.functions[0].ret,
@@ -358,8 +457,14 @@ mod tests {
             Ty::Int,
         )];
         let tail = ClassTail::default();
+        let class_id = crate::metadata::class_id::ResolvedClassId::declared(
+            crate::types::type_name("p/q/Point"),
+            crate::types::type_name("p/q"),
+            &["Point"],
+        );
         let point = ClassDeclaration {
             name: crate::types::type_name("p/q/Point"),
+            class_id: &class_id,
             ctor_params: &[("x".to_string(), Ty::Int)],
             props: &[],
             methods: &methods,

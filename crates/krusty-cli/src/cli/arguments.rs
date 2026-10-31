@@ -268,6 +268,7 @@ pub(super) fn apply(
         "-progressive" => parsed.progressive = flag,
         "-Werror" => parsed.all_warnings_as_errors = flag,
         "-nowarn" => parsed.suppress_warnings = flag,
+        "-Xreport-all-warnings" => opts.report_all_warnings = flag,
         "-Xmetadata-version" => match parse_metadata_level(text) {
             Some(version) => opts.metadata_version = Some(version),
             None => opts.errors.push(format!(

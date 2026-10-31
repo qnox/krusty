@@ -318,6 +318,13 @@ impl BackendModuleFacts {
                     ),
                     "a generated classifier identity may be published only once"
                 );
+                declaration_names.insert(
+                    crate::libraries::ClassifierDeclarationKey::Ordinary(generated.classifier),
+                    Some(crate::types::ClassifierDeclarationName::Nested {
+                        owner: generated.lexical_owner,
+                        name: generated.source_name.clone(),
+                    }),
+                );
                 generated_classifiers.push(generated.clone());
             }
             let flags = declaration_header.flags;

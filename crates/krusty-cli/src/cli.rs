@@ -167,12 +167,19 @@ pub struct Options {
     /// `-Xstring-concat=inline`: build every string concatenation with `StringBuilder`, whatever
     /// the JVM target.
     pub inline_string_concat: bool,
+    /// kotlinc's `USE_INLINE_SCOPES_NUMBERS` configuration: name inlined locals by their inline
+    /// scope's number. The box harness sets it from its typed configuration channel; the command
+    /// line still refuses `-Xuse-inline-scopes-numbers` until every inlining path numbers scopes.
+    pub inline_scopes_numbers: bool,
     /// `-opt-in=<fq name>[,<fq name>…]` (also `-opt-in <value>`, repeatable): requirement markers
     /// accepted module-wide, applied to the language settings once they are built.
     pub opt_in: Vec<String>,
     /// `-Xsuppress-version-warnings`: omit the deprecated and experimental language/API warnings.
     /// Redundant feature arguments stay reported.
     pub suppress_version_warnings: bool,
+    /// `-Xreport-all-warnings`: a failed compilation reports its warnings beside its errors. Without
+    /// it, kotlinc reports only the errors of a compilation that fails.
+    pub report_all_warnings: bool,
 }
 
 impl Default for Options {
@@ -223,8 +230,10 @@ impl Default for Options {
             explicit_api: None,
             assertions: None,
             inline_string_concat: false,
+            inline_scopes_numbers: false,
             opt_in: Vec::new(),
             suppress_version_warnings: false,
+            report_all_warnings: false,
         }
     }
 }
@@ -413,6 +422,9 @@ pub struct PluginResolution {
     pub notes: Vec<String>,
     /// Printed as `error:` — any one fails the compilation before it starts.
     pub errors: Vec<String>,
+    /// Plugins krusty implements only in part: the compilation runs, but a build asking which
+    /// compilations krusty takes is refused it.
+    pub partial: Vec<String>,
 }
 
 impl Options {
@@ -433,6 +445,7 @@ impl Options {
                 native: NativePlugins::none(),
                 notes: Vec::new(),
                 errors: missing,
+                partial: Vec::new(),
             };
         }
         let classpath = classpath
@@ -453,6 +466,11 @@ impl Options {
             native: resolved.native,
             notes: notes.iter().map(|note| note.message()).collect(),
             errors: errors.iter().map(|error| error.message()).collect(),
+            partial: notes
+                .iter()
+                .filter(|note| note.is_refusal())
+                .map(|note| note.message())
+                .collect(),
         }
     }
 }
@@ -563,6 +581,7 @@ impl Options {
             .with_java_parameters(self.java_parameters)
             .with_lambda_modes(self.lambda_modes)
             .with_inline_string_concat(self.inline_string_concat)
+            .with_inline_scopes_numbers(self.inline_scopes_numbers)
             .with_param_assertions(!self.no_param_assertions)
             .with_call_assertions(!self.no_call_assertions)
             .with_annotations_in_metadata(
@@ -658,7 +677,7 @@ pub fn classpath_entry_problems(entries: &[PathBuf]) -> Vec<ClasspathEntryProble
                                     || extension.eq_ignore_ascii_case("zip")
                             });
                         if is_archive {
-                            zip::ZipArchive::new(file)
+                            krusty::archive::open_file(file)
                                 .err()
                                 .map(|error| format!("not a readable archive ({error})"))
                         } else {

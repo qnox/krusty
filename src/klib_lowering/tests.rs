@@ -3,6 +3,7 @@
 
 use std::path::PathBuf;
 
+mod accessor_calls;
 mod body_forms;
 mod callee_headers;
 mod closure_frames;
@@ -11,11 +12,14 @@ mod constructor_calls;
 mod constructor_contracts;
 mod control_forms;
 mod demo_package;
+mod elvis_blocks;
 mod inline_templates;
 mod primitive_calls;
 mod range_membership_producers;
 mod returnable_blocks;
+mod safe_calls;
 mod target_calls;
+mod target_members;
 mod varargs;
 
 use super::*;

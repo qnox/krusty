@@ -2,6 +2,9 @@
 
 use super::{IrConst, Ty, TypeName};
 
+#[cfg(test)]
+mod tests;
+
 /// Backend-agnostic retention fact resolved by the frontend.
 pub type AnnoRetention = crate::types::AnnotationRetention;
 
@@ -53,9 +56,23 @@ pub struct PropertyAnnotations {
     pub annotations: DeclarationAnnotations,
 }
 
+/// Checked applications on a package property's own declaration and its backing field. Accessor
+/// applications retain their separate checked accessor identities.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct PackagePropertyAnnotations {
+    /// Checked PROPERTY or FIELD destinations declare property metadata annotations. Accessor-only
+    /// destinations retain their own flags. Presence is independent of the PROPERTY-site payload.
+    pub declares_metadata_annotations: bool,
+    pub property: DeclarationAnnotations,
+    pub field: DeclarationAnnotations,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct DeclarationAnnotations {
     retained: Vec<RetainedAnnotation>,
+    /// A checked SOURCE application still belongs to this declaration although its payload is
+    /// absent from class files and Kotlin metadata. Erased optional expectations have no carrier.
+    source_application: bool,
     /// The declaration also carried non-SOURCE `@OptionalExpectation` applications with no actual
     /// on this platform. kotlinc removes them from IR with their `expect` classes, so no class
     /// file or metadata record names them, yet the declaration's metadata flags still report
@@ -66,18 +83,42 @@ pub struct DeclarationAnnotations {
     /// uses this provenance to retain the property's empty annotation marker; it does not set
     /// Kotlin metadata's `HAS_ANNOTATIONS` bit.
     suppressed_source_application: bool,
+    /// How many trailing `retained` applications a compiler plugin attached after checking. They
+    /// reach the class file only: kotlinc serializes metadata from FIR, before its IR plugins run.
+    lowered: usize,
 }
 
 impl DeclarationAnnotations {
-    pub fn new(annotations: Vec<RetainedAnnotation>) -> Self {
+    /// These annotations without the applications of `annotation`.
+    pub(crate) fn without(&self, annotation: TypeName) -> Self {
+        let checked = self.retained.len() - self.lowered;
+        let mut retained = Vec::with_capacity(self.retained.len());
+        let mut lowered = 0;
+        for (index, application) in self.retained.iter().enumerate() {
+            if application.annotation.internal == annotation {
+                continue;
+            }
+            lowered += usize::from(index >= checked);
+            retained.push(application.clone());
+        }
         Self {
-            retained: annotations,
-            erased_optional_expectations: false,
-            suppressed_source_application: false,
+            retained,
+            lowered,
+            ..self.clone()
         }
     }
 
-    /// Partition checked applications for one declaration: SOURCE retention is dropped, an
+    pub fn new(annotations: Vec<RetainedAnnotation>) -> Self {
+        Self {
+            retained: annotations,
+            source_application: false,
+            erased_optional_expectations: false,
+            suppressed_source_application: false,
+            lowered: 0,
+        }
+    }
+
+    /// Partition checked applications for one declaration: SOURCE payload is dropped, an
     /// optional expectation leaves only the [`Self::declares_annotations`] fact, and every other
     /// application is retained.
     pub fn from_checked<'a>(
@@ -86,6 +127,7 @@ impl DeclarationAnnotations {
         let mut annotations = Self::default();
         for (checked, annotation) in applications {
             if checked.retention == crate::types::AnnotationRetention::Source {
+                annotations.source_application |= !checked.facts.optional_expectation;
                 continue;
             }
             if checked.facts.optional_expectation {
@@ -102,18 +144,24 @@ impl DeclarationAnnotations {
     }
 
     /// Whether the declaration carries annotation provenance: a retained application, an erased
-    /// optional expectation, or a suppressed SOURCE application retained for target realization.
+    /// optional expectation, or ordinary/suppressed SOURCE presence retained for target realization.
     /// Never derive it from [`Self::retains_none`].
     pub fn declares_annotations(&self) -> bool {
         !self.retained.is_empty()
+            || self.source_application
             || self.erased_optional_expectations
             || self.suppressed_source_application
     }
 
-    /// Whether Kotlin metadata reports `HAS_ANNOTATIONS`. Suppressed SOURCE provenance can require
+    /// Whether Kotlin metadata reports `HAS_ANNOTATIONS`. SOURCE provenance can require
     /// a target carrier without making the source declaration annotated in metadata.
     pub(crate) fn declares_metadata_annotations(&self) -> bool {
-        !self.retained.is_empty() || self.erased_optional_expectations
+        self.retained.len() > self.lowered || self.erased_optional_expectations
+    }
+
+    /// Whether ordinary SOURCE presence survives independently of its dropped payload.
+    pub(crate) fn has_source_application(&self) -> bool {
+        self.source_application
     }
 
     pub(crate) fn with_suppressed_source_application(mut self, retained: bool) -> Self {
@@ -125,6 +173,20 @@ impl DeclarationAnnotations {
     /// provenance even though [`Self::retains_none`] is true.
     pub fn has_suppressed_source_application(&self) -> bool {
         self.suppressed_source_application
+    }
+
+    /// Append an application a compiler plugin attaches to the declaration after checking.
+    pub(crate) fn push(&mut self, annotation: RetainedAnnotation) {
+        self.retained.push(annotation);
+        self.lowered += 1;
+    }
+
+    /// Append an application a compiler plugin attaches after checking that Kotlin metadata
+    /// records as well, as kotlinc's metadata declaration registrar adds it: it follows the
+    /// checked applications and precedes the plugin's other ones.
+    pub(crate) fn push_metadata_visible(&mut self, annotation: RetainedAnnotation) {
+        let checked = self.retained.len() - self.lowered;
+        self.retained.insert(checked, annotation);
     }
 
     pub fn iter(&self) -> std::slice::Iter<'_, RetainedAnnotation> {
@@ -139,6 +201,14 @@ impl DeclarationAnnotations {
     /// partition a backend may later require.
     pub fn applications(&self) -> impl Iterator<Item = &AppliedAnnotation> {
         self.retained.iter().map(|retained| &retained.annotation)
+    }
+
+    /// The checked applications Kotlin metadata records: [`Self::applications`] without the ones a
+    /// compiler plugin attached, save those it made metadata-visible.
+    pub(crate) fn checked_applications(&self) -> impl Iterator<Item = &AppliedAnnotation> {
+        self.retained[..self.retained.len() - self.lowered]
+            .iter()
+            .map(|retained| &retained.annotation)
     }
 
     /// Whether no application survives into the class file. This is a physical fact; whether the
@@ -189,6 +259,10 @@ impl From<&crate::types::AnnotationValue> for AnnoValue {
             AnnotationValue::Byte(value) => AnnoValue::Const(IrConst::Byte(*value)),
             AnnotationValue::Short(value) => AnnoValue::Const(IrConst::Short(*value)),
             AnnotationValue::Long(value) => AnnoValue::Const(IrConst::Long(*value)),
+            AnnotationValue::UByte(value) => AnnoValue::Const(IrConst::UByte(*value)),
+            AnnotationValue::UShort(value) => AnnoValue::Const(IrConst::UShort(*value)),
+            AnnotationValue::UInt(value) => AnnoValue::Const(IrConst::UInt(*value)),
+            AnnotationValue::ULong(value) => AnnoValue::Const(IrConst::ULong(*value)),
             AnnotationValue::Float(value) => AnnoValue::Const(IrConst::Float(*value)),
             AnnotationValue::Double(value) => AnnoValue::Const(IrConst::Double(*value)),
             AnnotationValue::Boolean(value) => AnnoValue::Const(IrConst::Boolean(*value)),

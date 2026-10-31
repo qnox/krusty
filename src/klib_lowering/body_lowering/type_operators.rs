@@ -85,6 +85,9 @@ impl BodyLowering<'_> {
         if target != ty {
             return Err(mismatch("an implicit cast is typed apart from its target"));
         }
+        if let Some(proven) = self.null_proven_receiver(argument, target)? {
+            return Ok(proven);
+        }
         let arg = self.expression(argument)?;
         let actual = self.lowered_type(arg);
         if super::is_value_of(actual, target) {
@@ -124,7 +127,8 @@ impl BodyLowering<'_> {
             TyKind::Obj(name, _) => Some(name),
             _ => None,
         };
-        self.linker.is_subtype(target, actual)
+        self.linker
+            .is_subtype(self.header.type_parameters(), target, actual)
             || classifier(actual).is_some_and(|name| classifier(target) == Some(name))
     }
 

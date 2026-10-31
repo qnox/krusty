@@ -208,7 +208,7 @@ impl ConstructorDeclaration {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::klib_lowering::{constructor_bounds, klib_types::KlibTypeParameters};
+    use crate::klib_lowering::{klib_types::KlibTypeParameters, type_evidence};
     use crate::types::{type_name, TypeVariance};
 
     fn declaration(formals: Vec<Ty>, bounds: Vec<Vec<Ty>>) -> ConstructorDeclaration {
@@ -251,7 +251,7 @@ mod tests {
         assert!(caller.record_bounds(v, vec![comparable(v)]));
         let instantiate = |caller: &KlibTypeParameters| {
             declaration.instantiate(&args, result, |argument, bound| {
-                constructor_bounds::satisfies(None, caller, argument, bound)
+                type_evidence::satisfies(None, caller, argument, bound)
             })
         };
         assert_eq!(instantiate(&caller).unwrap(), args);
