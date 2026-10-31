@@ -675,6 +675,13 @@ pub enum IrExpr {
     /// role in `debug_local_provenance`. A backend that emits debug locals materializes the slot,
     /// the zero store, and the name.
     InlineFrameMarker,
+    /// The operand of a parameter a call leaves to its callee's default, in the full parameter
+    /// frame a default-argument entry takes. The entry overwrites it before any code reads it, so
+    /// it carries no value: each backend realizes it as the zero of `ty`'s carrier. It is a node
+    /// of its own because a null constant cannot stand for every carrier, such as a value class.
+    AbsentArgument {
+        ty: Ty,
+    },
     /// Invoke a function value (`f(args)` where `f: (A,…) -> R`) via the `FunctionN.invoke` interface
     /// method. Arguments are boxed to `Object`; the `Object` result is cast/unboxed to `ret`.
     /// `params` retains the semantic Kotlin parameter types through backend carrier lowering so an
@@ -1816,6 +1823,9 @@ pub struct IrFile {
     /// adaptation boundary records this edge when it creates the call; later representation
     /// analysis consumes the identity and never recognizes an unbox operation by its spelling.
     pub(crate) value_class_unbox_type_operation_edges: crate::fx_hash::HashMap<ExprId, ExprId>,
+    /// Each declaration's default-argument entry, by the declaration's `FunId`, once a target's
+    /// shared default-argument lowering has realized it as an ordinary function of this file.
+    pub(crate) default_entries: crate::fx_hash::HashMap<FunId, FunId>,
     /// `FunId` → source parameter names and, when present, default-value expressions.
     pub fn_params: crate::fx_hash::HashMap<u32, FnParamInfo>,
     /// Per declared method/function, whether each SOURCE parameter was declared nullable (`a: String?`).
