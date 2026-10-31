@@ -217,8 +217,8 @@ fun box(): String {\n\
         // out of order, are that shape; the constant `a = 1` is passed in place.
         assert!(source.contains("return v0.g(1, v1);"), "{source}");
         assert!(!source.contains("cannot emit Block"), "{source}");
-        // A member `tailrec` whose self-call dispatches on `this` is the same frame and steps
-        // (docs/SPEC.md, "What `tailrec` loops is a FRAME"). The step sits in a branch of the
+        // A member `tailrec` whose self-call dispatches on `this` is the same frame and steps.
+        // The step sits in a branch of the
         // returned `if`, so the `return` moves into the branches and the `continue` stays a
         // statement of the loop. Asserted here because this backend renders the rewrite's output
         // directly, so it is the cheapest place to see that the rewrite reaches every backend.

@@ -435,8 +435,7 @@ to run. Drop-in rules it enforces:
   accepted; an entry that cannot be read cannot be identified and is `Unsupported`.
 - **Activation = a jar on `-Xplugin`** (or `-P` under the plugin id), never a krusty flag. Nothing
   runs by default: kotlinc without the serialization plugin synthesizes no serializer, so krusty's
-  serialization pass runs only when the plugin is requested (`docs/SPEC.md` §7, "A compiler plugin
-  runs only when the command line requests it").
+  serialization pass runs only when the plugin is requested.
 - **kotlinc's syntax exactly.** `-Xplugin=<jar>,<jar>` is repeatable and split on `,` (a `:` is part
   of the path); `-P plugin:<id>:<key>=<value>` and `-P=…`; the experimental
   `-Xcompiler-plugin=<jars>[=<key>=<value>,…]`, which kotlinc refuses to mix with the legacy pair. A
@@ -491,7 +490,7 @@ that one value, so they cannot disagree. Callers choose it explicitly:
 
 ## Reusing kotlinc's own plugin tests for conformance
 
-krusty's correctness is defined differentially vs real `kotlinc` (`docs/SPEC.md`), and that extends to
+krusty's correctness is defined differentially vs real `kotlinc`, and that extends to
 plugins — **reuse the upstream suites rather than writing fresh ones** (both are Apache-2.0):
 
 - **kotlinx.serialization** — the compiler plugin ships a box-test corpus at

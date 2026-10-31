@@ -1,5 +1,4 @@
-//! Suspend lambdas compiled to classes of their own, as kotlinc's `SuspendLambdaLowering` does
-//! (`docs/JVM_INLINE_BEFORE_CPS.md` §1a, step 6).
+//! Suspend lambdas compiled to classes of their own, as kotlinc's `SuspendLambdaLowering` does.
 //!
 //! The lambda extends `SuspendLambda`, implements its `FunctionN` and is its own continuation. Its
 //! body is `invokeSuspend`, whose state machine kotlinc's coroutine transformer builds in its

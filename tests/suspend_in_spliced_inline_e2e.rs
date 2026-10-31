@@ -10,7 +10,7 @@
 //! ```
 //!
 //! The machine for these is built during emission instead, where the spliced body's own locals
-//! exist and can be spilled. See `docs/JVM_INLINE_BEFORE_CPS.md`.
+//! exist and can be spilled.
 
 use super::common;
 

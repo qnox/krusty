@@ -2,12 +2,11 @@
 //!
 //! kotlinc's codegen emits a suspend function's body with each suspension point left between
 //! `InlineMarker` calls, inlines into it, and only then hands the finished method to
-//! `CoroutineTransformerMethodVisitor`, which builds the state machine over it (see
-//! `docs/JVM_INLINE_BEFORE_CPS.md`). krusty does the same: the emitter asks for the transformation
-//! when it adds the method, and it runs here, over the finished body with every table attached,
-//! before the rest of kotlinc's bytecode rewrites. What the state machine needs from its
-//! continuation class (the spill fields and `@DebugMetadata`) is handed back to the emitter, which
-//! writes that class afterwards.
+//! `CoroutineTransformerMethodVisitor`, which builds the state machine over it. krusty does the
+//! same: the emitter asks for the transformation when it adds the method, and it runs here, over
+//! the finished body with every table attached, before the rest of kotlinc's bytecode rewrites.
+//! What the state machine needs from its continuation class (the spill fields and `@DebugMetadata`)
+//! is handed back to the emitter, which writes that class afterwards.
 
 use super::constant_pool_queries::PoolLookup;
 use super::method_rewrite::{BodyStage, MethodIdentity};
