@@ -82,6 +82,9 @@ jobs:
         with:
           cache-provider: basic
       - name: build krusty and its Gradle plugin
+        # Frame pointers let the project jobs sample krusty's call stacks cheaply.
+        env:
+          RUSTFLAGS: -C force-frame-pointers=yes
         run: |
           set -euo pipefail
           cargo build --profile gate -p krusty-cli --bin krusty
@@ -91,6 +94,7 @@ jobs:
           cp target/gate/krusty corpus-tools/krusty
           unzip -q "dist-gradle/krusty-gradle-plugin-$version.zip" -d corpus-tools
           echo "$version" > corpus-tools/plugin-version
+          cargo install inferno --version 0.12.8 --locked --root corpus-tools/inferno
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: corpus-tools
@@ -120,10 +124,20 @@ jobs:
         with:
           name: corpus-tools
           path: corpus-tools
-      - name: build ${{ matrix.project }} with kotlinc and with krusty
+      - name: install perf
         run: |
           set -euo pipefail
-          chmod +x corpus-tools/krusty
+          sudo apt-get update -q
+          sudo apt-get install -y -q linux-tools-common "linux-tools-$(uname -r)"
+          # Lets the runner's user sample every process and resolve kernel symbols.
+          sudo sysctl -w kernel.perf_event_paranoid=-1 kernel.kptr_restrict=0
+      - name: build ${{ matrix.project }} with kotlinc and with krusty
+        env:
+          CORPUS_PERF: perf
+        run: |
+          set -euo pipefail
+          chmod +x corpus-tools/krusty corpus-tools/inferno/bin/*
+          export CORPUS_FLAMEGRAPH=$PWD/corpus-tools/inferno/bin/inferno-flamegraph
           version=$(cat corpus-tools/plugin-version)
           scripts/oss-corpus/run.sh "${{ matrix.project }}" "$RUNNER_TEMP/corpus" \
             "$PWD/corpus-tools/krusty" \

@@ -54,15 +54,4 @@ impl Classpath {
             self.read_entry_class(e, internal, &format!("{internal}.class"))
         })
     }
-
-    /// The annotations, with their arguments, that each method of class `internal` states, read
-    /// again from its class file. `None` when the class has no class file or it cannot be read.
-    pub(in crate::jvm) fn class_method_annotations(
-        &self,
-        internal: TypeName,
-    ) -> Option<Vec<crate::jvm::classreader::MethodAnnotations>> {
-        let internal = crate::jvm::jvm_class_map::to_jvm_type_name(internal);
-        let bytes = self.class_bytes(crate::jvm::names::classfile_internal_name_of(internal))?;
-        crate::jvm::classreader::method_annotations(&bytes).ok()
-    }
 }

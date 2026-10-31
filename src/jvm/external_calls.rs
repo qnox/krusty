@@ -263,6 +263,31 @@ fn realize_expressions(
             } else {
                 supplied
             };
+            if default.is_some() {
+                // The placeholders, masks and marker belong to the construction, as a defaulted
+                // call's do: emission puts the construction's line back at each run of them.
+                let operand_plan = realized_arguments
+                    .iter()
+                    .copied()
+                    .enumerate()
+                    .map(|(position, argument)| {
+                        let parameter = (position as u32).checked_sub(default_prefix_count);
+                        match parameter.filter(|parameter| defaults.contains(parameter)) {
+                            Some(parameter) => {
+                                DefaultCallOperand::synthesized_default(argument, parameter)
+                            }
+                            None => DefaultCallOperand::supplied(argument),
+                        }
+                    })
+                    .chain(
+                        realization_operands
+                            .iter()
+                            .copied()
+                            .map(DefaultCallOperand::synthesized_abi),
+                    )
+                    .collect();
+                default_call_operands.record(expression, operand_plan);
+            }
             let IrExpr::New {
                 args,
                 ctor_desc,

@@ -50,6 +50,7 @@ enum DependencyExternalRealization {
     TargetIntrinsic(crate::libraries::CompilerIntrinsic),
     Constructor,
     PropertyGetter,
+    TargetMember,
     ProviderLeaf,
 }
 
@@ -95,6 +96,16 @@ impl EmittedDependencyCallable {
         }
     }
 
+    /// A member of a classifier whose representation the target owns: the target realizes the
+    /// call at its dispatch receiver, so the KLIB body, written against the library's own class
+    /// layout, is never lowered.
+    pub(crate) fn target_member(target: ExternalCallableId) -> Self {
+        Self {
+            realization: DependencyExternalRealization::TargetMember,
+            ..Self::new(target, None, None)
+        }
+    }
+
     pub(crate) fn provider_leaf(target: ExternalCallableId) -> Self {
         Self {
             realization: DependencyExternalRealization::ProviderLeaf,
@@ -115,6 +126,13 @@ impl EmittedDependencyCallable {
             DependencyExternalRealization::TargetIntrinsic(operation) => Some(operation),
             _ => None,
         }
+    }
+
+    fn is_target_member(self) -> bool {
+        matches!(
+            self.realization,
+            DependencyExternalRealization::TargetMember
+        )
     }
 
     fn is_constructor(self) -> bool {
@@ -843,7 +861,10 @@ impl CallLinker for Linker<'_, '_> {
                     )));
                 }
             }
-            let purpose = if emitted.target_intrinsic().is_some() || declaration.body.is_none() {
+            let purpose = if emitted.target_intrinsic().is_some()
+                || emitted.is_target_member()
+                || declaration.body.is_none()
+            {
                 HeaderPurpose::External
             } else {
                 HeaderPurpose::Body(emitted.singleton_dispatch())
