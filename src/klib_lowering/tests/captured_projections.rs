@@ -514,3 +514,72 @@ fn a_capture_a_secondary_bound_rejects_declines() {
     assert_eq!(unit.ir().exprs.len(), fresh.ir().exprs.len());
     assert_eq!(lowered_body(&unit, k), lowered_body(&fresh, fresh_k));
 }
+
+/// `both(a: Array<P>)`, generic in `P` and an unused `R : P`, with `h(a: Array<out String>)`
+/// calling `both<_, String>(a)`; and `pick(a: Array<P>)`, generic in `P` and an unused,
+/// independent `S : CharSequence`, with `k(a: Array<out String>)` calling `pick<_, String>(a)`.
+fn peer_calls() -> Demo {
+    demo(
+        &[
+            ("both", &[T::ArrayPBoundingR], T::Unit),
+            ("h", &[T::ArrayOutString], T::Unit),
+            ("pick", &[T::ArrayPBesideS], T::Unit),
+            ("k", &[T::ArrayOutString], T::Unit),
+        ],
+        |name, body| {
+            let callee = match name {
+                "h" => "both",
+                "k" => "pick",
+                _ => return Some(Vec::new()),
+            };
+            let a = body.param(0);
+            let call = body.generic_call_with(callee, vec![a], &[T::String, T::String], T::Unit);
+            Some(vec![
+                crate::metadata::klib_ir::tree::KlibIrStatement::Expression(call),
+            ])
+        },
+    )
+}
+
+#[test]
+fn a_capture_beside_an_independent_peer_binds_as_the_source_call_does() {
+    // kotlinc accepts `pick<_, String>(a)` on an `a: Array<out String>`: `S : CharSequence` does
+    // not name `P`, so `P` is captured from `a` alone.
+    let demo = peer_calls();
+    let mut unit = DependencyBodyUnit::default();
+    let k = lower_two_input(&demo, &mut unit, "k", "pick")
+        .unwrap_or_else(|decline| panic!("{decline}"));
+    validated(unit.ir());
+    let source = "fun <P, S : CharSequence> pick(a: Array<P>) {\n}\n\
+                  fun k(a: Array<out String>) {\n pick<_, String>(a)\n}\n";
+    assert_eq!(
+        lowered_body(&unit, k),
+        super::demo_package::source_body_with_stdlib(source, "k", 1)
+    );
+}
+
+#[test]
+fn a_capture_an_unused_peer_bound_names_declines() {
+    // kotlinc rejects `both<_, String>(a)` on an `a: Array<out String>`: the unused `R : P`
+    // constrains `P` too, and `String` is no subtype of the captured `out String`. No operand,
+    // receiver or bound of `P` names `R`, so only `R`'s own bound reveals the constraint. The
+    // body declines and publishes nothing.
+    let demo = peer_calls();
+    let mut unit = DependencyBodyUnit::default();
+    let decline = lower_two_input(&demo, &mut unit, "h", "both").expect_err("the body declines");
+    super::demo_package::assert_unit_is_empty(&unit);
+    assert_eq!(
+        decline.to_string(),
+        "the KLIB body of `demo.h` \
+         (its serialized declaration disagrees with the selected one: \
+         a call captures a projection its other operands or bounds also constrain)"
+    );
+    let k = lower_two_input(&demo, &mut unit, "k", "pick")
+        .unwrap_or_else(|decline| panic!("{decline}"));
+    let mut fresh = DependencyBodyUnit::default();
+    let fresh_k = lower_two_input(&demo, &mut fresh, "k", "pick")
+        .unwrap_or_else(|decline| panic!("{decline}"));
+    assert_eq!(k, fresh_k);
+    assert_eq!(unit.ir().exprs.len(), fresh.ir().exprs.len());
+    assert_eq!(lowered_body(&unit, k), lowered_body(&fresh, fresh_k));
+}

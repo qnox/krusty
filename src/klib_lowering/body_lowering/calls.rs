@@ -783,7 +783,8 @@ impl BodyLowering<'_> {
     ///
     /// Kotlin captures each projected argument apart, so a capture is published only when it is
     /// the call's sole use of `P`: no other slot, operand, receiver or type-parameter bound of the
-    /// declaration names `P`. Any other shape declines; nothing is bound.
+    /// declaration names `P`, including the complete declared bounds of every other type
+    /// parameter, used or not. Any other shape declines; nothing is bound.
     fn captured_type_arguments(
         &self,
         linked: &LinkedCallee,
@@ -842,7 +843,7 @@ impl BodyLowering<'_> {
                         .receiver
                         .is_some_and(|receiver| names(receiver, name))
                     && !names(bound, name)
-                    && self.admits_every_declared_bound(linked, name, read);
+                    && self.bounds_admit_capture(linked, name, read);
                 if !sole {
                     return Err(mismatch(
                         "a call captures a projection its other operands or bounds also constrain",
@@ -855,26 +856,34 @@ impl BodyLowering<'_> {
 }
 
 impl BodyLowering<'_> {
-    /// Whether the captured read type `read` satisfies every upper bound the selected declaration
-    /// declares for its type parameter `name`: the complete authenticated ledger, not only the
-    /// first bound a type-parameter type carries. A bound naming a type parameter, or a selection
-    /// with no ledger, is no proof.
-    fn admits_every_declared_bound(&self, linked: &LinkedCallee, name: &str, read: Ty) -> bool {
-        let Some(bounds) = linked.type_parameter_bounds.as_ref().and_then(|bounds| {
-            let ordinal = linked
-                .type_parameters
-                .iter()
-                .position(|parameter| parameter == name)?;
-            bounds.get(ordinal)
-        }) else {
+    /// Whether the selected declaration's complete authenticated bound ledger, not only the
+    /// first bound a type-parameter type carries, admits capturing `read` for its type parameter
+    /// `name`: every bound of `name` admits `read` and names no type parameter, and no bound of
+    /// any other type parameter names `name`, since that peer would constrain the capture too. A
+    /// selection with no complete ledger is no proof.
+    fn bounds_admit_capture(&self, linked: &LinkedCallee, name: &str, read: Ty) -> bool {
+        let Some(ledger) = linked
+            .type_parameter_bounds
+            .as_ref()
+            .filter(|ledger| ledger.len() == linked.type_parameters.len())
+        else {
             return false;
         };
-        bounds.iter().all(|&bound| {
-            !bound.mentions_ty_param()
-                && self
-                    .linker
-                    .is_subtype(self.header.type_parameters(), read, bound)
-        })
+        linked
+            .type_parameters
+            .iter()
+            .zip(ledger)
+            .all(|(parameter, bounds)| {
+                if parameter != name {
+                    return bounds.iter().all(|&bound| !names(bound, name));
+                }
+                bounds.iter().all(|&bound| {
+                    !bound.mentions_ty_param()
+                        && self
+                            .linker
+                            .is_subtype(self.header.type_parameters(), read, bound)
+                })
+            })
     }
 }
 
