@@ -13263,15 +13263,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   or explicit applier target, a call to another file's composable, a name an overload with lambdas
   shares, a recursive function with composable lambda parameters, and a class whose stability is
   not decided in its file (a generic class, a value-class field, or a field of another file's or a
-  Compose-compiled library's class, whose `$stable` kotlinc reads at run time). A nonempty `metricsDestination`/`reportsDestination` is an
+  Compose-compiled library's class, whose `$stable` kotlinc reads at run time, or of a numbered
+  `KFunctionN`/`KSuspendFunctionN` type). A nonempty `metricsDestination`/`reportsDestination` is an
   `UnimplementedOption` error. The runtime functions the code calls are selected at the handoff by
   their Kotlin signatures, or the module is rejected. Every public or internal class of a Compose
   module that is not an enum, interface, annotation, anonymous, local, inner, companion or value
   class gets kotlinc's `ClassStabilityTransformer` marker: an `@JvmField public static final int
   $stable` (`0` stable, `8` unstable, stored in `<clinit>` unless it is the JVM default) and,
-  without a `@Stable`/`@Immutable`/`@StableMarker` marker, `@StabilityInferred(parameters = 1|0)`
+  without a `@Stable`/`@Immutable`/`@StableMarker` marker (read from the declaration, so a
+  SOURCE-retained marker counts), `@StabilityInferred(parameters = 1|0)`
   in the class file and in Kotlin metadata. The inference is kotlinc's: a final class of `val`s of
-  primitive, `String`, `Unit`, function, enum, object or stable same-file class types is stable; a
+  primitive, `String`, `Unit`, function, `KFunction`, enum, object or stable same-file class types is stable; a
   `var` (also `lateinit`) or a Java class makes it unstable; an interface, a suspend function type
   or a class that is not final is unknown, and unknown parts drop out once a class combines several
   of them (two interface-typed fields leave it stable). A superclass of unknown stability is

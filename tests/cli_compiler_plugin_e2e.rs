@@ -641,6 +641,13 @@ fn the_compose_pass_rejects_what_it_does_not_cover() {
          field yet",
     );
     assert_compose_rejects(
+        "compose-reflection-function-field",
+        "class Reference(val f: kotlin.reflect.KFunction1<Int, Int>)\n",
+        &[],
+        "3:1: error: krusty's Compose compiler plugin does not support a class with a field of a \
+         numbered reflection function type yet",
+    );
+    assert_compose_rejects(
         "compose-other-file-class-field",
         "class Card(val point: Point)\n",
         &[("Point.kt", "package probe\nclass Point(val x: Int)\n")],

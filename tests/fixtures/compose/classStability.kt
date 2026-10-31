@@ -11,6 +11,7 @@ import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.StableMarker
 import androidx.compose.runtime.State
+import kotlin.reflect.KFunction
 
 class Point(val x: Int, val y: Int)
 class Counter(var count: Int)
@@ -50,6 +51,10 @@ class Chain(val next: Chain?)
 class HoldsMarked(val marked: Marked)
 class Suspends(val block: suspend () -> Unit)
 class HoldsState(val state: State<Int>)
+@StableMarker @Retention(AnnotationRetention.SOURCE) annotation class Declared
+@Declared class DeclaredMarked(var value: Int)
+class HoldsDeclaredMarked(val marked: DeclaredMarked)
+class Reference(val f: KFunction<Int>)
 
 // FILE: box.kt
 package model
@@ -84,6 +89,9 @@ private val expected = listOf(
     "model.HoldsMarked" to 0,
     "model.Suspends" to 8,
     "model.HoldsState" to 0,
+    "model.DeclaredMarked" to 0,
+    "model.HoldsDeclaredMarked" to 0,
+    "model.Reference" to 0,
 )
 
 fun box(): String {

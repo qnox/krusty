@@ -32,6 +32,7 @@ use crate::types::{type_name, ClassifierDeclarationKind, Ty, TyKind, TypeName, V
 const STABILITY_INFERRED: &str = "androidx/compose/runtime/internal/StabilityInferred";
 const STABLE_MARKER: &str = "androidx/compose/runtime/StableMarker";
 const JVM_FIELD: &str = "kotlin/jvm/JvmField";
+const K_FUNCTION: &str = "kotlin/reflect/KFunction";
 /// The stability bits of slot 0: `StabilityBits.STABLE` and `StabilityBits.UNSTABLE`.
 const STABLE: i32 = 0b000;
 const UNSTABLE: i32 = 0b100 << 1;
@@ -273,12 +274,25 @@ impl Inference<'_> {
 
     /// Whether the class applies a stable marker itself (kotlinc's `hasStableMarker`).
     fn marker(&self, class: &crate::ir::IrClass) -> Result<bool, &'static str> {
-        for annotation in class.applied_annotations.applications() {
-            if self.is_stable_marker(annotation.internal)? {
+        for annotation in self.annotations(class.fq_name)? {
+            if self.is_stable_marker(annotation)? {
                 return Ok(true);
             }
         }
         Ok(false)
+    }
+
+    /// The annotations a classifier's declaration applies, whatever their retention: kotlinc reads
+    /// stable markers from the declaration, so a SOURCE-retained marker counts too.
+    fn annotations(&self, name: TypeName) -> Result<Vec<TypeName>, &'static str> {
+        match self.runtime.classifier(name) {
+            Some(declared) => Ok(declared
+                .annotations
+                .iter()
+                .map(|applied| applied.annotation)
+                .collect()),
+            None => Err("a class annotation the compilation does not declare"),
+        }
     }
 
     /// Whether `annotation` is a stable marker: annotated with the runtime's `@StableMarker`, or a
@@ -290,46 +304,22 @@ impl Inference<'_> {
         {
             return Ok(true);
         }
-        let stable_marker = type_name(STABLE_MARKER);
-        Ok(match self.classifier(annotation) {
-            Some(Classifier::File(class)) => class
-                .applied_annotations
-                .applications()
-                .any(|applied| applied.internal == stable_marker),
-            Some(Classifier::Declared(declared)) => declared
-                .annotations
-                .iter()
-                .any(|applied| applied.annotation == stable_marker),
-            None => return Err("a class annotation the compilation does not declare"),
-        })
+        Ok(self
+            .annotations(annotation)?
+            .contains(&type_name(STABLE_MARKER)))
     }
 
     /// Whether `name` or one of its supertypes other than `Any` applies a stable marker (kotlinc's
     /// `hasStableMarkedDescendant`).
     fn has_stable_marked_descendant(&self, name: TypeName) -> Result<bool, &'static str> {
-        let (annotations, supertypes): (Vec<TypeName>, Vec<TypeName>) = match self.classifier(name)
-        {
-            Some(Classifier::File(class)) => (
-                class
-                    .applied_annotations
-                    .applications()
-                    .map(|annotation| annotation.internal)
-                    .collect(),
-                std::iter::once(class.superclass)
-                    .chain(class.interfaces.iter())
-                    .collect(),
-            ),
-            Some(Classifier::Declared(declared)) => (
-                declared
-                    .annotations
-                    .iter()
-                    .map(|annotation| annotation.annotation)
-                    .collect(),
-                declared.supertypes,
-            ),
+        let supertypes: Vec<TypeName> = match self.classifier(name) {
+            Some(Classifier::File(class)) => std::iter::once(class.superclass)
+                .chain(class.interfaces.iter())
+                .collect(),
+            Some(Classifier::Declared(declared)) => declared.supertypes,
             None => return Err("a class whose supertypes the compilation does not declare"),
         };
-        for annotation in annotations {
+        for annotation in self.annotations(name)? {
             if self.is_stable_marker(annotation)? {
                 return Ok(true);
             }
@@ -514,7 +504,11 @@ impl Inference<'_> {
             // A suspend function type is a `SuspendFunctionN` interface to kotlinc.
             TyKind::Fun(signature) if signature.suspend => Ok(Stability::Unknown),
             TyKind::Fun(_) => Ok(Stability::STABLE),
-            TyKind::Obj(name, _) if is_kfunction(name) => Ok(Stability::STABLE),
+            // kotlinc counts `KFunction` and its numbered `KFunctionN` subtypes as function types.
+            TyKind::Obj(name, _) if name == type_name(K_FUNCTION) => Ok(Stability::STABLE),
+            TyKind::Obj(name, _) if self.extends_k_function(name) => {
+                Err("a class with a field of a numbered reflection function type")
+            }
             TyKind::Nullable(inner) | TyKind::PlatformNullable(inner) => {
                 self.of_type(inner, analyzing)
             }
@@ -537,6 +531,14 @@ impl Inference<'_> {
             TyKind::Nothing => Ok(Stability::UNSTABLE),
             _ => Err("a class with a field of a type kotlinc's stability inference reads apart"),
         }
+    }
+
+    /// Whether `name` declares `KFunction` as a direct supertype, as the numbered `KFunctionN` and
+    /// `KSuspendFunctionN` types do.
+    fn extends_k_function(&self, name: TypeName) -> bool {
+        self.runtime
+            .classifier(name)
+            .is_some_and(|declared| declared.supertypes.contains(&type_name(K_FUNCTION)))
     }
 
     fn is_value_class(&self, name: TypeName) -> bool {
@@ -571,12 +573,6 @@ fn is_protobuf_message(class: TypeName) -> bool {
     PROTOBUF_MESSAGES
         .iter()
         .any(|&message| class == type_name(message))
-}
-
-/// A `KFunction` type, which kotlinc's `isFunctionOrKFunction` counts as a function type.
-fn is_kfunction(class: TypeName) -> bool {
-    class == type_name("kotlin/reflect/KFunction")
-        || (0..=22).any(|arity| class == type_name(&format!("kotlin/reflect/KFunction{arity}")))
 }
 
 fn is_any(class: TypeName) -> bool {
