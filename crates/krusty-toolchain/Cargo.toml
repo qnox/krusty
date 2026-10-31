@@ -10,7 +10,7 @@ repository = "https://github.com/qnox/krusty"
 # A YAML 1.2 event parser that passes the YAML test suite. The project model is built from its
 # events with explicit size and depth bounds (`yaml.rs`), so no hand-written YAML grammar decides
 # what a configuration file means.
-saphyr-parser = "0.2.1"
+saphyr-parser = "0.3.3"
 # A conforming XML parser for Maven POMs, and JSON for Gradle module metadata; both are already
 # workspace dependencies.
 roxmltree = "0.21"
