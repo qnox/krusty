@@ -14666,12 +14666,13 @@ impl<'a> Checker<'a> {
                 // Descendants were checked while every addressable receiver rung occupied a
                 // provisional field. Rewrite their exact `ClassStorage` coordinates through the
                 // finalized field permutation instead of replaying the class body. Rechecking the
-                // whole subtree here doubles the work at every nesting level (and is exponential
-                // for deeply nested anonymous objects); the structural owner edge identifies the
-                // only constructions whose storage owner is this declaration.
-                if !remap_direct_anonymous_class_storage_captures(
+                // whole subtree here doubles the work at every nesting level. Forwarded operands
+                // execute on the enclosing construction rung and retain that storage owner.
+                if !capture_field_order::remap_direct_storage_captures(
+                    self.file,
                     declaration,
                     &self.anonymous_lexical_scope,
+                    &self.discovered_anonymous_super_forwards,
                     &storage_field_remap,
                     &mut self.discovered_anonymous_captures,
                 ) {
@@ -31355,40 +31356,6 @@ fn enclosing_receiver_labels(
             ))
         })
         .collect()
-}
-
-/// Translate storage ordinals recorded by direct anonymous children while `owner` still exposed
-/// its provisional receiver prefix. The lexical-owner graph is the authoritative relationship:
-/// deeper descendants read storage from their immediate classifier, whose own finalization remaps
-/// them independently.
-fn remap_direct_anonymous_class_storage_captures(
-    owner: DeclId,
-    lexical_scope: &AnonymousLexicalClassScope,
-    storage_fields: &[Option<u32>],
-    captures: &mut HashMap<DeclId, Vec<AnonymousObjectCapture>>,
-) -> bool {
-    let direct_children = lexical_scope
-        .owners
-        .iter()
-        .filter_map(|(&declaration, &candidate_owner)| {
-            (candidate_owner == owner).then_some(declaration)
-        })
-        .collect::<Vec<_>>();
-    for declaration in direct_children {
-        let Some(child_captures) = captures.get_mut(&declaration) else {
-            continue;
-        };
-        for capture in child_captures {
-            let AnonymousObjectCaptureSource::ClassStorage { field } = &mut capture.source else {
-                continue;
-            };
-            let Some(Some(finalized_field)) = storage_fields.get(*field as usize) else {
-                return false;
-            };
-            *field = *finalized_field;
-        }
-    }
-    true
 }
 
 fn install_anonymous_object_captures(
