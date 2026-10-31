@@ -127,7 +127,7 @@ impl Body<'_> {
     }
 }
 
-fn push_zero(code: &mut Code, carrier: ValType) {
+pub(super) fn push_zero(code: &mut Code, carrier: ValType) {
     match carrier {
         ValType::I32 => code.i32_const(0),
         ValType::I64 => code.i64_const(0),
