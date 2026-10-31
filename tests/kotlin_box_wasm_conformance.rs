@@ -137,7 +137,7 @@ impl Lane for WasmLane {
 
     fn not_applicable(&self, src: &str) -> Option<&'static str> {
         if !krusty::conformance::backend_targeted(src, &self.tokens()) {
-            return Some("targeted at another backend");
+            return Some(box_lane::TARGETED_AT_ANOTHER_BACKEND);
         }
         if krusty::conformance::backend_muted(src, &self.tokens()) {
             return Some("muted on this wasm target");
@@ -254,7 +254,7 @@ fn wasm_applicability_reads_both_the_family_and_the_exact_target() {
     assert_eq!(wasi.not_applicable(wasm_only), None);
     assert_eq!(
         js.not_applicable("// TARGET_BACKEND: JVM\nfun box() = \"OK\""),
-        Some("targeted at another backend")
+        Some(box_lane::TARGETED_AT_ANOTHER_BACKEND)
     );
     assert_eq!(
         js.not_applicable("// IGNORE_BACKEND: JVM\nfun box() = \"OK\""),

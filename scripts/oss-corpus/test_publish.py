@@ -41,6 +41,7 @@ class Publish(unittest.TestCase):
             write(f'{work}/run/corpus-fresh/out/fresh/compare.json', compare('fresh', 2, dict(
                 kotlinc=build(30.5, 2500, 120.0), krusty=build(10.0, 1400, 90.0))))
             write(f'{work}/run/corpus-fresh/logs/fresh.plugins.tsv', 'gradle\t:\tp\n')
+            write(f'{work}/run/corpus-fresh/logs/fresh.krusty.svg', '<svg/>')
             names = publish.publish(f'{work}/run', tree, {'kept', 'fresh'}, 'abc123', '2026-10-25',
                                     'https://example.test/run/9')
             self.assertEqual(names, ['fresh'])
@@ -49,6 +50,9 @@ class Publish(unittest.TestCase):
                 fresh = json.load(f)
             self.assertEqual((fresh['built'], fresh['measured']),
                              (2, dict(date='2026-10-25', commit='abc123', run='https://example.test/run/9')))
+            self.assertEqual(fresh['flame_graph'], 'krusty-flamegraph.svg')
+            with open(f'{tree}/projects/fresh/krusty-flamegraph.svg') as f:
+                self.assertEqual(f.read(), '<svg/>')
             with open(f'{tree}/projects/fresh/fresh.plugins.tsv') as f:
                 self.assertEqual(f.read(), 'gradle\t:\tp\n')
             with open(f'{tree}/projects/kept/compare.json') as f:

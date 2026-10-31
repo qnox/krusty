@@ -167,6 +167,10 @@ pub struct Options {
     /// `-Xstring-concat=inline`: build every string concatenation with `StringBuilder`, whatever
     /// the JVM target.
     pub inline_string_concat: bool,
+    /// kotlinc's `USE_INLINE_SCOPES_NUMBERS` configuration: name inlined locals by their inline
+    /// scope's number. The box harness sets it from its typed configuration channel; the command
+    /// line still refuses `-Xuse-inline-scopes-numbers` until every inlining path numbers scopes.
+    pub inline_scopes_numbers: bool,
     /// `-opt-in=<fq name>[,<fq name>…]` (also `-opt-in <value>`, repeatable): requirement markers
     /// accepted module-wide, applied to the language settings once they are built.
     pub opt_in: Vec<String>,
@@ -226,6 +230,7 @@ impl Default for Options {
             explicit_api: None,
             assertions: None,
             inline_string_concat: false,
+            inline_scopes_numbers: false,
             opt_in: Vec::new(),
             suppress_version_warnings: false,
             report_all_warnings: false,
@@ -576,6 +581,7 @@ impl Options {
             .with_java_parameters(self.java_parameters)
             .with_lambda_modes(self.lambda_modes)
             .with_inline_string_concat(self.inline_string_concat)
+            .with_inline_scopes_numbers(self.inline_scopes_numbers)
             .with_param_assertions(!self.no_param_assertions)
             .with_call_assertions(!self.no_call_assertions)
             .with_annotations_in_metadata(
@@ -671,7 +677,7 @@ pub fn classpath_entry_problems(entries: &[PathBuf]) -> Vec<ClasspathEntryProble
                                     || extension.eq_ignore_ascii_case("zip")
                             });
                         if is_archive {
-                            zip::ZipArchive::new(file)
+                            krusty::archive::open_file(file)
                                 .err()
                                 .map(|error| format!("not a readable archive ({error})"))
                         } else {
