@@ -156,3 +156,68 @@ fn klib_target_member_links_the_root_class_member_at_its_receiver() {
     );
     assert_unit_is_empty(&unit);
 }
+
+/// `fun a(): Unit = Unit`, whose body reads the `Unit` object.
+fn unit_object_reader() -> super::demo_package::Demo {
+    use super::demo_package::{demo, T};
+    demo(&[("a", &[], T::Unit)], |_, body| {
+        let KlibIrType::Simple { classifier, .. } = T::Unit.klib() else {
+            panic!("`Unit` is a simple class type")
+        };
+        let object = body.expr(T::Unit, KlibIrExprKind::GetObject(classifier));
+        Some(vec![body.ret(object)])
+    })
+}
+
+#[test]
+fn klib_object_value_of_a_target_classifier_is_the_targets_singleton() {
+    use crate::klib_libraries::KlibIntrinsicFacts;
+    let demo = unit_object_reader();
+    let root = demo.facts["a"].klib_body_callable().unwrap();
+    let represents_unit = |classifier| classifier == crate::types::wk::unit();
+    let facts = KlibCalleeFacts::new([root]).with_target_classifiers(&represents_unit);
+    let mut unit = DependencyBodyUnit::default();
+    let function = unit
+        .lower_function_with_intrinsics_and_externals(
+            root,
+            &demo.bodies,
+            &facts,
+            KlibIntrinsicFacts::empty(),
+            &Default::default(),
+        )
+        .unwrap();
+    validated(unit.ir());
+    assert_eq!(
+        lowered_body(&unit, function),
+        super::demo_package::source_body_with_stdlib("fun a(): Unit {\n return Unit\n}\n", "a", 0)
+    );
+}
+
+#[test]
+fn klib_object_value_of_a_library_laid_out_object_declines() {
+    use super::demo_package::assert_unit_is_empty;
+    use crate::klib_libraries::KlibIntrinsicFacts;
+    let demo = unit_object_reader();
+    let root = demo.facts["a"].klib_body_callable().unwrap();
+    let represents_any = |classifier| classifier == crate::types::wk::any();
+    for facts in [
+        KlibCalleeFacts::new([root]),
+        KlibCalleeFacts::new([root]).with_target_classifiers(&represents_any),
+    ] {
+        let mut unit = DependencyBodyUnit::default();
+        let declined = unit
+            .lower_function_with_intrinsics_and_externals(
+                root,
+                &demo.bodies,
+                &facts,
+                KlibIntrinsicFacts::empty(),
+                &Default::default(),
+            )
+            .unwrap_err();
+        assert_eq!(
+            declined.to_string(),
+            "the KLIB body of `demo.a` (it uses an object value)"
+        );
+        assert_unit_is_empty(&unit);
+    }
+}
