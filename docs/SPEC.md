@@ -13274,7 +13274,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   SOURCE-retained marker counts), `@StabilityInferred(parameters = 1|0)`
   in the class file and in Kotlin metadata. The inference is kotlinc's: a final class of `val`s of
   primitive, `String`, `Unit`, function, `KFunction`, enum, object or stable same-file class types is stable; a
-  `var` (also `lateinit`) or a Java class makes it unstable; an interface, a suspend function type
+  `var` (also `lateinit`) or a Java class makes it unstable (a Kotlin builtin the JVM realizes by a
+  Java class, such as `List` or `CharSequence`, is Kotlin by the JVM provider's builtin class map,
+  not by its package: `tests/fixtures/compose/classStabilityJavaOrigin.kt`); an interface, a suspend function type
   or a class that is not final is unknown, and unknown parts drop out once a class combines several
   of them (two interface-typed fields leave it stable). A superclass of unknown stability is
   ignored, a cycle is unstable, and a dependency Kotlin class without `@StabilityInferred` is

@@ -56,7 +56,8 @@ pub trait PluginRuntime {
 #[derive(Clone, Debug)]
 pub struct PluginClassifier {
     pub kind: ClassifierDeclarationKind,
-    /// A Kotlin declaration; `false` for a Java classifier.
+    /// A Kotlin declaration, including a Kotlin builtin its provider realizes by a platform class
+    /// (`kotlin/collections/List`); `false` for a Java classifier.
     pub is_kotlin: bool,
     /// Neither `open`, `abstract` nor `sealed`.
     pub is_final: bool,

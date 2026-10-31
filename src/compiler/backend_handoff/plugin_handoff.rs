@@ -2,7 +2,7 @@
 //! came from, the declarations its calls selected, and the runtime declarations the plugin's
 //! generated code calls, selected through the compilation's symbol source.
 
-use crate::backend::{BackendClassifierFact, BackendClassifierSource, CheckedBackendCallables};
+use crate::backend::{BackendClassifierSource, CheckedBackendCallables};
 use crate::diag::Span;
 use crate::fir::{ExternalCallableId, OriginStore, SourceFileId};
 use crate::ir::{ExprId, IrFile};
@@ -13,26 +13,7 @@ use crate::plugins::runtime_declarations::{
 use crate::plugins::CheckedSourceFacts;
 use crate::symbol_resolver::declared_member_callables;
 use crate::symbol_source::{SymbolNamespace, SymbolSource};
-use crate::types::{ClassifierDeclarationName, Ty, TypeName};
-
-/// A Kotlin builtin realized by a platform class, which carries no Kotlin metadata of its own: a
-/// classifier declared in package `kotlin` or `kotlin.collections` (`CharSequence`, `List`,
-/// `Map.Entry`), where no Java class is declared.
-fn is_mapped_builtin(
-    classifiers: &dyn BackendClassifierSource,
-    fact: &BackendClassifierFact,
-) -> bool {
-    match &fact.declaration_name {
-        Some(ClassifierDeclarationName::TopLevel { package, .. }) => {
-            *package == crate::types::wk::kotlin_package()
-                || *package == crate::types::type_name("kotlin/collections")
-        }
-        Some(ClassifierDeclarationName::Nested { owner, .. }) => classifiers
-            .classifier(*owner)
-            .is_some_and(|owner| is_mapped_builtin(classifiers, &owner)),
-        None => false,
-    }
-}
+use crate::types::{Ty, TypeName};
 
 /// One file's checked origins and frozen dependency declarations.
 pub(super) struct HandoffSourceFacts<'a> {
@@ -127,7 +108,7 @@ impl PluginRuntime for HandoffRuntime<'_> {
         let fact = self.classifiers.classifier(classifier)?;
         Some(PluginClassifier {
             kind: fact.kind.into(),
-            is_kotlin: fact.is_kotlin || is_mapped_builtin(self.classifiers, &fact),
+            is_kotlin: fact.is_kotlin || fact.mapped_builtin,
             is_final: !fact.is_extensible,
             is_value: fact.value_declaration.is_some(),
             in_module: fact.source,
