@@ -224,6 +224,36 @@ impl super::SymbolResolver<'_> {
     ) -> CandidateSelection<ScopedClassifier> {
         select(&self.src, self.fn_scope, name)
     }
+
+    /// Whether the nearest receiver-less function named `name` sits on a file/import rung strictly
+    /// nearer than the rung that selects `classifier` for the same spelling. A bare call then offers
+    /// that function before the classifier's constructors: kotlinc 2.4.21 calls a same-package
+    /// `fun Pair(a: Int, b: Int)` rather than the default-imported `kotlin.Pair` constructor.
+    pub(crate) fn top_level_function_precedes_classifier(
+        &self,
+        name: &str,
+        classifier: TypeName,
+    ) -> bool {
+        let (Some(scope), CandidateSelection::Selected(selected)) =
+            (self.fn_scope, self.scoped_classifier_in_scope(name))
+        else {
+            return false;
+        };
+        selected.classifier == classifier
+            && super::scope_level_callables::tagged_symbol_levels_in_function_scope(
+                &self.src, name, scope,
+            )
+            .into_iter()
+            .find(|level| {
+                super::scope_level_callables::level_functions(&level.symbols)
+                    .next()
+                    .is_some()
+            })
+            .is_some_and(|level| {
+                level.kind.callable_scope_rung().selection_key(level.rank)
+                    < selected.scope_rung.selection_key(selected.scope_rank)
+            })
+    }
 }
 
 /// One rung of classifier import precedence.
