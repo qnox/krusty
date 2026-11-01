@@ -3,7 +3,10 @@
 //! Kotlin ships the common declarations in the distribution KLIB next to `kotlin-stdlib.jar`. Exact
 //! public callable identities from it authorize language roles (floating-point range membership,
 //! `enumEntries`) that are then joined to the paired platform realization. The JVM stdlib's class
-//! files and `.kotlin_module` carry no such identity, which is why this KLIB is still read. Optional
+//! files and `.kotlin_module` carry no such identity, which is why this KLIB is still read. Opening it
+//! checks only the container: the manifest, the module header, and that the header and linkdata name
+//! the same packages. The identities and their packages' fragments are decoded on the first lookup a
+//! role could apply to, so a compilation that never meets one does not decode the library. Optional
 //! annotation classes do not come from here: kotlinc reads them from each classpath root's
 //! `.kotlin_module` (see `optional_annotations`).
 //!
@@ -102,9 +105,14 @@ impl From<KlibError> for CommonExpectationError {
     }
 }
 
+type RoleInventory = Result<Vec<CommonPackageFunctionRole>, Arc<CommonExpectationError>>;
+
 #[derive(Default)]
 pub(super) struct CommonExpectationIndex {
-    package_function_roles: Vec<CommonPackageFunctionRole>,
+    /// The selected KLIB, opened and container-checked; `None` when no KLIB was selected.
+    archive: Option<KlibArchive>,
+    /// Role-bearing identities, read from `archive` on the first lookup a role could apply to.
+    package_function_roles: OnceLock<RoleInventory>,
 }
 
 #[derive(Clone)]
@@ -144,28 +152,44 @@ impl CommonExpectationIndex {
     /// The caller must first prove that the physical callable came from the JVM stdlib paired with
     /// this KLIB. Signature facts only join that realization to an already-role-bearing identity;
     /// they never create the role themselves. Missing or ambiguous identity records fail closed.
+    /// A lookup no role identity could match never reads the KLIB; the first one that could reads
+    /// the role inventory, and a failure to read it is returned to every such lookup.
     pub(super) fn package_function_role(
         &self,
         common_metadata_source: bool,
         package: TypeName,
         name: &str,
         candidate: &FunctionInfo,
-    ) -> Option<CompilerIntrinsic> {
+    ) -> Result<Option<CompilerIntrinsic>, Arc<CommonExpectationError>> {
         if !common_metadata_source {
-            return None;
+            return Ok(None);
         }
-        let signature = candidate.generic_sig.as_ref()?;
-        let mut matches = self.package_function_roles.iter().filter(|declaration| {
+        let Some(signature) = candidate.generic_sig.as_ref() else {
+            return Ok(None);
+        };
+        // The inventory only holds identities the role table names, each with the table's own
+        // package, name, and shape, so a candidate no table entry accepts matches none of them.
+        if !StdlibKlibIntrinsic::ALL.iter().any(|identity| {
+            identity.package() == package
+                && identity.name() == name
+                && identity.accepts_source(candidate)
+        }) {
+            return Ok(None);
+        }
+        let roles = self.package_function_roles()?;
+        let mut matches = roles.iter().filter(|declaration| {
             declaration.package == package
                 && declaration.name == name
                 && declaration.generic_sig == *signature
                 && declaration.identity.accepts_source(candidate)
         });
-        let declaration = matches.next()?;
-        matches
+        let Some(declaration) = matches.next() else {
+            return Ok(None);
+        };
+        Ok(matches
             .next()
             .is_none()
-            .then(|| declaration.identity.compiler_intrinsic())
+            .then(|| declaration.identity.compiler_intrinsic()))
     }
 
     pub(super) fn attach(
@@ -174,34 +198,42 @@ impl CommonExpectationIndex {
         namespace: SymbolNamespace,
         name: &str,
         candidate: &mut FunctionInfo,
-    ) {
+    ) -> Result<(), Arc<CommonExpectationError>> {
         let SymbolNamespace::Package(package) = namespace else {
-            return;
+            return Ok(());
         };
         if let Some(role) =
-            self.package_function_role(common_metadata_source, package, name, candidate)
+            self.package_function_role(common_metadata_source, package, name, candidate)?
         {
             candidate.callable.compiler_intrinsic = Some(role);
         }
+        Ok(())
     }
 
+    fn package_function_roles(
+        &self,
+    ) -> Result<&[CommonPackageFunctionRole], Arc<CommonExpectationError>> {
+        self.package_function_roles
+            .get_or_init(|| match &self.archive {
+                Some(archive) => read_package_function_roles(archive).map_err(Arc::new),
+                None => Ok(Vec::new()),
+            })
+            .as_deref()
+            .map_err(Arc::clone)
+    }
+
+    #[cfg(test)]
+    fn with_roles(roles: Vec<CommonPackageFunctionRole>) -> Self {
+        Self {
+            archive: None,
+            package_function_roles: OnceLock::from(Ok(roles)),
+        }
+    }
+
+    /// Open the selected KLIB and check its container. Declarations are read on demand.
     fn read(path: &Path) -> Result<Self, CommonExpectationError> {
         let archive = KlibArchive::open(path)?;
         archive.manifest()?;
-        let package_function_roles =
-            match crate::metadata::klib_ir::read_public_declaration_signatures(&archive) {
-                Ok(signatures) => signatures
-                    .into_iter()
-                    .filter_map(common_package_function_role)
-                    .collect(),
-                Err(crate::metadata::klib_ir::KlibIrDecodeError::Missing { .. }) => Vec::new(),
-                Err(source) => {
-                    return Err(CommonExpectationError::InvalidIr {
-                        path: path.to_path_buf(),
-                        source,
-                    });
-                }
-            };
         let module_header = archive.module_header()?;
         let module_header = decode::parse_module_header(&module_header).map_err(|source| {
             CommonExpectationError::InvalidModuleHeader {
@@ -225,22 +257,48 @@ impl CommonExpectationIndex {
                 fragments: fragment_packages,
             });
         }
-        // The KLIB is a dependency: every fragment crosses the checked boundary even though only
-        // the IR identities above carry roles.
-        for fragment in fragments {
-            let bytes = archive.read(&fragment.entry)?;
-            semantic::parse_package_fragment_checked(&bytes).map_err(|source| {
-                CommonExpectationError::InvalidFragment {
-                    archive: path.to_path_buf(),
-                    entry: fragment.entry,
-                    source,
-                }
-            })?;
-        }
         Ok(Self {
-            package_function_roles,
+            archive: Some(archive),
+            package_function_roles: OnceLock::new(),
         })
     }
+}
+
+/// The role-bearing public identities of `archive`. Every fragment of a package that declares one
+/// crosses the checked boundary before the identity is trusted, even though only the IR identity
+/// carries the role.
+fn read_package_function_roles(
+    archive: &KlibArchive,
+) -> Result<Vec<CommonPackageFunctionRole>, CommonExpectationError> {
+    let path = archive.path();
+    let roles = match crate::metadata::klib_ir::read_public_declaration_signatures(archive) {
+        Ok(signatures) => signatures
+            .into_iter()
+            .filter_map(common_package_function_role)
+            .collect::<Vec<_>>(),
+        Err(crate::metadata::klib_ir::KlibIrDecodeError::Missing { .. }) => Vec::new(),
+        Err(source) => {
+            return Err(CommonExpectationError::InvalidIr {
+                path: path.to_path_buf(),
+                source,
+            });
+        }
+    };
+    for fragment in archive.package_fragments() {
+        let package_path = fragment.package_fqname.replace('.', "/");
+        if !roles.iter().any(|role| role.package.matches(&package_path)) {
+            continue;
+        }
+        let bytes = archive.read(&fragment.entry)?;
+        semantic::parse_package_fragment_checked(&bytes).map_err(|source| {
+            CommonExpectationError::InvalidFragment {
+                archive: path.to_path_buf(),
+                entry: fragment.entry,
+                source,
+            }
+        })?;
+    }
+    Ok(roles)
 }
 
 /// Language role carried by exact public identities from the trusted common stdlib KLIB. These
@@ -360,7 +418,8 @@ mod tests {
                 crate::types::wk::kotlin_ranges_package(),
                 "rangeTo",
                 &candidate,
-            ),
+            )
+            .expect("the role inventory reads"),
             None,
             "a trusted JVM declaration with the same owner and shape has no role without the exact common identity",
         );
@@ -373,26 +432,27 @@ mod tests {
             common_package_function_role(floating_range_identity("rangeTo", DOUBLE_RANGE_TO))
                 .expect("the exact common identity owns the role");
         let candidate = floating_range_candidate(&exact);
-        let index = CommonExpectationIndex {
-            package_function_roles: vec![exact],
-        };
+        let index = CommonExpectationIndex::with_roles(vec![exact]);
         assert_eq!(
             index.package_function_role(
                 false,
                 crate::types::wk::kotlin_ranges_package(),
                 "rangeTo",
                 &candidate,
-            ),
+            )
+            .expect("the role inventory reads"),
             None,
             "an identical owner and signature from another JVM dependency cannot actualize the common identity",
         );
         assert_eq!(
-            index.package_function_role(
-                true,
-                crate::types::wk::kotlin_ranges_package(),
-                "rangeTo",
-                &candidate,
-            ),
+            index
+                .package_function_role(
+                    true,
+                    crate::types::wk::kotlin_ranges_package(),
+                    "rangeTo",
+                    &candidate,
+                )
+                .expect("the role inventory reads"),
             Some(CompilerIntrinsic::FloatingRangeMembership),
         );
         assert_eq!(
@@ -401,7 +461,8 @@ mod tests {
                 crate::types::wk::kotlin_ranges_package(),
                 "otherRange",
                 &candidate,
-            ),
+            )
+            .expect("the role inventory reads"),
             None,
             "the paired owner and shape cannot actualize an identity under another source declaration name",
         );
@@ -521,12 +582,9 @@ mod tests {
         let candidate = enum_entries_candidate(&exact);
         let missing_identity = CommonExpectationIndex::default();
         assert_eq!(
-            missing_identity.package_function_role(
-                true,
-                type_name("kotlin/enums"),
-                "enumEntries",
-                &candidate,
-            ),
+            missing_identity
+                .package_function_role(true, type_name("kotlin/enums"), "enumEntries", &candidate,)
+                .expect("the role inventory reads"),
             None,
             "the same owner and signature have no role without the exact common identity",
         );
@@ -538,23 +596,26 @@ mod tests {
         let exact = common_package_function_role(enum_entries_identity(ENUM_ENTRIES))
             .expect("the zero-argument common identity owns the role");
         let candidate = enum_entries_candidate(&exact);
-        let index = CommonExpectationIndex {
-            package_function_roles: vec![exact],
-        };
+        let index = CommonExpectationIndex::with_roles(vec![exact]);
         assert_eq!(
-            index.package_function_role(false, type_name("kotlin/enums"), "enumEntries", &candidate),
+            index.package_function_role(false, type_name("kotlin/enums"), "enumEntries", &candidate)
+            .expect("the role inventory reads"),
             None,
             "an identical owner and signature from another JVM dependency cannot actualize the common identity",
         );
         assert_eq!(
-            index.package_function_role(true, type_name("kotlin/enums"), "enumEntries", &candidate),
+            index
+                .package_function_role(true, type_name("kotlin/enums"), "enumEntries", &candidate)
+                .expect("the role inventory reads"),
             Some(CompilerIntrinsic::EnumEntries),
         );
         let mut ordinary = candidate.clone();
         ordinary.flags.reified = false;
         ordinary.flags.inline = crate::libraries::InlineKind::None;
         assert_eq!(
-            index.package_function_role(true, type_name("kotlin/enums"), "enumEntries", &ordinary),
+            index
+                .package_function_role(true, type_name("kotlin/enums"), "enumEntries", &ordinary)
+                .expect("the role inventory reads"),
             None,
             "a non-reified same signature is not the inline declaration",
         );
@@ -705,7 +766,7 @@ mod tests {
     }
 
     #[test]
-    fn selected_common_klib_validates_manifest_module_and_every_fragment() {
+    fn selected_common_klib_validates_manifest_module_and_package_inventory() {
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("system clock")
@@ -793,20 +854,17 @@ mod tests {
             "default/linkdata/root_package/0_.knm",
             &[0x22, 0x02, 0x08],
         );
-        match CommonExpectationIndex::read(&invalid_fragment) {
-            Err(CommonExpectationError::InvalidFragment {
-                archive,
-                entry,
-                source,
-            }) => {
-                assert_eq!(archive, invalid_fragment);
-                assert_eq!(entry, "default/linkdata/root_package/0_.knm");
-                assert_eq!(source.offset, 2);
-                assert_eq!(source.detail, "truncated class declaration");
-            }
-            Err(error) => panic!("unexpected invalid-fragment error: {error}"),
-            Ok(_) => panic!("KLIB with invalid fragment initialized"),
-        }
+        let index = match CommonExpectationIndex::read(&invalid_fragment) {
+            Ok(index) => index,
+            Err(error) => panic!("opening reads no declaration fragment: {error}"),
+        };
+        assert!(
+            index
+                .package_function_roles()
+                .expect("a KLIB without IR identities has no role inventory")
+                .is_empty(),
+            "no package declares a role identity, so no fragment is read"
+        );
 
         let package_mismatch = directory.join("package-mismatch");
         write_valid_root_klib(&package_mismatch);
@@ -882,7 +940,7 @@ mod tests {
     }
 
     #[test]
-    fn invalid_header_nested_fragment_and_package_mismatch_are_exact_frontend_diagnostics() {
+    fn invalid_header_and_package_mismatch_are_exact_frontend_diagnostics() {
         let (header_klib, header) = exact_initialization_diagnostic("header", |klib| {
             write(klib, "default/manifest", b"unique_name=fixture\n");
             write(klib, "default/linkdata/module", &[0x08, 0x01]);
@@ -892,27 +950,6 @@ mod tests {
             format!(
                 "cannot load Kotlin common-expectation dependency: invalid KLIB module header {}: field in KLIB module header has wire type 0, expected 2 at byte 1",
                 header_klib.join("default/linkdata/module").display()
-            )
-        );
-
-        let malformed_class = [
-            0x0a, 0x03, 0x0a, 0x01, b'C', 0x12, 0x06, 0x0a, 0x04, 0x10, 0x00, 0x18, 0x00, 0x22,
-            0x06, 0x18, 0x00, 0x4a, 0x02, 0x10, 0x80,
-        ];
-        let (fragment_klib, fragment) = exact_initialization_diagnostic("fragment", |klib| {
-            write(klib, "default/manifest", b"unique_name=fixture\n");
-            write(klib, "default/linkdata/module", VALID_MODULE_HEADER);
-            write(
-                klib,
-                "default/linkdata/root_package/0_.knm",
-                &malformed_class,
-            );
-        });
-        assert_eq!(
-            fragment[0].msg,
-            format!(
-                "cannot load Kotlin common-expectation dependency: invalid KLIB metadata fragment \"default/linkdata/root_package/0_.knm\" in {}: truncated function declaration at byte 21",
-                fragment_klib.display()
             )
         );
 
@@ -932,5 +969,114 @@ mod tests {
                 mismatch_klib.join("default/linkdata/module").display()
             )
         );
+    }
+
+    /// The paired stdlib and its common KLIB, copied beside each other with the first fragment of
+    /// `kotlin.ranges`, a package that declares role identities, replaced by a truncated one.
+    fn paired_stdlib_with_corrupt_range_fragment(
+        stdlib: &Path,
+        fragment: &[u8],
+    ) -> (std::path::PathBuf, std::path::PathBuf, String) {
+        use std::io::Write as _;
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "krusty-common-expectation-lazy-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&directory).expect("create paired stdlib directory");
+        let copied_stdlib = directory.join("kotlin-stdlib.jar");
+        std::fs::copy(stdlib, &copied_stdlib).expect("copy the paired stdlib");
+        let source = stdlib.with_file_name("kotlin-stdlib-wasm-js.klib");
+        let klib = directory.join("kotlin-stdlib-wasm-js.klib");
+        let mut original = zip::ZipArchive::new(
+            std::fs::File::open(&source).expect("open the paired common KLIB"),
+        )
+        .expect("read the paired common KLIB");
+        let mut copy = zip::ZipWriter::new(
+            std::fs::File::create(&klib).expect("create the corrupted common KLIB"),
+        );
+        let mut corrupted = None;
+        for index in 0..original.len() {
+            let entry = original.by_index_raw(index).expect("read a KLIB entry");
+            let name = entry.name().expect("a KLIB entry name").to_string();
+            if corrupted.is_none()
+                && name.starts_with("default/linkdata/package_kotlin.ranges/")
+                && name.ends_with(".knm")
+            {
+                drop(entry);
+                copy.start_file(name.as_str(), zip::write::SimpleFileOptions::default())
+                    .expect("start the corrupt fragment");
+                copy.write_all(fragment)
+                    .expect("write the corrupt fragment");
+                corrupted = Some(name);
+            } else {
+                copy.raw_copy_file(entry).expect("copy a KLIB entry");
+            }
+        }
+        copy.finish().expect("finish the corrupted common KLIB");
+        let entry = corrupted.expect("kotlin.ranges declares a fragment");
+        (copied_stdlib, klib, entry)
+    }
+
+    fn analyze_with_stdlib(stdlib: &Path, source: &str) -> Vec<crate::diag::Diagnostic> {
+        let mut diagnostics = DiagSink::new();
+        crate::frontend::analyze_source_set_with_features(
+            &[SourceInput::kotlin(source)],
+            crate::frontend::PlatformProvider::jvm(JvmLibraries::new(std::rc::Rc::new(
+                Classpath::new(vec![stdlib.to_path_buf()]),
+            ))),
+            &LangFeatures::new(),
+            &mut diagnostics,
+        );
+        diagnostics.diags
+    }
+
+    #[test]
+    fn role_package_fragments_are_validated_on_the_first_lookup_a_role_could_apply_to() {
+        let Some(stdlib) = crate::toolchain::stdlib_jar() else {
+            return;
+        };
+        if !stdlib
+            .with_file_name("kotlin-stdlib-wasm-js.klib")
+            .is_file()
+        {
+            return;
+        }
+        let malformed_function = [
+            0x0a, 0x03, 0x0a, 0x01, b'C', 0x12, 0x06, 0x0a, 0x04, 0x10, 0x00, 0x18, 0x00, 0x22,
+            0x06, 0x18, 0x00, 0x4a, 0x02, 0x10, 0x80,
+        ];
+        let (copied_stdlib, klib, entry) =
+            paired_stdlib_with_corrupt_range_fragment(&stdlib, &malformed_function);
+
+        let unrelated = analyze_with_stdlib(&copied_stdlib, "fun answer() = 42");
+        assert_eq!(
+            unrelated.len(),
+            0,
+            "no lookup a role could apply to reads the corrupt fragment: {:?}",
+            unrelated
+                .iter()
+                .map(|diagnostic| &diagnostic.msg)
+                .collect::<Vec<_>>()
+        );
+
+        let range = analyze_with_stdlib(&copied_stdlib, "fun range() = 1.0..2.0");
+        assert_eq!(range.len(), 1, "no unresolved-reference cascade");
+        assert_eq!(range[0].file, 0);
+        assert_eq!(range[0].span, Span::new(0, 0));
+        assert_eq!(range[0].severity, Severity::Error);
+        assert_eq!(
+            range[0].msg,
+            format!(
+                "cannot load Kotlin common-expectation dependency: invalid KLIB metadata fragment {entry:?} in {}: truncated function declaration at byte 21",
+                klib.display()
+            )
+        );
+
+        std::fs::remove_dir_all(copied_stdlib.parent().expect("fixture directory"))
+            .expect("remove the paired stdlib fixture");
     }
 }
