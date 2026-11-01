@@ -1236,7 +1236,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   a `checkcast Object` the transformer deletes; the transformer moves the unboxing to the resume
   path, and the direct path keeps the carrier, which the point's consumer then reads as the carrier
   (`tests/suspend_value_class_results_e2e.rs::a_suspend_lambda_unboxes_a_carrier_result_on_resume`
-  and the tests after it). It cannot hand its own continuation to such a call: kotlinc builds a
+  and the tests after it). kotlinc materializes such a point at the value class's JVM type, the
+  carrier, whatever consumes it: the carrier's `checkcast` follows the merge of the two paths even
+  when the consumer takes `Object`, as `suspend fun test() = bar().s` and a non-tail
+  `return foo(qux())` of the value class return it. Only a point delivering no value-class box is
+  returned as the erased `Object` the invoke left (`jvm/ir_emit/transformed_suspensions.rs`,
+  `tests/suspend_value_class_carrier_cast_e2e.rs`). It cannot hand its own continuation to such a call: kotlinc builds a
   state machine for `suspend fun test() = bar().s` and for `suspend fun g(): X = bar()`. A scalar
   carrier crosses as the box on both paths (`Boxed`), and so does a nullable result whose ordinary
   erasure is the box (`Result<String>?`, `X(val v: Int)?`). A nullable result over a non-null
@@ -7624,7 +7629,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   copy that reads the lambda's field names the bridge (`SuspendMethodWithoutForInlineCopy`). The
   body is not inlined on trial: once a call is routed to the inliner, or a lambda-free call to a
   compiled body is, a failure to inline or regenerate is an emission error, never a direct call.
-  Tests: `tests/crossinline_suspend_object_e2e.rs`. An object the copied method constructs that reads the lambda through the copy's field (the
+  Tests: `tests/crossinline_suspend_object_e2e.rs`. Each copied method passes through kotlinc's
+  optimizer once, before its constants reach the class's pool, as kotlinc's class writer optimizes
+  every method it writes once. The passes are not idempotent: a second run would fold the store and
+  reload kotlinc keeps for an inline-only callee's receiver (`Continuation { it.getOrThrow() }`'s
+  `astore t; aload t`), whose separating `nop` the first run's cleanup removed
+  (`jvm/classfile/copied_class.rs`, `tests/inlined_lambda_extension_receiver_e2e.rs`). An object the copied method constructs that reads the lambda through the copy's field (the
   `FlowCollector` that `Flow.map`'s object creates) is regenerated too, as kotlinc's
   `MethodInliner` does: it takes the copy's next number after the continuation
   (`…$map$1$2`, its own continuation `…$map$1$2$1`), the lambda is inlined into its methods, and

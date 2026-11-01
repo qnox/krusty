@@ -12,6 +12,8 @@ mod destination_producer_result_e2e;
 mod enclosing_formal_signatures_e2e;
 #[path = "inferred_alias_constructor_abbreviation_e2e.rs"]
 mod inferred_alias_constructor_abbreviation_e2e;
+#[path = "inlined_lambda_extension_receiver_e2e.rs"]
+mod inlined_lambda_extension_receiver_e2e;
 #[path = "nested_signature_argument_layout_e2e.rs"]
 mod nested_signature_argument_layout_e2e;
 
@@ -477,8 +479,6 @@ mod classpath_subtype_ctor_arg_e2e;
 mod classpath_super_call_e2e;
 #[path = "classpath_super_ctor_args_e2e.rs"]
 mod classpath_super_ctor_args_e2e;
-#[path = "classpath_suspend_receiver_lambda_e2e.rs"]
-mod classpath_suspend_receiver_lambda_e2e;
 #[path = "classpath_synthetic_ctor_e2e.rs"]
 mod classpath_synthetic_ctor_e2e;
 #[path = "classpath_synthetic_setter_e2e.rs"]
@@ -601,7 +601,6 @@ mod construction_argument_labels_e2e;
 mod construction_default_arg_e2e;
 #[path = "constructor_argument_specificity_e2e.rs"]
 mod constructor_argument_specificity_e2e;
-mod constructor_continuation_e2e;
 #[path = "constructor_default_expression_lines_e2e.rs"]
 mod constructor_default_expression_lines_e2e;
 #[path = "constructor_initialization_order_e2e.rs"]
@@ -624,8 +623,6 @@ mod context_parameter_signature_order_e2e;
 mod context_parameters_e2e;
 #[path = "contextual_lambda_expected_return_e2e.rs"]
 mod contextual_lambda_expected_return_e2e;
-#[path = "continuation_spill_order_e2e.rs"]
-mod continuation_spill_order_e2e;
 #[path = "contract_calls_in_place_e2e.rs"]
 mod contract_calls_in_place_e2e;
 #[path = "contract_conjunct_null_checks_e2e.rs"]
@@ -644,8 +641,6 @@ mod contract_smartcast_e2e;
 mod contract_user_e2e;
 #[path = "contravariant_sam_adapter_e2e.rs"]
 mod contravariant_sam_adapter_e2e;
-#[path = "coroutine_intrinsics_e2e.rs"]
-mod coroutine_intrinsics_e2e;
 #[path = "e2e/counted_loops.rs"]
 mod counted_loops;
 #[path = "cross_file_companion_fun_e2e.rs"]
@@ -666,8 +661,6 @@ mod cross_file_typealias_e2e;
 mod cross_file_value_param_constructor_e2e;
 #[path = "crossinline_lambda_inlining_e2e.rs"]
 mod crossinline_lambda_inlining_e2e;
-#[path = "crossinline_suspend_object_e2e.rs"]
-mod crossinline_suspend_object_e2e;
 #[path = "ctor_lambda_return_binds_type_param_e2e.rs"]
 mod ctor_lambda_return_binds_type_param_e2e;
 #[path = "ctor_numeric_widening_e2e.rs"]
@@ -1129,8 +1122,6 @@ mod generic_signature_e2e;
 mod generic_static_field_e2e;
 #[path = "generic_super_call_e2e.rs"]
 mod generic_super_call_e2e;
-#[path = "generic_suspend_member_return_e2e.rs"]
-mod generic_suspend_member_return_e2e;
 #[path = "generic_value_class_result_e2e.rs"]
 mod generic_value_class_result_e2e;
 #[path = "generic_vararg_inference_e2e.rs"]
@@ -1514,8 +1505,6 @@ mod local_override_boxed_result_e2e;
 mod local_shadows_receiver_member_e2e;
 #[path = "local_superclass_capture_e2e.rs"]
 mod local_superclass_capture_e2e;
-#[path = "local_suspend_default_e2e.rs"]
-mod local_suspend_default_e2e;
 #[path = "loop_control_lines_e2e.rs"]
 mod loop_control_lines_e2e;
 #[path = "loop_jump_shape_e2e.rs"]
@@ -1716,8 +1705,6 @@ mod string_when_switch_e2e;
 mod super_delegation_line_e2e;
 #[path = "e2e/suspend.rs"]
 mod suspend;
-#[path = "suspending_concat_operands_e2e.rs"]
-mod suspending_concat_operands_e2e;
 #[path = "type_parameter_nullability_annotations_e2e.rs"]
 mod type_parameter_nullability_annotations_e2e;
 #[path = "e2e/type_resolution.rs"]
@@ -1816,12 +1803,6 @@ mod value_class_secondary_constructor_return_e2e;
 mod value_class_signature_e2e;
 #[path = "value_class_super_call_e2e.rs"]
 mod value_class_super_call_e2e;
-#[path = "value_class_suspend_member_reentry_e2e.rs"]
-mod value_class_suspend_member_reentry_e2e;
-#[path = "value_class_suspend_override_e2e.rs"]
-mod value_class_suspend_override_e2e;
-#[path = "value_class_suspend_resume_e2e.rs"]
-mod value_class_suspend_resume_e2e;
 #[path = "value_class_try_value_e2e.rs"]
 mod value_class_try_value_e2e;
 #[path = "vararg_generic_signature_e2e.rs"]
@@ -2235,8 +2216,6 @@ mod temporary_elimination_e2e;
 mod try_debug_lines_e2e;
 #[path = "try_primitive_nullable_join_e2e.rs"]
 mod try_primitive_nullable_join_e2e;
-#[path = "uncast_continuation_operand_e2e.rs"]
-mod uncast_continuation_operand_e2e;
 #[path = "unmatched_null_check_temporaries_e2e.rs"]
 mod unmatched_null_check_temporaries_e2e;
 #[path = "upcast_checkcast_e2e.rs"]
