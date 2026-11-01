@@ -267,6 +267,7 @@ pub enum IrPropertyDispatch {
 pub struct IrAnnotationConstruction {
     pub interface: TypeName,
     pub members: Vec<(String, Ty)>,
+    pub arguments: crate::libraries::AnnotationArgumentProvenance,
     /// Constructor defaults as lowered declarations, not evaluated call operands.
     pub defaults: Vec<Option<ExprId>>,
     /// The lexical scopes this construction is evaluated in; `None` is the file facade. A written

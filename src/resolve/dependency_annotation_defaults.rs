@@ -6,7 +6,7 @@
 //! shape whatever declared the annotation.
 
 use super::ResolvedAnnotationConstruction;
-use crate::libraries::{DefaultValue, LibraryMember, LibraryType};
+use crate::libraries::{AnnotationArgumentProvenance, DefaultValue, LibraryMember, LibraryType};
 use crate::symbol_source::SymbolSource;
 use crate::types::{AnnotationValue, Ty};
 
@@ -40,6 +40,9 @@ pub(super) fn dependency_construction(
     }
     Some(ResolvedAnnotationConstruction { members, defaults })
 }
+
+#[cfg(test)]
+mod tests;
 
 /// The default of each of `members`, parallel to it. An element without an evaluated default of
 /// its declared type has none.
@@ -128,7 +131,9 @@ fn element_default(
             (classifier == Some(crate::types::wk::kclass())).then(|| DefaultValue::KClass(*target))
         }
         AnnotationValue::Annotation {
-            internal, values, ..
+            internal,
+            values,
+            written,
         } => {
             if classifier != Some(*internal) {
                 return None;
@@ -147,6 +152,37 @@ fn element_default(
                 .into_iter()
                 .zip(parameters.types)
                 .collect::<Vec<_>>();
+            let supplied = values
+                .iter()
+                .map(|(name, _)| {
+                    let ordinal = members.iter().position(|(member, _)| member == name)?;
+                    u32::try_from(ordinal).ok()
+                })
+                .collect::<Option<Vec<_>>>()?;
+            if supplied
+                .iter()
+                .enumerate()
+                .any(|(index, ordinal)| supplied[..index].contains(ordinal))
+            {
+                return None;
+            }
+            let omitted = (0..members.len())
+                .map(|ordinal| u32::try_from(ordinal).ok())
+                .collect::<Option<Vec<_>>>()?
+                .into_iter()
+                .filter(|ordinal| !supplied.contains(ordinal))
+                .collect();
+            let written = match written {
+                Some(written) => Some(
+                    written
+                        .order
+                        .iter()
+                        .map(|ordinal| supplied.get(usize::from(*ordinal)).copied())
+                        .collect::<Option<Vec<_>>>()?,
+                ),
+                None => None,
+            };
+            let arguments = AnnotationArgumentProvenance::checked(members.len(), written, omitted)?;
             // A nested default lists only its explicit arguments; every other member takes that
             // annotation's own declaration default.
             let declared_defaults = dependency_annotation_defaults(libraries, &nested, &members);
@@ -164,6 +200,7 @@ fn element_default(
                 classifier: *internal,
                 members,
                 values,
+                arguments,
             })
         }
         AnnotationValue::Array(_) => None,

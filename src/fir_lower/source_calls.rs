@@ -1391,6 +1391,7 @@ impl BodyLowering<'_> {
             crate::ir::IrAnnotationConstruction {
                 interface: classifier,
                 members,
+                arguments: annotation.arguments.clone(),
                 defaults,
                 scopes: vec![enclosing_class],
             },
@@ -1450,6 +1451,7 @@ impl BodyLowering<'_> {
                 classifier,
                 members,
                 values,
+                arguments,
             } => {
                 if members.len() != values.len() {
                     return None;
@@ -1473,6 +1475,7 @@ impl BodyLowering<'_> {
                     crate::ir::IrAnnotationConstruction {
                         interface: *classifier,
                         members: members.clone(),
+                        arguments: arguments.clone(),
                         defaults: vec![None; members.len()],
                         // Evaluated where the constructions omitting this element are.
                         scopes: Vec::new(),

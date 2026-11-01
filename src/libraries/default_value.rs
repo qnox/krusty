@@ -36,6 +36,7 @@ pub enum DefaultValue {
         classifier: TypeName,
         members: Vec<(String, Ty)>,
         values: Vec<DefaultValue>,
+        arguments: super::AnnotationArgumentProvenance,
     },
 }
 

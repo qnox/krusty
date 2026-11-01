@@ -292,6 +292,12 @@ versions, classfile metadata or annotation payloads change.
 
 ## Checked annotation constructor results
 
+Closed nested annotation defaults retain checked written member order and omitted declaration
+defaults independently of their complete runtime values. The common publisher consumes operands
+according to the runtime construction, then projects the retained declaration ordinals to the
+compact Annotation argument list. Synthesized empty varargs remain supplied but unwritten; no
+wire schema or protocol version changes.
+
 The checked constructor overlay retains stable declaration identities while its merged inventory
 normalizes generic signatures from the classifier's formal layout. Semantic lambda parameter
 templates remain available before argument checking; physical constructor parameters and serialized

@@ -12277,6 +12277,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   those indices directly, then appends materialized unwritten values such as an omitted vararg's
   empty array. It does not remap arguments from syntax after checking. Declaration annotation
   metadata follows the same written order; physical annotation attributes keep declaration order.
+  A closed annotation construction used as another annotation element's default retains those
+  written parameter ordinals through folding and replay. Metadata omits declared defaults even
+  when replay supplies their runtime values, while an unwritten empty vararg remains present.
+  `annotation_constructions::tests::argument_provenance` compares both retained and replayed
+  constructions with the complete official Native nested-annotation message.
 
 - **A named function-type parameter records `@ParameterName` on its type.** kotlinc writes
   `(count: Int) -> Unit` as `Function1<@ParameterName(name = "count") Int, Unit>` in `@Metadata`:
