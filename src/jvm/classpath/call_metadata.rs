@@ -27,7 +27,7 @@ pub struct MetadataCallFacts {
     /// classifiers erased by a JVM signature (`MutableList<MutableSet<T>>` → `List<Set<T>>`).
     pub declared_ret: Option<Ty>,
     /// The typealias the declared return type was spelled through, from the same declaration.
-    pub ret_alias: Option<TypeName>,
+    pub ret_alias: Option<crate::libraries::DeclaredResultAlias>,
     /// Full Kotlin source parameter types from the same descriptor-aligned metadata declaration.
     /// An extension receiver, when present, is the leading entry. These are resolution facts; the
     /// descriptor-derived JVM parameters remain a separate realization shape in the provider.

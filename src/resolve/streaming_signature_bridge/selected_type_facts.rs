@@ -114,6 +114,43 @@ impl SelectedTypeFacts {
         self.shared.borrow().spellings.get(&syntax).copied()
     }
 
+    /// The typealias application the written type `syntax` selected: its alias applied to the
+    /// resolved types of its written arguments, marked nullable as written.
+    pub(super) fn alias_application(
+        &self,
+        arena: &crate::fir::HeaderSyntaxArena,
+        syntax: HeaderTypeId,
+    ) -> Option<crate::libraries::DeclaredResultAlias> {
+        let alias = self.spelling(syntax)?.alias?;
+        let node = arena.ty(syntax)?;
+        let crate::fir::HeaderTypeKind::Classifier { detail, .. } = node.kind else {
+            return None;
+        };
+        let arguments = arena
+            .type_operands(arena.classifier_type(detail)?.arguments)
+            .iter()
+            .map(|&argument| {
+                let flags = arena.ty(argument)?.flags;
+                if flags.star_projection() {
+                    let bound = crate::types::Ty::nullable(crate::types::Ty::obj("kotlin/Any"));
+                    return Some(crate::types::Ty::star_projection(bound));
+                }
+                let resolved = self.spelling(argument)?.resolved?;
+                Some(if flags.in_projection() {
+                    crate::types::Ty::in_projection(resolved)
+                } else if flags.out_projection() {
+                    crate::types::Ty::out_projection(resolved)
+                } else {
+                    resolved
+                })
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let nullable = node.flags.nullable();
+        Some(crate::libraries::DeclaredResultAlias::new(
+            alias, &arguments, nullable,
+        ))
+    }
+
     /// Whether compact resolution selected every node needed to publish one declaration-owned
     /// written type. A graph edge records only potential ownership; an undemanded graph expression
     /// never publishes these facts and therefore leaves the occurrence to active Pass 2.

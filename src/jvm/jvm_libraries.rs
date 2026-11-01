@@ -13,6 +13,7 @@ mod classpath_annotation_classes;
 mod collection_canonicalization;
 mod declaration_headers;
 mod declared_members;
+mod default_impls_realization;
 mod facade_package_callables;
 mod symbol_source;
 use classpath_annotation_classes::{
@@ -97,6 +98,7 @@ use crate::types::{
     TypeName, TypeNameList,
 };
 
+use default_impls_realization::interface_holder_method;
 use java_operator_convention::java_method_has_operator_convention;
 
 /// The JVM platform's contribution to Kotlin's default imports. The language-level `kotlin.*` set is

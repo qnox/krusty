@@ -1,20 +1,16 @@
-//! The typealias a declared result type was spelled through.
+//! The typealias application a declared result type was spelled through.
 
-use super::string_table::{resolve_class_name, Rec};
 use super::type_table_entry;
-use crate::metadata::decode::{parse_type_node, Pb};
-use crate::types::{type_name, TypeName};
+use crate::metadata::decode::Pb;
 
-/// The alias a declaration's result `Type` abbreviates: its `abbreviated_type` (field 13 inline,
-/// or a type-table id in field 14) names the alias by `type_alias_name` (field 12). kotlinc
-/// carries that abbreviation on the type a call or read of the declaration produces, so an
-/// inferred result reached through it records the alias in its own `@Metadata`.
-pub(super) fn result_alias(
-    resolved: Option<(&[u8], bool)>,
-    type_table: Option<&[u8]>,
-    records: &[Rec],
-    d2: &[String],
-) -> Option<TypeName> {
+/// The `abbreviated_type` of a declaration's result `Type` (field 13 inline, or a type-table id in
+/// field 14), with its nullability: the alias applied to its as-written arguments. Decoded in the
+/// declaration's type-parameter context it becomes a
+/// [`DeclaredResultAlias`](crate::libraries::DeclaredResultAlias).
+pub(super) fn abbreviated_type<'a>(
+    resolved: Option<(&'a [u8], bool)>,
+    type_table: Option<&'a [u8]>,
+) -> Option<(&'a [u8], bool)> {
     let (body, _) = resolved?;
     let mut message = Pb::new(body);
     let mut abbreviated = None;
@@ -23,15 +19,29 @@ pub(super) fn result_alias(
         match (tag >> 3, tag & 7) {
             (13, 2) => {
                 let length = message.varint()? as usize;
-                abbreviated = Some(message.bytes(length)?);
+                abbreviated = Some((message.bytes(length)?, false));
             }
             (14, 0) => {
                 let id = message.varint()? as usize;
-                abbreviated = Some(type_table_entry(type_table?, id)?.0);
+                abbreviated = Some(type_table_entry(type_table?, id)?);
             }
             (_, wire) => message.skip(wire)?,
         }
     }
-    let alias = parse_type_node(abbreviated?)?.type_alias_id?;
-    Some(type_name(&resolve_class_name(records, d2, alias as usize)?))
+    abbreviated
+}
+
+/// The [`DeclaredResultAlias`](crate::libraries::DeclaredResultAlias) a declaration's result
+/// `Type` carries, decoded in the declaration's type-parameter `context`.
+pub(super) fn declared(
+    resolved: Option<(&[u8], bool)>,
+    type_table: Option<&[u8]>,
+    records: &[super::string_table::Rec],
+    d2: &[String],
+    context: Option<&super::TypeParameterContext>,
+) -> Option<crate::libraries::DeclaredResultAlias> {
+    let abbreviated = abbreviated_type(resolved, type_table)?;
+    let application =
+        super::decode_metadata_type_ref(Some(abbreviated), type_table, records, d2, context)?;
+    crate::libraries::DeclaredResultAlias::from_application(application)
 }
