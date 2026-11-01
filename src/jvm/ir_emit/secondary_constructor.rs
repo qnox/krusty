@@ -181,7 +181,6 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
         let mut sctor = CodeBuilder::new(1 + sc_words);
         let sec_max;
         let mut sec_diverges = false;
-        let body_locals;
         {
             let mut e = Emitter::new(
                 ir,
@@ -454,7 +453,10 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
                 sctor.mark_line(sc.lines.decl_end_line);
             }
             sec_max = e.frame.max();
-            body_locals = std::mem::take(&mut e.open_locals);
+            // Body locals precede `this` and the parameters in kotlinc's table, as in a method,
+            // and stay in scope through the return.
+            let body_locals = std::mem::take(&mut e.open_locals);
+            e.record_open_locals(body_locals, |_| None, &mut sctor);
         }
         if !sec_diverges {
             if sc.generated_debug.fallthrough_line().is_some() {
@@ -463,11 +465,6 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
             } else {
                 sctor.ret_void();
             }
-        }
-        // Body locals precede `this` and the parameters in kotlinc's table, as in a method, and
-        // stay in scope through the return.
-        for local in body_locals {
-            local.record(None, &mut sctor);
         }
         if !generated {
             sctor.add_local_entry(0, None, 0, "this", &format!("L{fq_name};"));
@@ -526,7 +523,7 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
         let body_ranged_locals = if generated && debug_locals.is_some() {
             let code_length = sctor.bytes.len();
             sctor
-                .local_entries()
+                .named_local_entries()
                 .iter()
                 .filter(|&&(start, ..)| usize::from(start) < code_length)
                 .map(|&(start, length, slot, ref name, ref desc)| {

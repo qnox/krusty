@@ -8,7 +8,7 @@
 //! checked call to a dependency: no owner, physical name or descriptor crosses the boundary.
 
 use crate::ir::ExternalCallableId;
-use crate::types::{Ty, TypeName};
+use crate::types::{ClassifierDeclarationKind, ResolvedAnnotation, Ty, TypeName};
 
 /// A runtime function a plugin's generated code calls.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -46,9 +46,33 @@ pub trait PluginRuntime {
     /// Select `function` among the declarations the compilation sees, or say why none is selected.
     fn function(&mut self, function: &RuntimeFunction) -> Result<BoundRuntimeFunction, String>;
 
-    /// Whether the compilation sees a declaration of `classifier`, which is how a plugin detects
-    /// the runtime version it generates code for.
-    fn declares_classifier(&self, classifier: TypeName) -> bool;
+    /// The declaration of `classifier` the compilation sees, as its provider normalized it. A plugin
+    /// detects the runtime version it generates code for by whether a runtime classifier exists.
+    fn classifier(&self, classifier: TypeName) -> Option<PluginClassifier>;
+}
+
+/// The facts a plugin reads about a classifier the file does not declare, normalized at the
+/// provider boundary from source, Kotlin metadata or a Java class file alike.
+#[derive(Clone, Debug)]
+pub struct PluginClassifier {
+    pub kind: ClassifierDeclarationKind,
+    /// A Kotlin declaration, including a Kotlin builtin its provider realizes by a platform class
+    /// (`kotlin/collections/List`); `false` for a Java classifier.
+    pub is_kotlin: bool,
+    /// Neither `open`, `abstract` nor `sealed`.
+    pub is_final: bool,
+    /// A value class.
+    pub is_value: bool,
+    /// Declared by another file of the current compilation module.
+    pub in_module: bool,
+    /// An `inner` class, which captures an instance of its outer class.
+    pub is_inner: bool,
+    /// How many type parameters the classifier itself declares.
+    pub type_parameters: usize,
+    /// Its direct supertypes.
+    pub supertypes: Vec<TypeName>,
+    /// The annotations applied to it, with their arguments.
+    pub annotations: Vec<ResolvedAnnotation>,
 }
 
 impl RuntimeFunction {

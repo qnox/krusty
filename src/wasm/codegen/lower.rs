@@ -19,9 +19,11 @@
 use crate::fx_hash::{HashMap, HashSet};
 
 mod arrays;
+mod boxing;
 mod default_arguments;
 mod dependency_exports;
 mod exceptions;
+mod function_values;
 mod intrinsic_operations;
 mod objects;
 mod scalar_instructions;
@@ -47,7 +49,6 @@ use crate::ir::{
 };
 use crate::types::{EqualityMode, Ty, TyKind};
 
-use super::super::boxes::BOX_VALUE_FIELD;
 use super::super::encode::{BlockType, Code, Function, HeapType, Module, ValType};
 use super::super::objects::REFERENCE;
 use super::super::runtime::*;
@@ -386,6 +387,12 @@ pub(super) fn carrier(ty: Ty) -> Result<Option<ValType>, Unsupported> {
         // frontend checked, cast to its class where one is read (see `super::super::objects`).
         TyKind::Obj(..) | TyKind::TyParam(..) => REFERENCE,
         TyKind::DefinitelyNotNull(inner) if inner.is_ty_param() => REFERENCE,
+        // A function value is an object (see `super::super::function_values`).
+        TyKind::Fun(signature) if !signature.suspend => REFERENCE,
+        TyKind::Fun(_) => return Err("a suspend function value".into()),
+        TyKind::Nullable(inner) if matches!(inner.kind(), TyKind::Fun(signature) if !signature.suspend) => {
+            REFERENCE
+        }
         TyKind::Nullable(inner)
             if matches!(inner.kind(), TyKind::Obj(..) | TyKind::TyParam(..)) =>
         {
@@ -488,6 +495,9 @@ fn expression_type(
         {
             result
         }
+        // A SAM-converted lambda may have no checked type to ask about; it declines here as
+        // it does where it is lowered.
+        IrExpr::Lambda { sam: Some(_), .. } => return Err(function_values::SAM_CONVERSION.into()),
         node => ir
             .checked_type(id)
             .ok_or_else(|| format!("{} without a checked type", describe_node(node)))?,
@@ -812,6 +822,11 @@ impl<'a> Body<'a> {
             return Ok(());
         };
         let Some(source) = carrier(source)? else {
+            if source == Ty::Unit && target == REFERENCE {
+                let unit = self.runtime.unit_object(self.module);
+                self.code.global_get(unit);
+                return Ok(());
+            }
             return Err("a `Unit` value where a value is expected".to_string());
         };
         if source == target {
@@ -858,43 +873,6 @@ impl<'a> Body<'a> {
                 "a value carried as {source:?} where {target:?} is expected"
             )),
         }
-    }
-
-    /// Box the `ty` value on the stack (see `super::super::boxes`).
-    fn box_value(&mut self, ty: Ty) -> Result<(), Unsupported> {
-        let form = self
-            .runtime
-            .box_form(self.module, ty)
-            .ok_or_else(|| format!("a `{}` value carried as a reference", describe(ty)))?;
-        if let Some([no, yes]) = form.booleans {
-            self.code
-                .if_(BlockType::Value(REFERENCE))
-                .global_get(yes)
-                .else_()
-                .global_get(no)
-                .end();
-            return Ok(());
-        }
-        let value = carrier(ty)?.expect("a boxed primitive has a value");
-        let local = self.local(value);
-        self.code
-            .local_set(local)
-            .global_get(form.table)
-            .local_get(local)
-            .struct_new(form.structure);
-        Ok(())
-    }
-
-    /// Read the `ty` value out of the box the frontend checked the reference on the stack is.
-    fn unbox(&mut self, ty: Ty) -> Result<(), Unsupported> {
-        let form = self
-            .runtime
-            .box_form(self.module, ty)
-            .ok_or_else(|| format!("a reference read as a `{}` value", describe(ty)))?;
-        self.code
-            .ref_cast(false, HeapType::Concrete(form.structure))
-            .struct_get(form.structure, BOX_VALUE_FIELD);
-        Ok(())
     }
 
     /// Emit `id`, leaving its value on the stack when it has one.
@@ -1362,6 +1340,28 @@ impl<'a> Body<'a> {
                     self.code.unreachable();
                 }
             }
+            IrExpr::Lambda {
+                impl_fn,
+                captures,
+                sam: None,
+                ..
+            } => self.function_value(
+                impl_fn,
+                &captures,
+                function_values::FunctionEquality::Identity,
+            )?,
+            IrExpr::Lambda { sam: Some(_), .. } => {
+                return Err(function_values::SAM_CONVERSION.into());
+            }
+            IrExpr::CallableReference(reference) if !reference.declaration_suspend => {
+                self.callable_reference(&reference)?
+            }
+            IrExpr::InvokeFunction {
+                func,
+                args,
+                params,
+                ret,
+            } => self.invoke_function(func, &args, &params, ret)?,
             IrExpr::Call { callee, .. } => {
                 return Err(format!("a call to {}", callee_kind(&callee)));
             }

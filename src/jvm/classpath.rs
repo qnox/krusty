@@ -20,9 +20,11 @@ mod builtins_validation;
 mod call_metadata;
 mod candidate_union;
 mod catalog_availability;
+mod class_entry_bytes;
 mod class_locations;
 pub mod content_snapshot;
 mod ct_sym_index;
+mod declaration_annotations;
 mod entry_class_reads;
 mod external_identities;
 mod inner_class_scopes;
@@ -2771,7 +2773,7 @@ impl Classpath {
                 Ok(file) => file,
                 Err(error) => return EntryReadResult::Failed(error.to_string()),
             };
-            let archive = match zip::ZipArchive::new(file) {
+            let archive = match crate::archive::open_file(file) {
                 Ok(archive) => archive,
                 Err(error) => return EntryReadResult::Failed(error.to_string()),
             };
@@ -3020,48 +3022,6 @@ impl Classpath {
                 Some(Entry::Jar(jar)) if self.jar_entry(jar, &path).is_some() => Some(jar.clone()),
                 _ => None,
             })
-    }
-
-    /// The raw `.class` bytes for an internal name (Kotlin built-in names mapped to JVM first), or
-    /// `None` if absent. Unlike `find`, this keeps the bytes (the inline expander needs the body).
-    fn class_bytes(&self, internal: &str) -> Option<Vec<u8>> {
-        let internal = super::jvm_class_map::to_jvm_internal(internal);
-        self.physical_class_entry(internal).map(|(_, bytes)| bytes)
-    }
-
-    fn physical_class_entry(&self, internal: &str) -> Option<(usize, Vec<u8>)> {
-        let name = format!("{internal}.class");
-        let tree = self.package_tree();
-        for index in self.class_entry_indices(&tree, internal) {
-            let e = self.entries.get(index)?;
-            let bytes = match e {
-                Entry::Dir(d) => std::fs::read(d.join(&name)).ok().filter(|b| {
-                    // Case-insensitive-filesystem guard (see `find`): the served file must BE the
-                    // requested class, not a case-collided sibling.
-                    parse_class(b).is_ok_and(|ci| ci.this_class_matches(internal))
-                }),
-                Entry::Jar(j) => self.jar_entry(j, &name),
-                Entry::Jimage(_) => self.jimage_bytes(internal),
-                Entry::CtSym { path, release } => self.ct_sym_bytes(path, *release, internal),
-            };
-            if let Some(bytes) = bytes {
-                return Some((index, bytes));
-            }
-        }
-        None
-    }
-
-    /// The annotations, with their arguments, applied to method `name` `descriptor` of
-    /// `internal`, read from its class file ([`super::classreader::read_method_annotations`]).
-    pub fn method_annotations(
-        &self,
-        internal: TypeName,
-        name: &str,
-        descriptor: &str,
-    ) -> Option<Vec<crate::types::ResolvedAnnotation>> {
-        let internal = super::jvm_class_map::to_jvm_type_name(internal);
-        let bytes = self.class_bytes(crate::jvm::names::classfile_internal_name_of(internal))?;
-        super::classreader::read_method_annotations(&bytes, name, descriptor)
     }
 
     /// Lazily read (and cache) one method's bytecode body — the inline expander's entry point. Each

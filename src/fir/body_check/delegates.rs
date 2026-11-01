@@ -890,6 +890,7 @@ fn selected_delegate_call(
         DelegateGetValueTarget::Extension {
             callable,
             stable_declaration,
+            ..
         } => {
             let parameters = callable
                 .params
@@ -1226,6 +1227,7 @@ mod tests {
         let target = DelegateGetValueTarget::Extension {
             callable: Box::new(callable),
             stable_declaration: None,
+            applied_receiver: Ty::Int,
         };
 
         let failure = selected_delegate_call(

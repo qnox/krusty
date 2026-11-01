@@ -265,6 +265,26 @@ impl SourceMap {
         }
     }
 
+    /// The lines `queries` take in this map once `method`'s `written` lines are copied into it.
+    /// kotlinc's copier maps an inline marker's call-site line after the method's own lines, with
+    /// the same memory of the lines it mapped (`SourceMapCopyingMethodVisitor.visitLocalVariable`).
+    /// A line `method` does not cover keeps its number.
+    pub fn copied_lines(
+        &mut self,
+        method: &SourceMap,
+        written: &[u16],
+        queries: &[u16],
+    ) -> Vec<u16> {
+        let mut copier = LineCopier::default();
+        for &line in written {
+            copier.map(self, method, line);
+        }
+        queries
+            .iter()
+            .map(|&line| copier.map(self, method, line).unwrap_or(line))
+            .collect()
+    }
+
     /// The file and range covering output `line` (`SMAP.findRange`).
     fn find_range(&self, line: u16) -> Option<(usize, usize)> {
         self.files.iter().enumerate().find_map(|(file, mapping)| {

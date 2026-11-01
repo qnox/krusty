@@ -111,6 +111,7 @@ pub use crate::enclosing_declarations::EnclosingDeclaration;
 pub use crate::fir::{CallableId, ExternalCallableId, SourceFileId};
 pub use crate::spelling::{Spelled, TypeUseAnnotation};
 pub use crate::types::EqualityMode;
+pub(crate) use annotations::PackagePropertyAnnotations;
 pub use annotations::{
     AccessorAnnotations, AnnoRetention, AnnoValue, AppliedAnnotation, DeclarationAnnotations,
     FieldAnnotations, PropertyAnnotations, RetainedAnnotation,
@@ -1941,6 +1942,11 @@ pub struct IrFile {
     /// for evaluation order. This is provenance, not a storage decision; a backend decides how
     /// that role participates in its own frame or register allocation.
     pub call_operand_bindings: crate::fx_hash::HashSet<ExprId>,
+    /// Call-operand declarations introduced to preserve checked argument evaluation order, rather
+    /// than to bind an expanded callable's parameters or captures. A reused declaration leaves this
+    /// subset when an inline expansion adopts it as its own formal binding. This records purpose;
+    /// each backend still owns storage and lifetime decisions.
+    pub(crate) argument_evaluation_bindings: crate::fx_hash::HashSet<ExprId>,
     /// The call-operand holders of one inline lambda invocation, consecutive in its block: the
     /// invocation evaluates every operand before it binds any. A backend chooses the binding order.
     pub(crate) invocation_operand_bindings: crate::fx_hash::HashSet<ExprId>,
@@ -1981,6 +1987,10 @@ pub struct IrFile {
     /// Annotations written on a source property's accessors, by property. A declared accessor's
     /// also land in [`Self::function_annotations`]; a default one exists only in a backend.
     pub accessor_annotations: crate::fx_hash::HashMap<crate::fir::PropertyId, AccessorAnnotations>,
+    /// Checked PROPERTY-targeted applications on package declarations, including retention and
+    /// erased/suppressed provenance. Storage and accessor identities do not own these payloads.
+    pub(crate) package_property_annotations:
+        crate::fx_hash::HashMap<crate::fir::PropertyId, PackagePropertyAnnotations>,
     /// FIELD-targeted applications on parser-hoisted `companion { ... }` properties. Metadata
     /// handoff publishes them under stable property identity before common lowering realizes the
     /// exact static storage that will own them.
@@ -2273,6 +2283,9 @@ pub struct IrFile {
     /// Class fq-internal-name → its generic-signature SHAPE (type parameters + bounds), for a generic
     /// class. The JVM backend formats it into the class `Signature` attribute.
     class_signatures: crate::fx_hash::HashMap<TypeName, IrGenericSig>,
+    /// Declared self applications in the checker's complete own-and-captured parameter order.
+    /// Source method exports consume these facts before target realization.
+    declared_class_self_types: crate::fx_hash::HashMap<TypeName, Ty>,
     /// A generated class's signature after its plugin's IR lowering, where that differs from the
     /// declaration in [`Self::class_signatures`] that metadata records. The classfile is written
     /// from the lowered one.

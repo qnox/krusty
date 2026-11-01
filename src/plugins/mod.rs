@@ -1571,6 +1571,7 @@ mod tests {
             crate::ir::DeclarationAnnotations::new(vec![crate::ir::RetainedAnnotation {
                 retention: crate::types::AnnotationRetention::Runtime,
                 annotation: crate::ir::AppliedAnnotation {
+                    written_order: None,
                     internal: stamp,
                     values: vec![],
                 },
@@ -1672,6 +1673,7 @@ mod tests {
         let retained = |name: &str, values| crate::ir::RetainedAnnotation {
             retention: crate::types::AnnotationRetention::Runtime,
             annotation: crate::ir::AppliedAnnotation {
+                written_order: None,
                 internal: crate::types::type_name(name),
                 values,
             },

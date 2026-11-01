@@ -1,5 +1,24 @@
 # krusty — implementation plan
 
+## Class-generic dependency method exports
+
+Retain the complete declared self type, including captured parameters, at FIR lowering and consume
+it when source class methods publish KLIB export identities.
+Share consumption of FIR-checked class applications across Native and Wasm dependency calls,
+retaining exact fixed-type and callable-substitution validation. Exercise the existing method
+export path with one portable multimodule fixture and JVM-first Native validation. Backing-field
+getter materialization remains a subsequent consumer of this signature boundary.
+
+## Classpath declaration annotation query ownership
+
+Extract selected-method and all-method annotation queries into `classpath/declaration_annotations`.
+The borrowing `class_entry_bytes` collaborator owns mapped and physical class-file acquisition shared
+with compiled bodies and class locations. Keep class/field annotation records, snapshot ownership,
+entry caches, classreader parsing and JVM provider interpretation unchanged. This scoped #2647
+migration reduces the classpath facade from 6,317 to 6,277 lines; unrelated facade responsibilities
+remain separate work. Validate unchanged annotation and serialization inventories, class bytes,
+JSON comparisons and refusal controls before and after extraction.
+
 ## JVM annotation interface object methods
 
 Retain the realized construction's exact annotation interface at the JVM consumption boundary.
@@ -120,6 +139,11 @@ cross-file module resolver. Keep top-level and unavailable module records from b
 a classpath record with the same physical identity. Preserve local/coroutine/reference provenance
 and exact table order. This slice leaves source identity publication and metadata class-ID encoding
 for subsequent changes; the complete literal-dollar classfile regression remains open there.
+
+Consume the existing source declaration order at the JVM table boundary for equal-name source
+rows owned by each writer. Preserve referenced/generated row slots and ancestor constraints, and
+reapply that policy after final pool relayout. Nested-construction ABI/runtime and mixed
+continuation controls pin the distinction from emitted allocation order.
 
 ## Builtin declaration-name producers
 
@@ -365,6 +389,13 @@ expansion and adds no backend capabilities, outcome allowances or metadata field
 - ✅ **Exit met:** `tests/classfile_e2e.rs` emits `FooKt.add(II)I`; javac accepts it, `java
   -Xverify:all` verifies + runs it via a Java `Main` → `7`. Straight-line methods need no
   StackMapTable at v52; branch frames come in Phase 4.
+
+## Preserve checked call positions across result conversion
+
+Retain checked source positions before introducing declaration-result coercions, including the exact
+selected call under an operand-evaluation block. Retire the compiled-inline-operand source probe.
+Validate complete JVM artifacts and execution for source/compiled inline operands and reordered
+calls, alongside the existing complete line-table, generic-result and operand-copy controls.
 
 ## Phase 4 — Lower + emit the subset  🚧
 ### 4a — straight-line subset ✅
@@ -830,6 +861,14 @@ compare the complete emitted class inventory and raw artifacts with Kotlin befor
 - ✅ `tests/try_catch_e2e.rs` (try-as-expression + multi-catch hierarchy on the JVM; stack-nonempty
   and `finally` rejection). Box conformance **91 OK / 0 FAIL** (up from 86).
 
+## Reuse checked singleton member receivers
+
+Admit authenticated `SingletonValue` reads to the compound member assignment's existing stable-read
+substitution. Keep the index-operand classifier and computed/mutable receiver snapshots unchanged.
+Validate complete class inventories and bytes for singleton member/index programs, initialization
+before the right operand, and existing immutable/captured/mutable receiver controls. Treat this
+receiver correction separately from annotation declaration-default operand normalization.
+
 ## Phase 34 — Explicit `this` + member assignment  ✅
 - ✅ `this` resolves to the enclosing class type (the checker tracks `this_ty`); codegen loads it as
   `aload 0` in instance context. Usable as a value (`return this`), a receiver (`this.foo()`), and a
@@ -1135,6 +1174,18 @@ compare the complete emitted class inventory and raw artifacts with Kotlin befor
   resolve, so such a file is cleanly skipped (never miscompiled).
 - ✅ `tests/annotations_e2e.rs` (annotation-class decl + `@Tag`/`@Suppress` uses on a function, a
   local, and a loop, run on the JVM). Box conformance **170 → 173 OK / 0 FAIL**.
+
+## Reserve materialized operand-holder storage
+
+Retain checked argument-evaluation holders as a subset of call-operand bindings, including when
+their code is cloned. Remove that purpose when an expansion adopts a holder as its formal receiver.
+Separate physical reservation from semantic publication for those JVM argument-order holders;
+expanded parameters and captures retain their existing binding timing.
+Preserve the existing CallOperand frame identity, compatible reuse, width and lexical scope, and
+leave deferred results, safe-call chains and grouped invocations on their owning paths. Validate
+complete ordinary-constructor/array artifacts and reference-first runtime, plus existing named,
+inline, capture, handler and suspend controls. Annotation-default evaluation normalization remains
+a separate common-lowering concern.
 
 ## Phase 62 — Named arguments  ✅
 - ✅ Top-level function calls accept named arguments (`f(b = 2, a = 5)`). The parser records a
@@ -5323,7 +5374,11 @@ shadow with no output change.
   nothing (`removeUnnecessaryTemporaryVariables`, `irLetS`); the array constructor declares the
   index, size, array, function value and element index in `ArrayConstructorLowering`'s order and
   binds a lambda's parameter to the element index; a `::Array` adapter numbers its temporaries
-  after its parameters. Stability comes from the published `binding_read_stability`. A survey of
+  after its parameters. Stability comes from the published `binding_read_stability`, including
+  authenticated immutable receiver parameters and their by-value captures. Computed operands and
+  mutable captured cells remain snapshots; the JVM stores a safe cast's object-cell snapshot in
+  its erased field slot until the type test. Complete module/runtime controls live in
+  `implicit_receiver_stability_e2e`. A survey of
   the 4e corpus ranked the non-inline, non-coroutine local-variable mismatches: `for`-loop
   temporaries dominate (about 580 of 640 slot-only methods, mostly krusty's iterator local and
   kotlinc's progression first/last/step locals) and belong to the `for`-loop port, then the
@@ -6239,6 +6294,14 @@ Next, declaration-header layouts (#2576) must authenticate complete captured app
 omissions for #2537/#2532. Raw scope erasure must follow symbolic inheritance specialization, as the
 reference compiler demonstrates; it cannot independently erase a superclass from its own bounds.
 
+## Preserve sparse constructor-default line tables
+
+Publish the default stub's existing curated expression marks independently of its owner's
+declaration line. Keep entry/close guards and source provenance unchanged. Validate complete
+synthetic implementation artifacts, reference-first runtime and source-less dependency defaults,
+alongside ordinary primary/secondary and value-class constructor controls. Header prerequisite
+#2879 remains separate; this change adds no annotation-default metadata or allocation policy.
+
 ## Declared JVM constructor boxing slots
 
 Physical call operands and implicit coercions share scalar boxing followed by ordinary reference
@@ -6398,6 +6461,27 @@ block lowering as the independent #2811 follow-up.
   use them for scalar and expanded-vararg admission and diagnostics with complete kotlinc ledgers.
   Preserve invariant/in-projected inputs, named/default/non-last varargs and method-formal shadows.
 
+## Retain package property annotation payloads
+
+Publish checked property/field annotations by stable property identity and reuse them in shared
+metadata and JVM annotation carriers. Keep marker parameters, visibility, accessor names and
+collision diagnostics consistent with the selected declaration. Validate complete JVM classes and
+official KLIB property messages without outcome or applicability changes.
+Derive property annotation presence from the checked PROPERTY/FIELD partitions; accessor-only
+applications keep independent getter/setter metadata flags. Preserve optional and SOURCE policies.
+Retain SOURCE presence separately from payload and metadata flags for property marker realization.
+Default setters consume their checked parameter annotations through the complete shared payload
+reservation API and the existing metadata parameter writer.
+
+## Preserve checked annotation argument order
+
+Carry the checker's written indices into applied IR annotations and consume them at metadata
+encoding, including annotations nested in grouped varargs. Remove the type-use publisher's syntax
+remapping and preserve declaration-ordered values for physical annotation attributes. Validate
+complete reference classes and raw metadata with `tests/type_use_annotation_metadata_e2e.rs`.
+Reserve complete JVM parameter annotation payloads before code emission, sharing the classfile
+value encoder rather than seeding descriptors alone.
+
 ## Lower serialized Elvis expression blocks
 
 Authenticate the producer's exact temporary/null-test/branch contract and lower it to the existing
@@ -6411,5 +6495,8 @@ official-producer program and independent JVM-oracle controls.
 - [x] Serialize unsigned identity already retained by `IrConst` in the shared metadata value
   encoder, preserving its signed-width carrier and payload. Compare the complete 16-property
   official-producer value inventory, including high-bit boundaries and signed contrasts.
-- [ ] Preserve unsigned identity through the common checked annotation model and provider
-  normalization; keep that semantic work separate from this wire encoding correction.
+- [x] Preserve checked-source unsigned annotation identity through common values, IR, metadata
+  type-annotation decoding and typed KSP transport. Keep physical class-reader tags and build ABI
+  carriers distinct from the semantic model; validate full source payloads and the pinned KSP oracle.
+- [ ] Normalize raw dependency annotation defaults using their exact declaration parameter types;
+  keep that provider work separate from checked-source publication and scalar wire decoding.

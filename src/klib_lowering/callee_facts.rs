@@ -176,6 +176,28 @@ impl<'a> KlibCalleeFacts<'a> {
         super::accessor_calls::authenticate(selected, bodies).map(|getter| getter.is_some())
     }
 
+    /// Whether `identity` is a member of a classifier whose representation the target owns.
+    pub(crate) fn target_member(
+        &self,
+        identity: &KlibDependencyCallable,
+        represents: &dyn Fn(crate::types::TypeName) -> bool,
+    ) -> Result<bool, super::decline::KlibBodyDeclineReason> {
+        let selected = match self.get(identity) {
+            Some(KlibCalleeFact::Ambiguous) => {
+                return Err(super::decline::KlibBodyDeclineReason::SignatureMismatch(
+                    "conflicting provider contracts for a member declaration".to_owned(),
+                ));
+            }
+            Some(KlibCalleeFact::Selected(callables)) => callables[0],
+            None => return Ok(false),
+        };
+        Ok(selected.is_member()
+            && matches!(
+                selected.declaration_owner(),
+                Some(crate::types::SemanticCallableOwner::Classifier(owner)) if represents(owner)
+            ))
+    }
+
     pub(crate) fn common_primitive(
         &self,
         identity: &KlibDependencyCallable,
