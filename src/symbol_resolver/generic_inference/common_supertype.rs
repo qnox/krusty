@@ -10,9 +10,9 @@ use crate::fx_hash::HashSet;
 use std::collections::VecDeque;
 
 use super::super::hierarchy_projection::{direct_supertypes, intersection_components};
-use super::super::SourceOracle;
+use super::super::{ClassifierJoinFailure, SourceOracle};
 use crate::symbol_source::SymbolSource;
-use crate::types::{Ty, TyKind, TypeName, TypeVariance};
+use crate::types::{Ty, TyKind, TypeName};
 
 pub(crate) fn common_super_types(source: &dyn SymbolSource, bounds: &[Ty]) -> Ty {
     CommonSupertypeSolver::new(source).common(bounds)
@@ -234,56 +234,22 @@ impl<'a> CommonSupertypeSolver<'a> {
     }
 
     fn combine_classifier_inner(&mut self, classifier: TypeName, types: &[Ty]) -> Option<Ty> {
-        let arguments = types
-            .iter()
-            .map(|ty| match ty.kind() {
-                TyKind::Obj(_, arguments) => arguments,
-                _ => crate::types::TyList::EMPTY,
-            })
-            .collect::<Vec<_>>();
-        let arity = arguments.first().map_or(0, |arguments| arguments.len());
-        if arity == 0 {
-            return Some(Ty::obj_name(classifier));
-        }
-        let Some(shape) = self.source.classifier(classifier) else {
-            self.invalid_classifier_shape = true;
-            return None;
-        };
-        let variances = shape.type_param_variances();
-        if variances.len() != arity {
-            self.invalid_classifier_shape = true;
-            return None;
-        }
-        let mut combined_arguments = Vec::with_capacity(arity);
-        for index in 0..arity {
-            let projected = arguments
-                .iter()
-                .map(|arguments| arguments[index])
-                .collect::<Vec<_>>();
-            if projected.iter().all(|argument| *argument == projected[0]) {
-                combined_arguments.push(projected[0]);
-                continue;
+        let source = self.source;
+        let oracle = SourceOracle(source);
+        match super::super::join_classifier_applications(
+            source,
+            &oracle,
+            classifier,
+            types,
+            &mut |arguments| self.common_at(arguments),
+        ) {
+            Ok(joined) => Some(joined),
+            Err(ClassifierJoinFailure::UnknownShape) => {
+                self.invalid_classifier_shape = true;
+                None
             }
-            let variance = variances[index];
-            if variance == TypeVariance::In {
-                // A contravariant argument contributes no readable lower bound. Computing its
-                // common supertype is both semantically unused and recursively re-enters F-bounded
-                // declarations such as Comparable<in T>.
-                combined_arguments.push(Ty::star_projection(Ty::nullable(Ty::obj("kotlin/Any"))));
-                continue;
-            }
-            let readable = projected
-                .iter()
-                .map(|argument| argument.projection_read_ty())
-                .collect::<Vec<_>>();
-            let joined = self.common_at(&readable)?;
-            combined_arguments.push(if variance == TypeVariance::Out {
-                joined
-            } else {
-                Ty::out_projection(joined)
-            });
+            Err(ClassifierJoinFailure::Declined) => None,
         }
-        Some(Ty::obj_args_name(classifier, &combined_arguments))
     }
 }
 
@@ -576,7 +542,8 @@ mod tests {
                 left,
                 right,
             ),
-            Ty::obj_args("demo/Inv", &[Ty::star_projection(Ty::nullable(any))])
+            // Contravariant arguments meet: two unrelated classes share only `Nothing`.
+            Ty::obj_args("demo/Inv", &[Ty::Nothing])
         );
     }
 

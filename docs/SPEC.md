@@ -13886,6 +13886,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   replaced a separate hierarchy-depth join that picked the shared classifier nearest to both
   bounds. Wasm carries a value of such an intersection as a reference when every component is one.
   Tests: `tests/inferred_common_supertype_e2e.rs`, `tests/box_regressions/intersectionValueCarrier.kt`.
+- **One set of type-argument rules for every common supertype.** Once a join has chosen a shared
+  classifier, `symbol_resolver/classifier_application_join.rs` joins its applications, for lower
+  bounds and branch results alike: equal arguments stay; arguments that differ only by one
+  top-level platform wrapper keep the platform form; any star makes a star of the parameter's
+  bound; readable arguments join covariantly (out-projected unless the parameter is `out`);
+  writable arguments meet at the one that is a subtype of the others, else `Nothing` (`*` when a
+  built-in scalar is involved, `Comparable<UInt>` and `Comparable<ULong>` give `Comparable<*>`);
+  mixed in and out projections give the out-projected bound. Lower-bound joins used to turn every
+  differing contravariant argument into `*`, so `pick(SinkA(), SinkAB())` with `Sink<in T>`,
+  `SinkA : Sink<A>`, `SinkAB : Sink<AB>`, `AB : A` became a `Sink<*>` that rejected `put(AB())`.
+  It is now `Sink<AB>`, as kotlinc infers. Test: `tests/inferred_common_supertype_e2e.rs`.
 - **An invariant instantiation joins at a captured out-projection of the arguments' common supertype.**
   `sel(Inv(A), Inv(B))`, with `A : X, Y` and `B : X, Y`, has type `Inv<out (X & Y)>` rather than a
   raw `Inv` or `Any`. Reading `v` produces that captured upper bound, so the value has the members

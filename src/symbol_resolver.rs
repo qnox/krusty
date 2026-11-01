@@ -19,6 +19,7 @@ mod argument_compatibility;
 mod call_argument;
 mod callable_shapes;
 mod candidate_access;
+mod classifier_application_join;
 mod classifier_associated;
 mod classifier_scope;
 mod classifier_static_scope;
@@ -68,6 +69,7 @@ pub(crate) use call_argument::CallArgKind;
 pub(crate) use callable_shapes::{
     classifier_callable_signature, classifier_callable_signatures, declared_function_type,
 };
+pub(crate) use classifier_application_join::{join_classifier_applications, ClassifierJoinFailure};
 pub(crate) use declaration_specificity::retain_most_specific_declarations;
 use extension_specialization::{
     bind_defaulted_ext_ret, bind_defaulted_ext_ret_slots, bind_ext_ret, bind_ext_ret_tracking,

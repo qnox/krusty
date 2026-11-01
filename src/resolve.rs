@@ -341,7 +341,6 @@ mod streaming_signature_tests;
 mod super_calls;
 pub use super_calls::ResolvedSuperCall;
 mod superclass_validation;
-mod type_join;
 mod type_parameter_owners;
 use type_parameter_owners::ty_param_names_into;
 mod uninferred_call_results;
@@ -422,7 +421,6 @@ pub(crate) use streaming_signature_bridge::{
     publish_checked_local_signatures, publish_checked_local_signatures_in_active_root,
     publish_discovered_local_capture_declarations,
 };
-use type_join::join_type_projection;
 
 const MAX_OVERLOAD_DIAGNOSTIC_CANDIDATES: usize = 64;
 const MAX_OVERLOAD_DIAGNOSTIC_BYTES: usize = 64 * 1024;
@@ -30329,56 +30327,27 @@ pub(crate) fn join_applied_classifier(
     if left == right {
         return Some(left.non_null());
     }
-    let (TyKind::Obj(left_owner, left_args), TyKind::Obj(right_owner, right_args)) =
-        (left.non_null().kind(), right.non_null().kind())
-    else {
-        return None;
+    // A pair already being joined further up is recursive: its argument declines, and the
+    // classifier join falls back to the parameter's star bound.
+    let mut element_join = |types: &[Ty]| match types {
+        [left, right]
+            if visiting.contains(&(*left, *right)) || visiting.contains(&(*right, *left)) =>
+        {
+            None
+        }
+        [first, rest @ ..] => rest.iter().try_fold(*first, |joined, ty| {
+            semantic_common_supertype_inner(source, oracle, joined, *ty, visiting)
+        }),
+        [] => None,
     };
-    if left_owner != owner || right_owner != owner || left_args.len() != right_args.len() {
-        return None;
-    }
-    if left_args.is_empty() {
-        return Some(Ty::obj_name(owner));
-    }
-    let classifier = source.classifier(owner)?;
-    if classifier.type_params.len() != left_args.len() {
-        return None;
-    }
-    let mut arguments = Vec::with_capacity(left_args.len());
-    let mut left_formals = crate::symbol_resolver::GSigBinds::default();
-    let mut right_formals = crate::symbol_resolver::GSigBinds::default();
-    for (index, (&left, &right)) in left_args.iter().zip(right_args).enumerate() {
-        let declared_bound = classifier
-            .type_param_bounds
-            .get(index)
-            .and_then(|bounds| bounds.first())
-            .copied()
-            .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
-        let left_bound =
-            crate::symbol_resolver::ty_subst_keep_unbound(declared_bound, &left_formals);
-        let right_bound =
-            crate::symbol_resolver::ty_subst_keep_unbound(declared_bound, &right_formals);
-        let star_upper_bound =
-            semantic_common_supertype_inner(source, oracle, left_bound, right_bound, visiting)?;
-        let argument = join_type_projection(
-            source,
-            oracle,
-            classifier
-                .type_param_variances
-                .get(index)
-                .copied()
-                .unwrap_or_default(),
-            star_upper_bound,
-            left,
-            right,
-            visiting,
-        )?;
-        let formal = classifier.type_params[index].clone();
-        left_formals.insert(formal.clone(), left.projection_inner().unwrap_or(left));
-        right_formals.insert(formal, right.projection_inner().unwrap_or(right));
-        arguments.push(argument);
-    }
-    Some(Ty::obj_args_name(owner, &arguments))
+    crate::symbol_resolver::join_classifier_applications(
+        source,
+        oracle,
+        owner,
+        &[left, right],
+        &mut element_join,
+    )
+    .ok()
 }
 
 /// `===`/`!==` operands kotlinc forbids: an unsigned type or a `@JvmInline value` class, neither of
