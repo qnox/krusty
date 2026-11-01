@@ -4222,8 +4222,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   reported `argument type mismatch: actual type is 'Map<String, Any>', but 'Map<String, Shape>'
   was expected.` Every lower-bound join in that frame — an argument constraint, an expected-result
   binding, and a finished lambda's constraints merged into the call — now goes through the
-  symbol-aware `merge_inferred_ty_from_symbols`, which returns the nearest shared supertype from
-  the class hierarchy and still falls back to `Any` when the bounds share none. An unqualified
+  symbol-aware `merge_inferred_ty_from_symbols`, which returns the bounds' common supertype (see
+  the next entry on lower bounds of different classes) and still falls back to `Any` when the
+  bounds share none. An unqualified
   constructor call (`Wrapper(buildMap { … })`) already took `V` from the parameter type; the
   qualified nested-class constructor `Shape.Group(…)` solved the builder from its lower bounds
   alone, which is where the erased join surfaced. The same holds for a repository-owned
@@ -13873,6 +13874,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
     function type, a classifier without a runtime descriptor, and `KType.arguments`, whose
     `KTypeProjection` objects this target does not build.
   Tests: `tests/native_type_of_e2e.rs`; the corpus's `reified/reifiedIntersectionTypeArgument`.
+- **Lower bounds of different classes join at their common supertype.** A type variable whose
+  lower bounds are different classes is fixed to every most-specific supertype they share, however
+  far up each hierarchy it sits, as kotlinc's common supertype is. With `Leaf : Node` and
+  `Group : Labelled`, `Labelled : Container`, `Container : Node`, `listOf(Leaf(), Group())` is a
+  `List<Node>`, not a `List<Any>` (`Any` is one edge above each class, `Node` several). Several
+  incomparable most-specific supertypes join at their intersection: `A : Base(), I` and
+  `B : Base(), J`, `J : I`, fix `T` in `pick(A(), B())` to `Base & I`, so members of both stay
+  available. The common-supertype solver (`symbol_resolver/generic_inference/common_supertype.rs`)
+  computes it for every lower-bound join, with type arguments joined by declaration variance; it
+  replaced a separate hierarchy-depth join that picked the shared classifier nearest to both
+  bounds. Wasm carries a value of such an intersection as a reference when every component is one.
+  Tests: `tests/inferred_common_supertype_e2e.rs`, `tests/box_regressions/intersectionValueCarrier.kt`.
 - **An invariant instantiation joins at a captured out-projection of the arguments' common supertype.**
   `sel(Inv(A), Inv(B))`, with `A : X, Y` and `B : X, Y`, has type `Inv<out (X & Y)>` rather than a
   raw `Inv` or `Any`. Reading `v` produces that captured upper bound, so the value has the members
