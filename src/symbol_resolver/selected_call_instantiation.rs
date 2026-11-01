@@ -67,17 +67,15 @@ impl<'a> SymbolResolver<'a> {
     ) -> ReceiverFunctionSelection {
         let selected = match select_receiver_overload_from_functions_tracking(
             self.lib,
-            receiver,
-            name,
-            args,
-            type_args,
-            ExtCtx {
-                fn_scope: self.fn_scope,
-                source: &self.src,
-                type_variables: self.type_variables,
+            OverloadCall {
+                recv: receiver,
+                name,
+                args,
+                type_args,
+                indexed: IndexedConvention::Ordinary,
             },
+            self.ext_ctx(),
             callables.functions(),
-            IndexedConvention::Ordinary,
         ) {
             CandidateSelectionWithTies::Selected(selected) => selected,
             CandidateSelectionWithTies::None => return ReceiverFunctionSelection::None,

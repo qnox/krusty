@@ -368,6 +368,20 @@ pub(super) struct ExtCtx<'a> {
     pub(super) fn_scope: Option<FunctionScopeRef<'a>>,
     pub(super) source: &'a dyn SymbolSource,
     pub(super) type_variables: &'a [String],
+    /// The use site's member visibility, when the caller has a site. Selection ranks a
+    /// visibility error below every resolved candidate with it.
+    pub(super) member_access: Option<&'a dyn super::MemberAccessSite>,
+}
+
+/// One receiver call the overload selector answers: the receiver, the callee spelling, the
+/// supplied value and type arguments, and the indexed convention they are written in.
+#[derive(Clone, Copy)]
+pub(super) struct OverloadCall<'a> {
+    pub(super) recv: Ty,
+    pub(super) name: &'a str,
+    pub(super) args: &'a [CallArgKind],
+    pub(super) type_args: &'a [Ty],
+    pub(super) indexed: IndexedConvention,
 }
 
 /// The single call-overload selector for a receiver call `recv.name(args)`. It is parameterized by
@@ -446,31 +460,22 @@ fn indexed_fixed_parameter_projection(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn select_receiver_overload_from_functions_tracking(
     lib: &dyn SemanticPlatform,
-    recv: Ty,
-    name: &str,
-    args: &[CallArgKind],
-    type_args: &[Ty],
+    call: OverloadCall<'_>,
     ext: ExtCtx<'_>,
     functions: &[FunctionInfo],
-    indexed: IndexedConvention,
 ) -> CandidateSelectionWithTies<FunctionInfo> {
     let mut ambiguous = false;
     let mut ambiguous_candidates = Vec::new();
     let selected = select_overload_tracking_with_functions(
         lib,
-        recv,
-        name,
-        args,
-        type_args,
+        call,
         SelectionMode::Receiver,
         ext,
         Some(functions),
         &mut ambiguous,
         Some(&mut ambiguous_candidates),
-        indexed,
     );
     if ambiguous {
         CandidateSelectionWithTies::Ambiguous(ambiguous_candidates)
@@ -493,38 +498,32 @@ fn select_overload_tracking(
 ) -> Option<FunctionInfo> {
     select_overload_tracking_with_functions(
         lib,
-        recv,
-        name,
-        args,
-        type_args,
+        OverloadCall {
+            recv,
+            name,
+            args,
+            type_args,
+            indexed: IndexedConvention::Ordinary,
+        },
         SelectionMode::Kind(kind),
         ext,
         None,
         ambiguous,
         None,
-        IndexedConvention::Ordinary,
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn select_overload_tracking_with_functions(
     lib: &dyn SemanticPlatform,
-    recv: Ty,
-    name: &str,
-    args: &[CallArgKind],
-    type_args: &[Ty],
+    call: OverloadCall<'_>,
     mode: SelectionMode,
     ext: ExtCtx<'_>,
     provided_functions: Option<&[FunctionInfo]>,
     ambiguous: &mut bool,
     mut ambiguous_candidates: Option<&mut Vec<FunctionInfo>>,
-    indexed: IndexedConvention,
 ) -> Option<FunctionInfo> {
+    let OverloadCall { recv, name, .. } = call;
     let src = ext.source;
-    // Argument assignability and candidate enumeration consume the same federated source. Access
-    // control is checked after selection from the declaration metadata carried by the winner.
-    let assign_src = src;
-    let arg_tys: Vec<Ty> = args.iter().map(|arg| arg.ty()).collect();
     // EXTENSION candidates come from the ONE query — union `resolve_symbols`' function callables over the
     // in-scope packages (scope-pruned, tree-driven), so an unqualified extension binds only when its
     // facade's package is imported. No import scope → the whole-classpath `functions()` fallback
@@ -564,6 +563,68 @@ pub(super) fn select_overload_tracking_with_functions(
             _ => Vec::new(),
         }
     };
+    // Kotlin ranks a visibility error below every resolved candidate, whatever tier either one
+    // sits on: a member the site cannot see is selected only when no accessible candidate applies,
+    // and its access error is then what the caller reports. An applicable extension therefore
+    // takes `b + 1` from an inaccessible `B.plus`, and an accessible overload takes the call from
+    // a more specific inaccessible one.
+    if let Some(site) = ext.member_access {
+        let accessible = overloads
+            .iter()
+            .copied()
+            .filter(|overload| {
+                overload.kind != FnKind::Member || site.member_accessible(overload, recv)
+            })
+            .collect::<Vec<_>>();
+        if accessible.len() != overloads.len() {
+            let selected = select_among_overloads(
+                lib,
+                call,
+                mode,
+                ext,
+                &accessible,
+                ambiguous,
+                ambiguous_candidates.as_deref_mut(),
+            );
+            if selected.is_some() || *ambiguous {
+                return selected;
+            }
+        }
+    }
+    select_among_overloads(
+        lib,
+        call,
+        mode,
+        ext,
+        &overloads,
+        ambiguous,
+        ambiguous_candidates,
+    )
+}
+
+/// The tier walk over one candidate family: declaration-priority and receiver-distance tiers,
+/// each tried by the ordered applicability passes.
+fn select_among_overloads(
+    lib: &dyn SemanticPlatform,
+    call: OverloadCall<'_>,
+    mode: SelectionMode,
+    ext: ExtCtx<'_>,
+    overloads: &[&FunctionInfo],
+    ambiguous: &mut bool,
+    mut ambiguous_candidates: Option<&mut Vec<FunctionInfo>>,
+) -> Option<FunctionInfo> {
+    let OverloadCall {
+        recv,
+        name,
+        args,
+        type_args,
+        indexed,
+    } = call;
+    let src = ext.source;
+    // Argument assignability and candidate enumeration consume the same federated source. Access
+    // control is checked after selection from the declaration metadata carried by the winner.
+    let assign_src = src;
+    let arg_tys: Vec<Ty> = args.iter().map(|arg| arg.ty()).collect();
     // Candidates from the scoped query are IN-SCOPE by construction: each came from a `resolve_symbols`
     // over an imported package, so its declared package is in scope even when `@JvmPackageName` relocated
     // its facade to a different JVM package (`kotlin.collections`'s `UArraysKt` → `kotlin/collections/
@@ -576,7 +637,7 @@ pub(super) fn select_overload_tracking_with_functions(
         ext.fn_scope.map(FunctionScopeRef::package_count),
         overloads.len(),
     );
-    for o in &overloads {
+    for o in overloads {
         crate::trace_compiler!(
             "resolve",
             "  raw {name} kind={:?} recv={:?} params={:?} generic={:?} context={} required={} vararg={:?} pub={} rank={} origin={:?} owner={}",
