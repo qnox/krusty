@@ -121,9 +121,26 @@ impl<'a> JvmSignatureFormatter<'a> {
 
     /// `(params)result` in a method's parameter and return modes, declaring no type parameter.
     pub(super) fn method_positions(&self, params: &[Ty], ret: &Ty) -> Option<String> {
+        self.method_positions_with_vararg(params, ret, None)
+    }
+
+    /// [`Self::method_positions`] where the parameter at `vararg_index` is a `vararg`: its element
+    /// is a value parameter, so it keeps its declaration-site wildcards, as in
+    /// [`Self::method_signature`].
+    pub(super) fn method_positions_with_vararg(
+        &self,
+        params: &[Ty],
+        ret: &Ty,
+        vararg_index: Option<usize>,
+    ) -> Option<String> {
         let mut signature = String::from("(");
-        for parameter in params {
-            signature.push_str(&self.parameter_ty(parameter)?);
+        for (index, parameter) in params.iter().enumerate() {
+            let rendered = if vararg_index == Some(index) {
+                self.vararg_element_ty(parameter, Wildcards::Declared)?
+            } else {
+                self.parameter_ty(parameter)?
+            };
+            signature.push_str(&rendered);
         }
         signature.push(')');
         signature.push_str(&self.method_ty(ret, Wildcards::Suppressed)?);
