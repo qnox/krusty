@@ -2571,6 +2571,36 @@ impl FirBody {
         id
     }
 
+    /// Wrap the checked `value` in an implicit conversion to `target`.
+    ///
+    /// kotlinc builds an implicit cast, coercion, widening or SAM wrap at its operand's offsets:
+    /// the conversion has no source extent of its own, so it takes the operand's origin. A block
+    /// is no operand of its own either: kotlinc converts the statement that yields its value (a
+    /// lambda's last expression is its return value), so the conversion takes that value's
+    /// origin. What required the conversion (a call argument, a lambda's result, an assignment)
+    /// stays on [`FirConversion::origin`].
+    pub fn add_implicit_conversion(
+        &mut self,
+        value: FirExprId,
+        target: ResolvedTy,
+        conversion: FirConversion,
+    ) -> FirExprId {
+        let mut yielded = value;
+        while let FirExprKind::Block {
+            result: Some(result),
+            ..
+        } = self.expressions[yielded.raw() as usize].kind
+        {
+            yielded = result;
+        }
+        let origin = self.expressions[yielded.raw() as usize].origin;
+        self.add_expr(FirExpr {
+            origin,
+            ty: target,
+            kind: FirExprKind::ImplicitConversion { value, conversion },
+        })
+    }
+
     pub(crate) fn record_constant_read(&mut self, expression: FirExprId) {
         self.constant_reads.insert(expression);
     }

@@ -1081,21 +1081,11 @@ pub(super) fn implicit_return_end(ir: &IrFile, value: ExprId) -> Option<u32> {
     let mut end = ir.expr_end_lines.get(&value).copied();
     let inline_call_end = ir.inline_regions.contains(&value);
     let mut returned = value;
-    loop {
-        // An implicit coercion of the value to the callable's result type (a `() -> Any?`
-        // lambda's `String`) has no source extent of its own: the value it coerces ends the body.
-        let inner = match ir.expr(returned) {
-            crate::ir::IrExpr::Block {
-                value: Some(inner), ..
-            }
-            | crate::ir::IrExpr::TypeOp {
-                op: crate::ir::IrTypeOp::ImplicitCoercion,
-                arg: inner,
-                ..
-            } => *inner,
-            _ => break,
-        };
-        returned = inner;
+    while let crate::ir::IrExpr::Block {
+        value: Some(inner), ..
+    } = ir.expr(returned)
+    {
+        returned = *inner;
         let inner_end = ir.expr_end_lines.get(&returned).copied();
         end = if inline_call_end {
             end.or(inner_end)
