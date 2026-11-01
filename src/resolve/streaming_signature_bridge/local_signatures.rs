@@ -6,6 +6,7 @@ use crate::types::TyKind;
 
 #[cfg(test)]
 mod tests;
+mod written_type_parameters;
 
 /// Same-parse test adapter for capture storage discovered by the legacy retained-file fixture.
 /// Production ordinary bodies publish no capture declaration; their checked FIR carries field
@@ -1173,55 +1174,13 @@ fn publish_checked_local_signatures_selected(
                         failed.push(declaration);
                         continue;
                     }
-                    let semantic_names =
-                        info.resolved_declaration_type_parameters(method.signature_span.lo);
-                    let prepared_type_parameters = (semantic_names.len()
-                        == method.type_params.len())
-                    .then(|| {
-                        method
-                            .type_params
-                            .iter()
-                            .zip(semantic_names)
-                            .enumerate()
-                            .map(|(ordinal, (source_name, semantic_name))| {
-                                let bounds = method
-                                    .type_param_bounds
-                                    .iter()
-                                    .filter(|(formal, _)| formal == source_name)
-                                    .map(|(_, bound)| info.resolved_type_bound(bound))
-                                    .collect::<Option<Vec<_>>>()?;
-                                Some((
-                                    ordinal as u32,
-                                    source_name.clone(),
-                                    semantic_name.clone(),
-                                    ResolvedTypeParameterFlags::new(
-                                        crate::types::TypeVariance::Invariant,
-                                        false,
-                                        method.reified_type_params.contains(source_name),
-                                    ),
-                                    bounds,
-                                ))
-                            })
-                            .collect::<Option<Vec<_>>>()
-                    })
-                    .flatten();
-                    let existing_type_parameters = (0..method.type_params.len())
-                        .filter(|&ordinal| {
-                            index.type_parameter(declaration, ordinal as u32).is_some()
-                        })
-                        .count();
-                    assert!(
-                        existing_type_parameters == 0
-                            || existing_type_parameters == method.type_params.len(),
-                        "a declaration generic contract is published atomically"
-                    );
-                    let type_parameters_failed = match prepared_type_parameters {
-                        Some(parameters) if existing_type_parameters == 0 => index
-                            .publish_type_parameters_atomically(declaration, parameters)
-                            .is_err(),
-                        Some(_) => false,
-                        None => true,
-                    };
+                    let type_parameters_failed = !written_type_parameters::WrittenTypeParameters {
+                        names: &method.type_params,
+                        bounds: &method.type_param_bounds,
+                        reified: &method.reified_type_params,
+                        declaration_start: method.signature_span.lo,
+                    }
+                    .publish(info, index, declaration);
                     if type_parameters_failed
                         || (!signature_published
                             && index
@@ -1348,6 +1307,18 @@ fn publish_checked_local_signatures_selected(
                         failed.push(declaration);
                         continue;
                     };
+                    // An extension property declares its own formals (`val <T> T.x`), and its
+                    // semantic header is complete only once they are published.
+                    let type_parameters = written_type_parameters::WrittenTypeParameters {
+                        names: &property.type_params,
+                        bounds: &property.type_param_bounds,
+                        reified: &property.reified_type_params,
+                        declaration_start: property.span.lo,
+                    };
+                    if !type_parameters.publish(info, index, declaration) {
+                        failed.push(declaration);
+                        continue;
+                    }
                     let context_parameters = property
                         .context_params
                         .iter()

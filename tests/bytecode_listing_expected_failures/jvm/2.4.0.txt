@@ -1,6 +1,6 @@
 # Kotlin 2.4.0 compiler/testData/codegen/bytecodeListing cases krusty does not reproduce yet,
-# relative to that directory. Regenerate with KRUSTY_BLESS_BYTECODE_LISTING_EXPECTATIONS=1 on a full local run. The list only
-# shrinks.
+# relative to that directory. Regenerate with KRUSTY_BLESS_BYTECODE_LISTING_EXPECTATIONS=1
+# on a full local run. The list only shrinks.
 accessorsForProtectedStaticJavaFieldInOtherPackage.kt
 annotations/JvmSynthetic.kt
 annotations/annotationAllTarget.kt
@@ -20,7 +20,6 @@ annotations/repeatable/kotlinSpecificTargets.kt
 annotations/repeatable/multipleRepeatableOrder.kt
 annotations/repeatable/propertyGetterUseSiteTarget.kt
 annotations/repeatable/retentionAndTarget.kt
-anonymousObjectInGenericFun.kt
 callableNameIntrinsic.kt
 callableReference/adaptedReference.kt
 callableReferenceArrayConstructorArguments.kt
