@@ -215,7 +215,8 @@ fn specialize_member_type_with_unbound(
                 if bound.upper_bound_admits_null() {
                     binding
                 } else {
-                    binding.non_null()
+                    // `S & Any` takes the argument's own `& Any` (`T` becomes `T & Any`).
+                    binding.non_null().definitely_non_null()
                 }
             };
             match (position, binding.kind()) {
