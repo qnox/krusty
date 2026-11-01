@@ -7,7 +7,7 @@
 
 use super::common;
 
-#[path = "value_class_constructor_lines_e2e.rs"]
+#[path = "value_class_constructor_bodies_e2e/constructor_lines.rs"]
 mod constructor_lines;
 
 const SRC: &str = "var sink: Any? = null\n\

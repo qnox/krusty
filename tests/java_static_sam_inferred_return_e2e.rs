@@ -6,12 +6,7 @@
 
 use super::common;
 
-fn assert_clean_diagnostic_ledger(
-    label: &str,
-    code: i32,
-    stderr: &str,
-    stdout: Option<&str>,
-) {
+fn assert_clean_diagnostic_ledger(label: &str, code: i32, stderr: &str, stdout: Option<&str>) {
     // `compiler_diagnostics` exposes krusty's stdout separately. Its recorded kotlinc boundary
     // exposes one diagnostic stream only, so the reference calls pass no stdout ledger.
     let stdout = stdout.unwrap_or_default();

@@ -16,7 +16,7 @@ use std::fs;
 
 use super::common;
 
-#[path = "annotation_argument_constness_e2e.rs"]
+#[path = "annotation_emission_e2e/annotation_argument_constness.rs"]
 mod annotation_argument_constness;
 
 /// Per-DECLARATION annotation facts from `javap -v`, keyed by the declaration line: its flags and

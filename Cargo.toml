@@ -12,7 +12,7 @@ categories = ["compilers", "development-tools"]
 autotests = false
 
 [workspace]
-members = ["crates/krusty-build", "crates/krusty-cli", "crates/krusty-lsp", "crates/krusty-plugin-host", "crates/krusty-plugin-ir", "crates/krusty-test-support", "crates/krusty-toolchain"]
+members = ["crates/krusty-build", "crates/krusty-cli", "crates/krusty-lsp", "crates/krusty-plugin-host", "crates/krusty-plugin-ir", "crates/krusty-test-modules", "crates/krusty-test-support", "crates/krusty-toolchain"]
 default-members = [".", "crates/krusty-cli"]
 resolver = "2"
 
@@ -66,6 +66,8 @@ focused-klib-tests = []
 dhat-heap = ["dep:dhat"]
 
 [dev-dependencies]
+# Declares the e2e target's modules from the `tests/*_e2e.rs` files present.
+krusty-test-modules = { path = "crates/krusty-test-modules" }
 # The kotlinc command-line conformance test compares the CLI's argument parser with kotlinc's own.
 krusty-cli = { path = "crates/krusty-cli" }
 rayon = "1"
@@ -168,7 +170,7 @@ path = "tests/e2e.rs"
 
 [[test]]
 name = "klib_e2e"
-path = "tests/klib_e2e.rs"
+path = "tests/klib.rs"
 required-features = ["focused-klib-tests"]
 
 [[test]]

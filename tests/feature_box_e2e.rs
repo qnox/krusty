@@ -1,6 +1,6 @@
 //! Consolidated feature `box()` snippets, compiled by krusty and run on a real JVM. To keep the test
 //! suite fast, every accepted snippet runs in ONE JVM via a reflective runner (per-snippet
-//! `URLClassLoader`), instead of a `javac`+`java` per snippet — the same trick as `box_vendored_e2e`.
+//! `URLClassLoader`), instead of a `javac`+`java` per snippet — the same trick as `box_vendored`.
 //! Each snippet's `box(): String` must return "OK" under `-Xverify:all`.
 
 use super::common;
