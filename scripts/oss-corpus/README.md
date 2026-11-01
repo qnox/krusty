@@ -49,7 +49,8 @@ and the report lists the top ones across the corpus with a link to each project'
 `summarize.py` turns the per-project results into the run's report: stars, Kotlin and Java lines,
 compilations built, identical classes, the reason for every miss, every error the verify build
 reported (grouped by cause: the message without its location, with quoted text and numbers masked,
-counted across the corpus and listed in full per project), what both builds cost, krusty's
+counted across the corpus and listed in full per project; a project whose verify build recorded
+nothing is reported as unverified, not left out), what both builds cost, krusty's
 hotspots, and the Gradle and compiler plugins the corpus uses. The nightly run, and a manual run
 with `publish` set, records the results on the `corpus-results` branch with `publish.py`:
 `README.md` is the scoreboard, `projects/<name>/` holds each project's latest result (a project a

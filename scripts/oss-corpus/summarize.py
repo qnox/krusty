@@ -141,41 +141,57 @@ def code(text):
     return f'{fence}{padding}{text}{padding}{fence}'
 
 
+def verification(project):
+    """How far the verify build of a project got, or None for a result measured before the corpus
+    ran one (it has no `verify_exit`): the build's exit code, and how many compilations have a
+    verify record and how many have none (no verify compile, or one that wrote no record)."""
+    if project.get('verify_exit') is None:
+        return None
+    verified = sum(1 for r in project['rows']
+                   if r.get('verify') and r['verify']['status'] != 'no record')
+    return dict(exit=project['verify_exit'], verified=verified, unverified=len(project['rows']) - verified)
+
+
 def errors_section(projects):
     """Every error krusty reported when it compiled each compilation on its own, grouped by cause:
-    one table across the corpus, then each project's errors, under their cause, with the
-    compilations that reported them."""
-    verified = [p for p in projects if any(r.get('verify') for r in p['rows'])]
-    if not verified:
+    one table across the corpus, then, for every project the verify build ran for, its errors under
+    their cause with the compilations that reported them, or that it verified nothing."""
+    measured = [p for p in projects if verification(p) is not None]
+    if not measured:
         return []
     out = ['', '## krusty errors', '',
            'The verify build compiles every compilation with kotlinc, and krusty compiles each one on its own',
            'beside it, against kotlinc\'s classes of the compilations it depends on (the krusty plugin\'s',
            'verify mode). One failure therefore never hides the next: these are all the errors krusty',
            'reported, grouped by cause, the message without its location and with quoted text and numbers',
-           'masked.', '']
-    causes = {p['name']: error_causes(p) for p in verified}
+           'masked. A result measured before the corpus ran the verify build is left out.', '']
+    causes = {p['name']: error_causes(p) for p in measured}
     corpus = collections.defaultdict(lambda: [set(), set(), set()])
     for name, ranked in causes.items():
         for c, errors in ranked:
             corpus[c][0].add(name)
             corpus[c][1].update((name, task) for _, tasks in errors for task in tasks)
             corpus[c][2].update((name, error) for error, _ in errors)
-    if not corpus:
-        return out + ['None.']
-    out += ['| Cause | Projects | Compilations | Errors |', '| --- | ---: | ---: | ---: |']
-    for c, (names, tasks, errors) in sorted(corpus.items(),
-                                            key=lambda kv: (-len(kv[1][0]), -len(kv[1][1]), -len(kv[1][2]), kv[0])):
-        cell = code(c).replace('|', '\\|')
-        out.append(f'| {cell} | {len(names)} | {len(tasks)} | {len(errors)} |')
-    for p in verified:
+    if corpus:
+        out += ['| Cause | Projects | Compilations | Errors |', '| --- | ---: | ---: | ---: |']
+        for c, (names, tasks, errors) in sorted(
+                corpus.items(), key=lambda kv: (-len(kv[1][0]), -len(kv[1][1]), -len(kv[1][2]), kv[0])):
+            cell = code(c).replace('|', '\\|')
+            out.append(f'| {cell} | {len(names)} | {len(tasks)} | {len(errors)} |')
+    else:
+        out.append('No verified compilation reported an error.')
+    for p in measured:
         ranked = causes[p['name']]
+        state = verification(p)
+        if not state['verified']:
+            out += ['', f"- **{p['name']}**: no compilation verified (verify build exit {state['exit']})"]
+            continue
         failed = {task for _, errors in ranked for _, tasks in errors for task in tasks}
-        unverified = sum(1 for r in p['rows'] if not r.get('verify') or r['verify']['status'] == 'no record')
         summary = (f"{counted(sum(len(errors) for _, errors in ranked), 'error')} in "
-                   f"{counted(len(failed), 'compilation')}, {counted(len(ranked), 'cause')}")
-        if unverified:
-            summary += f"; {counted(unverified, 'compilation')} not verified"
+                   f"{counted(len(failed), 'compilation')}, {counted(len(ranked), 'cause')}; "
+                   f"{state['verified']} of {counted(len(p['rows']), 'compilation')} verified")
+        if state['exit']:
+            summary += f" (verify build exit {state['exit']})"
         out += ['', f"<details><summary><b>{p['name']}</b>: {summary}</summary>", '']
         if not ranked:
             out.append('None.')
@@ -360,6 +376,7 @@ def main():
             json.dump(dict(projects=[dict(p, stars=stars.get(p['name']), misses=misses(p),
                                           errors=[dict(cause=c, errors=[dict(error=e, compilations=t) for e, t in errors])
                                                   for c, errors in error_causes(p)],
+                                          verification=verification(p),
                                           plugins=surveys.get(p['name'], {})) for p in projects]),
                       f, indent=1)
 
