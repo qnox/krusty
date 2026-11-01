@@ -43,3 +43,24 @@ class Called { fun f(o: Any) = if (o is Outer.Called) o.m() else 0 }
         ],
     );
 }
+
+/// A local an inline function's body declares keeps the callee's descriptor when the body is
+/// copied into a caller: kotlinc's inliner never maps it, so the caller lists no row for it. A
+/// caller declaring its own local of that type maps it and lists the row.
+#[test]
+fn a_local_copied_from_an_inline_body_lists_no_nested_class() {
+    common::assert_classes_identical_to_kotlinc(
+        "CopiedLocalRows",
+        r#"
+package rows
+
+class Holder { class Item }
+
+inline fun copied(value: Any): Any { val item = value as Holder.Item; return item }
+
+class Inlined { fun f(o: Any) = copied(o) }
+class Own { fun f(o: Any): Any { val own = o as Holder.Item; return own } }
+"#,
+        &["rows/Inlined", "rows/Own"],
+    );
+}

@@ -38,6 +38,45 @@ fn copies_referenced_classpath_inner_class_metadata() {
     assert!(emitted.inner_classes.contains(&expected));
 }
 
+/// The same dependency, reached only through a written type test. kotlinc boxes a type operator's
+/// operand without its type mapper, so the consumer lists no row for the dependency's nested class.
+#[test]
+fn a_type_test_alone_lists_no_classpath_nested_class() {
+    let lib = common::compile_lib(
+        "inner_classes_type_test",
+        "package dep\nclass Outer { class Nested }\n",
+    )
+    .expect("krusty compiles the dependency");
+    common::assert_classes_identical_to_kotlinc_against(
+        "Use",
+        "package app\nfun nested(value: Any) = value is dep.Outer.Nested\n",
+        &["app/UseKt"],
+        &[lib],
+    );
+}
+
+/// A library inline function's local keeps its descriptor when the compiled body is copied into a
+/// caller: kotlinc's inliner never maps it, so that caller lists no row for the nested class. A
+/// caller that declares its own local of the type maps it and lists the row.
+#[test]
+fn a_local_copied_from_a_library_inline_body_lists_no_nested_class() {
+    let lib = common::compile_lib(
+        "inner_classes_copied_local",
+        "package dep\n\
+         class Holder { class Item }\n\
+         inline fun copied(value: Any): Any { val item = value as Holder.Item; return item }\n",
+    )
+    .expect("krusty compiles the dependency");
+    common::assert_classes_identical_to_kotlinc_against(
+        "Use",
+        "package app\n\
+         class Inlined { fun f(o: Any) = dep.copied(o) }\n\
+         class Own { fun f(o: Any): Any { val own = o as dep.Holder.Item; return own } }\n",
+        &["app/Inlined", "app/Own"],
+        &[lib],
+    );
+}
+
 #[test]
 fn inherited_inner_constructor_metadata_excludes_its_enclosing_instance() {
     let Some(lib) = common::compile_lib(

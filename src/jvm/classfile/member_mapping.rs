@@ -24,6 +24,9 @@ pub(super) struct MappedMembers {
     /// supertypes) was not created by the copy.
     copied_classes: HashSet<u16>,
     mapped_classes: HashSet<u16>,
+    /// Descriptors of the locals the class's own code declares. kotlinc maps a local's type when
+    /// it declares the variable; a local the inliner copies keeps the callee's descriptor.
+    local_types: crate::fx_hash::HashSet<String>,
 }
 
 impl MappedMembers {
@@ -36,10 +39,15 @@ impl MappedMembers {
         index
     }
 
-    /// How many references the class's own code names; the mention cache is rebuilt when it
-    /// grows.
+    /// How many references and local types the class's own code names; the mention cache is
+    /// rebuilt when it grows.
     pub(super) fn mapped_count(&self) -> usize {
-        self.mapped.len()
+        self.mapped.len() + self.local_types.len()
+    }
+
+    /// The local variable descriptors the class's own code declares.
+    pub(super) fn local_types(&self) -> impl Iterator<Item = &str> {
+        self.local_types.iter().map(String::as_str)
     }
 
     /// Whether only copied code names the member reference at `index`.
@@ -65,6 +73,14 @@ impl ClassWriter {
     /// a compiler-inserted cast included, still maps it.
     pub fn type_operand_class_ref(&mut self, internal: &str) -> u16 {
         self.copying(|writer| writer.class_ref(internal))
+    }
+
+    /// Declare a local of `descriptor`: kotlinc's type mapper maps it unless the declaration is
+    /// copied from an inline function's compiled body.
+    pub fn declare_local_type(&mut self, descriptor: &str) {
+        if !self.members.copying {
+            self.members.local_types.insert(descriptor.to_string());
+        }
     }
 
     /// Whether the class's own code, or a declaration, names `internal` as a class constant.

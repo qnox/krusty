@@ -236,18 +236,12 @@ impl ClassWriter {
                 });
             }
         }
-        // A local variable's type is mapped for its `LocalVariableTable` entry.
-        for index in self
-            .methods
-            .iter()
-            .flat_map(|method| method.lvt.iter().map(|&(_, descriptor, ..)| descriptor))
-        {
-            if let Some(value) = self.cp.utf8_value(index) {
-                record_mentioned_names(value, &mut names);
-                record_signature_classes(value, &mut |class| {
-                    classes.insert(class.to_string());
-                });
-            }
+        // A local variable's type is mapped where the class's own code declares it.
+        for value in self.members.local_types() {
+            record_mentioned_names(value, &mut names);
+            record_signature_classes(value, &mut |class| {
+                classes.insert(class.to_string());
+            });
         }
         self.cp
             .record_typed_descriptor_names(&self.copied_only_name_and_types(), &mut |value| {
