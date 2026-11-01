@@ -25,6 +25,8 @@ mod parenthesized_line_breaks_e2e;
 mod primary_constructor_newline_e2e;
 #[path = "../property_initializer_newline_e2e.rs"]
 mod property_initializer_newline_e2e;
+#[path = "../reordered_argument_line_e2e.rs"]
+mod reordered_argument_line_e2e;
 #[path = "../receiver_type_line_break_e2e.rs"]
 mod receiver_type_line_break_e2e;
 #[path = "../type_annotation_newline_e2e.rs"]
