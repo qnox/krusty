@@ -143,6 +143,7 @@ fn alpha_equivalent_type(
             .is_some_and(|mapped| mapped == right),
         (TyKind::Nullable(left), TyKind::Nullable(right))
         | (TyKind::PlatformNullable(left), TyKind::PlatformNullable(right))
+        | (TyKind::MutabilityFlexible(left), TyKind::MutabilityFlexible(right))
         | (TyKind::InProjection(left), TyKind::InProjection(right))
         | (TyKind::OutProjection(left), TyKind::OutProjection(right))
         | (TyKind::StarProjection(left), TyKind::StarProjection(right)) => {

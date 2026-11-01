@@ -8,7 +8,8 @@
 //! declarations and target-neutral inline bodies, not a target's realization of them.
 
 use crate::backend::{
-    Artifact, Backend, CheckedIrFile, DependencyExportSignatures, DependencyMetadata,
+    Artifact, Backend, BackendClassifierSource, CheckedIrFile, DependencyExportSignatures,
+    DependencyMetadata,
 };
 use crate::compilation_target::CompilationTarget;
 use crate::diag::DiagSink;
@@ -124,7 +125,16 @@ impl KlibBackend {
         diags: &mut DiagSink,
     ) -> DependencyExportSignatures {
         let ir = &file.ir;
-        let classes = library_classes(ir);
+        let classes = match library_classes(ir) {
+            Ok(classes) => classes,
+            Err(error) => {
+                diags.error(
+                    crate::diag::Span::new(0, 0),
+                    format!("{DECLINE_PREFIX}class metadata name: {error}"),
+                );
+                return DependencyExportSignatures::default();
+            }
+        };
         if let Some(construct) = classes
             .iter()
             .find_map(|&class| unsupported_class_construct(ir, class))
@@ -236,23 +246,62 @@ impl KlibBackend {
                 )
             })
             .collect::<Vec<_>>();
+        let class_ids = match records
+            .iter()
+            .zip(&tails)
+            .map(|(record, tail)| {
+                let classifier = record.classifier();
+                if tail.local_classifiers.contains(&classifier) {
+                    Ok(crate::metadata::class_id::ResolvedClassId::local(
+                        classifier,
+                    ))
+                } else {
+                    crate::metadata::class_id::ResolvedClassId::resolve(
+                        crate::libraries::ClassifierDeclarationKey::Ordinary(classifier),
+                        &|key| file.classifiers.classifier_declaration_name(key),
+                    )
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()
+        {
+            Ok(names) => names,
+            Err(error) => {
+                diags.error(
+                    crate::diag::Span::new(0, 0),
+                    format!("{DECLINE_PREFIX}class metadata name: {error}"),
+                );
+                return DependencyExportSignatures::default();
+            }
+        };
         let declarations = records
             .iter()
             .zip(&tails)
             .zip(enum_entries.iter().zip(&constants))
-            .map(|((record, tail), (entries, constants))| KlibClass {
-                declaration: record.declaration(tail, entries),
-                constants,
-                in_source_file: record.has_source_file(),
-            })
+            .zip(&class_ids)
+            .map(
+                |(((record, tail), (entries, constants)), class_id)| KlibClass {
+                    declaration: record.declaration(class_id, tail, entries),
+                    constants,
+                    in_source_file: record.has_source_file(),
+                },
+            )
             .collect::<Vec<_>>();
-        let fragment = package_fragment_with_inner_classifiers(
+        let fragment = match package_fragment_with_inner_classifiers(
             &segments,
             &members,
             &declarations,
             self.annotations_in_metadata,
             &inner_classifier,
-        );
+        ) {
+            Ok(fragment) => fragment,
+            Err(error) => {
+                diags.error(
+                    crate::diag::Span::new(0, 0),
+                    format!("{DECLINE_PREFIX}class metadata name: {error}"),
+                );
+                return DependencyExportSignatures::default();
+            }
+        };
         let Some(package_exports) =
             package_exports(ir, file.module_name, &segments, &fragment, diags)
         else {
@@ -525,7 +574,7 @@ fn record_class_function_exports(
     exports: &mut DependencyExportSignatures,
     declarations: &mut super::inline_ir::DeclarationSignatures,
 ) -> Result<(), String> {
-    let source_classes = library_classes(ir);
+    let source_classes = library_classes(ir).map_err(|error| error.to_string())?;
     if source_classes.len() != decoded.class_order.len() {
         return Err("generated KLIB metadata changed class declaration order".to_string());
     }
@@ -584,7 +633,18 @@ fn record_class_function_exports(
                             declaration.name
                         )
                     })?;
-                Some(crate::types::Ty::obj_name(receiver))
+                if receiver != source.fq_name_id() {
+                    return Err(format!(
+                        "class function {} lost its declared receiver signature",
+                        declaration.name
+                    ));
+                }
+                Some(ir.declared_class_self_type(receiver).ok_or_else(|| {
+                    format!(
+                        "class function {} lost its declared receiver application",
+                        declaration.name
+                    )
+                })?)
             };
             // The current prepared writer can serialize a non-generic dispatch classifier exactly.
             // A generic owner also needs its class parameters remapped into the synthetic prepared
@@ -766,7 +826,19 @@ fn declared_setter(
 /// in declaration order, each followed by the classifiers its `nestedClassName` list names (the
 /// declared ones, those a compiler plugin generated, the companion), in that list's order. A
 /// classifier declared in executable code is no declaration of the library.
-fn library_classes(ir: &IrFile) -> Vec<&IrClass> {
+fn library_classes(ir: &IrFile) -> Result<Vec<&IrClass>, crate::metadata::class_id::ClassIdError> {
+    for class in &ir.classes {
+        if class.is_source_declared
+            && class.enclosure.is_none()
+            && !class.is_enum_entry
+            && !crate::metadata::local_classifiers::is_local(ir, class)
+            && class.declaration_name.is_none()
+        {
+            return Err(crate::metadata::class_id::ClassIdError::UnknownName(
+                crate::libraries::ClassifierDeclarationKey::Ordinary(class.fq_name_id()),
+            ));
+        }
+    }
     let mut top_level = ir
         .classes
         .iter()
@@ -777,7 +849,10 @@ fn library_classes(ir: &IrFile) -> Vec<&IrClass> {
                 && !class.is_local_class
                 && !class.is_anonymous_object
                 && !class.is_enum_entry
-                && class.fq_name.nested_owner().is_none()
+                && matches!(
+                    class.declaration_name.as_ref(),
+                    Some(crate::types::ClassifierDeclarationName::TopLevel { .. })
+                )
         })
         .map(|(index, class)| {
             let order = ir
@@ -807,7 +882,7 @@ fn library_classes(ir: &IrFile) -> Vec<&IrClass> {
                 }),
         );
     }
-    ordered
+    Ok(ordered)
 }
 
 /// A construct of `class` this writer does not record yet.

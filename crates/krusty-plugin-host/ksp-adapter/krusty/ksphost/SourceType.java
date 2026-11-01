@@ -3,11 +3,13 @@ package krusty.ksphost;
 import com.google.devtools.ksp.symbol.KSAnnotation;
 import com.google.devtools.ksp.symbol.KSDeclaration;
 import com.google.devtools.ksp.symbol.KSType;
+import com.google.devtools.ksp.symbol.KSTypeAlias;
 import com.google.devtools.ksp.symbol.KSTypeArgument;
 import com.google.devtools.ksp.symbol.Nullability;
 import com.google.devtools.ksp.symbol.Variance;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.Supplier;
 import kotlin.sequences.Sequence;
 
 // A type a source declaration names: a classifier or a type parameter, applied to arguments. Its
@@ -18,8 +20,8 @@ final class SourceType implements KSType {
     private final String name;
     // The type parameter's round-unique id, or -1 for a classifier.
     private final int parameter;
-    // The library type alias the type was named by, or null.
-    LibraryTypeAlias alias;
+    // The type alias the type was named by, found when asked for, or null.
+    Supplier<KSTypeAlias> alias;
     private final boolean nullable;
     // Whether the type has no annotations: source spells it with no type-use annotation, or it is
     // the classifier type a constructor returns.
@@ -44,7 +46,7 @@ final class SourceType implements KSType {
     @Override
     public KSDeclaration getDeclaration() {
         if (alias != null) {
-            return alias;
+            return alias.get();
         }
         return parameter < 0 ? symbols.resolvedClass(name) : symbols.typeParameter(parameter);
     }
@@ -99,12 +101,18 @@ final class SourceType implements KSType {
 
     @Override
     public KSType makeNullable() {
-        return nullable ? this : new SourceType(symbols, name, parameter, true, unannotated, arguments);
+        return nullable ? this : withNullability(true);
     }
 
     @Override
     public KSType makeNotNullable() {
-        return nullable ? new SourceType(symbols, name, parameter, false, unannotated, arguments) : this;
+        return nullable ? withNullability(false) : this;
+    }
+
+    private SourceType withNullability(boolean nullable) {
+        SourceType type = new SourceType(symbols, name, parameter, nullable, unannotated, arguments);
+        type.alias = alias;
+        return type;
     }
 
     @Override

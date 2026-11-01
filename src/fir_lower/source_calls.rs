@@ -2099,14 +2099,7 @@ impl BodyLowering<'_> {
         if suspend {
             self.ir.suspend_calls.insert(call, signature.result.get());
         }
-        Some(Ok(if statements.is_empty() {
-            call
-        } else {
-            self.ir.add_expr(IrExpr::Block {
-                stmts: statements,
-                value: Some(call),
-            })
-        }))
+        Some(Ok(self.wrap_call_statements(statements, call)))
     }
 
     /// Consume the checker's parameter mapping once for all ordinary source calls. This is the
@@ -2230,11 +2223,14 @@ impl BodyLowering<'_> {
                     array_type,
                     elements,
                     spreads,
-                } => Some(Some(self.ir.add_expr(IrExpr::Vararg {
+                    source_line,
+                } => Some(Some(super::checked_arguments::vararg_value(
+                    self.ir,
                     array_type,
-                    spreads,
                     elements,
-                }))),
+                    spreads,
+                    source_line,
+                ))),
             })
             .collect::<Option<Vec<_>>>()?;
         Some(NormalizedCheckedArguments {
@@ -2259,6 +2255,7 @@ impl BodyLowering<'_> {
             named: false,
         });
         self.ir.call_operand_bindings.insert(declaration);
+        self.ir.argument_evaluation_bindings.insert(declaration);
         statements.push(declaration);
         let read = self.ir.add_expr(IrExpr::GetValue(temporary));
         // This read is generated while normalizing checked argument evaluation order, so it has no

@@ -25,6 +25,7 @@ pub const DECLINE_PREFIX: &str = "krusty: the wasm backend does not support ";
 pub struct WasmBackend {
     target: WasmTarget,
     entry: Entry,
+    array_range_checks: bool,
 }
 
 impl WasmBackend {
@@ -32,12 +33,20 @@ impl WasmBackend {
         Self {
             target,
             entry: Entry::Main,
+            array_range_checks: super::array_access::default_range_checks(),
         }
     }
 
     /// Start the program in `entry` instead of `main`.
     pub fn with_entry(mut self, entry: Entry) -> Self {
         self.entry = entry;
+        self
+    }
+
+    /// Explicit `-Xwasm-enable-array-range-checks` semantics. This is a code-generation option;
+    /// it does not change frontend array types, overload selection or dependency identities.
+    pub fn with_array_range_checks(mut self, enabled: bool) -> Self {
+        self.array_range_checks = enabled;
         self
     }
 }
@@ -106,6 +115,13 @@ impl Backend for WasmBackend {
         true
     }
 
+    fn realizes_dependency_intrinsic(
+        &self,
+        operation: crate::backend::BackendCompilerIntrinsic,
+    ) -> bool {
+        lower::is_direct_operation(operation)
+    }
+
     fn lower_ir_file(
         &self,
         mut file: CheckedIrFile<'_>,
@@ -161,6 +177,8 @@ impl Backend for WasmBackend {
                 ir: &file.ir,
                 properties: &properties,
                 callables: &file.callables,
+                classifiers: &file.classifiers,
+                array_range_checks: self.array_range_checks,
                 dependency_exports: &file.dependency_exports,
                 module_name: file.module_name,
                 plan,
@@ -293,6 +311,15 @@ mod tests {
         entry: Entry,
         sources: &[&str],
     ) -> (Vec<Artifact>, Vec<String>) {
+        compile_program_with_provider(target, entry, sources, Box::new(EmptySymbolSource))
+    }
+
+    fn compile_program_with_provider(
+        target: WasmTarget,
+        entry: Entry,
+        sources: &[&str],
+        provider: Box<dyn crate::libraries::SemanticPlatform>,
+    ) -> (Vec<Artifact>, Vec<String>) {
         let stems = (0..sources.len())
             .map(|ordinal| match ordinal {
                 0 => "Main".to_string(),
@@ -309,7 +336,7 @@ mod tests {
             &inputs,
             crate::frontend::PlatformProvider::new(
                 crate::compiler::Backend::compilation_target(&WasmBackend::new(target)),
-                Box::new(EmptySymbolSource),
+                provider,
             ),
             &crate::features::LangFeatures::new(),
             &mut diags,
@@ -519,16 +546,29 @@ mod tests {
 
     #[test]
     fn nothing_member_property_getter_has_no_wasm_result() {
+        use crate::klib_libraries::{KlibLibraries, KlibLibraryInput, KlibStdlibSemantics};
+
         for target in WasmTarget::ALL {
-            let (outputs, diagnostics) = compile(
+            let path = crate::toolchain::kotlin_stdlib_klib(
+                crate::backend::Backend::compilation_target(&WasmBackend::new(target)),
+            )
+            .expect("the exact target stdlib must be provisioned");
+            let libraries = KlibLibraries::open(&[KlibLibraryInput::platform_stdlib(
+                path,
+                KlibStdlibSemantics::Wasm,
+            )])
+            .unwrap();
+            let (outputs, diagnostics) = compile_program_with_provider(
                 target,
-                "var flag = true\n\
+                Entry::Box,
+                &["var flag = true\n\
                  object Test { val magic: Nothing get() = null!! }\n\
                  fun box(): String {\n\
                  \x20   val answer: String\n\
                  \x20   if (flag) answer = \"OK\" else Test.magic\n\
                  \x20   return answer\n\
-                 }",
+                 }"],
+                Box::new(libraries),
             );
             assert_eq!(diagnostics, Vec::<String>::new());
             assert_eq!(outputs.len(), 2);

@@ -39,6 +39,17 @@ pub(crate) fn selected_default_callable(base: &FunctionInfo) -> Option<LibraryCa
     Some(callable)
 }
 
+/// The selected declaration itself, when it fills its own omitted defaults and its body is not
+/// spliced at the call: the call keeps its identity and the target realizes the omission.
+pub(crate) fn declaration_default_callable(base: &FunctionInfo) -> Option<LibraryCallable> {
+    if !base.callable.defaults_from_declaration || base.flags.inline.can_inline() {
+        return None;
+    }
+    let mut callable = base.callable.clone();
+    callable.default_call = true;
+    Some(callable)
+}
+
 impl<'a> SymbolResolver<'a> {
     /// Let a lambda's checked result decide applicability, as `+EagerLambdaAnalysis` does.
     pub(crate) fn with_eager_lambda_results(mut self, eager: bool) -> Self {

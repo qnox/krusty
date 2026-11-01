@@ -1,0 +1,45 @@
+# What KSP2 2.3.12 (KSPJvmMain) logs with AllMembers.kt over all-members-grouping/: getAllFunctions
+# and getAllProperties grouped by name, own names first, then each supertype's.
+w: [ksp] grouping.Named fun first(): Int parent=grouping.Named origin=KOTLIN modifiers=[] abstract=true
+w: [ksp] grouping.Named fun name(prefix: String): String parent=grouping.Named origin=KOTLIN modifiers=[] abstract=true
+w: [ksp] grouping.Named fun name(): String parent=grouping.Named origin=KOTLIN modifiers=[] abstract=true
+w: [ksp] grouping.Named fun other(): Int parent=grouping.Named origin=KOTLIN modifiers=[] abstract=true
+w: [ksp] grouping.Named fun equals(other: Any?): Boolean parent=kotlin.Any origin=KOTLIN_LIB modifiers=[OPEN, OPERATOR, OVERRIDE, PUBLIC] abstract=false
+w: [ksp] grouping.Named fun hashCode(): Int parent=kotlin.Any origin=KOTLIN_LIB modifiers=[OPEN, PUBLIC] abstract=false
+w: [ksp] grouping.Named fun toString(): String parent=kotlin.Any origin=KOTLIN_LIB modifiers=[OPEN, PUBLIC] abstract=false
+w: [ksp] grouping.Named property first: Int parent=grouping.Named origin=KOTLIN modifiers=[]
+w: [ksp] grouping.Named property name: String parent=grouping.Named origin=KOTLIN modifiers=[]
+w: [ksp] grouping.Base fun base(): Int parent=grouping.Base origin=KOTLIN modifiers=[] abstract=false
+w: [ksp] grouping.Base fun shared(): Int parent=grouping.Base origin=KOTLIN modifiers=[] abstract=false
+w: [ksp] grouping.Base fun equals(other: Any?): Boolean parent=kotlin.Any origin=KOTLIN_LIB modifiers=[OPEN, OPERATOR, OVERRIDE, PUBLIC] abstract=false
+w: [ksp] grouping.Base fun hashCode(): Int parent=kotlin.Any origin=KOTLIN_LIB modifiers=[OPEN, PUBLIC] abstract=false
+w: [ksp] grouping.Base fun toString(): String parent=kotlin.Any origin=KOTLIN_LIB modifiers=[OPEN, PUBLIC] abstract=false
+w: [ksp] grouping.Base fun <init>(): Base parent=grouping.Base origin=SYNTHETIC modifiers=[FINAL, PUBLIC] abstract=false
+w: [ksp] grouping.Base property base: Int parent=grouping.Base origin=KOTLIN modifiers=[ABSTRACT]
+w: [ksp] grouping.Derived fun own(): Int parent=grouping.Derived origin=KOTLIN modifiers=[] abstract=false
+w: [ksp] grouping.Derived fun name(): String parent=grouping.Derived origin=KOTLIN modifiers=[OVERRIDE] abstract=false
+w: [ksp] grouping.Derived fun name(prefix: String): String parent=grouping.Named origin=KOTLIN modifiers=[] abstract=true
+w: [ksp] grouping.Derived fun first(): Int parent=grouping.Named origin=KOTLIN modifiers=[] abstract=true
+w: [ksp] grouping.Derived fun shared(scale: Int): Int parent=grouping.Derived origin=KOTLIN modifiers=[] abstract=false
+w: [ksp] grouping.Derived fun shared(): Int parent=grouping.Base origin=KOTLIN modifiers=[] abstract=false
+w: [ksp] grouping.Derived fun base(): Int parent=grouping.Base origin=KOTLIN modifiers=[] abstract=false
+w: [ksp] grouping.Derived fun equals(other: Any?): Boolean parent=kotlin.Any origin=KOTLIN_LIB modifiers=[OPEN, OPERATOR, OVERRIDE, PUBLIC] abstract=false
+w: [ksp] grouping.Derived fun hashCode(): Int parent=kotlin.Any origin=KOTLIN_LIB modifiers=[OPEN, PUBLIC] abstract=false
+w: [ksp] grouping.Derived fun toString(): String parent=kotlin.Any origin=KOTLIN_LIB modifiers=[OPEN, PUBLIC] abstract=false
+w: [ksp] grouping.Derived fun other(): Int parent=grouping.Named origin=KOTLIN modifiers=[] abstract=true
+w: [ksp] grouping.Derived fun <init>(): Derived parent=grouping.Derived origin=SYNTHETIC modifiers=[FINAL, PUBLIC] abstract=false
+w: [ksp] grouping.Derived property name: String parent=grouping.Named origin=KOTLIN modifiers=[]
+w: [ksp] grouping.Derived property first: Int parent=grouping.Derived origin=KOTLIN modifiers=[OVERRIDE]
+w: [ksp] grouping.Derived property base: Int parent=grouping.Base origin=KOTLIN modifiers=[ABSTRACT]
+w: [ksp] grouping.Pair2 fun left(): Int parent=grouping.Pair2 origin=KOTLIN modifiers=[] abstract=false
+w: [ksp] grouping.Pair2 fun component1(x: Int): Int parent=grouping.Pair2 origin=KOTLIN modifiers=[] abstract=false
+w: [ksp] grouping.Pair2 fun component1(): Int parent=grouping.Pair2 origin=SYNTHETIC modifiers=[FINAL, OPERATOR, OVERRIDE, PUBLIC] abstract=false
+w: [ksp] grouping.Pair2 fun copy(): Int parent=grouping.Pair2 origin=KOTLIN modifiers=[] abstract=false
+w: [ksp] grouping.Pair2 fun copy(left: Int, right: Int): Pair2 parent=grouping.Pair2 origin=SYNTHETIC modifiers=[FINAL, PUBLIC] abstract=false
+w: [ksp] grouping.Pair2 fun component2(): Int parent=grouping.Pair2 origin=SYNTHETIC modifiers=[FINAL, OPERATOR, OVERRIDE, PUBLIC] abstract=false
+w: [ksp] grouping.Pair2 fun equals(other: Any?): Boolean parent=grouping.Pair2 origin=SYNTHETIC modifiers=[OPEN, OPERATOR, OVERRIDE, PUBLIC] abstract=false
+w: [ksp] grouping.Pair2 fun hashCode(): Int parent=grouping.Pair2 origin=SYNTHETIC modifiers=[OPEN, PUBLIC] abstract=false
+w: [ksp] grouping.Pair2 fun toString(): String parent=grouping.Pair2 origin=SYNTHETIC modifiers=[OPEN, PUBLIC] abstract=false
+w: [ksp] grouping.Pair2 fun <init>(left: Int, right: Int): Pair2 parent=grouping.Pair2 origin=KOTLIN modifiers=[FINAL] abstract=false
+w: [ksp] grouping.Pair2 property left: Int parent=grouping.Pair2 origin=KOTLIN modifiers=[]
+w: [ksp] grouping.Pair2 property right: Int parent=grouping.Pair2 origin=KOTLIN modifiers=[]

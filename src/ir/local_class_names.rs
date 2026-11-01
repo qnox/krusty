@@ -135,6 +135,7 @@ fn ty(value: Ty, names: &IdentityRemap<'_>) -> Ty {
         ),
         TyKind::Nullable(inner) => Ty::nullable(ty(inner, names)),
         TyKind::PlatformNullable(inner) => Ty::platform_nullable(ty(inner, names)),
+        TyKind::MutabilityFlexible(inner) => Ty::mutability_flexible(ty(inner, names)),
         TyKind::InProjection(inner) => Ty::in_projection(ty(inner, names)),
         TyKind::OutProjection(inner) => Ty::out_projection(ty(inner, names)),
         TyKind::StarProjection(inner) => Ty::star_projection(ty(inner, names)),
@@ -1347,6 +1348,10 @@ impl super::IrFile {
         for alias in &mut self.package_type_aliases {
             type_alias(alias, names);
         }
+        for applied in self.package_property_annotations.values_mut() {
+            annotations(&mut applied.property, names);
+            annotations(&mut applied.field, names);
+        }
         for properties in self.member_ext_props.values_mut() {
             for property in properties {
                 property.receiver = ty(property.receiver, names);
@@ -1601,10 +1606,6 @@ impl super::IrFile {
             .map(|value| remapped_name(value, names))
             .collect();
         self.deprecated_classes = std::mem::take(&mut self.deprecated_classes)
-            .into_iter()
-            .map(|value| remapped_name(value, names))
-            .collect();
-        self.public_synthetics = std::mem::take(&mut self.public_synthetics)
             .into_iter()
             .map(|value| remapped_name(value, names))
             .collect();

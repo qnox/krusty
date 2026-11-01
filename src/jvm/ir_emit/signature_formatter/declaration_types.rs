@@ -4,16 +4,15 @@ use super::{JvmSignatureFormatter, Wildcards};
 use crate::types::{Ty, TyKind};
 
 pub(in crate::jvm::ir_emit) struct JvmPropertySignatures {
-    pub(in crate::jvm::ir_emit) field: Option<String>,
     pub(in crate::jvm::ir_emit) getter: Option<String>,
     pub(in crate::jvm::ir_emit) setter: Option<String>,
 }
 
 fn retains_generic_type_use(ty: Ty) -> bool {
     match ty.kind() {
-        TyKind::Nullable(inner) | TyKind::PlatformNullable(inner) => {
-            retains_generic_type_use(inner)
-        }
+        TyKind::Nullable(inner)
+        | TyKind::PlatformNullable(inner)
+        | TyKind::MutabilityFlexible(inner) => retains_generic_type_use(inner),
         TyKind::TyParam(..) | TyKind::Fun(_) | TyKind::Intersection(_) => true,
         TyKind::Obj(_, arguments) => !arguments.is_empty(),
         _ => false,
@@ -48,6 +47,29 @@ impl JvmSignatureFormatter<'_> {
         (signature != super::super::ir_method_desc(params, ret)).then_some(signature)
     }
 
+    /// A backing field's generic `Signature`. kotlinc's `mapFieldSignature` maps the type in its
+    /// value-parameter mode when the field backs a `var` property and in its return-type mode
+    /// otherwise: a `val xs: List<CharSequence>` signs `Ljava/util/List<Ljava/lang/CharSequence;>;`,
+    /// a `var` `Ljava/util/List<+Ljava/lang/CharSequence;>;`. The property decides, not the field's
+    /// finality: a plugin's non-final field behind a `val`, or one with no property at all, signs
+    /// like a return type.
+    pub(in crate::jvm::ir_emit) fn field_signature(
+        &self,
+        ty: &Ty,
+        type_parameter: Option<&str>,
+        backs_var: bool,
+    ) -> Option<String> {
+        if let Some(parameter) = type_parameter {
+            return Some(format!("T{parameter};"));
+        }
+        let wildcards = if backs_var {
+            Wildcards::Declared
+        } else {
+            Wildcards::Suppressed
+        };
+        self.declaration_type_use(ty, wildcards)
+    }
+
     pub(in crate::jvm::ir_emit) fn property_signatures(
         &self,
         ty: &Ty,
@@ -55,13 +77,11 @@ impl JvmSignatureFormatter<'_> {
     ) -> JvmPropertySignatures {
         if let Some(parameter) = type_parameter {
             return JvmPropertySignatures {
-                field: Some(format!("T{parameter};")),
                 getter: Some(format!("()T{parameter};")),
                 setter: Some(format!("(T{parameter};)V")),
             };
         }
         JvmPropertySignatures {
-            field: self.declaration_type_use(ty, Wildcards::Suppressed),
             getter: self.declaration_method_type_use(&[], ty),
             setter: self.declaration_method_type_use(std::slice::from_ref(ty), &Ty::Unit),
         }

@@ -544,6 +544,7 @@ impl Record {
         KlibCallable::new(
             crate::libraries::KlibBodyCallableShape {
                 class_contract: None,
+                accessor: None,
                 name: self.name,
                 kind: ExternalCallableKind::TopLevel,
                 visibility: crate::types::Visibility::Public,
@@ -1503,41 +1504,47 @@ fn stdlib_calls_reach_header_declared_callees() {
     assert_eq!(lowered_with_callees, Vec::<String>::new());
     // Selected generic roots now pass their own declared headers and can reach unselected
     // generic callees. These exact deeper-decline counts are measured on every manifest release;
-    // they are not expected-failure allowances for executable conformance tests.
+    // they are not expected-failure allowances for executable conformance tests. Elvis and safe-call
+    // blocks, then generic calls and `when` subject blocks, now reach further declared callees;
+    // the same complete inputs were measured on every release.
     let expected =
         if crate::kotlin_version::target() >= crate::kotlin_version::KotlinVersion::V2_4_20 {
             vec![
                 ("it calls `kotlin.ArithmeticException.<init>`)", 2),
+                ("it calls `kotlin.NumberFormatException.<init>`)", 4),
+                ("it calls `kotlin.UInt.<init>`)", 4),
                 ("it converts a value implicitly)", 1),
-                ("it declares a parameter default)", 27),
-                ("it declares type parameters)", 173),
-                ("it uses a block of a compiler-introduced form)", 6),
-                ("it uses a call of a member function)", 59),
+                ("it declares a parameter default)", 35),
+                ("it declares type parameters)", 182),
+                ("it uses a block of a compiler-introduced form)", 1),
+                ("it uses a call of a member function)", 60),
                 (
                     "it uses a call of a member no library serializes, such as a fake override)",
                     10,
                 ),
-                ("it uses a call through a property accessor signature)", 29),
+                ("it uses a call through a property accessor signature)", 35),
                 ("it uses a constant of another type than its value's)", 6),
                 ("it uses a loop whose body is not a block)", 2),
-                ("its library serializes none)", 73),
+                ("its library serializes none)", 74),
             ]
         } else {
             vec![
                 ("it calls `kotlin.ArithmeticException.<init>`)", 2),
+                ("it calls `kotlin.NumberFormatException.<init>`)", 4),
+                ("it calls `kotlin.UInt.<init>`)", 4),
                 ("it converts a value implicitly)", 1),
-                ("it declares a parameter default)", 20),
-                ("it declares type parameters)", 155),
-                ("it uses a block of a compiler-introduced form)", 6),
-                ("it uses a call of a member function)", 59),
+                ("it declares a parameter default)", 28),
+                ("it declares type parameters)", 164),
+                ("it uses a block of a compiler-introduced form)", 1),
+                ("it uses a call of a member function)", 60),
                 (
                     "it uses a call of a member no library serializes, such as a fake override)",
                     10,
                 ),
-                ("it uses a call through a property accessor signature)", 29),
+                ("it uses a call through a property accessor signature)", 35),
                 ("it uses a constant of another type than its value's)", 6),
                 ("it uses a loop whose body is not a block)", 2),
-                ("its library serializes none)", 73),
+                ("its library serializes none)", 74),
             ]
         };
     assert_eq!(

@@ -281,6 +281,10 @@ pub enum DelegateGetValueTarget {
     Extension {
         callable: Box<crate::libraries::LibraryCallable>,
         stable_declaration: Option<crate::fir::DeclarationId>,
+        /// The delegate type as the selected call applies it, like [`Self::Member::applied_receiver`].
+        /// Not the callable's `source_receiver`: that is the declaration's own receiver, whose
+        /// formals say nothing about the delegate expression's type arguments.
+        applied_receiver: Ty,
     },
     MemberExtension {
         stable_declaration: Option<crate::fir::DeclarationId>,
@@ -319,7 +323,9 @@ impl DelegateGetValueTarget {
             Self::Member {
                 applied_receiver, ..
             } => Some(*applied_receiver),
-            Self::Extension { callable, .. } => callable.source_receiver,
+            Self::Extension {
+                applied_receiver, ..
+            } => Some(*applied_receiver),
             Self::MemberExtension {
                 extension_receiver, ..
             } => Some(*extension_receiver),
@@ -1614,6 +1620,7 @@ impl Checker<'_> {
                 .map(|callable| DelegateGetValueTarget::Extension {
                     callable,
                     stable_declaration,
+                    applied_receiver,
                 }) {
                 Some(target) => DelegateOperatorSelection::Selected(Box::new(target)),
                 None => DelegateOperatorSelection::None,

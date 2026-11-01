@@ -15,6 +15,11 @@ use crate::types::{stored_value_ty, Ty, TyKind, TypeName};
 
 use super::{DeclarationFlags, DeclarationId, DeclarationKind, ResolvedModuleIndex, SourceFileId};
 
+mod declaration_names;
+
+#[cfg(test)]
+mod declaration_name_tests;
+
 /// Pass-2 current-module provider. Its type deliberately cannot retain the Pass-1 symbol table.
 pub(crate) struct StreamedModuleSymbols<'a> {
     index: &'a ResolvedModuleIndex,
@@ -101,6 +106,7 @@ impl<'a> StreamedModuleSymbols<'a> {
         let header = self.index.type_alias_by_identity(identity)?;
         Some(crate::libraries::AliasExpansion {
             identity: header.identity,
+            declaration_name: header.declaration_name.clone().map(std::sync::Arc::new),
             target: header.target,
             formals: self
                 .index
@@ -140,6 +146,7 @@ impl<'a> StreamedModuleSymbols<'a> {
         };
         Some(crate::libraries::AliasExpansion {
             identity: header.identity,
+            declaration_name: header.declaration_name.clone().map(std::sync::Arc::new),
             target: header.target,
             formals: self
                 .index
@@ -287,6 +294,7 @@ impl<'a> StreamedModuleSymbols<'a> {
         let flags = declaration_header.flags;
         let mut projected = crate::libraries::LibraryType::declaration_header();
 
+        projected.declaration_name = classifier_header.declaration_name.clone();
         projected.is_kotlin = true;
         projected.access = declaration_header.visibility.into();
         projected.source_file = Some(anchor.source.raw());
@@ -711,6 +719,7 @@ impl<'a> StreamedModuleSymbols<'a> {
             member_realization: MemberRealization::Dispatch,
             inline: InlineKind::None,
             default_call: false,
+            defaults_from_declaration: false,
             vararg_elem: None,
             vararg_index: None,
             signature: None,
@@ -1863,6 +1872,13 @@ impl<'a> StreamedModuleSymbols<'a> {
 }
 
 impl SymbolSource for StreamedModuleSymbols<'_> {
+    fn classifier_declaration_name(
+        &self,
+        declaration: crate::libraries::ClassifierDeclarationKey,
+    ) -> Option<Option<crate::types::ClassifierDeclarationName>> {
+        declaration_names::source_declaration_name(self, declaration)
+    }
+
     fn actualized_expect(&self, internal: TypeName) -> Option<TypeName> {
         self.index
             .actualizes_expect(self.source_file, internal)
@@ -1883,8 +1899,8 @@ impl SymbolSource for StreamedModuleSymbols<'_> {
         self.type_parameter_bounds(name)
     }
 
-    fn sam_with_receiver_annotations(&self) -> &[TypeName] {
-        self.index.sam_with_receiver_annotations()
+    fn annotation_conventions(&self) -> &crate::symbol_source::AnnotationConventions {
+        self.index.annotation_conventions()
     }
 
     fn package_exists(&self, parent: TypeName, name: &str) -> bool {

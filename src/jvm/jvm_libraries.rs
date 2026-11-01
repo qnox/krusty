@@ -13,6 +13,7 @@ mod classpath_annotation_classes;
 mod collection_canonicalization;
 mod declaration_headers;
 mod declared_members;
+mod symbol_source;
 use classpath_annotation_classes::{
     annotation_element_defaults, classpath_annotation_targets, java_annotation_parameter_list,
 };
@@ -24,6 +25,8 @@ mod contract_dsl_tests;
 mod dependency_access_policy;
 mod dependency_deprecation;
 use dependency_deprecation::{ClassifierShape, PropertyDeclaration, PropertyDeprecations};
+#[cfg(test)]
+mod builtin_declaration_name_tests;
 mod dependency_registration;
 mod generic_signatures;
 mod inline_body_plan;
@@ -76,7 +79,7 @@ use crate::jvm::names::type_descriptor;
 use crate::libraries::{
     CallSig, EmptySymbolSource, FnFlags, FnKind, FunctionInfo, FunctionSet, GenericReturnPolicy,
     GenericSig, InlineKind, LibraryCallable, LibraryConst, LibraryMember, LibraryType, PropKind,
-    PropertyInfo, PropertyProducer, PropertySet, ReturnInfo, SemanticPlatform, Visibility,
+    PropertyInfo, PropertyProducer, PropertySet, ReturnInfo, Visibility,
 };
 use crate::runtime::{PlatformRangeCtor, RangeConstruction};
 use crate::symbol_resolver::{ty_subst, ty_subst_all, ty_subst_keep_unbound};
@@ -1843,6 +1846,10 @@ impl JvmLibraries {
             let is_mapped_builtin =
                 super::jvm_class_map::maps_to_distinct_jvm_internal(internal_name);
             let builtin_class_signature = self.cp.builtin_class_signature_name(internal_name);
+            let builtin_declaration_name = builtin_class_signature
+                .as_ref()
+                .filter(|signature| signature.declaration == internal_name)
+                .map(|signature| signature.declaration_name.clone());
             let metadata_class_signature = ci.meta.class_visibility.map(|_| {
                 (
                     ci.meta.class_type_parameters.type_params.clone(),
@@ -2405,9 +2412,12 @@ impl JvmLibraries {
             let own_type_parameter_count = application_header.own_count;
             let type_parameters = application_header.parameters;
             Some(LibraryType {
-                declaration_name: (ci.this_class == internal_name)
-                    .then(|| classifier_facts::classifier_declaration_name(&ci))
-                    .flatten(),
+                runtime_exception: None,
+                declaration_name: if ci.this_class == internal_name {
+                    classifier_facts::classifier_declaration_name(&ci)
+                } else {
+                    builtin_declaration_name
+                },
                 is_kotlin: has_kotlin_metadata,
                 is_data: ci.meta.is_data,
                 access: if let Some(visibility) = ci.meta.class_visibility {
@@ -2476,6 +2486,7 @@ impl JvmLibraries {
                 annotation_targets: (kind == crate::libraries::TypeKind::Annotation)
                     .then(|| classpath_annotation_targets(&ci)),
                 mapped_collection: None,
+                mapped_builtin: is_mapped_builtin,
                 annotation_element_defaults: annotation_element_defaults(&ci),
                 deprecation,
             })
@@ -3319,17 +3330,7 @@ impl JvmLibraries {
                         .member_functions_with_renames(recv, &setter_name, function_renames)
                         .overloads
                         .into_iter()
-                        .find(|setter| {
-                            // Java synthetic-property pairing is declaration-shape matching, not
-                            // call overload selection. A `setX` is the setter when its single
-                            // value parameter is the getter's exact semantic storage type. The
-                            // method's return type is not part of that shape: a fluent or
-                            // otherwise non-void Java setter is still a `var`, and the assignment
-                            // discards the result. Core assignability belongs above this boundary.
-                            setter.callable.params.len() == 1
-                                && self.library_value_form(ty)
-                                    == self.library_value_form(setter.callable.params[0])
-                        });
+                        .find(|setter| self.pairs_java_setter(ty, &setter.semantic_params()));
                     let setter_visibility = setter
                         .as_ref()
                         .map_or(visibility, |setter| setter.visibility);
@@ -3525,8 +3526,8 @@ impl JvmLibraries {
     /// source dependencies publish the semantic source arity. Providers must agree before the
     /// resolver selects the declaration; core must not accept two physical spellings afterward.
     fn semantic_type_alias_target(&self, identity: TypeName) -> Option<TypeName> {
-        let (target, _, expansion, _) = self.cp.type_alias_expansion(identity)?;
-        Self::normalized_type_alias_target(target, expansion)
+        let alias = self.cp.type_alias_expansion(identity)?;
+        Self::normalized_type_alias_target(alias.target, alias.expansion)
     }
 
     fn normalized_type_alias_target(target: TypeName, expansion: Ty) -> Option<TypeName> {
@@ -4010,57 +4011,6 @@ impl JvmLibraries {
                 importable_declaration,
             },
         )
-    }
-}
-
-impl SymbolSource for JvmLibraries {
-    /// Both answered by the classpath, which is where this provider interned them.
-    fn external_callable(
-        &self,
-        identity: crate::fir::ExternalCallableId,
-    ) -> Option<crate::libraries::ExternalCallableRealization> {
-        self.cp.external_callable(identity)
-    }
-
-    fn external_property(
-        &self,
-        identity: crate::fir::ExternalPropertyId,
-    ) -> Option<crate::libraries::ExternalPropertyRealization> {
-        self.cp.external_property(identity)
-    }
-
-    fn package_exists(&self, parent: TypeName, name: &str) -> bool {
-        JvmLibraries::package_exists(self, parent, name)
-    }
-
-    fn symbols(
-        &self,
-        namespace: SymbolNamespace,
-        name: &str,
-    ) -> std::rc::Rc<crate::libraries::ResolvedSymbols> {
-        JvmLibraries::symbols(self, namespace, name)
-    }
-
-    fn api_withheld_callable(&self, owner: TypeName, name: &str) -> bool {
-        self.api_withheld
-            .borrow()
-            .get(&owner)
-            .is_some_and(|names| names.contains(name))
-    }
-
-    fn platform_flexible_upper_bound(&self, lower: Ty) -> Ty {
-        super::jvm_class_map::platform_flexible_upper_bound(lower)
-    }
-
-    fn generated_serializer_singleton(&self, classifier: TypeName) -> Option<TypeName> {
-        classifier_facts::generated_serializer_singleton(self, classifier)
-    }
-
-    fn serializable_class_elements(
-        &self,
-        classifier: TypeName,
-    ) -> Option<crate::types::SerializableClassElements> {
-        classifier_facts::serializable_class_elements(self, classifier)
     }
 }
 
@@ -4835,21 +4785,20 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
     }
 
     fn type_alias_expansion(&self, internal: TypeName) -> Option<crate::libraries::AliasExpansion> {
-        self.cp.type_alias_expansion(internal).and_then(
-            |(target, formals, expansion, expansion_spelling)| {
-                let target = Self::normalized_type_alias_target(target, expansion)?;
-                Some(crate::libraries::AliasExpansion {
-                    identity: internal,
-                    target: self.canonical_source_type_name(target),
-                    formals,
-                    expansion_spelling,
-                    // Metadata may name a mapped JVM collection as the expanded classifier. Normalize
-                    // the complete template at the provider boundary so core resolution only sees
-                    // source identities, including inside projections, function types, and nullability.
-                    expansion: canonicalize_jvm_collections(expansion),
-                })
-            },
-        )
+        self.cp.type_alias_expansion(internal).and_then(|alias| {
+            let target = Self::normalized_type_alias_target(alias.target, alias.expansion)?;
+            Some(crate::libraries::AliasExpansion {
+                identity: internal,
+                declaration_name: alias.declaration_name,
+                target: self.canonical_source_type_name(target),
+                formals: alias.formals,
+                expansion_spelling: alias.expansion_spelling,
+                // Metadata may name a mapped JVM collection as the expanded classifier. Normalize
+                // the complete template at the provider boundary so core resolution only sees
+                // source identities, including inside projections, function types, and nullability.
+                expansion: canonicalize_jvm_collections(alias.expansion),
+            })
+        })
     }
 
     fn canonical_source_type_name(&self, internal: TypeName) -> TypeName {
@@ -4857,7 +4806,9 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
         // may find the JVM realization (`java/lang/String`, `java/util/List`), but its source identity
         // is the one `.kotlin_builtins` record that declares the Kotlin API. Keeping the physical name
         // here loses members such as inherited `CharSequence.length` and creates a second class model.
-        super::jvm_class_map::jvm_to_kotlin_builtin_metadata_name(internal).unwrap_or(internal)
+        // Only a group Java source maps to Kotlin has that identity: `java.lang.Void` is the realization
+        // `Nothing` erases to, yet a Java or Kotlin reference to it names the ordinary Java class.
+        super::jvm_class_map::to_kotlin_type_name(internal)
     }
 
     fn is_default_library_owner(&self, internal: TypeName) -> bool {
@@ -4949,13 +4900,7 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
                 let setter = setter_callables
                     .functions()
                     .iter()
-                    .find(|setter| {
-                        // Same pairing as a setter declared on the receiver: one value parameter
-                        // of the getter's storage type. The Java method may return anything.
-                        setter.semantic_params().len() == 1
-                            && self.library_value_form(ty)
-                                == self.library_value_form(setter.semantic_params()[0])
-                    })
+                    .find(|setter| self.pairs_java_setter(ty, &setter.semantic_params()))
                     .cloned();
                 let getter_declaration = function.stable_declaration;
                 let setter_declaration =
@@ -6156,6 +6101,10 @@ mod tests {
         assert_eq!(
             libs.canonical_source_type_name(type_name("java/lang/String")),
             type_name("kotlin/String")
+        );
+        assert_eq!(
+            libs.canonical_source_type_name(type_name("java/lang/Void")),
+            type_name("java/lang/Void")
         );
     }
 

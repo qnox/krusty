@@ -563,6 +563,9 @@ impl Checker<'_> {
                             TyKind::PlatformNullable(_) => {
                                 Some(Ty::platform_nullable as fn(Ty) -> Ty)
                             }
+                            TyKind::MutabilityFlexible(_) => {
+                                Some(Ty::mutability_flexible as fn(Ty) -> Ty)
+                            }
                             _ => None,
                         };
                         let TyKind::Fun(function) = parameter.non_null().kind() else {
@@ -1167,6 +1170,35 @@ impl Checker<'_> {
                 tied,
             ),
         }
+    }
+
+    /// The shape of a call selected by its lambda's return type (`recv.sumOf { … }`): each lambda
+    /// takes the receiver's element inputs, and nothing else is shaped.
+    pub(super) fn lambda_return_overload_shape(
+        &self,
+        receiver: Ty,
+        name: &str,
+        args: &[ExprId],
+    ) -> Option<crate::symbol_resolver::LambdaCallShape> {
+        let params = self.lambda_return_overload_param_types(receiver, name)?;
+        Some(crate::symbol_resolver::LambdaCallShape {
+            generic_formals: Vec::new(),
+            argument_parameters: Vec::new(),
+            param_types: Some(
+                args.iter()
+                    .map(|&argument| match self.file.expr(argument) {
+                        Expr::Lambda { .. } => params.clone(),
+                        _ => Vec::new(),
+                    })
+                    .collect(),
+            ),
+            expected_types: None,
+            fixed_expected_types: None,
+            receivers: None,
+            context_counts: None,
+            boxes_captures: None,
+            inline: false,
+        })
     }
 
     /// The lambda shape `overload` supplies when it is selected for `call` on `binding_receiver`.

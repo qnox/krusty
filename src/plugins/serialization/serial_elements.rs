@@ -91,12 +91,13 @@ pub(super) struct WireElement {
 pub(super) enum ElementDeclaration {
     /// A property of this class in this file.
     Property(ClassId),
-    /// An element of a superclass compiled apart from this file, with the property annotations
-    /// its provider read. Its type carries no annotations.
+    /// An element of a superclass compiled apart from this file, with the property and type-use
+    /// annotations its provider read.
     Published {
         serial_name: Option<KtString>,
         serializer: Option<TypeName>,
         contextual: bool,
+        type_spelling: crate::ir::Spelled,
     },
 }
 
@@ -107,7 +108,13 @@ impl WireElement {
             ElementDeclaration::Property(class) => {
                 super::declared_serializer_of(ctx, ir, *class, &self.name)
             }
-            ElementDeclaration::Published { serializer, .. } => *serializer,
+            // The property's own serializer, then one its declared type names, as for a property.
+            ElementDeclaration::Published {
+                serializer,
+                type_spelling,
+                ..
+            } => serializer
+                .or_else(|| super::type_argument_serializers::named_serializer(type_spelling)),
         }
     }
 
@@ -118,11 +125,9 @@ impl WireElement {
             ElementDeclaration::Property(class) => {
                 super::property_is_contextual(ctx, ir, *class, &self.name)
             }
-            ElementDeclaration::Published {
-                serializer,
-                contextual,
-                ..
-            } => *contextual && serializer.is_none(),
+            ElementDeclaration::Published { contextual, .. } => {
+                *contextual && self.declared_serializer(ctx, ir).is_none()
+            }
         }
     }
 
@@ -134,7 +139,7 @@ impl WireElement {
                     ctx, ir, *class, &self.name,
                 )
             }
-            ElementDeclaration::Published { .. } => crate::ir::Spelled::NONE.clone(),
+            ElementDeclaration::Published { type_spelling, .. } => type_spelling.clone(),
         }
     }
 
@@ -277,6 +282,7 @@ impl SerialElements {
                             serial_name: element.serial_name.clone(),
                             serializer: element.serializer,
                             contextual: element.contextual,
+                            type_spelling: element.type_spelling.clone(),
                         },
                         name: element.name.to_string(),
                         ty,

@@ -84,6 +84,16 @@ impl<'a> CheckerModuleSymbols<'a> {
 }
 
 impl SymbolSource for CheckerModuleSymbols<'_> {
+    fn classifier_declaration_name(
+        &self,
+        declaration: crate::libraries::ClassifierDeclarationKey,
+    ) -> Option<Option<crate::types::ClassifierDeclarationName>> {
+        match self {
+            Self::Legacy(source) => source.classifier_declaration_name(declaration),
+            Self::Streamed(source) => source.classifier_declaration_name(declaration),
+        }
+    }
+
     fn actualized_expect(&self, internal: TypeName) -> Option<TypeName> {
         match self {
             Self::Legacy(source) => source.actualized_expect(internal),
@@ -127,10 +137,10 @@ impl SymbolSource for CheckerModuleSymbols<'_> {
         }
     }
 
-    fn sam_with_receiver_annotations(&self) -> &[TypeName] {
+    fn annotation_conventions(&self) -> &crate::symbol_source::AnnotationConventions {
         match self {
-            Self::Legacy(source) => source.sam_with_receiver_annotations(),
-            Self::Streamed(source) => source.sam_with_receiver_annotations(),
+            Self::Legacy(source) => source.annotation_conventions(),
+            Self::Streamed(source) => source.annotation_conventions(),
         }
     }
 }

@@ -1489,7 +1489,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                     return None;
                 };
                 let postponed_bindings = projected.selected_bindings(&selected);
-                selected_constructor.set(selected.bound_inner_constructor.is_some());
+                selected_constructor.set(selected.constructor.is_some());
                 if selected_constructor.get() {
                     *selected_alias.borrow_mut() = selected.constructor_alias().cloned();
                 }
@@ -3916,7 +3916,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 arguments,
                 trailing_lambda,
             );
-            selected_constructor.set(selected.bound_inner_constructor.is_some());
+            selected_constructor.set(selected.constructor.is_some());
             if selected_constructor.get() {
                 *selected_alias.borrow_mut() = selected.constructor_alias().cloned();
             }

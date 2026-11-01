@@ -212,7 +212,9 @@ pub(super) fn primary_constructor_access(
     is_continuation: bool,
     value_param_ctor: bool,
 ) -> u16 {
-    let access = if class.is_anonymous_object && anonymous_object_in_inline_function(ir, class) {
+    let access = if class.is_anonymous_object
+        && super::enclosure::in_inline_function_scope(ir, class)
+    {
         ACC_PUBLIC
     } else if is_continuation || class.is_anonymous_object {
         // A continuation class's ctor is package-private (constructed only by its own file);
@@ -223,6 +225,11 @@ pub(super) fn primary_constructor_access(
         0
     } else if class.is_value {
         ACC_PRIVATE | ACC_SYNTHETIC
+    } else if class.is_singleton()
+        && ir.ctor_visibilities.get(&class.fq_name_id()) == Some(&crate::types::Visibility::Public)
+    {
+        // A generated singleton whose producer declares a public constructor.
+        ACC_PUBLIC
     } else if class.is_singleton() || value_param_ctor || class.is_sealed {
         ACC_PRIVATE
     } else {
@@ -236,14 +243,4 @@ pub(super) fn primary_constructor_access(
         }
     };
     access | primary_constructor_varargs(class)
-}
-
-/// An anonymous object declared directly in an `inline` function. Inlining copies its `new` into
-/// each call site, which may live in another package, so the constructor has to be public. The
-/// class itself stays in the function's package.
-fn anonymous_object_in_inline_function(ir: &IrFile, class: &crate::ir::IrClass) -> bool {
-    let Some(crate::ir::IrEnclosure::Function(function)) = class.enclosure.as_ref() else {
-        return false;
-    };
-    ir.inline_fns.contains(function)
 }

@@ -44,6 +44,7 @@ fn normalized_input(libraries: &JvmLibraries, ty: Ty) -> Ty {
             other => normalized_input(libraries, other),
         },
         TyKind::PlatformNullable(inner) => normalized_input(libraries, Ty::nullable(inner)),
+        TyKind::MutabilityFlexible(inner) => normalized_input(libraries, inner),
         TyKind::TyParam(_, bound) | TyKind::DefinitelyNotNull(bound) => {
             normalized_input(libraries, bound)
         }

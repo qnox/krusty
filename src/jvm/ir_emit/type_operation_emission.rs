@@ -99,6 +99,9 @@ impl Emitter<'_> {
             }
             _ => self.emit_type_op_operand(arg, code),
         };
+        if op == IrTypeOp::ImplicitCoercion {
+            self.mark_intrinsic_instruction(expression, code);
+        }
         if matches!(op, IrTypeOp::Cast | IrTypeOp::CastNonNull)
             && semantic_arg.non_null().is_reference_array()
             && crate::jvm::array_casts::compatible(
@@ -469,39 +472,56 @@ impl Emitter<'_> {
         code: &mut CodeBuilder,
     ) -> (Ty, Ty) {
         let reference_target = !ir_ty_to_jvm(&stored_value_ty(type_operand)).is_jvm_scalar();
-        if reference_target && self.erased_reference_result(arg).is_some() {
+        if let Some(read) = self.trailing_value_read(arg).filter(|_| reference_target) {
+            // A boxed inlined value reaches a reference consumer as the box its slot holds.
+            self.boxed_scalar_reads.insert(read);
+            let produced = self.emit_implicit_coercion_reference_operand(arg, type_operand, code);
+            self.boxed_scalar_reads.remove(&read);
+            return produced;
+        }
+        if reference_target {
+            return self.emit_implicit_coercion_reference_operand(arg, type_operand, code);
+        }
+        let arg = self.unboxed_reference_source(arg, type_operand);
+        self.emit_type_op_operand(arg, code)
+    }
+
+    /// A reference target's operand, as [`Self::emit_implicit_coercion_operand`] emits it.
+    fn emit_implicit_coercion_reference_operand(
+        &mut self,
+        arg: ExprId,
+        type_operand: Ty,
+        code: &mut CodeBuilder,
+    ) -> (Ty, Ty) {
+        if self.erased_reference_result(arg).is_some() {
             // A reference target materializes an erased result at its own type, so the result's
             // narrowing to the substituted type is not written first.
             let source = self.emit_consumed_operand(arg, code);
             return (source, source);
         }
-        if reference_target {
-            // A reference target reads an erased result narrowed to a scalar as the callee returned
-            // it: kotlinc coerces the `Object` slot straight to the consumer and never unboxes it.
-            return match self.erased_scalar_result(arg) {
-                Some((call, slot)) => {
-                    self.emit_value(call, code);
-                    (slot, slot)
-                }
-                None => match self.emit_boxed_call_reference(arg, code) {
-                    Some(wrapper) => (wrapper, wrapper),
-                    // A smart cast reaches this coercion unnarrowed; it materializes the value at
-                    // its own type.
-                    None => match self.consumed_implicit_cast_operand(arg) {
-                        Some(operand) => {
-                            let source = self.emit_consumed_operand(operand, code);
-                            (source, source)
-                        }
-                        None => {
-                            let arg = self.unboxed_reference_source(arg, type_operand);
-                            self.emit_type_op_operand(arg, code)
-                        }
-                    },
+        // A reference target reads an erased result narrowed to a scalar as the callee returned
+        // it: kotlinc coerces the `Object` slot straight to the consumer and never unboxes it.
+        match self.erased_scalar_result(arg) {
+            Some((call, slot)) => {
+                self.emit_value(call, code);
+                (slot, slot)
+            }
+            None => match self.emit_boxed_call_reference(arg, code) {
+                Some(wrapper) => (wrapper, wrapper),
+                // A smart cast reaches this coercion unnarrowed; it materializes the value at
+                // its own type.
+                None => match self.consumed_implicit_cast_operand(arg) {
+                    Some(operand) => {
+                        let source = self.emit_consumed_operand(operand, code);
+                        (source, source)
+                    }
+                    None => {
+                        let arg = self.unboxed_reference_source(arg, type_operand);
+                        self.emit_type_op_operand(arg, code)
+                    }
                 },
-            };
+            },
         }
-        let arg = self.unboxed_reference_source(arg, type_operand);
-        self.emit_type_op_operand(arg, code)
     }
 
     fn emit_implicit_coercion(
@@ -641,9 +661,13 @@ impl Emitter<'_> {
     /// reference (a smart cast): kotlinc's `IMPLICIT_CAST`, which its codegen emits as the operand
     /// itself (`ExpressionCodegen.visitTypeOperator`), leaving the consumer to materialize it at its
     /// own type. A written `as` is not one.
+    ///
+    /// A non-null reference widened to a nullable type is the same: kotlinc inserts no cast for an
+    /// upcast, so its consumer materializes the value itself (`S` passed where a generic `T` is
+    /// inferred as `V?` reaches the `Object` slot uncast).
     pub(super) fn implicit_reference_cast_operand(&self, expression: ExprId) -> Option<ExprId> {
         let IrExpr::TypeOp {
-            op: IrTypeOp::Cast,
+            op,
             arg,
             type_operand,
         } = *self.ir.expr(expression)
@@ -651,10 +675,25 @@ impl Emitter<'_> {
             return None;
         };
         let reference_target = !ir_ty_to_jvm(&stored_value_ty(type_operand)).is_jvm_scalar();
-        (reference_target
-            && !self.ir.written_casts.contains(&expression)
-            && !self.value_ty(arg).is_jvm_scalar())
-        .then_some(arg)
+        let implicit = match op {
+            IrTypeOp::Cast => !self.ir.written_casts.contains(&expression),
+            IrTypeOp::ImplicitCoercion => {
+                // An erased call result keeps its widening: that boundary reads the callee's
+                // `Object` result straight into the consumer.
+                type_operand.is_nullable()
+                    && !self.ir.declaration_result_coercions.contains(&expression)
+                    && self.erased_reference_result(arg).is_none()
+                    && !self
+                        .ir
+                        .logical_types
+                        .get(&arg)
+                        .copied()
+                        .unwrap_or_else(|| self.value_ty(arg))
+                        .admits_null()
+            }
+            _ => false,
+        };
+        (reference_target && implicit && !self.value_ty(arg).is_jvm_scalar()).then_some(arg)
     }
 
     /// The value a consumer that materializes it at its own slot reads in place of `expression`:
