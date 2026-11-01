@@ -19,7 +19,6 @@ krusty=$3
 plugin_repository=$4
 plugin_version=$5
 here=$(cd "$(dirname "$0")" && pwd)
-repo_root=$(cd "$here/../.." && pwd)
 projects=${CORPUS_PROJECTS:-$here/projects.tsv}
 
 row=$(awk -F'\t' -v name="$name" '$1 == name' "$projects")
@@ -27,33 +26,11 @@ if [ -z "$row" ]; then
   echo "unknown corpus project: $name" >&2
   exit 2
 fi
-IFS=$'\t' read -r _ url commit gradle_root jdk pin android_variant <<<"$row"
-
-kotlin=$(sed 's/#.*//' "$repo_root/kotlin-versions" | awk 'NF { print $1 }' | sort -V | tail -n 1)
-if [ -z "$kotlin" ]; then
-  echo "kotlin-versions lists no release" >&2
-  exit 2
-fi
+IFS=$'\t' read -r _ _ _ gradle_root jdk _ android_variant <<<"$row"
 checkout=$work/src/$name
 logs=$work/logs
 mkdir -p "$logs"
-
-rm -rf "$checkout"
-git init -q "$checkout"
-git -C "$checkout" remote add origin "$url"
-git -C "$checkout" fetch -q --depth 1 origin "$commit"
-git -C "$checkout" checkout -q FETCH_HEAD
-head=$(git -C "$checkout" rev-parse HEAD)
-if [ "$head" != "$commit" ]; then
-  echo "$name: checked out $head, not the pinned $commit" >&2
-  exit 1
-fi
-if [ -f "$here/patches/$name.patch" ]; then
-  git -C "$checkout" apply "$here/patches/$name.patch"
-fi
-if [ "$pin" != - ]; then
-  python3 "$here/pin.py" "$checkout/${pin%%:*}" "${pin#*:}" "$kotlin"
-fi
+"$here/checkout.sh" "$name" "$checkout"
 
 java_home_var=JAVA_HOME_${jdk}_X64
 export JAVA_HOME=${!java_home_var:-$JAVA_HOME}
