@@ -1236,7 +1236,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   a `checkcast Object` the transformer deletes; the transformer moves the unboxing to the resume
   path, and the direct path keeps the carrier, which the point's consumer then reads as the carrier
   (`tests/suspend_value_class_results_e2e.rs::a_suspend_lambda_unboxes_a_carrier_result_on_resume`
-  and the tests after it). It cannot hand its own continuation to such a call: kotlinc builds a
+  and the tests after it). kotlinc materializes such a point at the value class's JVM type, the
+  carrier, whatever consumes it: the carrier's `checkcast` follows the merge of the two paths even
+  when the consumer takes `Object`, as `suspend fun test() = bar().s` and a non-tail
+  `return foo(qux())` of the value class return it. Only a point delivering no value-class box is
+  returned as the erased `Object` the invoke left (`jvm/ir_emit/transformed_suspensions.rs`,
+  `tests/suspend_value_class_carrier_cast_e2e.rs`). It cannot hand its own continuation to such a call: kotlinc builds a
   state machine for `suspend fun test() = bar().s` and for `suspend fun g(): X = bar()`. A scalar
   carrier crosses as the box on both paths (`Boxed`), and so does a nullable result whose ordinary
   erasure is the box (`Result<String>?`, `X(val v: Int)?`). A nullable result over a non-null

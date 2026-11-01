@@ -73,6 +73,8 @@ mod serializable_parent_dependency_e2e;
 mod serializable_parent_same_module_e2e;
 #[path = "super_call_vararg_e2e.rs"]
 mod super_call_vararg_e2e;
+#[path = "suspend_value_class_carrier_cast_e2e.rs"]
+mod suspend_value_class_carrier_cast_e2e;
 #[path = "common/target_diagnostics.rs"]
 mod target_diagnostics_support;
 
