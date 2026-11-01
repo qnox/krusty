@@ -236,3 +236,78 @@ fn a_script_return_is_prohibited_in_its_result_position_like_kotlinc() {
         &[],
     );
 }
+
+/// Only a contextual one-parameter function type introduces a lambda's implicit `it`. Without
+/// one (an `Any` or type-variable expectation, a `() -> R` parameter, or no expectation at all) a
+/// lambda that omits its parameter list declares no parameters, so `it` is unresolved.
+#[test]
+fn implicit_it_without_a_function_type_is_unresolved_like_kotlinc() {
+    let source = "fun <T> id(x: T): T = x\n\
+                  fun anyExpected() { val f: Any = { it } }\n\
+                  fun typeVariable() { id { it } }\n\
+                  fun noParameters() { run { it } }\n\
+                  fun element() { val l = listOf({ it }) }\n\
+                  fun branch() { val g = if (true) { { it } } else null }\n\
+                  fun bare() { val f = { it.toString() } }";
+    let stdlib = common::stdlib_jar();
+    let result =
+        common::compiler_diagnostics(&[("ImplicitIt.kt", source)], std::slice::from_ref(&stdlib));
+    assert_ne!(result.krusty_code, 0, "krusty silently accepted source");
+    assert_ne!(
+        result.reference_code, 0,
+        "kotlinc unexpectedly accepted source"
+    );
+    let mut krusty_errors = errors(&result.krusty_stderr);
+    krusty_errors.extend(errors(&result.krusty_stdout));
+    assert_eq!(krusty_errors, errors(&result.reference_stderr));
+    assert_eq!(
+        krusty_errors
+            .iter()
+            .map(|error| (error.line, error.column, error.message.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            (2, 36, "unresolved reference 'it'."),
+            (
+                3,
+                22,
+                "cannot infer type for type parameter 'T'. Specify it explicitly."
+            ),
+            (3, 27, "unresolved reference 'it'."),
+            (
+                4,
+                22,
+                "cannot infer type for type parameter 'R'. Specify it explicitly."
+            ),
+            (4, 28, "unresolved reference 'it'."),
+            (
+                5,
+                25,
+                "cannot infer type for type parameter 'T'. Specify it explicitly."
+            ),
+            (5, 34, "unresolved reference 'it'."),
+            (6, 38, "unresolved reference 'it'."),
+            (7, 24, "unresolved reference 'it'."),
+        ]
+    );
+}
+
+/// Every contextual one-parameter function type still binds `it`: a typed declaration, a branch
+/// of one, a stdlib higher-order argument, a fun interface, a suspend function type, and an
+/// explicit type argument.
+#[test]
+fn implicit_it_with_a_one_parameter_function_type_runs_like_kotlinc() {
+    let source = "fun interface IntOp { fun apply(x: Int): Int }\n\
+                  fun <T> id(x: T): T = x\n\
+                  fun take(op: IntOp) = op.apply(2)\n\
+                  fun box(): String {\n\
+                      val f: (Int) -> Int = { it * 2 }\n\
+                      val g: ((Int) -> Int)? = if (f(1) > 0) { { it + 1 } } else null\n\
+                      val h = listOf(1, 2).map { it + 1 }.filter { it > 2 }\n\
+                      val k = IntOp { it + 3 }\n\
+                      val n: suspend (Int) -> Int = { it }\n\
+                      val o = id<(String) -> Int> { it.length }\n\
+                      val all = listOf(f(1), g!!(1), h.single(), k.apply(1), take { it * 5 }, o(\"ab\"))\n\
+                      return if (all == listOf(2, 2, 3, 4, 10, 2) && n != null) \"OK\" else all.toString()\n\
+                  }";
+    common::expect_box_ok_with_stdlib(source, "ImplicitItContext");
+}

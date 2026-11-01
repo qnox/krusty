@@ -18724,11 +18724,14 @@ impl<'a> Checker<'a> {
                         let lambda_parameter = semantic_parameter.map(|parameter| {
                             let packed =
                                 sig.vararg_index == Some(pi) && !self.file.is_spread_arg(a);
-                            if packed {
+                            let parameter = if packed {
                                 parameter.array_read_elem().unwrap_or(parameter)
                             } else {
                                 parameter
-                            }
+                            };
+                            // A declared function classifier (`Function1<Any?, *>`) is the same
+                            // function shape as its `(Any?) -> Any?` spelling.
+                            self.declared_function_semantic_type(parameter)
                         });
                         if let (Some(TyKind::Fun(expected_function)), true) = (
                             lambda_parameter.map(|ty| ty.kind()),
@@ -51399,15 +51402,6 @@ impl<'a> Checker<'a> {
         ty
     }
 
-    /// Whether an UNTYPED lambda that omits its parameter list must synthesize Kotlin's implicit `it`.
-    ///
-    /// Merely finding the token in the body is insufficient: when a lexical value named `it` already
-    /// exists, the inner lambda CAPTURES that value and remains `Function0`. Keep this decision in one
-    /// helper because both overload probing and fallback lambda typing must infer the same arity.
-    fn untyped_lambda_binds_implicit_it(&self, scope: &CheckerScope<'_>, body: ExprId) -> bool {
-        self.file.expr_uses_name(body, "it") && self.lookup(scope, "it").is_none()
-    }
-
     /// A lambda argument's expected shape at one parameter position of a semantic-provider
     /// candidate: the
     /// VALUE parameter types, plus the receiver type when the parameter is a receiver function
@@ -53178,15 +53172,8 @@ impl<'a> Checker<'a> {
                     implicit_label,
                 );
             }
-            // A lambda literal `{ a, b -> body }` — type is `Fun(arity)`. With no explicit
-            // parameters but a body referencing `it`, bind the implicit single parameter.
-            let bind_names: Vec<String> = if !params.is_empty() {
-                params.clone()
-            } else if self.untyped_lambda_binds_implicit_it(scope, body) {
-                vec!["it".to_string()]
-            } else {
-                vec![]
-            };
+            // A lambda literal `{ a, b -> body }` — type is `Fun(arity)`.
+            let bind_names = self.unshaped_lambda_parameter_names(scope, &params, body);
             let arity = bind_names.len() as u8;
             // Type each parameter from its explicit annotation (`{ x: Int -> … }`) if present, so a
             // bare-value lambda checks its body correctly; otherwise the erased `Any` (an expected
