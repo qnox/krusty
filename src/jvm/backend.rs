@@ -457,6 +457,8 @@ fn run_backend_passes_after_plugins(
         SkipReason::InlineParameters
     })?;
     crate::jvm::ir_emit::reparent_lambda_impls(ir);
+    // A method placed on a coroutine state-machine class keeps no parameter guards.
+    crate::jvm::parameter_assertions::drop_in_coroutine_classes(ir);
     // After reparenting: a lifted name is distinct only within the class the method lands in.
     crate::jvm::lifted_names::realize(
         ir,

@@ -219,6 +219,27 @@ fn realize_secondary_constructors(ir: &mut IrFile) {
     }
 }
 
+/// kotlinc guards no parameter of a method declared on a coroutine state-machine class
+/// (`generateNonNullAssertions` skips a parent of origin `SUSPEND_LAMBDA` or
+/// `CONTINUATION_CLASS`). That includes the implementation of a lambda literal written in a
+/// suspend lambda's body: its `invokedynamic` handle names a private method of the suspend
+/// lambda's class, so it keeps no receiver or value-parameter guard there, although the same
+/// lambda placed on a facade or an ordinary class guards them. Placement is physical, so this runs
+/// once lambda implementations have been reparented onto the class that emits them.
+pub(super) fn drop_in_coroutine_classes(ir: &mut IrFile) {
+    let methods = ir
+        .classes
+        .iter()
+        .filter(|class| crate::jvm::ir_emit::is_coroutine_state_machine(class))
+        .flat_map(|class| class.methods.iter().copied())
+        .collect::<Vec<_>>();
+    for method in methods {
+        if let Some(function) = ir.functions.get_mut(method as usize) {
+            function.param_checks.fill(None);
+        }
+    }
+}
+
 /// Drop every `Intrinsics.checkNotNullParameter` guard the lowering recorded.
 ///
 /// `-Xno-param-assertions` removes the parameter null checks kotlinc emits at the entry of every

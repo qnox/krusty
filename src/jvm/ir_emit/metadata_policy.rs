@@ -16,7 +16,7 @@ pub(super) fn is_continuation_class(class: &crate::ir::IrClass) -> bool {
         || class.superclass_matches("kotlin/coroutines/jvm/internal/RestrictedContinuationImpl")
 }
 
-pub(super) fn is_coroutine_state_machine(class: &crate::ir::IrClass) -> bool {
+pub(crate) fn is_coroutine_state_machine(class: &crate::ir::IrClass) -> bool {
     is_continuation_class(class)
         || class.superclass_matches("kotlin/coroutines/jvm/internal/SuspendLambda")
         || class.superclass_matches("kotlin/coroutines/jvm/internal/RestrictedSuspendLambda")

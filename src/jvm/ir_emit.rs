@@ -231,10 +231,11 @@ use inline_call::{bind_inline_handlers, parse_descriptor_params, InlineStaticTar
 use member_schedule::{
     source_ordered_members, split_around_primary_constructor, SourceOrderedMember,
 };
+pub(crate) use metadata_policy::is_coroutine_state_machine;
 pub use metadata_policy::KotlinMetadata;
 use metadata_policy::{
-    finish_local_synthetic_class, is_continuation_class, is_coroutine_state_machine,
-    synthetic_class_xi, SYNTHETIC_LOCAL, SYNTHETIC_PROTECTED, SYNTHETIC_PUBLIC,
+    finish_local_synthetic_class, is_continuation_class, synthetic_class_xi, SYNTHETIC_LOCAL,
+    SYNTHETIC_PROTECTED, SYNTHETIC_PUBLIC,
 };
 use method_defaults::{
     emit_default_stub, emit_facade_default_stub, static_default_stub_marker, DefaultStubSource,
