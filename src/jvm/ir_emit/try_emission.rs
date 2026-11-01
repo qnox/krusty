@@ -424,11 +424,7 @@ impl Emitter<'_> {
                 // copy is named at the depth it sits at rather than under the bare spelling the
                 // source wrote once.
                 let rendered = c.binding.as_ref().and_then(|binding| {
-                    crate::jvm::debug_local_names::render(
-                        self.ir,
-                        Some(binding.name.as_str()),
-                        binding.provenance,
-                    )
+                    crate::jvm::debug_local_names::catch_parameter(self.ir, binding)
                 });
                 if let (Some(name), Some(start_pc)) = (rendered.as_deref(), local_start) {
                     let end_pc = code.bytes.len().min(u16::MAX as usize) as u16;

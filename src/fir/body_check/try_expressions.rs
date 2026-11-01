@@ -27,7 +27,12 @@ impl BodyFirChecker<'_> {
             self.scopes.push(HashMap::default());
             self.delegate_scopes.push(HashMap::default());
             let parameter_ty = self.resolved_type(catch.ty.span, parameter_ty)?;
-            let parameter = self.bind_local(&catch.name, parameter_ty);
+            // An underscore declares no name: nothing in the body can refer to it.
+            let parameter = if catch.unused {
+                self.allocate_local()
+            } else {
+                self.bind_local(&catch.name, parameter_ty)
+            };
             let checked_body = self.expression(catch.body);
             self.delegate_scopes.pop();
             self.scopes.pop();
@@ -35,6 +40,7 @@ impl BodyFirChecker<'_> {
                 origin: self.origins.source(self.source, catch.param_span),
                 parameter,
                 parameter_ty,
+                unused: catch.unused,
                 body: checked_body?,
                 debug_line: catch.line,
             });

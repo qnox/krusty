@@ -1,6 +1,9 @@
 //! JVM spelling of backend-neutral common-IR debug-local provenance.
 
-use crate::ir::{ExprId, FunId, IrDebugLocalProvenance, IrFile, IrInlineLocalRole, IrLambdaOrigin};
+use crate::ir::{
+    ExprId, FunId, IrCatchBinding, IrCatchName, IrDebugLocalProvenance, IrFile, IrInlineLocalRole,
+    IrLambdaOrigin,
+};
 
 /// Physical JVM names for specialized lambda implementation copies.
 ///
@@ -160,7 +163,7 @@ fn marker_name(ir: &IrFile, declaration: ExprId) -> Option<String> {
 
 /// Render one source/debug local at the JVM boundary. Common lowering records source spelling,
 /// inline depth, and stable lambda identity; only this module owns kotlinc's `$this$`, `$iv`, and
-/// `_u24` conventions.
+/// receiver-name `_u24` conventions.
 pub(super) fn name(ir: &IrFile, declaration: ExprId) -> Option<String> {
     render(
         ir,
@@ -183,6 +186,16 @@ pub(super) fn escaped(name: &str) -> String {
     escaped
 }
 
+/// Render a `catch` parameter's debug local. An unused parameter (`catch (_: E)`) takes kotlinc's
+/// `<unused var>` (`SpecialNames.UNDERSCORE_FOR_UNUSED_VAR`).
+pub(super) fn catch_parameter(ir: &IrFile, binding: &IrCatchBinding) -> Option<String> {
+    let source = match &binding.name {
+        IrCatchName::Source(name) => name.as_str(),
+        IrCatchName::Unused => "<unused var>",
+    };
+    render(ir, Some(source), binding.provenance)
+}
+
 /// Render one debug local from the two facts common IR carries for every binding: the source
 /// spelling it was declared with, and its provenance.
 ///
@@ -194,15 +207,18 @@ pub(super) fn render(
     provenance: Option<IrDebugLocalProvenance>,
 ) -> Option<String> {
     match provenance {
+        // kotlinc's inliner renames an expanded value by suffixing the name it already had, one
+        // `$iv` per expansion, without mangling it (`a b$iv`, `p$q$iv`, `<unused var>$iv`); only
+        // a receiver name built from a callable is mangled for a JVM local.
         Some(IrDebugLocalProvenance::InlineValue { role, depth }) => {
-            let escaped = escaped(source?);
+            let source = source?;
             let mut rendered = match role {
-                IrInlineLocalRole::Value => escaped,
+                IrInlineLocalRole::Value => source.to_owned(),
                 // kotlinc spells the expanded callable's own `this` `this_`, and the receiver it
                 // extends `$this$<callable>` — the source name is the callable's in the second case
                 // and unused in the first.
                 IrInlineLocalRole::DispatchReceiver => "this_".to_string(),
-                IrInlineLocalRole::ExtensionReceiver => format!("$this${escaped}"),
+                IrInlineLocalRole::ExtensionReceiver => format!("$this${}", escaped(source)),
             };
             for _ in 0..depth {
                 rendered.push_str("$iv");
@@ -222,7 +238,7 @@ pub(super) fn render(
         // A spliced lambda's value parameter keeps its source spelling; only cloning the splice
         // into a further expansion suffixes it, one `$iv` per enclosing expansion.
         Some(IrDebugLocalProvenance::InlineLambdaParameter { depth }) => {
-            let mut rendered = escaped(source?);
+            let mut rendered = source?.to_owned();
             for _ in 0..depth {
                 rendered.push_str("$iv");
             }
@@ -271,14 +287,14 @@ mod tests {
     }
 
     #[test]
-    fn inline_value_escaping_and_depth_are_jvm_owned() {
+    fn inline_value_depth_is_jvm_owned_and_keeps_the_spelling() {
         let mut ir = IrFile::default();
         let declaration = local(&mut ir, "cost$raw");
         ir.set_debug_local_provenance(
             declaration,
             IrDebugLocalProvenance::inline_value(IrInlineLocalRole::Value, 2),
         );
-        assert_eq!(name(&ir, declaration).as_deref(), Some("cost_u24raw$iv$iv"));
+        assert_eq!(name(&ir, declaration).as_deref(), Some("cost$raw$iv$iv"));
     }
 
     #[test]

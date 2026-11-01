@@ -49,7 +49,7 @@ impl BodyLowering<'_> {
             .record_name(&parameter.base.symbol, &parameter.name);
         Ok(IrCatch {
             var: local.index,
-            binding: Some(IrCatchBinding::source(parameter.name.clone())),
+            binding: Some(catch_binding(&parameter.name)),
             ty: caught,
             body: self.try_branch(catch.result, ty)?,
             line: None,
@@ -64,5 +64,15 @@ impl BodyLowering<'_> {
             return Ok(lowered);
         }
         self.branch_value(lowered, ty)
+    }
+}
+
+/// A KLIB writes kotlinc's special `<unused var>` name for `catch (_: E)`; it enters common IR as
+/// the same unused role a source underscore does.
+fn catch_binding(name: &str) -> IrCatchBinding {
+    if name == "<unused var>" {
+        IrCatchBinding::unused()
+    } else {
+        IrCatchBinding::source(name.to_owned())
     }
 }

@@ -2827,7 +2827,7 @@ mod external_overrides;
 mod generated_members;
 pub(crate) use data_class_members::IrDataClassMemberRole;
 pub(crate) use debug_lines::UnitBodyExit;
-pub use debug_locals::{IrCatchBinding, IrLambdaForm, IrLambdaOrigin};
+pub use debug_locals::{IrCatchBinding, IrCatchName, IrLambdaForm, IrLambdaOrigin};
 pub(crate) use debug_locals::{IrDebugLocalProvenance, IrInlineLocalRole};
 pub(crate) use generated_members::{
     IrGeneratedClassRole, IrGeneratedFunctionRole, IrValueClassAnyMember,

@@ -14,6 +14,8 @@ mod inline_call_operand_spill_e2e;
 mod inline_capture_default_e2e;
 #[path = "../inline_capture_splice_e2e.rs"]
 mod inline_capture_splice_e2e;
+#[path = "../inline_catch_parameter_names_e2e.rs"]
+mod inline_catch_parameter_names_e2e;
 #[path = "../inline_constructor_reference_e2e.rs"]
 mod inline_constructor_reference_e2e;
 #[path = "../inline_crossinline_object_e2e.rs"]
