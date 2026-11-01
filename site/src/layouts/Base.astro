@@ -1,0 +1,157 @@
+---
+// The page frame every site page shares: fonts, the design tokens in site.css, link-preview
+// metadata, the site header and the footer. A page passes its own title and description and
+// puts anything else it needs in <head> (structured data, preloads) into the "head" slot.
+import { SEO } from "astro-seo";
+import "@fontsource-variable/bricolage-grotesque/wght.css";
+import "@fontsource-variable/ibm-plex-sans/wght.css";
+import "@fontsource-variable/jetbrains-mono/wght.css";
+import "../styles/site.css";
+
+interface Props {
+  title: string;
+  description: string;
+}
+
+const { title, description } = Astro.props;
+const repo = "https://github.com/qnox/krusty";
+const xHandle = "@qnox";
+const canonical = new URL(Astro.url.pathname, Astro.site).href;
+// Link-preview card: 1200x630 (X's and Open Graph's 1.91:1 size) so the crawler shows it uncropped.
+const card = new URL("/card.png", Astro.site).href;
+const cardAlt = "krusty, a crab mascot";
+const nav = [
+  { href: "/#install", label: "Install" },
+  { href: "/#support", label: "Support" },
+];
+---
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <SEO
+      title={title}
+      description={description}
+      canonical={canonical}
+      openGraph={{
+        basic: { title, type: "website", image: card, url: canonical },
+        optional: { description, siteName: "krusty" },
+        image: { type: "image/png", width: 1200, height: 630, alt: cardAlt },
+      }}
+      twitter={{ card: "summary_large_image", site: xHandle, creator: xHandle, title, description, image: card, imageAlt: cardAlt }}
+      extend={{
+        link: [
+          { rel: "icon", href: "/favicon.ico", sizes: "16x16 32x32 48x48" },
+          { rel: "apple-touch-icon", href: "/apple-touch-icon.png" },
+        ],
+        meta: [
+          { name: "theme-color", content: "#fbfaff", media: "(prefers-color-scheme: light)" },
+          { name: "theme-color", content: "#110f17", media: "(prefers-color-scheme: dark)" },
+        ],
+      }}
+    />
+    <slot name="head" />
+  </head>
+  <body>
+    <a class="skip" href="#main">Skip to content</a>
+    <header class="site-header">
+      <div class="wrap site-header-row">
+        <a class="brand" href="/" aria-label="krusty home">
+          <img src="/apple-touch-icon.png" alt="" width="28" height="28" />
+          <span>krusty</span>
+        </a>
+        <nav aria-label="Site">
+          {nav.map((item) => <a href={item.href} aria-current={Astro.url.pathname === item.href ? "page" : undefined}>{item.label}</a>)}
+          <a href={repo}>GitHub</a>
+        </nav>
+      </div>
+    </header>
+    <main id="main">
+      <slot />
+    </main>
+    <footer class="site-footer">
+      <div class="wrap site-footer-row">
+        <p>
+          Apache-2.0 · <a href={repo}>github.com/qnox/krusty</a> · News: <a href="https://x.com/qnox">{xHandle} on X</a> · <a href="https://github.com/sponsors/qnox">Sponsor</a>
+        </p>
+        <p>Kotlin is a trademark of JetBrains; krusty is an independent project.</p>
+      </div>
+    </footer>
+  </body>
+</html>
+
+<style>
+  .skip {
+    position: absolute;
+    left: -999px;
+    top: 0.5rem;
+    padding: 0.5rem 0.75rem;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: var(--radius-small);
+    z-index: 20;
+  }
+
+  .skip:focus {
+    left: max(16px, env(safe-area-inset-left, 0px));
+  }
+
+  .site-header {
+    border-bottom: 1px solid var(--line);
+    padding-top: env(safe-area-inset-top, 0px);
+  }
+
+  .site-header-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    min-height: 3.75rem;
+  }
+
+  .brand {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.55rem;
+    color: var(--fg);
+    text-decoration: none;
+    font: 750 1.25rem / 1 var(--font-display);
+    letter-spacing: -0.02em;
+  }
+
+  .brand img {
+    border-radius: 7px;
+  }
+
+  nav {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 0.25rem 1.25rem;
+  }
+
+  nav a {
+    color: var(--muted);
+    text-decoration: none;
+    font-weight: 500;
+    font-size: var(--step--1);
+  }
+
+  nav a:hover,
+  nav a[aria-current="page"] {
+    color: var(--fg);
+  }
+
+  .site-footer {
+    border-top: 1px solid var(--line);
+    padding-block: 2rem calc(2rem + env(safe-area-inset-bottom, 0px));
+    color: var(--muted);
+    font-size: var(--step--1);
+  }
+
+  .site-footer-row {
+    display: grid;
+    gap: 0.4rem;
+  }
+</style>

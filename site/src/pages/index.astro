@@ -1,17 +1,15 @@
 ---
-import { SEO } from "astro-seo";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import Base from "../layouts/Base.astro";
+import { gist, readFigure } from "../lib/figures";
 
 const repo = "https://github.com/qnox/krusty";
-const news = "https://x.com/qnox";
-const xHandle = "@qnox";
+const release = `${repo}/releases/latest`;
+const blob = (path: string) => `${repo}/blob/master/${path}`;
 const title = "krusty: a Kotlin compiler written in Rust";
 const description =
   "krusty is a Kotlin compiler written in Rust. Built as a drop-in replacement for kotlinc on the JVM: for the supported Kotlin subset, kotlinc-compatible flags and .class files that aim to be byte-for-byte identical to kotlinc's.";
-// Link-preview card: 1200x630 (X's and Open Graph's 1.91:1 size) so the crawler shows it uncropped.
-const card = new URL("/card.png", Astro.site).href;
-const cardAlt = "krusty, a crab mascot";
-const badge = (file: string) =>
-  `https://img.shields.io/endpoint?url=https%3A%2F%2Fgist.githubusercontent.com%2Fqnox%2Fdec8149bc4f43b203d6cc9adc14f2026%2Fraw%2F${file}`;
 const jsonLd = {
   "@context": "https://schema.org",
   "@type": "SoftwareApplication",
@@ -22,149 +20,573 @@ const jsonLd = {
   license: "https://www.apache.org/licenses/LICENSE-2.0",
   url: Astro.site?.href,
   codeRepository: repo,
-  downloadUrl: `${repo}/releases/latest`,
+  downloadUrl: release,
   // Google picks a result thumbnail from structured data before guessing from the page.
-  image: card,
+  image: new URL("/card.png", Astro.site).href,
 };
+
+// kotlin-versions is the single source of truth for the supported Kotlin releases.
+const kotlinVersions = readFileSync(resolve(process.cwd(), "../kotlin-versions"), "utf8")
+  .split("\n")
+  .map((line) => line.trim().split(/\s+/)[0])
+  .filter((version) => version && !version.startsWith("#"));
+const newestKotlin = kotlinVersions[kotlinVersions.length - 1];
+
+const figures = [
+  {
+    id: "conformance",
+    file: "krusty-conformance.json",
+    label: "JVM conformance",
+    unit: "cases pass",
+    explain: "Share of the applicable codegen/box cases whose box() returns OK when run on krusty's bytecode.",
+  },
+  {
+    id: "bytes",
+    file: "krusty-jvm-byte-equality.json",
+    label: "JVM byte equality",
+    unit: "class-file bytes match",
+    explain: "Across the same cases, each class file counts its bytes that match kotlinc's up to the first difference. 100% means every class is identical.",
+  },
+  {
+    id: "native",
+    file: "krusty-native-conformance.json",
+    label: "Native conformance",
+    unit: "cases pass",
+    explain: "Share of the Native-applicable cases that compile against the Kotlin/Native stdlib, link, run and return OK. Native is experimental.",
+  },
+];
+const values = await Promise.all(figures.map((figure) => readFigure(figure.file)));
+const fmt = (n: number) => n.toLocaleString("en-US");
+
+type Level = "yes" | "partial" | "no";
+const levelLabel: Record<Level, string> = { yes: "Supported", partial: "Partial", no: "Not supported" };
+
+const buildSystems: { name: string; level: Level; html: string }[] = [
+  {
+    name: "Command line",
+    level: "yes",
+    html: "kotlinc-compatible flags for the supported subset; output to a class directory or a jar. Compiler plugins come in through <code>-Xplugin</code>/<code>-P</code>/<code>-Xcompiler-plugin</code> as for kotlinc.",
+  },
+  {
+    name: "Gradle",
+    level: "yes",
+    html: `<code>id("dev.krustythecompiler")</code> plugin, shipped as <code>krusty-gradle-plugin-&lt;version&gt;.zip</code> in each <a href="${release}">release</a>. Replaces the Kotlin/JVM compile tasks of source sets and of Android variants (AGP 9's built-in Kotlin or <code>kotlin("android")</code>). Validated with Gradle 7.6.3, 8.14.3, 9.5.0 and 9.7.0. <code>kotlin-dsl</code> builds such as <code>buildSrc</code> and compile tasks outside a source set stay with kotlinc, logged per task.`,
+  },
+  {
+    name: "Kotlin Toolchain (project.yaml/module.yaml)",
+    level: "partial",
+    html: `<code>krusty-toolchain</code>, built from source, as a drop-in for JetBrains' <code>kotlin</code> command. JVM modules only; a module with Java sources, a compiler setting it does not pass yet or an artifact to download is refused by name. See <a href="${blob("docs/KOTLIN_TOOLCHAIN.md")}">docs/KOTLIN_TOOLCHAIN.md</a>.`,
+  },
+  {
+    name: "Kotlin Build Tools API",
+    level: "partial",
+    html: `<code>krusty-build-tools-&lt;version&gt;-kotlin-&lt;kotlin&gt;.jar</code> in each release stands in for <code>kotlin-build-tools-impl</code> in a build tool that loads the API from a classpath. JVM toolchain and in-process execution only. See <a href="${blob("tools/krusty-build-tools/README.md")}">tools/krusty-build-tools</a>.`,
+  },
+  {
+    name: "Bazel",
+    level: "yes",
+    html: `<code>krusty_jvm_library</code> rule from the <code>krusty</code> Bazel module each release publishes, with the release's compiler as a toolchain per host and a <code>--persistent_worker</code>. The worker accepts no compiler plugins. See <a href="${blob("tools/krusty-bazel/README.md")}">tools/krusty-bazel</a>.`,
+  },
+  {
+    name: "Maven",
+    level: "partial",
+    html: `Verification only: the <code>krusty-maven-plugin</code> <code>verify</code> goal compiles each compilation with krusty beside kotlinc's output and reports how krusty fares. kotlinc still builds what Maven ships. See <a href="${blob("tools/krusty-maven/README.md")}">tools/krusty-maven</a>.`,
+  },
+];
+
+const plugins: { name: string; level: Level; html: string }[] = [
+  { name: "kotlinx.serialization", level: "yes", html: "Conformance is measured against the plugin's own box-test corpus." },
+  { name: "all-open (plugin.allopen, plugin.spring, plugin.jpa)", level: "yes", html: "Including the <code>spring</code> and <code>jpa</code> presets." },
+  { name: "no-arg (plugin.noarg, plugin.jpa)", level: "partial", html: "Including the <code>jpa</code> preset; <code>invokeInitializers=true</code> is not implemented." },
+  { name: "sam-with-receiver", level: "yes", html: "" },
+  {
+    name: "KSP (KSP2)",
+    level: "partial",
+    html: "Through a build system. Under Gradle, KSP's own <code>kspKotlin</code> task runs the processors and krusty compiles what they generate (Gradle 8 or newer). Under the Kotlin Toolchain, only generated classes and resources are picked up. The plain command line rejects KSP.",
+  },
+  {
+    name: "kapt",
+    level: "partial",
+    html: "Under Gradle: kapt's own tasks run the annotation processors with kotlinc, then krusty compiles the module. kapt options on the command line fail with an error.",
+  },
+  {
+    name: "Compose, Parcelize, assignment and every other FIR/IR plugin",
+    level: "no",
+    html: "The command line fails with an error. The Gradle plugin reports the plugin and leaves that compile task to kotlinc, so the build still succeeds.",
+  },
+  { name: "Kotlin scripts (.kts)", level: "no", html: "" },
+];
 ---
-<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <SEO
-      title={title}
-      description={description}
-      canonical={Astro.site?.href}
-      openGraph={{
-        basic: { title, type: "website", image: card, url: Astro.site?.href },
-        optional: { description, siteName: "krusty" },
-        image: { type: "image/png", width: 1200, height: 630, alt: cardAlt },
-      }}
-      twitter={{ card: "summary_large_image", site: xHandle, creator: xHandle, title, description, image: card, imageAlt: cardAlt }}
-      extend={{
-        link: [
-          { rel: "icon", href: "/favicon.ico", sizes: "16x16 32x32 48x48" },
-          { rel: "apple-touch-icon", href: "/apple-touch-icon.png" },
-        ],
-      }}
-    />
-    <script type="application/ld+json" is:inline set:html={JSON.stringify(jsonLd)} />
-  </head>
-  <body>
-    <main>
-      <picture>
+<Base title={title} description={description}>
+  <script slot="head" type="application/ld+json" is:inline set:html={JSON.stringify(jsonLd)} />
+
+  <section class="band hero">
+    <div class="wrap hero-grid">
+      <div class="hero-copy">
+        <p class="eyebrow">Kotlin/JVM compiler · written in Rust</p>
+        <h1>kotlinc's class files, <span class="rust">from a native binary.</span></h1>
+        <p class="lede">
+          krusty is a drop-in replacement for <code>kotlinc</code>. For the Kotlin it supports, it takes the same
+          command-line flags and aims to write <code>.class</code> files byte-for-byte identical to kotlinc's. It needs
+          no JVM to run.
+        </p>
+        <div class="actions">
+          <a class="button button-primary" href={release}>Download the latest release</a>
+          <a class="button" href="#try">Try it on your build</a>
+        </div>
+        <p class="hero-meta">
+          Linux, macOS and Windows on x86_64 and arm64 · Kotlin {kotlinVersions.join(", ")} · Apache-2.0
+        </p>
+      </div>
+      <picture class="hero-art">
         <source srcset="/krusty.avif" type="image/avif" />
-        <img class="mascot" src="/krusty.png" alt="krusty, a crab mascot" width="240" height="156" fetchpriority="high" />
+        <img src="/krusty.png" alt="krusty, a crab mascot" width="480" height="311" fetchpriority="high" />
       </picture>
-      <h1>krusty</h1>
-      <p class="tag">A Kotlin compiler written in Rust.</p>
-      <p>
-        Built to be a drop-in replacement for <code>kotlinc</code> on the JVM. For the Kotlin subset it supports, it accepts <code>kotlinc</code>'s command-line flags and aims to emit <code>.class</code> files byte-for-byte identical to <code>kotlinc</code>'s, from a single native binary. Three badges measure it against the applicable cases of Kotlin's own <code>codegen/box</code> test suite: JVM runtime conformance, JVM byte equality, and Native runtime conformance.
-      </p>
-      <p class="badges">
-        <img src={badge("krusty-kotlin.json")} alt="Latest supported Kotlin version" height="20" />
-        <img src={badge("krusty-conformance.json")} alt="Kotlin conformance: share of applicable codegen/box cases whose box() returns OK" height="20" />
-        <img src={badge("krusty-jvm-byte-equality.json")} alt="JVM byte equality: matching leading .class bytes against kotlinc across the same codegen/box cases" height="20" />
-        <img src={badge("krusty-native-conformance.json")} alt="Native conformance: share of applicable Native codegen/box cases whose box() returns OK" height="20" />
-      </p>
-      <p>
-        <a href={`${repo}/releases/latest`}>Download</a> · <a href={repo}>GitHub</a> · <a href="https://github.com/sponsors/qnox">Sponsor</a>
-      </p>
+    </div>
+  </section>
 
-      <h2>Install</h2>
-      <p>
-        Download <code>krusty</code> for Linux, macOS or Windows from the <a href={`${repo}/releases/latest`}>latest release</a> and put it on your <code>PATH</code>. krusty needs no JVM to run, but reads the class library of an installed JDK.
+  <section class="band" id="measured" aria-labelledby="measured-title">
+    <div class="wrap">
+      <div class="section-head">
+        <p class="eyebrow">Kotlin {newestKotlin} · latest master build</p>
+        <h2 id="measured-title">Measured against kotlinc's own tests</h2>
+        <p>
+          Every master build runs JetBrains' <code>codegen/box</code> suite: the cases kotlinc's own JVM runner expects
+          to pass. A case passes when its <code>box()</code> function returns <code>OK</code>.
+        </p>
+      </div>
+      <div class="tiles">
+        {figures.map((figure, i) => {
+          const value = values[i];
+          return (
+            <article class="tile figure" data-file={figure.file} data-unit={figure.unit}>
+              <h3 class="tile-label">{figure.label}</h3>
+              <p class="tile-value" data-part="value">{value ? `${value.pct}%` : "–"}</p>
+              <div class="meter" role="img" aria-label={value ? `${value.pct}%` : "not available"} style={`--value: ${value ? value.pct : 0}%`}>
+                <span />
+              </div>
+              <p class="tile-meta" data-part="meta">
+                {value ? `${fmt(value.count)} of ${fmt(value.of)} ${figure.unit}` : "Not available right now. The badges in the README show the latest figure."}
+              </p>
+              <p class="figure-explain">{figure.explain}</p>
+            </article>
+          );
+        })}
+      </div>
+      <p class="fine">
+        How each figure is counted: <a href={blob("docs/TEST_HARNESS.md")}>docs/TEST_HARNESS.md</a>. Other suites
+        (kotlinx.serialization, KSP and the rest) are correctness gates and count toward none of these figures.
       </p>
+    </div>
+  </section>
 
-      <h2>Usage</h2>
-      <pre><code>krusty src/ -d out/                          # compile to a class directory
-krusty src/ -d mylib.jar -module-name mylib  # or to a jar
-krusty -cp deps.jar:classes/ App.kt -d out/  # with a classpath</code></pre>
+  <section class="band" id="install" aria-labelledby="install-title">
+    <div class="wrap split">
+      <div class="prose">
+        <p class="eyebrow">Install</p>
+        <h2 id="install-title">One binary on your PATH</h2>
+        <ol class="steps">
+          <li>Download the archive for your platform from the <a href={release}>latest release</a>.</li>
+          <li>Extract <code>krusty</code> and put it on your <code>PATH</code>.</li>
+          <li>Have a JDK installed. krusty does not run on the JVM, but it reads the JDK's class library (<code>JAVA_HOME</code> or <code>-jdk-home &lt;dir&gt;</code>).</li>
+        </ol>
+      </div>
+      <div class="prose code-col">
+        <p class="eyebrow">Usage</p>
+        <pre><code><span class="c"># compile a source tree to a class directory</span>
+krusty src/ -d out/
+<span class="c"># or to a jar</span>
+krusty src/ -d mylib.jar -module-name mylib
+<span class="c"># with a classpath</span>
+krusty -cp deps.jar:classes/ App.kt -d out/
+<span class="c"># all options</span>
+krusty -help</code></pre>
+      </div>
+    </div>
+  </section>
 
-      <h2>Features</h2>
-      <ul>
-        <li><strong>kotlinc-compatible command line</strong> for the supported subset, output to a class directory or a jar.</li>
-        <li><strong>Byte-level fidelity.</strong> Every change is diffed against the real <code>kotlinc</code>, and every build runs JetBrains' <code>codegen/box</code> suite.</li>
-        <li><strong>Low memory.</strong> On our multi-module benchmark, about a third of the peak memory of the GraalVM-native <code>kotlinc</code>.</li>
-        <li><strong>Build systems and compiler plugins</strong> listed below: Gradle, the Kotlin Toolchain, the Kotlin Build Tools API and Bazel; kotlinx.serialization, all-open, no-arg, sam-with-receiver and KSP.</li>
-        <li><strong>Editor support.</strong> <code>krusty-lsp</code> language server, with a <a href={`${repo}/blob/master/editors/zed/README.md`}>Zed extension</a>.</li>
+  <section class="band" id="try" aria-labelledby="try-title">
+    <div class="wrap split">
+      <div class="prose">
+        <p class="eyebrow">Gradle</p>
+        <h2 id="try-title">Find out if krusty fits your build, without switching</h2>
+        <p>
+          The Gradle plugin's <code>krustyVerify</code> task compiles every Kotlin/JVM compilation with kotlinc, as your
+          build does today, and with krusty beside it. Nothing you ship changes.
+        </p>
+        <p>
+          The report in <code>build/reports/krusty-verify/</code> lists which compilations krusty handles and which it
+          leaves to kotlinc and why, how many classes are byte-identical to kotlinc's and how the rest differ, and
+          both compilers' compile time and krusty's peak memory.
+        </p>
+        <p>
+          Setup takes two blocks in your Gradle files. See <a href={`${repo}#gradle`}>the Gradle instructions</a>.
+        </p>
+      </div>
+      <div class="prose code-col">
+        <pre><code>./gradlew krustyVerify</code></pre>
+        <p class="fine">
+          The report has a button that opens a prefilled GitHub issue with totals and difference kinds, with
+          compilation, class and member names masked. Sending it tells us what to fix next.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <section class="band" aria-labelledby="why-title">
+    <div class="wrap">
+      <div class="section-head">
+        <p class="eyebrow">Why krusty</p>
+        <h2 id="why-title">What you get today</h2>
+      </div>
+      <ul class="points">
+        <li>
+          <h3>Same command line</h3>
+          <p>kotlinc's flags for the supported subset, output to a class directory or a jar. Anything unsupported fails with an error instead of being skipped.</p>
+        </li>
+        <li>
+          <h3>Checked byte by byte</h3>
+          <p>Every change is diffed against the real kotlinc, and every build runs JetBrains' <code>codegen/box</code> suite.</p>
+        </li>
+        <li>
+          <h3>Less memory</h3>
+          <p>On our multi-module benchmark, about a third of the peak memory of the GraalVM-native kotlinc.</p>
+        </li>
+        <li>
+          <h3>Editor support</h3>
+          <p>The <code>krusty-lsp</code> language server, with a <a href={blob("editors/zed/README.md")}>Zed extension</a>.</p>
+        </li>
       </ul>
+    </div>
+  </section>
 
-      <h2 id="support">Supported build systems and compiler plugins</h2>
-      <p>
-        krusty targets every Kotlin release listed in <a href={`${repo}/blob/master/kotlin-versions`}><code>kotlin-versions</code></a>; the badge above shows the newest. On the command line, anything not listed here fails the build with an error instead of being skipped; the Gradle plugin reports it and leaves that compile task to kotlinc.
+  <section class="band" id="support" aria-labelledby="support-title">
+    <div class="wrap">
+      <div class="section-head">
+        <p class="eyebrow">Compatibility</p>
+        <h2 id="support-title">Supported build systems and compiler plugins</h2>
+        <p>
+          krusty targets every Kotlin release in <a href={blob("kotlin-versions")}><code>kotlin-versions</code></a>.
+          On the command line, anything not listed here fails the build with an error. The Gradle plugin reports it and
+          leaves that compile task to kotlinc.
+        </p>
+      </div>
+
+      <h3 class="table-title">Build systems</h3>
+      <div class="table-scroll">
+        <table class="support">
+          <thead><tr><th scope="col">Build system</th><th scope="col">Status</th><th scope="col">Details</th></tr></thead>
+          <tbody>
+            {buildSystems.map((row) => (
+              <tr>
+                <th scope="row">{row.name}</th>
+                <td><span class={`chip chip-${row.level}`}>{levelLabel[row.level]}</span></td>
+                <td set:html={row.html} />
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      <h3 class="table-title">Compiler plugins</h3>
+      <p class="table-intro">
+        krusty cannot run kotlinc's FIR/IR plugin jars. It reimplements the plugins below natively and selects them from
+        the same jar and options kotlinc receives, so a build switches compilers without changing its plugin
+        configuration.
       </p>
-      <h3>Build systems</h3>
-      <table>
-        <thead><tr><th>Build system</th><th>Support</th></tr></thead>
-        <tbody>
-          <tr><td>Command line</td><td>kotlinc-compatible flags for the supported subset; output to a class directory or a jar. Compiler plugins come in through <code>-Xplugin</code>/<code>-P</code>/<code>-Xcompiler-plugin</code> as for kotlinc.</td></tr>
-          <tr><td>Gradle</td><td><code>id("dev.krustythecompiler")</code> plugin, shipped as <code>krusty-gradle-plugin-&lt;version&gt;.zip</code> in each <a href={`${repo}/releases/latest`}>release</a>. Replaces Kotlin/JVM compile tasks of source sets and of Android variants (AGP 9's built-in Kotlin or <code>kotlin("android")</code>, with android.jar, Java sources and generated <code>R</code>/<code>BuildConfig</code> taken from the variant); validated with Gradle 7.6.3, 8.14.3, 9.5.0 and 9.7.0. <code>kotlin-dsl</code> builds such as <code>buildSrc</code> and compile tasks outside a source set stay with kotlinc, logged per task.</td></tr>
-          <tr><td>Kotlin Toolchain (<code>project.yaml</code>/<code>module.yaml</code>)</td><td><code>krusty-toolchain</code>, built from source, as a drop-in for JetBrains' <code>kotlin</code> command: <code>show modules</code>, <code>show settings</code>, <code>show dependencies</code> and <code>task :&lt;module&gt;:compileJvm</code>. JVM modules only; a module with Java sources, a compiler setting it does not pass yet or an artifact to download is refused by name. See <a href={`${repo}/blob/master/docs/KOTLIN_TOOLCHAIN.md`}>docs/KOTLIN_TOOLCHAIN.md</a>.</td></tr>
-          <tr><td>Kotlin Build Tools API</td><td><code>krusty-build-tools-&lt;version&gt;-kotlin-&lt;kotlin&gt;.jar</code> in each release, one per supported Kotlin version, stands in for <code>kotlin-build-tools-impl</code> in a build tool that loads the API from a classpath (JetBrains' Kotlin Toolchain among them). JVM toolchain and in-process execution only. See <a href={`${repo}/blob/master/tools/krusty-build-tools/README.md`}>tools/krusty-build-tools</a>.</td></tr>
-          <tr><td>Bazel</td><td><code>krusty_jvm_library</code> rule from the <code>krusty</code> Bazel module each release publishes, which brings the release's compiler as a toolchain per host, and a <code>--persistent_worker</code> speaking intellij-community's <code>jvm-inc-builder</code> vocabulary. The worker accepts no compiler plugins. See <a href={`${repo}/blob/master/tools/krusty-bazel/README.md`}>tools/krusty-bazel/README.md</a>.</td></tr>
-          <tr><td>Maven</td><td>Not supported.</td></tr>
-        </tbody>
-      </table>
-      <h3>Compiler plugins</h3>
-      <p>
-        krusty cannot run kotlinc's FIR/IR plugin jars. It reimplements the plugins below natively and selects them from the same jar and options kotlinc receives, so a build switches compilers without changing its plugin configuration.
-      </p>
-      <table>
-        <thead><tr><th>Plugin</th><th>Support</th></tr></thead>
-        <tbody>
-          <tr><td>kotlinx.serialization</td><td>Supported. Conformance is measured against the plugin's own box-test corpus.</td></tr>
-          <tr><td>all-open (<code>plugin.allopen</code>, <code>plugin.spring</code>, <code>plugin.jpa</code>)</td><td>Supported, with the <code>spring</code> and <code>jpa</code> presets.</td></tr>
-          <tr><td>no-arg (<code>plugin.noarg</code>, <code>plugin.jpa</code>)</td><td>Supported, with the <code>jpa</code> preset; <code>invokeInitializers=true</code> is not implemented.</td></tr>
-          <tr><td>sam-with-receiver</td><td>Supported.</td></tr>
-          <tr><td>KSP (KSP2)</td><td>Supported through a build system: under Gradle, KSP's own <code>kspKotlin</code> task runs the processors and krusty compiles what they generate (KSP's Gradle plugin needs Gradle 8 or newer); under the Kotlin Toolchain, processors from Maven artifacts run before the module compiles, but only their generated classes and resources are picked up; a processor that generates Kotlin or Java sources fails the module for now. The plain command line has no codegen host and rejects the KSP plugin.</td></tr>
-          <tr><td>kapt</td><td>Supported under Gradle: kapt's own tasks generate stubs and run the annotation processors with kotlinc, and krusty compiles the module after them. kapt's jar alone, which the Kotlin Gradle plugin passes to every compile of a kapt project, changes nothing; kapt options on the command line fail with an error.</td></tr>
-          <tr><td>Compose, Parcelize, assignment and every other FIR/IR plugin</td><td>Not supported. The command line fails with an error. The Gradle plugin reports the unsupported plugin and leaves that compile task to kotlinc, so the build still succeeds.</td></tr>
-          <tr><td>Kotlin scripts (<code>.kts</code>)</td><td>Not supported.</td></tr>
-        </tbody>
-      </table>
+      <div class="table-scroll">
+        <table class="support">
+          <thead><tr><th scope="col">Plugin</th><th scope="col">Status</th><th scope="col">Details</th></tr></thead>
+          <tbody>
+            {plugins.map((row) => (
+              <tr>
+                <th scope="row">{row.name}</th>
+                <td><span class={`chip chip-${row.level}`}>{levelLabel[row.level]}</span></td>
+                <td set:html={row.html} />
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
 
-      <h2>Status</h2>
-      <p>krusty compiles plain Kotlin/JVM code today, through the build systems and with the compiler plugins listed above.</p>
+  <section class="band" aria-labelledby="roadmap-title">
+    <div class="wrap split">
+      <div class="prose">
+        <p class="eyebrow">Roadmap</p>
+        <h2 id="roadmap-title">Where krusty is going</h2>
+        <p>krusty compiles plain Kotlin/JVM code today, through the build systems and with the compiler plugins above. Next:</p>
+        <ul class="roadmap">
+          <li>100% JVM conformance with kotlinc</li>
+          <li>Kotlin/Native</li>
+          <li>Kotlin/Wasm</li>
+          <li>Compose</li>
+        </ul>
+      </div>
+      <div class="prose sponsor">
+        <p class="eyebrow">Sponsor</p>
+        <h2>Help fund it</h2>
+        <p>If krusty saves your team build time or CI money, please consider sending part of it back.</p>
+        <p><a class="button" href="https://github.com/sponsors/qnox">Sponsor on GitHub</a></p>
+      </div>
+    </div>
+  </section>
+</Base>
 
-      <h2>Roadmap</h2>
-      <ul>
-        <li>100% JVM conformance with kotlinc</li>
-        <li>Kotlin/Native</li>
-        <li>Kotlin/Wasm</li>
-        <li>Compose</li>
-      </ul>
-
-      <h2>Sponsor</h2>
-      <p>
-        If krusty saves your team build time or CI money, please consider sending part of it back through <a href="https://github.com/sponsors/qnox">GitHub Sponsors</a>.
-      </p>
-    </main>
-    <footer>
-      Apache-2.0 · <a href={repo}>github.com/qnox/krusty</a> · News: <a href={news}>{xHandle} on X</a> · Kotlin is a trademark of JetBrains; krusty is an independent project.
-    </footer>
-  </body>
-</html>
-
-<style is:global>
-  :root { color-scheme: light dark; --fg: #1b1a1f; --muted: #5d5a66; --bg: #fff; --code: #f3f1f6; --accent: #7f52ff; }
-  @media (prefers-color-scheme: dark) {
-    :root { --fg: #ecebf0; --muted: #a09cab; --bg: #131217; --code: #201e27; --accent: #a78bff; }
+<script define:vars={{ gist }}>
+  // Refresh the figures from the same gist the badges read, so a page built days ago still shows
+  // the latest master build. On failure the build-time figures stay.
+  const pattern = /^(\d+(?:\.\d+)?)% \((\d+)\/(\d+)(?: bytes)?\)$/;
+  for (const tile of document.querySelectorAll(".figure")) {
+    fetch(gist + tile.dataset.file, { cache: "no-cache" })
+      .then((response) => (response.ok ? response.json() : null))
+      .then((body) => {
+        const match = body && pattern.exec(body.message);
+        if (!match) return;
+        const [, pct, count, of] = match;
+        const fmt = (n) => Number(n).toLocaleString("en-US");
+        tile.querySelector('[data-part="value"]').textContent = `${pct}%`;
+        tile.querySelector('[data-part="meta"]').textContent = `${fmt(count)} of ${fmt(of)} ${tile.dataset.unit}`;
+        const meter = tile.querySelector(".meter");
+        meter.style.setProperty("--value", `${pct}%`);
+        meter.setAttribute("aria-label", `${pct}%`);
+      })
+      .catch(() => {});
   }
-  body { margin: 0 auto; max-width: 720px; padding: 32px 16px; background: var(--bg); color: var(--fg); font: 17px/1.6 system-ui, sans-serif; }
-  .mascot { display: block; width: 240px; height: auto; margin: 0 0 8px -8px; }
-  h1 { font-size: 40px; margin: 0; }
-  .tag { font-size: 22px; margin: 0 0 16px; color: var(--muted); }
-  h2 { margin-top: 36px; font-size: 22px; }
-  a { color: var(--accent); }
-  code, pre { font: 14.5px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-  p code, li code { background: var(--code); padding: 1px 4px; border-radius: 4px; }
-  pre { background: var(--code); padding: 14px 16px; border-radius: 8px; overflow-x: auto; }
-  .badges img { margin-right: 6px; vertical-align: middle; }
-  footer { margin-top: 48px; font-size: 14px; color: var(--muted); }
-  table { border-collapse: collapse; width: 100%; font-size: 15px; }
-  th, td { text-align: left; vertical-align: top; padding: 6px 8px; border-bottom: 1px solid var(--code); }
-  td:first-child { min-width: 8em; }
-  h3 { margin-top: 24px; font-size: 18px; }
+</script>
+
+<style>
+  .hero {
+    padding-block: clamp(2.5rem, 1.5rem + 5vw, 5.5rem) clamp(2rem, 1.5rem + 3vw, 4rem);
+  }
+
+  .hero-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr);
+    align-items: center;
+    gap: 2rem 3rem;
+  }
+
+  .hero-copy {
+    display: grid;
+    gap: 1.25rem;
+    min-width: 0;
+  }
+
+  .rust {
+    color: var(--rust);
+  }
+
+  .lede {
+    font-size: var(--step-1);
+    line-height: 1.55;
+    max-width: 38rem;
+  }
+
+  .actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+  }
+
+  .hero-meta {
+    color: var(--muted);
+    font-size: var(--step--1);
+  }
+
+  .hero-art img {
+    display: block;
+    width: 100%;
+    max-width: 26rem;
+    height: auto;
+    margin-inline: auto;
+  }
+
+  .figure-explain {
+    color: var(--muted);
+    font-size: var(--step--1);
+    border-top: 1px solid var(--line);
+    padding-top: 0.75rem;
+    margin-top: 0.25rem;
+  }
+
+  .fine {
+    color: var(--muted);
+    font-size: var(--step--1);
+    margin-top: 1.25rem;
+    max-width: var(--measure);
+  }
+
+  .split {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 2.5rem 3rem;
+    align-items: start;
+  }
+
+  .code-col {
+    min-width: 0;
+    align-content: start;
+  }
+
+  .code-col .fine {
+    margin-top: 0;
+  }
+
+  .steps {
+    display: grid;
+    gap: 0.6rem;
+  }
+
+  pre .c {
+    color: var(--muted);
+  }
+
+  .points {
+    list-style: none;
+    padding: 0;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 14rem), 1fr));
+    gap: 1.5rem 2rem;
+  }
+
+  .points li {
+    display: grid;
+    gap: 0.4rem;
+    align-content: start;
+    border-top: 2px solid var(--fg);
+    padding-top: 0.9rem;
+  }
+
+  .points p {
+    color: var(--muted);
+  }
+
+  .table-title {
+    margin: 2rem 0 0.75rem;
+  }
+
+  .table-intro {
+    max-width: var(--measure);
+    margin-bottom: 1rem;
+    color: var(--muted);
+  }
+
+  .support th[scope="row"] {
+    color: var(--fg);
+    font: 600 var(--step--1) / 1.5 var(--font-body);
+    letter-spacing: 0;
+    text-transform: none;
+    min-width: 11rem;
+  }
+
+  .support td:last-child {
+    min-width: 20rem;
+  }
+
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    white-space: nowrap;
+    font-weight: 600;
+    font-size: 0.8rem;
+  }
+
+  .chip::before {
+    content: "";
+    width: 0.6rem;
+    height: 0.6rem;
+    border-radius: 50%;
+    flex: none;
+  }
+
+  .chip-yes::before {
+    background: var(--st-good);
+  }
+
+  .chip-partial::before {
+    background: var(--st-warn);
+  }
+
+  .chip-no::before {
+    background: transparent;
+    box-shadow: inset 0 0 0 2px var(--muted);
+  }
+
+  .chip-no {
+    color: var(--muted);
+  }
+
+  .roadmap {
+    display: grid;
+    gap: 0.35rem;
+  }
+
+  .sponsor {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    padding: 1.5rem;
+  }
+
+  @media (max-width: 760px) {
+    .hero-grid,
+    .split {
+      grid-template-columns: minmax(0, 1fr);
+    }
+
+    .hero-art {
+      order: -1;
+    }
+
+    .hero-art img {
+      max-width: 15rem;
+      margin-inline: 0;
+    }
+  }
+
+  /* On a phone each support row becomes a short entry: name and status, then the details. */
+  @media (max-width: 640px) {
+    .support thead {
+      display: none;
+    }
+
+    .support,
+    .support tbody,
+    .support tr,
+    .support th,
+    .support td {
+      display: block;
+      min-width: 0 !important;
+    }
+
+    .support tr {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 0.35rem 0.75rem;
+      padding: 0.9rem 1rem;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .support tr:last-child {
+      border-bottom: 0;
+    }
+
+    .support th,
+    .support td {
+      padding: 0;
+      border: 0;
+    }
+
+    .support td:last-child {
+      grid-column: 1 / -1;
+      color: var(--muted);
+    }
+
+    .support td:last-child:empty {
+      display: none;
+    }
+  }
 </style>
