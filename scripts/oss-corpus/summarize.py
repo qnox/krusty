@@ -172,6 +172,15 @@ def passing(t):
     return f"{t['passed']:,} / {t['passed_kotlinc']:,}{share(t['passed'], t['passed_kotlinc'])}"
 
 
+def unavailable_reasons(entry):
+    """Why one test build's results cannot be compared."""
+    if entry.get('inventory') == 'missing':
+        yield 'listed no test task (it failed before Gradle planned its tasks)'
+    if 'changed' in entry:
+        yield ('was not checked against the measured classes' if entry['changed'] is None
+               else f"changed {entry['changed']:,} measured output files")
+
+
 def test_section(projects):
     """The projects' own tests run on krusty's classes against the same tests run on kotlinc's: of
     the tests that passed on kotlinc's classes, how many pass, fail, are skipped or do not run on
@@ -199,10 +208,8 @@ def test_section(projects):
         for scope in totals:
             totals[scope].update(p['tests'][scope])
     for p in unavailable:
-        reasons = '; '.join(
-            f"the {mode} test build " + ('was not checked against the measured classes' if why['changed'] is None
-                                         else f"changed {why['changed']:,} measured output files")
-            for mode, why in p['tests']['unavailable'].items())
+        reasons = '; '.join(f'the {mode} test build {why}' for mode, entry in p['tests']['unavailable'].items()
+                            for why in unavailable_reasons(entry))
         out.append(f"| {p['name']} | {p['tests']['exit'].get('kotlinc')} / {p['tests']['exit'].get('krusty')} | "
                    f"unavailable: {reasons} | | | | |")
     t, own = totals['total'], totals['krusty_classes']

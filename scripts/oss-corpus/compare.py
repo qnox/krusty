@@ -21,6 +21,7 @@ import re
 import sys
 
 import hotspots
+import summarize
 import testruns
 
 
@@ -248,10 +249,10 @@ def main():
                   f"peak {cost['peak_rss_mb']['total']} MB; compile {cost['compile_seconds']} s, "
                   f"{cost['built_compile_seconds']} s in compilations krusty built")
     if summary['tests'] and summary['tests']['unavailable']:
-        for mode, why in summary['tests']['unavailable'].items():
-            print(f"  tests unavailable: the {mode} test build " + (
-                'was not checked against the measured outputs' if why['changed'] is None else
-                f"changed {why['changed']} measured output files: {', '.join(why['examples'])}"))
+        for mode, entry in summary['tests']['unavailable'].items():
+            for why in summarize.unavailable_reasons(entry):
+                print(f"  tests unavailable: the {mode} test build {why}"
+                      + (f": {', '.join(entry['examples'])}" if entry.get('examples') else ''))
     elif summary['tests']:
         for scope, label in (('total', 'all test tasks'), ('krusty_classes', 'tasks on krusty classes only')):
             t = summary['tests'][scope]

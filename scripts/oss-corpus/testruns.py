@@ -84,21 +84,23 @@ def changes(path):
 
 
 def compare(work, name, rows, exits):
-    """The test comparison of one project, or None when the reference test build listed no test
-    task. `rows` are compare.py's compilations, `exits` each test build's exit status. When a test
-    build changed the measured outputs, or that was not checked, only why the comparison is
-    unavailable is recorded."""
+    """The test comparison of one project's test builds. `rows` are compare.py's compilations,
+    `exits` each test build's exit status (compare.py passes none for a run without test builds).
+    A reference test build that wrote no test inventory (it failed before Gradle planned its
+    tasks) makes the comparison unavailable, as does a test build that changed the measured
+    outputs or was not checked against them: then only why is recorded. An empty inventory is a
+    build with no test task, compared as such."""
     logs = os.path.join(work, 'logs')
     reference = inventory(os.path.join(logs, f'{name}.kotlinc.tests.tsv'))
-    if not reference:
-        return None
     unavailable = {}
+    if reference is None:
+        unavailable['kotlinc'] = dict(inventory='missing')
     for mode in ('kotlinc', 'krusty'):
         changed = changes(os.path.join(logs, f'{name}.{mode}.changed.tsv'))
         if changed is None:
-            unavailable[mode] = dict(changed=None, examples=[])
+            unavailable.setdefault(mode, {}).update(changed=None, examples=[])
         elif changed:
-            unavailable[mode] = dict(changed=len(changed), examples=changed[:EXAMPLES])
+            unavailable.setdefault(mode, {}).update(changed=len(changed), examples=changed[:EXAMPLES])
     if unavailable:
         return dict(exit=exits, unavailable=unavailable)
     candidate = {task: reports for task, reports, _ in

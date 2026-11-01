@@ -226,5 +226,40 @@ class RunScript(unittest.TestCase):
                                      unavailable=dict(krusty=dict(changed=None, examples=[]))))
 
 
+class Inventory(unittest.TestCase):
+    """A reference test build that fails before writing its test inventory is reported, not
+    dropped; an empty inventory is a build without test tasks; a run without test builds has no
+    test record (`test_without_test_builds_there_is_no_test_comparison`)."""
+
+    def test_a_reference_test_build_that_failed_before_listing_its_tasks_is_unavailable(self):
+        with tempfile.TemporaryDirectory() as work:
+            # The test builds fail during configuration: neither writes a test inventory.
+            project = RunScript().run_corpus(work, '#!/bin/sh\n'
+                                                   'if [ -n "$CORPUS_COMPILATIONS" ]; then : > "$CORPUS_COMPILATIONS"; fi\n'
+                                                   'if [ -n "$CORPUS_TESTS" ]; then exit 1; fi\n')
+            path = f'{work}/corpus/out/p/compare.json'
+            text = subprocess.run([sys.executable, os.path.join(HERE, 'summarize.py'), path],
+                                  check=True, capture_output=True, text=True).stdout
+        self.assertEqual(project['tests'], dict(exit=dict(kotlinc=1, krusty=1),
+                                                unavailable=dict(kotlinc=dict(inventory='missing'))))
+        self.assertEqual(text[text.index('## Project tests'):text.index('## Build cost')].splitlines()[8:], [
+            '| p | 1 / 1 | unavailable: the kotlinc test build listed no test task '
+            '(it failed before Gradle planned its tasks) | | | | |',
+            '| **Total** | | **0 / 0** | **0** | **0** | **0** | **0 / 0 in 0 / 0 tasks** |',
+            '',
+        ])
+
+    def test_an_empty_inventory_is_a_build_without_test_tasks(self):
+        with tempfile.TemporaryDirectory() as work:
+            project = RunScript().run_corpus(work, '#!/bin/sh\n'
+                                                   'if [ -n "$CORPUS_COMPILATIONS" ]; then : > "$CORPUS_COMPILATIONS"; fi\n'
+                                                   'if [ -n "$CORPUS_TESTS" ]; then : > "$CORPUS_TESTS"; fi\n')
+        self.assertEqual(project['tests'], dict(
+            exit=dict(kotlinc=0, krusty=0), unavailable=None,
+            total=dict(tasks=0, passed_kotlinc=0, passed=0, failed=0, skipped=0, not_run=0),
+            krusty_classes=dict(tasks=0, passed_kotlinc=0, passed=0, failed=0, skipped=0, not_run=0),
+            tasks=[]))
+
+
 if __name__ == '__main__':
     unittest.main()
