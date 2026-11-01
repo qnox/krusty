@@ -1864,9 +1864,14 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                                 sibling.get(),
                                 joined.get(),
                             );
-                                if current == sibling
-                                    || (!current.get().mentions_ty_param() && joined != current)
-                                {
+                                if current == sibling {
+                                    continue;
+                                }
+                                let generic = current.get().mentions_ty_param();
+                                let supertype = joined == current;
+                                let completed =
+                                    completed_open_arguments(current.get(), sibling.get());
+                                if !generic && !supertype && !completed {
                                     continue;
                                 }
                                 let Some(Ok(rebound)) = evaluate_expression_with_expected(
@@ -1874,6 +1879,12 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
                                 ) else {
                                     continue;
                                 };
+                                // A branch whose own call left its type arguments open completes
+                                // them to `Any`; only the sibling can fix them, and it must fix
+                                // them exactly (`emptyMap()` beside `Map<Table, List<Table>>`).
+                                if !generic && !supertype && rebound != sibling {
+                                    continue;
+                                }
                                 if rebound != current {
                                     resolved_operands[index] = rebound;
                                     changed = true;
@@ -2192,4 +2203,25 @@ fn call_selection_origin(graph: &SignatureGraph, expression: SigExprId) -> Optio
         SigExpr::MutableLocalFlow { current, .. } => call_selection_origin(graph, current),
         _ => None,
     }
+}
+
+/// Whether `current` is `sibling`'s classifier with some type arguments completed to the top type
+/// (`Any`/`Any?`) where `sibling` names another argument. That is the shape of a call whose own
+/// arguments left its type parameters open, such as `emptyMap()` in one branch of a conditional.
+fn completed_open_arguments(current: Ty, sibling: Ty) -> bool {
+    let (Some((classifier, arguments)), Some((sibling_classifier, sibling_arguments))) =
+        (current.obj_parts(), sibling.obj_parts())
+    else {
+        return false;
+    };
+    let top = Ty::obj("kotlin/Any");
+    classifier == sibling_classifier
+        && current.is_nullable() == sibling.is_nullable()
+        && arguments.len() == sibling_arguments.len()
+        && arguments
+            .iter()
+            .zip(sibling_arguments)
+            .all(|(argument, sibling_argument)| {
+                argument == sibling_argument || argument.non_null() == top
+            })
 }
