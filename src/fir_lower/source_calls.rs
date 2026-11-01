@@ -2289,8 +2289,8 @@ fn inline_argument_stays(ir: &crate::ir::IrFile, value: ExprId) -> bool {
     }
 }
 
-/// The inline template of a lambda, or of a non-suspend callable reference whose adapter is that
-/// template. The reference's target is not consulted: the adapter's captures, bound receiver, and
+/// The inline template of a lambda, or of a callable reference whose adapter is that template and
+/// whose selected declaration is not itself suspend. The reference's target is not consulted: the adapter's captures, bound receiver, and
 /// one returned value are the invocation. A stored reference never reaches this helper.
 pub(crate) fn inline_argument_template(
     ir: &crate::ir::IrFile,
