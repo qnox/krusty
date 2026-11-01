@@ -28,8 +28,9 @@
      `wasm-js-klib`, and `wasm-wasi-klib` fail/not-applicable inventories are committed under
      tests/box_expected_*/<platform>/<version>.txt.
      See docs/TEST_HARNESS.md "Current Conformance".
-     The master build recomputes all three and writes the badge JSON to a Gist
-     (no repo commit) — see the `release` job in .github/workflows/ci.yml. The gist id is wired via
+     Every master CI run recomputes all three; the `pages` workflow (.github/workflows/pages.yml),
+     nightly and after each release, writes the latest successful run's reports as badge JSON to a
+     Gist (no repo commit). The gist id is wired via
      the CONFORMANCE_GIST_ID repo variable; updates need the GIST_TOKEN secret (PAT, `gist` scope). -->
 
 krusty is built to be a drop-in replacement for `kotlinc` on the JVM. For the Kotlin subset it

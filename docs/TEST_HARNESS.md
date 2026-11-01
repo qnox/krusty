@@ -506,13 +506,15 @@ The `master` ruleset (id `19534763`) requires this aggregate from the GitHub Act
    It must print `[{"context":"ci-and-conformance","integration_id":15368}]`. An open pull request
    must also list `ci-and-conformance` as required.
 
-The JVM conformance, JVM byte-equality, and Native conformance badges change only when a master
-`release` job publishes. To verify a publication, confirm that run's `release` job succeeded,
-render its max-version reports locally, and compare the results with the three Gist files:
+The JVM conformance, JVM byte-equality, and Native conformance badges change only when the `pages`
+workflow runs on master: nightly, after each release, and on site changes. It publishes the reports of
+the latest successful master `ci` push run for the newest Kotlin version that run covered. To verify a
+publication, find that `ci` run, render its reports locally, and compare the results with the three
+Gist files:
 
 ```sh
-gh run view <run-id> --repo qnox/krusty --json jobs \
-  --jq '.jobs[] | select(.name == "release") | {conclusion, steps: [.steps[] | {name, conclusion}]}'
+gh run list --repo qnox/krusty --workflow ci.yml --branch master --event push --status success \
+  --limit 1 --json databaseId,headSha
 v="$(just max-version)"
 gh run download <run-id> --repo qnox/krusty -n "pct-$v" -n "jvm-byte-equality-$v" -n "native-pct-$v" -D target/reports
 just conformance-badge target/reports/pct-$v/pct.txt target/reports/jvm-byte-equality-$v/jvm-byte-equality.txt target/reports/native-pct-$v/native-pct.txt
@@ -523,7 +525,7 @@ curl -fsSL https://gist.githubusercontent.com/qnox/dec8149bc4f43b203d6cc9adc14f2
 
 The `label`, `message`, and `color` in `docs/badges/conformance.json` and
 `docs/badges/jvm-byte-equality.json` and `docs/badges/native-conformance.json` must match the Gist's
-respective files. A `release` job that skipped its publish steps left all three unchanged.
+respective files. A `pages` run without the `CONFORMANCE_GIST_ID` variable left all three unchanged.
 
 ## Focused Runs
 
@@ -799,8 +801,8 @@ just conformance-badge target/reports/pct-$v/pct.txt target/reports/jvm-byte-equ
 
 In CI, every target row prints and uploads its own report: JVM owns `pct-<version>` and
 `jvm-byte-equality-<version>`, while Native owns `native-pct-<version>`. Only the
-`release` job on master publishes the max version's three payloads to the badge Gist; pull requests
-and merge groups never publish.
+`pages` workflow on master publishes the newest version's three payloads to the badge Gist, from
+the latest successful master run; pull requests and merge groups never publish.
 
 To inspect where bytes are lost, focus a case with `KRUSTY_BOX_ONLY=<substring>` (which turns the
 score on for that selection, failed boxes included) and add `KRUSTY_BYTE_DIFF=1` for the first
