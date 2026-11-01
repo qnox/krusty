@@ -42,15 +42,19 @@ impl Emitter<'_> {
         }
         self.link_safe_call_chain(block, code);
         let copied_caller = self.copied_function_caller(block, code);
-        let enclosing_statement_line = self.statement_line;
         let saved = self.open_slot_scope();
         let terminal_target = self.terminal_statement_target.take();
         let marked_initializer = self.renders_initializer_boundary(block);
         self.mark_initializer_line(block, false, code);
-        // The optimized safe call still owns an ordinary lexical block. Enter its depth before
-        // asking for the fast path so nested selector emission, local ranges, and frames observe
-        // the same lifecycle as `emit_open_block`.
-        self.block_depth += 1;
+        let entry = InlineBodyEntry {
+            normalize_at_lambda_frame: delays_stack_normalization,
+            stack_height: inline_stack_height,
+            within_inline_lambda,
+            opening: self.external_inline_body_opening(block, &stmts),
+            copied_function: copied_caller.is_some().then_some(block),
+            discarded_frame_result: value
+                .and_then(|value| self.discarded_copied_frame_tail(block, &stmts, value)),
+        };
         let EmittedBlock {
             discard_after_close,
             retains_postfix_temporary,
@@ -59,31 +63,7 @@ impl Emitter<'_> {
             emit_after_frame_close,
             discard_after_frame,
             close_discarded_provider_frame,
-        } = if self.try_emit_duplicated_safe_call(block, &stmts, value, true, code) {
-            self.terminal_statement_target = None;
-            self.statement_line = enclosing_statement_line;
-            EmittedBlock {
-                discard_after_close: None,
-                retains_postfix_temporary: false,
-                reserved_inline_stack: None,
-                close_lambda_before_locals: false,
-                emit_after_frame_close: None,
-                discard_after_frame: None,
-                close_discarded_provider_frame: None,
-            }
-        } else {
-            self.block_depth -= 1;
-            let entry = InlineBodyEntry {
-                normalize_at_lambda_frame: delays_stack_normalization,
-                stack_height: inline_stack_height,
-                within_inline_lambda,
-                opening: self.external_inline_body_opening(block, &stmts),
-                copied_function: copied_caller.is_some().then_some(block),
-                discarded_frame_result: value
-                    .and_then(|value| self.discarded_copied_frame_tail(block, &stmts, value)),
-            };
-            self.emit_open_block(block, stmts, value, terminal_target, entry, true, code)
-        };
+        } = self.emit_open_block(block, stmts, value, terminal_target, entry, true, code);
         self.mark_initializer_line(block, true, code);
         let mut anchored = false;
         if !self.ir.callable_scopes.contains(&block) {
@@ -189,9 +169,7 @@ impl Emitter<'_> {
         let mut deferred_invocation_result = None;
         let mut copied_frame_result = None;
         let optimized_postfix = self.emit_postfix_iinc(block, false, code);
-        if !optimized_postfix
-            && !self.try_emit_duplicated_safe_call(block, stmts, value, false, code)
-        {
+        if !optimized_postfix {
             let mut normalize_at_lambda_frame = delays_stack_normalization;
             let opening = self.external_inline_body_opening(block, stmts);
             let mut bound_operands = 0;

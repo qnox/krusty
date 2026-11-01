@@ -62,7 +62,13 @@ pub(super) fn realize(
             // declares as the value class receives that class's carrier, not its box.
             let logical_erased_params = b.erased_params.clone();
             let target = b.target_name.clone().unwrap_or_else(|| b.name.clone());
-            if let Some(m) = mangle_map.get(&(c.fq_name, target.clone(), b.concrete_params.len())) {
+            let mangled_target =
+                mangle_map.get(&(c.fq_name, target.clone(), b.concrete_params.len()));
+            // A dependency's supertype member publishes its physical name, already mangled over its
+            // declared signature (`hash-<hash>`). When the override mangles to that same name, the
+            // bridge's name is final: mangling it again would append a second suffix.
+            let name_is_physical = mangled_target.is_some_and(|mangled| *mangled == b.name);
+            if let Some(m) = mangled_target {
                 b.target_name = Some(m.clone());
             }
             let target_mentions_vc = bridge_returns::mentions_value_class(
@@ -128,7 +134,7 @@ pub(super) fn realize(
                 // param (`foo(i: Marker)`) mangles by the param; a literal-VC return (`fun bar():
                 // Gx`) also mangles by the return; a generic `T` (erased `Object`) does not.
                 // A bridge lives on a class (never a file class); its value-class return mangles.
-                if bridge_mentions_vc {
+                if bridge_mentions_vc && !name_is_physical {
                     naming.mangle_by_supertype(b);
                     // A supertype that mentions a value class elsewhere still declares a generic
                     // slot (`I<T>.foo(x: T): IC` for `foo(x: IC2)`): the argument arrives boxed and
@@ -193,7 +199,9 @@ pub(super) fn realize(
                 if b.target_name.is_none() {
                     b.target_name = Some(b.name.clone());
                 }
-                naming.mangle_by_supertype(b);
+                if !name_is_physical {
+                    naming.mangle_by_supertype(b);
+                }
                 for p in b.erased_params.iter_mut() {
                     *p = erase(p, callable_under);
                 }
@@ -221,7 +229,13 @@ pub(super) fn realize(
                 // its name and arrives as the carrier, on a box exactly as on any other class: the
                 // bridge answers to `put-<hash>(ILjava/lang/Object;)`, and only the erased `T` slot
                 // is unboxed for the target.
-                naming.answer_to_value_class_parameters(b, &target);
+                if name_is_physical {
+                    for parameter in &mut b.erased_params {
+                        *parameter = erase(parameter, callable_under);
+                    }
+                } else {
+                    naming.answer_to_value_class_parameters(b, &target);
+                }
             }
             if let Some((target_name, target_params, target_ret)) = lowered_member_target {
                 let physical_params = target_params
