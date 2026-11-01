@@ -32,6 +32,22 @@ pub enum IrParameterRole {
     Generated(IrGeneratedParameterRole),
 }
 
+impl IrParameterRole {
+    /// A declared context or value parameter: what [`IrVarargParameter::index`] counts. Receivers,
+    /// captures and compiler-generated parameters are not declared parameters.
+    pub const fn is_declared_parameter(self) -> bool {
+        matches!(
+            self,
+            Self::Value
+                | Self::UnusedValue
+                | Self::DestructuredValue
+                | Self::ContextValue
+                | Self::AnonymousContextParameter { .. }
+                | Self::ContextReceiver { .. }
+        )
+    }
+}
+
 /// What a lifted callable's captured value was declared as, and what kind of callable captures
 /// it. Both are source facts; a target that names the lifted parameter after them (kotlinc's
 /// `LocalDeclarationsLowering` keeps a variable's own name for a named local function or an
@@ -444,15 +460,16 @@ impl IrFile {
         Some(identities)
     }
 
-    /// The position of `function`'s `vararg` parameter in its semantic parameter list, which leads
-    /// with any receiver, context or captured slot. [`IrVarargParameter::index`] counts value
-    /// parameters only.
+    /// The position of `function`'s `vararg` parameter in its semantic parameter list, which may
+    /// lead with a capture or an extension receiver. [`IrVarargParameter::index`] counts the
+    /// declared context and value parameters, so the position is the declared parameter at that
+    /// ordinal.
     pub(crate) fn vararg_parameter_position(&self, function: FunId) -> Option<usize> {
         let vararg = self.fn_varargs.get(&function)?;
         self.function_parameter_identities(function)?
             .iter()
             .enumerate()
-            .filter(|(_, identity)| identity.role == IrParameterRole::Value)
+            .filter(|(_, identity)| identity.role.is_declared_parameter())
             .nth(vararg.index)
             .map(|(position, _)| position)
     }
@@ -605,7 +622,9 @@ mod tests {
 /// The `vararg` parameter of a declared function.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct IrVarargParameter {
-    /// SOURCE index among the value parameters (receiver excluded).
+    /// Index among the declared parameters: context parameters first, then value parameters.
+    /// Receivers and captures are not counted; a target finds the physical slot through the
+    /// function's parameter identities.
     pub index: usize,
     /// No value parameter follows it.
     pub is_last: bool,

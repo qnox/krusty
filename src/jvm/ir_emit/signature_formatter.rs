@@ -124,17 +124,18 @@ impl<'a> JvmSignatureFormatter<'a> {
         self.method_positions_with_vararg(params, ret, None)
     }
 
-    /// [`Self::method_positions`] where the parameter at `vararg` is a `vararg`: its array keeps
-    /// the element's declaration-site wildcards, as `Array<out E>` does.
+    /// [`Self::method_positions`] where the parameter at `vararg_index` is a `vararg`: its element
+    /// is a value parameter, so it keeps its declaration-site wildcards, as in
+    /// [`Self::method_signature`].
     pub(super) fn method_positions_with_vararg(
         &self,
         params: &[Ty],
         ret: &Ty,
-        vararg: Option<usize>,
+        vararg_index: Option<usize>,
     ) -> Option<String> {
         let mut signature = String::from("(");
         for (index, parameter) in params.iter().enumerate() {
-            let rendered = if vararg == Some(index) {
+            let rendered = if vararg_index == Some(index) {
                 self.vararg_element_ty(parameter, Wildcards::Declared)?
             } else {
                 self.parameter_ty(parameter)?

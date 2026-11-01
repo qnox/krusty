@@ -1822,6 +1822,8 @@ mod value_class_suspend_override_e2e;
 mod value_class_suspend_resume_e2e;
 #[path = "value_class_try_value_e2e.rs"]
 mod value_class_try_value_e2e;
+#[path = "vararg_generic_signature_e2e.rs"]
+mod vararg_generic_signature_e2e;
 #[path = "variance_conflicts_e2e.rs"]
 mod variance_conflicts_e2e;
 
