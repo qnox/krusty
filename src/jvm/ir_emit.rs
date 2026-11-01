@@ -812,32 +812,7 @@ fn attach_synth_nullability(
             }
         }
     }
-    // The `Companion` instance field is a never-null reference (`@NotNull`), and each REFERENCE
-    // hoisted companion static is annotated like any other backing field.
-    if let Some(companion) = &c.companion_class {
-        cw.set_field_nullability(
-            crate::jvm::companion_storage::field_name(c.fq_name, *companion),
-            &format!("L{};", companion.render()),
-            "Lorg/jetbrains/annotations/NotNull;",
-        );
-        for (index, s) in ir
-            .statics
-            .iter()
-            .enumerate()
-            .filter(|(index, s)| {
-                ir.is_jvm_companion_hoisted_static(*index as u32) && s.owner_matches(&c.fq_name())
-            })
-            .filter(|(_, s)| !s.is_lateinit)
-        {
-            if let Some(a) = declared_static_annotation(s) {
-                cw.set_field_nullability(
-                    ir.static_field_jvm_name(index as u32),
-                    &desc(jvm_declared_ty(&s.ty)),
-                    a,
-                );
-            }
-        }
-    }
+    companion_field::attach_companion_field_nullability(ir, c, cw);
     // Primary constructor: one parameter annotation slot per SOURCE parameter, plain or
     // property-backed. The prefix takes no slot: kotlinc sizes the table by the source parameters,
     // so an inner class's first declared parameter is annotation parameter 0, as in javac's output.
@@ -989,20 +964,6 @@ fn attach_synth_nullability(
     }
 }
 
-/// An interface's fields are public, so each one its private companion moves out is deprecated
-/// for Java, as on a class.
-fn deprecate_moved_interface_field(
-    ir: &IrFile,
-    interface: &IrClass,
-    static_index: usize,
-    cw: &mut ClassWriter,
-) {
-    let static_index = u32::try_from(static_index).expect("too many statics for a packed index");
-    if static_fields::moved_from_private_companion(ir, interface, static_index) {
-        cw.deprecate_last_late_field();
-    }
-}
-
 /// Emit the companion/static surface shared by declarations that are JVM interfaces: Kotlin
 /// interfaces and annotation classes. Common IR keeps those source kinds distinct, but both use
 /// interface field constraints and the companion's self-hosted `$$INSTANCE` realization.
@@ -1071,59 +1032,7 @@ fn emit_jvm_interface_companion_surface(
     }
 
     add_companion_field(ir, cw, c);
-    // `<clinit>` already interned `Companion`. These constants follow it in the field table, and
-    // their names, descriptors, and `ConstantValue` payloads intern together at the field visit —
-    // after that alias store, before `@Metadata`. A hoisted `@JvmField` property is visited later
-    // because kotlinc places it after both.
-    for (static_index, property) in ir.statics.iter().enumerate().filter(|(index, property)| {
-        property.owner_matches(&fq_name) && !ir.is_jvm_field_static(*index as u32)
-    }) {
-        let descriptor = ir_type_desc(&property.ty);
-        let value = property
-            .init
-            .and_then(|init| static_fields::constant_value(ir, init));
-        let nullability = (descriptor.starts_with('L') || descriptor.starts_with('[')).then(|| {
-            if property.ty.is_nullable() {
-                "Lorg/jetbrains/annotations/Nullable;"
-            } else {
-                "Lorg/jetbrains/annotations/NotNull;"
-            }
-        });
-        cw.add_field_late(0x0019, &property.name, &descriptor, value, nullability);
-        deprecate_moved_interface_field(ir, c, static_index, cw);
-    }
-
-    // A hoisted `@JvmField` property is the public static field itself. Its declaration annotations
-    // remain owned by the companion in common IR and are copied onto this target field here.
-    for (static_index, s) in ir
-        .statics
-        .iter()
-        .enumerate()
-        .filter(|(index, s)| s.owner_matches(&fq_name) && ir.is_jvm_field_static(*index as u32))
-    {
-        let descriptor = ir_type_desc(&s.ty);
-        let nullability = (descriptor.starts_with('L') || descriptor.starts_with('[')).then(|| {
-            if s.ty.is_nullable() {
-                "Lorg/jetbrains/annotations/Nullable;"
-            } else {
-                "Lorg/jetbrains/annotations/NotNull;"
-            }
-        });
-        cw.add_field_late(0x0019, &s.name, &descriptor, None, nullability);
-        deprecate_moved_interface_field(ir, c, static_index, cw);
-        if let Some(annotations) = c
-            .companion_class
-            .and_then(|companion| ir.class_id_by_name(companion))
-            .and_then(|companion| {
-                ir.classes[companion as usize]
-                    .field_annotations
-                    .iter()
-                    .find(|annotations| annotations.field == s.name)
-            })
-        {
-            cw.set_last_late_field_annotations(&annotations.annotations);
-        }
-    }
+    static_fields::declare_interface_statics(ir, c, cw);
 }
 
 /// Construct a `ClassWriter` with the per-file [`EmitOptions`] stamped on — the single place emission

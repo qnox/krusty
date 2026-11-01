@@ -6,12 +6,13 @@ use crate::jvm::private_static_access::StaticOwner;
 
 /// `static final` plus the companion object's own visibility, as kotlinc writes the outer class's
 /// `Companion` field: a `private companion object` keeps its field private, a protected one
-/// protected. An interface field is always public, and kotlinc marks the public field of an
-/// interface's private companion synthetic (`isPrivateCompanionFieldInInterface`).
+/// protected. A JVM interface's field (an interface's or an annotation class's) is always public,
+/// and kotlinc marks that field of a private companion synthetic
+/// (`isPrivateCompanionFieldInInterface`).
 pub(super) fn companion_field_access(ir: &IrFile, class: &IrClass, companion: TypeName) -> u16 {
     const STATIC_FINAL: u16 = 0x0018;
     let visibility = ir.class_visibilities.get(&companion);
-    if class.is_interface {
+    if is_jvm_interface(class) {
         let synthetic = if visibility == Some(&crate::types::Visibility::Private) {
             crate::jvm::classfile::ACC_SYNTHETIC
         } else {
@@ -263,6 +264,39 @@ pub(super) fn emit_companion_init(
         &descriptor,
     );
     code.putstatic(field, 1);
+}
+
+/// kotlinc's field nullability on a class's companion surface: the `Companion` field is a
+/// never-null reference (`@NotNull`), and each reference companion static hoisted into the class is
+/// annotated like any other backing field. Every classifier kind that hosts a companion (a class,
+/// an interface, an annotation class) publishes it the same way; the writer drops the annotation
+/// from a synthetic field.
+pub(super) fn attach_companion_field_nullability(ir: &IrFile, c: &IrClass, cw: &mut ClassWriter) {
+    let Some(companion) = c.companion_class else {
+        return;
+    };
+    cw.set_field_nullability(
+        crate::jvm::companion_storage::field_name(c.fq_name, companion),
+        &format!("L{};", companion.render()),
+        "Lorg/jetbrains/annotations/NotNull;",
+    );
+    for (index, s) in ir
+        .statics
+        .iter()
+        .enumerate()
+        .filter(|(index, s)| {
+            ir.is_jvm_companion_hoisted_static(*index as u32) && s.owner_matches(&c.fq_name())
+        })
+        .filter(|(_, s)| !s.is_lateinit)
+    {
+        if let Some(annotation) = declared_static_annotation(s) {
+            cw.set_field_nullability(
+                ir.static_field_jvm_name(index as u32),
+                &crate::jvm::names::type_descriptor(jvm_declared_ty(&s.ty)),
+                annotation,
+            );
+        }
+    }
 }
 
 #[cfg(test)]

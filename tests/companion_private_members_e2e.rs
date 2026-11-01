@@ -229,6 +229,7 @@ open class Guarded {
     fun all() = LIMIT
     protected companion object {
         const val LIMIT = 1
+        const val NAME = "tagged"
     }
 }
 "#,
@@ -240,7 +241,7 @@ open class Guarded {
 /// (`specialCaseVisibility`): its `InnerClasses` rows are public, and the interface's `Companion`
 /// field is public and synthetic, so it carries no nullability annotation. Each constant the
 /// companion moves onto the interface is deprecated as on a class. A public companion's field is
-/// an ordinary one.
+/// an ordinary one, on an interface and on an annotation class alike.
 #[test]
 fn an_interfaces_private_companion_is_public_and_synthetic_in_bytecode() {
     common::assert_classes_identical_to_kotlinc(
@@ -261,7 +262,20 @@ interface Open {
         const val LIMIT = 1
     }
 }
+
+annotation class Tagged {
+    companion object {
+        const val LIMIT = 1
+    }
+}
 "#,
-        &["Keyed", "Keyed$Companion", "Open", "Open$Companion"],
+        &[
+            "Keyed",
+            "Keyed$Companion",
+            "Open",
+            "Open$Companion",
+            "Tagged",
+            "Tagged$Companion",
+        ],
     );
 }
