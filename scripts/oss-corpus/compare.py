@@ -132,14 +132,15 @@ def compile_seconds(times, task, mode):
 
 
 def build_cost(work, name, mode, rows):
-    """What one build cost: `measure.py`'s record of the whole build, and the compile time of every
-    compared compilation and of those krusty built, or None when the build was not measured."""
+    """What one build cost: `measure.py`'s record of the whole build, its Gradle exit status
+    included, and the compile time of every compared compilation and of those krusty built, or None
+    when the build was not measured. The exit status says whether the build ran to completion, so a
+    reader can tell two whole builds that did the same work from one that stopped early."""
     try:
         with open(os.path.join(work, 'logs', f'{name}.{mode}.metrics.json')) as f:
             cost = json.load(f)
     except OSError:
         return None
-    cost.pop('exit', None)
     cost['compile_seconds'] = round(sum(r['seconds'][mode] or 0 for r in rows), 1)
     cost['built_compile_seconds'] = round(sum(r['seconds'][mode] or 0 for r in rows if r['built']), 1)
     return cost

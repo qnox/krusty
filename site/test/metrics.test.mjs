@@ -3,6 +3,7 @@
 // that nothing was measured rather than show a number.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -114,9 +115,11 @@ test("corpus projects carry their totals, cost and what was built", () => {
       source,
       notBuilt: { leftToKotlinc: 1, failed: 1, notRun: 1 },
       cost: {
-        kotlinc: { builtCompileSeconds: 4, compileSeconds: 8, wallSeconds: 10, cpuSeconds: 20, compilerPeakRssMb: 500, buildPeakRssMb: 900 },
-        krusty: { builtCompileSeconds: 1, compileSeconds: 3, wallSeconds: 7, cpuSeconds: 9, compilerPeakRssMb: 80, buildPeakRssMb: 600 },
+        kotlinc: { exit: null, builtCompileSeconds: 4, compileSeconds: 8, wallSeconds: 10, cpuSeconds: 20, compilerPeakRssMb: 500, buildPeakRssMb: 900 },
+        krusty: { exit: null, builtCompileSeconds: 1, compileSeconds: 3, wallSeconds: 7, cpuSeconds: 9, compilerPeakRssMb: 80, buildPeakRssMb: 600 },
       },
+      // One compilation failed and one was not run: the whole builds did different work.
+      wholeBuildsComparable: false,
     });
     assert.equal(q.referenceBuild, "failed (exit 1)");
     assert.equal(q.source, null);
@@ -170,4 +173,68 @@ test("the built page shows every measured project, or says nothing was measured"
 
 test("the landing page links the metrics page", { skip: !existsSync(new URL("../dist/index.html", import.meta.url)) }, () => {
   assert.ok(readFileSync(new URL("../dist/index.html", import.meta.url), "utf8").includes('href="/metrics/"'));
+});
+
+// From the corpus producer to the page's data: compare.py and summarize.py write results.json the
+// way the nightly run does, and the page credits a whole-build change only where both Gradle builds
+// succeeded and krusty did the same work.
+test("whole builds are comparable only when both succeeded and did the same work", () => {
+  const corpus = new URL("../../scripts/oss-corpus/", import.meta.url).pathname;
+  const metricsJson = (exit, wall, rss) =>
+    JSON.stringify({ exit, wall_seconds: wall, cpu_seconds: wall, peak_rss_mb: { total: rss, gradle: 500, kotlin_daemon: 0, krusty: 0, other: 0 } });
+  const work = inputs({});
+  const files = {};
+  const projects = {
+    // Every compilation built, but krusty's Gradle build failed after them.
+    failed: { krustyExit: 1, krustyLog: "" },
+    succeeded: { krustyExit: 0, krustyLog: "" },
+    // :b is compiled by kotlinc in both builds: the same work.
+    fallback: { krustyExit: 0, krustyLog: "krusty: task ':b:compileKotlin' is left to kotlinc: unsupported plugin\n" },
+  };
+  for (const [name, { krustyExit, krustyLog }] of Object.entries(projects)) {
+    for (const mode of ["kotlinc", "krusty"]) {
+      files[`out/${name}/${mode}/a/build/classes/kotlin/main/A.class`] = "A";
+      files[`out/${name}/${mode}/b/build/classes/kotlin/main/B.class`] = "B";
+    }
+    files[`logs/${name}.kotlinc.metrics.json`] = metricsJson(0, 60, 900);
+    files[`logs/${name}.krusty.metrics.json`] = metricsJson(krustyExit, 30, 600);
+    files[`logs/${name}.kotlinc.compilations.tsv`] = ":a:compileKotlin\ta/build/classes/kotlin/main\n:b:compileKotlin\tb/build/classes/kotlin/main\n";
+    files[`logs/${name}.kotlinc.tasks.tsv`] = ":a:compileKotlin\t1000\t4000\texecuted\n:b:compileKotlin\t4000\t6500\texecuted\n";
+    files[`logs/${name}.krusty.tasks.tsv`] = ":a:compileKotlinWithKrusty\t1100\t1900\texecuted\n:b:compileKotlin\t2100\t4600\texecuted\n";
+    files[`logs/${name}.krusty.log`] = krustyLog;
+  }
+  for (const [path, contents] of Object.entries(files)) {
+    mkdirSync(dirname(join(work, path)), { recursive: true });
+    writeFileSync(join(work, path), contents);
+  }
+  try {
+    const compares = Object.keys(projects).map((name) => {
+      execFileSync("python3", [join(corpus, "compare.py"), work, name, "0"], { stdio: "ignore" });
+      return join(work, "out", name, "compare.json");
+    });
+    mkdirSync(join(work, "input", "corpus"), { recursive: true });
+    execFileSync("python3", [join(corpus, "summarize.py"), "--json", join(work, "input", "corpus", "results.json"), ...compares], { stdio: "ignore" });
+    const byName = Object.fromEntries(collectMetrics(join(work, "input")).corpus.projects.map((p) => [p.name, p]));
+    assert.deepEqual(
+      Object.fromEntries(Object.entries(byName).map(([name, p]) => [name, [p.built, p.notBuilt, p.cost.kotlinc.exit, p.cost.krusty.exit, p.wholeBuildsComparable]])),
+      {
+        failed: [2, { leftToKotlinc: 0, failed: 0, notRun: 0 }, 0, 1, false],
+        succeeded: [2, { leftToKotlinc: 0, failed: 0, notRun: 0 }, 0, 0, true],
+        fallback: [1, { leftToKotlinc: 1, failed: 0, notRun: 0 }, 0, 0, true],
+      },
+    );
+    // The raw measurements stay whatever the comparability.
+    assert.deepEqual(byName.failed.cost.krusty, { exit: 1, builtCompileSeconds: 3.3, compileSeconds: 3.3, wallSeconds: 30, cpuSeconds: 30, compilerPeakRssMb: 0, buildPeakRssMb: 600 });
+  } finally {
+    rmSync(work, { recursive: true });
+  }
+});
+
+test("a result without build outcomes leaves whole-build comparability unknown", () => {
+  const dir = inputs({ "corpus/results.json": { projects: [project("old", { rows: [{ built: true, fallback: null, error: null }] })] } });
+  try {
+    assert.equal(collectMetrics(dir).corpus.projects[0].wholeBuildsComparable, null);
+  } finally {
+    rmSync(dir, { recursive: true });
+  }
 });
