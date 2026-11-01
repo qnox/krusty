@@ -190,6 +190,7 @@ fn bound_parameters(descriptor: &str, receiver: bool, lambdas: &[usize]) -> Opti
         parameters,
         captured: Vec::new(),
         capture_owners: Vec::new(),
+        non_inline_suspend: Vec::new(),
     })
 }
 

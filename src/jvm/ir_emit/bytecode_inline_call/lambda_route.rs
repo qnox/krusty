@@ -146,9 +146,9 @@ impl Emitter<'_> {
                 "a default lambda of the call cannot be inlined"
             })?;
             let parameters = self.call_parameters(
+                call,
                 &supplies,
                 &physical,
-                args,
                 &lambda_bindings,
                 captured,
                 &lambdas,

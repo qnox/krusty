@@ -136,6 +136,32 @@ pub(super) fn extract(
 }
 
 impl Constructor {
+    /// The captured fields the original constructor stores the arguments at `arguments` of
+    /// `call_desc` in; an argument it keeps in no field has none.
+    pub(super) fn argument_fields(
+        &self,
+        call_desc: &str,
+        arguments: &[usize],
+    ) -> Result<Vec<String>, RegenerationError> {
+        let descriptors = argument_descriptors(call_desc).ok_or(RegenerationError::Unsupported(
+            "a malformed constructor descriptor",
+        ))?;
+        let mut fields = Vec::new();
+        let mut slot = 1u16;
+        for (index, argument) in descriptors.iter().enumerate() {
+            if arguments.contains(&index) {
+                fields.extend(
+                    self.fields
+                        .iter()
+                        .filter(|field| field.slot == slot)
+                        .map(|field| field.name.clone()),
+                );
+            }
+            slot += descriptor_words(argument);
+        }
+        Ok(fields)
+    }
+
     /// kotlinc's constructor for a copy that inlines the lambdas passed as the arguments at
     /// `lambda_arguments` of `call_desc`: each lambda's field and parameter go, and the values the
     /// lambdas capture, `recaptured` as `(field, descriptor)`, are taken after the other arguments

@@ -7650,9 +7650,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `InlineCallableReferenceToLambda` binds it to. A reference whose selected declaration is itself
   suspend (`flatMapLatest(::fetch)`) has a suspension point in its template, which the coroutine
   pass places only in a literal's own inline body, so its template is declined and the copy refused.
-  A captured function value the call does not inline would be invoked unmarked in the
-  rebuilt machine (kotlinc marks it with `surroundInvokesWithSuspendMarkersIfNeeded`, not ported
-  yet), so such a copy is refused. Tests: `tests/suspend_lambda_regeneration_e2e.rs`. The
+  A function value the call passes for an inline suspend parameter without inlining it (kotlinc's
+  `NonInlineArgumentForInlineSuspendParameter.OTHER`) is kept in a field of the copy, and each
+  invoke of it in a rebuilt machine, a suspend lambda's or a named suspend method's, is a
+  suspension point: the `$$forInline` body leaves it unmarked, and the inliner surrounds it with
+  suspend markers and brackets it from the first instruction of its function value's read as an
+  inline call (kotlinc's `surroundInvokesWithSuspendMarkersIfNeeded`,
+  `jvm/inliner/suspend_invoke_markers.rs`). Before, a named method's copy that used such a value's
+  result after the invoke missed the suspension and cast `COROUTINE_SUSPENDED` to the result.
+  Tests: `tests/suspend_lambda_regeneration_e2e.rs`, `tests/suspend_value_invokes_e2e.rs`. The
   body is not inlined on trial: once a call is routed to the inliner, or a lambda-free call to a
   compiled body is, a failure to inline or regenerate is an emission error, never a direct call.
   Tests: `tests/crossinline_suspend_object_e2e.rs`. An object the copied method constructs that reads the lambda through the copy's field (the
