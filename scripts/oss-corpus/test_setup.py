@@ -90,6 +90,10 @@ class Pin(unittest.TestCase):
             write(f'{work}/gradle.properties', 'kotlin_version=2.1.0\nother=1\n')
             pin.rewrite(f'{work}/gradle.properties', 'kotlin_version', '2.4.21')
             self.assertEqual(read(f'{work}/gradle.properties'), 'kotlin_version=2.4.21\nother=1\n')
+            write(f'{work}/Versions.kt', 'object Versions {\n    const val kotlin = "1.8.10"\n    const val kotlinStdlib = kotlin\n}\n')
+            pin.rewrite(f'{work}/Versions.kt', 'kotlin', '2.4.21')
+            self.assertEqual(read(f'{work}/Versions.kt'),
+                             'object Versions {\n    const val kotlin = "2.4.21"\n    const val kotlinStdlib = kotlin\n}\n')
 
     def test_an_unmatched_or_repeated_key_fails_and_leaves_the_file(self):
         for text in ('[versions]\nkotlinVersion = "2.1.0"\n', 'kotlin = "1"\nkotlin = "2"\n'):
@@ -141,6 +145,74 @@ class Setup(unittest.TestCase):
                 work, result, "expected exactly one assignment of 'kotlin_version', found 0")
             self.assertEqual(read(f'{work}/corpus/src/p/gradle.properties'),
                              'kotlin.code.style=official\n')
+
+
+class Sampling(unittest.TestCase):
+    """`run.sh` run again in the same work directory leaves only that run's samples and graph."""
+
+    def run_corpus(self, work, commit, perf=None):
+        projects = f'{work}/projects.tsv'
+        write(projects, f'p\tfile://{work}/upstream\t{commit}\t.\t21\t-\n')
+        env = dict(os.environ, CORPUS_PROJECTS=projects)
+        env.pop('CORPUS_PERF', None)
+        env.pop('CORPUS_FLAMEGRAPH', None)
+        if perf:
+            env.update(CORPUS_PERF=perf, CORPUS_FLAMEGRAPH=f'{work}/flamegraph')
+        result = subprocess.run(['bash', os.path.join(HERE, 'run.sh'), 'p', f'{work}/corpus',
+                                 '/nonexistent/krusty', '/nonexistent/repository', '0'],
+                                env=env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with open(f'{work}/corpus/out/p/compare.json') as f:
+            return json.load(f)
+
+    def upstream(self, work):
+        """A build that compiles nothing, a perf that records one krusty sample or none, and a
+        flame graph drawer."""
+        repo = f'{work}/upstream'
+        write(f'{repo}/gradlew', '#!/bin/sh\n: > "$CORPUS_COMPILATIONS"\n')
+        os.chmod(f'{repo}/gradlew', 0o755)
+        for perf, sample in (('perf', 'krusty 1 cycles:\n\t1 main+0x1 (/bin/krusty)\n\n'),
+                             ('silent-perf', '')):
+            # A background job starts with SIGINT ignored; `perf record` installs its own handler.
+            write(f'{work}/{perf}', '#!/usr/bin/env python3\n'
+                                    'import signal, sys\n'
+                                    "if sys.argv[1] == 'record':\n"
+                                    '    signal.signal(signal.SIGINT, lambda *_: sys.exit(0))\n'
+                                    '    signal.pause()\n'
+                                    f'sys.stdout.write({sample!r})\n')
+            os.chmod(f'{work}/{perf}', 0o755)
+        write(f'{work}/flamegraph', '#!/bin/sh\necho "<svg>$2</svg>"\n')
+        os.chmod(f'{work}/flamegraph', 0o755)
+        git = ['git', '-C', repo, '-c', 'user.name=t', '-c', 'user.email=t@t']
+        subprocess.run(['git', 'init', '-q', repo], check=True)
+        subprocess.run(git + ['add', '.'], check=True)
+        subprocess.run(git + ['commit', '-qm', 'init'], check=True)
+        return subprocess.run(git + ['rev-parse', 'HEAD'], check=True, capture_output=True,
+                              text=True).stdout.strip()
+
+    def test_an_unsampled_run_keeps_no_earlier_samples_or_graph(self):
+        with tempfile.TemporaryDirectory() as work:
+            commit = self.upstream(work)
+            sampled = self.run_corpus(work, commit, f'{work}/perf')
+            self.assertEqual(sampled['hotspots'],
+                             dict(samples=1, functions=[dict(function='main', self=1, total=1)]))
+            self.assertEqual(read(f'{work}/corpus/logs/p.krusty.svg'), '<svg>p: krusty</svg>\n')
+
+            unsampled = self.run_corpus(work, commit)
+            self.assertIsNone(unsampled['hotspots'])
+            self.assertFalse(os.path.exists(f'{work}/corpus/logs/p.krusty.folded'))
+            self.assertFalse(os.path.exists(f'{work}/corpus/logs/p.krusty.svg'))
+
+    def test_a_run_sampling_nothing_keeps_no_earlier_graph(self):
+        with tempfile.TemporaryDirectory() as work:
+            commit = self.upstream(work)
+            self.run_corpus(work, commit, f'{work}/perf')
+            self.assertTrue(os.path.exists(f'{work}/corpus/logs/p.krusty.svg'))
+
+            empty = self.run_corpus(work, commit, f'{work}/silent-perf')
+            self.assertEqual(empty['hotspots'], dict(samples=0, functions=[]))
+            self.assertEqual(read(f'{work}/corpus/logs/p.krusty.folded'), '')
+            self.assertFalse(os.path.exists(f'{work}/corpus/logs/p.krusty.svg'))
 
 
 if __name__ == '__main__':

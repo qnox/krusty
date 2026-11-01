@@ -11,13 +11,13 @@
 //! into the same unit. Nothing here names a target: Native and Wasm share it. A body using a form
 //! this lowering does not model declines by the form's name.
 
+mod accessor_calls;
 mod body_lowering;
 mod body_unit;
 mod callee_facts;
 mod class_headers;
 mod class_initialization;
 mod closure_forms;
-mod constructor_bounds;
 mod constructor_calls;
 mod decline;
 mod function_lowering;
@@ -30,6 +30,7 @@ mod primitive_calls;
 mod range_membership;
 #[cfg(test)]
 mod tests;
+mod type_evidence;
 
 pub use crate::libraries::KlibBodyCallable as KlibCallable;
 pub use body_unit::DependencyBodyUnit;

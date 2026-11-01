@@ -381,7 +381,12 @@ pub(super) fn select(
                 for parameter in &sig.type_params {
                     bindings.remove(parameter);
                 }
-                crate::symbol_resolver::unify_ty(sig.receiver, extension_receiver, &mut bindings);
+                crate::symbol_resolver::unify_ty_from_symbols(
+                    source,
+                    sig.receiver,
+                    extension_receiver,
+                    &mut bindings,
+                );
                 let context_params = sig
                     .context_params
                     .iter()

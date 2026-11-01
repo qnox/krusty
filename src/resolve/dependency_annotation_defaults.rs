@@ -92,6 +92,18 @@ fn element_default(
         AnnotationValue::Long(value) => {
             matches!(declared, Ty::Long | Ty::ULong).then_some(DefaultValue::Long(*value))
         }
+        AnnotationValue::UByte(value) => {
+            (declared == Ty::UByte).then_some(DefaultValue::Int(i64::from(*value)))
+        }
+        AnnotationValue::UShort(value) => {
+            (declared == Ty::UShort).then_some(DefaultValue::Int(i64::from(*value)))
+        }
+        AnnotationValue::UInt(value) => {
+            (declared == Ty::UInt).then_some(DefaultValue::Int(i64::from(*value)))
+        }
+        AnnotationValue::ULong(value) => {
+            (declared == Ty::ULong).then_some(DefaultValue::Long(*value as i64))
+        }
         AnnotationValue::Float(value) => {
             (declared == Ty::Float).then_some(DefaultValue::Float(*value))
         }

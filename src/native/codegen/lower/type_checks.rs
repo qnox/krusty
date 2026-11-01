@@ -209,19 +209,20 @@ impl<'a> FileLowering<'a> {
                     .and_then(|internal| self.function_type_descriptor(internal))
                     .expect("just matched")
             }
-            // `kotlin.collections.List`. The runtime builds two kinds and a check names neither,
-            // so both name a marker and that is what this compares against. Only where THIS FILE
-            // implements no list of its own: a class of the program standing behind the type would
-            // wear no marker, and answering `false` for one is a wrong answer rather than a
-            // decline. That file keeps declining, exactly as it did before.
+            // A read-only collection interface (`List`, `Collection`, `Iterable`, ...). The
+            // runtime's collections are of kinds a check names none of, so each wears the
+            // interface's marker, as a class of the program implementing it does (its descriptor
+            // flattens the markers of its dependency interfaces), and that is what this compares
+            // against.
             _ if target
                 .obj_internal()
-                .is_some_and(|internal| self.is_list_check_type(internal))
-                && !self.implements_collection_shape(
-                    super::super::super::intrinsics::CollectionShape::Iterable,
-                ) =>
+                .and_then(|internal| self.collection_check_descriptor(internal))
+                .is_some() =>
             {
-                "kt_type_list_interface"
+                target
+                    .obj_internal()
+                    .and_then(|internal| self.collection_check_descriptor(internal))
+                    .expect("just matched")
             }
             // One of Kotlin's REFLECTION types, asked about the same way a function type is: the
             // reference object's own type is one of a kind, so the markers are what it shares with

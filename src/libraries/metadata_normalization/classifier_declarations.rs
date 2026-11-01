@@ -229,6 +229,7 @@ pub(crate) fn classifier_shape(
         .transpose()?;
     let is_interface = matches!(kind, TypeKind::Interface | TypeKind::Annotation);
     Ok(LibraryType {
+        runtime_exception: None,
         declaration_name: Some(metadata_declaration_name(metadata_name)),
         access: class.visibility.into(),
         is_kotlin: true,
@@ -293,6 +294,7 @@ pub(crate) fn classifier_shape(
         retention: (kind == TypeKind::Annotation).then(|| declared_retention(class).to_string()),
         annotation_targets: (kind == TypeKind::Annotation).then(|| declared_targets(class)),
         mapped_collection: None,
+        mapped_builtin: false,
         annotation_element_defaults: Vec::new(),
         deprecation: None,
     })

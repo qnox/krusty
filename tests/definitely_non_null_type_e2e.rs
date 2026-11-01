@@ -457,3 +457,49 @@ fn dnn_cast_throws_npe_on_null() {
         \x20 }\n";
     assert_eq!(run(SRC).expect("dnn cast NPE"), "OK");
 }
+
+/// A member returning `T & Any`, called on a receiver that binds `T` to the caller's own `T?`,
+/// returns the caller's `T & Any`: `(T?) & Any` is `T & Any`, not the nullable-bounded `T`. This is
+/// moshi's `JsonAdapter.nonNull()` reaching `unsafeNonNull()` through a `JsonAdapter<T?>`.
+#[test]
+fn nullable_type_parameter_binding_keeps_a_definitely_non_null_result() {
+    const SRC: &str = r#"abstract class Adapter<T> {
+    abstract fun read(text: String?): T
+
+    fun nonNull(): Adapter<T & Any> {
+        val finalized =
+            when (this) {
+                is NonNullAdapter<*> -> {
+                    @Suppress("UNCHECKED_CAST")
+                    this as Adapter<T?>
+                }
+                else -> NonNullAdapter(this)
+            }
+        return finalized.unsafeNonNull()
+    }
+
+    fun nullable(other: Adapter<T?>): Adapter<T & Any> = other.unsafeNonNull()
+
+    @Suppress("UNCHECKED_CAST")
+    fun unsafeNonNull(): Adapter<T & Any> = this as Adapter<T & Any>
+}
+
+class NonNullAdapter<T>(val delegate: Adapter<T>) : Adapter<T?>() {
+    override fun read(text: String?): T & Any = delegate.read(text) ?: error("null")
+}
+
+class Text : Adapter<String?>() {
+    override fun read(text: String?): String? = text
+}
+
+fun <T> topLevel(adapter: Adapter<T?>): Adapter<T & Any> = adapter.unsafeNonNull()
+
+fun box(): String {
+    val strict = Text().nonNull()
+    val failure = runCatching { strict.read(null) }.exceptionOrNull()?.message
+    val text = strict.read("O") + topLevel(Text()).read("K") + Text().nullable(Text()).read("")
+    return if (failure == "null") text else "fail: $failure"
+}
+"#;
+    common::expect_box_same_as_kotlinc(SRC, "SubstitutedDefinitelyNonNull");
+}
