@@ -7621,7 +7621,30 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   which writes no such copy for an object's method yet) keeps the lambda as a value. That route is
   decided once from the callee's facts before any code is emitted: the constructions the body
   passes a suspend lambda are paired with their classes, and a method other than a `$$forInline`
-  copy that reads the lambda's field names the bridge (`SuspendMethodWithoutForInlineCopy`). The
+  copy that invokes the lambda names the bridge (`SuspendMethodWithoutForInlineCopy`). Whether a
+  method invokes the lambda is the placement analysis's answer over the method with the field read
+  in the lambda's slot: a method that only passes the lambda on to the object's own constructor (a
+  suspend lambda's `invoke` or `create`) invokes nothing, and a use the analysis does not place
+  counts as an invoke.
+  **A suspend lambda the body creates is regenerated with its machine rebuilt.** A suspend lambda in
+  an inline function that captures a `crossinline` lambda (kotlinx `flatMapLatest`'s
+  `transformLatest { emitAll(transform(it)) }`) has an `invokeSuspend$$forInline` beside its
+  `invokeSuspend`, which reads its parameters back from their spill fields, invokes the lambda
+  passing itself as the continuation, and keeps its suspension points between markers. The copy
+  (`<caller>$<function>$$inlined$<callee>$1`) skips `invokeSuspend`, inlines the call's lambda into
+  the `$$forInline` body, and rebuilds `invokeSuspend` from it with kotlinc's
+  `newStateMachineForLambda`: the lambda is its own continuation (slot 0, `$result` slot 1), the
+  machine reuses the spill fields the body reads its parameters from (`initialVarsCountByType`),
+  adds any other spill field it needs, and attributes its own code to the call's line. The
+  original's `@DebugMetadata` is replaced by the rebuilt machine's (`f` the calling file, `c` the
+  copy). The copy's `invoke` and `create`, which construct the object anew passing it the lambda,
+  construct the copy, which is already regenerated (kotlinc's `isAlreadyRegenerated`), passing the
+  lambda's captured values from the copy's fields in its place. A literal lambda takes this route,
+  so it is no longer kept as a value constructing the library's own class; a suspend callable
+  reference (`flatMapLatest(::lookup)`) is not an inline lambda shape yet
+  (`IrFile::callable_reference_inline_template` declines it), so its copy is refused. A captured function value the call does not inline would be invoked unmarked in the
+  rebuilt machine (kotlinc marks it with `surroundInvokesWithSuspendMarkersIfNeeded`, not ported
+  yet), so such a copy is refused. Tests: `tests/suspend_lambda_regeneration_e2e.rs`. The
   body is not inlined on trial: once a call is routed to the inliner, or a lambda-free call to a
   compiled body is, a failure to inline or regenerate is an emission error, never a direct call.
   Tests: `tests/crossinline_suspend_object_e2e.rs`. An object the copied method constructs that reads the lambda through the copy's field (the

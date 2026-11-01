@@ -15,10 +15,12 @@ use crate::jvm::bytecode_passes::insn_list::EditableMethod;
 use crate::jvm::method_node::{Category, Insn, MethodNode, Node};
 use crate::jvm::source_map::SourceMap;
 
+use super::super::class_roles::RegeneratedClass;
 use super::super::lambda_expansion::{self, Lambda, SourceLines};
 use super::super::{functional_arguments, object_regeneration, preparation, try_blocks};
-use super::super::{Binding, InlineError, Parameter, Parameters};
+use super::super::{Binding, ClassRoles, InlineError, Parameter, Parameters};
 use super::{CopiedLines, NestedObjects, RegenerationError};
+use crate::ir::InlineLambdaPlacement;
 
 const ALOAD: u8 = 0x19;
 const GETFIELD: u8 = 0xb4;
@@ -40,12 +42,34 @@ pub(super) fn reads_lambda(method: &MethodNode, lambdas: &[FieldLambda<'_>]) -> 
     })
 }
 
-/// Whether `method` reads the field of one of `lambdas` that is a suspend lambda.
-pub(super) fn reads_suspend_lambda(method: &MethodNode, lambdas: &[FieldLambda<'_>]) -> bool {
-    method.instructions().any(|insn| {
-        matches!(insn, Insn::Field { op: GETFIELD, name, .. }
-            if lambdas.iter().any(|lambda| lambda.lambda.suspend && lambda.field == *name))
-    })
+/// Whether `method` of `owner` invokes a lambda one of `fields` holds (`aload 0; getfield` of the
+/// field, then `FunctionN.invoke` on it), as `functional_arguments::lambda_placements` places each
+/// lambda the method reads: a read only passed on to the constructor of a regenerated object, as a
+/// suspend lambda's `invoke` passes its lambdas to its own constructor, invokes nothing here. An
+/// error names a use the inliner does not place.
+pub(super) fn invokes_field_lambda(
+    method: &MethodNode,
+    owner: &str,
+    fields: &[&str],
+    classes: &dyn ClassRoles,
+) -> Result<bool, RegenerationError> {
+    let reads = method.instructions().any(|insn| {
+        matches!(insn, Insn::Field { op: GETFIELD, name, .. } if fields.contains(&name.as_str()))
+    });
+    if !reads {
+        return Ok(false);
+    }
+    let parameters = own_parameters(method, fields.len())?;
+    let mut node = method.clone();
+    preparation::add_captured_parameters(&mut node, &parameters);
+    replace_lambda_reads(&mut node, owner, fields, parameters.real_size())?;
+    let placements =
+        functional_arguments::lambda_placements(&node, &parameters, fields.len(), classes)
+            .map_err(|_error| {
+                crate::trace_compiler!("splice", "a field lambda is not placed: {_error}");
+                RegenerationError::Unsupported("a lambda use the inliner does not place")
+            })?;
+    Ok(placements.contains(&InlineLambdaPlacement::Invoked))
 }
 
 /// `method` of the copy `owner`, its types already renamed, with every `invoke` of one of `lambdas`
@@ -63,13 +87,17 @@ pub(super) fn inline_into(
     let (parameters, placed) = method_parameters(method, owner, lambdas)?;
     let mut node = method.clone();
     preparation::add_captured_parameters(&mut node, &parameters);
-    replace_lambda_reads(&mut node, owner, lambdas, parameters.real_size())?;
+    let fields: Vec<&str> = lambdas.iter().map(|lambda| lambda.field.as_str()).collect();
+    replace_lambda_reads(&mut node, owner, &fields, parameters.real_size())?;
     try_blocks::move_try_starts_to_their_first_instruction(&mut node).map_err(inlining)?;
     let mut node = super::super::preprocess_node_before_inline(node).map_err(inlining)?;
     preparation::remove_fake_variable_initializations(&mut node);
-    let classes = objects.regeneration.classes;
+    let classes = WithOwnCopy {
+        classes: objects.regeneration.classes,
+        copy: owner,
+    };
     let constructors =
-        object_regeneration::regenerate_objects(&mut node, &parameters, &placed, classes, objects)
+        object_regeneration::regenerate_objects(&mut node, &parameters, &placed, &classes, objects)
             .map_err(inlining)?;
     let invokes = functional_arguments::mark_places(&mut node, &parameters).map_err(inlining)?;
     object_regeneration::complete_constructor_calls(&mut node, constructors).map_err(inlining)?;
@@ -114,22 +142,11 @@ fn method_parameters(
     owner: &str,
     lambdas: &[FieldLambda<'_>],
 ) -> Result<(Parameters, Vec<Lambda>), RegenerationError> {
-    let malformed = RegenerationError::Unsupported("a malformed method descriptor");
-    let arguments =
-        crate::jvm::bytecode_passes::descriptors::argument_types(&method.desc).ok_or(malformed)?;
-    let own = std::iter::once(Category::Reference)
-        .chain(arguments.iter().map(|ty| Category::of_descriptor(ty)))
-        .map(|category| Parameter {
-            category,
-            binding: Binding::Temporary,
-        })
-        .collect();
-    let mut captured: Vec<Parameter> = (0..lambdas.len())
-        .map(|lambda| Parameter {
-            category: Category::Reference,
-            binding: Binding::Lambda(lambda),
-        })
-        .collect();
+    let Parameters {
+        parameters: own,
+        mut captured,
+        ..
+    } = own_parameters(method, lambdas.len())?;
     let mut placed = Vec::with_capacity(lambdas.len());
     for lambda in lambdas {
         let start = captured.len();
@@ -158,12 +175,63 @@ fn method_parameters(
     ))
 }
 
+/// The classes a method of the copy names, the copy among the regenerated ones: a method that
+/// constructs the object anew (a suspend lambda's `invoke` or `create`) passes it the lambdas it
+/// was passed, and that construction is the copy's own, already regenerated (kotlinc's
+/// `isAlreadyRegenerated`), taking the lambdas' captured values in their place.
+struct WithOwnCopy<'a> {
+    classes: &'a dyn ClassRoles,
+    copy: &'a str,
+}
+
+impl ClassRoles for WithOwnCopy<'_> {
+    fn regenerated_class(&self, internal: &str) -> Option<RegeneratedClass> {
+        if internal == self.copy {
+            return Some(RegeneratedClass::AnonymousObject);
+        }
+        self.classes.regenerated_class(internal)
+    }
+
+    fn contains_reified_marker(&self, internal: &str) -> bool {
+        internal != self.copy && self.classes.contains_reified_marker(internal)
+    }
+
+    fn class_file(&self, internal: &str) -> Option<Vec<u8>> {
+        self.classes.class_file(internal)
+    }
+}
+
+/// The method's own parameters (`this` first), then one slot for each of `lambdas` lambdas.
+fn own_parameters(method: &MethodNode, lambdas: usize) -> Result<Parameters, RegenerationError> {
+    let malformed = RegenerationError::Unsupported("a malformed method descriptor");
+    let arguments =
+        crate::jvm::bytecode_passes::descriptors::argument_types(&method.desc).ok_or(malformed)?;
+    let parameters = std::iter::once(Category::Reference)
+        .chain(arguments.iter().map(|ty| Category::of_descriptor(ty)))
+        .map(|category| Parameter {
+            category,
+            binding: Binding::Temporary,
+        })
+        .collect();
+    let captured = (0..lambdas)
+        .map(|lambda| Parameter {
+            category: Category::Reference,
+            binding: Binding::Lambda(lambda),
+        })
+        .collect();
+    Ok(Parameters {
+        parameters,
+        captured,
+        capture_owners: Vec::new(),
+    })
+}
+
 /// Turn each read of a lambda's field (`aload 0; getfield`) into a load of the slot the lambda
 /// takes among the method's captured parameters, which the analysis follows to its `invoke`s.
 fn replace_lambda_reads(
     node: &mut MethodNode,
     owner: &str,
-    lambdas: &[FieldLambda<'_>],
+    fields: &[&str],
     first_captured: u16,
 ) -> Result<(), RegenerationError> {
     let mut at = 0;
@@ -178,7 +246,7 @@ fn replace_lambda_reads(
             at += 1;
             continue;
         };
-        let Some(lambda) = lambdas.iter().position(|lambda| lambda.field == *name) else {
+        let Some(lambda) = fields.iter().position(|field| *field == name) else {
             at += 1;
             continue;
         };

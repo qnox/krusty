@@ -34,7 +34,7 @@ pub(in crate::jvm::ir_emit) enum SpliceReason {
     /// A lambda the callee may pass to an object it creates reaches a private declaration, which
     /// kotlinc reaches from the regenerated object through synthetic accessors.
     PrivateMemberInObject,
-    /// An object the callee constructs reads a suspend lambda of the call from a method without
+    /// An object the callee constructs invokes a suspend lambda of the call from a method without
     /// the `$$forInline` copy kotlinc writes for it
     /// ([`inliner::suspend_lambda_without_for_inline_copy`]): a library krusty compiled, which
     /// writes no such copy yet.

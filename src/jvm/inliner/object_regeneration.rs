@@ -422,8 +422,8 @@ fn malformed(malformed: MalformedType) -> InlineError {
 
 /// Each anonymous `new` and the `<init>` call that initializes it, by instruction index.
 /// Whether an object `callee` constructs is passed one of the call's suspend `lambdas` that one of
-/// its methods reads without a `$$forInline` copy
-/// ([`super::anonymous_object::reads_suspend_lambda_without_for_inline_copy`]). The call's route
+/// its methods invokes without a `$$forInline` copy
+/// ([`super::anonymous_object::invokes_suspend_lambda_without_for_inline_copy`]). The call's route
 /// is decided from this fact before anything is inlined.
 pub(crate) fn suspend_lambda_without_for_inline_copy(
     callee: &MethodNode,
@@ -451,10 +451,11 @@ pub(crate) fn suspend_lambda_without_for_inline_copy(
         };
         let bytes = classes.class_file(owner).ok_or_else(unreadable)?;
         let original = crate::jvm::class_node::ClassNode::read(&bytes).map_err(|_| unreadable())?;
-        if super::anonymous_object::reads_suspend_lambda_without_for_inline_copy(
+        if super::anonymous_object::invokes_suspend_lambda_without_for_inline_copy(
             &original,
             &constructions.descriptors[at],
             &suspend_arguments,
+            classes,
         )
         .map_err(InlineError::Regeneration)?
         {

@@ -588,15 +588,6 @@ impl<'a> JvmSignatureFormatter<'a> {
         }
     }
 
-    /// Translate one semantic Kotlin type into a JVM generic-signature element. Kotlin declaration-
-    /// site variance has no classfile equivalent, so the JVM backend realizes it as a wildcard on
-    /// each otherwise-unprojected use-site argument. Explicit Kotlin `in`/`out` projections already
-    /// carry their own direction and take precedence.
-    /// A type in a PARAMETER position (declaration-site variance becomes a wildcard).
-    pub(super) fn ty(&self, ty: &Ty) -> Option<String> {
-        self.ty_at(ty, Wildcards::Declared)
-    }
-
     /// A class header's supertype. A function-type supertype is written as its runtime function
     /// interface (`FunctionN<R>` past 22 parameters, a continuation-taking `Function{N+1}` for a
     /// suspend one), exactly as the same function type is in any other position.
@@ -607,6 +598,11 @@ impl<'a> JvmSignatureFormatter<'a> {
         self.ty_at(ty, Wildcards::Supertype)
     }
 
+    /// Translate one semantic Kotlin type into a JVM generic-signature element at a position whose
+    /// `wildcards` mode decides how declaration-site variance is written: Kotlin's has no classfile
+    /// equivalent, so the JVM backend realizes it as a wildcard on each otherwise-unprojected
+    /// use-site argument. Explicit Kotlin `in`/`out` projections already carry their own direction
+    /// and take precedence.
     pub(super) fn ty_at(&self, ty: &Ty, wildcards: Wildcards) -> Option<String> {
         if let TyKind::Nullable(inner)
         | TyKind::PlatformNullable(inner)
