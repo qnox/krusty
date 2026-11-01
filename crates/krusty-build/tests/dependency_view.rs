@@ -52,7 +52,8 @@ const BASE: &str = "package library\n\
     const val LIMIT = 30\n\
     fun greet(name: String): String = \"Hello, \" + name\n\
     object Shouting { inline fun shout(name: String): String = name.uppercase() }\n\
-    class Counter(var count: Int) { fun bump() { count += 1 } }\n";
+    class Counter(var count: Int) { fun bump() { count += 1 } }\n\
+    class Names { fun of(values: List<Int>): List<String> = values.map { it.toString() } }\n";
 
 #[test]
 fn only_what_a_dependent_observes_moves_the_fingerprint() {
@@ -69,6 +70,9 @@ fn only_what_a_dependent_observes_moves_the_fingerprint() {
         ("recompiled", BASE.to_string()),
         ("function-body", BASE.replace("\"Hello, \"", "\"Hi, \"")),
         ("member-body", BASE.replace("count += 1", "count += 2")),
+        // The lines of both classes below `Shouting` move, and with them the source map of the
+        // inline `map` spliced into `Names.of`.
+        ("moved-lines", BASE.replace("class Counter", "\nclass Counter")),
     ];
     for (tag, source) in unchanged {
         assert_eq!(fingerprint(&krusty, &scratch, tag, &source), base, "{tag}");

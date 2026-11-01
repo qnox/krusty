@@ -11,10 +11,10 @@
 //! * **Every other class contributes its compiler-visible declaration model**, the
 //!   [`ClassInfo`](krusty::jvm::classreader::ClassInfo) the class reader hands the frontend:
 //!   signatures, `ConstantValue`s (folded into the consumer), annotations with their payloads, and
-//!   the fully decoded `@kotlin.Metadata`, contracts included. It carries no method body, so a body
-//!   edit leaves it unchanged. Private members are kept: changing one recompiles dependents for
-//!   nothing, which costs time but never correctness. A field the class reader gains later joins
-//!   the fingerprint without a change here.
+//!   the fully decoded `@kotlin.Metadata`, contracts included. It carries no method body and no
+//!   source map of one, so a body edit leaves it unchanged. Private members are kept: changing one
+//!   recompiles dependents for nothing, which costs time but never correctness. A field the class
+//!   reader gains later joins the fingerprint without a change here.
 //! * **Any other file contributes its bytes**, as does a class file the reader rejects.
 //!
 //! Unlike [`crate::abi`], which models a reduced ABI with no bodies at all, this view is complete
@@ -23,6 +23,7 @@
 use std::path::{Path, PathBuf};
 
 use krusty::jvm::classreader::{parse_class, ClassInfo, ACC_SYNTHETIC};
+use krusty::types::type_name;
 
 use crate::digest::{digest_bytes, Digest, Hasher};
 
@@ -131,8 +132,9 @@ fn collect_files(
 /// How one file enters the fingerprint: its declaration model or all of its bytes.
 fn file_view(relative: &str, bytes: &[u8]) -> (&'static str, Digest) {
     if relative.ends_with(".class") {
-        if let Ok(class) = parse_class(bytes) {
+        if let Ok(mut class) = parse_class(bytes) {
             if !bytecode_reaches_dependents(&class) {
+                without_source_map(&mut class);
                 return (
                     "declarations",
                     digest_bytes(format!("{class:?}").as_bytes()),
@@ -141,6 +143,19 @@ fn file_view(relative: &str, bytes: &[u8]) -> (&'static str, Digest) {
         }
     }
     ("bytes", digest_bytes(bytes))
+}
+
+/// Removes the class's source map from its declaration model. kotlinc publishes a class's
+/// `SourceDebugExtension`, the line map of the inline bodies spliced into its own methods, a second
+/// time as the BINARY-retained `@kotlin.jvm.internal.SourceDebugExtension`, and the class reader
+/// keeps it among the class's annotations. It describes method bodies, and an edit that only moves
+/// lines changes it; only an inline call that copies the class's bytecode reads it back, and such a
+/// class enters the fingerprint by all of its bytes.
+fn without_source_map(class: &mut ClassInfo) {
+    let source_map = type_name("kotlin/jvm/internal/SourceDebugExtension");
+    class
+        .annotations
+        .retain(|annotation| annotation.annotation != source_map);
 }
 
 fn bytecode_reaches_dependents(class: &ClassInfo) -> bool {
