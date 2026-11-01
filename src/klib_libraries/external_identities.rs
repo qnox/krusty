@@ -326,6 +326,9 @@ impl ExternalIdentities {
             klib_body_accessor: None,
             klib_body_vararg_index: body.vararg_index,
             klib_body_parameter_defaults: body.parameter_defaults,
+            declares_parameter_defaults: body
+                .parameter_defaults
+                .is_some_and(|defaults| defaults.as_slice().contains(&true)),
         });
         self.by_signature.borrow_mut().insert(key, identity);
     }

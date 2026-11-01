@@ -469,6 +469,18 @@ fn pass_composer(
     let IrExpr::Call { callee, args, .. } = &ir.exprs[call as usize] else {
         unreachable!("a composable call is a call");
     };
+    // A library composable takes the composer parameters already, after every declared one.
+    if let Callee::External { .. } = **callee {
+        let composer = ir.add_expr(IrExpr::GetValue(caller.composer));
+        let changed = changed_argument(ir, caller, arguments);
+        ir.mark_positionless(composer);
+        ir.mark_positionless(changed);
+        let IrExpr::Call { args, .. } = &mut ir.exprs[call as usize] else {
+            unreachable!("a composable call is a call");
+        };
+        args.extend([composer, changed]);
+        return;
+    }
     let function = callee
         .source_function()
         .expect("a composable call in the file calls one of its functions");

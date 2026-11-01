@@ -791,6 +791,7 @@ fn selected_singletons_are_frozen_per_call_edge_not_on_the_provider_base_record(
             klib_body_accessor: None,
             klib_body_vararg_index: None,
             klib_body_parameter_defaults: None,
+            declares_parameter_defaults: false,
         },
     };
 
@@ -968,6 +969,7 @@ fn a_plugin_added_dependency_super_call_is_frozen_once() {
         klib_body_accessor: None,
         klib_body_vararg_index: None,
         klib_body_parameter_defaults: None,
+        declares_parameter_defaults: false,
     };
     let queries = std::cell::Cell::new(0);
     facts
