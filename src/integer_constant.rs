@@ -40,7 +40,7 @@ impl IntegerConstant {
         expected
             .map(Ty::non_null)
             .map(|expected| match expected.kind() {
-                TyKind::TyParam(_, bound) => bound.non_null(),
+                TyKind::TyParam(_, bound) | TyKind::Var(_, bound) => bound.non_null(),
                 _ => expected,
             })
             .filter(|ty| *ty == Ty::Long)

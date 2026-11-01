@@ -173,7 +173,7 @@ impl PostponedCallConstraints {
             (TyKind::DefinitelyNotNull(inner), true) | (TyKind::Nullable(inner), false) => inner,
             (_, _) => bound,
         };
-        matches!(variable.kind(), TyKind::TyParam(name, _) if name == formal)
+        matches!(variable.kind(), TyKind::TyParam(name, _) | TyKind::Var(name, _) if name == formal)
     }
 
     pub(super) fn mentions_formal(&self, ty: Ty) -> bool {
@@ -584,7 +584,8 @@ impl Checker<'_> {
             .rev()
             .find(|frame| frame.mentions_formal(expected))
             .map_or(expected, |frame| frame.declared_type(expected));
-        let TyKind::TyParam(formal, _) = expected.non_null().kind() else {
+        let (TyKind::TyParam(formal, _) | TyKind::Var(formal, _)) = expected.non_null().kind()
+        else {
             return true;
         };
         // A generic referenced declaration can specialize its input to the still-open formal. Its

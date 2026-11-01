@@ -25,7 +25,9 @@ fn erased_bound(source: &dyn SymbolSource, ty: Ty) -> Option<ErasedBound> {
     let mut seen = HashSet::new();
     loop {
         match current.kind() {
-            TyKind::TyParam(name, bound) if seen.insert(name) => current = bound.non_null(),
+            TyKind::TyParam(name, bound) | TyKind::Var(name, bound) if seen.insert(name) => {
+                current = bound.non_null()
+            }
             TyKind::DefinitelyNotNull(inner) => current = inner.non_null(),
             TyKind::Obj(name, _) => {
                 let role = source.classifier(name).and_then(|ty| ty.classifier_role());
@@ -48,6 +50,7 @@ fn erased_bound(source: &dyn SymbolSource, ty: Ty) -> Option<ErasedBound> {
                 }));
             }
             TyKind::TyParam(..)
+            | TyKind::Var(..)
             | TyKind::Nullable(_)
             | TyKind::PlatformNullable(_)
             | TyKind::Null

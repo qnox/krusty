@@ -22,7 +22,9 @@ impl LexicalBoundsIndex {
     pub(super) fn record(&mut self, names: &[String], parameters: &TParams) {
         for source_name in names {
             let parameter = parameters.bound(source_name);
-            let TyKind::TyParam(identity, first_bound) = parameter.non_null().kind() else {
+            let (TyKind::TyParam(identity, first_bound) | TyKind::Var(identity, first_bound)) =
+                parameter.non_null().kind()
+            else {
                 continue;
             };
             let extra = parameters.extra_bounds_of(source_name);

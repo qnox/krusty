@@ -192,13 +192,15 @@ impl Checker<'_> {
 }
 
 fn same_type_parameter(left: Ty, right: Ty) -> bool {
-    matches!((left.kind(), right.kind()), (TyKind::TyParam(a, _), TyKind::TyParam(b, _)) if a == b)
+    matches!((left.kind(), right.kind()), (TyKind::TyParam(a, _), TyKind::TyParam(b, _)) | (TyKind::Var(a, _), TyKind::Var(b, _)) if a == b)
 }
 
 fn direct_type_parameter(mut ty: Ty) -> Option<&'static str> {
     loop {
         ty = match ty.kind() {
-            TyKind::TyParam(parameter, _) => return Some(parameter.as_str()),
+            TyKind::TyParam(parameter, _) | TyKind::Var(parameter, _) => {
+                return Some(parameter.as_str())
+            }
             TyKind::Nullable(inner)
             | TyKind::PlatformNullable(inner)
             | TyKind::DefinitelyNotNull(inner)

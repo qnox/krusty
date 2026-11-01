@@ -155,7 +155,12 @@ fn ty(value: Ty, names: &IdentityRemap<'_>) -> Ty {
                 .map(|part| ty(*part, names))
                 .collect::<Vec<_>>(),
         ),
-        TyKind::Unit | TyKind::Null | TyKind::Nothing | TyKind::Error | TyKind::Pending => value,
+        TyKind::Unit
+        | TyKind::Null
+        | TyKind::Nothing
+        | TyKind::Error
+        | TyKind::Pending
+        | TyKind::Var(..) => value,
     }
 }
 

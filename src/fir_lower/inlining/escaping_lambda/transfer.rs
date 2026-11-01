@@ -1626,7 +1626,12 @@ fn type_mentions_anonymous_class(ir: &crate::ir::IrFile, ty: Ty) -> bool {
         TyKind::Intersection(parts) => parts
             .iter()
             .any(|part| type_mentions_anonymous_class(ir, *part)),
-        TyKind::Unit | TyKind::Null | TyKind::Nothing | TyKind::Error | TyKind::Pending => false,
+        TyKind::Unit
+        | TyKind::Null
+        | TyKind::Nothing
+        | TyKind::Error
+        | TyKind::Pending
+        | TyKind::Var(..) => false,
     }
 }
 

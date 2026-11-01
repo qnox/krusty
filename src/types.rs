@@ -39,10 +39,10 @@ mod type_parameter_identity;
 pub use equality_mode::EqualityMode;
 
 pub(crate) use substitute::{
-    declares_formal, ty_canonicalize_params, ty_rename_params, ty_subst, ty_subst_alias_expansion,
-    ty_subst_all, ty_subst_applied_arguments, ty_subst_applied_lookup, ty_subst_formals,
-    ty_subst_keep_unbound, ty_with_param_bounds, ty_with_transitive_param_bounds, TyParamBindings,
-    TyParamKey,
+    declares_formal, ty_canonicalize_params, ty_map_symbols, ty_rename_params, ty_subst,
+    ty_subst_alias_expansion, ty_subst_all, ty_subst_applied_arguments, ty_subst_applied_lookup,
+    ty_subst_formals, ty_subst_keep_unbound, ty_with_param_bounds, ty_with_transitive_param_bounds,
+    TyParamBindings, TyParamKey,
 };
 
 pub use crate::context_parameters::{CapturedContextKind, ContextParameterKind};
@@ -652,9 +652,10 @@ impl Ty {
     pub fn type_args(self) -> &'static [Ty] {
         match self.kind() {
             TyKind::Obj(_, args) => args.as_slice(),
-            TyKind::TyParam(_, b) | TyKind::PlatformNullable(b) | TyKind::MutabilityFlexible(b) => {
-                b.type_args()
-            }
+            TyKind::TyParam(_, b)
+            | TyKind::Var(_, b)
+            | TyKind::PlatformNullable(b)
+            | TyKind::MutabilityFlexible(b) => b.type_args(),
             _ => &[],
         }
     }
@@ -667,7 +668,7 @@ impl Ty {
         bindings: &crate::fx_hash::HashMap<K, Ty>,
     ) -> Ty {
         match self.kind() {
-            TyKind::TyParam(name, bound) => bindings
+            TyKind::TyParam(name, bound) | TyKind::Var(name, bound) => bindings
                 .get(name.as_str())
                 .copied()
                 .map(Ty::raw_binding_read)
@@ -737,7 +738,9 @@ impl Ty {
         match self.kind() {
             TyKind::Obj(n, args) if n == wk::array() => args.first().copied(),
             TyKind::Obj(n, _) => prim_array_element(n),
-            TyKind::TyParam(_, b) | TyKind::PlatformNullable(b) => b.array_elem(),
+            TyKind::TyParam(_, b) | TyKind::Var(_, b) | TyKind::PlatformNullable(b) => {
+                b.array_elem()
+            }
             _ => None,
         }
     }
@@ -917,7 +920,9 @@ impl Ty {
         loop {
             match current.kind() {
                 TyKind::Nullable(_) | TyKind::PlatformNullable(_) | TyKind::Null => return true,
-                TyKind::TyParam(name, bound) if seen.insert(name) => current = bound,
+                TyKind::TyParam(name, bound) | TyKind::Var(name, bound) if seen.insert(name) => {
+                    current = bound
+                }
                 _ => return false,
             }
         }
@@ -954,8 +959,8 @@ impl Ty {
         match self.kind() {
             TyKind::Null => Ty::Nothing,
             TyKind::DefinitelyNotNull(_) | TyKind::MutabilityFlexible(_) => self,
-            TyKind::TyParam(name, bound) => {
-                Ty::ty_param(name.as_str(), bound.definitely_non_null())
+            TyKind::TyParam(..) | TyKind::Var(..) => {
+                self.with_symbol_bound(self.ty_param_bound().unwrap().definitely_non_null())
             }
             _ => self.non_null_keeping_mutability(),
         }
@@ -970,7 +975,9 @@ impl Ty {
     pub(crate) fn contributed_through_nullable_formal(self) -> Ty {
         let actual = self.non_null_keeping_mutability();
         match actual.kind() {
-            TyKind::TyParam(_, bound) if bound.upper_bound_admits_null() => {
+            TyKind::TyParam(_, bound) | TyKind::Var(_, bound)
+                if bound.upper_bound_admits_null() =>
+            {
                 Ty::intern(TyKind::DefinitelyNotNull(actual))
             }
             _ => actual,
@@ -997,7 +1004,7 @@ impl Ty {
             | TyKind::Nullable(inner)
             | TyKind::PlatformNullable(inner)
             | TyKind::MutabilityFlexible(inner) => inner.kotlin_class_internal(),
-            TyKind::TyParam(_, bound) => bound.kotlin_class_internal(),
+            TyKind::TyParam(_, bound) | TyKind::Var(_, bound) => bound.kotlin_class_internal(),
             _ => None,
         }
     }
@@ -1038,7 +1045,9 @@ impl Ty {
             TyKind::PlatformNullable(inner) | TyKind::MutabilityFlexible(inner) => {
                 inner.erased_recv()
             }
-            TyKind::DefinitelyNotNull(inner) | TyKind::TyParam(_, inner) => inner.erased_recv(),
+            TyKind::DefinitelyNotNull(inner)
+            | TyKind::TyParam(_, inner)
+            | TyKind::Var(_, inner) => inner.erased_recv(),
             // `Array<T>` keeps its array-ness but erases the ELEMENT's own generics (`Array<List<Int>>` →
             // `Array<List>`) — an array receiver keys per element class. Use the identity-form
             // object constructor (NOT `Ty::array`, which collapses a bare-primitive element to an
@@ -1067,7 +1076,9 @@ impl Ty {
             TyKind::PlatformNullable(inner) => Ty::platform_nullable(inner.extension_recv_key()),
             TyKind::MutabilityFlexible(inner) => inner.extension_recv_key(),
             TyKind::DefinitelyNotNull(inner) => inner.extension_recv_key(),
-            TyKind::TyParam(_, bound) => Ty::ty_param("\u{0}", bound.extension_recv_key()),
+            TyKind::TyParam(_, bound) | TyKind::Var(_, bound) => {
+                Ty::ty_param("\u{0}", bound.extension_recv_key())
+            }
             TyKind::Obj(n, args) if n == wk::array() => {
                 let element = args
                     .first()
@@ -1098,9 +1109,26 @@ impl Ty {
         Ty::intern(TyKind::TyParam(TyParamName::new(name), bound))
     }
 
-    /// Whether this is a generic type-parameter reference (`T`).
+    /// The inference variable `name` of one call, standing for the called declaration's formal
+    /// and carrying that formal's instantiated upper bound.
+    pub(crate) fn type_variable(name: TyParamName, bound: Ty) -> Ty {
+        Ty::intern(TyKind::Var(name, bound))
+    }
+
+    /// This type parameter or inference variable with its upper bound replaced, keeping its kind
+    /// and identity. Any other type is returned unchanged.
+    pub(crate) fn with_symbol_bound(self, bound: Ty) -> Ty {
+        match self.kind() {
+            TyKind::TyParam(name, _) => Ty::intern(TyKind::TyParam(name, bound)),
+            TyKind::Var(name, _) => Ty::type_variable(name, bound),
+            _ => self,
+        }
+    }
+
+    /// Whether this is a generic type-parameter reference (`T`) or a call's inference variable
+    /// standing for one. Until every call solves only its variables, the solver treats both alike.
     pub fn is_ty_param(self) -> bool {
-        matches!(self.kind(), TyKind::TyParam(..))
+        matches!(self.kind(), TyKind::TyParam(..) | TyKind::Var(..))
     }
 
     /// Whether a type parameter appears ANYWHERE in this type — as the type itself, a type argument,
@@ -1155,7 +1183,7 @@ impl Ty {
 
     pub fn mentions_ty_param(self) -> bool {
         match self.kind() {
-            TyKind::TyParam(..) => true,
+            TyKind::TyParam(..) | TyKind::Var(..) => true,
             TyKind::DefinitelyNotNull(inner) => inner.mentions_ty_param(),
             TyKind::Intersection(parts) => parts.iter().any(|part| part.mentions_ty_param()),
             TyKind::Nullable(inner)
@@ -1174,18 +1202,19 @@ impl Ty {
         }
     }
 
-    /// The name of a type-parameter type (`T`), else `None`.
+    /// The name of a type-parameter type (`T`) or of a call's variable standing for one, else
+    /// `None`.
     pub fn ty_param_name(self) -> Option<&'static str> {
         match self.kind() {
-            TyKind::TyParam(n, _) => Some(n.as_str()),
+            TyKind::TyParam(n, _) | TyKind::Var(n, _) => Some(n.as_str()),
             _ => None,
         }
     }
 
-    /// The declared upper bound of a type-parameter type, else `None`.
+    /// The declared upper bound of a type-parameter type or a call's variable, else `None`.
     pub fn ty_param_bound(self) -> Option<Ty> {
         match self.kind() {
-            TyKind::TyParam(_, b) => Some(b),
+            TyKind::TyParam(_, b) | TyKind::Var(_, b) => Some(b),
             _ => None,
         }
     }
@@ -1193,7 +1222,9 @@ impl Ty {
     /// The upper bound carried by an occurrence of the type parameter identified by `name`.
     pub(crate) fn type_parameter_occurrence_bound(self, name: &str) -> Option<Ty> {
         match self.kind() {
-            TyKind::TyParam(candidate, bound) => (candidate == name).then_some(bound),
+            TyKind::TyParam(candidate, bound) | TyKind::Var(candidate, bound) => {
+                (candidate == name).then_some(bound)
+            }
             TyKind::DefinitelyNotNull(inner) => inner.type_parameter_occurrence_bound(name),
             TyKind::Intersection(parts) => parts
                 .iter()
@@ -1346,7 +1377,9 @@ impl Ty {
                     .map(Ty::canonical_semantic)
                     .collect::<Vec<_>>(),
             ),
-            TyKind::TyParam(name, bound) => Ty::ty_param(name.as_str(), bound.canonical_semantic()),
+            TyKind::TyParam(_, bound) | TyKind::Var(_, bound) => {
+                self.with_symbol_bound(bound.canonical_semantic())
+            }
             TyKind::Fun(signature) => Ty::fun_with_shape(
                 signature
                     .params
@@ -1539,7 +1572,7 @@ impl Ty {
             // A type parameter's nullability marker belongs to its name, ahead of any owner text a
             // diagnostic appends: `T? (of class Box<T>)`, `T! (of class Box<T>)`.
             TyKind::Nullable(inner) | TyKind::PlatformNullable(inner)
-                if matches!(inner.kind(), TyKind::TyParam(..)) =>
+                if matches!(inner.kind(), TyKind::TyParam(..) | TyKind::Var(..)) =>
             {
                 diagnostic_rendering::qualified_type_parameter(
                     inner,
@@ -1587,7 +1620,9 @@ impl Ty {
                 .map(|part| render(*part))
                 .collect::<Vec<_>>()
                 .join(" & "),
-            TyKind::TyParam(n, _) => type_parameter(n.as_str()),
+            // A call's variable is never published; a diagnostic about one is worded by the formal
+            // it stands for.
+            TyKind::TyParam(n, _) | TyKind::Var(n, _) => type_parameter(n.as_str()),
             // Only reachable from a diagnostic rendered while the declaration is still being
             // resolved; it never names a real type.
             TyKind::Pending => "<not determined>".to_string(),
@@ -1651,7 +1686,7 @@ impl Ty {
             TyKind::OutProjection(inner) => format!("out {}", inner.name()),
             TyKind::StarProjection(_) => "*".to_string(),
             TyKind::RawProjection(erased) => erased.name(),
-            TyKind::TyParam(name, _) => name.to_string(),
+            TyKind::TyParam(name, _) | TyKind::Var(name, _) => name.to_string(),
             TyKind::DefinitelyNotNull(inner) => format!("{} & Any", inner.name()),
             TyKind::Intersection(parts) => parts
                 .iter()
@@ -1667,9 +1702,10 @@ impl Ty {
             TyKind::Obj(n, _) => Some(n),
             // A type parameter follows its bound for object identity queries.
             TyKind::DefinitelyNotNull(inner) => inner.obj_internal(),
-            TyKind::TyParam(_, b) | TyKind::PlatformNullable(b) | TyKind::MutabilityFlexible(b) => {
-                b.obj_internal()
-            }
+            TyKind::TyParam(_, b)
+            | TyKind::Var(_, b)
+            | TyKind::PlatformNullable(b)
+            | TyKind::MutabilityFlexible(b) => b.obj_internal(),
             _ => None,
         }
     }
@@ -1680,7 +1716,7 @@ impl Ty {
         match self.kind() {
             _ if self.scalar_value_repr().is_some() => false,
             TyKind::DefinitelyNotNull(_) | TyKind::Intersection(_) => true,
-            TyKind::TyParam(_, b) => b.is_reference(),
+            TyKind::TyParam(_, b) | TyKind::Var(_, b) => b.is_reference(),
             // A flexible Java `T!` can be consumed as its non-null lower bound, but until that
             // commitment it also admits null and is represented by a reference — including a method
             // type variable specialized to a source primitive (`Boolean!`).
@@ -1741,7 +1777,7 @@ impl Ty {
     /// the expression itself remains `T` everywhere else in the type system.
     pub fn range_operand_bound(self) -> Ty {
         match self.kind() {
-            TyKind::TyParam(_, bound) => bound.range_operand_bound(),
+            TyKind::TyParam(_, bound) | TyKind::Var(_, bound) => bound.range_operand_bound(),
             TyKind::PlatformNullable(inner) | TyKind::MutabilityFlexible(inner) => {
                 inner.range_operand_bound()
             }
@@ -1895,7 +1931,7 @@ impl Ty {
             TyKind::USHORT => Ty::Short,
             TyKind::UINT => Ty::Int,
             TyKind::ULONG => Ty::Long,
-            TyKind::TyParam(_, bound) => return bound.scalar_value_repr(),
+            TyKind::TyParam(_, bound) | TyKind::Var(_, bound) => return bound.scalar_value_repr(),
             _ => return None,
         })
     }
@@ -1955,7 +1991,7 @@ pub(crate) fn semantic_value_parameter_ty(declared: Ty, is_vararg: bool) -> Ty {
 /// (generic-shape gates).
 pub(crate) fn ty_mentions_param<F: TyParamKey>(ty: Ty, names: &[F]) -> bool {
     match ty.kind() {
-        TyKind::TyParam(name, _) => declares_formal(names, &name),
+        TyKind::TyParam(name, _) | TyKind::Var(name, _) => declares_formal(names, &name),
         TyKind::DefinitelyNotNull(inner) => ty_mentions_param(inner, names),
         TyKind::Intersection(parts) => parts.iter().any(|part| ty_mentions_param(*part, names)),
         TyKind::Obj(_, arguments) => arguments
@@ -1984,7 +2020,7 @@ pub(crate) fn ty_mentions_param<F: TyParamKey>(ty: Ty, names: &[F]) -> bool {
 /// only question is "does a type variable appear at all".
 pub(crate) fn ty_mentions_any_param(ty: Ty) -> bool {
     match ty.kind() {
-        TyKind::TyParam(..) => true,
+        TyKind::TyParam(..) | TyKind::Var(..) => true,
         TyKind::Intersection(parts) => parts.iter().any(|part| ty_mentions_any_param(*part)),
         TyKind::Obj(_, arguments) => arguments
             .iter()
@@ -2011,7 +2047,7 @@ pub(crate) fn ty_mentions_any_param(ty: Ty) -> bool {
 /// Declaration-owned bounds are checked separately from the occurrences they contain.
 pub(crate) fn ty_mentions_undeclared_param<F: TyParamKey>(ty: Ty, names: &[F]) -> bool {
     ty.mentions_marker(
-        &|occurrence| matches!(occurrence.kind(), TyKind::TyParam(name, _) if !declares_formal(names, &name)),
+        &|occurrence| matches!(occurrence.kind(), TyKind::TyParam(name, _) | TyKind::Var(name, _) if !declares_formal(names, &name)),
     )
 }
 

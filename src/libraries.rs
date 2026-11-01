@@ -1555,7 +1555,11 @@ impl FunctionInfo {
             formals: &[crate::types::TyParamName],
         ) -> Ty {
             match (declared.kind(), selected.kind()) {
-                (TyKind::TyParam(formal, _), _) if formals.contains(&formal) => selected,
+                (TyKind::TyParam(formal, _) | TyKind::Var(formal, _), _)
+                    if formals.contains(&formal) =>
+                {
+                    selected
+                }
                 (TyKind::Obj(name, arguments), TyKind::Obj(selected_name, selected_arguments))
                     if name == selected_name && arguments.len() == selected_arguments.len() =>
                 {

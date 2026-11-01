@@ -146,7 +146,7 @@ fn infer_generic_call_constraints_with_receiver_and_argument_ordinals(
         }
     }
     for (argument, variable, actual) in deferred_flexible_roots {
-        let TyKind::TyParam(formal, _) = variable.kind() else {
+        let (TyKind::TyParam(formal, _) | TyKind::Var(formal, _)) = variable.kind() else {
             unreachable!("deferred flexible root is a declaration variable")
         };
         if invariantly_fixed.contains(formal.as_str()) {
@@ -229,7 +229,7 @@ pub(crate) fn collect_assignability_constraints_from_symbols(
     ) {
         let actual = actual.projection_inner().unwrap_or(actual);
         match actual.kind() {
-            TyKind::TyParam(name, _) => {
+            TyKind::TyParam(name, _) | TyKind::Var(name, _) => {
                 let expected = expected.projection_inner().unwrap_or(expected);
                 constraints.insert(
                     source,
@@ -486,7 +486,8 @@ impl CallInferenceConstraints {
             return false;
         }
         let actual = inference_actual(actual);
-        if matches!(actual.kind(), TyKind::TyParam(actual_name, _) if actual_name == name) {
+        if matches!(actual.kind(), TyKind::TyParam(actual_name, _) | TyKind::Var(actual_name, _) if actual_name == name)
+        {
             return false;
         }
         match position {
@@ -531,7 +532,9 @@ impl CallInferenceConstraints {
             let upper = self.upper.clone();
             for (formal, bounds) in signature.formals.iter().zip(&signature.formal_bounds) {
                 for bound in bounds {
-                    let TyKind::TyParam(bound_formal, _) = bound.non_null().kind() else {
+                    let (TyKind::TyParam(bound_formal, _) | TyKind::Var(bound_formal, _)) =
+                        bound.non_null().kind()
+                    else {
                         continue;
                     };
                     if !signature.formals.contains(&bound_formal) {
@@ -842,7 +845,7 @@ fn collect_call_inference_constraints(
     constraints: &mut CallInferenceConstraints,
 ) {
     match shape.kind() {
-        TyKind::TyParam(name, _) => {
+        TyKind::TyParam(name, _) | TyKind::Var(name, _) => {
             constraints.insert(source, name.as_str(), actual, position, origin);
         }
         TyKind::Nullable(inner) => {
@@ -931,7 +934,7 @@ fn collect_call_inference_constraints(
             // classifier-shaped constraint. Treating the variable itself as the callee's element
             // argument makes `T : Iterable<*>` bind `Iterable<E>.withIndex` as `E = T`; project
             // through the bound so it correctly binds `E` to the star's readable upper type.
-            while let TyKind::TyParam(_, bound) = actual.kind() {
+            while let TyKind::TyParam(_, bound) | TyKind::Var(_, bound) = actual.kind() {
                 actual = bound.projection_inner().unwrap_or(bound).non_null();
             }
             let projected = supertype_with_classifier(source, actual, owner);

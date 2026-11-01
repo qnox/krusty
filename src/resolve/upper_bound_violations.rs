@@ -1137,7 +1137,7 @@ struct AliasApplication<'a> {
 impl AliasApplication<'_> {
     /// The written use-site argument when the template argument `template` is exactly a formal.
     fn formal_argument(&self, template: Ty) -> Option<&TypeRef> {
-        let TyKind::TyParam(parameter, _) = template.kind() else {
+        let (TyKind::TyParam(parameter, _) | TyKind::Var(parameter, _)) = template.kind() else {
             return None;
         };
         let index = self.formals.iter().position(|formal| formal == parameter)?;

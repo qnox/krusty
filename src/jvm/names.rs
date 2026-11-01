@@ -401,7 +401,7 @@ fn descriptor_shapes_match(left: Ty, right: Ty) -> bool {
 
 fn descriptor_shape(ty: Ty) -> DescriptorShape {
     match ty.kind() {
-        TyKind::Pending | TyKind::Error => {
+        TyKind::Pending | TyKind::Error | TyKind::Var(..) => {
             unreachable!("a not-determined type reached {}", "a JVM descriptor")
         }
         TyKind::INT | TyKind::UINT => DescriptorShape::Primitive(b'I'),

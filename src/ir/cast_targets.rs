@@ -36,7 +36,7 @@ impl IrFile {
             TyKind::Nothing => "kotlin.Nothing".to_string(),
             TyKind::Null => "kotlin.Nothing?".to_string(),
             TyKind::Error => "<error>".to_string(),
-            TyKind::Pending => "<pending>".to_string(),
+            TyKind::Pending | TyKind::Var(..) => "<pending>".to_string(),
             TyKind::Obj(name, types) => format!(
                 "{}{}",
                 rendered_owner(name, qualify_root_classifier),

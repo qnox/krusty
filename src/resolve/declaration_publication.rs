@@ -416,7 +416,8 @@ impl FlexibleValue {
             _ => (declared, selected),
         };
 
-        if matches!(declared.kind(), TyKind::TyParam(_, bound) if bound.is_platform_nullable()) {
+        if matches!(declared.kind(), TyKind::TyParam(_, bound) | TyKind::Var(_, bound) if bound.is_platform_nullable())
+        {
             let upper =
                 (!selected.is_nullable()).then(|| upper_bound(selected.platform_lower_bound()));
             // A Java type-parameter occurrence is flexible as a whole, but its selected lower face
@@ -496,7 +497,7 @@ impl FlexibleValue {
         binding: &dyn Fn(&str) -> Option<FlexibleValue>,
     ) -> FlexibleValue {
         match declared.kind() {
-            TyKind::TyParam(name, _) => binding(name.as_str())
+            TyKind::TyParam(name, _) | TyKind::Var(name, _) => binding(name.as_str())
                 .map(|argument| self.overlay(&argument))
                 .unwrap_or_else(|| self.clone()),
             TyKind::Nullable(inner) | TyKind::DefinitelyNotNull(inner) => {

@@ -138,7 +138,8 @@ fn alpha_equivalent_type(
         return true;
     }
     match (left.kind(), right.kind()) {
-        (TyKind::TyParam(left, _), TyKind::TyParam(right, _)) => formals
+        (TyKind::TyParam(left, _), TyKind::TyParam(right, _))
+        | (TyKind::Var(left, _), TyKind::Var(right, _)) => formals
             .get(left.as_str())
             .is_some_and(|mapped| mapped == right),
         (TyKind::Nullable(left), TyKind::Nullable(right))
@@ -208,7 +209,7 @@ fn receiver_validated_projected_formals(
     let mut alpha = crate::fx_hash::HashMap::default();
     for (&declared, classifier_formal) in declared_arguments.iter().zip(&classifier.type_params) {
         let declared = declared.projection_inner().unwrap_or(declared);
-        if let TyKind::TyParam(method_formal, _) = declared.kind() {
+        if let TyKind::TyParam(method_formal, _) | TyKind::Var(method_formal, _) = declared.kind() {
             if generic.formals.contains(&method_formal) {
                 alpha.insert(method_formal.to_string(), classifier_formal.clone());
             }
@@ -221,7 +222,8 @@ fn receiver_validated_projected_formals(
             continue;
         }
         let declared = declared.projection_inner().unwrap_or(declared);
-        let TyKind::TyParam(method_formal, _) = declared.kind() else {
+        let (TyKind::TyParam(method_formal, _) | TyKind::Var(method_formal, _)) = declared.kind()
+        else {
             continue;
         };
         let Some(method_index) = generic
@@ -460,7 +462,7 @@ pub(super) fn is_compatible(
             let expected =
                 crate::symbol_resolver::ty_subst_keep_unbound(*expected, &result_bindings);
             match expected.non_null().kind() {
-                TyKind::TyParam(_, bound) => is_assignable(*actual, bound),
+                TyKind::TyParam(_, bound) | TyKind::Var(_, bound) => is_assignable(*actual, bound),
                 _ => is_assignable(expected, *actual),
             }
         })
@@ -538,8 +540,8 @@ pub(super) fn input_parameter_fits(
     mut is_assignable: impl FnMut(Ty, Ty) -> bool,
 ) -> bool {
     match (expected.non_null().kind(), target.non_null().kind()) {
-        (TyKind::TyParam(_, bound), _) => is_assignable(target, bound),
-        (_, TyKind::TyParam(_, bound)) => is_assignable(expected, bound),
+        (TyKind::TyParam(_, bound) | TyKind::Var(_, bound), _) => is_assignable(target, bound),
+        (_, TyKind::TyParam(_, bound) | TyKind::Var(_, bound)) => is_assignable(expected, bound),
         _ => is_assignable(expected, target),
     }
 }

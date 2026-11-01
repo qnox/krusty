@@ -199,7 +199,7 @@ impl Projection<'_> {
             };
         }
         match ty.kind() {
-            TyKind::TyParam(..) | TyKind::DefinitelyNotNull(_) => {
+            TyKind::TyParam(..) | TyKind::Var(..) | TyKind::DefinitelyNotNull(_) => {
                 let applied = crate::symbol_resolver::instantiate_slot(
                     self.source,
                     None,
@@ -234,7 +234,7 @@ impl Projection<'_> {
                     // A directly captured use-site projection is already the declaration-owned
                     // view of an invariant argument. Keep its direction; compound argument shapes
                     // instead need their upper/lower interval computed below.
-                    if matches!(argument.kind(), TyKind::TyParam(..))
+                    if matches!(argument.kind(), TyKind::TyParam(..) | TyKind::Var(..))
                         && matches!(variance, TypeVariance::Invariant)
                     {
                         let view = crate::symbol_resolver::instantiate_slot(

@@ -377,7 +377,7 @@ fn publication_arguments(
 
 fn collect_type_parameters(ty: Ty, output: &mut Vec<crate::types::TyParamName>) {
     match ty.kind() {
-        TyKind::TyParam(name, _) => {
+        TyKind::TyParam(name, _) | TyKind::Var(name, _) => {
             if !output.contains(&name) {
                 output.push(name);
             }
@@ -406,7 +406,7 @@ fn collect_type_parameters(ty: Ty, output: &mut Vec<crate::types::TyParamName>) 
 
 fn publish_selected(declared: Ty, selected: Ty, bindings: &crate::types::TyParamBindings) -> Ty {
     match (declared.kind(), selected.kind()) {
-        (TyKind::TyParam(name, declared_bound), _) => {
+        (TyKind::TyParam(name, declared_bound) | TyKind::Var(name, declared_bound), _) => {
             let publication = bindings
                 .get(name.as_str())
                 .copied()
@@ -728,7 +728,7 @@ pub(super) fn constrain_parameters<F: Clone>(
     view: &mut impl FnMut(Ty, &F, TypeName) -> Option<(Ty, Vec<F>)>,
 ) {
     match declared.kind() {
-        TyKind::TyParam(name, _) if formals.contains(&name) => {
+        TyKind::TyParam(name, _) | TyKind::Var(name, _) if formals.contains(&name) => {
             constraints
                 .entry(name.to_string())
                 .or_default()

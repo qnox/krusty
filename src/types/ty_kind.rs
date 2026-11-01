@@ -64,6 +64,15 @@ pub enum TyKind {
     /// reasons about `T` as `T` (subtyping against the bound, substitution at instantiation); runtime
     /// erasure is a backend concern.
     TyParam(TyParamName, Ty),
+    /// An inference variable of one call: the unknown argument a call's constraint system solves
+    /// for one formal of the called declaration, carrying the formal's instantiated upper bound.
+    ///
+    /// It is distinct from [`TyKind::TyParam`] even when it stands for a formal of an enclosing
+    /// declaration: inside `class Tree<T>`, the call `Tree(label)` with `label: T` solves its own
+    /// variable for `T` against the enclosing, fixed `T`. A variable exists only while its call is
+    /// solved; the solution is expressed over the declaration's formals again before anything else
+    /// sees it, so lowering and the backends never meet one.
+    Var(TyParamName, Ty),
     /// Kotlin's definitely-non-null type `T & Any`.
     ///
     /// The wrapped type is the original type parameter, including a bound that still admits null.

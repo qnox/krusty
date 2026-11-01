@@ -401,7 +401,9 @@ pub(super) fn ty_of_ref_with(
     };
     let base = if reference.definitely_non_null() {
         match base.kind() {
-            TyKind::TyParam(name, bound) => Ty::ty_param(name.as_str(), bound.non_null()),
+            TyKind::TyParam(_, bound) | TyKind::Var(_, bound) => {
+                base.with_symbol_bound(bound.non_null())
+            }
             _ => base,
         }
     } else {

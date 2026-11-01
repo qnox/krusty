@@ -609,7 +609,8 @@ fn comparable_range_to(
     let element = facts.receiver?;
     let bound = element.ty_param_bound()?;
     let is_element = |ty: &Ty| match (ty.kind(), element.kind()) {
-        (TyKind::TyParam(name, _), TyKind::TyParam(declared, _)) => name == declared,
+        (TyKind::TyParam(name, _), TyKind::TyParam(declared, _))
+        | (TyKind::Var(name, _), TyKind::Var(declared, _)) => name == declared,
         _ => false,
     };
     let applied_to_element = |ty: Ty, class| {

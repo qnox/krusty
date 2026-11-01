@@ -112,7 +112,7 @@ fn contravariant_formals_read_nothing(decl_recv: Ty, recv: Ty, bindings: &mut GS
         ) {
             continue;
         }
-        if let TyKind::TyParam(name, _) = inner.non_null().kind() {
+        if let TyKind::TyParam(name, _) | TyKind::Var(name, _) = inner.non_null().kind() {
             bindings.insert(name, Ty::Nothing);
         }
     }
@@ -254,7 +254,7 @@ impl ReceiverMro {
         // A generic receiver may bind its parameter to a nullable type even though a bare T is not
         // itself a nullable value occurrence. An explicit non-null upper bound closes that route.
         let accepts_nullable = decl_recv.admits_null()
-            || matches!(decl_recv.kind(), TyKind::TyParam(_, bound) if bound.upper_bound_admits_null());
+            || matches!(decl_recv.kind(), TyKind::TyParam(_, bound) | TyKind::Var(_, bound) if bound.upper_bound_admits_null());
         // The null literal has no classifier hierarchy of its own, but it is a valid receiver for
         // every nullable extension receiver. Candidate specificity is decided after this applicability
         // rung; inventing a class key for `Null` would incorrectly make it a member of `Any`'s MRO.

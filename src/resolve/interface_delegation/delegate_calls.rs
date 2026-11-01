@@ -42,7 +42,7 @@ pub(in crate::resolve) fn delegate_member_calls(
     let interface = delegation.interface.get();
     // A type-parameter delegate offers its bound's members.
     let mut delegate = delegate.non_null();
-    while let TyKind::TyParam(_, bound) = delegate.kind() {
+    while let TyKind::TyParam(_, bound) | TyKind::Var(_, bound) = delegate.kind() {
         delegate = bound.non_null();
     }
     if !matches!(delegate.kind(), TyKind::Obj(..)) {

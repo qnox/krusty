@@ -1232,7 +1232,7 @@ pub(super) fn semantic_arg_assignable(src: &dyn SymbolSource, param: &Ty, arg: &
     if param == arg {
         return true;
     }
-    if let TyKind::TyParam(_, bound) = param.non_null().kind() {
+    if let TyKind::TyParam(_, bound) | TyKind::Var(_, bound) = param.non_null().kind() {
         if *arg == Ty::Null {
             return param.admits_null();
         }

@@ -322,7 +322,9 @@ pub(crate) fn seed_unbound_constructor_result_from_symbols<S: AsRef<str>>(
                 && generic_bindings_satisfy_bounds(&signature, &trial, |actual, bound| {
                     let mut actual = actual.projection_inner().unwrap_or(actual);
                     let mut seen = crate::fx_hash::HashSet::default();
-                    while let TyKind::TyParam(name, upper) = actual.kind() {
+                    while let TyKind::TyParam(name, upper) | TyKind::Var(name, upper) =
+                        actual.kind()
+                    {
                         if !seen.insert(name) {
                             break;
                         }
@@ -413,7 +415,7 @@ pub(crate) fn constrain_constructor_result<F: crate::types::TyParamKey>(
         if binds.contains_key(formal) && actual.mentions_ty_param() {
             continue;
         }
-        if matches!(actual.non_null().kind(), TyKind::TyParam(actual_formal, _) if actual_formal == formal)
+        if matches!(actual.non_null().kind(), TyKind::TyParam(actual_formal, _) | TyKind::Var(actual_formal, _) if actual_formal == formal)
         {
             binds.insert(
                 crate::types::TyParamName::new(formal),
@@ -464,14 +466,15 @@ fn unify_ty_impl(source: Option<&dyn SymbolSource>, sig: Ty, actual: Ty, binds: 
         // The bound carried by a star is a read approximation, not a written generic argument
         // from which call type parameters may be inferred.
         TyKind::StarProjection(_) => {}
-        TyKind::TyParam(n, _) => {
+        TyKind::TyParam(n, _) | TyKind::Var(n, _) => {
             if actual.mentions_error() {
                 return;
             }
             // A partially specialized candidate legitimately keeps an unconstrained formal in
             // place (`Mapper<Message, R>`). That is absence of evidence, not the binding `R = R`;
             // recording it would block the lambda result from later binding `R = String`.
-            if matches!(actual.kind(), TyKind::TyParam(actual, _) if actual == n) {
+            if matches!(actual.kind(), TyKind::TyParam(actual, _) | TyKind::Var(actual, _) if actual == n)
+            {
                 return;
             }
             match binds.entry(n) {
@@ -546,7 +549,7 @@ fn unify_ty_impl(source: Option<&dyn SymbolSource>, sig: Ty, actual: Ty, binds: 
             // `V : EntityID<String>?` in `E : EntityID<T>`.
             while source.is_some() {
                 actual = match actual.kind() {
-                    TyKind::TyParam(_, bound) => {
+                    TyKind::TyParam(_, bound) | TyKind::Var(_, bound) => {
                         bound.projection_inner().unwrap_or(bound).non_null()
                     }
                     TyKind::DefinitelyNotNull(inner) => inner.non_null(),
@@ -645,6 +648,7 @@ pub(crate) fn collect_generic_identity_bindings(
 ) {
     match (declared.kind(), actual.kind()) {
         (TyKind::TyParam(declared, _), TyKind::TyParam(found, _))
+        | (TyKind::Var(declared, _), TyKind::Var(found, _))
             if declared == found && formals.contains(&declared) =>
         {
             bindings.entry(declared).or_insert(actual);
@@ -818,7 +822,7 @@ fn formal_has_nested_flexible_expected_occurrence(
         match declared.kind() {
             TyKind::PlatformNullable(inner) => {
                 if nested
-                    && matches!(inner.kind(), TyKind::TyParam(name, _) if name == formal)
+                    && matches!(inner.kind(), TyKind::TyParam(name, _) | TyKind::Var(name, _) if name == formal)
                     && !expected.admits_null()
                 {
                     return true;
@@ -901,7 +905,9 @@ pub(crate) fn unprojected_expected_result_formals(
 /// inspecting the bound value cannot distinguish invariant `Box<Any?>` from `Box<out Any?>`.
 fn formal_has_unprojected_expected_occurrence(declared: Ty, expected: Ty, formal: &str) -> bool {
     match declared.kind() {
-        TyKind::TyParam(name, _) if name == formal => expected.projection_inner().is_none(),
+        TyKind::TyParam(name, _) | TyKind::Var(name, _) if name == formal => {
+            expected.projection_inner().is_none()
+        }
         TyKind::Obj(declared_name, declared_args) => match expected.non_null().kind() {
             TyKind::Obj(expected_name, expected_args)
                 if declared_name == expected_name && declared_args.len() == expected_args.len() =>
@@ -1124,7 +1130,8 @@ pub(crate) fn formal_variance_in_type(
 
     // Nullability is orthogonal to variance: `R?` has the same occurrence variance as `R`.
     // Inspect the normalized shape here as well as in the recursive object/function branches.
-    if matches!(shape.non_null().kind(), TyKind::TyParam(name, _) if name == formal) {
+    if matches!(shape.non_null().kind(), TyKind::TyParam(name, _) | TyKind::Var(name, _) if name == formal)
+    {
         return Some(TypeVariance::Out);
     }
     match shape.non_null().kind() {
@@ -1192,7 +1199,8 @@ pub(crate) fn formal_fixed_exactly_by(source: &dyn SymbolSource, shape: Ty, form
         invariant_path: bool,
         found: &mut Vec<bool>,
     ) {
-        if matches!(shape.non_null().kind(), TyKind::TyParam(name, _) if name == formal) {
+        if matches!(shape.non_null().kind(), TyKind::TyParam(name, _) | TyKind::Var(name, _) if name == formal)
+        {
             found.push(invariant_path);
             return;
         }
@@ -1261,7 +1269,7 @@ pub(super) fn unify_inferred_ty_impl(
             binds,
         ),
         TyKind::StarProjection(_) => {}
-        TyKind::TyParam(name, _) => {
+        TyKind::TyParam(name, _) | TyKind::Var(name, _) => {
             if actual.mentions_error() {
                 return;
             }
@@ -1276,7 +1284,8 @@ pub(super) fn unify_inferred_ty_impl(
                 TyKind::DefinitelyNotNull(inner) => inner,
                 _ => actual,
             };
-            if matches!(identity.kind(), TyKind::TyParam(actual_name, _) if actual_name == name) {
+            if matches!(identity.kind(), TyKind::TyParam(actual_name, _) | TyKind::Var(actual_name, _) if actual_name == name)
+            {
                 return;
             }
             match binds.entry(name) {
@@ -1370,8 +1379,8 @@ pub(crate) fn merge_inferred_ty_from_symbols(
     // so substituting the inferred result through `R?` can reopen the original caller `T?`.
     let same_parameter_dnn = |provenance: Ty, compact: Ty| match provenance.kind() {
         TyKind::DefinitelyNotNull(inner) => match inner.kind() {
-            TyKind::TyParam(name, bound) => {
-                compact == Ty::ty_param(name.as_str(), bound.definitely_non_null())
+            TyKind::TyParam(_, bound) | TyKind::Var(_, bound) => {
+                compact == inner.with_symbol_bound(bound.definitely_non_null())
             }
             _ => false,
         },
@@ -1956,7 +1965,9 @@ pub(crate) fn complete_bottom_constraint_bindings(
                 continue;
             };
             for bound in bounds {
-                let TyKind::TyParam(bound_formal, _) = bound.non_null().kind() else {
+                let (TyKind::TyParam(bound_formal, _) | TyKind::Var(bound_formal, _)) =
+                    bound.non_null().kind()
+                else {
                     continue;
                 };
                 let Some(position) = generic_sig
@@ -2325,7 +2336,7 @@ pub(crate) fn infer_generic_symbolic_return_constraints(
 ) -> SymbolicReturnConstraints {
     fn symbolic_parameter(ty: Ty) -> bool {
         match ty.kind() {
-            TyKind::TyParam(..) => true,
+            TyKind::TyParam(..) | TyKind::Var(..) => true,
             TyKind::Nullable(inner)
             | TyKind::PlatformNullable(inner)
             | TyKind::MutabilityFlexible(inner) => symbolic_parameter(inner),
@@ -2352,7 +2363,7 @@ pub(crate) fn infer_generic_symbolic_return_constraints(
         constrained_formals: &mut crate::fx_hash::HashSet<String>,
     ) {
         match (declared.kind(), expected.kind()) {
-            (TyKind::TyParam(declared, _), _)
+            (TyKind::TyParam(declared, _) | TyKind::Var(declared, _), _)
                 if formals.iter().any(|formal| formal.as_str() == declared) =>
             {
                 let expected_ty = expected_argument(expected);
@@ -2444,7 +2455,9 @@ pub(super) fn seed_undeclared_return_bindings(
     binds: &mut GSigBinds,
 ) {
     match sig.kind() {
-        TyKind::TyParam(n, _) if !declared_formals.contains(&n) && actual != Ty::Error => {
+        TyKind::TyParam(n, _) | TyKind::Var(n, _)
+            if !declared_formals.contains(&n) && actual != Ty::Error =>
+        {
             binds.entry(n).or_insert(actual);
         }
         TyKind::Fun(fsig) => {
@@ -2556,7 +2569,7 @@ pub(super) fn merge_specialized_return(provider: Ty, inferred: Ty) -> Ty {
         }
         // The declaration's formal specialized to a caller variable (`A := X` for `X : Number?`)
         // names that variable; restoring the declaration formal would leak it out of the call.
-        (TyKind::TyParam(..), TyKind::TyParam(..)) => inferred,
+        (TyKind::TyParam(..), TyKind::TyParam(..)) | (TyKind::Var(..), TyKind::Var(..)) => inferred,
         _ => provider,
     }
 }
