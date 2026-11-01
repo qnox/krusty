@@ -967,7 +967,7 @@ mod tests {
     }
 
     #[test]
-    fn suspend_inline_finally_plan_is_fully_checked_and_opaque() {
+    fn suspend_inline_call_publishes_no_structural_plan() {
         let classpath = crate::toolchain::classpath_jars_for("// WITH_STDLIB\n// WITH_COROUTINES");
         assert!(
             classpath
@@ -990,68 +990,20 @@ mod tests {
             "read",
             platform,
         );
-        let plan = (0..body.expression_count()).find_map(|raw| {
-            let FirExprKind::Call(call) = &body.expr(FirExprId::from_raw(raw as u32))?.kind else {
-                return None;
-            };
-            let FirCallTarget::External {
-                inline_plan: Some(plan),
-                ..
-            } = &call.target
-            else {
-                return None;
-            };
-            matches!(plan.as_ref(), FirInlineBodyPlan::InvokeLambda { cleanup, .. }
-                if !cleanup.is_empty())
-            .then_some(plan.as_ref())
+        // A suspend inline function is inlined from its bytecode, so its call carries no plan.
+        let planned = (0..body.expression_count()).any(|raw| {
+            matches!(
+                body.expr(FirExprId::from_raw(raw as u32)).map(|expr| &expr.kind),
+                Some(FirExprKind::Call(call)) if matches!(
+                    &call.target,
+                    FirCallTarget::External { inline_plan: Some(_), .. }
+                )
+            )
         });
-        let Some(FirInlineBodyPlan::InvokeLambda {
-            lambda_parameter,
-            arguments,
-            prologue,
-            cleanup,
-            cause,
-            recovery: None,
-            defaults,
-            result,
-            ..
-        }) = plan
-        else {
-            panic!("withLock must publish its selected structural plan in checked FIR")
-        };
-        assert_eq!(*lambda_parameter, 1);
-        assert!(arguments.is_empty());
-        assert_eq!(
-            defaults.as_ref(),
-            [crate::fir::FirInlineDefault {
-                parameter: 0,
-                value: crate::fir::FirInlineDefaultValue::Null,
-            }]
+        assert!(
+            !planned,
+            "withLock published a structural plan in checked FIR"
         );
-        assert_eq!(*cause, None);
-        assert_eq!(*result, None);
-        let ([enter], [cleanup]) = (prologue.as_ref(), cleanup.as_ref()) else {
-            panic!("withLock must publish one enter and one cleanup call")
-        };
-        assert_eq!(enter.parameters.len(), 1);
-        assert_eq!(cleanup.parameters.len(), 1);
-        assert_eq!(enter.result.get(), Ty::Unit);
-        assert_eq!(cleanup.result.get(), Ty::Unit);
-        assert_eq!(
-            enter.receiver,
-            Some(crate::fir::FirInlineCallReceiver::Dispatch(
-                crate::fir::FirInlineValue::Receiver,
-            ))
-        );
-        assert_eq!(
-            enter.arguments.as_ref(),
-            [crate::fir::FirInlineValue::Parameter(0)]
-        );
-        assert_eq!(cleanup.receiver, enter.receiver);
-        assert_eq!(cleanup.arguments, enter.arguments);
-        assert!(enter.suspend);
-        assert!(!cleanup.suspend);
-        assert_ne!(enter.declaration, cleanup.declaration);
     }
 
     #[test]

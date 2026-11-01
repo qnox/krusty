@@ -50,18 +50,6 @@ pub(super) fn logical_suspend_descriptor(descriptor: &str) -> String {
     descriptor_from_parts(&parameters, result)
 }
 
-/// Physical CPS descriptor for a semantically suspend declaration.
-///
-/// The continuation classifier is JVM suspend ABI, not a source-resolution fact. Keep that
-/// representation spelling at this provider boundary.
-pub(super) fn physical_suspend_descriptor(descriptor: &str) -> Option<String> {
-    let (parameters, result) = crate::jvm::names::parse_method_descriptor(descriptor)?;
-    let mut physical = descriptor_from_parts(&parameters, result);
-    let result_at = physical.find(')')?;
-    physical.insert_str(result_at, "Lkotlin/coroutines/Continuation;");
-    Some(physical)
-}
-
 /// Reassemble components already validated by `parse_method_descriptor` without interpreting
 /// their JVM representation as source-language types.
 fn descriptor_from_parts(parameters: &[&str], result: &str) -> String {
@@ -107,17 +95,13 @@ pub(super) fn member(member: &mut LibraryMember, dispatch: bool, continuation: b
 
 #[cfg(test)]
 mod tests {
-    use super::{logical_suspend_descriptor, physical_suspend_descriptor};
+    use super::logical_suspend_descriptor;
 
     #[test]
     fn suspend_descriptors_preserve_validated_jvm_components() {
         assert_eq!(
             logical_suspend_descriptor("(ILkotlin/coroutines/Continuation;)Ljava/lang/Object;"),
             "(I)Ljava/lang/Object;"
-        );
-        assert_eq!(
-            physical_suspend_descriptor("(Lsample/Token;)Ljava/lang/Object;").as_deref(),
-            Some("(Lsample/Token;Lkotlin/coroutines/Continuation;)Ljava/lang/Object;")
         );
     }
 
@@ -127,6 +111,5 @@ mod tests {
             logical_suspend_descriptor("not-a-descriptor"),
             "not-a-descriptor"
         );
-        assert_eq!(physical_suspend_descriptor("not-a-descriptor"), None);
     }
 }

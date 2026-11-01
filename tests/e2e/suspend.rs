@@ -50,6 +50,8 @@ mod suspend_inline_for_inline_e2e;
 mod suspend_inline_hof_suspending_lambda_reject_e2e;
 #[path = "../suspend_inline_lambda_placement_e2e.rs"]
 mod suspend_inline_lambda_placement_e2e;
+#[path = "../suspend_inline_library_bytecode_e2e.rs"]
+mod suspend_inline_library_bytecode_e2e;
 #[path = "../suspend_inline_splice_names_e2e.rs"]
 mod suspend_inline_splice_names_e2e;
 #[path = "../suspend_inline_splice_nonlocal_return_e2e.rs"]
