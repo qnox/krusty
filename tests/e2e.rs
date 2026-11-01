@@ -7,6 +7,8 @@ mod constructor_boxing_casts_e2e;
 mod constructor_type_argument_publication_e2e;
 #[path = "dependent_constructor_bounds_e2e.rs"]
 mod dependent_constructor_bounds_e2e;
+#[path = "destination_producer_result_e2e.rs"]
+mod destination_producer_result_e2e;
 mod enclosing_formal_signatures_e2e;
 #[path = "inferred_alias_constructor_abbreviation_e2e.rs"]
 mod inferred_alias_constructor_abbreviation_e2e;
@@ -285,6 +287,8 @@ mod callable_ref_generic_signature_e2e;
 mod callable_ref_to_inferred_member_e2e;
 #[path = "callable_ref_unresolved_e2e.rs"]
 mod callable_ref_unresolved_e2e;
+#[path = "callable_reference_misfit_e2e.rs"]
+mod callable_reference_misfit_e2e;
 #[path = "caller_type_param_receiver_e2e.rs"]
 mod caller_type_param_receiver_e2e;
 #[path = "cannot_infer_cascade_e2e.rs"]
@@ -495,6 +499,8 @@ mod classpath_value_class_builder_e2e;
 mod classpath_value_class_default_e2e;
 #[path = "classpath_value_class_member_e2e.rs"]
 mod classpath_value_class_member_e2e;
+#[path = "classpath_value_class_override_e2e.rs"]
+mod classpath_value_class_override_e2e;
 #[path = "classpath_value_class_param_e2e.rs"]
 mod classpath_value_class_param_e2e;
 #[path = "classpath_valueclass_param_ext_e2e.rs"]
@@ -1087,6 +1093,8 @@ mod generic_arity_overload_e2e;
 mod generic_base_member_type_e2e;
 #[path = "generic_bound_projection_e2e.rs"]
 mod generic_bound_projection_e2e;
+#[path = "generic_call_line_marks_e2e.rs"]
+mod generic_call_line_marks_e2e;
 #[path = "generic_cast_number_e2e.rs"]
 mod generic_cast_number_e2e;
 #[path = "generic_constructor_parameter_scope_e2e.rs"]
@@ -1131,6 +1139,8 @@ mod generic_vararg_inference_e2e;
 mod getter_return_line_e2e;
 #[path = "hidden_mapped_member_e2e.rs"]
 mod hidden_mapped_member_e2e;
+#[path = "hidden_member_extension_e2e.rs"]
+mod hidden_member_extension_e2e;
 #[path = "hides_members_overload_e2e.rs"]
 mod hides_members_overload_e2e;
 #[path = "iconsapi_byte_residue_e2e.rs"]
@@ -1145,6 +1155,8 @@ mod implicit_any_super_method_e2e;
 mod implicit_integer_coercion_e2e;
 #[path = "e2e/implicit_receiver.rs"]
 mod implicit_receiver;
+#[path = "implicit_receiver_stability_e2e.rs"]
+mod implicit_receiver_stability_e2e;
 #[path = "implicit_this_callable_ref_e2e.rs"]
 mod implicit_this_callable_ref_e2e;
 #[path = "implicit_this_member_hof_lambda_e2e.rs"]
@@ -1199,6 +1211,8 @@ mod initializer_inline_local_scopes_e2e;
 mod inline;
 #[path = "inline_member_super_arguments_e2e.rs"]
 mod inline_member_super_arguments_e2e;
+#[path = "inline_scopes_numbers_flag_e2e.rs"]
+mod inline_scopes_numbers_flag_e2e;
 #[path = "inlined_code_inner_classes_e2e.rs"]
 mod inlined_code_inner_classes_e2e;
 #[path = "inlined_lambda_stack_spill_e2e.rs"]
@@ -2468,6 +2482,8 @@ mod safe_call_e2e;
 mod safe_call_generic_field_e2e;
 #[path = "safe_call_inline_callable_reference_e2e.rs"]
 mod safe_call_inline_callable_reference_e2e;
+#[path = "safe_call_lambda_label_e2e.rs"]
+mod safe_call_lambda_label_e2e;
 #[path = "safe_call_layout_e2e.rs"]
 mod safe_call_layout_e2e;
 #[path = "safe_call_let_destructure_e2e.rs"]
@@ -2484,6 +2500,8 @@ mod safe_call_primitive_e2e;
 mod safe_call_unresolved_member_e2e;
 #[path = "safe_cast_elvis_e2e.rs"]
 mod safe_cast_elvis_e2e;
+#[path = "safe_cast_type_test_e2e.rs"]
+mod safe_cast_type_test_e2e;
 #[path = "sam_classpath_e2e.rs"]
 mod sam_classpath_e2e;
 #[path = "sam_constructor_lambda_label_e2e.rs"]
@@ -2789,6 +2807,8 @@ mod unreachable_trailing_block_ty_e2e;
 mod unresolved_label_diagnostic_e2e;
 #[path = "unresolved_supertype_diag_e2e.rs"]
 mod unresolved_supertype_diag_e2e;
+#[path = "unsigned_annotation_values_e2e.rs"]
+mod unsigned_annotation_values_e2e;
 #[path = "unsigned_array_e2e.rs"]
 mod unsigned_array_e2e;
 #[path = "unsigned_bitwise_e2e.rs"]
@@ -2998,6 +3018,9 @@ mod intersection_bound_metadata_order_e2e;
 mod type_safe_override_call_e2e;
 #[path = "where_bound_arguments_e2e.rs"]
 mod where_bound_arguments_e2e;
+
+#[path = "immediate_lambda_invocation_e2e.rs"]
+mod immediate_lambda_invocation_e2e;
 
 #[path = "facade_local_classifier_metadata_e2e.rs"]
 mod facade_local_classifier_metadata_e2e;

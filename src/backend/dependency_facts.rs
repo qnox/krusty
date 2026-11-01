@@ -19,6 +19,9 @@ use std::collections::hash_map::Entry;
 use crate::fir::{ExternalCallableId, ExternalPropertyId};
 pub use crate::libraries::CompilerIntrinsic as BackendCompilerIntrinsic;
 pub use crate::libraries::DependencyGetterSignature;
+/// A dependency classifier a target may represent itself
+/// ([`super::Backend::represents_dependency_classifier`]).
+pub type DependencyClassifier = crate::types::TypeName;
 use crate::libraries::{
     DefaultCallRealization, DirectCFunction, ExternalCallableKind, GenericSig, InlineKind,
     KlibBodyCompanionReceiver, KlibDeclarationSignature, KlibDependencyCallable, MemberRealization,
@@ -650,6 +653,17 @@ impl CheckedBackendCallables {
         expression: crate::ir::ExprId,
     ) -> Option<SingletonDispatch> {
         self.singleton_dispatches.get(&expression).copied()
+    }
+
+    /// Give each copy of a checked expression the facts frozen for the expression it copies, so
+    /// a lowering that clones a checked body after the handoff keeps its exact selections.
+    /// `clones` pairs each original with its copy.
+    pub(crate) fn extend_to_clones(&mut self, clones: &[(crate::ir::ExprId, crate::ir::ExprId)]) {
+        for &(original, copy) in clones {
+            if let Some(&dispatch) = self.singleton_dispatches.get(&original) {
+                self.singleton_dispatches.insert(copy, dispatch);
+            }
+        }
     }
 
     /// Copy the provider's facts for every dependency identity `ir` references.

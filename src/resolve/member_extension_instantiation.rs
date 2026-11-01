@@ -93,12 +93,30 @@ pub(super) fn instantiate_member_extension_with(
         extension_receiver,
         &mut lower_inputs,
     );
+    let bound_before_receiver = bindings.clone();
     crate::symbol_resolver::unify_ty_from_symbols(
         source,
         declared_receiver,
         extension_receiver,
         &mut bindings,
     );
+    // A formal the receiver reaches only covariantly (`Assert<out T>`) gets a lower bound from
+    // it, not an equality: an argument's lower bound joins it at their common supertype, as an
+    // ordinary extension's receiver and arguments do in `merge_call_argument_bindings`.
+    let covariant_receiver_formals = method_type_params
+        .iter()
+        .map(|(_, formal)| *formal)
+        .filter(|formal| {
+            !bound_before_receiver.contains_key(*formal)
+                && bindings.contains_key(*formal)
+                && crate::symbol_resolver::formal_variance_in_type(
+                    source,
+                    declared_receiver,
+                    formal,
+                ) == Some(crate::types::TypeVariance::Out)
+        })
+        .collect::<Vec<_>>();
+    let symbols = source;
     let declared_params = generic.map_or(function.signature.params.as_slice(), |signature| {
         signature.params.as_slice()
     });
@@ -177,6 +195,26 @@ pub(super) fn instantiate_member_extension_with(
             actual,
             &mut lower_inputs,
         );
+        let mut evidence = crate::symbol_resolver::GSigBinds::default();
+        crate::symbol_resolver::unify_ty(declared, actual, &mut evidence);
+        for formal in &covariant_receiver_formals {
+            // Only a covariant occurrence is another lower bound; `(T) -> Unit` bounds T above.
+            if crate::symbol_resolver::formal_variance_in_type(symbols, declared, formal)
+                != Some(crate::types::TypeVariance::Out)
+            {
+                continue;
+            }
+            if let (Some(&receiver), Some(&argument)) =
+                (bindings.get(*formal), evidence.get(*formal))
+            {
+                let joined = crate::symbol_resolver::merge_inferred_ty_from_symbols(
+                    Some(symbols),
+                    receiver,
+                    argument,
+                );
+                bindings.insert((*formal).clone(), joined);
+            }
+        }
         unify_member_extension_slot(declared, actual, deferred_type_variables, &mut bindings);
     }
     if let Some(expected) = result_constraint.expected() {

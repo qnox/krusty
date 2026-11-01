@@ -124,7 +124,10 @@ impl BodyLowering<'_> {
         })
     }
 
-    fn elvis_null_test(&self, condition: KlibIrExprId) -> Lowered<(KlibIrExprId, KlibIrExprId)> {
+    pub(super) fn elvis_null_test(
+        &self,
+        condition: KlibIrExprId,
+    ) -> Lowered<(KlibIrExprId, KlibIrExprId)> {
         let condition = self.arena.expr(condition);
         let KlibIrExprKind::Call {
             access,

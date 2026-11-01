@@ -6,6 +6,8 @@
 //! same call resolved inside a function body and declined at the top level.
 use super::common;
 
+#[path = "typealias_constructor_inference_e2e/anonymous_super_lambdas.rs"]
+mod anonymous_super_lambdas;
 #[path = "typealias_constructor_inference_e2e/parameterized_parent_aliases.rs"]
 mod parameterized_parent_aliases;
 
@@ -231,5 +233,11 @@ fn a_superclass_lambda_parameter_shadows_the_enclosing_value() {
     );
 }
 
-// The unchanged complete-ABI oracle for this program is preserved in #2833: baseline and this
-// capture fix emit identical class bytes, while construction-site lambda placement still differs.
+// PLATFORM: the complete JVM ABI proves the shadowed outer value adds no capture storage.
+#[test]
+fn a_shadowed_superclass_lambda_has_the_complete_reference_class_abi() {
+    assert_complete_class_abi(&common::classes_against_kotlinc_module(&[(
+        "ShadowedSuperclassLambda.kt",
+        SHADOWED_SUPERCLASS_LAMBDA,
+    )]));
+}

@@ -277,6 +277,18 @@ pub(super) fn requires_mangling(t: &Ty, value_classes: &(impl ValueClassNames + 
     })
 }
 
+/// Whether kotlinc gives a member function with this declared signature a mangled JVM name
+/// (`base-<hash>`): a parameter, the extension receiver included, that requires mangling, or a
+/// value-class return, which a member (never in a file class) always mangles by. The answer reads
+/// the semantic value-class identity, the unsigned integers included, as `vc_mangle` does.
+pub(crate) fn member_signature_is_mangled<'a>(
+    ir: &crate::ir::IrFile,
+    params: impl IntoIterator<Item = &'a Ty>,
+    ret: &Ty,
+) -> bool {
+    params.into_iter().any(|t| requires_mangling(t, ir)) || mangling_info(ret, ir).is_value
+}
+
 /// Whether kotlinc mangles a property accessor over a property of type `t`: the property's type,
 /// read through its erased upper bound, is a value class. A type parameter bounded by a value class
 /// (`val z: T` with `T : Z?`) mangles its accessors exactly as the bound itself would.

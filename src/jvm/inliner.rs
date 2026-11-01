@@ -30,7 +30,7 @@ mod default_masks;
 mod finally_blocks;
 mod finally_markers;
 mod functional_arguments;
-mod inline_scopes;
+pub(crate) mod inline_scopes;
 mod lambda_expansion;
 mod local_sorter;
 mod name_generator;

@@ -420,20 +420,19 @@ fn emit_holder_forward(cw: &mut ClassWriter, forward: HolderForward<'_>) {
     parameter_annotations.extend(semantic_params.iter().map(jd_nullability_annotation));
     let mut user_parameter_annotations = vec![crate::ir::DeclarationAnnotations::default()];
     user_parameter_annotations.extend(annotations.parameters.iter().cloned());
-    let annotation_types = function_annotations::header_annotation_types(
-        ret_ann,
-        &user_parameter_annotations,
-        &parameter_annotations,
-        true,
-    );
-    let annotation_types: Vec<&str> = annotation_types.iter().map(String::as_str).collect();
     cw.reserve_method_pool_with_annotations(
         member_name,
         &desc,
         signature,
-        &annotation_types,
+        &[],
         &retained_where(false),
         &[],
+    );
+    cw.reserve_method_parameter_annotation_pool(
+        ret_ann,
+        &user_parameter_annotations,
+        &parameter_annotations,
+        true,
     );
 
     let argument_words = 1 + param_tys.iter().map(|ty| slot_words(*ty)).sum::<u16>();

@@ -43,6 +43,7 @@ mod interface_records;
 pub(super) use defaults::exports_default_entry;
 pub(super) use imported_functions::ImportedAbis;
 mod lists;
+pub(super) use classifier_shapes::represents_dependency_classifier;
 pub(super) use lists::realizes_dependency_getter;
 mod local_delegates;
 mod maps;
@@ -2550,7 +2551,9 @@ fn callee_kind(callee: &Callee) -> &'static str {
         Callee::LocalDefault(_) | Callee::LocalWithDefaults { .. } => "defaulted",
         Callee::Intrinsic { .. } => "intrinsic",
         Callee::CrossFile { .. } => "cross-file",
-        Callee::Module { .. } | Callee::ModuleWithDefaults { .. } => "same-module",
+        Callee::Module { .. }
+        | Callee::ModuleWithDefaults { .. }
+        | Callee::ModuleDefaultEntry { .. } => "same-module",
         Callee::External { .. } => "dependency",
         Callee::Static { .. } => "static",
         Callee::Virtual { .. } => "virtual",

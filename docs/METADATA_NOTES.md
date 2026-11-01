@@ -28,6 +28,11 @@ Annotation values: `mv=[1,9,0]`, `k=2` (file facade), `xi=48`, `d2=["f","","a"]`
   `flags`=9 (default 6 = public final); JVM ext `method_signature`=100 — **omitted** when the JVM
   descriptor is derivable from the Kotlin signature (the simple case).
 - `Type.class_name` = field 6 (fq-name id).
+- A raw platform type sets `JvmProtoBuf.is_raw` (field 101) on both flexible faces. The lower
+  application uses erased declared upper bounds; the nullable upper uses all-star arguments and
+  the read-only collection face where applicable. `flexible_type_capabilities_id` names
+  `kotlin.jvm.PlatformType`. Strings intern lower, upper, then capability.
+  Test: `tests/java_raw_type_e2e.rs`.
 - `ValueParameter`: `name`=2, `type`=3.
 - `StringTableTypes` (jvm_metadata.proto): `record`=1 (repeated `Record`); `Record.predefined_index`
   = field 2 → index into `PREDEFINED_STRINGS`.
@@ -138,6 +143,9 @@ Reverse-engineered from kotlinc for `class Point(val x: Int, var y: String)` (se
   (f100) interns its `d2` strings BEFORE the annotations, while the annotation field serializes first
   (ascending field number). An annotated `suspend fun f(a: Int)` therefore lands
   `…, "a", "(ILkotlin/coroutines/Continuation;)Ljava/lang/Object;", "Lp/Mark;"` in `d2`.
+- Metadata annotation arguments serialize written values first and any materialized unwritten
+  values afterward, recursively through nested annotations and arrays. Applications without source
+  provenance keep their stored order. JVM annotation attributes instead retain declaration order.
 - The PRIMARY constructor's flags word is written whenever it differs from the proto default 6
   (visibility PUBLIC). krusty carries the real word (6 for a public primary ctor) and omits it only
   at 6, so the bit takes a public ctor to an explicit 7, and an `internal constructor`, whose
@@ -345,6 +353,13 @@ kotlinc — accepted by the reader, which is the ABI goal.
 Decoded from kotlinc output over a top-level property shape matrix (`Package.property` = f4;
 `Property`: `name`=2, `return_type`=3, `receiver_type`=5, `setter_value_parameter`=6,
 `getter_flags`=7, `setter_flags`=8, `flags`=11, `JvmPropertySignature` ext=100).
+
+Package properties use the same checked PROPERTY/FIELD annotation partitions and format gates as
+class properties. JVM records use fields 14 and 34; KLIB records use 170 and 181. Getter, setter and
+setter-parameter applications retain independent accessor flags and records. SOURCE-retained and
+erased optional applications do not gain annotation payload records. Accessor strings intern
+before property annotation records. KLIB file extensions intern before annotation records, while
+constant payload strings intern afterward.
 
 | shape | f11 flags | notes |
 |---|---|---|
@@ -647,3 +662,8 @@ BYTE, SHORT, INT or LONG and `int_value` remains the zigzag encoding of its sign
 high-bit values. Signed constants have no flags field. Recursive annotation and array values use
 the same encoder. The complete compile-time-value messages of the pinned official Native producer
 are the byte oracle; this does not infer unsigned identity when an earlier semantic model lost it.
+
+The type-annotation adapter accepts exactly `IS_UNSIGNED` on BYTE, SHORT, INT and LONG values with
+valid signed carriers; other flags and incompatible kinds are rejected. KSP protocol 16 transports
+`UByte`, `UShort`, `UInt` and `ULong` value tags, whose JVM adapter boxes the matching Kotlin unsigned
+wrappers. Class-reader constants and build ABI fingerprints retain their physical JVM carriers.

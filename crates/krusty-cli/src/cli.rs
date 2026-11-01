@@ -167,9 +167,8 @@ pub struct Options {
     /// `-Xstring-concat=inline`: build every string concatenation with `StringBuilder`, whatever
     /// the JVM target.
     pub inline_string_concat: bool,
-    /// kotlinc's `USE_INLINE_SCOPES_NUMBERS` configuration: name inlined locals by their inline
-    /// scope's number. The box harness sets it from its typed configuration channel; the command
-    /// line still refuses `-Xuse-inline-scopes-numbers` until every inlining path numbers scopes.
+    /// `-Xuse-inline-scopes-numbers` (kotlinc's `USE_INLINE_SCOPES_NUMBERS` configuration): name
+    /// inlined locals by their inline scope's number instead of `$iv` suffixes.
     pub inline_scopes_numbers: bool,
     /// `-opt-in=<fq name>[,<fq name>…]` (also `-opt-in <value>`, repeatable): requirement markers
     /// accepted module-wide, applied to the language settings once they are built.
@@ -677,7 +676,7 @@ pub fn classpath_entry_problems(entries: &[PathBuf]) -> Vec<ClasspathEntryProble
                                     || extension.eq_ignore_ascii_case("zip")
                             });
                         if is_archive {
-                            zip::ZipArchive::new(file)
+                            krusty::archive::open_file(file)
                                 .err()
                                 .map(|error| format!("not a readable archive ({error})"))
                         } else {
@@ -818,6 +817,14 @@ mod tests {
             assert_eq!(parsed.kotlin_reference_version, None, "{bad:?}");
             assert_eq!(parsed.errors.len(), 1, "{bad:?}: {:?}", parsed.errors);
         }
+    }
+
+    #[test]
+    fn inline_scopes_numbers_is_read_not_refused() {
+        let parsed = parse_args(&["-Xuse-inline-scopes-numbers", "x.kt"]);
+        assert!(parsed.inline_scopes_numbers);
+        assert_eq!(parsed.ignored, Vec::<String>::new());
+        assert!(!parse_args(&["x.kt"]).inline_scopes_numbers);
     }
 
     /// Both assertion flags must reach `Options`, not fall through to `ignored`: a missing match arm
