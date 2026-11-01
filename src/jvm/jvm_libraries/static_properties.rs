@@ -322,6 +322,39 @@ impl JvmLibraries {
         field.external_identity = declaration.external_identity;
     }
 
+    /// Join a package facade's static field with the metadata property it realizes. A `const val`
+    /// keeps its metadata declaration and gains the field's constant. A top-level `@JvmField`
+    /// property has no getter: the field is its only accessor, so it is published as the
+    /// field-backed property a qualified read selects.
+    pub(super) fn merge_top_level_field_property(
+        &self,
+        name: &str,
+        field: &JvmStaticField,
+        properties: &mut Vec<PropertyInfo>,
+    ) {
+        let Some(metadata) =
+            self.metadata_property_for_field(field.owner, &field.name, &field.descriptor)
+        else {
+            return;
+        };
+        let deprecated_hidden = field.deprecated_hidden;
+        super::super::top_level_properties::merge_metadata_const(
+            name,
+            &metadata,
+            field,
+            deprecated_hidden,
+            properties,
+        );
+        if metadata.name == name
+            && metadata.getter.is_none()
+            && !metadata.is_const
+            && !metadata.is_extension
+            && metadata.context_params.is_empty()
+        {
+            properties.extend(self.associated_property_for_static_field(field.clone()));
+        }
+    }
+
     pub(super) fn associated_property_for_static_field(
         &self,
         field: JvmStaticField,
