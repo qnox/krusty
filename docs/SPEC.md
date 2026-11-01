@@ -23601,6 +23601,18 @@ lambda, so `it` is the column. The outer `Table` receiver's member is not consid
 receiver's own source member still outranks its extensions. Tests:
 `implicit_receiver_tower_lambda_shape_e2e`.
 
+## Implicit `it` needs a one-parameter function type
+
+A lambda that omits its parameter list gets the implicit `it` parameter only when its contextual
+type is a function type with exactly one value parameter. That covers a typed declaration, a branch
+of one, a selected higher-order or fun-interface parameter, and an explicit type argument. Without
+such a type the lambda declares no parameters, so a use of `it` in its body is "unresolved
+reference 'it'". This holds for an `Any` or type-variable expectation, a `() -> R` parameter, a
+collection element, a branch with no expectation, and a bare `val f = { it }`. The name in the
+body never creates the parameter. Tests:
+`diagnostics_language_parity_e2e::implicit_it_without_a_function_type_is_unresolved_like_kotlinc`
+and `::implicit_it_with_a_one_parameter_function_type_runs_like_kotlinc`.
+
 ## Extension receivers bound to caller variables
 
 An extension receiver is applicable when its declared receiver, specialized by the bindings the

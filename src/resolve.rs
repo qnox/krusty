@@ -51403,7 +51403,7 @@ impl<'a> Checker<'a> {
     ///
     /// Merely finding the token in the body is insufficient: when a lexical value named `it` already
     /// exists, the inner lambda CAPTURES that value and remains `Function0`. Keep this decision in one
-    /// helper because both overload probing and fallback lambda typing must infer the same arity.
+    /// helper because overload probing and rejected-call diagnostics must infer the same arity.
     fn untyped_lambda_binds_implicit_it(&self, scope: &CheckerScope<'_>, body: ExprId) -> bool {
         self.file.expr_uses_name(body, "it") && self.lookup(scope, "it").is_none()
     }
@@ -53178,15 +53178,10 @@ impl<'a> Checker<'a> {
                     implicit_label,
                 );
             }
-            // A lambda literal `{ a, b -> body }` — type is `Fun(arity)`. With no explicit
-            // parameters but a body referencing `it`, bind the implicit single parameter.
-            let bind_names: Vec<String> = if !params.is_empty() {
-                params.clone()
-            } else if self.untyped_lambda_binds_implicit_it(scope, body) {
-                vec!["it".to_string()]
-            } else {
-                vec![]
-            };
+            // A lambda literal `{ a, b -> body }` — type is `Fun(arity)`. Without an expected
+            // function type, a lambda that omits its parameter list declares none: only a
+            // contextual one-parameter function type introduces the implicit `it`.
+            let bind_names = params.clone();
             let arity = bind_names.len() as u8;
             // Type each parameter from its explicit annotation (`{ x: Int -> … }`) if present, so a
             // bare-value lambda checks its body correctly; otherwise the erased `Any` (an expected
