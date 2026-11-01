@@ -2492,6 +2492,8 @@ mod safe_call_primitive_e2e;
 mod safe_call_unresolved_member_e2e;
 #[path = "safe_cast_elvis_e2e.rs"]
 mod safe_cast_elvis_e2e;
+#[path = "safe_cast_type_test_e2e.rs"]
+mod safe_cast_type_test_e2e;
 #[path = "sam_classpath_e2e.rs"]
 mod sam_classpath_e2e;
 #[path = "sam_constructor_lambda_label_e2e.rs"]
