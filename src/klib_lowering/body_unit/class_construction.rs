@@ -17,7 +17,7 @@ impl<'u, 's> Linker<'u, 's> {
         else {
             return Ok(());
         };
-        let classifier = plan.header.contract.classifier;
+        let classifier = plan.storage.declaration.classifier;
         if ir.class_id_by_name(classifier).is_some() {
             return Err(KlibBodyDeclineReason::SignatureMismatch(
                 "different dependency identities claim the same materialized classifier".to_owned(),
@@ -25,12 +25,13 @@ impl<'u, 's> Linker<'u, 's> {
         }
         let header = super::super::function_lowering::initializer_header(&plan)?;
         let mut class = IrClass::synthetic(classifier);
-        class.supertypes.push(Ty::obj_name(crate::types::wk::any()));
+        class.supertypes.push(plan.storage.superclass);
         class.fields = plan
+            .storage
             .fields
             .iter()
             .map(|field| {
-                IrField::new(field.declaration.name.clone(), field.ty)
+                IrField::new(field.name.clone(), field.ty)
                     .with_is_final(field.final_)
                     .with_is_private(field.private)
             })

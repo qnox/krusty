@@ -116,7 +116,9 @@ pub use inline_body::{
 };
 #[cfg(test)]
 pub(crate) use klib_body_class::test_fixture as klib_body_class_fixture;
-pub(crate) use klib_body_class::{KlibBodyClassContract, KlibBodyClassParameters};
+pub(crate) use klib_body_class::{
+    KlibBodyClassContract, KlibBodyClassParameters, KlibClassStorage, KlibStoredField,
+};
 pub use member_flags::LmFlags;
 pub(crate) use metadata_normalization::{
     associated_function_parameter_identities, associated_property_parameter_identities,

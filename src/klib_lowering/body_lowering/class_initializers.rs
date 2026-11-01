@@ -21,7 +21,7 @@ impl<'a> BodyLowering<'a> {
         for step in &plan.steps {
             let statement = match step {
                 InitializationStep::Field { index, value } => {
-                    let field = &plan.fields[*index as usize];
+                    let field = &plan.storage.fields[*index as usize];
                     let receiver = self.read(
                         &plan
                             .header
@@ -66,17 +66,17 @@ impl<'a> BodyLowering<'a> {
                 "a field read"
             });
         };
-        let Some((index, field)) = frame
+        let Some(index) = frame
             .plan
-            .fields
+            .field_declarations
             .iter()
-            .enumerate()
-            .find(|(_, field)| &field.declaration.base.symbol == symbol)
+            .position(|field| &field.base.symbol == symbol)
         else {
             return Err(mismatch(
                 "an initializer accesses a field outside its exact declaring class",
             ));
         };
+        let field = &frame.plan.storage.fields[index];
         let receiver =
             receiver.ok_or_else(|| mismatch("an instance field access has no receiver"))?;
         let receiver = self.operand(
