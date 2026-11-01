@@ -49,7 +49,6 @@ annotations/recursiveAnnotationWithVarargAndWithoutDefaultValue.kt
 annotations/selfReferentialAnnotation.kt
 annotations/spreadOperatorInAnnotationArguments.kt
 annotations/typeAnnotations/checkingNotincorporatedInputTypes.kt
-argumentOrder/arguments.kt
 argumentOrder/captured.kt
 argumentOrder/capturedInExtension.kt
 argumentOrder/defaults.kt
@@ -60,7 +59,6 @@ argumentOrder/lambdaMigration.kt
 argumentOrder/lambdaMigrationInClass.kt
 argumentOrder/simple.kt
 argumentOrder/simpleInClass.kt
-argumentOrder/singleSideEffect.kt
 arithmetic/basic_charConversions.kt
 arithmetic/basic_charCornerCases.kt
 arithmetic/basic_compareIntToFloat.kt
@@ -1981,7 +1979,6 @@ diagnostics/functions/tailRecursion/tailrecWithExplicitCompanionObjectDispatcher
 diagnostics/functions/tailRecursion/whenWithIs.kt
 diagnostics/vararg/kt4172.kt
 directInvokeOptimization/boundInnerContructorRef.kt
-directInvokeOptimization/capturingLambda.kt
 directInvokeOptimization/contextParameters.kt
 directInvokeOptimization/samConversion.kt
 directInvokeOptimization/unboundInnerContructorRef.kt

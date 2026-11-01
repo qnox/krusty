@@ -23651,6 +23651,15 @@ Nested superclass setters preserve the same lexical instance after both anonymou
 been constructed. `box_regressions/nestedAnonymousSuperSetter.kt` distinguishes two same-typed
 callers through the shared backend inventory; its JVM companion compares the complete class ABI.
 
+## Immediately invoked source lambdas
+
+A synchronous source lambda invoked directly uses its checked inline template at that call site.
+Capture operands precede context and value arguments, each is evaluated once, and local returns
+leave that lambda invocation. An escaping function value retains its implementation. The common
+lowering supplies this operation to all backends. Full ABI controls, including the complete #2838
+oracle, live in `immediate_lambda_invocation_e2e`; operand-order and return behavior share
+`box_regressions/immediateFunctionLiteralOperands.kt` across the backend matrix.
+
 ## Runtime-owned dependency getter leaves
 
 An ordinary serialized KLIB body may read a property through a getter the target implements.

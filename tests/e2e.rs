@@ -3019,5 +3019,8 @@ mod type_safe_override_call_e2e;
 #[path = "where_bound_arguments_e2e.rs"]
 mod where_bound_arguments_e2e;
 
+#[path = "immediate_lambda_invocation_e2e.rs"]
+mod immediate_lambda_invocation_e2e;
+
 #[path = "facade_local_classifier_metadata_e2e.rs"]
 mod facade_local_classifier_metadata_e2e;
