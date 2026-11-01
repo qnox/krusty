@@ -3942,17 +3942,7 @@ impl JvmLibraries {
             SymbolNamespace::Classifier(owner) => self.static_field_name(owner, name),
         };
         if let (SymbolNamespace::Package(_), Some(field)) = (namespace, static_field.as_ref()) {
-            if let Some(metadata) =
-                self.metadata_property_for_field(field.owner, &field.name, &field.descriptor)
-            {
-                super::top_level_properties::merge_metadata_const(
-                    name,
-                    &metadata,
-                    field,
-                    field.deprecated_hidden,
-                    &mut props,
-                );
-            }
+            self.merge_top_level_field_property(name, field, &mut props);
         }
         let hidden = self.withhold_hidden_declarations(package, name, &mut props);
         let platform_callables = match (overloads.is_empty(), props.is_empty()) {

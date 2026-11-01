@@ -1396,8 +1396,6 @@ mod kotlin_fun_java_sam_param_e2e;
 mod kotlin_native_provisioning_e2e;
 #[path = "kotlin_script_e2e.rs"]
 mod kotlin_script_e2e;
-#[path = "kotlinc_argument_conformance_e2e.rs"]
-mod kotlinc_argument_conformance_e2e;
 #[path = "krusty_dep_dir_e2e.rs"]
 mod krusty_dep_dir_e2e;
 #[path = "krusty_roundtrip_class_metadata_e2e.rs"]
@@ -1824,6 +1822,8 @@ mod value_class_suspend_override_e2e;
 mod value_class_suspend_resume_e2e;
 #[path = "value_class_try_value_e2e.rs"]
 mod value_class_try_value_e2e;
+#[path = "vararg_generic_signature_e2e.rs"]
+mod vararg_generic_signature_e2e;
 #[path = "variance_conflicts_e2e.rs"]
 mod variance_conflicts_e2e;
 
