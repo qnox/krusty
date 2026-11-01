@@ -224,6 +224,13 @@ fn assignable_inner(cx: &TyCtx, oracle: &dyn TypeOracle, sub: Ty, sup: Ty) -> bo
     if sub == Ty::Nothing {
         return true;
     }
+    // `T & Any` is the intersection of the parameter and `Any`: a source fits it only when it fits
+    // the parameter itself and is non-null. A shared classifier bound is not that proof, since
+    // `<T : CharSequence, S : T?>` does not make `T` a subtype of `S & Any`.
+    if let TyKind::DefinitelyNotNull(original) = sup.kind() {
+        return assignable_inner(cx, oracle, sub, original)
+            && assignable_inner(cx, oracle, sub, Ty::obj("kotlin/Any"));
+    }
     // A target intersection requires the source to meet every component. Checked before the
     // source arm so `Int & String & Number` is still a subtype of `Int & String`. `Nothing` is
     // already a subtype of every intersection via the arm above.
@@ -537,6 +544,16 @@ fn capture_projection_parameters(
 fn same_type_argument_with(oracle: &dyn TypeOracle, left: Ty, right: Ty) -> bool {
     match (left.kind(), right.kind()) {
         (TyKind::TyParam(a, _), TyKind::TyParam(b, _)) => a == b,
+        // `T & Any` has two spellings: the provenance wrapper a nullable binding leaves and the
+        // compact parameter whose occurrence bound excludes null. They are one argument.
+        (TyKind::DefinitelyNotNull(a), TyKind::DefinitelyNotNull(b)) => {
+            same_flexible_type_with(oracle, a, b)
+        }
+        (TyKind::DefinitelyNotNull(wrapped), TyKind::TyParam(name, bound))
+        | (TyKind::TyParam(name, bound), TyKind::DefinitelyNotNull(wrapped)) => {
+            !bound.upper_bound_admits_null()
+                && matches!(wrapped.kind(), TyKind::TyParam(inner, _) if inner == name)
+        }
         (TyKind::Obj(a, aa), TyKind::Obj(b, ba)) => {
             a == b
                 && aa.len() == ba.len()
@@ -1149,5 +1166,39 @@ mod tests {
     fn value_class_is_not_assignable_to_its_storage_type() {
         assert!(!ok(s("app/Aid"), Ty::String));
         assert!(!ok(s("app/Aid"), s("kotlin/String")));
+    }
+
+    /// `T & Any` left by substituting a nullable binding and the compact `T` whose occurrence bound
+    /// excludes null are one type argument. A different parameter, or the same parameter while its
+    /// bound still admits null, is not.
+    #[test]
+    fn substituted_definitely_non_null_matches_only_its_non_null_bounded_parameter() {
+        let nullable_any = Ty::nullable(s("kotlin/Any"));
+        let wrapped = Ty::ty_param("T", nullable_any).contributed_through_nullable_formal();
+        let compact = Ty::ty_param("T", nullable_any).definitely_non_null();
+        assert!(matches!(wrapped.kind(), TyKind::DefinitelyNotNull(_)));
+        assert!(matches!(compact.kind(), TyKind::TyParam(..)));
+        assert!(same_flexible_type(wrapped, compact));
+        assert!(same_flexible_type(compact, wrapped));
+        assert!(same_flexible_type(wrapped, wrapped));
+
+        let other_wrapped = Ty::ty_param("U", nullable_any).contributed_through_nullable_formal();
+        assert!(!same_flexible_type(wrapped, other_wrapped));
+        assert!(!same_flexible_type(
+            wrapped,
+            Ty::ty_param("U", s("kotlin/Any"))
+        ));
+        assert!(!same_flexible_type(
+            Ty::ty_param("U", s("kotlin/Any")),
+            wrapped
+        ));
+        assert!(!same_flexible_type(
+            wrapped,
+            Ty::ty_param("T", nullable_any)
+        ));
+        assert!(!same_flexible_type(
+            Ty::ty_param("T", nullable_any),
+            wrapped
+        ));
     }
 }

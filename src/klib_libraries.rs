@@ -174,6 +174,31 @@ impl KlibLibraries {
 }
 
 impl SymbolSource for KlibLibraries {
+    fn classifier_declaration_name(
+        &self,
+        declaration: crate::libraries::ClassifierDeclarationKey,
+    ) -> Option<Option<crate::types::ClassifierDeclarationName>> {
+        use crate::libraries::ClassifierDeclarationKey as Key;
+        match declaration {
+            Key::TypeAlias(identity) => self
+                .inventory
+                .type_alias(identity)
+                .map(|alias| alias.declaration_name.as_deref().cloned()),
+            Key::Ordinary(identity) => {
+                if let Some(record) = self.inventory.classifier(identity) {
+                    return Some(record.shape.declaration_name.clone());
+                }
+                let function = crate::libraries::function_classifiers::classifier(identity)
+                    .filter(|function| function.identity() == identity)?;
+                Some(
+                    crate::libraries::function_classifiers::synthetic(function)
+                        .declaration_name
+                        .clone(),
+                )
+            }
+        }
+    }
+
     fn package_exists(&self, parent: TypeName, name: &str) -> bool {
         self.inventory.package_exists(parent, name)
     }

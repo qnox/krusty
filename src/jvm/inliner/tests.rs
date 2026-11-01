@@ -111,6 +111,7 @@ fn inline_plain(
             classes: &NoClasses,
             objects: &mut NoObjects,
             enum_entries: &mut crate::jvm::reified_arguments::NoEnumEntriesReads,
+            scopes: None,
         },
     )
 }
@@ -444,7 +445,6 @@ fn arguments_are_read_in_place_only_when_loaded_first_and_once() {
         op(0xb1),
     ];
     assert!(can_inline_arguments_in_place(&node));
-    assert!(in_place_arguments_begin_at_entry(&node));
     node.nodes = vec![var(0x19, 1), var(0x15, 0), op(0x57), op(0x57), op(0xb1)];
     assert!(!can_inline_arguments_in_place(&node));
 
@@ -459,7 +459,6 @@ fn arguments_are_read_in_place_only_when_loaded_first_and_once() {
         op(0xb1),
     ];
     assert!(can_inline_arguments_in_place(&node));
-    assert!(!in_place_arguments_begin_at_entry(&node));
 }
 
 #[test]
@@ -513,7 +512,6 @@ fn intrinsic_rewrites_require_the_exact_jvm_method_shape() {
         op(0xb1),
     ];
     assert!(can_inline_arguments_in_place(&null_check));
-    assert!(in_place_arguments_begin_at_entry(&null_check));
     null_check.nodes[2] = method("checkNotNullParameter", "()V", false);
     assert!(!can_inline_arguments_in_place(&null_check));
     null_check.nodes[2] = method(
@@ -637,6 +635,7 @@ fn an_invoke_of_an_inline_lambda_becomes_the_lambdas_body() {
             classes: &NoClasses,
             objects: &mut NoObjects,
             enum_entries: &mut crate::jvm::reified_arguments::NoEnumEntriesReads,
+            scopes: None,
         },
     )
     .expect("inlines");
@@ -752,6 +751,7 @@ fn a_lambda_invoked_over_a_stacked_value_is_bracketed_for_fix_stack() {
             classes: &NoClasses,
             objects: &mut NoObjects,
             enum_entries: &mut crate::jvm::reified_arguments::NoEnumEntriesReads,
+            scopes: None,
         },
     )
     .expect("inlines");

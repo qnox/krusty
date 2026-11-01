@@ -85,6 +85,9 @@ impl BodyLowering<'_> {
         if target != ty {
             return Err(mismatch("an implicit cast is typed apart from its target"));
         }
+        if let Some(proven) = self.null_proven_receiver(argument, target)? {
+            return Ok(proven);
+        }
         let arg = self.expression(argument)?;
         let actual = self.lowered_type(arg);
         if super::is_value_of(actual, target) {
@@ -118,14 +121,35 @@ impl BodyLowering<'_> {
 
 impl BodyLowering<'_> {
     /// Whether a smart cast of a value of `actual` to `target` narrows it: `target` is a subtype
-    /// of `actual`, or names the same classifier at other type arguments.
+    /// of `actual`, of `actual`'s classifier at any type arguments (`Collection<*>` after
+    /// `this is Collection<*>` on an `Iterable<T>`), or names the same classifier at other type
+    /// arguments.
     fn narrows(&self, actual: Ty, target: Ty) -> bool {
         let classifier = |ty: Ty| match ty.non_null().kind() {
             TyKind::Obj(name, _) => Some(name),
             _ => None,
         };
-        self.linker.is_subtype(target, actual)
-            || classifier(actual).is_some_and(|name| classifier(target) == Some(name))
+        let parameters = self.header.type_parameters();
+        self.linker.is_subtype(parameters, target, actual)
+            || classifier(actual).is_some_and(|name| {
+                classifier(target) == Some(name)
+                    || self
+                        .linker
+                        .is_subtype(parameters, target, Self::star_projected(actual))
+            })
+    }
+
+    /// `ty`'s classifier with every type argument a star projection.
+    fn star_projected(ty: Ty) -> Ty {
+        let TyKind::Obj(name, arguments) = ty.non_null().kind() else {
+            return ty;
+        };
+        let any = Ty::nullable(Ty::obj("kotlin/Any"));
+        let stars = arguments
+            .iter()
+            .map(|_| Ty::star_projection(any))
+            .collect::<Vec<_>>();
+        Ty::obj_args_name(name, &stars)
     }
 
     /// `value`, of the non-null type `actual`, widened to its nullable type `target`: a coercion

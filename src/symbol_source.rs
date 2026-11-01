@@ -13,8 +13,33 @@
 //! collected together and selected later by [`crate::symbol_resolver::SymbolResolver`].
 
 pub use crate::libraries::ClassifierAccess;
+pub use crate::libraries::ClassifierDeclarationKey;
 use crate::libraries::{FunctionSet, LibraryType, PropertySet, ResolvedSymbols};
 use crate::types::{Ty, TypeName};
+
+/// Call conventions that kotlinc's frontend plugins configure with annotations. Each list holds
+/// the qualified identities of the annotation classes the compilation names for that plugin.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AnnotationConventions {
+    /// sam-with-receiver: an interface carrying one directly converts a lambda with its abstract
+    /// method's first parameter as the receiver.
+    pub sam_with_receiver: Vec<TypeName>,
+    /// assignment: an assignment to a `val` property whose type's class, or one of its supertypes,
+    /// carries one calls `assign` with the assigned value.
+    pub assignment: Vec<TypeName>,
+}
+
+/// The conventions of a compilation that configures none.
+pub static NO_ANNOTATION_CONVENTIONS: AnnotationConventions = AnnotationConventions {
+    sam_with_receiver: Vec::new(),
+    assignment: Vec::new(),
+};
+
+impl AnnotationConventions {
+    pub fn is_empty(&self) -> bool {
+        self.sam_with_receiver.is_empty() && self.assignment.is_empty()
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum SymbolNamespace {
@@ -53,6 +78,20 @@ impl SymbolNamespace {
 /// A provider of declarations — a module's AST or a compiled library. The arg-independent metadata
 /// surface that federates across sources; arg-dependent selection/binding lives above (the resolver).
 pub trait SymbolSource {
+    /// The selected declaration record's own name, addressed by an already-bound declaration key.
+    /// `None` means this source has no such declaration; `Some(None)` means its selected record
+    /// has unknown name evidence and must shadow later sources. This projects the same normalized
+    /// classifier/alias records as `symbols`, without decomposing the identity or selecting an
+    /// alias's expansion target. Ordinary and alias keys stay distinct even when their flattened
+    /// identities coincide. This is not a source-name binding operation. Every source publishing
+    /// classifier declarations implements this projection; the default is only for empty sources.
+    fn classifier_declaration_name(
+        &self,
+        _declaration: crate::libraries::ClassifierDeclarationKey,
+    ) -> Option<Option<crate::types::ClassifierDeclarationName>> {
+        None
+    }
+
     /// Core projection of the classifier half of [`Self::symbols`]. Providers must not override this;
     /// the implementation lives here solely while call sites migrate to reading the record directly.
     fn classifier(&self, internal: TypeName) -> Option<std::sync::Arc<LibraryType>> {
@@ -194,11 +233,10 @@ pub trait SymbolSource {
         None
     }
 
-    /// The annotations kotlinc's sam-with-receiver plugin is configured with: an interface carrying
-    /// one directly converts a lambda with its abstract method's first parameter as the receiver.
-    /// A compilation fact, published by the current-module provider.
-    fn sam_with_receiver_annotations(&self) -> &[TypeName] {
-        &[]
+    /// The annotation-configured call conventions the compilation's frontend plugins select. A
+    /// compilation fact, published by the current-module provider.
+    fn annotation_conventions(&self) -> &AnnotationConventions {
+        &NO_ANNOTATION_CONVENTIONS
     }
 
     /// Whether `companion` declares the exact serialization-plugin accessor shape. This reads a
@@ -223,6 +261,9 @@ pub trait SymbolSource {
     }
 }
 
+#[cfg(test)]
+mod declaration_names_tests;
+
 /// An ordered federation of sources — itself a [`SymbolSource`], so it nests. Earlier children win:
 /// Callables concatenate in order (each overload keeps its own origin); the classifier comes from the
 /// first/earliest contributor on a name clash. Holds children by REFERENCE so a resolver can federate the
@@ -245,6 +286,15 @@ impl<'a> CompositeSource<'a> {
 }
 
 impl SymbolSource for CompositeSource<'_> {
+    fn classifier_declaration_name(
+        &self,
+        declaration: crate::libraries::ClassifierDeclarationKey,
+    ) -> Option<Option<crate::types::ClassifierDeclarationName>> {
+        self.children
+            .iter()
+            .find_map(|child| child.classifier_declaration_name(declaration))
+    }
+
     /// A package exists if ANY source declares it — packages are a union across the module and the
     /// classpath, not a shadowing lookup: the same package name legitimately holds declarations from
     /// both, and a qualifier walk must be able to continue through either.
@@ -291,12 +341,12 @@ impl SymbolSource for CompositeSource<'_> {
             .find_map(|child| child.serializable_class_elements(classifier))
     }
 
-    fn sam_with_receiver_annotations(&self) -> &[TypeName] {
+    fn annotation_conventions(&self) -> &AnnotationConventions {
         self.children
             .iter()
-            .map(|child| child.sam_with_receiver_annotations())
-            .find(|annotations| !annotations.is_empty())
-            .unwrap_or_default()
+            .map(|child| child.annotation_conventions())
+            .find(|conventions| !conventions.is_empty())
+            .unwrap_or(&NO_ANNOTATION_CONVENTIONS)
     }
 
     /// Only the child that assigned `identity` answers for it; the module's own declarations
@@ -432,6 +482,12 @@ impl SymbolSource for CompositeSource<'_> {
 /// cannot outlive or conceal mutation of any contributing provider.
 #[derive(Default)]
 pub(crate) struct SymbolQueryCache {
+    declaration_names: std::cell::RefCell<
+        crate::fx_hash::HashMap<
+            ClassifierDeclarationKey,
+            Option<Option<crate::types::ClassifierDeclarationName>>,
+        >,
+    >,
     /// Keyed by NAME, and every miss and hit hashes that string. The default hasher is SipHash,
     /// which is a cryptographic-strength choice this cache does not need: the keys are internal
     /// declaration spellings, never attacker-supplied, and the map lives and dies inside one source
@@ -461,6 +517,21 @@ impl<'a> CachedCompositeSource<'a> {
 }
 
 impl SymbolSource for CachedCompositeSource<'_> {
+    fn classifier_declaration_name(
+        &self,
+        declaration: crate::libraries::ClassifierDeclarationKey,
+    ) -> Option<Option<crate::types::ClassifierDeclarationName>> {
+        if let Some(name) = self.cache.declaration_names.borrow().get(&declaration) {
+            return name.clone();
+        }
+        let name = self.source.classifier_declaration_name(declaration);
+        self.cache
+            .declaration_names
+            .borrow_mut()
+            .insert(declaration, name.clone());
+        name
+    }
+
     fn package_exists(&self, parent: TypeName, name: &str) -> bool {
         self.source.package_exists(parent, name)
     }
@@ -534,8 +605,8 @@ impl SymbolSource for CachedCompositeSource<'_> {
         self.source.serializable_class_elements(classifier)
     }
 
-    fn sam_with_receiver_annotations(&self) -> &[TypeName] {
-        self.source.sam_with_receiver_annotations()
+    fn annotation_conventions(&self) -> &AnnotationConventions {
+        self.source.annotation_conventions()
     }
 }
 
@@ -743,6 +814,7 @@ mod tests {
                     retention: None,
                     annotation_targets: None,
                     mapped_collection: None,
+                    mapped_builtin: false,
                     annotation_element_defaults: Vec::new(),
                     deprecation: None,
                 }))

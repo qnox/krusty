@@ -15,6 +15,8 @@ use crate::types::{stored_value_ty, Ty, TyKind, TypeName};
 
 use super::{DeclarationFlags, DeclarationId, DeclarationKind, ResolvedModuleIndex, SourceFileId};
 
+mod declaration_names;
+
 #[cfg(test)]
 mod declaration_name_tests;
 
@@ -717,6 +719,7 @@ impl<'a> StreamedModuleSymbols<'a> {
             member_realization: MemberRealization::Dispatch,
             inline: InlineKind::None,
             default_call: false,
+            defaults_from_declaration: false,
             vararg_elem: None,
             vararg_index: None,
             signature: None,
@@ -1869,6 +1872,13 @@ impl<'a> StreamedModuleSymbols<'a> {
 }
 
 impl SymbolSource for StreamedModuleSymbols<'_> {
+    fn classifier_declaration_name(
+        &self,
+        declaration: crate::libraries::ClassifierDeclarationKey,
+    ) -> Option<Option<crate::types::ClassifierDeclarationName>> {
+        declaration_names::source_declaration_name(self, declaration)
+    }
+
     fn actualized_expect(&self, internal: TypeName) -> Option<TypeName> {
         self.index
             .actualizes_expect(self.source_file, internal)
@@ -1889,8 +1899,8 @@ impl SymbolSource for StreamedModuleSymbols<'_> {
         self.type_parameter_bounds(name)
     }
 
-    fn sam_with_receiver_annotations(&self) -> &[TypeName] {
-        self.index.sam_with_receiver_annotations()
+    fn annotation_conventions(&self) -> &crate::symbol_source::AnnotationConventions {
+        self.index.annotation_conventions()
     }
 
     fn package_exists(&self, parent: TypeName, name: &str) -> bool {

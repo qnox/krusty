@@ -300,6 +300,12 @@ fn attach_function_metadata(
     if annotations.declares_annotations() {
         ir.function_annotations.insert(function_id, annotations);
     }
+    let source_retained =
+        super::declaration_metadata::source_retained_annotations(&function.annotations, info);
+    if !source_retained.is_empty() {
+        ir.function_source_annotations
+            .insert(function_id, source_retained);
+    }
     let mut parameter_annotations = function
         .params
         .iter()
@@ -395,9 +401,9 @@ fn attach_property_metadata(
         .expect("a checked property retains its declaration header");
     if header.flags.has(DeclarationFlags::COMPANION_BLOCK_MEMBER) {
         let property_annotations =
-            super::declaration_metadata::companion_block_property_annotations(property, info);
+            super::declaration_metadata::property_declaration_annotations(property, info);
         let field_annotations =
-            super::declaration_metadata::companion_block_field_annotations(property, info);
+            super::declaration_metadata::property_field_annotations(property, info);
         if field_annotations.declares_annotations() {
             ir.companion_block_field_annotations
                 .insert(property_id, field_annotations);
@@ -441,10 +447,19 @@ fn attach_property_metadata(
         if let Some(spelling) = published_declaration_spellings(declaration, info, index) {
             package_property.spellings = spelling;
         }
-        package_property.suppressed_source_annotation_application =
-            super::declaration_metadata::top_level_property_retains_suppressed_source_application(
-                property, info,
-            );
+        let property_annotations =
+            super::declaration_metadata::property_declaration_annotations(property, info);
+        let field_annotations =
+            super::declaration_metadata::property_field_annotations(property, info);
+        ir.package_property_annotations.insert(
+            property_id,
+            crate::ir::PackagePropertyAnnotations {
+                declares_metadata_annotations: property_annotations.declares_metadata_annotations()
+                    || field_annotations.declares_metadata_annotations(),
+                property: property_annotations,
+                field: field_annotations,
+            },
+        );
     }
 }
 

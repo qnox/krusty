@@ -316,6 +316,15 @@ fn merge_type(
 }
 
 impl SymbolSource for DependencyPlatform {
+    fn classifier_declaration_name(
+        &self,
+        declaration: crate::libraries::ClassifierDeclarationKey,
+    ) -> Option<Option<crate::types::ClassifierDeclarationName>> {
+        self.source()
+            .classifier_declaration_name(declaration)
+            .or_else(|| self.platform.classifier_declaration_name(declaration))
+    }
+
     fn package_exists(&self, parent: TypeName, name: &str) -> bool {
         self.source().package_exists(parent, name) || self.platform.package_exists(parent, name)
     }
@@ -373,8 +382,8 @@ impl SymbolSource for DependencyPlatform {
             .or_else(|| self.platform.serializable_class_elements(classifier))
     }
 
-    fn sam_with_receiver_annotations(&self) -> &[TypeName] {
-        &self.symbols.sam_with_receiver_annotations
+    fn annotation_conventions(&self) -> &crate::symbol_source::AnnotationConventions {
+        &self.symbols.annotation_conventions
     }
 
     fn symbols(&self, namespace: SymbolNamespace, name: &str) -> Rc<ResolvedSymbols> {
@@ -740,6 +749,7 @@ mod tests {
             retention: None,
             annotation_targets: None,
             mapped_collection: None,
+            mapped_builtin: false,
             annotation_element_defaults: Vec::new(),
             deprecation: None,
         }

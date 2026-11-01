@@ -28,6 +28,26 @@ fn first_block_expression(ir: &IrFile, block: ExprId) -> ExprId {
     }
 }
 
+/// Whether `value` is `expression` itself, or only an implicit coercion or the bottom-typed
+/// completion of it, which writes no code ahead of it and marks no line of its own there.
+pub(super) fn evaluates_to(ir: &IrFile, value: ExprId, expression: ExprId) -> bool {
+    let mut value = value;
+    loop {
+        if value == expression {
+            return true;
+        }
+        match ir.expr(value) {
+            IrExpr::TypeOp {
+                op: crate::ir::IrTypeOp::ImplicitCoercion,
+                arg,
+                ..
+            } => value = *arg,
+            IrExpr::BottomValue { producer, .. } => value = *producer,
+            _ => return false,
+        }
+    }
+}
+
 /// Mark a source statement or block value at the first instruction it emits.
 pub(super) fn mark_statement(ir: &IrFile, expression: ExprId, code: &mut CodeBuilder) {
     if let Some(&line) = ir.expr_lines.get(&expression) {

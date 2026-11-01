@@ -1,6 +1,5 @@
 //! JVM class-file reading, writing, and bytecode emission (all JVM-specific code).
 
-mod abstract_method_nullability;
 mod annotation_constructions;
 mod annotation_kclass;
 mod anonymous_context_labels;
@@ -75,6 +74,7 @@ mod method_descriptors;
 pub mod method_node;
 mod method_parameters;
 mod module_calls;
+mod multifile_facades;
 pub mod names;
 mod operation_relocation;
 mod optional_annotations;

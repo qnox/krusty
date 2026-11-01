@@ -221,6 +221,7 @@ fn annotation_type(class: &OptionalAnnotationClass) -> LibraryType {
         retention: Some(crate::libraries::declared_retention(declaration).to_string()),
         annotation_targets: Some(crate::libraries::declared_targets(declaration)),
         mapped_collection: None,
+        mapped_builtin: false,
         annotation_element_defaults: Vec::new(),
         deprecation: None,
     }

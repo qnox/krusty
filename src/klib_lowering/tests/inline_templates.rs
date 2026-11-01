@@ -306,13 +306,13 @@ fn a_scope_function_body_is_a_generic_template_that_splices_its_lambda() {
     };
     let libraries = stdlib(&root);
     for (name, spellings, rendered) in [
-        ("let", &["T", "R"][..], "scope {scope {return@Some(0) invoke(v1!: (T) -> R, v0: T): R: Nothing}: Nothing}"),
-        ("also", &["T"][..], "scope {scope {invoke(v1!: (T) -> Unit, v0: T): Unit; return@Some(0) v0: T: Nothing}: Nothing}"),
+        ("let", &["T", "R"][..], "scope {scope {return@Some(0) invoke(v1!: (T) -> R, v0!: T): R: Nothing}: Nothing}"),
+        ("also", &["T"][..], "scope {scope {invoke(v1!: (T) -> Unit, v0!: T): Unit; return@Some(0) v0!: T: Nothing}: Nothing}"),
         (
             "takeIf",
             &["T"][..],
-            "scope {scope {return@Some(0) when[invoke(v1!: (T) -> Boolean, v0: T): Boolean -> \
-             ImplicitCoercion<T?>(v0: T), else -> Null: Null]: T?: Nothing}: Nothing}",
+            "scope {scope {return@Some(0) when[invoke(v1!: (T) -> Boolean, v0!: T): Boolean -> \
+             ImplicitCoercion<T?>(v0!: T), else -> Null: Null]: T?: Nothing}: Nothing}",
         ),
     ] {
         let selected = kotlin_function(&libraries, name);
