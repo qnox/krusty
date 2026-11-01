@@ -16,22 +16,18 @@ use std::path::{Path, PathBuf};
 
 mod maven_download;
 
-/// Locate a complete kotlin-stdlib jar from the dist or standard local caches, mirroring how a
-/// drop-in `kotlinc` user supplies it via `-classpath`. "Complete" = the jar's facades yield type
-/// aliases when scanned (so `Exception` etc. resolve). `None` if none is found.
+/// Locate the kotlin-stdlib jar from the dist or standard local caches, mirroring how a drop-in
+/// `kotlinc` user supplies it via `-classpath`. Each source names the exact reference release's
+/// artifact, and downloads are published atomically, so the jar is selected without reading it:
+/// its declarations are authenticated by the compilation that loads them, package by package.
+/// `None` if none is found.
 pub fn stdlib_jar() -> Option<PathBuf> {
     // Prefer the dist's own stdlib — the exact jar the reference compiler uses.
-    if let Some(j) = dist_jar("kotlin-stdlib.jar") {
-        let cp = Classpath::new(vec![j.clone()]);
-        if !cp.scan_types().is_empty() {
-            return Some(j);
-        }
-    }
-    let version = reference_version();
-    let jar = find_exact_dependency_jar("kotlin-stdlib", &version)
-        .or_else(|| ensure_maven("org.jetbrains.kotlin", "kotlin-stdlib", &version))?;
-    let cp = Classpath::new(vec![jar.clone()]);
-    (!cp.scan_types().is_empty()).then_some(jar)
+    dist_jar("kotlin-stdlib.jar").or_else(|| {
+        let version = reference_version();
+        find_exact_dependency_jar("kotlin-stdlib", &version)
+            .or_else(|| ensure_maven("org.jetbrains.kotlin", "kotlin-stdlib", &version))
+    })
 }
 
 /// A `Classpath` containing the located stdlib jar and the JDK, as kotlinc compiles against them
