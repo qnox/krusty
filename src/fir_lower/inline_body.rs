@@ -1466,14 +1466,22 @@ impl BodyLowering<'_> {
             let parameter = capture_count + u32::try_from(operand).ok()?;
             if receiver_parameter == Some(parameter) {
                 // The inlined callee's receiver and the invoked extension lambda's receiver are
-                // distinct semantic parameters, even though both receive the same value.
-                let callee_slot = self.allocate_temporary();
-                statements.push(self.ir.add_expr(IrExpr::Variable {
-                    index: callee_slot,
-                    ty,
-                    init: Some(value),
-                    named: false,
-                }));
+                // distinct semantic parameters, even though both receive the same value. A value
+                // already held in a local is the callee's receiver itself; copying it would be a
+                // slot the reference compiler does not emit.
+                let callee_slot = match self.ir.expr(value) {
+                    IrExpr::GetValue(held) => *held,
+                    _ => {
+                        let callee_slot = self.allocate_temporary();
+                        statements.push(self.ir.add_expr(IrExpr::Variable {
+                            index: callee_slot,
+                            ty,
+                            init: Some(value),
+                            named: false,
+                        }));
+                        callee_slot
+                    }
+                };
                 callee_receiver = Some(callee_slot);
                 let slot = self.allocate_temporary();
                 let read = self.ir.add_expr(IrExpr::GetValue(callee_slot));
