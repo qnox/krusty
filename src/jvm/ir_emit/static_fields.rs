@@ -238,7 +238,7 @@ pub(super) fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, env:
 /// field store. An explicit backing field's `field = …` and a `val x =` whose initializer starts on
 /// the next line both differ from the declaration line; generated storage has only the latter.
 pub(super) fn initializer_line(ir: &IrFile, s: &crate::ir::IrStatic, init: ExprId) -> u32 {
-    ir.expr_source_lines.get(&init).copied().unwrap_or(s.line)
+    ir.source_line(init).unwrap_or(s.line)
 }
 
 /// The HOISTED outer-class static backing a companion property of `c` (a companion class), if any:
@@ -1360,7 +1360,7 @@ impl Emitter<'_> {
         super::debug_lines::restore_initializer_store_line(initializer_line, code);
         // An inlined value leaves its own line in effect; kotlinc marks the statement's line
         // again at the store, as an instance field store does.
-        if self.ir.expr_source_lines.contains_key(&value) {
+        if self.ir.source_line(value).is_some() {
             if let Some(&statement_line) = self.ir.expr_lines.get(&statement) {
                 self.mark_expression_line(statement, statement_line, code);
             }

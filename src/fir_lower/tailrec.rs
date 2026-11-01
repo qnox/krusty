@@ -40,7 +40,7 @@ pub(super) fn finish_tailrec_body(
                 .pop()
                 .ok_or(FirLoweringFailure::MissingBodyResult { origin })?;
             let returned = generated(ir, IrExpr::Return(Some(value)), origin);
-            if let Some(&end) = ir.expr_end_lines.get(&value) {
+            if let Some(end) = ir.end_line(value) {
                 ir.mark_implicit_return_end_line(returned, end);
             }
             roots.push(returned);
@@ -221,11 +221,10 @@ fn tail_calls(ir: &IrFile, roots: &[ExprId], frame: &Frame, unit: bool) -> TailC
                 return;
             }
             let outer = self.line;
-            if let Some(&line) = self
+            if let Some(line) = self
                 .ir
-                .expr_source_lines
-                .get(&expression)
-                .or_else(|| self.ir.expr_lines.get(&expression))
+                .source_line(expression)
+                .or_else(|| self.ir.expr_lines.get(&expression).copied())
             {
                 self.line = Some(line);
             }
@@ -1457,8 +1456,8 @@ fn forget_lines(ir: &mut IrFile, root: ExprId) {
     let mut pending = vec![root];
     while let Some(expression) = pending.pop() {
         ir.expr_lines.remove(&expression);
-        ir.expr_source_lines.remove(&expression);
-        ir.expr_end_lines.remove(&expression);
+        ir.take_source_line(expression);
+        ir.take_end_line(expression);
         crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
     }
 }

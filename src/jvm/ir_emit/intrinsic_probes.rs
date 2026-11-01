@@ -55,7 +55,7 @@ impl Emitter<'_> {
             }
         };
         // The block ran as an inlined body, after which kotlinc writes the call's line afresh.
-        if let Some(&line) = self.ir.expr_source_lines.get(&point) {
+        if let Some(line) = self.ir.source_line(point) {
             if line != 0 {
                 // Closing the spliced lambda may already have put the call line on a trailing
                 // `nop`. The probe's first real instruction shares that line, so do not split the

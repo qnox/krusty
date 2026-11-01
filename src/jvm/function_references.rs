@@ -681,7 +681,7 @@ fn realize_own_invoke(
     // operands begin: at each parameter or captured value read, or at a constructed object's
     // `new`. Every other node enters it only at its dispatch, so a bound receiver's read stays
     // ahead of the line.
-    if let Some(line) = ir.expr_source_lines.get(&(expression as u32)).copied() {
+    if let Some(line) = ir.source_line(expression as u32) {
         // The bridge maps its whole body to the same line.
         ir.fn_decl_lines.insert(adapter, line);
         let parameter_count = function_type.params.len() as u32;
@@ -693,9 +693,9 @@ fn realize_own_invoke(
                 _ => false,
             };
             if marks {
-                ir.expr_source_lines.insert(current, line);
+                ir.set_source_line(current, line);
             } else {
-                ir.expr_source_lines.remove(&current);
+                ir.take_source_line(current);
                 ir.mark_dispatch_line(current, line);
             }
         }

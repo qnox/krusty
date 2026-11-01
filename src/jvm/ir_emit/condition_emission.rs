@@ -209,9 +209,7 @@ impl Emitter<'_> {
             return true;
         }
         self.emit_value(cond, code);
-        if let Some(&line) =
-            operand_line.and_then(|operand| self.ir.expr_source_lines.get(&operand))
-        {
+        if let Some(line) = operand_line.and_then(|operand| self.ir.source_line(operand)) {
             self.mark_expression_line(operand_line.unwrap_or(cond), line, code);
         }
         if jump_when_true {

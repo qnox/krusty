@@ -800,7 +800,7 @@ fn push_delegate_static(
 /// inlined operator's lines are mapped against.
 fn at_property_line(ir: &mut IrFile, call: ExprId, line: u32) {
     if line != 0 {
-        ir.expr_source_lines.insert(call, line);
+        ir.set_source_line(call, line);
     }
 }
 

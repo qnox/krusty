@@ -40,7 +40,7 @@ pub(super) fn vararg_value(
         elements,
     });
     if source_line != 0 {
-        ir.expr_source_lines.insert(value, source_line);
+        ir.set_source_line(value, source_line);
     }
     value
 }

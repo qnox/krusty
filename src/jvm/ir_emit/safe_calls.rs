@@ -265,9 +265,7 @@ pub(super) fn safe_call_selector_boundary(ir: &crate::ir::IrFile, expression: u3
 fn mark_safe_call_line(emitter: &mut Emitter<'_>, block: u32, code: &mut CodeBuilder) {
     let Some(line) = emitter
         .ir
-        .expr_source_lines
-        .get(&block)
-        .copied()
+        .source_line(block)
         .or_else(|| emitter.ir.expr_lines.get(&block).copied())
         .filter(|line| *line != 0)
     else {
@@ -386,9 +384,7 @@ fn reads_share_receiver_line(
     temporary: u32,
 ) -> bool {
     let line = |expression: u32| {
-        ir.expr_source_lines
-            .get(&expression)
-            .copied()
+        ir.source_line(expression)
             .or_else(|| super::debug_lines::safe_call_read_line(ir, expression))
     };
     let condition_read = match ir.expr(condition) {

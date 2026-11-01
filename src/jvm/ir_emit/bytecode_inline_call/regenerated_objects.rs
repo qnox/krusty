@@ -322,9 +322,8 @@ impl<'a> Emitter<'a> {
             source_file: self.cw.source_file_name(),
             call_line: self
                 .ir
-                .expr_source_lines
-                .get(&call_expression)
-                .and_then(|&line| u16::try_from(line.checked_sub(1)?).ok()),
+                .source_line(call_expression)
+                .and_then(|line| u16::try_from(line.checked_sub(1)?).ok()),
         }
     }
 }

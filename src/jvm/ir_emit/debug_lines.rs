@@ -133,9 +133,7 @@ impl Emitter<'_> {
             // when the normal-path finalizer left that same line in effect. An entirely one-line
             // `try { ... } finally { ... }` has no line transition at all, and kotlinc keeps only
             // the entry at pc 0 instead of repeating it at the catch-all handler.
-            if self.ir.expr_source_lines.get(&try_expression).copied()
-                == self.ir.expr_lines.get(&expression).copied()
-            {
+            if self.ir.source_line(try_expression) == self.ir.expr_lines.get(&expression).copied() {
                 code.mark_line(line);
             } else {
                 code.mark_control_entry_line(line);
@@ -154,7 +152,7 @@ impl Emitter<'_> {
         if let Some(line) = self
             .ir
             .implicit_return_end_line(returned)
-            .or_else(|| self.ir.expr_source_lines.get(&returned).copied())
+            .or_else(|| self.ir.source_line(returned))
             .or_else(|| self.ir.expr_lines.get(&returned).copied())
         {
             self.mark_expression_line(returned, line, code);
@@ -173,7 +171,7 @@ impl Emitter<'_> {
         if !states_line_before_operands(self.ir, expression) {
             return;
         }
-        if let Some(&line) = self.ir.expr_source_lines.get(&expression) {
+        if let Some(line) = self.ir.source_line(expression) {
             self.mark_expression_line(expression, line, code);
         }
     }
@@ -193,9 +191,7 @@ impl Emitter<'_> {
         }
         let Some(line) = self
             .ir
-            .expr_source_lines
-            .get(&expression)
-            .copied()
+            .source_line(expression)
             .or_else(|| safe_call_read_line(self.ir, expression))
         else {
             return;
@@ -215,7 +211,7 @@ impl Emitter<'_> {
     /// `andand`/`oror` intrinsic's own mark). Operand code marking another line at this same offset
     /// keeps the entry, as kotlinc's line table does.
     pub(super) fn mark_kept_start_line(&mut self, expression: ExprId, code: &mut CodeBuilder) {
-        let Some(&line) = self.ir.expr_source_lines.get(&expression) else {
+        let Some(line) = self.ir.source_line(expression) else {
             return;
         };
         if line != 0 && !code.is_dead() {
@@ -411,7 +407,7 @@ impl Emitter<'_> {
     /// first line stays in effect into the catch-all handler, whose identical mark can then
     /// deduplicate away.
     pub(super) fn mark_block_exit(&mut self, block: ExprId, code: &mut CodeBuilder) {
-        if let Some(&line) = self.ir.expr_end_lines.get(&block) {
+        if let Some(line) = self.ir.end_line(block) {
             if line != 0 {
                 self.mark_expression_line(block, line, code);
             }
@@ -446,7 +442,7 @@ impl Emitter<'_> {
                 .ir
                 .inline_copy_provenance(expression)
                 .is_some_and(|provenance| provenance.iter().any(|frame| frame.call_line.is_some()))
-            && self.ir.expr_source_lines.contains_key(&expression)
+            && self.ir.source_line(expression).is_some()
     }
 
     /// Common IR identifies an operation whose source line owns its generated leading operand.
@@ -466,7 +462,7 @@ impl Emitter<'_> {
         if let Some(line) = self
             .ir
             .dispatch_line(call)
-            .or_else(|| self.ir.expr_source_lines.get(&call).copied())
+            .or_else(|| self.ir.source_line(call))
         {
             if line != 0 {
                 code.mark_line_retained(line);
@@ -500,7 +496,7 @@ impl Emitter<'_> {
     /// compiler generated has no source line and no instruction of its own; the `nop` of a line
     /// that has other instructions is cleaned up with every other redundant `nop`.
     pub(super) fn mark_boolean_constant(&mut self, constant: ExprId, code: &mut CodeBuilder) {
-        let Some(&line) = self.ir.expr_source_lines.get(&constant) else {
+        let Some(line) = self.ir.source_line(constant) else {
             return;
         };
         if line != 0 {
@@ -585,7 +581,7 @@ impl Emitter<'_> {
     /// dispatch of its own to return to afterwards — the `invoke*` it ends with belongs to the
     /// inlined body, not to the call — so this REPLACES the dispatch mark rather than joining it.
     pub(super) fn mark_inline_call_site_line(&self, expression: ExprId, code: &mut CodeBuilder) {
-        if let Some(&line) = self.ir.expr_source_lines.get(&expression) {
+        if let Some(line) = self.ir.source_line(expression) {
             if line != 0 {
                 code.mark_line_retained(line);
             }

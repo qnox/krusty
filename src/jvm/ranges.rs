@@ -265,12 +265,7 @@ fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId) {
     if let Some(line) = ir.expr_lines.get(&source).copied() {
         ir.expr_lines.insert(target, line);
     }
-    if let Some(line) = ir.expr_source_lines.get(&source).copied() {
-        ir.expr_source_lines.insert(target, line);
-    }
-    if let Some(line) = ir.expr_end_lines.get(&source).copied() {
-        ir.expr_end_lines.insert(target, line);
-    }
+    ir.copy_position(source, target);
 }
 
 /// The JVM's counted loops: Java-like counter loops HotSpot recognizes, with the calls kotlinc

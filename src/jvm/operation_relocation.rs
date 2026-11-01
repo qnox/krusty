@@ -62,7 +62,9 @@ pub(super) fn clone_below_representation_wrapper(ir: &mut IrFile, source: ExprId
     // The source line is the call's: kotlinc marks it where the call starts and again at its
     // dispatch, and writes the representation adaptation after it with no line of its own. The
     // wrapper starts where the call does, so its start keeps the same mark.
-    move_fact!(expr_source_lines);
+    if let Some(line) = ir.take_source_line(source) {
+        ir.set_source_line(target, line);
+    }
     ir.move_generated_operand_start(source, target);
     ir.move_compiled_inline_call(source, target);
 

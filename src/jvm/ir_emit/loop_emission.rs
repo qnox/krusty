@@ -120,7 +120,7 @@ impl Emitter<'_> {
             //
             // The condition is inside this loop: `do { … } while (break)` leaves THIS loop.
             // Popping the loop first would make that transfer miss the loop it names.
-            if !self.ir.expr_source_lines.contains_key(&cond) {
+            if !self.ir.source_line(cond).is_some() {
                 debug_lines::mark_loop_control(loop_line, code);
             }
             let _ = self.emit_cond_branch(cond, start, true, code);

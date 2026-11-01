@@ -794,8 +794,8 @@ impl BodyLowering<'_> {
                     self.ir.exprs[copy as usize] = self.ir.expr(lambda).clone();
                     // The parameter read's end line is the callee's `block(this)`. The splice's
                     // closing `nop` belongs on the call-site lambda's `}`.
-                    if let Some(&end) = self.ir.expr_end_lines.get(&lambda) {
-                        self.ir.expr_end_lines.insert(copy, end);
+                    if let Some(end) = self.ir.end_line(lambda) {
+                        self.ir.set_end_line(copy, end);
                     }
                     // The parameter read carried the inline body's line. A callable reference is
                     // the call site's expression: the spliced invocation keeps that line, and the
@@ -803,12 +803,12 @@ impl BodyLowering<'_> {
                     if matches!(self.ir.expr(lambda), IrExpr::CallableReference(_)) {
                         // A copy that an invocation splices is marked there. A copy the body
                         // evaluates (an object capturing the reference) stays a carrier.
-                        match self.ir.expr_source_lines.get(&lambda).copied() {
+                        match self.ir.source_line(lambda) {
                             Some(line) => {
-                                self.ir.expr_source_lines.insert(copy, line);
+                                self.ir.set_source_line(copy, line);
                             }
                             None => {
-                                self.ir.expr_source_lines.remove(&copy);
+                                self.ir.take_source_line(copy);
                             }
                         }
                     }
@@ -1139,7 +1139,7 @@ impl BodyLowering<'_> {
                 let unit = self.ir.add_expr(IrExpr::UnitInstance);
                 frame.record_copy(self.ir, unit, function);
                 if let Some(line) = close_line {
-                    self.ir.expr_source_lines.insert(unit, line);
+                    self.ir.set_source_line(unit, line);
                 }
                 self.ir.retain_inline_unit_line(unit);
                 Some(unit)
@@ -1435,7 +1435,7 @@ impl BodyLowering<'_> {
         // locals first and then anchor the surrounding inline body. Non-empty bodies already
         // restore that line through their emitted effect and must not gain a duplicate boundary.
         if let Some(unit) = unit_only_body_result(self.ir, body) {
-            if let Some(line) = self.ir.expr_source_lines.get(&invocation).copied() {
+            if let Some(line) = self.ir.source_line(invocation) {
                 // With no body instruction, argument evaluation is the invocation's first
                 // physical instruction. Put that source point on the generated bindings; an
                 // enclosing inline copy maps it through the caller frame retained below.
@@ -1444,15 +1444,15 @@ impl BodyLowering<'_> {
                     self.ir.copy_inline_copy_mark(invocation, declaration);
                 }
                 self.ir.copy_inline_copy_mark(invocation, unit);
-                self.ir.expr_source_lines.insert(unit, line);
+                self.ir.set_source_line(unit, line);
                 self.ir.retain_inline_unit_line(unit);
             }
         }
         if indexed_parameters {
-            if let Some(line) = self.ir.expr_source_lines.get(&func).copied() {
+            if let Some(line) = self.ir.source_line(func) {
                 // The adapter was built as its own method and has no source position. The splice
                 // is the reference expression, so this call keeps that line.
-                self.ir.expr_source_lines.insert(body, line);
+                self.ir.set_source_line(body, line);
             }
         }
         let local_base = self.next_temporary;
@@ -1475,8 +1475,8 @@ impl BodyLowering<'_> {
         };
         // The closing `nop` is the lambda literal's last line (its `}`), which is otherwise a
         // line that already holds the call and the nop cleanup would delete.
-        if let Some(end) = self.ir.expr_end_lines.get(&func).copied() {
-            self.ir.expr_end_lines.insert(invocation, end);
+        if let Some(end) = self.ir.end_line(func) {
+            self.ir.set_end_line(invocation, end);
         }
         // The spliced body's own calls are the suspension points now, not the invocation.
         self.ir.suspend_calls.remove(&invocation);
@@ -2133,16 +2133,14 @@ fn produce_sole_tail_return(
         let unit = ir.add_expr(IrExpr::UnitInstance);
         ir.copy_inline_copy_mark(tail, unit);
         if let Some(line) = ir
-            .expr_source_lines
-            .get(&tail)
-            .copied()
-            .or_else(|| ir.expr_source_lines.get(&effect).copied())
+            .source_line(tail)
+            .or_else(|| ir.source_line(effect))
             .or_else(|| ir.fallthrough_return_line(tail))
-            .or_else(|| ir.expr_end_lines.get(&tail).copied())
-            .or_else(|| ir.expr_end_lines.get(&root).copied())
+            .or_else(|| ir.end_line(tail))
+            .or_else(|| ir.end_line(root))
             .or(close_line)
         {
-            ir.expr_source_lines.insert(unit, line);
+            ir.set_source_line(unit, line);
         }
         ir.retain_inline_unit_line(unit);
         produced = ir.add_expr(IrExpr::Block {
@@ -2152,17 +2150,15 @@ fn produce_sole_tail_return(
     }
     if matches!(ir.expr(produced), IrExpr::UnitInstance) {
         ir.copy_inline_copy_mark(tail, produced);
-        if !ir.expr_source_lines.contains_key(&produced) {
+        if !ir.source_line(produced).is_some() {
             if let Some(line) = ir
-                .expr_source_lines
-                .get(&tail)
-                .copied()
+                .source_line(tail)
                 .or_else(|| ir.fallthrough_return_line(tail))
-                .or_else(|| ir.expr_end_lines.get(&tail).copied())
-                .or_else(|| ir.expr_end_lines.get(&root).copied())
+                .or_else(|| ir.end_line(tail))
+                .or_else(|| ir.end_line(root))
                 .or(close_line)
             {
-                ir.expr_source_lines.insert(produced, line);
+                ir.set_source_line(produced, line);
             }
         }
         ir.retain_inline_unit_line(produced);

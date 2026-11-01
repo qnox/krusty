@@ -1130,7 +1130,7 @@ fn constructor_arguments(
                     crate::ir::IrConst::zero_for_value_type(*parameters.get(parameter)?),
                 ));
                 if let Some(line) = delegation_line {
-                    ir.expr_source_lines.insert(placeholder, line);
+                    ir.set_source_line(placeholder, line);
                 }
                 Some(placeholder)
             }

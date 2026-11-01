@@ -100,10 +100,10 @@ impl BodyLowering<'_> {
                                 self.ir.mark_positionless(lowered);
                             }
                             if debug.source != 0 {
-                                self.ir.expr_source_lines.insert(lowered, debug.source);
+                                self.ir.set_source_line(lowered, debug.source);
                             }
                             if debug.end != 0 {
-                                self.ir.expr_end_lines.insert(lowered, debug.end);
+                                self.ir.set_end_line(lowered, debug.end);
                             }
                             Ok(lowered)
                         }
@@ -1523,7 +1523,7 @@ impl BodyLowering<'_> {
             self.ir.mark_positionless(lowered);
         }
         if debug.source != 0 {
-            self.ir.expr_source_lines.insert(lowered, debug.source);
+            self.ir.set_source_line(lowered, debug.source);
             // The builtin call this node realizes, when lowering made a node of its own for it.
             if let Some(call) = builtin_call.filter(|_| lowered as usize >= first_generated) {
                 self.ir.builtin_calls.insert(lowered, call);
@@ -1531,27 +1531,24 @@ impl BodyLowering<'_> {
             // A call whose operands were stored first keeps the call's line on the call itself, which
             // kotlinc marks once those operands are evaluated.
             if let Some(&call) = self.operand_bound_calls.get(&lowered) {
-                self.ir
-                    .expr_source_lines
-                    .entry(call)
-                    .or_insert(debug.source);
+                self.ir.set_source_line_if_absent(call, debug.source);
             }
             for raw in first_generated..self.ir.exprs.len() {
                 let raw = raw as u32;
                 if !self.ir.suspend_calls.contains_key(&raw) {
                     continue;
                 }
-                self.ir.expr_source_lines.entry(raw).or_insert(debug.source);
+                self.ir.set_source_line_if_absent(raw, debug.source);
             }
         }
         if debug.end != 0 {
-            self.ir.expr_end_lines.insert(lowered, debug.end);
+            self.ir.set_end_line(lowered, debug.end);
             for raw in first_generated..self.ir.exprs.len() {
                 let raw = raw as u32;
                 if !self.ir.suspend_calls.contains_key(&raw) {
                     continue;
                 }
-                self.ir.expr_end_lines.entry(raw).or_insert(debug.end);
+                self.ir.set_end_line_if_absent(raw, debug.end);
             }
         }
         self.record_expression_origins(first_generated, lowered, origin);
@@ -1667,12 +1664,9 @@ impl BodyLowering<'_> {
         // The conversion remains the same checked source operation. Keep its position on the
         // original producer and on the selected call inside an operand-evaluation block.
         if source_line != 0 {
-            self.ir.expr_source_lines.entry(call).or_insert(source_line);
+            self.ir.set_source_line_if_absent(call, source_line);
             if let Some(&selected) = self.operand_bound_calls.get(&call) {
-                self.ir
-                    .expr_source_lines
-                    .entry(selected)
-                    .or_insert(source_line);
+                self.ir.set_source_line_if_absent(selected, source_line);
             }
         }
         let coercion = self.ir.add_expr(IrExpr::TypeOp {
@@ -1729,10 +1723,10 @@ impl BodyLowering<'_> {
                 self.ir.mark_positionless(lowered);
             }
             if debug.source != 0 {
-                self.ir.expr_source_lines.insert(lowered, debug.source);
+                self.ir.set_source_line(lowered, debug.source);
             }
             if debug.end != 0 {
-                self.ir.expr_end_lines.insert(lowered, debug.end);
+                self.ir.set_end_line(lowered, debug.end);
             }
             self.record_expression_origins(first_generated, lowered, origin);
             return Ok(lowered);
@@ -1743,8 +1737,8 @@ impl BodyLowering<'_> {
             matches!(conversion.kind, FirConversionKind::FunctionValue { .. })
         }) {
             // The checker named the class a function-value conversion compiles to on its value.
-            if let Some(&line) = self.ir.expr_source_lines.get(&expression) {
-                self.ir.expr_source_lines.insert(converted, line);
+            if let Some(line) = self.ir.source_line(expression) {
+                self.ir.set_source_line(converted, line);
             }
             self.record_generated_class_provenance(value, converted as usize);
         }
@@ -2177,7 +2171,7 @@ impl BodyLowering<'_> {
             let null = self.ir.add_expr(IrExpr::Const(IrConst::Null));
             let line = self.body.expression_debug_lines(safe_call).source;
             if line != 0 {
-                self.ir.expr_source_lines.insert(null, line);
+                self.ir.set_source_line(null, line);
             }
             null
         };

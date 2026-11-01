@@ -81,7 +81,7 @@ fn placed_suspensions(
             }
             let continuation = ir.add_expr(IrExpr::CurrentContinuation);
             if let Some(line) = ir.dispatch_line(suspension.call) {
-                ir.expr_source_lines.insert(continuation, line);
+                ir.set_source_line(continuation, line);
             }
             if !append_continuation(
                 ir,

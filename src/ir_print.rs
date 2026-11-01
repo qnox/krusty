@@ -43,7 +43,7 @@ pub fn write_ir_file(out: &mut impl fmt::Write, ir: &IrFile) -> fmt::Result {
     writeln!(out, "\nexprs ({})", ir.exprs.len())?;
     for (id, expr) in ir.exprs.iter().enumerate() {
         let key = id as u32;
-        let line = match ir.expr_source_lines.get(&key) {
+        let line = match ir.source_line(key) {
             Some(line) => format!("line={line}"),
             None => "line=?".to_string(),
         };

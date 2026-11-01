@@ -484,7 +484,7 @@ impl SerializeBody<'_> {
                                 .copied()
                                 .filter(|line| *line != 0)
                             {
-                                ir.expr_source_lines.insert(def, line);
+                                ir.set_source_line(def, line);
                             }
                         }
                         def

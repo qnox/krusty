@@ -94,7 +94,7 @@ impl Emitter<'_> {
         };
         if operands
             .iter()
-            .any(|operand| self.ir.expr_source_lines.contains_key(operand))
+            .any(|&operand| self.ir.source_line(operand).is_some())
         {
             code.mark_line(line);
         }
@@ -146,9 +146,7 @@ impl Emitter<'_> {
     ) -> R {
         let line = self
             .ir
-            .expr_source_lines
-            .get(&expression)
-            .copied()
+            .source_line(expression)
             .map(|line| (expression, line));
         let outer = std::mem::replace(&mut self.comparison_line, line);
         let result = emit(self);
