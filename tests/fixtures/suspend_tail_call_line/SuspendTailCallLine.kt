@@ -49,6 +49,14 @@ class Service(private val store: Store) {
         }
     }
 
+    // A `when` of non-`Unit` calls, coerced to `Unit` as the last statement.
+    suspend fun coerced(id: String) {
+        if (id.isEmpty()) store.count() else {
+            store.record(id)
+            store.count()
+        }
+    }
+
     // A call followed by another statement is not a tail call.
     suspend fun twice(id: String) {
         store.record(id)
@@ -69,6 +77,7 @@ suspend fun exercise(service: Service): Int {
     service.discarded("c")
     service.branches("d")
     service.branches("ee")
+    service.coerced("g")
     return service.measured("f")
 }
 
@@ -78,5 +87,5 @@ fun box(): String {
     var result = -1
     val run: suspend () -> Unit = { result = exercise(service) }
     run.startCoroutine(Done())
-    return if (result == 9 && store.log.toString() == "abconeeef") "OK" else "fail ${store.log} $result"
+    return if (result == 10 && store.log.toString() == "abconeeegf") "OK" else "fail ${store.log} $result"
 }

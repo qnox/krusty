@@ -280,9 +280,14 @@ fn collect_tail_calls(
             op: IrTypeOp::ImplicitCoercion,
             arg,
             type_operand,
-        } if type_operand == Ty::Unit && tail_calls.contains(&arg) => {
-            if let Some(slot) = slot.filter(|_| !immediate_return) {
-                found.push((expression, slot));
+        } if type_operand == Ty::Unit => {
+            if tail_calls.contains(&arg) {
+                if let Some(slot) = slot.filter(|_| !immediate_return) {
+                    found.push((expression, slot));
+                }
+            } else {
+                // kotlinc visits the coerced operand: a block or `when` keeps its tail positions.
+                recurse(arg, None, false, found);
             }
         }
         _ => {}
