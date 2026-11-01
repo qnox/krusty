@@ -18724,11 +18724,14 @@ impl<'a> Checker<'a> {
                         let lambda_parameter = semantic_parameter.map(|parameter| {
                             let packed =
                                 sig.vararg_index == Some(pi) && !self.file.is_spread_arg(a);
-                            if packed {
+                            let parameter = if packed {
                                 parameter.array_read_elem().unwrap_or(parameter)
                             } else {
                                 parameter
-                            }
+                            };
+                            // A declared function classifier (`Function1<Any?, *>`) is the same
+                            // function shape as its `(Any?) -> Any?` spelling.
+                            self.declared_function_semantic_type(parameter)
                         });
                         if let (Some(TyKind::Fun(expected_function)), true) = (
                             lambda_parameter.map(|ty| ty.kind()),

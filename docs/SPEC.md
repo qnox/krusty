@@ -23605,7 +23605,8 @@ receiver's own source member still outranks its extensions. Tests:
 
 A lambda that omits its parameter list gets the implicit `it` parameter only when its contextual
 type is a function type with exactly one value parameter. That covers a typed declaration, a branch
-of one, a selected higher-order or fun-interface parameter, and an explicit type argument. Without
+of one, a selected higher-order or fun-interface parameter (also when it is declared as a function
+classifier such as `Function1<Any?, *>`), and an explicit type argument. Without
 such a type the lambda declares no parameters, so a use of `it` in its body is "unresolved
 reference 'it'". This holds for an `Any` or type-variable expectation, a `() -> R` parameter, a
 collection element, a branch with no expectation, and a bare `val f = { it }`. The name in the
