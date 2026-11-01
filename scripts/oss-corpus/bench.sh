@@ -49,6 +49,7 @@ common=(-I "$here/corpus.init.gradle" --no-configure-on-demand --no-configuratio
 with_krusty=(-I "$here/krusty.init.gradle" -Pkrusty.binary="$krusty")
 
 probe=$logs/$name.probe
+rm -f "$probe".*
 (
   cd "$root"
   CORPUS_COMPILATIONS=$probe.compilations.tsv CORPUS_SOURCES=$probe.sources.tsv \
@@ -57,6 +58,10 @@ probe=$logs/$name.probe
     timeout 5400 ./gradlew --no-daemon "${common[@]}" "${with_krusty[@]}" \
     corpusCompile --continue --rerun-tasks
 ) >"$probe.log" 2>&1 || true
+if [ ! -f "$probe.compilations.tsv" ]; then
+  echo "$name: the probe build recorded no compile-task inventory; see $probe.log" >&2
+  exit 1
+fi
 python3 "$here/bench.py" plan "$logs" "$name" "$root" "$bench/$name/plan.json"
 
 # Each session leaves the edited file as it found it and stops its daemons, so the second compiler
