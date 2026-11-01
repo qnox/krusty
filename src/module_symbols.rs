@@ -571,6 +571,7 @@ impl<'a> ModuleSymbols<'a> {
             retention: None,
             annotation_targets: None,
             mapped_collection: None,
+            mapped_builtin: false,
             annotation_element_defaults: Vec::new(),
             deprecation: None,
         };
@@ -1056,6 +1057,7 @@ fn fn_info(
         member_realization: crate::libraries::MemberRealization::Dispatch,
         inline: InlineKind::from_flags(sig.is_inline(), sig.requires_splice()),
         default_call: false,
+        defaults_from_declaration: false,
         vararg_elem: None,
         vararg_index: None,
         signature: None,
@@ -1186,6 +1188,7 @@ fn source_callable(
         member_realization: crate::libraries::MemberRealization::Dispatch,
         inline: InlineKind::None,
         default_call: false,
+        defaults_from_declaration: false,
         vararg_elem: None,
         vararg_index: None,
         signature: None,
@@ -1343,8 +1346,8 @@ impl SymbolSource for ModuleSymbols<'_> {
         self.type_parameter_bounds(name)
     }
 
-    fn sam_with_receiver_annotations(&self) -> &[TypeName] {
-        &self.syms.sam_with_receiver_annotations
+    fn annotation_conventions(&self) -> &crate::symbol_source::AnnotationConventions {
+        &self.syms.annotation_conventions
     }
 
     fn package_exists(&self, parent: TypeName, name: &str) -> bool {

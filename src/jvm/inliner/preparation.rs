@@ -21,11 +21,13 @@ const INLINED_LOCAL_SUFFIX: &str = "$iv";
 /// parameters after the body's own (`capturedParamsSize` words, which the body's locals move up
 /// by). An `@InlineOnly` body loses its line numbers and local variables (nobody steps into it),
 /// any other body keeps both, its locals renamed by the old scheme (`x` → `x$iv`, `this` →
-/// `this_$iv`).
+/// `this_$iv`). A body whose scopes are `numbered` already carries its new names, and only its
+/// `this` becomes the declaration-site `this_`.
 pub(super) fn prepare(
     callee: &MethodNode,
     inline_only: bool,
     parameters: &Parameters,
+    numbered: bool,
 ) -> MethodNode {
     let mut node = callee.clone();
     add_captured_parameters(&mut node, parameters);
@@ -37,6 +39,10 @@ pub(super) fn prepare(
     }
     for local in &mut node.local_variables {
         if local.name.starts_with(INLINE_FUNCTION_MARKER_PREFIX) {
+            continue;
+        }
+        if numbered {
+            local.name = super::inline_scopes::declaration_site_name(&local.name);
             continue;
         }
         let prefix = if local.name == "this" {

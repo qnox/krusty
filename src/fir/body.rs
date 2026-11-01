@@ -324,6 +324,9 @@ pub enum FirCallTarget {
         /// to the checked call, not to its provider-owned physical realization: a nearer override
         /// may inherit the role without changing its stable dependency identity.
         semantic_role: Option<crate::types::SemanticCallRole>,
+        /// The selected declaration carries `@IntrinsicConstEvaluation`: with constant operands,
+        /// its call is a compile-time constant whose operation `semantic_role` names.
+        intrinsic_const: bool,
         /// Exact identities of the declarations the selected declaration overrides, as the member
         /// hierarchy proved them. Lowering freezes them with the stable dependency identity, so a
         /// target keys a specially implemented language declaration on them, never on the call.

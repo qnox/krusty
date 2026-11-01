@@ -37,11 +37,17 @@ impl Checker<'_> {
         });
         let scope = anonymous_scope.as_ref().unwrap_or(scope);
         // Base class constructor args are evaluated before the body and may reference ctor params.
-        // A LAMBDA arg is typed against the selected super ctor's parameter type (a receiver
-        // lambda's `this` scope comes from that expected type), so it is deferred here and
-        // checked below once the ctor is resolved; anything else is typed up front.
+        // A LAMBDA or callable reference arg is typed against the selected super ctor's parameter
+        // type (a receiver lambda's `this` scope and a reference's function shape come from that
+        // expected type), so it is postponed here and checked below once the ctor is resolved;
+        // anything else is typed up front.
         let file = self.file;
-        let is_lambda = |arg: ExprId| matches!(file.expr(arg), Expr::Lambda { .. });
+        let is_postponed = |arg: ExprId| {
+            matches!(
+                file.expr(arg),
+                Expr::Lambda { .. } | Expr::CallableRef { .. }
+            )
+        };
         let static_this = current_owner
             .and_then(|owner| self.applied_declared_supertype(owner))
             .and_then(Ty::kotlin_class_internal)
@@ -72,6 +78,15 @@ impl Checker<'_> {
                     }),
             );
             let header_scope = &header_scope;
+            if is_anonymous_object {
+                self.constructor_receiver_frames.push(
+                    super::constructor_receiver_frames::ConstructorReceiverFrame::new(
+                        d,
+                        header_scope,
+                        lexical_scope,
+                    ),
+                );
+            }
             let previous_static_this =
                 std::mem::replace(&mut self.static_companion_this, static_this);
             let previous_singleton_this =
@@ -86,7 +101,7 @@ impl Checker<'_> {
                 let previous_capture_accounting = c.suppress_receiver_capture_accounting;
                 c.suppress_receiver_capture_accounting = is_anonymous_object;
                 for &arg in &cl.base_args {
-                    if !is_lambda(arg) {
+                    if !is_postponed(arg) {
                         c.expr(header_scope, arg);
                     }
                 }
@@ -130,7 +145,7 @@ impl Checker<'_> {
                     {
                         let selected = *selected;
                         if let Some(receiver) = &selected.outer_receiver {
-                            c.mark_selected_implicit_receiver_used(header_scope, receiver);
+                            c.mark_selected_implicit_receiver_used(header_scope, receiver, d);
                         }
                         crate::trace_compiler!(
                             "fir",
@@ -161,7 +176,13 @@ impl Checker<'_> {
                             // argument-side evidence of its own (`Base<String>(Value("x"))`)
                             // and must publish `Value<String>` before checked FIR validates
                             // its substitutions.
-                            let actual = c.expr_types[arg.0 as usize];
+                            let actual = if matches!(file.expr(arg), Expr::CallableRef { .. })
+                                && !expected.non_null().is_fun()
+                            {
+                                c.expr(header_scope, arg)
+                            } else {
+                                c.expr_types[arg.0 as usize]
+                            };
                             c.expect_call_arg_labeled(
                                 header_scope,
                                 expected,
@@ -185,7 +206,7 @@ impl Checker<'_> {
                         // No unique ctor match: type the deferred lambda args without an expected type.
                         c.suppress_receiver_capture_accounting = is_anonymous_object;
                         for &arg in &cl.base_args {
-                            if is_lambda(arg) {
+                            if is_postponed(arg) {
                                 c.expr(header_scope, arg);
                             }
                         }
@@ -203,6 +224,11 @@ impl Checker<'_> {
             });
             self.static_companion_this = previous_static_this;
             self.static_singleton_this = previous_singleton_this;
+        }
+        if is_anonymous_object {
+            self.constructor_receiver_frames
+                .pop()
+                .expect("anonymous constructor receiver frame");
         }
     }
 }

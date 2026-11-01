@@ -96,7 +96,8 @@ pub(super) fn inline_into(
     let lambda_expansion::Expanded {
         mut node,
         lambda_blocks,
-    } = lambda_expansion::expand(&node, &context, invokes, &mut method_lines).map_err(inlining)?;
+    } = lambda_expansion::expand(&node, &context, invokes, &mut method_lines, None)
+        .map_err(inlining)?;
     super::super::try_blocks::order_around_finally_blocks(&mut node, lambda_blocks);
     if let Some(error) = method_lines.failed {
         return Err(error);

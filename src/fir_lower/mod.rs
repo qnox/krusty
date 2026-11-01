@@ -416,6 +416,9 @@ struct BodyLowering<'a> {
     /// Nesting depth of the recursive expression funnel, used to decide when to re-check the
     /// remaining stack. See [`BodyLowering::expression`].
     expression_depth: u32,
+    /// The start line of the elvis chain whose next link is being lowered. kotlinc folds
+    /// `a ?: b ?: c` into one chain, so every later link declares its temporary at the chain's start.
+    elvis_chain_start: Option<u32>,
     /// The executable scope the classes this body declares or generates belong to.
     enclosure: Option<crate::ir::IrEnclosure>,
     /// The declaration whose body or default fragment contains an inline expansion. Unlike
@@ -737,6 +740,7 @@ impl<'a> BodyLowering<'a> {
             declaration_lambda: None,
             in_default_argument: body.is_default_fragment(),
             expression_depth: 0,
+            elvis_chain_start: None,
             root_block: root_scope_block(body),
             lowered_root_block: None,
             operand_bound_calls: HashMap::default(),
@@ -1217,6 +1221,11 @@ fn consume_trailing_unit_result(ir: &mut IrFile, roots: &mut Vec<ExprId>) {
             // intact: flattening it would also flatten its lexical scope and extend the inlined
             // locals through the caller's return.
             if ir.retains_inline_unit_line(*value) {
+                return;
+            }
+            // A dependency's inline expansion closes its frame on the block itself, which writes
+            // the declaration's closing line on a `nop`. A replacement block would not own it.
+            if ir.external_frame_closes.contains_key(&trailing) {
                 return;
             }
             let effects = stmts.clone();

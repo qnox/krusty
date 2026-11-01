@@ -986,21 +986,31 @@ impl Emitter<'_> {
 
         // Like any call, an inline call states its line once its arguments are evaluated; that line
         // is the call site the body's lines are mapped against.
+        let since = match code.value_boundary_here() {
+            Some((first, value)) if debug_lines::evaluates_to(self.ir, value, call_expression) => {
+                first
+            }
+            _ => code.line_entry_count(),
+        };
         self.mark_expression_start(call_expression, code);
         let caller_line = code.current_line();
         let call_line = caller_line.unwrap_or(1);
         // An `@InlineOnly` body whose ordinary arguments are movable evaluates them where the
-        // copied body first loads their temporary. The eager expression boundary above exists so
-        // the call line can anchor the body's source-map interval, but it must not claim the
-        // generated prefix before that first source argument. Withdrawing it leaves the enclosing
-        // inline line in effect until emitting the in-place operand marks the call-site line.
-        if supplies.contains(&Supply::InPlace)
-            && !inliner::in_place_arguments_begin_at_entry(callee)
-        {
-            code.withdraw_line();
-        }
+        // copied body loads their temporary. kotlinc generated that code, with its lines, before
+        // the call marked its own line, so the entry is settled once the body has placed them.
+        let deferred_line = if supplies.contains(&Supply::InPlace) {
+            code.defer_line_mark(since)
+        } else {
+            None
+        };
         let claimable = self.claimable_lines();
         let bodies = self.bodies;
+        // The body is numbered from the method's scopes so far, its own scope at the call's line
+        // (`currentCallSiteLineNumber = lastLineNumber`).
+        let mut scopes = self.inline_scopes.take().map(|mut scopes| {
+            scopes.call_site_line = caller_line.map_or(-1, i32::from);
+            scopes
+        });
         let mut lines = CallLines {
             emitter: self,
             body,
@@ -1038,11 +1048,16 @@ impl Emitter<'_> {
                 classes: &bodies,
                 objects: &mut objects,
                 enum_entries: &mut enum_entries,
+                scopes: scopes.as_mut(),
             },
         );
+        self.inline_scopes = scopes;
         let inlined = match inlined {
             Ok(inlined) => inlined,
             Err(error) => {
+                if let Some(deferred) = deferred_line {
+                    code.settle_deferred_line(deferred);
+                }
                 for lease in leases {
                     self.release_temporary(lease);
                 }
@@ -1081,6 +1096,9 @@ impl Emitter<'_> {
             code.set_stack_height(0);
         }
         self.write_inlined_node(&inlined, placement, code);
+        if let Some(deferred) = deferred_line {
+            code.settle_deferred_line(deferred);
+        }
         if spills_operands {
             code.inline_call_marker(false);
             code.set_stack_height(saved + code.stack_height());

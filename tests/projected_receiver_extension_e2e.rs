@@ -411,7 +411,8 @@ fn anonymous_factory_aliased_parent_runs_like_kotlinc() {
     common::expect_box_same_as_kotlinc(ANONYMOUS_ALIASED_PARENT, "anonymous_aliased_parent");
 }
 
-// Complete constructor-alias inference oracles are retained in #2655 with independent baselines.
+// Complete constructor-alias inference oracles live in
+// typealias_constructor_inference_e2e::parameterized_parent_aliases.
 
 const ANONYMOUS_INTERFACE_PARENT_ALIASES: &str = r#"
 interface Token<T>
@@ -536,4 +537,24 @@ fun starThenOut(value: Bucket<*, out Number>) {
 }
 "#;
     common::assert_errors_match_kotlinc(&[("Main.kt", source)], &[]);
+}
+
+#[test]
+fn an_in_projected_receiver_formal_reads_nothing_from_an_out_projected_argument() {
+    // `Expr<out Any>` and `Expr<*>` are `Expr<in S>` only for `S = Nothing`: the extension
+    // applies, and its result exposes `Nothing`, as kotlinc reports.
+    let source = "open class Expr<T>\n\
+fun <S> Expr<in S>.sel(): List<S> = emptyList()\n\
+fun f(c: Expr<out Any>): Int = c.sel()\n\
+fun g(c: Expr<*>): Int = c.sel()\n";
+    let sources = [("Main.kt", source)];
+    let reference_args = common::language_directives::kotlinc_args(source);
+    assert_eq!(
+        common::reference_error_blocks(&sources, &reference_args),
+        [
+            "Main.kt:3:32: return type mismatch: expected 'Int', actual 'List<Nothing>'.",
+            "Main.kt:4:26: return type mismatch: expected 'Int', actual 'List<Nothing>'.",
+        ]
+    );
+    common::assert_error_blocks_match_kotlinc(&sources, &reference_args);
 }

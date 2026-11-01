@@ -5,8 +5,11 @@ build with the krusty Gradle plugin).
 usage: compare.py <work dir> <name> <reference build exit code>
 
 Reads <work dir>/out/<name>/{kotlinc,krusty}, <work dir>/logs/<name>.kotlinc.compilations.tsv (the
-reference build's compile tasks and their output directories) and <work dir>/logs/<name>.krusty.log
-(fallback reasons and the first error of each failed compile). Writes
+reference build's compile tasks and their output directories), <work dir>/logs/<name>.krusty.log
+(fallback reasons and the first error of each failed compile), and each build's
+<work dir>/logs/<name>.<mode>.metrics.json and <name>.<mode>.tasks.tsv (what the build cost, and when
+each task ran), and <work dir>/logs/<name>.krusty.folded when the krusty build was sampled (its
+call stacks, ranked into the functions krusty spends the most time in). Writes
 <work dir>/out/<name>/compare.json and prints one line per compilation.
 """
 import glob
@@ -14,6 +17,8 @@ import json
 import os
 import re
 import sys
+
+import hotspots
 
 
 def fallbacks(log_path):
@@ -103,6 +108,51 @@ def compilations(manifest):
         return []
 
 
+def task_seconds(path):
+    """{task path: seconds it ran} from the task times `corpus.init.gradle` records."""
+    seconds = {}
+    try:
+        with open(path) as f:
+            for line in f:
+                fields = line.rstrip('\n').split('\t')
+                if len(fields) == 4:
+                    seconds[fields[0]] = (int(fields[2]) - int(fields[1])) / 1000
+    except OSError:
+        pass
+    return seconds
+
+
+def compile_seconds(times, task, mode):
+    """A compilation's compile time in one build, or None when none of its tasks ran. kotlinc's is
+    the Kotlin task; krusty's adds the replacement and its support check, and the Kotlin task, which
+    is kotlinc's compile when the plugin leaves the compilation to it."""
+    tasks = [task] if mode == 'kotlinc' else [task, task + 'KrustyCheck', task + 'WithKrusty']
+    ran = [times[t] for t in tasks if t in times]
+    return round(sum(ran), 2) if ran else None
+
+
+def build_cost(work, name, mode, rows):
+    """What one build cost: `measure.py`'s record of the whole build, and the compile time of every
+    compared compilation and of those krusty built, or None when the build was not measured."""
+    try:
+        with open(os.path.join(work, 'logs', f'{name}.{mode}.metrics.json')) as f:
+            cost = json.load(f)
+    except OSError:
+        return None
+    cost.pop('exit', None)
+    cost['compile_seconds'] = round(sum(r['seconds'][mode] or 0 for r in rows), 1)
+    cost['built_compile_seconds'] = round(sum(r['seconds'][mode] or 0 for r in rows if r['built']), 1)
+    return cost
+
+
+def sampled_hotspots(folded):
+    """The functions the sampled krusty build spent the most time in, or None when it was not
+    sampled."""
+    if not os.path.exists(folded):
+        return None
+    return hotspots.rank(hotspots.read_folded(folded))
+
+
 def files(d):
     return {os.path.relpath(p, d): p for p in glob.glob(d + '/**/*', recursive=True) if os.path.isfile(p)}
 
@@ -139,6 +189,8 @@ def compare(work, name):
         failure = build_failure(log)
         if failure:
             not_run = 'not run: the krusty build failed: ' + failure
+    times = {mode: task_seconds(os.path.join(work, 'logs', f'{name}.{mode}.tasks.tsv'))
+             for mode in ('kotlinc', 'krusty')}
     rows, empty = [], []
     for task, rel in compilations(os.path.join(work, 'logs', name + '.kotlinc.compilations.tsv')):
         reference = files(os.path.join(kotlinc, rel))
@@ -160,7 +212,8 @@ def compare(work, name):
         rows.append(dict(task=task, dir=rel, built=built, fallback=fallback, error=error, classes=classes,
                          identical=identical if built else 0,
                          only_kotlinc=len(set(reference) - set(candidate)) if built else None,
-                         only_krusty=len(set(candidate) - set(reference)) if built else None))
+                         only_krusty=len(set(candidate) - set(reference)) if built else None,
+                         seconds={mode: compile_seconds(times[mode], task, mode) for mode in times}))
     return rows, empty
 
 
@@ -175,6 +228,8 @@ def main():
         built=sum(r['built'] for r in rows),
         classes=sum(r['classes'] for r in rows),
         identical=sum(r['identical'] for r in rows),
+        cost={mode: build_cost(work, name, mode, rows) for mode in ('kotlinc', 'krusty')},
+        hotspots=sampled_hotspots(os.path.join(work, 'logs', f'{name}.krusty.folded')),
         rows=rows,
         no_reference_classes=empty,
     )
@@ -182,6 +237,11 @@ def main():
         json.dump(summary, f, indent=1)
     print(f"{name}: reference exit {reference_exit}; compilations {summary['built']}/{summary['compilations']} "
           f"built by krusty; classes identical {summary['identical']}/{summary['classes']}")
+    for mode, cost in summary['cost'].items():
+        if cost:
+            print(f"  {mode} build: {cost['wall_seconds']} s wall, {cost['cpu_seconds']} s CPU, "
+                  f"peak {cost['peak_rss_mb']['total']} MB; compile {cost['compile_seconds']} s, "
+                  f"{cost['built_compile_seconds']} s in compilations krusty built")
     for r in rows:
         state = 'ok ' if r['built'] else ('KTC' if r['fallback'] else 'ERR')
         print(f"  {state} {r['task']} ({r['dir']}): {r['identical']}/{r['classes']}"

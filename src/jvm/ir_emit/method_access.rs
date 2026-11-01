@@ -212,36 +212,42 @@ pub(super) fn primary_constructor_access(
     is_continuation: bool,
     value_param_ctor: bool,
 ) -> u16 {
-    let access =
-        if class.is_anonymous_object && super::enclosure::in_inline_function_scope(ir, class) {
-            ACC_PUBLIC
-        } else if is_continuation
-            && ir.class_id_by_name(class.fq_name_id()).is_some_and(|id| {
-                crate::jvm::suspend_inline_functions::constructed_by_method_copy(ir, id)
-            })
-        {
-            // A method's `$$forInline` copy constructs it, from wherever it is inlined.
-            ACC_PUBLIC
-        } else if is_continuation || class.is_anonymous_object {
-            // A continuation class's ctor is package-private (constructed only by its own file);
-            // kotlinc gives an ANONYMOUS class's ctor the same access (flags 0x0000). This remains
-            // true when a capture has value-class type: the enclosing class directly constructs the
-            // anonymous class, so treating that semantic capture like a declared value-class
-            // parameter would make the only reachable constructor private.
-            0
-        } else if class.is_value {
-            ACC_PRIVATE | ACC_SYNTHETIC
-        } else if class.is_singleton() || value_param_ctor || class.is_sealed {
-            ACC_PRIVATE
-        } else {
-            // A DECLARED protected constructor reaches the JVM method too (kotlinc emits `<init>`
-            // protected), and a declared PRIVATE one is ACC_PRIVATE: another class calls it
-            // through its `constructor_accessors` accessor.
-            match ir.ctor_visibilities.get(&class.fq_name_id()) {
-                Some(crate::types::Visibility::Protected) => ACC_PROTECTED,
-                Some(crate::types::Visibility::Private) => ACC_PRIVATE,
-                _ => ACC_PUBLIC,
-            }
-        };
+    let access = if class.is_anonymous_object
+        && super::enclosure::in_inline_function_scope(ir, class)
+    {
+        ACC_PUBLIC
+    } else if is_continuation
+        && ir.class_id_by_name(class.fq_name_id()).is_some_and(|id| {
+            crate::jvm::suspend_inline_functions::constructed_by_method_copy(ir, id)
+        })
+    {
+        // A method's `$$forInline` copy constructs it, from wherever it is inlined.
+        ACC_PUBLIC
+    } else if is_continuation || class.is_anonymous_object {
+        // A continuation class's ctor is package-private (constructed only by its own file);
+        // kotlinc gives an ANONYMOUS class's ctor the same access (flags 0x0000). This remains
+        // true when a capture has value-class type: the enclosing class directly constructs the
+        // anonymous class, so treating that semantic capture like a declared value-class
+        // parameter would make the only reachable constructor private.
+        0
+    } else if class.is_value {
+        ACC_PRIVATE | ACC_SYNTHETIC
+    } else if class.is_singleton()
+        && ir.ctor_visibilities.get(&class.fq_name_id()) == Some(&crate::types::Visibility::Public)
+    {
+        // A generated singleton whose producer declares a public constructor.
+        ACC_PUBLIC
+    } else if class.is_singleton() || value_param_ctor || class.is_sealed {
+        ACC_PRIVATE
+    } else {
+        // A DECLARED protected constructor reaches the JVM method too (kotlinc emits `<init>`
+        // protected), and a declared PRIVATE one is ACC_PRIVATE: another class calls it
+        // through its `constructor_accessors` accessor.
+        match ir.ctor_visibilities.get(&class.fq_name_id()) {
+            Some(crate::types::Visibility::Protected) => ACC_PROTECTED,
+            Some(crate::types::Visibility::Private) => ACC_PRIVATE,
+            _ => ACC_PUBLIC,
+        }
+    };
     access | primary_constructor_varargs(class)
 }

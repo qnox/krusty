@@ -7,7 +7,10 @@ class OverrideesProvider : SymbolProcessorProvider {
     override fun create(environment: SymbolProcessorEnvironment): SymbolProcessor = OverrideesProcessor(environment)
 }
 
-/** Logs `findOverridee` of every source function and property, once. */
+/**
+ * Logs `findOverridee` of every source function and property, once: the overridee's name, origin,
+ * classifier, and parameter types or type.
+ */
 class OverrideesProcessor(private val env: SymbolProcessorEnvironment) : SymbolProcessor {
     private var done = false
 
@@ -28,7 +31,13 @@ class OverrideesProcessor(private val env: SymbolProcessorEnvironment) : SymbolP
             else -> null
         }
         if (declaration !is KSClassDeclaration) {
-            env.logger.warn("$name ${declaration.origin} overrides ${overridee?.qualifiedName?.asString()}")
+            val parent = overridee?.parentDeclaration?.qualifiedName?.asString()
+            val parameters = (overridee as? KSFunctionDeclaration)?.parameters?.map { it.type.resolve() }
+            val type = (overridee as? KSPropertyDeclaration)?.type?.resolve()
+            env.logger.warn(
+                "$name ${declaration.origin} overrides ${overridee?.qualifiedName?.asString()}" +
+                    " origin=${overridee?.origin} parent=$parent params=$parameters type=$type"
+            )
         }
         if (declaration is KSClassDeclaration) {
             for (member in declaration.declarations) visit(member)

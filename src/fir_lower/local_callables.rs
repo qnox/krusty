@@ -143,6 +143,13 @@ impl BodyLowering<'_> {
                 holder,
             }))
         } else {
+            // A captured binding no code can reassign is read like the local it copies: kotlinc
+            // re-reads it (a loop bound, a `when` subject) instead of snapshotting it.
+            if capture.stable {
+                self.ir
+                    .binding_read_stability
+                    .insert(holder, crate::ir::IrBindingStability::Stable);
+            }
             Ok(holder)
         }
     }

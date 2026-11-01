@@ -18,6 +18,8 @@ pub(super) struct InnerClasses {
     paths: DeclarationPaths,
     /// The class each class declared in executable code is declared in, by internal name.
     declaring: Rc<HashMap<String, String>>,
+    /// Source declaration visitation order, independent of emitted constructor evaluation.
+    source_orders: Rc<HashMap<String, u32>>,
     /// Specialized lambdas regenerated at a call site. kotlinc's inliner copies the
     /// `new` into the caller without giving that caller an `InnerClasses` row.
     call_sites: Rc<HashSet<String>>,
@@ -238,10 +240,20 @@ impl InnerClasses {
                 Some((class.fq_name(), owner))
             })
             .collect();
+        let source_orders = ir
+            .classes
+            .iter()
+            .enumerate()
+            .filter_map(|(class_id, class)| {
+                let order = ir.class_source_order(class_id.try_into().expect("packed class id"))?;
+                Some((class.fq_name(), order))
+            })
+            .collect();
         Self {
             specs: specs.into_iter().map(Rc::new).collect(),
             paths: Rc::new(paths),
             declaring: Rc::new(declaring),
+            source_orders: Rc::new(source_orders),
             call_sites: Rc::new(call_site_regenerated_lambdas(ir)),
             copied_inline_holders: Rc::new(copied_inline_capture_holders(ir, facade, lambda_modes)),
             independent_capture_holders: Rc::new(independent_capture_holders(
@@ -258,6 +270,7 @@ impl InnerClasses {
         writer.add_inner_classes(&self.specs);
         writer.set_declaration_paths(self.paths.clone());
         writer.set_declaring_classes(self.declaring.clone());
+        writer.set_declaration_source_orders(self.source_orders.clone());
         writer.set_call_site_classes(self.call_sites.clone());
         writer.set_copied_inline_capture_holders(
             self.copied_inline_holders.clone(),
@@ -720,6 +733,37 @@ mod tests {
     };
     use crate::jvm::ir_emit::{LambdaMode, LambdaModes};
     use crate::types::Ty;
+
+    #[test]
+    fn nested_anonymous_classes_publish_declaration_visitation_order() {
+        let ir = crate::fir_lower::tests::lower_single_source_with_jvm_stdlib(
+            include_str!("../../tests/box_regressions/nestedAnonymousConstructionOrder.kt"),
+            "NestedAnonymousConstructionOrder",
+        );
+        let order = |base| {
+            let classes = ir
+                .classes
+                .iter()
+                .enumerate()
+                .filter(|(_, class)| {
+                    class.is_local_class
+                        && class
+                            .supertypes
+                            .iter()
+                            .any(|ty| ty.kotlin_class_internal() == Some(type_name(base)))
+                })
+                .collect::<Vec<_>>();
+            let [(class, _)] = classes.as_slice() else {
+                panic!("one anonymous subclass of {base}")
+            };
+            ir.class_source_order((*class).try_into().expect("packed class id"))
+                .expect("source declaration order")
+        };
+        assert!(
+            order("Container") < order("Leaf"),
+            "containing declaration is visited before its constructor operands"
+        );
+    }
 
     fn function(name: &str) -> IrFunction {
         IrFunction {
