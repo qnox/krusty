@@ -91,6 +91,7 @@ mod class_literal_receiver;
 mod class_literal_type_arguments;
 mod class_names_aliases;
 mod expression_finalization;
+mod reference_array_spread;
 mod star_projected_classifier;
 use candidate_display::{
     ambiguous_classifier_message, classifier_access_display_from_shape,
@@ -59270,31 +59271,7 @@ impl<'a> Checker<'a> {
                             None => self.expr(scope, argument),
                         };
                     }
-                    let spread_array =
-                        |element| Ty::obj_args("kotlin/Array", &[Ty::out_projection(element)]);
-                    let array_expected = raw_hint
-                        .filter(|hint| !matches!(hint.kind(), TyKind::InProjection(_)))
-                        .map(|hint| spread_array(hint.projection_read_ty()));
-                    let actual = match array_expected {
-                        Some(expected) => self.expr_expected(scope, argument, expected),
-                        None => self.expr(scope, argument),
-                    };
-                    let Some(contributed) = actual.non_null().array_read_elem() else {
-                        if actual != Ty::Error {
-                            self.diags.error(
-                                self.span(argument),
-                                "spread argument must have an array type".to_string(),
-                            );
-                        }
-                        return Ty::Error;
-                    };
-                    self.expect_assignable(
-                        spread_array(contributed),
-                        actual,
-                        self.span(argument),
-                        "array spread",
-                    );
-                    contributed
+                    self.reference_array_spread_element(scope, argument, raw_hint)
                 })
                 .collect::<Vec<_>>();
             self.commit_checked_single_vararg_arguments(

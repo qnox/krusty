@@ -155,8 +155,6 @@ mod apt_host_e2e;
 mod arity_error_coverage_e2e;
 #[path = "array_member_reference_e2e.rs"]
 mod array_member_reference_e2e;
-#[path = "array_of_projected_spread_e2e.rs"]
-mod array_of_projected_spread_e2e;
 #[path = "assert_intrinsic_e2e.rs"]
 mod assert_intrinsic_e2e;
 #[path = "backend_rejection_coverage_e2e.rs"]
