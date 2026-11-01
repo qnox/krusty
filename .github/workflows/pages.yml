@@ -4,7 +4,8 @@
 # The metrics page (krustythecompiler.dev/metrics/) is built from the latest successful master CI
 # run's box reports, the corpus-results branch and the coverage baseline. The nightly corpus run
 # dispatches this workflow once it has published, and the schedule rebuilds the page every night
-# even when the corpus run does not finish.
+# even when the corpus run does not finish. The README and landing-page badges are published from
+# the same box reports, so the badges and the page always agree.
 # One-time setup: Settings -> Pages -> Source: "GitHub Actions", Custom domain: krustythecompiler.dev.
 name: pages
 
@@ -61,6 +62,29 @@ jobs:
               -p 'pct-*' -p 'jvm-byte-equality-*' -p 'native-pct-*'
           fi
           echo "KRUSTY_METRICS_INPUT=$in" >> "$GITHUB_ENV"
+      # The newest Kotlin version of that CI run: its JVM case and byte reports and its Native case
+      # report, as shields.io endpoint JSON in one gist update. Needs the CONFORMANCE_GIST_ID
+      # variable and the GIST_TOKEN secret (a token with the `gist` scope).
+      - name: publish badges → gist
+        if: ${{ github.ref == 'refs/heads/master' && vars.CONFORMANCE_GIST_ID != '' }}
+        env:
+          GH_TOKEN: ${{ secrets.GIST_TOKEN }}
+          GIST_ID: ${{ vars.CONFORMANCE_GIST_ID }}
+        run: |
+          set -euo pipefail
+          box=$KRUSTY_METRICS_INPUT/box
+          version=$(node site/scripts/metrics.mjs "$KRUSTY_METRICS_INPUT" | jq -er '.box.versions[0].version')
+          conformance=$(bash scripts/conformance-badge.sh json conformance "$box/pct-$version/pct.txt" "$version")
+          bytes=$(bash scripts/conformance-badge.sh json jvm-byte-equality \
+            "$box/jvm-byte-equality-$version/jvm-byte-equality.txt" "$version")
+          native=$(bash scripts/conformance-badge.sh json native-conformance "$box/native-pct-$version/native-pct.txt" "$version")
+          kotlin=$(jq -cn --arg v "$version" '{schemaVersion: 1, label: "Kotlin", message: $v, color: "blue"}')
+          jq -n --arg c "$conformance" --arg b "$bytes" --arg n "$native" --arg k "$kotlin" '{files: {
+            "krusty-conformance.json": {content: $c},
+            "krusty-jvm-byte-equality.json": {content: $b},
+            "krusty-native-conformance.json": {content: $n},
+            "krusty-kotlin.json": {content: $k}}}' |
+            gh api --method PATCH "gists/$GIST_ID" --input - >/dev/null
       - name: build
         working-directory: site
         run: npm ci && npm run build && npm test

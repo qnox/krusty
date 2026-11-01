@@ -1054,8 +1054,9 @@ jobs:
       # Master runs overlap, so two release jobs can run at once and an older commit can reach
       # this job after a newer one. A concurrency group would cancel a queued release, and with it
       # the whole run, so publishing takes a lock held in a ref instead. Under it, only the tip of
-      # master that descends from the last published commit publishes: the release, the
-      # latest-release marker and the badges never move backwards.
+      # master that descends from the last published commit publishes: the release and the
+      # latest-release marker never move backwards. The badges are published by the pages workflow,
+      # which this job dispatches.
       - name: take the release lock
         id: lock
         run: echo "lock=$(scripts/release-publisher.sh acquire)" >> "$GITHUB_OUTPUT"
@@ -1238,42 +1239,6 @@ jobs:
       - name: record the published commit
         if: steps.tip.outputs.publish == 'true'
         run: scripts/release-publisher.sh record
-      # Badges: the max version's JVM case/byte reports and Native case report, each published to
-      # its own gist file.
-      - name: download max-version pct
-        if: ${{ steps.tip.outputs.publish == 'true' && vars.CONFORMANCE_GIST_ID != '' }}
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: pct-${{ needs.build-tool-bins.outputs.max }}
-      - name: download max-version JVM byte equality
-        if: ${{ steps.tip.outputs.publish == 'true' && vars.CONFORMANCE_GIST_ID != '' }}
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: jvm-byte-equality-${{ needs.build-tool-bins.outputs.max }}
-      - name: download max-version Native conformance
-        if: ${{ steps.tip.outputs.publish == 'true' && vars.CONFORMANCE_GIST_ID != '' }}
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: native-pct-${{ needs.build-tool-bins.outputs.max }}
-      # One gist update with every badge's shields.io endpoint JSON, through the gh CLI.
-      - name: publish badges → gist
-        if: ${{ steps.tip.outputs.publish == 'true' && vars.CONFORMANCE_GIST_ID != '' }}
-        env:
-          GH_TOKEN: ${{ secrets.GIST_TOKEN }}
-          GIST_ID: ${{ vars.CONFORMANCE_GIST_ID }}
-          MAX_VERSION: ${{ needs.build-tool-bins.outputs.max }}
-        run: |
-          set -euo pipefail
-          conformance=$(bash scripts/conformance-badge.sh json conformance pct.txt "$MAX_VERSION")
-          bytes=$(bash scripts/conformance-badge.sh json jvm-byte-equality jvm-byte-equality.txt "$MAX_VERSION")
-          native=$(bash scripts/conformance-badge.sh json native-conformance native-pct.txt "$MAX_VERSION")
-          kotlin=$(jq -cn --arg v "$MAX_VERSION" '{schemaVersion: 1, label: "Kotlin", message: $v, color: "blue"}')
-          jq -n --arg c "$conformance" --arg b "$bytes" --arg n "$native" --arg k "$kotlin" '{files: {
-            "krusty-conformance.json": {content: $c},
-            "krusty-jvm-byte-equality.json": {content: $b},
-            "krusty-native-conformance.json": {content: $n},
-            "krusty-kotlin.json": {content: $k}}}' |
-            gh api --method PATCH "gists/$GIST_ID" --input - >/dev/null
       - name: drop the release lock
         if: always() && steps.lock.outputs.lock != ''
         run: scripts/release-publisher.sh release "${{ steps.lock.outputs.lock }}"
