@@ -1716,8 +1716,6 @@ mod string_when_switch_e2e;
 mod super_delegation_line_e2e;
 #[path = "e2e/suspend.rs"]
 mod suspend;
-#[path = "suspend_result_erased_slot_e2e.rs"]
-mod suspend_result_erased_slot_e2e;
 #[path = "suspending_concat_operands_e2e.rs"]
 mod suspending_concat_operands_e2e;
 #[path = "type_parameter_nullability_annotations_e2e.rs"]
