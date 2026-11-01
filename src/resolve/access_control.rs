@@ -189,30 +189,6 @@ impl<'a> Checker<'a> {
         )
     }
 
-    /// Whether a member function the call found on `receiver` is hidden from this site. Kotlin
-    /// ranks a hidden member below every visible candidate: an applicable extension takes the
-    /// call (`clone()` declared beside the protected `Object.clone`), and the member is reported
-    /// as inaccessible only when nothing visible applies. `internal` ownership stays with the
-    /// selected-member check.
-    pub(super) fn member_hidden_from_site(
-        &self,
-        candidate: &crate::libraries::FunctionInfo,
-        receiver: Option<Ty>,
-    ) -> bool {
-        let Some(receiver) = receiver else {
-            return false;
-        };
-        matches!(
-            candidate.visibility,
-            Visibility::Private | Visibility::Protected | Visibility::PackagePrivate
-        ) && !self.receiver_callable_accessible(
-            candidate.visibility,
-            candidate.callable.owner,
-            crate::symbol_resolver::member_scope_receiver(receiver),
-            candidate.callable.external_identity,
-        )
-    }
-
     /// An instance member the reference site cannot see does not shadow an applicable extension:
     /// `Col::clone` names the extension when `Object.clone` is protected. Without an extension the
     /// member stays, so the reference reports the member's visibility.
@@ -247,7 +223,7 @@ impl<'a> Checker<'a> {
         let before = overloads.len();
         overloads.retain(|candidate| {
             candidate.kind != crate::libraries::FnKind::Member
-                || !self.member_hidden_from_site(candidate, Some(receiver))
+                || self.member_candidate_accessible(candidate, Some(receiver))
         });
         overloads.len() != before
     }
@@ -337,9 +313,12 @@ impl<'a> Checker<'a> {
         true
     }
 
-    /// Whether a member candidate is accessible through the call's receiver. Top-level and
-    /// extension candidates are filtered by [`Self::source_callable_visible`] before applicability,
-    /// and constructors keep their own access diagnostic.
+    /// Whether a member candidate is accessible through the call's receiver. Kotlin ranks an
+    /// inaccessible member below every accessible candidate: an applicable extension takes the
+    /// call (`clone()` declared beside the protected `Object.clone`), and the member is reported
+    /// as inaccessible only when nothing accessible applies. Top-level and extension candidates
+    /// are filtered by [`Self::source_callable_visible`] before applicability, and constructors
+    /// keep their own access diagnostic.
     pub(super) fn member_candidate_accessible(
         &self,
         candidate: &crate::libraries::FunctionInfo,
@@ -352,9 +331,12 @@ impl<'a> Checker<'a> {
         let owner = candidate.callable.owner_type();
         let identity = candidate.callable.external_identity;
         match receiver {
-            Some(receiver) => {
-                self.receiver_callable_accessible(candidate.visibility, owner, receiver, identity)
-            }
+            Some(receiver) => self.receiver_callable_accessible(
+                candidate.visibility,
+                owner,
+                crate::symbol_resolver::member_scope_receiver(receiver),
+                identity,
+            ),
             None => self.callable_accessible(candidate.visibility, owner, identity),
         }
     }

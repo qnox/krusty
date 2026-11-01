@@ -37643,12 +37643,7 @@ impl<'a> Checker<'a> {
             if candidate.is_extension() && candidate.callable.annotations.contains(&hides_members) {
                 (0_u8, (0_u8, 0_u32), candidate.receiver_rank)
             } else if candidate.kind == crate::libraries::FnKind::Member {
-                let hidden = self.member_hidden_from_site(candidate, extension_receiver);
-                (
-                    if hidden { 3 } else { 1 },
-                    (0_u8, 0_u32),
-                    candidate.receiver_rank,
-                )
+                (1_u8, (0_u8, 0_u32), candidate.receiver_rank)
             } else {
                 (
                     2_u8,
