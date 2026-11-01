@@ -23502,7 +23502,11 @@ storage used by an array builder follows the holder. The initializer still sees 
 semantic value map; the new binding becomes visible at the store. Named arguments retain source
 evaluation order and one evaluation. Common IR retains that holder's semantic purpose through
 cloning; an inline expansion that adopts it as its formal receiver records the changed purpose.
-Expanded parameters and captures retain operand-first binding. Deferred inline-return results, folded safe-call chains and
+Expanded parameters and captures retain operand-first binding. Only the temporaries of a call reordered
+by its named arguments are argument-evaluation holders (kotlinc's variables); a holder that only stages
+an operand, such as an inline call's receiver, is stored once it is evaluated, so an inline call in its
+value keeps its frame marker's slot and the holder takes the next one, as kotlinc's `let` receiver does
+(`inline_operand_holder_slots_e2e`). Deferred inline-return results, folded safe-call chains and
 grouped invocation operands retain their existing allocation contracts. Complete class and runtime
 controls in `named_argument_operands_e2e` cover ordinary constructors, effectful arrays and wide values.
 
