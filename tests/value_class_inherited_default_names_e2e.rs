@@ -138,8 +138,14 @@ value class Wrapped(val s: String) : Ids
 fn a_forwarder_declares_a_sibling_file_value_class_by_its_carrier() {
     let sources = [
         ("Ids.kt", format!("package app\n\n{CARRIER_INTERFACE}")),
-        ("Values.kt", format!("package app\n\n{CARRIER_VALUE_CLASSES}")),
-        ("Plain.kt", format!("package app\n\n{CARRIER_IMPLEMENTATIONS}")),
+        (
+            "Values.kt",
+            format!("package app\n\n{CARRIER_VALUE_CLASSES}"),
+        ),
+        (
+            "Plain.kt",
+            format!("package app\n\n{CARRIER_IMPLEMENTATIONS}"),
+        ),
     ];
     let sources = sources
         .iter()
