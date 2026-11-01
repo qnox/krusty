@@ -19,7 +19,12 @@ fun later(): suspend () -> Int = deferredBy { pause(20) + 1 }
 suspend fun now(): Int = deferredBy { pause(1) }() + pairedWith(2) { pause(it) * 10 }()
 
 fun builder(block: suspend () -> Unit) {
-    block.startCoroutine(Continuation(EmptyCoroutineContext) { it.getOrThrow() })
+    block.startCoroutine(object : Continuation<Unit> {
+        override val context: CoroutineContext get() = EmptyCoroutineContext
+        override fun resumeWith(result: Result<Unit>) {
+            result.getOrThrow()
+        }
+    })
 }
 
 fun box(): String {
@@ -39,18 +44,7 @@ fn a_noinline_suspend_parameters_callee_is_inlined_from_the_compiled_body_like_k
         classes.krusty.keys().collect::<Vec<_>>(),
         classes.reference.keys().collect::<Vec<_>>()
     );
-    // `DeclarationKt$pairedWith$1` lacks only the `SourceDebugExtension` kotlinc gives a lambda an
-    // inline function declares, and `CallerKt$builder$$inlined$Continuation$1` is the library
-    // `Continuation { }` copy: neither is this route's.
-    for name in [
-        "CallerKt",
-        "CallerKt$box$1",
-        "CallerKt$later$1",
-        "CallerKt$now$1",
-        "CallerKt$now$2",
-        "CallerKt$now$3",
-        "DeclarationKt",
-    ] {
+    for name in classes.reference.keys() {
         assert!(
             classes.krusty.get(name) == classes.reference.get(name),
             "{name} differs from kotlinc's bytes"

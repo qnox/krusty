@@ -355,8 +355,20 @@ pub(super) fn emit_suspend_lambda_class(
             None => cw.set_enclosing_class(&owner),
         }
     }
+    let origin = super::enclosure::start_inline_body_source_map(
+        ir,
+        env.override_results,
+        c,
+        facade,
+        &mut cw,
+    );
     env.inner_classes.register(&mut cw);
     cw.add_interface(&jvm_function_interface(shape.arity));
+    if let Some((owner, Some((name, descriptor)))) =
+        origin.and_then(|origin| origin.declaration_enclosure)
+    {
+        cw.retain_replaced_enclosing_method(&owner, &name, &descriptor);
+    }
     // kotlinc writes a class's fields after its methods, as the coroutine transformer adds the
     // spill fields ahead of them: `label`, the parameters' fields, then the captured values.
     cw.add_field_late(0x0000, "label", "I", None, None);

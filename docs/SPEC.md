@@ -14353,6 +14353,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `tests/inline_lambda_captured_literal_e2e.rs`,
   `tests/inline_lambda_placed_capture_suspension_e2e.rs`, and
   `tests/inline_erased_capture_e2e.rs`.
+  The identity map follows kotlinc's `visitSMAP(…, intoInline = true)` for every class whose
+  nearest enclosing function is inline, whichever kind the class is: a function lambda's, a suspend
+  lambda's (`SuspendLambda` subclass) and a local or anonymous class's alike, and a call-site
+  copy of one keeps its declaration's map under the declaration class's path and source file
+  (`ir_emit/enclosure/inline_source_origin.rs`). Test:
+  `tests/inline_same_module_suspend_values_e2e.rs` (`DeclarationKt$pairedWith$1`, a suspend lambda
+  an inline function declares, byte for byte against kotlinc).
 - **A lambda with a `Nothing`/`Nothing?` type the factory cannot adapt is the same class, with a raw
   supertype.** kotlinc's `computeParameterTypeAdaptationConstraint` also returns CONFLICT when the
   adaptee type `isNothing() || isNullableNothing()`: a parameter typed `Nothing`/`Nothing?` by the
