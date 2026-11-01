@@ -47,8 +47,13 @@ pub fn directory_fingerprint(root: &Path) -> std::io::Result<Digest> {
 /// file and enters as nothing, as a directory does; the archive's own layout (entry order,
 /// timestamps, compression) is no part of what the compilation reads and none of the fingerprint.
 pub fn archive_fingerprint(path: &Path) -> std::io::Result<Digest> {
+    archive_contents_fingerprint(&std::fs::read(path)?)
+}
+
+/// [`archive_fingerprint`] of an archive whose contents are `bytes`, already read.
+pub fn archive_contents_fingerprint(bytes: &[u8]) -> std::io::Result<Digest> {
     let invalid = |error| std::io::Error::new(std::io::ErrorKind::InvalidData, error);
-    let mut archive = krusty::archive::open_file(std::fs::File::open(path)?).map_err(invalid)?;
+    let mut archive = krusty::archive::open_bytes(bytes).map_err(invalid)?;
     let mut files = Vec::new();
     for index in 0..archive.len() {
         let mut entry = archive.by_index(index).map_err(invalid)?;

@@ -72,7 +72,10 @@ fn only_what_a_dependent_observes_moves_the_fingerprint() {
         ("member-body", BASE.replace("count += 1", "count += 2")),
         // The lines of both classes below `Shouting` move, and with them the source map of the
         // inline `map` spliced into `Names.of`.
-        ("moved-lines", BASE.replace("class Counter", "\nclass Counter")),
+        (
+            "moved-lines",
+            BASE.replace("class Counter", "\nclass Counter"),
+        ),
     ];
     for (tag, source) in unchanged {
         assert_eq!(fingerprint(&krusty, &scratch, tag, &source), base, "{tag}");

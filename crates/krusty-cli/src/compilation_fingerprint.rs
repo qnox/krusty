@@ -22,8 +22,8 @@ use std::path::{Path, PathBuf};
 use krusty::jvm::compilation_inputs::{
     is_archive_entry, JvmCompilationInputInventory, OUTPUT_ENVIRONMENT,
 };
-use krusty_build::dependency_view::{archive_fingerprint, directory_fingerprint};
-use krusty_build::{digest_file, digest_files, Digest, Hasher};
+use krusty_build::dependency_view::{archive_contents_fingerprint, directory_fingerprint};
+use krusty_build::{digest_contents, digest_file, digest_files, Digest, Hasher};
 
 use crate::{cli, kotlinc_arguments};
 
@@ -125,7 +125,7 @@ fn fingerprint_in(
 /// in place of the classpath files skips a dependent when a dependency's edit is body-only.
 ///
 /// An entry enters by its contents, as in [`fingerprint`], except that a jar enters by its
-/// [`archive_fingerprint`], the view a class directory enters by: a dependency's body-only edit
+/// [`archive_contents_fingerprint`], the view a class directory enters by: a dependency's body-only edit
 /// leaves the digest unchanged whether it reaches this compilation as classes or as a jar. An
 /// entry enters by its position, never by its path, so the digest is the same in another checkout.
 /// A friend path enters by the position of the classpath entry it names, since that equality is how
@@ -188,7 +188,7 @@ pub fn classpath_fingerprint(
 }
 
 /// How a jar entry is read: as a dependency the compilation resolves against, by its
-/// [`archive_fingerprint`], or by its bytes (the JDK image, or a plugin jar, whose code runs). A
+/// [`archive_contents_fingerprint`], or by its bytes (the JDK image, or a plugin jar, whose code runs). A
 /// directory enters by its [`directory_fingerprint`] either way.
 #[derive(Clone, Copy)]
 enum Reading {
@@ -219,31 +219,49 @@ impl ArchiveViews {
         })
     }
 
-    /// The [`archive_fingerprint`] of the jar at `path`, whose bytes have the digest `bytes`. A
-    /// cache entry is keyed by contents alone, so it is published by renaming a complete file into
-    /// place, and an unreadable one is read afresh.
-    fn view(&self, path: &Path, bytes: Digest) -> std::io::Result<Digest> {
-        let Some((cache, compiler)) = &self.cache else {
-            return archive_fingerprint(path);
+    /// How the jar at `path` enters a fingerprint: by its [`archive_contents_fingerprint`], or by
+    /// its bytes when the zip reader rejects it. The jar is read once, and both its cache key and
+    /// its view come from those bytes, so a jar replaced while it is read cannot publish one
+    /// version's view under the other's key. A cache entry is published by renaming a complete
+    /// file into place, and an unreadable one is read afresh.
+    fn contents(&self, path: &Path) -> std::io::Result<Contents> {
+        let bytes = std::fs::read(path)?;
+        let digest = digest_contents(&bytes);
+        let view = || match archive_contents_fingerprint(&bytes) {
+            Ok(view) => Ok(Some(view)),
+            // An archive the zip reader rejects enters by its bytes, as a class file the class
+            // reader rejects does: the key stays conservative, and the compilation reports it.
+            Err(error) if error.kind() == std::io::ErrorKind::InvalidData => Ok(None),
+            Err(error) => Err(error),
         };
-        let key = Hasher::new()
-            .text("format", VIEW_CACHE_FORMAT)
-            .nested("compiler", *compiler)
-            .nested("archive", bytes)
-            .finish();
-        let entry = cache.join(key.to_string());
-        if let Some(view) = std::fs::read_to_string(&entry)
-            .ok()
-            .and_then(|text| Digest::parse_hex(text.trim()))
-        {
-            return Ok(view);
-        }
-        let view = archive_fingerprint(path)?;
-        std::fs::create_dir_all(cache)?;
-        let staging = cache.join(format!("{key}.{}.tmp", std::process::id()));
-        std::fs::write(&staging, view.to_string())?;
-        std::fs::rename(&staging, &entry)?;
-        Ok(view)
+        let view = match &self.cache {
+            None => view()?,
+            Some((cache, compiler)) => {
+                let key = Hasher::new()
+                    .text("format", VIEW_CACHE_FORMAT)
+                    .nested("compiler", *compiler)
+                    .nested("archive", digest)
+                    .finish();
+                let entry = cache.join(key.to_string());
+                match std::fs::read_to_string(&entry)
+                    .ok()
+                    .and_then(|text| Digest::parse_hex(text.trim()))
+                {
+                    Some(view) => Some(view),
+                    None => {
+                        let view = view()?;
+                        if let Some(view) = view {
+                            std::fs::create_dir_all(cache)?;
+                            let staging = cache.join(format!("{key}.{}.tmp", std::process::id()));
+                            std::fs::write(&staging, view.to_string())?;
+                            std::fs::rename(&staging, &entry)?;
+                        }
+                        view
+                    }
+                }
+            }
+        };
+        Ok(view.map_or(Contents::File(digest), Contents::Archive))
     }
 }
 
@@ -288,7 +306,7 @@ fn read(
             entries
                 .iter()
                 .zip(&kinds)
-                .filter(|(_, kind)| matches!(kind, Kind::File | Kind::Archive))
+                .filter(|(_, kind)| matches!(kind, Kind::File))
                 .map(|((entry, _), _)| *entry),
         )
         .collect::<Vec<_>>();
@@ -303,6 +321,17 @@ fn read(
         .by_ref()
         .take(files.len())
         .collect::<Result<Vec<_>, _>>()?;
+    let archive_paths = entries
+        .iter()
+        .zip(&kinds)
+        .filter(|(_, kind)| matches!(kind, Kind::Archive))
+        .map(|((entry, _), _)| *entry)
+        .collect::<Vec<_>>();
+    let mut archives = match views {
+        Some(views) => archive_contents(views, &archive_paths, workers),
+        None => Vec::new(),
+    }
+    .into_iter();
     let contents = entries
         .iter()
         .zip(kinds)
@@ -313,25 +342,41 @@ fn read(
             Kind::Directory => directory_fingerprint(entry)
                 .map(Contents::Directory)
                 .map_err(|error| format!("cannot read {}: {error}", entry.display())),
-            // An archive the zip reader rejects enters by its bytes, as a class file the class
-            // reader rejects does: the key stays conservative, and the compilation reports it.
-            Kind::Archive => {
-                let bytes = digests.next().expect("one digest per file")?;
-                match views
-                    .expect("an archive is read by its view")
-                    .view(entry, bytes)
-                {
-                    Ok(view) => Ok(Contents::Archive(view)),
-                    Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
-                        Ok(Contents::File(bytes))
-                    }
-                    Err(error) => Err(format!("cannot read {}: {error}", entry.display())),
-                }
-            }
+            Kind::Archive => archives.next().expect("one view per archive"),
             Kind::Missing => Ok(Contents::Missing),
         })
         .collect::<Result<Vec<_>, _>>()?;
     Ok((file_digests, contents))
+}
+
+/// The [`ArchiveViews::contents`] of each of `paths`, in order, on `workers` threads.
+fn archive_contents(
+    views: &ArchiveViews,
+    paths: &[&Path],
+    workers: usize,
+) -> Vec<Result<Contents, String>> {
+    let chunk = paths.len().div_ceil(workers.max(1)).max(1);
+    std::thread::scope(|scope| {
+        let handles = paths
+            .chunks(chunk)
+            .map(|chunk| {
+                scope.spawn(move || {
+                    chunk
+                        .iter()
+                        .map(|path| {
+                            views
+                                .contents(path)
+                                .map_err(|error| format!("cannot read {}: {error}", path.display()))
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect::<Vec<_>>();
+        handles
+            .into_iter()
+            .flat_map(|handle| handle.join().expect("an archive view worker panicked"))
+            .collect()
+    })
 }
 
 /// `argv` after `@argfile` expansion and the options it parses to, or every reason the compilation
@@ -355,7 +400,7 @@ fn parsed(argv: Vec<String>) -> Result<(Vec<String>, cli::Options), String> {
 }
 
 /// How an entry enters a fingerprint: a directory by its [`directory_fingerprint`], an archive by
-/// its [`archive_fingerprint`], any other file by its bytes, a missing entry as missing.
+/// its [`archive_contents_fingerprint`], any other file by its bytes, a missing entry as missing.
 enum Contents {
     Directory(Digest),
     Archive(Digest),
@@ -630,6 +675,40 @@ mod tests {
             std::fs::write(entry.expect("an entry").path(), b"torn").expect("tear an entry");
         }
         assert_eq!(digest(&first, Some(&cache)), base, "a torn entry");
+    }
+
+    /// A jar replaced at its path and then restored is keyed and viewed from the bytes of each
+    /// read: the cache holds each version's view under that version's digest, so restoring the
+    /// first version reads its own view back, never the replacement's.
+    #[test]
+    fn a_replaced_jar_never_takes_another_versions_view() {
+        let scratch = Scratch::new("jar-replaced");
+        let time = zip::DateTime::from_date_and_time(2001, 1, 1, 0, 0, 0).expect("a time");
+        let jar = scratch.0.join("lib.jar");
+        let cache = scratch.0.join("views");
+        let views = super::ArchiveViews::new(Some(&cache)).expect("open the view cache");
+        let view = |bytes: &[u8]| {
+            krusty_build::dependency_view::archive_contents_fingerprint(bytes).expect("a view")
+        };
+        let read = |views: &super::ArchiveViews| match views.contents(&jar).expect("read the jar") {
+            super::Contents::Archive(view) => view,
+            _ => panic!("the jar enters by its view"),
+        };
+        write_jar(&jar, &[("a.txt", b"first")], time);
+        let first = std::fs::read(&jar).expect("read");
+        assert_eq!(read(&views), view(&first), "the first version's miss");
+        write_jar(&jar, &[("a.txt", b"other")], time);
+        let second = std::fs::read(&jar).expect("read");
+        assert_eq!(
+            first.len(),
+            second.len(),
+            "the versions differ only in contents"
+        );
+        assert_eq!(read(&views), view(&second), "the replacement's miss");
+        std::fs::write(&jar, &first).expect("restore the first version");
+        assert_eq!(read(&views), view(&first), "the restored version's hit");
+        let entries = std::fs::read_dir(&cache).expect("list the cache").count();
+        assert_eq!(entries, 2, "one entry per version");
     }
 
     /// A classpath file that is no archive the zip reader accepts enters by its bytes.
