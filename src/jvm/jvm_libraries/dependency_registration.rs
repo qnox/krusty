@@ -250,11 +250,13 @@ impl JvmLibraries {
                             "a normalized protected dependency function publishes every parameter identity",
                         )
                 });
-            self.register_external_callable(
-                &mut function.callable,
-                function.kind,
-                declaration_owner,
-            );
+            // A classifier's member extension is realized as an instance method of the classifier,
+            // the identity its member record already registered.
+            let realization = match (function.kind, declaration_owner) {
+                (FnKind::Extension, Some(SemanticCallableOwner::Classifier(_))) => FnKind::Member,
+                (kind, _) => kind,
+            };
+            self.register_external_callable(&mut function.callable, realization, declaration_owner);
             if let (Some(identity), Some(parameter_identities)) =
                 (function.callable.external_identity, parameter_identities)
             {

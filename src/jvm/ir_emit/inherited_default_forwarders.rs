@@ -28,6 +28,8 @@ struct InheritedForwarder {
     target_interface: TypeName,
     /// The member's name before value-class mangling: its declared or accessor name.
     declared_name: String,
+    /// The property an accessor belongs to; a function has none.
+    property_name: Option<String>,
     /// The forwarder's JVM name: the member's, or the name kotlinc gives the fake override a
     /// value-class substitution specializes.
     name: String,
@@ -110,14 +112,22 @@ impl InheritedForwarder {
         }
     }
 
-    /// The name an extension receiver is labeled after (`$this$<label>`). The forwarder is a member
-    /// on the class under its own JVM name, so kotlinc labels it after that name with its
-    /// non-identifier characters escaped (`$this$bar_u2d_u2dh0D71M`); a value class's static
-    /// stands for the declaration and keeps its declared name (`$this$bar`).
+    /// The name an extension receiver is labeled after (`$this$<label>`), which kotlinc derives from
+    /// the IR function's name at each site. An ordinary class's forwarder keeps the fake override's
+    /// name: an accessor's `<get-prop>` labels `$this$prop`, and a function renamed for its JVM
+    /// signature labels its escaped JVM name (`$this$bar_u2d_u2dh0D71M`). A value class's members are
+    /// renamed to their JVM names, so its forwarder is labeled after its escaped JVM name
+    /// (`$this$getProp`), while the static stands for the declaration and keeps its declared name
+    /// (`$this$bar`, `$this$prop`).
     fn receiver_label(&self, site: ForwarderSite) -> String {
-        match site {
-            ForwarderSite::Forwarder => crate::jvm::debug_local_names::escaped(&self.name),
-            ForwarderSite::ValueClassStatic => self.declared_name.clone(),
+        match (site, &self.property_name) {
+            (ForwarderSite::Forwarder | ForwarderSite::ValueClassStatic, Some(property)) => {
+                property.clone()
+            }
+            (ForwarderSite::Forwarder | ForwarderSite::ValueClassForwarder, _) => {
+                crate::jvm::debug_local_names::escaped(&self.name)
+            }
+            (ForwarderSite::ValueClassStatic, None) => self.declared_name.clone(),
         }
     }
 
@@ -155,8 +165,10 @@ impl InheritedForwarder {
 /// Where an inherited member's parameters are written.
 #[derive(Clone, Copy)]
 enum ForwarderSite {
-    /// The forwarder on the implementing class.
+    /// The forwarder on an ordinary implementing class.
     Forwarder,
+    /// The forwarder on a value class, beside its static.
+    ValueClassForwarder,
     /// The static a value class realizes the forwarder with.
     ValueClassStatic,
 }
@@ -316,6 +328,11 @@ fn forwarder(
     };
     Some(InheritedForwarder {
         target_interface,
+        property_name: match &default.name {
+            crate::fir::InheritedMemberName::Function(_) => None,
+            crate::fir::InheritedMemberName::PropertyGetter(name)
+            | crate::fir::InheritedMemberName::PropertySetter(name) => Some(name.to_string()),
+        },
         declared_name: crate::jvm::inherited_default_realization::inherited_member_declared_name(
             default,
         ),
@@ -491,6 +508,11 @@ fn write_forwarder(
         "an inherited forwarder needs every declaration parameter identity"
     );
     let desc = forwarder.descriptor();
+    let site = if c.is_value {
+        ForwarderSite::ValueClassForwarder
+    } else {
+        ForwarderSite::Forwarder
+    };
     let signature = forwarder
         .signature
         .as_ref()
@@ -501,7 +523,7 @@ fn write_forwarder(
     let reflected = if java_parameters {
         crate::jvm::method_parameters::resolved_class_forwarder(
             parameter_identities,
-            &forwarder.method_parameter_names(ForwarderSite::Forwarder),
+            &forwarder.method_parameter_names(site),
             param_tys,
         )
     } else {
@@ -565,10 +587,7 @@ fn write_forwarder(
     cw.set_method_parameters(name, &desc, &reflected);
     let mut locals = vec![("this".to_string(), format!("L{};", c.fq_name()), 0)];
     let mut slot = 1u16;
-    for (parameter, parameter_name) in param_tys
-        .iter()
-        .zip(forwarder.local_variable_names(ForwarderSite::Forwarder))
-    {
+    for (parameter, parameter_name) in param_tys.iter().zip(forwarder.local_variable_names(site)) {
         if let Some(parameter_name) = parameter_name {
             locals.push((parameter_name, local_variable_desc(*parameter), slot));
         }
