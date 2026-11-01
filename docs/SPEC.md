@@ -7588,12 +7588,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `reifiedOperationMarker` plus `instanceof Object` becomes `instanceof java/lang/String`. The
   marker itself is then removed. When the copy still names a reified parameter of an enclosing
   inline function, the marker is put back immediately before the `new` or `getstatic` for that
-  caller to specialize. A marker stays pending through class literals, casts and calls and is
-  consumed by the next `new` or `getstatic INSTANCE`, the one object it asks to specialize;
-  regeneration and the safety check share that target. A marker whose target was left uncopied although its methods contain `reifiedOperationMarker` is refused, rather than
-  emitted as a call that throws. Only a marker's own class is asked: any other class the body names
-  stays as it is even when it declares inline functions with reified parameters, as kotlinc leaves
-  koin's `Module` beside the copied `singleOf` definition lambda.
+  caller to specialize. A marker is consumed by the next anonymous object event, as the class roles
+  authenticate it: a `new` of an anonymous object paired with its constructor call, or a
+  `getstatic INSTANCE` of an anonymous singleton (kotlinc's `awaitClassReification`, consumed by
+  its `MethodInliner`'s anonymous-object branches). It stays pending through every other
+  instruction, class literals, casts, calls and ordinary allocations or singleton loads among
+  them. That one target decides which object is specialized, and so not reused by a same-module
+  call, and a marker no authenticated event follows is refused rather than emitted as a call that
+  throws. No other class the body names is asked about: one that declares inline functions with
+  reified parameters stays as it is, as kotlinc leaves koin's `Module` beside the copied `singleOf`
+  definition lambda.
   Whether the splice is mandatory is separate from `@InlineOnly`: a public reified function such
   as `filterIsInstance` keeps the callee's lines, `$i$f$` marker, and source map, and stores an
   argument that already lives in a local. Only a method the class file marks private — the

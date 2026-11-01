@@ -987,6 +987,87 @@ fn a_same_module_body_reuses_an_object_only_its_reification_marker_regenerates()
     );
 }
 
+/// An ordinary allocation between the marker and the anonymous object does not consume the marker:
+/// the anonymous object is still the one specialized, not reused.
+#[test]
+fn an_ordinary_allocation_leaves_the_reification_marker_to_the_anonymous_object() {
+    let mut node = MethodNode::new(ACC_STATIC, "f", "()V");
+    node.nodes = vec![
+        reification_marker(),
+        new("lib/Plain"),
+        op(0x59),
+        init("lib/Plain", "()V"),
+        op(0x57),
+        new("lib/B$f$2"),
+        op(0x59),
+        init("lib/B$f$2", "()V"),
+        op(0x57),
+        op(0xb1),
+    ];
+    let mut objects = NumberingObjects {
+        same_module: true,
+        ..NumberingObjects::default()
+    };
+    object_regeneration::regenerate_objects(
+        &mut node,
+        &Parameters::default(),
+        &[],
+        &OBJECTS,
+        &mut objects,
+    )
+    .expect("regenerates");
+    assert_eq!(
+        objects.asked,
+        [("lib/B$f$2".to_string(), "()V".to_string())]
+    );
+    assert_eq!(
+        constructions(&node),
+        [
+            "new lib/Plain",
+            "init lib/Plain()V",
+            "new Main$g$$inlined$f$1",
+            "init Main$g$$inlined$f$1(I)V",
+        ]
+    );
+}
+
+/// An ordinary singleton load between the marker and the anonymous object does not consume the
+/// marker either.
+#[test]
+fn an_ordinary_singleton_leaves_the_reification_marker_to_the_anonymous_object() {
+    let mut node = MethodNode::new(ACC_STATIC, "f", "()V");
+    node.nodes = vec![
+        reification_marker(),
+        instance_load("lib/Plain"),
+        op(0x57),
+        new("lib/B$f$2"),
+        op(0x59),
+        init("lib/B$f$2", "()V"),
+        op(0x57),
+        op(0xb1),
+    ];
+    let mut objects = NumberingObjects {
+        same_module: true,
+        ..NumberingObjects::default()
+    };
+    object_regeneration::regenerate_objects(
+        &mut node,
+        &Parameters::default(),
+        &[],
+        &OBJECTS,
+        &mut objects,
+    )
+    .expect("regenerates");
+    assert_eq!(
+        objects.asked,
+        [("lib/B$f$2".to_string(), "()V".to_string())]
+    );
+    assert_eq!(
+        constructions(&node),
+        ["new Main$g$$inlined$f$1", "init Main$g$$inlined$f$1(I)V"]
+    );
+}
+
 #[test]
 fn two_outstanding_instances_of_one_class_each_get_their_own_copy() {
     // `A(A())` of one original class: the inner instance is initialized first.
@@ -1228,17 +1309,15 @@ fn an_anonymous_singleton_is_copied_and_the_reification_marker_goes() {
     }));
 }
 
-/// A class the classpath says still contains `reifiedOperationMarker`, and that this stage did
-/// not copy, keeps the splice from emitting a call that would throw.
+/// A marker whose object the class roles do not authenticate as an anonymous object names one this
+/// stage cannot copy: its reified operations would stay unspecialized and throw, so the inline is
+/// refused.
 #[test]
 fn a_reified_class_left_in_place_refuses_the_inline() {
     struct Marked;
     impl ClassRoles for Marked {
         fn regenerated_class(&self, _internal: &str) -> Option<RegeneratedClass> {
             None
-        }
-        fn contains_reified_marker(&self, internal: &str) -> bool {
-            internal == "lib/Kept"
         }
     }
     let mut node = MethodNode::new(ACC_STATIC, "f", "()V");
@@ -1256,17 +1335,14 @@ fn a_reified_class_left_in_place_refuses_the_inline() {
 }
 
 /// A class literal between the marker and the object it marks does not consume the marker
-/// (kotlinc's `awaitClassReification` waits for the next `new` or singleton load), so the marked
-/// class, left in place, still refuses the inline.
+/// (kotlinc's `awaitClassReification` waits for the next anonymous object), so an unauthenticated
+/// object after it still refuses the inline.
 #[test]
 fn a_reified_class_left_in_place_behind_an_intervening_reference_refuses_the_inline() {
     struct Marked;
     impl ClassRoles for Marked {
         fn regenerated_class(&self, _internal: &str) -> Option<RegeneratedClass> {
             None
-        }
-        fn contains_reified_marker(&self, internal: &str) -> bool {
-            internal == "lib/Marked"
         }
     }
     let mut node = MethodNode::new(ACC_STATIC, "f", "()V");

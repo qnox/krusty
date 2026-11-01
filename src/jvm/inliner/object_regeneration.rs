@@ -111,8 +111,9 @@ pub(super) fn regenerate_objects(
     // `new` / `getstatic INSTANCE` sites whose copy still uses a reified parameter.
     let mut reemit_markers = Vec::new();
     let marker_sites = need_class_reification_sites(node);
-    // The object each marker asks to be specialized for this call.
-    let marker_targets = reification_targets(node, &marker_sites);
+    // The object event each marker asks to be specialized for this call. A marker whose object
+    // is not one the class roles authenticate is refused before anything is regenerated.
+    let marker_targets = reification_targets(node, &marker_sites, &constructions, classes)?;
     // The `new`s of objects a same-module body constructs that this call reuses unchanged.
     let mut reused = BTreeSet::new();
     for at in 0..node.nodes.len() {
@@ -212,9 +213,6 @@ pub(super) fn regenerate_objects(
     for local in &mut node.local_variables {
         local.desc = remapper.map_desc(&local.desc).map_err(malformed)?;
     }
-    if left_unreified(node, &marker_targets, &prior_classes, classes) {
-        return Err(InlineError::UnreifiedClass);
-    }
     remove_nodes(node, &marker_sites);
     insert_reification_markers(node, &marker_sites, &reemit_markers);
     Ok(pending)
@@ -269,56 +267,45 @@ pub(super) fn is_need_class_reification(insn: &Insn) -> bool {
         if !*interface && owner == INTRINSICS && name == "needClassReification" && desc == "()V")
 }
 
-/// The instruction whose object each `needClassReification` marker asks to be specialized
-/// (kotlinc's `awaitClassReification`): the marker stays pending through class literals, casts and
-/// calls, and is consumed by the next object construction (`new`) or singleton load
-/// (`getstatic INSTANCE`). Regeneration specializes the object at that instruction, and the
-/// safety check asks only about it.
-fn reification_targets(node: &MethodNode, marker_sites: &[usize]) -> Vec<usize> {
+/// The object event each `needClassReification` marker asks to be specialized (kotlinc's
+/// `awaitClassReification`): the next anonymous object construction or anonymous singleton load,
+/// as the class roles authenticate them, which are the events regeneration consumes the marker at.
+/// The marker stays pending through every other instruction, an ordinary allocation or singleton
+/// load among them. A marker no such event follows names an object this call cannot regenerate:
+/// its reified operations would stay unspecialized, so the inline is refused.
+fn reification_targets(
+    node: &MethodNode,
+    marker_sites: &[usize],
+    constructions: &Constructions,
+    classes: &dyn ClassRoles,
+) -> Result<Vec<usize>, InlineError> {
     marker_sites
         .iter()
-        .filter_map(|&site| {
-            (site + 1..node.nodes.len()).find(|&at| object_site_class(&node.nodes[at]).is_some())
+        .map(|&site| {
+            (site + 1..node.nodes.len())
+                .find(|&at| is_anonymous_object_event(node, at, constructions, classes))
+                .ok_or_else(|| {
+                    crate::trace_compiler!("splice", "unresolved reification marker at {site}");
+                    InlineError::UnreifiedClass
+                })
         })
         .collect()
 }
 
-/// The class an object construction or singleton load names.
-fn object_site_class(entry: &Node) -> Option<&str> {
-    match entry {
-        Node::Insn(Insn::Type { op: NEW, class }) => Some(class),
-        Node::Insn(Insn::Field {
-            op: GETSTATIC,
-            owner,
-            name,
-            ..
-        }) if name == "INSTANCE" => Some(owner),
-        _ => None,
-    }
-}
-
-/// Whether the object a `needClassReification` marker asks to be specialized was left as it is
-/// although its methods call `reifiedOperationMarker`. Only a marker's own target is asked: any
-/// other class the body names, such as a library class declaring inline functions with reified
-/// parameters, is not copied by kotlinc either. `node` has its regenerated objects renamed; the
-/// target's original is the class it names unless a copy replaced it.
-fn left_unreified(
+/// Whether instruction `at` constructs an anonymous object (a `new` paired with its constructor
+/// call) or loads an anonymous singleton, by the class roles: the events regeneration handles.
+fn is_anonymous_object_event(
     node: &MethodNode,
-    targets: &[usize],
-    regenerated: &[(String, String)],
+    at: usize,
+    constructions: &Constructions,
     classes: &dyn ClassRoles,
 ) -> bool {
-    targets.iter().any(|&at| {
-        let Some(class) = object_site_class(&node.nodes[at]) else {
-            unreachable!("a reification target is an object site")
-        };
-        let left = !regenerated.iter().any(|(_, copy)| copy == class)
-            && classes.contains_reified_marker(class);
-        if left {
-            crate::trace_compiler!("splice", "unreified class {class}");
-        }
-        left
-    })
+    if anonymous_singleton_owner(node, at, classes).is_some() {
+        return true;
+    }
+    constructions.by_new.contains_key(&at)
+        && matches!(&node.nodes[at], Node::Insn(Insn::Type { class, .. })
+            if classes.is_anonymous_object(class))
 }
 
 fn remove_nodes(node: &mut MethodNode, indices: &[usize]) {
