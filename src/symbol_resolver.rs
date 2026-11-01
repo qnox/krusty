@@ -66,7 +66,9 @@ pub(crate) use call_argument::CallArgKind;
 pub(crate) use callable_shapes::{
     classifier_callable_signature, classifier_callable_signatures, declared_function_type,
 };
-pub(crate) use declaration_specificity::retain_most_specific_declarations;
+pub(crate) use declaration_specificity::{
+    declarations_equally_specific, retain_most_specific_declarations,
+};
 use extension_specialization::{
     bind_defaulted_ext_ret, bind_defaulted_ext_ret_slots, bind_ext_ret, bind_ext_ret_tracking,
     extension_bindings_are_determinate, specialized_extension_return,

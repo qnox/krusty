@@ -198,22 +198,28 @@ fun box(): String {\n\
     assert_eq!(classes.differences(), Vec::<String>::new());
 }
 
-// The overloads differ in their JVM descriptors, so they need no distinct JVM names.
+// Every pair's alternatives both take the trailing lambda, and each pair is equally specific, so
+// kotlinc's ordinary discrimination picks the winner before the lambda is analyzed: no omitted
+// default, no vararg, and a non-generic declaration. The JVM descriptors differ, so no JvmName.
 const PRIORITY_DECLARATIONS: &str =
-    "fun Int.pick(f: (Int) -> String, suffix: String = \"!\"): String = \"d\" + f(this) + suffix\n\
-fun Int.pick(f: (Int) -> Int): String = \"p\" + f(this)\n\
-fun Int.tag(f: (Int) -> String, vararg extra: Int): String = \"v\" + f(this) + extra.size\n\
-fun Int.tag(f: (Int) -> Int): String = \"t\" + f(this)\n";
+    "fun <T> Int.pick(suffix: String = \"!\", f: (Int) -> T): String = \"d\" + f(this) + suffix\n\
+fun <T> Int.pick(f: (Int) -> T): T = f(this)\n\
+fun <T> Int.tag(vararg extra: Int, f: (Int) -> T): String = \"v\" + f(this) + extra.size\n\
+fun <T> Int.tag(f: (Int) -> T): T = f(this)\n\
+fun Int.gen(f: (Int) -> Int): String = \"n\" + f(this)\n\
+fun <T> Int.gen(f: (Int) -> T): T = f(this)\n";
 
 #[test]
-fn an_ordinary_winner_by_defaults_or_varargs_shapes_the_lambda_like_kotlinc() {
-    // Both pairs tie on the lambda's parameter alone. Ordinary selection prefers the candidate
-    // that omits no default and the one without a vararg, so their lambda results shape the
-    // lambdas before any refinement is considered.
+fn an_ordinary_winner_by_defaults_varargs_or_genericity_shapes_the_lambda_like_kotlinc() {
+    // kotlinc 2.4.21 prints `2 6 n2`: the winners without a default and without a vararg return
+    // the lambda's `Int`, and the non-generic `gen` its own `String`.
     let source = format!(
         "{PRIORITY_DECLARATIONS}fun box(): String {{\n\
-    val r = 1.pick {{ it + 1 }} + 2.tag {{ it * 3 }}\n\
-    return if (r == \"p2t6\") \"OK\" else r\n\
+    val a: Int = 1.pick {{ it + 1 }}\n\
+    val b: Int = 2.tag {{ it * 3 }}\n\
+    val c: String = 3.gen {{ it - 1 }}\n\
+    val r = \"$a $b $c\"\n\
+    return if (r == \"2 6 n2\") \"OK\" else r\n\
 }}\n"
     );
     common::expect_box_ok_with_stdlib(&source, "PriorityPick");
@@ -222,17 +228,19 @@ fn an_ordinary_winner_by_defaults_or_varargs_shapes_the_lambda_like_kotlinc() {
 }
 
 #[test]
-fn an_ordinary_winner_by_defaults_or_varargs_keeps_its_result_like_kotlinc() {
+fn an_ordinary_winner_by_defaults_varargs_or_genericity_keeps_its_result_like_kotlinc() {
     let source = format!(
-        "{PRIORITY_DECLARATIONS}fun bad() = 1.pick {{ it.toString() }}\n\
-fun worse() = 2.tag {{ \"x$it\" }}\n"
+        "{PRIORITY_DECLARATIONS}fun bad(): String = 1.pick {{ it + 1 }}\n\
+fun worse(): String = 2.tag {{ it * 3 }}\n\
+fun worst() = 3.gen {{ it.toString() }}\n"
     );
     assert_diagnostics_match_kotlinc(
         "PriorityMismatch.kt",
         &source,
         &[
-            &["5:22: error: return type mismatch: expected 'Int', actual 'String'."],
-            &["6:23: error: return type mismatch: expected 'Int', actual 'String'."],
+            &["7:30: error: return type mismatch: expected 'String', actual 'Int'."],
+            &["8:31: error: return type mismatch: expected 'String', actual 'Int'."],
+            &["9:23: error: return type mismatch: expected 'Int', actual 'String'."],
         ],
     );
 }

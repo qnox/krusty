@@ -38278,15 +38278,29 @@ impl<'a> Checker<'a> {
                     && candidate.receiver_rank == nearest_receiver
             })
             .collect::<Vec<_>>();
+        let declared_receiver = |candidate: &SelectedCallable| {
+            candidate
+                .is_extension()
+                .then(|| candidate.semantic_receiver())
+                .flatten()
+                .map(|receiver| crate::types::ty_subst(receiver, &HashMap::default()))
+        };
         if maximal.len() > 1 {
+            // Fewer omitted defaults wins only between equally specific declarations.
+            let source = self.fed_source();
             let dominated = maximal
                 .iter()
                 .enumerate()
-                .filter_map(|(index, (_, _, _, _, omitted, _, params, _))| {
+                .filter_map(|(index, (_, _, _, _, omitted, candidate, _, declared))| {
                     maximal
                         .iter()
-                        .any(|(_, _, _, _, other_omitted, _, other_params, _)| {
-                            other_params == params && other_omitted < omitted
+                        .any(|(_, _, _, _, other_omitted, other, _, other_declared)| {
+                            other_omitted < omitted
+                                && crate::symbol_resolver::declarations_equally_specific(
+                                    &source,
+                                    (declared_receiver(candidate), declared),
+                                    (declared_receiver(other), other_declared),
+                                )
                         })
                         .then_some(index)
                 })
@@ -38328,14 +38342,7 @@ impl<'a> Checker<'a> {
             extension_receiver,
             &mut maximal,
             |(_, generic, _, _, _, candidate, _, parameters)| {
-                let receiver = candidate
-                    .is_extension()
-                    .then(|| {
-                        candidate
-                            .semantic_receiver()
-                            .map(|receiver| crate::types::ty_subst(receiver, &HashMap::default()))
-                    })
-                    .flatten();
+                let receiver = declared_receiver(candidate);
                 let member_owner = (candidate.kind == crate::libraries::FnKind::Member)
                     .then_some(candidate.callable.owner);
                 (receiver, parameters, *generic, member_owner)
@@ -38396,13 +38403,7 @@ impl<'a> Checker<'a> {
                         .iter()
                         .map(|(_, _, _, _, _, candidate, _, declaration_params)| {
                             selecting_extension
-                                .then(|| {
-                                    candidate
-                                        .semantic_receiver()
-                                        .map(|receiver| {
-                                            crate::types::ty_subst(receiver, &HashMap::default())
-                                        })
-                                })
+                                .then(|| declared_receiver(candidate))
                                 .flatten()
                                 .into_iter()
                                 .chain(declaration_params.iter().copied())

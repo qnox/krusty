@@ -8961,8 +8961,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   rung, its rank inside the rung, and receiver distance; numeric ranks of different rungs are
   never compared alone). An extension call's lambdas are shaped by the call's own pre-lambda
   selection over the receiver's extension rung, with the declaration priorities and argument
-  mapping it applies (no omitted default and no vararg beat their alternatives), not by comparing
-  lambda parameter types alone. A non-lambda argument still waiting for its expectation
+  mapping it applies (no omitted default, no vararg and a non-generic declaration beat equally
+  specific alternatives that also take the trailing lambda), not by comparing lambda parameter
+  types alone. Fewer omitted defaults decide only between declarations that are each at least as
+  specific as the other, so `<T> pick(suffix = "!", f: (Int) -> T)` loses to `<T> pick(f: (Int) -> T)`
+  although their type parameters differ, while `(Int) -> String` against `(Int) -> Int` stays
+  ambiguous like kotlinc. A non-lambda argument still waiting for its expectation
   (`mapTo(HashSet()) { .. }`) is postponed rather than erroneous, and a bound that relates a
   binding to a formal only the lambda fixes (`C := HashSet<R>` for `C : MutableCollection<in R>`)
   is checked with that formal still open. When the only candidate the arguments can take is
