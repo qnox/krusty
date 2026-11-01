@@ -69,6 +69,7 @@ pub(super) fn publish_serializer_accessor_declaration(
             plugin: "serialization",
             operation: "serializer",
         }),
+        is_override: false,
     });
 }
 
@@ -176,6 +177,7 @@ mod tests {
                 ),
                 annotations: &annotation,
                 annotation_class_arguments: &[],
+                declared_functions: &Default::default(),
             },
             &mut members,
         );
@@ -218,6 +220,7 @@ mod tests {
                     plugin: "serialization",
                     operation: "serializer",
                 }),
+                is_override: false,
             }]
         );
     }
@@ -236,6 +239,7 @@ mod tests {
                 type_parameters: &crate::types::TypeParameters::default(),
                 annotations: &annotation,
                 annotation_class_arguments: &[],
+                declared_functions: &Default::default(),
             },
             &mut members,
         );
@@ -258,6 +262,7 @@ mod tests {
             type_parameters: &parameters,
             annotations: &annotation,
             annotation_class_arguments: &[],
+            declared_functions: &Default::default(),
         };
 
         assert_eq!(
@@ -311,6 +316,7 @@ mod tests {
                 type_parameters: &parameters,
                 annotations: &annotations,
                 annotation_class_arguments: &[],
+                declared_functions: &Default::default(),
             },
             &mut generated,
         );
@@ -365,6 +371,7 @@ mod tests {
                 type_parameters: &parameters,
                 annotations: &annotation,
                 annotation_class_arguments: arguments,
+                declared_functions: &Default::default(),
             };
             assert_eq!(
                 generated_serializer_classifier_fact(&context),

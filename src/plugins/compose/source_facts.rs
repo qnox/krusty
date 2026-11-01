@@ -570,21 +570,11 @@ pub(super) fn class_rejection(
     class: &crate::ir::IrClass,
     what: &str,
 ) -> PluginRejection {
-    let start = line_start(source.text, class.decl_line);
+    let start = crate::plugins::line_start(source.text, class.decl_line);
     PluginRejection {
         span: crate::diag::Span::new(start, start),
         message: unsupported(what),
     }
-}
-
-/// The byte offset where 1-based `line` of `text` starts.
-fn line_start(text: &str, line: u32) -> u32 {
-    let offset = text
-        .match_indices('\n')
-        .nth(line.saturating_sub(2) as usize)
-        .filter(|_| line > 1)
-        .map_or(0, |(index, _)| index + 1);
-    offset as u32
 }
 
 /// The runtime annotations that change how kotlinc's plugin groups a composable function, or fix

@@ -3073,6 +3073,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                         type_parameters: &class_type_parameters,
                         annotations: &resolved_annotations,
                         annotation_class_arguments: &resolved_annotation_class_arguments,
+                        declared_functions: &methods,
                     };
                     let mut contributed_members = Vec::new();
                     frontend_plugins.generate_frontend_declarations(
@@ -3098,7 +3099,9 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                             ret: member.ret,
                             generic_sig: member.generic_sig,
                             projected_return_hazard: false,
-                            flags: SigFlags::default().with_is_final(true),
+                            flags: SigFlags::default()
+                                .with_is_final(true)
+                                .with_is_override(member.is_override),
                             annotations: Vec::new(),
                             equality_bound: None,
                             vararg_index: None,

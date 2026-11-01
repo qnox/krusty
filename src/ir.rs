@@ -1637,6 +1637,8 @@ pub struct IrFile {
     /// What the Compose plugin recorded from this file's source at the handoff, for its body
     /// transform. `None` unless the plugin is active and the file declares a composable function.
     pub compose: Option<Box<crate::plugins::compose::ComposeFileFacts>>,
+    /// The Parcelize plugin's handoff facts; `None` unless the file declares a parcelized class.
+    pub parcelize: Option<Box<crate::plugins::parcelize::ParcelizeFileFacts>>,
     /// Package functions a compiler plugin gave physical parameters their declaration does not
     /// have (Compose's `$composer` and `$changed`). Metadata records their realized signature.
     pub(crate) plugin_extended_signatures: crate::fx_hash::HashSet<FunId>,
@@ -2096,8 +2098,8 @@ pub struct IrFile {
     synthetic_classes: crate::fx_hash::HashSet<TypeName>,
     /// Internal names of classes a compiler plugin generates with no Kotlin declaration behind
     /// them, such as Compose's `ComposableSingletons$<File>Kt`. No declaration record describes
-    /// them, and kotlinc writes them a synthetic-class `@Metadata`.
-    declarationless_classes: crate::fx_hash::HashSet<TypeName>,
+    /// them, and kotlinc writes them a synthetic-class `@Metadata` recording their visibility.
+    declarationless_classes: crate::fx_hash::HashMap<TypeName, IrDeclarationlessVisibility>,
     /// Provenance and initialization placement for statics generated without a Kotlin declaration.
     generated_static_facts: crate::fx_hash::HashMap<u32, generated_members::GeneratedStaticFacts>,
     /// `FunId`s of methods carrying a `Deprecated` classfile attribute (from `@Deprecated`) — e.g. a
@@ -2819,6 +2821,7 @@ impl IrFile {
 }
 
 mod class_declaration_facts;
+pub(crate) use class_declaration_facts::IrDeclarationlessVisibility;
 mod class_skeletons;
 mod data_class_members;
 mod debug_lines;

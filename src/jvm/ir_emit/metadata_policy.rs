@@ -23,6 +23,7 @@ pub(super) fn is_coroutine_state_machine(class: &crate::ir::IrClass) -> bool {
 }
 
 /// `ProtoBuf.Visibility` numbers kotlinc writes for a synthetic class.
+pub(super) const SYNTHETIC_INTERNAL: i32 = 0;
 pub(super) const SYNTHETIC_PROTECTED: i32 = 2;
 pub(super) const SYNTHETIC_PUBLIC: i32 = 3;
 pub(super) const SYNTHETIC_LOCAL: i32 = 5;

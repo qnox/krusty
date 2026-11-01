@@ -234,7 +234,7 @@ use member_schedule::{
 pub use metadata_policy::KotlinMetadata;
 use metadata_policy::{
     finish_local_synthetic_class, is_continuation_class, is_coroutine_state_machine,
-    synthetic_class_xi, SYNTHETIC_LOCAL, SYNTHETIC_PROTECTED, SYNTHETIC_PUBLIC,
+    synthetic_class_xi, SYNTHETIC_INTERNAL, SYNTHETIC_LOCAL, SYNTHETIC_PROTECTED, SYNTHETIC_PUBLIC,
 };
 use method_defaults::{
     emit_default_stub, emit_facade_default_stub, static_default_stub_marker, DefaultStubSource,

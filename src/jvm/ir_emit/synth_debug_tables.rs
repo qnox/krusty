@@ -35,7 +35,7 @@ pub(super) fn attach_synth_debug_tables(
     } = constructor;
     let line = c.decl_line;
     // A class with no declaration behind it has no line, but its members still have locals.
-    if line == 0 && !ir.is_declarationless_class(c.fq_name_id()) {
+    if line == 0 && ir.declarationless_class(c.fq_name_id()).is_none() {
         return;
     }
     let at = |pc: u16, line: u32| (line != 0).then_some((pc, line));
