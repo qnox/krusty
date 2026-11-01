@@ -53180,8 +53180,19 @@ impl<'a> Checker<'a> {
             }
             // A lambda literal `{ a, b -> body }` — type is `Fun(arity)`. Without an expected
             // function type, a lambda that omits its parameter list declares none: only a
-            // contextual one-parameter function type introduces the implicit `it`.
-            let bind_names = params.clone();
+            // contextual one-parameter function type introduces the implicit `it`. A postponed
+            // call argument is checked here only provisionally, before a candidate supplies its
+            // shape, so it keeps the arity overload probing infers; the selected or rejected call
+            // checks it again against the declared shape.
+            let bind_names: Vec<String> = if !params.is_empty() {
+                params.clone()
+            } else if self.postponed_argument_depth != 0
+                && self.untyped_lambda_binds_implicit_it(scope, body)
+            {
+                vec!["it".to_string()]
+            } else {
+                vec![]
+            };
             let arity = bind_names.len() as u8;
             // Type each parameter from its explicit annotation (`{ x: Int -> … }`) if present, so a
             // bare-value lambda checks its body correctly; otherwise the erased `Any` (an expected

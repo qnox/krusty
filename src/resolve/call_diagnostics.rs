@@ -730,7 +730,29 @@ impl Checker<'_> {
             };
             self.diags.error(self.span(argument), message.clone());
             self.omit_unshaped_any_receiver_type += 1;
-            self.expr_inner_lambda(scope, argument, None, params, body, implicit_lambda_label);
+            // The selected declaration still owns the lambda's arity: `(T) -> String` gives it an
+            // implicit `it`, erased to `Any` because `T` could not be inferred.
+            match parameter.non_null().kind() {
+                TyKind::Fun(function) if !function.has_receiver => {
+                    let inputs = vec![Ty::obj("kotlin/Any"); function.params.len()];
+                    self.check_lambda_with_types_labeled(
+                        scope,
+                        argument,
+                        &inputs,
+                        implicit_lambda_label,
+                    );
+                }
+                _ => {
+                    self.expr_inner_lambda(
+                        scope,
+                        argument,
+                        None,
+                        params,
+                        body,
+                        implicit_lambda_label,
+                    );
+                }
+            }
             self.omit_unshaped_any_receiver_type -= 1;
         }
     }
