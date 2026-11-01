@@ -33,6 +33,29 @@ pub(crate) fn physical_ty(ir: &IrFile, class: ClassId, index: u32, declared: Ty)
     }
 }
 
+/// The PHYSICAL type of constructor parameter `parameter` of `class`, given the type the
+/// constructor declares for it. Only a compiler-supplied PREFIX parameter fills a capture field, and
+/// it carries a shared cell exactly when the field it fills holds one. The field is the one the
+/// parameter names, never the one at the parameter's own position: a capture kept in its parameter
+/// alone fills no field, so every field after it sits one place earlier than its parameter.
+///
+/// Every constructor of a class leads with the same prefix, so a secondary constructor's prefix
+/// parameter, a default-argument entry's among them, is answered by the same position here.
+pub(crate) fn prefix_physical_ty(
+    ir: &IrFile,
+    class: ClassId,
+    parameter: usize,
+    declared: Ty,
+) -> Ty {
+    let declaration = &ir.classes[class as usize];
+    declaration
+        .ctor_args
+        .get(..declaration.constructor_prefix_count as usize)
+        .and_then(|prefix| prefix.get(parameter))
+        .and_then(|argument| argument.field_index)
+        .map_or(declared, |field| physical_ty(ir, class, field, declared))
+}
+
 /// The types a function's parameters are CARRIED as, which are not always the types it declares.
 ///
 /// A `var` that a closure captures is replaced by a holder, and what is passed to the lambda's body

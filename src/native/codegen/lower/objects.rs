@@ -117,7 +117,29 @@ pub(super) fn constructor_parameters(ir: &IrFile, class: ClassId) -> Vec<Ty> {
         .ctor_args
         .iter()
         .enumerate()
-        .map(|(index, argument)| captures::physical_ty(ir, class, index as u32, argument.ty))
+        .map(|(index, argument)| captures::prefix_physical_ty(ir, class, index, argument.ty))
+        .collect()
+}
+
+/// The parameters secondary constructor `secondary` of `class` takes, beyond `this`, as they are
+/// carried: the class's prefix, then its own.
+///
+/// The declaration keeps the prefix's SEMANTIC types, which a default-argument entry copies from
+/// the primary — a captured `var n: Int` stays `Int`. What carries it is the class's choice for
+/// that prefix position, so a construction, the constructor itself and a `this(…)` it forwards
+/// the prefix through agree with the primary on the shared cell.
+pub(super) fn secondary_constructor_parameters(
+    ir: &IrFile,
+    class: ClassId,
+    secondary: usize,
+) -> Vec<Ty> {
+    let constructor = &ir.classes[class as usize].secondary_ctors[secondary];
+    constructor
+        .prefix_params
+        .iter()
+        .enumerate()
+        .map(|(index, &ty)| captures::prefix_physical_ty(ir, class, index, ty))
+        .chain(constructor.params.iter().copied())
         .collect()
 }
 
@@ -227,15 +249,9 @@ impl<'a> FileLowering<'a> {
             // Each `constructor(…)` beyond the primary is its own entry point: it delegates to
             // another constructor and then runs its own body.
             let mut secondaries = Vec::new();
-            for (ordinal, secondary) in self.ir.classes[class as usize]
-                .secondary_ctors
-                .clone()
-                .iter()
-                .enumerate()
-            {
+            for ordinal in 0..self.ir.classes[class as usize].secondary_ctors.len() {
                 let mut params = vec![any()];
-                params.extend(secondary.prefix_params.iter().copied());
-                params.extend(secondary.params.iter().copied());
+                params.extend(secondary_constructor_parameters(self.ir, class, ordinal));
                 secondaries.push(self.declare_local_function(
                     &format!("kt_{base}__init_{ordinal}"),
                     &params,
@@ -868,8 +884,7 @@ impl<'a> FileLowering<'a> {
             ));
         }
         let mut slots = vec![self.object_type(class)];
-        slots.extend(secondary.prefix_params.iter().copied());
-        slots.extend(secondary.params.iter().copied());
+        slots.extend(secondary_constructor_parameters(self.ir, class, ordinal));
         let mut semantic_slots = vec![Ty::obj_name(declaration.fq_name)];
         semantic_slots.extend(secondary.prefix_params.iter().copied());
         semantic_slots.extend(secondary.params.iter().copied());
@@ -1053,14 +1068,13 @@ impl<'a> FileLowering<'a> {
                         .pre_super_param_fields
                         .iter()
                         .any(|(pre, _)| *pre as usize == parameter);
-                    (argument.is_field && !written_early)
-                        .then(|| {
-                            layout
-                                .fields
-                                .get(parameter)
-                                .map(|field| field.offset as i32)
-                        })
-                        .flatten()
+                    // The field the parameter names: a capture kept in its parameter alone
+                    // fills none, so parameter and field positions need not agree.
+                    argument
+                        .field_index
+                        .filter(|_| argument.is_field && !written_early)
+                        .and_then(|field| layout.fields.get(field as usize))
+                        .map(|field| field.offset as i32)
                 })
                 .collect()
         } else {
@@ -1492,12 +1506,7 @@ impl<'a> FileLowering<'a> {
                 // The operands lead with the superclass's prefix — an inner superclass's outer
                 // instance — whichever of its constructors is called.
                 let params: Vec<Ty> = match sibling {
-                    Some(sibling) => {
-                        let constructor = &parent_declaration.secondary_ctors[sibling];
-                        let mut params = constructor.prefix_params.clone();
-                        params.extend(constructor.params.iter().copied());
-                        params
-                    }
+                    Some(sibling) => secondary_constructor_parameters(self.ir, parent, sibling),
                     None => constructor_parameters(self.ir, parent),
                 };
                 if declaration.super_args.len() != params.len() {
@@ -1670,7 +1679,7 @@ impl<'a> FileLowering<'a> {
                     let field_type =
                         model::field_storage_ty(body.file.values, body.file.ir, class, field)?;
                     let argument_type =
-                        captures::physical_ty(body.file.ir, class, index as u32, argument.ty);
+                        captures::prefix_physical_ty(body.file.ir, class, index, argument.ty);
                     let Some(value) =
                         body.convert(params[index + 1], Some(argument_type), field_type)?
                     else {
@@ -2083,15 +2092,10 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             // primary's is supplied. So the physical list is the prefix and then the
             // declaration's own; the arity check below is what says whether the call really
             // carries one.
-            Some(index) => {
-                let secondary = &declaration.secondary_ctors[index as usize];
-                let mut params = secondary.prefix_params.clone();
-                params.extend(secondary.params.iter().copied());
-                (
-                    self.file.classes[class as usize].secondaries[index as usize],
-                    params,
-                )
-            }
+            Some(index) => (
+                self.file.classes[class as usize].secondaries[index as usize],
+                secondary_constructor_parameters(self.file.ir, class, index as usize),
+            ),
         };
         if args.len() != params.len() {
             return Err(declined!(

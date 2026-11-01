@@ -497,10 +497,7 @@ fn constructor_frame(ir: &crate::ir::IrFile, class: ClassId, ordinal: u32) -> Op
     let Some(index) = ordinal.checked_sub(1) else {
         return Some(super::objects::constructor_parameters(ir, class));
     };
-    let constructor = ir.classes[class as usize]
-        .secondary_ctors
-        .get(index as usize)?;
-    let mut frame = constructor.prefix_params.clone();
-    frame.extend(constructor.params.iter().copied());
-    Some(frame)
+    let index = index as usize;
+    (index < ir.classes[class as usize].secondary_ctors.len())
+        .then(|| super::objects::secondary_constructor_parameters(ir, class, index))
 }
