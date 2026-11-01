@@ -230,7 +230,7 @@ pub(super) fn drop_in_coroutine_classes(ir: &mut IrFile) {
     let methods = ir
         .classes
         .iter()
-        .filter(|class| crate::jvm::suspend::is_coroutine_state_machine(class))
+        .filter(|class| super::coroutine_classes::is_coroutine_state_machine(class))
         .flat_map(|class| class.methods.iter().copied())
         .collect::<Vec<_>>();
     for method in methods {

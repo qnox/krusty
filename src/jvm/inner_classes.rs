@@ -155,8 +155,8 @@ impl InnerClasses {
             // the scope it was lowered in. A coroutine state machine is anonymous in
             // `InnerClasses` even though its own IR class is not a source anonymous-object
             // declaration, and so is a lambda realized as a class.
-            let coroutine =
-                crate::jvm::suspend::is_coroutine_state_machine(class) || class.lambda.is_some();
+            let coroutine = super::coroutine_classes::is_coroutine_state_machine(class)
+                || class.lambda.is_some();
             let local = class.is_local_class && class.enclosure.is_some();
             let (outer, name) = match &class.declaration_name {
                 Some(ClassifierDeclarationName::TopLevel { .. }) => continue,

@@ -28,9 +28,7 @@
 
 mod bytecode_machine;
 mod continuation_class;
-mod coroutine_classes;
 mod coroutine_context;
-pub(crate) use coroutine_classes::{is_continuation_class, is_coroutine_state_machine};
 mod resume_coercion;
 use continuation_class::{build_continuation_class, physical_parameters, suspend_parameter_ty};
 use coroutine_context::realize_coroutine_context;
