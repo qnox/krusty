@@ -161,16 +161,10 @@ enum ForwarderSite {
     ValueClassStatic,
 }
 
-/// `@NotNull`/`@Nullable` for one semantic type of a forwarder: reference types only, and never a
-/// bare type variable.
+/// `@NotNull`/`@Nullable` for one semantic type of a forwarder, as kotlinc annotates any declared
+/// position: reference types only, and a bare type variable only when its bound excludes null.
 fn forwarder_nullability(ty: Ty) -> Option<&'static str> {
-    if ty.non_null().is_ty_param() || !ir_ty_to_jvm(&ty).is_reference() {
-        None
-    } else if ty.is_nullable() {
-        Some("Lorg/jetbrains/annotations/Nullable;")
-    } else {
-        Some("Lorg/jetbrains/annotations/NotNull;")
-    }
+    crate::jvm::declared_type_nullability::declared_annotation(ty, ir_ty_to_jvm(&ty))
 }
 
 /// Emit an ordinary class's forwarders. A value class writes its own, each beside its `-impl`
@@ -277,8 +271,8 @@ fn forwarder(
     let signature = forwarder_signature(
         formatter,
         class_type_params,
-        &semantic_params,
-        semantic_ret,
+        &default.type_parameters,
+        (&semantic_params, semantic_ret),
         (&param_tys, ret),
         default.suspend,
     );
@@ -348,31 +342,51 @@ fn forwarder(
 }
 
 /// The generic `Signature` of a forwarder whose types have generic structure (`List<String>`, a
-/// class type parameter), or `None` when it would only repeat the descriptor. A `suspend` member
-/// signs its CPS shape, as the member itself does: the declared result travels as the trailing
-/// `Continuation<? super R>` and the method returns `Object`.
+/// class type parameter, a type parameter of its own), or `None` when it would only repeat the
+/// descriptor. A `suspend` member signs its CPS shape, as the member itself does: the declared
+/// result travels as the trailing `Continuation<? super R>` and the method returns `Object`.
 ///
-/// A member's own type parameters would need their declarations ahead of the parameter list,
-/// which the inherited record does not carry; such a forwarder keeps descriptor-only shape
-/// (recorded in docs/SPEC.md).
+/// The member's own type parameters are declared ahead of the parameter list with their bounds as
+/// the class's applied supertype substitutes them (`<T::Ljava/lang/Comparable<-TT;>;>`).
 fn forwarder_signature(
     formatter: &JvmSignatureFormatter<'_>,
     class_type_params: &[String],
-    semantic_params: &[Ty],
-    semantic_ret: Ty,
+    type_parameters: &[crate::fir::InheritedTypeParameter],
+    (semantic_params, semantic_ret): (&[Ty], Ty),
     (param_tys, ret): (&[Ty], Ty),
     suspend: bool,
 ) -> Option<String> {
-    // A member's own type parameter (`fun <T> echo`) needs its declaration in the forwarder's
-    // signature, which this record does not carry: keep the descriptor-only shape for it.
+    let known = class_type_params
+        .iter()
+        .cloned()
+        .chain(
+            type_parameters
+                .iter()
+                .map(|parameter| parameter.semantic_name.to_string()),
+        )
+        .collect::<Vec<_>>();
     if semantic_params
         .iter()
         .chain(std::iter::once(&semantic_ret))
-        .any(|ty| mentions_other_type_parameter(*ty, class_type_params))
+        .chain(
+            type_parameters
+                .iter()
+                .flat_map(|parameter| parameter.bounds.iter().map(|(bound, _)| bound)),
+        )
+        .any(|ty| mentions_other_type_parameter(*ty, &known))
     {
         return None;
     }
-    let mut signature = String::from("(");
+    let mut signature = jvm_type_parameter_declarations(
+        formatter,
+        type_parameters.iter().map(|parameter| {
+            (
+                crate::types::type_parameter_source_name(&parameter.semantic_name),
+                &*parameter.bounds,
+            )
+        }),
+    )?;
+    signature.push('(');
     for parameter in semantic_params {
         signature.push_str(&formatter.method_ty(parameter, Wildcards::Declared)?);
     }

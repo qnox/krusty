@@ -1103,6 +1103,8 @@ mod generic_constructor_parameter_scope_e2e;
 mod generic_ctor_lambda_targs_e2e;
 #[path = "generic_ctor_template_prepass_e2e.rs"]
 mod generic_ctor_template_prepass_e2e;
+#[path = "generic_default_forwarder_signature_e2e.rs"]
+mod generic_default_forwarder_signature_e2e;
 #[path = "generic_delegate_e2e.rs"]
 mod generic_delegate_e2e;
 #[path = "generic_fn_e2e.rs"]

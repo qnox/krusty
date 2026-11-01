@@ -183,6 +183,7 @@ pub(super) fn inherited_defaults(
                     result: accessor.result,
                     applied_parameters,
                     applied_result,
+                    type_parameters: accessor.type_parameters,
                     suspend: accessor.suspend,
                     vararg: accessor.vararg,
                     body,
@@ -354,6 +355,8 @@ struct SurfaceAccessor {
     parameters: Box<[Ty]>,
     parameter_identities: Box<[ResolvedParameterIdentity]>,
     result: Ty,
+    /// A function's own type parameters as the applied view bounds them; an accessor has none.
+    type_parameters: Box<[crate::fir::InheritedTypeParameter]>,
     suspend: bool,
     /// The declaration's last physical parameter is its declared `vararg`.
     vararg: bool,
@@ -459,6 +462,7 @@ fn module_surface(
                     .into_iter()
                     .find(|function| function.stable_declaration == Some(child))
                     .expect("a module interface function is visible through its provider");
+                let type_parameters = type_parameters(source, &applied);
                 let mut parameters = signature
                     .parameters
                     .iter()
@@ -493,6 +497,7 @@ fn module_surface(
                         parameters: parameters.into_boxed_slice(),
                         parameter_identities,
                         result: signature.result.get(),
+                        type_parameters,
                         suspend: header.flags.has(DeclarationFlags::SUSPEND),
                         vararg,
                         is_abstract,
@@ -539,6 +544,7 @@ fn module_surface(
                     parameters: parameters.clone().into_boxed_slice(),
                     parameter_identities: getter_identities.clone().into_boxed_slice(),
                     result: signature.result.get(),
+                    type_parameters: Box::default(),
                     suspend: false,
                     vararg: false,
                     is_abstract,
@@ -567,6 +573,7 @@ fn module_surface(
                         parameters: parameters.into_boxed_slice(),
                         parameter_identities: setter_identities.into_boxed_slice(),
                         result: Ty::Unit,
+                        type_parameters: Box::default(),
                         suspend: false,
                         vararg: false,
                         is_abstract,
@@ -625,9 +632,10 @@ fn dependency_surface(
             .zip(applied_functions.overloads)
             .filter(|(function, _)| member_function(function))
         {
+            let type_parameters = type_parameters(source, &applied);
             surface.push(SurfaceMember {
                 slot: Slot::Function(Box::new(applied)),
-                accessors: vec![dependency_function(function)],
+                accessors: vec![dependency_function(function, type_parameters)],
                 is_kotlin: shape.is_kotlin,
             });
         }
@@ -679,7 +687,41 @@ fn dependency_realization(callable: &LibraryCallable) -> DependencyRealization {
     }
 }
 
-fn dependency_function(function: &FunctionInfo) -> SurfaceAccessor {
+/// The type parameters `function` declares, bounded as its applied view substitutes them.
+fn type_parameters(
+    source: &dyn SymbolSource,
+    function: &FunctionInfo,
+) -> Box<[crate::fir::InheritedTypeParameter]> {
+    let Some(signature) = &function.generic_sig else {
+        return Box::default();
+    };
+    signature
+        .formals
+        .iter()
+        .enumerate()
+        .map(|(ordinal, name)| crate::fir::InheritedTypeParameter {
+            semantic_name: name.as_str().into(),
+            bounds: signature
+                .formal_bounds
+                .get(ordinal)
+                .into_iter()
+                .flatten()
+                .map(|&bound| {
+                    let is_interface =
+                        crate::fir::ResolvedTypeParameterBound::is_interface_type(bound, |owner| {
+                            is_interface(source, owner)
+                        });
+                    (bound, is_interface)
+                })
+                .collect(),
+        })
+        .collect()
+}
+
+fn dependency_function(
+    function: &FunctionInfo,
+    type_parameters: Box<[crate::fir::InheritedTypeParameter]>,
+) -> SurfaceAccessor {
     let callable = &function.callable;
     // An extension receiver leads the physical parameters; the call shape's `vararg_index` counts
     // only the logical (context and value) parameters.
@@ -701,6 +743,7 @@ fn dependency_function(function: &FunctionInfo) -> SurfaceAccessor {
             )
             .expect("a normalized function publishes every typed parameter identity"),
         result: callable.ret,
+        type_parameters,
         suspend: function.flags.suspend,
         vararg: function.call_sig.vararg_index.is_some_and(|index| {
             index + usize::from(receiver_param) + 1 == callable.physical_params.len()
@@ -749,6 +792,7 @@ fn dependency_accessor(
         parameters: callable.params.clone().into_boxed_slice(),
         parameter_identities: identities.into_boxed_slice(),
         result: callable.ret,
+        type_parameters: Box::default(),
         suspend: callable.suspend,
         // A property accessor never declares a `vararg`.
         vararg: false,
