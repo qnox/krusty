@@ -770,7 +770,8 @@ impl EntryHeader {
             parts.render()
         })
         .filter(|signature| signature != descriptor);
-        let nullability = super::declared_nullability::declared_nullability(ir, member);
+        let nullability =
+            super::override_result_emission::declared_nullability(ir, override_results, member);
         let reflected = if java_parameters {
             crate::jvm::method_parameters::value_class_interface_entry(
                 ir,
