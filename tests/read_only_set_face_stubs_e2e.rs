@@ -5,9 +5,10 @@
 //! E>)`, `removeAll`/`retainAll(Collection<?>)`. Unlike `Collection`, the face has no JDK
 //! `removeIf` stub: kotlinc writes none for a `Set`.
 //!
-//! An abstract class's fake-override bridges are a later realization; these comparisons leave
-//! them out by their exact spelling and compare every other member, the `toArray` pair and the
-//! declared `containsAll` override included, byte for byte.
+//! An abstract class materializes the read-only members it leaves abstract (`abstract boolean
+//! contains(String)`, `abstract int getSize()`) with their final special bridges. These comparisons
+//! compare every member, the `toArray` pair and the declared `containsAll` override included, byte
+//! for byte.
 
 use super::common;
 
@@ -34,28 +35,13 @@ const ABSTRACT_INT_SET: &str = "abstract class Bag : Set<Int>\n";
 
 const ABSTRACT_GENERIC_SET: &str = "abstract class Bag<T> : Set<T>\n";
 
-/// The members a later realization writes, as `javap -p` spells them in either compiler's class.
-const LATER_REALIZATIONS: &[&str] = &[
-    "public abstract boolean contains(java.lang.String);",
-    "public abstract boolean contains(int);",
-    "public final boolean contains(java.lang.Object);",
-    "public abstract int getSize();",
-    "public final int size();",
-];
-
 fn assert_members_match_kotlinc(source: &str, members: &[&str]) {
     let classes =
         common::classes_against_kotlinc_module(&[("Bag.kt", &format!("package sets\n\n{source}"))]);
     let (reference, krusty) = classes
         .method_declarations("sets/Bag")
         .expect("both compilers write sets/Bag");
-    let realized_here = |declarations: Vec<String>| {
-        declarations
-            .into_iter()
-            .filter(|declaration| !LATER_REALIZATIONS.contains(&declaration.as_str()))
-            .collect::<Vec<_>>()
-    };
-    assert_eq!(realized_here(krusty), realized_here(reference));
+    assert_eq!(krusty, reference);
     let (reference, krusty) = classes.method_blocks("sets/Bag");
     for member in members {
         let block = |blocks: &[(String, String)]| {
@@ -152,6 +138,10 @@ fn an_abstract_set_also_gets_an_iterator_stub_like_kotlinc() {
             "public java.util.Iterator<java.lang.String> iterator();",
             "public boolean add(java.lang.String);",
             "public boolean add(java.lang.Object);",
+            "public abstract boolean contains(java.lang.String);",
+            "public final boolean contains(java.lang.Object);",
+            "public abstract int getSize();",
+            "public final int size();",
         ],
     );
 }
@@ -165,6 +155,8 @@ fn an_abstract_primitive_set_keeps_its_unboxed_add_and_bridge_like_kotlinc() {
             "public boolean add(int);",
             "public boolean addAll(java.util.Collection<? extends java.lang.Integer>);",
             "public boolean add(java.lang.Object);",
+            "public abstract boolean contains(int);",
+            "public final boolean contains(java.lang.Object);",
         ],
     );
 }
@@ -178,6 +170,8 @@ fn an_abstract_generic_set_needs_no_add_bridge_like_kotlinc() {
             "public boolean add(T);",
             "public boolean addAll(java.util.Collection<? extends T>);",
             "public boolean removeAll(java.util.Collection<?>);",
+            "public abstract int getSize();",
+            "public final int size();",
         ],
     );
 }

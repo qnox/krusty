@@ -1,8 +1,10 @@
-//! Read-only collection faces: kotlinc's throwing stubs for a mutable face's members, and the
-//! bridges of the members a class implements.
+//! Read-only collection faces: kotlinc's throwing stubs for a mutable face's members, the bridges
+//! of the members a class implements, and the builtin members an abstract class materializes.
 
 use super::common;
 
+#[path = "../abstract_builtin_overrides_e2e.rs"]
+mod abstract_builtin_overrides_e2e;
 #[path = "../collection_override_signature_e2e.rs"]
 mod collection_override_signature_e2e;
 #[path = "../collection_to_array_e2e.rs"]

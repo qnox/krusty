@@ -227,10 +227,10 @@ fn emit_stub_bridge(class: &IrClass, cw: &mut ClassWriter, stub: &ReadOnlyStub) 
 }
 
 /// The member a bridge forwards to, by its JVM name and physical descriptor.
-struct Target<'a> {
-    name: &'a str,
-    parameters: &'a [Ty],
-    result: Ty,
+pub(super) struct Target<'a> {
+    pub(super) name: &'a str,
+    pub(super) parameters: &'a [Ty],
+    pub(super) result: Ty,
 }
 
 /// The bridge of an implemented member: each erased argument is cast or unboxed to the
@@ -238,7 +238,7 @@ struct Target<'a> {
 /// result is discarded for a `void` bridge (a `Nothing` member's `Void`) or boxed back to the
 /// erased result when that is a reference. A type-safe declaration's bridge first tests each
 /// checked argument against its declared type.
-fn emit_forwarding<const ACCESS: u16>(
+pub(super) fn emit_forwarding<const ACCESS: u16>(
     class: &IrClass,
     cw: &mut ClassWriter,
     target: &Target<'_>,
@@ -247,7 +247,7 @@ fn emit_forwarding<const ACCESS: u16>(
     barrier: Option<(StubBarrier, &[Ty])>,
 ) {
     let targets = target.parameters;
-    cw.reserve_method_pool(bridge.name, bridge.descriptor, None, &[]);
+    cw.reserve_method_pool(bridge.name, bridge.descriptor, bridge.signature, &[]);
     let words: u16 = bridge.parameters.iter().map(|ty| slot_words(*ty)).sum();
     let mut code = CodeBuilder::new(1 + words);
     if let Some((barrier, declared)) = barrier {
@@ -311,7 +311,7 @@ fn emit_forwarding<const ACCESS: u16>(
         bridge.descriptor,
         &mut code,
         1 + words,
-        None,
+        bridge.signature,
     );
     let line = if class.decl_start_line == 0 {
         class.decl_line
@@ -372,12 +372,14 @@ fn method_locals(class: &IrClass, method: &ThrowingMethod) -> Vec<(String, Strin
     locals
 }
 
-struct ThrowingMethod<'a> {
-    name: &'a str,
-    parameters: &'a [Ty],
-    parameter_names: &'a [String],
-    descriptor: &'a str,
-    signature: Option<&'a str>,
+/// A method a stub or bridge writes: its JVM name, parameters with their names, descriptor, and
+/// generic signature.
+pub(super) struct ThrowingMethod<'a> {
+    pub(super) name: &'a str,
+    pub(super) parameters: &'a [Ty],
+    pub(super) parameter_names: &'a [String],
+    pub(super) descriptor: &'a str,
+    pub(super) signature: Option<&'a str>,
 }
 
 fn emit_throwing<const ACCESS: u16>(
