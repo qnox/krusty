@@ -215,6 +215,7 @@ impl ClassWriter {
                 const_value: None,
                 visible_anns: Vec::new(),
                 invisible_anns: Vec::new(),
+                deprecated: false,
             },
         );
     }

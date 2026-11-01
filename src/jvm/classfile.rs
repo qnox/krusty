@@ -442,6 +442,8 @@ struct FieldInfo {
     /// `RuntimeVisibleAnnotations` (RUNTIME retention) and `RuntimeInvisibleAnnotations` (BINARY).
     visible_anns: Vec<Vec<u8>>,
     invisible_anns: Vec<Vec<u8>>,
+    /// A `Deprecated` attribute, after `Signature` and before the annotation attributes.
+    deprecated: bool,
 }
 
 /// What every `@kotlin.Metadata` of one compilation stamps beside its payload: the `mv` version,
@@ -773,6 +775,7 @@ impl ClassWriter {
             const_value: None,
             visible_anns: Vec::new(),
             invisible_anns: Vec::new(),
+            deprecated: false,
         });
     }
 
@@ -790,6 +793,7 @@ impl ClassWriter {
             const_value: Some(const_idx),
             visible_anns: Vec::new(),
             invisible_anns: Vec::new(),
+            deprecated: false,
         });
     }
 
@@ -1349,12 +1353,16 @@ impl ClassWriter {
         // A field's own `RuntimeVisibleAnnotations` name interns in this same field-first window; the
         // method/class-level uses below dedup onto it.
         let mut field_rva: Option<u16> = None;
+        let mut field_dep_name: Option<u16> = None;
         for i in 0..self.fields.len() {
             if self.fields[i].signature.is_some() && field_sig_name.is_none() {
                 field_sig_name = Some(self.cp.utf8("Signature"));
             }
             if self.fields[i].const_value.is_some() && constval_attr_name.is_none() {
                 constval_attr_name = Some(self.cp.utf8("ConstantValue"));
+            }
+            if self.fields[i].deprecated && field_dep_name.is_none() {
+                field_dep_name = Some(self.cp.utf8("Deprecated"));
             }
             if !self.fields[i].visible_anns.is_empty() && field_rva.is_none() {
                 field_rva = Some(self.cp.utf8("RuntimeVisibleAnnotations"));
@@ -1420,7 +1428,7 @@ impl ClassWriter {
         let mut vis_ann_name: Option<u16> = field_rva;
         // `Deprecated` interned from the per-method sequence above; the class-level fallback below
         // dedups onto it when a method already introduced the name.
-        let mut method_dep_name: Option<u16> = None;
+        let mut method_dep_name: Option<u16> = field_dep_name;
         let mut rvpa_attr_name = None;
         // A method-level RIA first use dedups onto the field-level index when both are present.
         let mut invis_ann_name = field_ria;
@@ -1622,6 +1630,7 @@ impl ClassWriter {
             u2(&mut out, f.desc);
             let nattr = f.signature.is_some() as u16
                 + f.const_value.is_some() as u16
+                + f.deprecated as u16
                 + (!f.visible_anns.is_empty()) as u16
                 + (!f.invisible_anns.is_empty()) as u16;
             u2(&mut out, nattr);
@@ -1635,6 +1644,10 @@ impl ClassWriter {
                 u2(&mut out, signature_attr_name.unwrap());
                 u4(&mut out, 2);
                 u2(&mut out, si);
+            }
+            if f.deprecated {
+                u2(&mut out, deprecated_attr_name.unwrap());
+                u4(&mut out, 0);
             }
             write_annotation_attr(&mut out, field_vis_ann_name, &f.visible_anns);
             write_annotation_attr(&mut out, field_invis_ann_name, &f.invisible_anns);
