@@ -152,6 +152,18 @@ impl ExplicitTypeArgumentFixity for &[Ty] {
     }
 }
 
+/// Seed a declaration's formals from explicit call-site type arguments. All inference channels use
+/// this operation before receiver/argument unification so written arguments remain authoritative and
+/// member, extension, static, and lambda-shape probes cannot drift into different binding rules.
+pub(crate) fn seeded_gsig_binds(gsig: &GenericSig, type_args: &[Ty]) -> GSigBinds {
+    gsig.formals
+        .iter()
+        .map(crate::types::TyParamName::from)
+        .zip(type_args.iter().copied())
+        .filter(|(_, argument)| *argument != Ty::Error)
+        .collect()
+}
+
 /// The type arguments of a constructed generic type INFERRED from a construction's argument types
 /// (`Pair(1, 2)` → `[Int, Int]`, so `Pair(1, 2)` types as `Pair<Int, Int>`). Each of the type's formal
 /// parameters (`ty.type_params`) is bound by unifying the matching-arity constructor's parsed generic

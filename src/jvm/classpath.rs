@@ -1183,11 +1183,7 @@ impl BuiltinsFile {
                     BuiltinMember {
                         name: m.name,
                         generic_sig: GenericSig {
-                            formals: m
-                                .formals
-                                .iter()
-                                .map(|p| crate::types::TyParamName::new(&p.name))
-                                .collect(),
+                            formals: m.formals.iter().map(|p| (&p.name).into()).collect(),
                             formal_bounds: m
                                 .formals
                                 .iter()
