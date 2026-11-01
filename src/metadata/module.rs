@@ -29,26 +29,80 @@ pub fn kotlin_module_file_name(module_name: &str) -> String {
     format!("META-INF/{sanitised}.kotlin_module")
 }
 
-/// `packages`: `(package fq-name, [file-facade short class names])`. `version` is the `@Metadata`
-/// `mv` the module's classes carry (`[X, Y, 0]` for `-language-version X.Y`, the default stamp
-/// otherwise). kotlinc sorts the part names of each package alphabetically when writing the
-/// mapping (the caller's insertion order is source-file order), so the builder sorts them here.
-pub fn build_kotlin_module(packages: &[(String, Vec<String>)], version: [i32; 3]) -> Vec<u8> {
+/// One package part a `.kotlin_module` lists: a file class's short name, and the short name of
+/// the multifile facade it is a part of.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PackagePart {
+    pub name: String,
+    pub multifile_facade: Option<String>,
+}
+
+impl From<&str> for PackagePart {
+    fn from(name: &str) -> Self {
+        PackagePart::from(name.to_string())
+    }
+}
+
+impl From<String> for PackagePart {
+    fn from(name: String) -> Self {
+        PackagePart {
+            name,
+            multifile_facade: None,
+        }
+    }
+}
+
+/// `packages`: `(package fq-name, [package parts])`. `version` is the `@Metadata` `mv` the
+/// module's classes carry (`[X, Y, 0]` for `-language-version X.Y`, the default stamp
+/// otherwise). kotlinc's `PackageParts.addTo` groups the parts by multifile facade, facades in
+/// name order and plain parts last, and sorts the parts of each group alphabetically (the
+/// caller's insertion order is source-file order). Each multifile part then records its facade
+/// as a 1-based index into the facade names that follow.
+pub fn build_kotlin_module(packages: &[(String, Vec<PackagePart>)], version: [i32; 3]) -> Vec<u8> {
+    // ModuleMapping uses the JVM's String ordering. Rust's `str` order agrees for BMP text but
+    // not when a name contains a supplementary-plane character: Java compares the leading
+    // surrogate before a later BMP code unit, while Rust compares Unicode scalar values.
+    fn jvm_order(left: &str, right: &str) -> std::cmp::Ordering {
+        left.encode_utf16().cmp(right.encode_utf16())
+    }
     let mut out = Vec::new();
     for v in [3i32, version[0], version[1], version[2], 0] {
         out.extend_from_slice(&v.to_be_bytes()); // version length-prefixed + flags=0
     }
     let mut module = Pb::new();
-    for (pkg, facades) in packages {
+    for (pkg, parts) in packages {
         let mut pp = Pb::new();
         pp.field_bytes(1, pkg.as_bytes()); // package_fq_name
-        let mut facades: Vec<&String> = facades.iter().collect();
-        // ModuleMapping uses the JVM's String ordering. Rust's `str` order agrees for BMP text but
-        // not when a facade contains a supplementary-plane character: Java compares the leading
-        // surrogate before a later BMP code unit, while Rust compares Unicode scalar values.
-        facades.sort_by(|left, right| left.encode_utf16().cmp(right.encode_utf16()));
-        for f in facades {
-            pp.field_bytes(2, f.as_bytes()); // short_class_name
+        let mut parts: Vec<&PackagePart> = parts.iter().collect();
+        parts.sort_by(|left, right| {
+            match (&left.multifile_facade, &right.multifile_facade) {
+                (Some(left), Some(right)) => jvm_order(left, right),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => std::cmp::Ordering::Equal,
+            }
+            .then_with(|| jvm_order(&left.name, &right.name))
+        });
+        let mut facades: Vec<&str> = Vec::new();
+        let mut facade_ids = Vec::new();
+        for part in &parts {
+            pp.field_bytes(2, part.name.as_bytes()); // short_class_name
+            if let Some(facade) = part.multifile_facade.as_deref() {
+                let id = match facades.iter().position(|known| *known == facade) {
+                    Some(id) => id,
+                    None => {
+                        facades.push(facade);
+                        facades.len() - 1
+                    }
+                };
+                facade_ids.push(id as u64 + 1);
+            }
+        }
+        if !facade_ids.is_empty() {
+            pp.field_packed_varints(3, &facade_ids); // multifile_facade_short_name_id
+        }
+        for facade in facades {
+            pp.field_bytes(4, facade.as_bytes()); // multifile_facade_short_name
         }
         module.repeated_message(1, &pp); // Module.package_parts
     }
@@ -155,6 +209,41 @@ mod tests {
             &[(
                 "demo".into(),
                 vec!["ZKt".into(), "BKt".into(), "AKt".into()],
+            )],
+            [2, 4, 0],
+        );
+        assert_eq!(
+            got, reference,
+            "\n got: {:02x?}\n ref: {:02x?}",
+            got, reference
+        );
+    }
+
+    #[test]
+    fn multifile_parts_are_grouped_by_facade() {
+        // Exact bytes kotlinc 2.4.21 writes for `package p` with multifile parts `V__ZKt`,
+        // `U__YKt`, `U__BKt` and the plain part `MKt`: facades in order, each one's parts sorted,
+        // the plain part last, then the packed 1-based facade ids and the facade names.
+        let reference: &[u8] = &[
+            0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0a, 0x2b, 0x0a, 0x01, 0x70, 0x12, 0x06, 0x55,
+            0x5f, 0x5f, 0x42, 0x4b, 0x74, 0x12, 0x06, 0x55, 0x5f, 0x5f, 0x59, 0x4b, 0x74, 0x12,
+            0x06, 0x56, 0x5f, 0x5f, 0x5a, 0x4b, 0x74, 0x12, 0x03, 0x4d, 0x4b, 0x74, 0x1a, 0x03,
+            0x01, 0x01, 0x02, 0x22, 0x01, 0x55, 0x22, 0x01, 0x56, 0x22, 0x00, 0x2a, 0x00,
+        ];
+        let part = |name: &str, facade: &str| PackagePart {
+            name: name.to_string(),
+            multifile_facade: Some(facade.to_string()),
+        };
+        let got = build_kotlin_module(
+            &[(
+                "p".into(),
+                vec![
+                    part("V__ZKt", "V"),
+                    part("U__YKt", "U"),
+                    part("U__BKt", "U"),
+                    "MKt".into(),
+                ],
             )],
             [2, 4, 0],
         );

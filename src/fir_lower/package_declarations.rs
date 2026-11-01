@@ -241,7 +241,6 @@ pub(super) fn publish(
                         .declaration_annotations(declaration)
                         .to_vec()
                         .into_boxed_slice(),
-                    suppressed_source_annotation_application: false,
                     flags: header.flags,
                     spellings: index
                         .declaration_spellings(declaration)

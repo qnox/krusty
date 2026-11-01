@@ -8,7 +8,7 @@ use crate::ir::{AppliedAnnotation, DeclarationAnnotations};
 ///
 /// The flag is the frontend's fact that the source declaration declares metadata annotations. It
 /// travels explicitly and is never reconstructed from the records: an `@OptionalExpectation`
-/// application this platform erased leaves no record yet still sets the flag. Suppressed SOURCE
+/// application this platform erased leaves no record yet still sets the flag. SOURCE
 /// provenance may retain a target carrier, but does not set this metadata flag.
 #[derive(Clone, Debug, Default)]
 pub struct MetadataAnnotations {
@@ -23,6 +23,13 @@ pub static NO_ANNOTATIONS: MetadataAnnotations = MetadataAnnotations {
 };
 
 impl MetadataAnnotations {
+    /// Retain an independently checked owner flag when its prefix applications select several
+    /// sites but this metadata field records only one site's payload.
+    pub(crate) fn with_declaration_flag(mut self, declared: bool) -> Self {
+        self.declared = declared;
+        self
+    }
+
     /// A declaration's checked annotations, recorded in declaration order.
     pub fn of(annotations: &DeclarationAnnotations) -> Self {
         Self::with_records(

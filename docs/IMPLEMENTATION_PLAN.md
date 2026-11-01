@@ -1,5 +1,45 @@
 # krusty — implementation plan
 
+## Class-generic dependency method exports
+
+Retain the complete declared self type, including captured parameters, at FIR lowering and consume
+it when source class methods publish KLIB export identities.
+Share consumption of FIR-checked class applications across Native and Wasm dependency calls,
+retaining exact fixed-type and callable-substitution validation. Exercise the existing method
+export path with one portable multimodule fixture and JVM-first Native validation. Backing-field
+getter materialization remains a subsequent consumer of this signature boundary.
+
+## Classpath declaration annotation query ownership
+
+Extract selected-method and all-method annotation queries into `classpath/declaration_annotations`.
+The borrowing `class_entry_bytes` collaborator owns mapped and physical class-file acquisition shared
+with compiled bodies and class locations. Keep class/field annotation records, snapshot ownership,
+entry caches, classreader parsing and JVM provider interpretation unchanged. This scoped #2647
+migration reduces the classpath facade from 6,317 to 6,277 lines; unrelated facade responsibilities
+remain separate work. Validate unchanged annotation and serialization inventories, class bytes,
+JSON comparisons and refusal controls before and after extraction.
+
+## JVM annotation interface object methods
+
+Retain the realized construction's exact annotation interface at the JVM consumption boundary.
+Authenticated Any-method roles select that interface for a fresh allocation; declared annotation
+parameters and ordinary interface receivers retain their class-owned dispatch. Generated annotation
+carriers consume the selected interface receiver slot
+through the existing operand materializer. Keep header constant-pool ordering as its separate
+follow-up; compare complete annotation artifacts and exercise declared-parameter and interface controls.
+
+The annotation-header follow-up reserves only the existing version-enabled nullability descriptors
+before method bodies. Shared string-method finalization also covers memberless implementations.
+Keep constructor guards, metadata and the version policy intact; validate complete artifacts across
+the supported-release manifest, including reference-valued and memberless annotations.
+
+## Native callable-reference capture storage
+
+Use one target-owned physical capture plan for closure layout, GC references, stores and ordinary
+or SAM thunk loads. Store the recorded equality receiver as Any? and use the existing conversion
+boundary to restore the body carrier. Preserve checked adapter parameters and ordinary captures;
+the storage repair is independent of serialized callable-reference admission and identity work.
+
 ## Wasm reference assertion exceptions
 
 Authenticate NullPointerException storage through the existing platform exception declaration
@@ -99,6 +139,11 @@ cross-file module resolver. Keep top-level and unavailable module records from b
 a classpath record with the same physical identity. Preserve local/coroutine/reference provenance
 and exact table order. This slice leaves source identity publication and metadata class-ID encoding
 for subsequent changes; the complete literal-dollar classfile regression remains open there.
+
+Consume the existing source declaration order at the JVM table boundary for equal-name source
+rows owned by each writer. Preserve referenced/generated row slots and ancestor constraints, and
+reapply that policy after final pool relayout. Nested-construction ABI/runtime and mixed
+continuation controls pin the distinction from emitted allocation order.
 
 ## Builtin declaration-name producers
 
@@ -285,6 +330,12 @@ the checked classifier identity available to nested annotation folding without b
 constructor selection. Owned source/dependency publication and ordinary-call controls cover the
 shared path.
 
+## Finalized array expression type validity
+
+Check ordinary `Array<Nothing>` values after selected-call and reified decisions commit. Reuse the
+semantic recursive array matcher while preserving class-literal LHS policy and lexical suppression.
+Keep complete expression/reified diagnostic ledgers and compare the suppressed value's JVM ABI.
+
 ## String operation authority publication
 
 The shared StringPlus operation requires the existing selected-stdlib authority for both member
@@ -338,6 +389,13 @@ expansion and adds no backend capabilities, outcome allowances or metadata field
 - ✅ **Exit met:** `tests/classfile_e2e.rs` emits `FooKt.add(II)I`; javac accepts it, `java
   -Xverify:all` verifies + runs it via a Java `Main` → `7`. Straight-line methods need no
   StackMapTable at v52; branch frames come in Phase 4.
+
+## Preserve checked call positions across result conversion
+
+Retain checked source positions before introducing declaration-result coercions, including the exact
+selected call under an operand-evaluation block. Retire the compiled-inline-operand source probe.
+Validate complete JVM artifacts and execution for source/compiled inline operands and reordered
+calls, alongside the existing complete line-table, generic-result and operand-copy controls.
 
 ## Phase 4 — Lower + emit the subset  🚧
 ### 4a — straight-line subset ✅
@@ -546,6 +604,12 @@ expansion and adds no backend capabilities, outcome allowances or metadata field
 - ✅ `tests/nullable_e2e.rs` (runs on JVM incl. `!!`→NPE, ABI vs kotlinc). `?.` safe-calls are
   explicitly rejected for now (skipped, not miscompiled). Box conformance: 27 / 27 OK / 0 FAIL
   (nullable is foundational; it compounds once collections/`?.`/char literals land).
+
+## Checked annotation array operand values
+
+Reuse the checked whole-array argument role when folding selected array factories for annotation
+values. Preserve nested spread order, named arrays, empty contributions and ordinary elements;
+compare the complete emitted class inventory and raw artifacts with Kotlin before runtime controls.
 
 ## Phase 14 — Modifiers, annotations & conformance fixes  ✅
 - ✅ Data-driven (scanned the "expected a top-level declaration" bucket): **leading declaration
@@ -796,6 +860,14 @@ expansion and adds no backend capabilities, outcome allowances or metadata field
   partially-computed stack values, so it is rejected (skipped) — never miscompiled.
 - ✅ `tests/try_catch_e2e.rs` (try-as-expression + multi-catch hierarchy on the JVM; stack-nonempty
   and `finally` rejection). Box conformance **91 OK / 0 FAIL** (up from 86).
+
+## Reuse checked singleton member receivers
+
+Admit authenticated `SingletonValue` reads to the compound member assignment's existing stable-read
+substitution. Keep the index-operand classifier and computed/mutable receiver snapshots unchanged.
+Validate complete class inventories and bytes for singleton member/index programs, initialization
+before the right operand, and existing immutable/captured/mutable receiver controls. Treat this
+receiver correction separately from annotation declaration-default operand normalization.
 
 ## Phase 34 — Explicit `this` + member assignment  ✅
 - ✅ `this` resolves to the enclosing class type (the checker tracks `this_ty`); codegen loads it as
@@ -1102,6 +1174,18 @@ expansion and adds no backend capabilities, outcome allowances or metadata field
   resolve, so such a file is cleanly skipped (never miscompiled).
 - ✅ `tests/annotations_e2e.rs` (annotation-class decl + `@Tag`/`@Suppress` uses on a function, a
   local, and a loop, run on the JVM). Box conformance **170 → 173 OK / 0 FAIL**.
+
+## Reserve materialized operand-holder storage
+
+Retain checked argument-evaluation holders as a subset of call-operand bindings, including when
+their code is cloned. Remove that purpose when an expansion adopts a holder as its formal receiver.
+Separate physical reservation from semantic publication for those JVM argument-order holders;
+expanded parameters and captures retain their existing binding timing.
+Preserve the existing CallOperand frame identity, compatible reuse, width and lexical scope, and
+leave deferred results, safe-call chains and grouped invocations on their owning paths. Validate
+complete ordinary-constructor/array artifacts and reference-first runtime, plus existing named,
+inline, capture, handler and suspend controls. Annotation-default evaluation normalization remains
+a separate common-lowering concern.
 
 ## Phase 62 — Named arguments  ✅
 - ✅ Top-level function calls accept named arguments (`f(b = 2, a = 5)`). The parser records a
@@ -5114,10 +5198,15 @@ their declarations into an index-based model (`declarations`, `model`), lays rec
   `tests/native_compiler_command_e2e.rs` checks the answer on the JVM lane, then compiles a
   two-file program with the command, runs it, and asserts the complete diagnostics of a broken
   source.
+- **Computed defaults across source modules (done, Native and Wasm).** A KLIB declaration with
+  a default is published with `LibraryCallable::defaults_from_declaration`: a call omitting a
+  computed default keeps the declaration's identity, and the target routes it to the declaring
+  module's default entry, exported beside the declaration (`multimoduleComputedDefaults.kt`).
+  Constant defaults are still passed at the call site.
 - **Next.** `-produce library`, which needs the KLIB writer to serialize ordinary function and
   class bodies into `default/ir`; until then a first-party library's sources are compiled into the
   program. Programs reach further as dependency body emission grows (library member bodies, then
-  non-constant parameter defaults of third-party KLIBs).
+  the non-constant parameter defaults of third-party KLIB bodies).
 
 ## Byte-identical box conformance, item 1 — local-class naming  ◐
 
@@ -5285,7 +5374,11 @@ shadow with no output change.
   nothing (`removeUnnecessaryTemporaryVariables`, `irLetS`); the array constructor declares the
   index, size, array, function value and element index in `ArrayConstructorLowering`'s order and
   binds a lambda's parameter to the element index; a `::Array` adapter numbers its temporaries
-  after its parameters. Stability comes from the published `binding_read_stability`. A survey of
+  after its parameters. Stability comes from the published `binding_read_stability`, including
+  authenticated immutable receiver parameters and their by-value captures. Computed operands and
+  mutable captured cells remain snapshots; the JVM stores a safe cast's object-cell snapshot in
+  its erased field slot until the type test. Complete module/runtime controls live in
+  `implicit_receiver_stability_e2e`. A survey of
   the 4e corpus ranked the non-inline, non-coroutine local-variable mismatches: `for`-loop
   temporaries dominate (about 580 of 640 slot-only methods, mostly krusty's iterator local and
   kotlinc's progression first/last/step locals) and belong to the `for`-loop port, then the
@@ -5915,6 +6008,9 @@ non-inline callers, still reads the field directly. Test:
 - `src/wasm/` lowers checked common IR to one WasmGC module per program for both kotlinc Wasm
   targets; the targets share every instruction and differ only in the host write function and the
   Node.js loader. Unsupported constructs decline the whole compilation by name.
+- Constructor-prefix admission distinguishes recorded anonymous-super forwards from unsupported
+  captures. Existing typed parameter/super-call lowering executes field-free forwarded operands;
+  both Wasm hosts run the same portable nested-construction fixture as JVM and Native.
 - First slice: top-level functions and properties over primitives and `String` (locals, `when`,
   loops with labels, arithmetic with Kotlin's promotion and narrowing, equality, templates,
   same-file calls).
@@ -6172,7 +6268,10 @@ retain declaration-name spans for exact ambiguous-parent diagnostics. Private an
 results remain exact; shared outcomes and operand ABI ownership are unchanged.
 Canonical compact parent templates, including alias arguments, are computed once before signature
 inference and shared with classifier publication; parent diagnostics retain their publication order.
-Complete anonymous metadata parity stays in #2653/#2654 with its full retained fixture oracles.
+File-facade metadata now carries the existing local/enum-body classifier inventories into both
+package class-ID encoding and JVM signature-record decisions. The original three #2654 complete
+metadata oracles are restored, with an additional complete property-storage ABI/metadata control.
+Own versus lexical-capture metadata applications stay in #2653 with their full retained oracles.
 Parameterized alias superclass arguments retain their enclosing lexical bindings. The original
 expanded #2655 fixture and both complete ABI/runtime controls are retained in
 `tests/typealias_constructor_inference_e2e/parameterized_parent_aliases.rs` alongside the minimal tests.
@@ -6194,6 +6293,14 @@ independent physical descriptor checks.
 Next, declaration-header layouts (#2576) must authenticate complete captured applications and raw
 omissions for #2537/#2532. Raw scope erasure must follow symbolic inheritance specialization, as the
 reference compiler demonstrates; it cannot independently erase a superclass from its own bounds.
+
+## Preserve sparse constructor-default line tables
+
+Publish the default stub's existing curated expression marks independently of its owner's
+declaration line. Keep entry/close guards and source provenance unchanged. Validate complete
+synthetic implementation artifacts, reference-first runtime and source-less dependency defaults,
+alongside ordinary primary/secondary and value-class constructor controls. Header prerequisite
+#2879 remains separate; this change adds no annotation-default metadata or allocation policy.
 
 ## Declared JVM constructor boxing slots
 
@@ -6313,8 +6420,13 @@ and the pass rejects every construct it does not cover yet.
 - [x] `@Composable () -> Unit` parameters: called with the composer and their own state bits,
   compared by identity, passed on to composable calls, and their `@ComposableInferredTarget`
   applier scheme inferred.
-- [ ] Composable lambdas (`ComposableSingletons`, `rememberComposableLambda`), other composable
-  function types, and the composable call checker's diagnostics.
+- [x] Composable lambdas that capture nothing, passed to a composable call: `ComposableSingletons`
+  properties made by `composableLambdaInstance`, each body a skippable group.
+- [x] Composable lambdas that capture value parameters of their function, passed to a composable
+  call: remembered by `rememberComposableLambda`, with the captures leading the implementation's
+  parameters.
+- [ ] Composable lambdas that capture locals or composable lambda parameters, nested and empty
+  ones, other composable function types, and the composable call checker's diagnostics.
 - [x] Primitive and `String` parameters: `$changed`/`$dirty` slot tracking with strong skipping,
   `Composer.changed` comparisons, and each call's argument bits (static, passed on, uncertain).
 - [x] Constant default arguments: the `$default` mask, defaults assigned in the group, placeholders
@@ -6322,7 +6434,7 @@ and the pass rejects every construct it does not cover yet.
 - [ ] More parameters: non-constant defaults (defaults groups), receivers, varargs, more than ten,
   stability inference.
 - [ ] The full body transform: control-flow groups, `remember`, early returns, inline composables.
-- [ ] `ComposableSingletons` lambda holders and the `$stable` field of classes.
+- [ ] The `$stable` field of classes.
 - [ ] Remove the partial marker and rerun the corpus for the Compose projects.
 
 ## Anonymous superclass closure captures
@@ -6349,6 +6461,27 @@ block lowering as the independent #2811 follow-up.
   use them for scalar and expanded-vararg admission and diagnostics with complete kotlinc ledgers.
   Preserve invariant/in-projected inputs, named/default/non-last varargs and method-formal shadows.
 
+## Retain package property annotation payloads
+
+Publish checked property/field annotations by stable property identity and reuse them in shared
+metadata and JVM annotation carriers. Keep marker parameters, visibility, accessor names and
+collision diagnostics consistent with the selected declaration. Validate complete JVM classes and
+official KLIB property messages without outcome or applicability changes.
+Derive property annotation presence from the checked PROPERTY/FIELD partitions; accessor-only
+applications keep independent getter/setter metadata flags. Preserve optional and SOURCE policies.
+Retain SOURCE presence separately from payload and metadata flags for property marker realization.
+Default setters consume their checked parameter annotations through the complete shared payload
+reservation API and the existing metadata parameter writer.
+
+## Preserve checked annotation argument order
+
+Carry the checker's written indices into applied IR annotations and consume them at metadata
+encoding, including annotations nested in grouped varargs. Remove the type-use publisher's syntax
+remapping and preserve declaration-ordered values for physical annotation attributes. Validate
+complete reference classes and raw metadata with `tests/type_use_annotation_metadata_e2e.rs`.
+Reserve complete JVM parameter annotation payloads before code emission, sharing the classfile
+value encoder rather than seeding descriptors alone.
+
 ## Lower serialized Elvis expression blocks
 
 Authenticate the producer's exact temporary/null-test/branch contract and lower it to the existing
@@ -6356,3 +6489,14 @@ common Elvis snapshot and conditional. Preserve single evaluation, lazy fallback
 return targets and declared storage; leave generic operand and unrelated conditional admission
 unchanged. Validate malformed contracts and checked-FIR parity alongside the original full #2811
 official-producer program and independent JVM-oracle controls.
+
+## Preserve unsigned metadata constant flags
+
+- [x] Serialize unsigned identity already retained by `IrConst` in the shared metadata value
+  encoder, preserving its signed-width carrier and payload. Compare the complete 16-property
+  official-producer value inventory, including high-bit boundaries and signed contrasts.
+- [x] Preserve checked-source unsigned annotation identity through common values, IR, metadata
+  type-annotation decoding and typed KSP transport. Keep physical class-reader tags and build ABI
+  carriers distinct from the semantic model; validate full source payloads and the pinned KSP oracle.
+- [ ] Normalize raw dependency annotation defaults using their exact declaration parameter types;
+  keep that provider work separate from checked-source publication and scalar wire decoding.

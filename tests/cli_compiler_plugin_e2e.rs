@@ -417,13 +417,13 @@ fn refusals_lists_the_arguments_and_plugins_krusty_refuses() {
     );
     assert_eq!(
         check(&[
-            "-Xuse-inline-scopes-numbers".to_string(),
+            "-Xvalidate-bytecode".to_string(),
             format!("-Xplugin={}", widget.display()),
         ]),
         (
             Some(1),
             format!(
-                "krusty does not implement the kotlinc argument '-Xuse-inline-scopes-numbers'\n{}",
+                "krusty does not implement the kotlinc argument '-Xvalidate-bytecode'\n{}",
                 refused(&widget.display().to_string())
             ),
             String::new()
@@ -475,14 +475,14 @@ fn refusals_lists_the_arguments_and_plugins_krusty_refuses() {
     assert_eq!(
         check(&[
             "-Xexplicit-api=sideways".to_string(),
-            "-Xuse-inline-scopes-numbers".to_string(),
+            "-Xvalidate-bytecode".to_string(),
         ]),
         (
             Some(2),
             String::new(),
             "krusty: error: unknown value for parameter -Xexplicit-api: 'sideways'. Value should be one \
              of {disable, strict, warning}\n\
-             krusty: error: krusty does not implement the kotlinc argument '-Xuse-inline-scopes-numbers'\n"
+             krusty: error: krusty does not implement the kotlinc argument '-Xvalidate-bytecode'\n"
                 .to_string()
         )
     );
@@ -574,6 +574,41 @@ fn the_compose_pass_rejects_what_it_does_not_cover() {
         "3:13: error: krusty's Compose compiler plugin does not support a recursive composable \
          function whose lambda parameters' applier kotlinc infers yet",
     );
+    let frame = "@Composable fun Frame(content: @Composable () -> Unit) {\ncontent()\n}\n";
+    assert_compose_rejects(
+        "compose-lambda-capturing-local",
+        &format!(
+            "{frame}@Composable fun Greeting(text: String) {{\nval shown = text\nFrame {{ println(shown) }}\n}}\n"
+        ),
+        &[],
+        "6:13: error: krusty's Compose compiler plugin does not support a composable lambda that \
+         captures a local value yet",
+    );
+    assert_compose_rejects(
+        "compose-lambda-capturing-lambda-parameter",
+        &format!(
+            "{frame}@Composable fun Greeting(inner: @Composable () -> Unit) {{\nFrame {{ inner() }}\n}}\n"
+        ),
+        &[],
+        "6:13: error: krusty's Compose compiler plugin does not support a composable lambda that \
+         captures a composable lambda parameter yet",
+    );
+    assert_compose_rejects(
+        "compose-nested-lambda",
+        &format!(
+            "{frame}@Composable fun Greeting() {{\nFrame {{\nFrame {{ Frame {{ }} }}\n}}\n}}\n"
+        ),
+        &[],
+        "6:13: error: krusty's Compose compiler plugin does not support a lambda in a composable \
+         lambda yet",
+    );
+    assert_compose_rejects(
+        "compose-empty-lambda",
+        &format!("{frame}@Composable fun Greeting() {{\nFrame {{ }}\n}}\n"),
+        &[],
+        "7:7: error: krusty's Compose compiler plugin does not support an empty composable lambda \
+         yet",
+    );
     assert_compose_rejects(
         "compose-non-skippable",
         "@Composable @androidx.compose.runtime.NonSkippableComposable fun Greeting() {}\n",
@@ -590,6 +625,44 @@ fn the_compose_pass_rejects_what_it_does_not_cover() {
         )],
         "4:1: error: krusty's Compose compiler plugin does not support a call to a composable \
          function from another file yet",
+    );
+    assert_compose_rejects(
+        "compose-generic-class-field",
+        "class Box<T>(val value: T)\nclass User(val box: Box<Int>)\n",
+        &[],
+        "4:1: error: krusty's Compose compiler plugin does not support a class whose stability \
+         depends on a generic class yet",
+    );
+    assert_compose_rejects(
+        "compose-value-class-field",
+        "@JvmInline value class Id(val raw: Int)\nclass User(val id: Id)\n",
+        &[],
+        "4:1: error: krusty's Compose compiler plugin does not support a class with a value-class \
+         field yet",
+    );
+    assert_compose_rejects(
+        "compose-reflection-function-field",
+        "class Reference(val f: kotlin.reflect.KFunction1<Int, Int>)\n",
+        &[],
+        "3:1: error: krusty's Compose compiler plugin does not support a class with a field of a \
+         numbered reflection function type yet",
+    );
+    assert_compose_rejects(
+        "compose-library-generic-class-field",
+        "class Holder(val value: androidx.compose.runtime.ProvidedValue<Int>)\n",
+        &[],
+        "3:1: error: krusty's Compose compiler plugin does not support a class whose stability \
+         depends on a generic class of another file or a Compose library yet",
+    );
+    assert_compose_rejects(
+        "compose-other-file-inner-class-field",
+        "class Card(val inner: Outer.Inner)\n",
+        &[(
+            "Outer.kt",
+            "package probe\nclass Outer { inner class Inner(val x: Int) }\n",
+        )],
+        "3:1: error: krusty's Compose compiler plugin does not support a class whose stability \
+         depends on another file's class without `$stable` yet",
     );
 }
 

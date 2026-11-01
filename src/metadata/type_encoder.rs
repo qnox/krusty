@@ -141,10 +141,12 @@ fn no_inner_classifiers(_: TypeName) -> Result<Option<InnerClassifier>, TypeName
 }
 
 /// Checked type facts supplied by a metadata-emitting target.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(crate) struct MetadataTypeLookups<'a> {
     pub(crate) intersection_approximation: Option<&'a dyn Fn(Ty) -> Option<Ty>>,
     pub(crate) inner_classifiers: InnerClassifiers<'a>,
+    pub(crate) local_classifiers: crate::fx_hash::HashSet<TypeName>,
+    pub(crate) enum_entry_bodies: crate::fx_hash::HashSet<TypeName>,
 }
 
 impl Default for MetadataTypeLookups<'_> {
@@ -154,6 +156,8 @@ impl Default for MetadataTypeLookups<'_> {
             // Standalone metadata-builder tests declare no inner classifiers. Production emitters
             // replace this with their frozen checked classifier view.
             inner_classifiers: &no_inner_classifiers,
+            local_classifiers: Default::default(),
+            enum_entry_bodies: Default::default(),
         }
     }
 }
@@ -188,17 +192,6 @@ impl<'a> StringTable<'a> {
             intersection_approximation,
             inner_classifiers,
             ..StringTable::default()
-        }
-    }
-
-    pub(crate) fn with_intersection_approximation(
-        approximation: Option<&'a dyn Fn(Ty) -> Option<Ty>>,
-        inner_classifiers: InnerClassifiers<'a>,
-    ) -> Self {
-        Self {
-            intersection_approximation: approximation,
-            inner_classifiers,
-            ..Self::default()
         }
     }
 
@@ -1579,7 +1572,12 @@ mod tests {
     #[test]
     fn a_missing_checked_classifier_fact_is_an_error() {
         let missing = |classifier| Err(classifier);
-        let mut strings = StringTable::with_intersection_approximation(None, &missing);
+        let mut strings = StringTable::with_local_classifiers(
+            &Default::default(),
+            &Default::default(),
+            None,
+            &missing,
+        );
         let classifier = crate::types::type_name("sample/Missing");
 
         let Err(error) = encode_type(
@@ -1604,7 +1602,12 @@ mod tests {
                 }))
                 .ok_or(classifier)
         };
-        let mut strings = StringTable::with_intersection_approximation(None, &lookup);
+        let mut strings = StringTable::with_local_classifiers(
+            &Default::default(),
+            &Default::default(),
+            None,
+            &lookup,
+        );
 
         let Err(error) = encode_type(
             &mut strings,

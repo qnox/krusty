@@ -137,7 +137,7 @@ impl Lane for WasmLane {
 
     fn not_applicable(&self, src: &str) -> Option<&'static str> {
         if !krusty::conformance::backend_targeted(src, &self.tokens()) {
-            return Some("targeted at another backend");
+            return Some(box_lane::TARGETED_AT_ANOTHER_BACKEND);
         }
         if krusty::conformance::backend_muted(src, &self.tokens()) {
             return Some("muted on this wasm target");
@@ -254,7 +254,7 @@ fn wasm_applicability_reads_both_the_family_and_the_exact_target() {
     assert_eq!(wasi.not_applicable(wasm_only), None);
     assert_eq!(
         js.not_applicable("// TARGET_BACKEND: JVM\nfun box() = \"OK\""),
-        Some("targeted at another backend")
+        Some(box_lane::TARGETED_AT_ANOTHER_BACKEND)
     );
     assert_eq!(
         js.not_applicable("// IGNORE_BACKEND: JVM\nfun box() = \"OK\""),
@@ -592,6 +592,34 @@ fn expect_wasm_decline(src: &str, stem: &str, reason: &str) {
     }
 }
 
+// PLATFORM-SPECIFIC: exercise the shared box representation at Wasm's dependency call boundary.
+#[test]
+fn wasm_nested_source_and_dependency_arguments_share_boxing() {
+    let src = include_str!("box_regressions/genericDependencyNestedSource.kt");
+    super::box_reference_classes::checked_box(src, "numericDependencyNestedSource")
+        .expect("the exact Kotlin compiler must run the nested source-call fixture");
+    let modules = krusty::conformance::split_modules(src).expect("valid module fixture");
+    let units = krusty::conformance::module_units(&modules);
+    for target in WasmTarget::ALL {
+        let lane = WasmLane { target };
+        assert!(
+            focused_wasm_lane_available(&lane, "numericDependencyNestedSource"),
+            "the owned nested source-call fixture requires its Wasm lane"
+        );
+        assert_eq!(
+            lane.compile_modules_and_run(
+                &std::env::temp_dir(),
+                "numericDependencyNestedSource",
+                &units,
+                src,
+            ),
+            Outcome::Pass,
+            "nested source argument on {}",
+            target.name(),
+        );
+    }
+}
+
 // PLATFORM-SPECIFIC: Wasm's checked-access default and host trap are independent of the portable
 // reference-array value/identity/effect-order case in the shared box inventory.
 const REFERENCE_ARRAY_BOUNDS: &str = r#"fun captured(index: Int): Throwable? {
@@ -687,7 +715,7 @@ fn wasm_reference_array_bounds_preserve_reference_defaults_and_explicit_options(
 }
 
 // PLATFORM-SPECIFIC: a reference assertion cannot implement nullable scalar unboxing.
-fn expect_reference_assertion_box(src: &str, stem: &str) {
+fn expect_reference_box(src: &str, stem: &str) {
     let jdk = super::common::jdk_modules();
     let classpath = super::common::classpath_jars_for(src);
     let reference = super::box_reference_classes::reference_compile(
@@ -697,13 +725,13 @@ fn expect_reference_assertion_box(src: &str, stem: &str) {
         krusty::conformance::BoxJdk::Full { root: Some(&jdk) },
         krusty::conformance::COROUTINE_HELPERS,
     )
-    .expect("the exact Kotlin compiler must compile the nullable assertion fixture");
+    .expect("the exact Kotlin compiler must compile the fixture");
     let classes = reference.flatten().into_iter().collect::<Vec<_>>();
     let entry = super::common::find_box_class(&classes).expect("reference fixture must emit box()");
     assert_eq!(
         super::common::run_box(&classes, &entry, &classpath),
         Some("OK".to_string()),
-        "{stem}: the exact Kotlin compiler must run the nullable assertion fixture"
+        "{stem}: the exact Kotlin compiler must run the fixture"
     );
 }
 
@@ -718,7 +746,7 @@ fn wasm_nullable_scalar_assertions_decline_without_an_unboxing_contract() {
     ] {
         let src =
             format!("fun read(value: {scalar}?): {scalar} = value!!\nfun box(): String = \"OK\"");
-        expect_reference_assertion_box(&src, stem);
+        expect_reference_box(&src, stem);
         expect_wasm_decline(
             &src,
             stem,
@@ -727,11 +755,36 @@ fn wasm_nullable_scalar_assertions_decline_without_an_unboxing_contract() {
     }
 }
 
+// PLATFORM-SPECIFIC: function values are non-suspend objects called through their arity's entry;
+// a suspend function value has no Wasm representation yet and must decline, not run as a plain one.
+#[test]
+fn wasm_suspend_function_values_decline() {
+    let src = "fun take(f: suspend () -> Int): Int = 1\nfun box(): String = if (take { 2 } == 1) \"OK\" else \"fail\"";
+    expect_reference_box(src, "suspendFunctionValue");
+    expect_wasm_decline(src, "suspendFunctionValue", "a suspend function value");
+}
+
+// PLATFORM-SPECIFIC: a lambda or callable reference converted to a `fun interface` is not a
+// function value; until SAM conversion lands, both forms must decline.
+#[test]
+fn wasm_sam_converted_function_values_decline() {
+    for (stem, argument) in [
+        ("samConvertedLambda", "{ 1 }"),
+        ("samConvertedReference", "(::one)"),
+    ] {
+        let src = format!(
+            "fun interface Source {{ fun get(): Int }}\nfun one(): Int = 1\nfun read(source: Source): Int = source.get()\nfun box(): String = if (read {argument} == 1) \"OK\" else \"fail\""
+        );
+        expect_reference_box(&src, stem);
+        expect_wasm_decline(&src, stem, "a lambda converted to a `fun interface`");
+    }
+}
+
 // PLATFORM-SPECIFIC: the scalar boundary guard must preserve existing reference assertions.
 #[test]
 fn wasm_nullable_reference_assertions_keep_their_existing_carrier() {
     let src = "fun read(value: String?): String = value!!\nfun box(): String = read(\"OK\")";
-    expect_reference_assertion_box(src, "nullableReferenceAssertion");
+    expect_reference_box(src, "nullableReferenceAssertion");
     expect_wasm_box(src, "nullableReferenceAssertion");
 }
 
