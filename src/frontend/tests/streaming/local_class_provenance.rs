@@ -48,6 +48,39 @@ fn source_set_records_anonymous_source_provenance_without_a_backend_name() {
 }
 
 #[test]
+fn anonymous_member_ownership_keeps_the_exact_enclosing_executable() {
+    let source =
+        include_str!("../../../../tests/fixtures/captured_field_storage/anonymousLantern.kt");
+    let inputs = [SourceInput::kotlin(source).with_file_stem("Lantern")];
+    let mut diagnostics = DiagSink::new();
+    let analysis = analyze_source_set_with_features(
+        &inputs,
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
+        &LangFeatures::new(),
+        &mut diagnostics,
+    );
+    assert!(!diagnostics.has_errors(), "{:?}", diagnostics.diags);
+    let file = &analysis.files[0];
+    let lantern = file
+        .decls
+        .iter()
+        .copied()
+        .find(|declaration| {
+            matches!(file.decl(*declaration), crate::ast::Decl::Class(class) if class.name == "Lantern")
+        })
+        .expect("the Lantern classifier");
+    assert_eq!(file.anonymous_object_classes.len(), 1);
+    let wick = file.anonymous_object_classes.values().next().unwrap();
+    assert_eq!(
+        file.anonymous_object_enclosing_functions.get(wick),
+        Some(&crate::ast::AnonymousEnclosingFunction::Member {
+            class: lantern,
+            method: 0,
+        })
+    );
+}
+
+#[test]
 fn stable_nested_classifier_provenance_keeps_exact_anonymous_ownership() {
     let source = "fun build(): Any = object { inner class Nested }";
     let inputs = [SourceInput::kotlin(source).with_file_stem("Widget")];

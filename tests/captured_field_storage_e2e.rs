@@ -24,16 +24,7 @@ fun box(): String {\n\
 }\n";
 
 /// An anonymous object keeps its enclosing instance, and a class nested in it reads it.
-const ANONYMOUS_OBJECT: &str = "class Lantern(val glow: String) {\n\
-    fun light(): String {\n\
-        val wick = object {\n\
-            inner class Flame { fun shine() = glow }\n\
-            fun burn() = Flame().shine()\n\
-        }\n\
-        return wick.burn()\n\
-    }\n\
-}\n\
-fun box(): String = Lantern(\"OK\").light()\n";
+const ANONYMOUS_OBJECT: &str = include_str!("fixtures/captured_field_storage/anonymousLantern.kt");
 
 #[test]
 fn inner_class_of_local_class_reads_its_captures() {

@@ -112,6 +112,36 @@ fun statements() {
 }
 
 #[test]
+fn enclosing_opt_in_reaches_members_of_an_anonymous_object() {
+    let src = source(
+        "@A fun experimental(): Int = 1
+
+@OptIn(A::class)
+class AcceptedAnonymous {
+    fun read(): Int {
+        val receiver = object {
+            inner class Inner { fun value(): Int = experimental() }
+            fun value(): Int = Inner().value()
+        }
+        return receiver.value()
+    }
+}
+
+class RejectedAnonymous {
+    fun read(): Int {
+        val receiver = object {
+            inner class Inner { fun value(): Int = experimental() }
+            fun value(): Int = Inner().value()
+        }
+        return receiver.value()
+    }
+}
+",
+    );
+    common::assert_errors_match_kotlinc(&[("main.kt", &src)], &[]);
+}
+
+#[test]
 fn file_opt_in_accepts_the_marker() {
     let src = format!(
         "@file:OptIn(A::class)\n{}",
