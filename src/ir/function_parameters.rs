@@ -32,6 +32,22 @@ pub enum IrParameterRole {
     Generated(IrGeneratedParameterRole),
 }
 
+impl IrParameterRole {
+    /// A declared context or value parameter: what [`IrVarargParameter::index`] counts. Receivers,
+    /// captures and compiler-generated parameters are not declared parameters.
+    pub const fn is_declared_parameter(self) -> bool {
+        matches!(
+            self,
+            Self::Value
+                | Self::UnusedValue
+                | Self::DestructuredValue
+                | Self::ContextValue
+                | Self::AnonymousContextParameter { .. }
+                | Self::ContextReceiver { .. }
+        )
+    }
+}
+
 /// What a lifted callable's captured value was declared as, and what kind of callable captures
 /// it. Both are source facts; a target that names the lifted parameter after them (kotlinc's
 /// `LocalDeclarationsLowering` keeps a variable's own name for a named local function or an
@@ -592,7 +608,9 @@ mod tests {
 /// The `vararg` parameter of a declared function.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct IrVarargParameter {
-    /// SOURCE index among the value parameters (receiver excluded).
+    /// Index among the declared parameters: context parameters first, then value parameters.
+    /// Receivers and captures are not counted; a target finds the physical slot through the
+    /// function's parameter identities.
     pub index: usize,
     /// No value parameter follows it.
     pub is_last: bool,

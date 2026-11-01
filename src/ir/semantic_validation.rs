@@ -109,6 +109,7 @@ fn validate_callee(callee: &Callee) -> Result<(), UndeterminedIrType> {
         }
         Callee::CrossFile { params, ret, .. }
         | Callee::Module { params, ret, .. }
+        | Callee::ModuleDefaultEntry { params, ret, .. }
         | Callee::Super { params, ret, .. } => {
             reject_all("callee parameter", params.iter().copied())?;
             reject("callee result", *ret)
@@ -314,6 +315,7 @@ fn validate_expr(expression: &IrExpr) -> Result<(), UndeterminedIrType> {
         IrExpr::TypeOp { type_operand, .. } => reject("type operation", *type_operand),
         IrExpr::Variable { ty, .. } => reject("local variable", *ty),
         IrExpr::PrimitiveNeg { ty, .. } => reject("primitive negation", *ty),
+        IrExpr::AbsentArgument { ty } => reject("absent argument", *ty),
         IrExpr::PropertyRead { ty, .. } | IrExpr::PropertyWrite { ty, .. } => {
             reject("property operation", *ty)
         }
