@@ -4843,30 +4843,30 @@ fn method_signature_shape(
     // Signature attribute is needed and when the selected shape is invalid, so chaining formatters
     // with `or_else` would incorrectly treat an encoding error as permission to try a less complete
     // shape. `JvmSignatureFormatter` records a precise emit error for the latter case.
+    let vararg = ir.vararg_parameter_position(fid);
     if let (Some(generic), Some((_, declared_ret))) =
         (ir.signatures.get(&fid), ir.suspend_declared_sigs.get(&fid))
     {
         let ret = generic.ret.as_ref().unwrap_or(declared_ret);
-        return suspend_generic_method_sig(formatter, generic, ret);
+        return suspend_generic_method_sig(formatter, generic, ret, vararg);
     }
     if let Some(generic) = ir.jvm_value_class_member_signatures.get(&fid) {
         return formatter.method_signature(generic, f, None);
     }
     if let Some(generic) = ir.signatures.get(&fid) {
         let generic = value_class_signatures::physical_generic_signature(ir, fid, generic);
-        let vararg_index = ir.fn_varargs.get(&fid).map(|vararg| vararg.index);
-        return formatter.method_signature(&generic, f, vararg_index);
+        return formatter.method_signature(&generic, f, vararg);
     }
     if let (Some((params, ret)), Some(_)) = (
         ir.member_semantic_sigs.get(&fid),
         ir.suspend_declared_sigs.get(&fid),
     ) {
-        return suspend_method_sig(formatter, params, ret);
+        return suspend_method_sig(formatter, params, ret, vararg);
     }
     if let Some((params, ret)) = value_class_signatures::physical_member_signature(ir, fid) {
         // A member using ENCLOSING-CLASS type parameters declares none: they belong to the class
         // header's own signature (`(TT;)TT;`).
-        return formatter.method_positions(&params, &ret);
+        return formatter.method_positions_with_vararg(&params, &ret, vararg);
     }
     if let Some((params, declared_ret)) = ir.suspend_declared_sigs.get(&fid) {
         // A value-class RETURN survives in the continuation's type argument as the value class
@@ -4878,21 +4878,32 @@ fn method_signature_shape(
             .get(&fid)
             .map(|(_, _, value_class_ret)| value_class_ret)
             .unwrap_or(declared_ret);
-        return suspend_method_sig(formatter, params, ret);
+        return suspend_method_sig(formatter, params, ret, vararg);
     }
     if let Some((params, ret)) = value_class_signatures::declared_value_class_signature(ir, fid) {
-        return formatter.method_positions(&params, &ret);
+        return formatter.method_positions_with_vararg(&params, &ret, vararg);
     }
-    method_parameterized_sig(formatter, &signature_function_params(ir, fid), &f.ret)
+    method_parameterized_sig(
+        formatter,
+        &signature_function_params(ir, fid),
+        &f.ret,
+        vararg,
+    )
 }
 
 fn suspend_generic_method_sig(
     formatter: &JvmSignatureFormatter<'_>,
     generic: &crate::ir::IrGenericSig,
     ret: &Ty,
+    vararg: Option<usize>,
 ) -> Option<String> {
     let mut signature = jvm_type_params(formatter, generic)?;
-    signature.push_str(&suspend_method_sig(formatter, &generic.params, ret)?);
+    signature.push_str(&suspend_method_sig(
+        formatter,
+        &generic.params,
+        ret,
+        vararg,
+    )?);
     Some(signature)
 }
 
@@ -4905,14 +4916,19 @@ fn suspend_method_sig(
     formatter: &JvmSignatureFormatter<'_>,
     params: &[Ty],
     ret: &Ty,
+    vararg: Option<usize>,
 ) -> Option<String> {
     // The suspend return travels as `Continuation<-RET>`, a PARAMETER of the erased method, and
     // kotlinc wildcards inside it: `suspend fun <U> f(): Cont<U>` signs
     // `(Lkotlin/coroutines/Continuation<-LCont<+TU;>;>;)Ljava/lang/Object;`.
     let continuation = formatter.continuation(*ret, Wildcards::Declared)?;
     let mut s = String::from("(");
-    for p in params {
-        s.push_str(&formatter.parameter_ty(p)?);
+    for (index, p) in params.iter().enumerate() {
+        s.push_str(&if vararg == Some(index) {
+            formatter.vararg_element_ty(p, Wildcards::Declared)?
+        } else {
+            formatter.parameter_ty(p)?
+        });
     }
     s.push_str(&continuation);
     s.push_str(")Ljava/lang/Object;");
@@ -4926,6 +4942,7 @@ fn method_parameterized_sig(
     formatter: &JvmSignatureFormatter<'_>,
     params: &[Ty],
     ret: &Ty,
+    vararg: Option<usize>,
 ) -> Option<String> {
     // Runs for every emitted method — bail before building any string when no position can carry one.
     let is_parameterized = |t: &Ty| {
@@ -4941,7 +4958,7 @@ fn method_parameterized_sig(
         return None;
     }
     // A `Unit` parameter is the `kotlin.Unit` object, not `void`.
-    let s = formatter.method_positions(params, ret)?;
+    let s = formatter.method_positions_with_vararg(params, ret, vararg)?;
     (s != ir_method_desc(params, ret)).then_some(s)
 }
 
