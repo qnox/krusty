@@ -190,6 +190,15 @@ imports and default imports and binds the default-imported `kotlin.Metadata` (ko
 The signature-collection name universe and the checker's classifier tower apply the same rule.
 `tests/box_regressions/callableImportKeepsDefaultClassifier.kt` covers it.
 
+## Bare constructor calls on the callable tower
+
+A classifier reached on a file/import rung contributes its constructors to a bare `Name(args)`
+call on that rung only. An applicable receiver-less function on a strictly nearer rung takes the
+call first: a same-package or star-imported `fun Pair(a: Int, b: Int)` wins over the
+default-imported `kotlin.Pair` constructor, and `Pair("x", 2)` still constructs the pair because
+that function does not apply (kotlinc 2.4.21). An explicitly imported classifier outranks a
+same-package function. `tests/box_regressions/packageFunctionShadowsDefaultConstructor.kt` covers it.
+
 ## Bound declaration-name evidence
 
 A query for an already-bound classifier or alias key projects the selected declaration's own
