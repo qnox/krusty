@@ -118,6 +118,8 @@ impl EmittedDependencyCallable {
             self.realization,
             DependencyExternalRealization::EmittedBody
                 | DependencyExternalRealization::PropertyGetter
+                | DependencyExternalRealization::TargetMember
+                | DependencyExternalRealization::ProviderLeaf
         )
     }
 

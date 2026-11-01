@@ -20884,8 +20884,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   compilation's subtyping), so its parameters and result are substituted as a source member call
   is. A value used as one of its supertypes, by an implicit cast, a branch or an argument, is the
   value itself, with the coercion checked FIR places for a nullable target. An implicit cast to a
-  subtype, or to another parameterization of the same classifier, is the smart cast kotlinc proved
-  and lowers as a cast; any other implicit cast declines. A prepared copy erases the type
+  subtype, to another parameterization of the same classifier, or to a subtype of the value's
+  star projection (kotlinc erases the checked arguments, so `this is Collection<*>` narrows an
+  `Iterable<T>`), is the smart cast kotlinc proved and lowers as a cast; any other implicit cast
+  declines. A prepared copy erases the type
   parameters of the inline functions it already expanded to their bounds, so a value typed with a
   supertype of the declared type, passed to a function value or produced by one, is that erased
   value. A `FOR_LOOP` block is the source `for` over an iterator: an unnamed iterator local and a
@@ -20893,7 +20895,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   source `try`, each `catch` parameter bound to the next value slot under its source name, each
   branch of a non-`Unit` `try` converted to its type as a conditional's branches are. Tests:
   `klib_lowering::tests::control_forms::try_lowers_as_the_source_try_does`,
-  `klib_lowering::tests::inline_templates::a_member_of_a_generic_class_is_called_at_its_receiver_type_arguments`.
+  `klib_lowering::tests::inline_templates::a_member_of_a_generic_class_is_called_at_its_receiver_type_arguments`,
+  `klib_lowering::tests::control_forms::stdlib_star_projected_smart_cast_lowers_as_a_cast`.
 - **The Native backend realizes what an expanded library body reaches.** A KLIB member's builtin
   operation (`Int.and`, `Long.times`, `Int.inv`, `Array.size`, `String.length`) is attached when
   the provider publishes the member, before its identity is assigned, so a template's call of it

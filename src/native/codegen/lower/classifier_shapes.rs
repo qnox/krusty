@@ -332,18 +332,18 @@ pub(super) fn collection_shape(
     })
 }
 
-/// Whether a type check names the read-only List face represented by the runtime's List marker.
-pub(super) fn is_list_check_type(
+/// The runtime marker a type check against one of Kotlin's read-only mapped collection interfaces
+/// tests: every runtime collection and every class implementing the interface wears it.
+pub(super) fn collection_check_descriptor(
     classifiers: &dyn BackendClassifierSource,
     internal: TypeName,
-) -> bool {
-    matches!(
-        classifiers.classifier(internal).and_then(|fact| fact.role),
-        Some(ClassifierRole::MappedCollection(MappedCollection {
-            kind: CollectionKind::List,
-            mutable: false,
-        }))
-    )
+) -> Option<&'static str> {
+    match classifiers.classifier(internal)?.role? {
+        ClassifierRole::MappedCollection(collection) if !collection.mutable => {
+            exact_collection_descriptor(collection)
+        }
+        _ => None,
+    }
 }
 
 /// The native runtime marker for a checked function role.
@@ -582,8 +582,8 @@ impl<'a> FileLowering<'a> {
         (shape != CollectionShape::MapEntry).then_some(shape)
     }
 
-    pub(super) fn is_list_check_type(&self, internal: TypeName) -> bool {
-        is_list_check_type(self.classifiers, internal)
+    pub(super) fn collection_check_descriptor(&self, internal: TypeName) -> Option<&'static str> {
+        collection_check_descriptor(self.classifiers, internal)
     }
 
     pub(super) fn function_type_descriptor(&self, internal: TypeName) -> Option<&'static str> {
@@ -669,10 +669,6 @@ impl<'a> FileLowering<'a> {
     pub(super) fn implements_unwalkable_collection_of(&self, ty: Ty) -> bool {
         self.collection_shape_of(ty)
             .is_some_and(|shape| self.unwalkable_collections.contains(&shape))
-    }
-
-    pub(super) fn implements_collection_shape(&self, shape: CollectionShape) -> bool {
-        self.implemented_collections.contains(&shape)
     }
 
     pub(super) fn implements_collection_of(&self, ty: Ty) -> bool {
