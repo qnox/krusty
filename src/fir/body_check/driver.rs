@@ -1018,8 +1018,12 @@ fn check_and_dispatch_scheduled_function_body_in_session_with_source(
     )
     .map_err(CheckedBodyDriverFailure::Check)?;
     publish_result_type(&mut body, signature.result)?;
-    if matches!(function.body, FunBody::Expr(_)) {
-        body.set_implicit_return();
+    match function.body {
+        FunBody::Expr(_) => body.set_implicit_return(),
+        // A block body falls off its closing `}`. The line travels with the checked body, so a
+        // file that compiles this function as another file's inline callee marks it too.
+        FunBody::Block(_) => body.set_close_line(function.body_lines.close),
+        FunBody::None => {}
     }
     session.absorb_checked_body(&body);
     dispatch_checked_body(callable, work, body, inline_bodies, ordinary_sink);
