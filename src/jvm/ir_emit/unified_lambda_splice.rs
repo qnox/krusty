@@ -537,12 +537,14 @@ impl Emitter<'_> {
                     "I".to_string(),
                 ));
             }
+            let caller_in_lambda = self.enter_inline_lambda_body();
             let body_ret = self.emit_fn_body_inline_with_aliases(
                 facts.inline_body,
                 &param_slots,
                 cap_bindings.aliases.clone(),
                 &mut scratch,
             );
+            self.leave_inline_lambda_body(caller_in_lambda);
             // The erased `invoke` result is `Object`. Coerce from the BODY's value type, not the
             // contextual lambda declaration return: a block accepted as `() -> Any?` can still
             // produce a primitive `Boolean`/`Int` here.

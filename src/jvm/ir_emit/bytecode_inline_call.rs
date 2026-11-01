@@ -1243,9 +1243,11 @@ impl Emitter<'_> {
             } else {
                 Supply::Stored
             };
-            // kotlinc never stores an inline suspend callee's continuation: the body reads the
-            // caller's own continuation local, as every suspension point in the caller does. A
-            // suspend lambda's continuation is the lambda itself, `this` cast where it is read.
+            // kotlinc does not store an inline suspend callee's continuation that is the caller's
+            // own continuation local: the body reads that local, as every suspension point in the
+            // caller does. An inline lambda's body reads its continuation as a value, which the
+            // callee's parameter keeps in a local of its own (`$completion$iv`). A suspend
+            // lambda's continuation is the lambda itself, `this` cast where it is read.
             // Suspend lowering records the operand it inserted; with an omitted default argument
             // that is before the `$default` mask and marker, not the last operand.
             let lambda_continuation = index
@@ -1255,7 +1257,9 @@ impl Emitter<'_> {
                         .is_continuation(call_expression, argument_index)
                 })
                 && self.cast_local_operand(argument).is_some();
-            if self.reads_continuation_local(argument) || lambda_continuation {
+            let own_continuation =
+                self.reads_continuation_local(argument) && !self.continuation_is_lambda_value();
+            if own_continuation || lambda_continuation {
                 supplies.push(Supply::CallerLocal);
                 continue;
             }

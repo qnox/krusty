@@ -2,6 +2,8 @@
 
 use super::common;
 
+#[path = "../inline_lambda_suspend_completion_e2e.rs"]
+mod inline_lambda_suspend_completion_e2e;
 #[path = "../suspend_anonymous_object_name_e2e.rs"]
 mod suspend_anonymous_object_name_e2e;
 #[path = "../suspend_arg_order_e2e.rs"]
