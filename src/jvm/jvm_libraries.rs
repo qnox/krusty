@@ -2772,6 +2772,12 @@ impl JvmLibraries {
         accessors: &AccessorInventory,
     ) -> crate::libraries::Callables {
         let mut functions = self.member_functions_with_renames(recv, name, function_renames);
+        // A member extension is a declaration of this classifier as much as any member, so the
+        // declaration model carries it beside them, as every other provider's does. Its extension
+        // kind keeps it out of ordinary dispatch on the classifier.
+        functions
+            .overloads
+            .extend(self.member_extension_declarations(recv, name));
         // Exact declarations on this classifier. The resolver owns the one inheritance walk.
         let Some(internal) = recv.kotlin_class_internal() else {
             return crate::libraries::Callables::from_parts(functions, PropertySet::default());
@@ -4168,6 +4174,31 @@ impl JvmLibraries {
         };
         let function_renames = self.mapped_collection_function_renames(classifier);
         self.member_functions_with_renames(receiver, name, &function_renames)
+    }
+
+    /// The member-extension functions named `name` that `receiver`'s classifier declares, each with
+    /// its semantic extension receiver.
+    fn member_extension_declarations(&self, receiver: Ty, name: &str) -> Vec<FunctionInfo> {
+        let Some(owner) = receiver.kotlin_class_internal() else {
+            return Vec::new();
+        };
+        let Some(classifier) = self.classifier_record(owner) else {
+            return Vec::new();
+        };
+        classifier
+            .members
+            .iter()
+            .filter(|member| member.name == name && member.is_member_extension())
+            .map(|member| {
+                let extension_receiver = member
+                    .semantic_extension_receiver()
+                    .expect("a member-extension declaration publishes its semantic receiver");
+                let mut function =
+                    FunctionInfo::classifier_member(FnKind::Extension, owner, member.clone());
+                function.receiver = Some(extension_receiver);
+                function
+            })
+            .collect()
     }
 
     fn member_functions_with_renames(
