@@ -6184,8 +6184,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   route once (`fir_lower/source_calls/inline_route.rs`): a call stays a call recorded for the
   backend (`IrFile::compiled_inline_call`) only when the callee is a non-suspend function in this
   module (public, or declared in the caller's own file), top-level or a member of a class, object
-  or companion, with no suspend function-typed parameter or receiver, no
-  `crossinline` parameter, and a template without local classes
+  or companion, with no `crossinline` parameter, and a template without local classes
   or a subject `when` that switches on an enum's keys (`IrFile::enum_switch_when`),
   called with every argument from any body: a named function, an inline function (whose compiled
   body then holds the nested callee's code, as kotlinc's does), a lambda's method, a local function,
@@ -6201,8 +6200,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `tests/inline_same_module_suspend_callers_e2e.rs` (an elvis-return callee, suspensions in a
   placed lambda and `coroutineContext` read there, from suspend functions and suspend lambdas,
   against kotlinc's bytes and as runs, and a run whose placed suspensions really suspend and
-  resume). A suspend inline function is not such a body yet: its template is expanded at its
-  call sites in IR (`SuspendCallee`), and the calls it holds are expanded with it, so a lambda it
+  resume). A non-suspend callee's `noinline` suspend function-typed parameter takes the same
+  route: the compiled body only passes the value on, so the call's suspend lambda is the caller's
+  own object, as kotlinc's is (`tests/inline_same_module_suspend_values_e2e.rs`, against kotlinc's
+  bytes and as a run). A suspend inline function is not such a body yet: its template is
+  expanded at its call sites in IR (`SuspendCallee`), and the calls it holds are expanded with it, so a lambda it
   hands an inline callee keeps its parameters' inline frame in the caller's `@DebugMetadata`
   (`inline_route::tests::calls_in_a_suspend_inline_function_stay_expanded`,
   `continuation_spill_order_e2e::a_lambda_declared_inside_an_inline_function_gains_its_frame`).
