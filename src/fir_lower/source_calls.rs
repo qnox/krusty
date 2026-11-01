@@ -2256,6 +2256,11 @@ impl BodyLowering<'_> {
         });
         self.ir.call_operand_bindings.insert(declaration);
         self.ir.argument_evaluation_bindings.insert(declaration);
+        // kotlinc's `visitVariable` marks the temporary at the argument's line once the value is
+        // stored: after an inlined argument has forgotten the line, that mark states it again.
+        if let Some(line) = self.operand_source_line(value) {
+            self.ir.expr_lines.insert(declaration, line);
+        }
         statements.push(declaration);
         let read = self.ir.add_expr(IrExpr::GetValue(temporary));
         // This read is generated while normalizing checked argument evaluation order, so it has no
