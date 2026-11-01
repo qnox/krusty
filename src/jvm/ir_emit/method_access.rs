@@ -3,7 +3,7 @@
 use crate::ir::IrFile;
 use crate::jvm::classfile::{
     ACC_ABSTRACT, ACC_BRIDGE, ACC_FINAL, ACC_PRIVATE, ACC_PROTECTED, ACC_PUBLIC, ACC_STATIC,
-    ACC_SYNTHETIC, ACC_VARARGS,
+    ACC_STRICT, ACC_SYNCHRONIZED, ACC_SYNTHETIC, ACC_VARARGS,
 };
 
 use super::{IrExpr, LambdaMode, LambdaModes};
@@ -101,7 +101,31 @@ pub(super) fn declared_method_access(
     } else {
         0
     };
-    access | synthetic | bridge | varargs_access(ir, fid)
+    access
+        | synthetic
+        | bridge
+        | varargs_access(ir, fid)
+        | annotated_method_modifiers(ir.function_annotations.get(&fid))
+}
+
+/// The method modifiers kotlinc's `calculateMethodFlags` derives from the function's annotations:
+/// `@Synchronized` makes the method `ACC_SYNCHRONIZED` and `@Strictfp` `ACC_STRICT`. Both are
+/// SOURCE annotations, recorded on the declaration (a function or a property accessor) as
+/// resolved identities.
+pub(super) fn annotated_method_modifiers(
+    annotations: Option<&crate::ir::DeclarationAnnotations>,
+) -> u16 {
+    let Some(annotations) = annotations else {
+        return 0;
+    };
+    let mut modifiers = 0;
+    if annotations.declares(crate::types::type_name("kotlin/jvm/Synchronized")) {
+        modifiers |= ACC_SYNCHRONIZED;
+    }
+    if annotations.declares(crate::types::type_name("kotlin/jvm/Strictfp")) {
+        modifiers |= ACC_STRICT;
+    }
+    modifiers
 }
 
 /// kotlinc's `isReifiable`: the function declares a `reified` type parameter. Its erased body only

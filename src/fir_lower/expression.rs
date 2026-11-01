@@ -973,6 +973,8 @@ impl BodyLowering<'_> {
                 });
                 if *suspend {
                     self.ir.suspend_calls.insert(invoke, result.get());
+                } else {
+                    super::inlining::splice_immediate_lambda(self, invoke, origin)?;
                 }
                 invoke
             }
