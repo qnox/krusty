@@ -77,6 +77,7 @@ fn render(ir: &IrFile, expression: ExprId) -> String {
             ..
         } => format!("val ${index} = {}", render(ir, *init)),
         IrExpr::AbsentArgument { ty: absent } => format!("absent {}", ty(*absent)),
+        IrExpr::Return(Some(value)) => format!("return {}", render(ir, *value)),
         IrExpr::TypeOp {
             op,
             arg,
@@ -193,6 +194,7 @@ fn a_published_entry_takes_the_frame_and_one_mask_word_per_32_parameters() {
     assert_eq!(ir.default_entries.len(), 1);
     let declaration = &ir.functions[entry as usize];
     assert_eq!(declaration.name, "wide$default");
+    assert_eq!(ir.synthetic_methods.iter().collect::<Vec<_>>(), [&entry]);
     assert_eq!(declaration.params, vec![Ty::Int; 36]);
     assert_eq!(declaration.ret, Ty::Unit);
     assert_eq!(declaration.dispatch_receiver, None);
@@ -258,7 +260,7 @@ fn a_default_reads_an_earlier_parameter_and_its_own_locals_move_past_the_masks()
     assert_eq!(
         body(&ir, entry),
         format!(
-            "{{ {}; fun{function}($0, $1) }}",
+            "{{ {}; return fun{function}($0, $1) }}",
             fill(2, 2, 1, "{ val $3 = $0; ($3 Add 1) }")
         )
     );
@@ -368,7 +370,10 @@ fn a_member_entry_takes_the_receiver_and_dispatches_through_the_method() {
     assert_eq!(declaration.dispatch_receiver, None);
     assert_eq!(
         body(&ir, entry),
-        format!("{{ {}; $0.method{class}:0($1) }}", fill(2, 1, 1, "2"))
+        format!(
+            "{{ {}; return $0.method{class}:0($1) }}",
+            fill(2, 1, 1, "2")
+        )
     );
     assert_eq!(body(&ir, caller), format!("fun{entry}($0, absent Int, 1)"));
     assert!(
@@ -415,7 +420,7 @@ fn a_value_class_member_entry_calls_the_member_directly() {
     let entry = ir.default_entries[&function];
     assert_eq!(
         body(&ir, entry),
-        format!("{{ {}; $0.fun{function}($1) }}", fill(2, 1, 1, "2"))
+        format!("{{ {}; return $0.fun{function}($1) }}", fill(2, 1, 1, "2"))
     );
     assert_eq!(body(&ir, caller), format!("fun{entry}($0, absent Int, 1)"));
 }
@@ -481,7 +486,10 @@ fn an_inherited_default_calls_the_entry_of_its_provider_in_this_file() {
     let entry = ir.default_entries[&provider];
     assert_eq!(
         body(&ir, entry),
-        format!("{{ {}; $0.method{base}:0($1) }}", fill(2, 1, 1, "\"base\""))
+        format!(
+            "{{ {}; return $0.method{base}:0($1) }}",
+            fill(2, 1, 1, "\"base\"")
+        )
     );
     assert_eq!(
         body(&ir, caller),
@@ -586,7 +594,10 @@ fn an_actual_entry_is_keyed_by_its_expect_and_calls_the_actual() {
     assert_eq!(published_identities(&ir, function), [expect]);
     assert_eq!(
         body(&ir, entry),
-        format!("{{ {}; fun{function}($0) }}", fill(1, 1, 0, "\"OK\""))
+        format!(
+            "{{ {}; return fun{function}($0) }}",
+            fill(1, 1, 0, "\"OK\"")
+        )
     );
     assert_eq!(
         body(&ir, caller),
@@ -777,14 +788,12 @@ fn an_entry_keeps_the_checked_facts_frozen_for_its_defaults() {
     let entry = ir.default_entries[&function];
     assert_eq!(ir.default_entries.len(), 1);
     assert_eq!(ir.functions[entry as usize].params, vec![Ty::Int, Ty::Int]);
-    let IrExpr::Block { stmts, value } = ir.expr(ir.functions[entry as usize].body.unwrap()) else {
-        panic!("an entry body is a block");
+    let IrExpr::Block { stmts, value: None } = ir.expr(ir.functions[entry as usize].body.unwrap())
+    else {
+        panic!("an entry body is a block of statements");
     };
-    assert_eq!(stmts.len(), 1);
-    assert_eq!(
-        render(&ir, value.expect("the entry calls the declaration")),
-        format!("fun{function}($0)")
-    );
+    assert_eq!(stmts.len(), 2);
+    assert_eq!(render(&ir, stmts[1]), format!("fun{function}($0)"));
     let IrExpr::When { branches } = ir.expr(stmts[0]) else {
         panic!("a fill is guarded by its mask bit");
     };

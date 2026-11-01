@@ -21,7 +21,7 @@ mod masks;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use entries::published_identities;
+pub(crate) use entries::{published_entry, published_identities};
 pub(crate) use masks::{mask_words, omission_masks};
 
 use super::CheckedBackendCallables;

@@ -2137,7 +2137,6 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
 
     pub(super) fn method_call(
         &mut self,
-        site: u32,
         class: ClassId,
         index: u32,
         receiver: u32,
@@ -2147,16 +2146,12 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         let function = &self.file.ir.functions[fid as usize];
         let arguments: Option<Vec<u32>> = args.iter().copied().collect();
         let Some(arguments) = arguments else {
-            // Arguments left out: the wrapper for this omission shape fills them, and dispatches
-            // on the receiver itself, so an open method still reaches its override.
-            let omitted: Vec<u32> = args
-                .iter()
-                .enumerate()
-                .filter(|(_, argument)| argument.is_none())
-                .map(|(ordinal, _)| ordinal as u32)
-                .collect();
-            let supplied: Vec<u32> = args.iter().flatten().copied().collect();
-            return self.defaulted_call(fid, &omitted, Some(receiver), &supplied, site);
+            // The shared default-argument lowering rewrites every member call with omitted
+            // arguments it can realize to call the member's entry.
+            return Err(declined!(
+                "a call of `{}` with omitted arguments",
+                function.name
+            ));
         };
         if function.dispatch_receiver.is_none() {
             return Err(declined!("a class-static call (`{}`)", function.name));
