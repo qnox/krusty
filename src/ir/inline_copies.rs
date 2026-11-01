@@ -11,6 +11,7 @@
 
 use crate::fx_hash::{HashMap, HashSet};
 
+use super::expression_copy::InheritedFacts;
 use super::{ExprId, IrFile};
 use crate::types::{Ty, TypeName};
 
@@ -117,28 +118,7 @@ impl IrFile {
     /// A clone keeps what its source was: an inline copy (expanding an inline call copies an
     /// inline body that may already hold another expansion), or an operand left unread.
     pub(crate) fn copy_inline_copy_mark(&mut self, source: ExprId, target: ExprId) {
-        if self.is_inline_copy(source) {
-            self.mark_inline_copy(target);
-        }
-        if let Some(provenance) = self.inline_copy_provenance(source).map(<[_]>::to_vec) {
-            self.inline_expansions
-                .provenance
-                .entry(target)
-                .or_default()
-                .extend(provenance);
-        }
-        if self.is_unread_inline_operand(source) {
-            self.mark_unread_inline_operand(target);
-        }
-        if let Some(ty) = self.inline_declared_type(source) {
-            self.record_inline_declared_type(target, ty);
-        }
-        if self.is_inline_result_boundary(source) {
-            self.mark_inline_result_boundary(target);
-        }
-        if self.retains_inline_unit_line(source) {
-            self.retain_inline_unit_line(target);
-        }
+        self.inline_expansions.inherit(source, target);
     }
 
     pub(crate) fn is_inline_copy(&self, expression: ExprId) -> bool {
@@ -217,5 +197,28 @@ impl IrFile {
                 }
             }
         }
+    }
+}
+
+impl InheritedFacts for InlineExpansions {
+    fn inherit(&mut self, source: ExprId, target: ExprId) {
+        let Self {
+            copies,
+            unread_operands,
+            provenance,
+            declared_inline_types,
+            result_boundaries,
+            retained_unit_lines,
+        } = self;
+        copies.inherit(source, target);
+        unread_operands.inherit(source, target);
+        // A copy placed in a frame that already has provenance keeps those frames and appends
+        // the source's.
+        if let Some(frames) = provenance.get(&source).cloned() {
+            provenance.entry(target).or_default().extend(frames);
+        }
+        declared_inline_types.inherit(source, target);
+        result_boundaries.inherit(source, target);
+        retained_unit_lines.inherit(source, target);
     }
 }

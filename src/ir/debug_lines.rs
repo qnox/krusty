@@ -4,6 +4,7 @@
 
 use crate::fx_hash::{HashMap, HashSet};
 
+use super::expression_copy::InheritedFacts;
 use super::{ExprId, IrExpr, IrFile, IrTypeOp};
 
 /// Where the `return` a `Unit` body is completed with takes its source line.
@@ -225,36 +226,31 @@ impl IrFile {
             self.generated_lines.generated_operand_starts.insert(target);
         }
     }
+}
 
-    /// Carry `source`'s generated line marks over to its copy `target`.
-    pub(super) fn copy_generated_line_marks(&mut self, source: ExprId, target: ExprId) {
-        let marks = &mut self.generated_lines;
-        if let Some(&line) = marks.implicit_return_ends.get(&source) {
-            marks.implicit_return_ends.insert(target, line);
-        }
-        if let Some(&line) = marks.evaluated_result_ends.get(&source) {
-            marks.evaluated_result_ends.insert(target, line);
-        }
-        if let Some(&line) = marks.dispatches.get(&source) {
-            marks.dispatches.insert(target, line);
-        }
-        if let Some(&line) = marks.fallthrough_returns.get(&source) {
-            marks.fallthrough_returns.insert(target, line);
-        }
-        if marks.positionless.contains(&source) {
-            marks.positionless.insert(target);
-        }
-        if marks.generated_operand_starts.contains(&source) {
-            marks.generated_operand_starts.insert(target);
-        }
-        if let Some(&line) = marks.invocation_result_adaptations.get(&source) {
-            marks.invocation_result_adaptations.insert(target, line);
-        }
-        if marks.inline_result_adaptation_boundaries.contains(&source) {
-            marks.inline_result_adaptation_boundaries.insert(target);
-        }
-        if marks.early_result_adaptations.contains(&source) {
-            marks.early_result_adaptations.insert(target);
-        }
+impl InheritedFacts for GeneratedLineMarks {
+    fn inherit(&mut self, source: ExprId, target: ExprId) {
+        let Self {
+            implicit_return_ends,
+            evaluated_result_ends,
+            fallthrough_returns,
+            // An accessor's own body: the exit the accessor appends after it is that accessor's.
+            accessor_body_exits: _,
+            dispatches,
+            positionless,
+            generated_operand_starts,
+            invocation_result_adaptations,
+            inline_result_adaptation_boundaries,
+            early_result_adaptations,
+        } = self;
+        implicit_return_ends.inherit(source, target);
+        evaluated_result_ends.inherit(source, target);
+        fallthrough_returns.inherit(source, target);
+        dispatches.inherit(source, target);
+        positionless.inherit(source, target);
+        generated_operand_starts.inherit(source, target);
+        invocation_result_adaptations.inherit(source, target);
+        inline_result_adaptation_boundaries.inherit(source, target);
+        early_result_adaptations.inherit(source, target);
     }
 }

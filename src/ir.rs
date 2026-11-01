@@ -59,6 +59,7 @@ pub(crate) use enum_switch_whens::EnumSwitchWhen;
 mod emitted_body_roots;
 mod enums;
 mod expect_actualization;
+mod expression_copy;
 mod expression_provenance;
 pub(crate) use emitted_body_roots::{
     emitted_body_roots, emitted_declaration_roots, EmittedDeclaration,

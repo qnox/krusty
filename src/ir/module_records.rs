@@ -4,6 +4,7 @@
 //! exact semantic facts each referenced module declaration needs are copied into these records, so
 //! a target realizes the edge without reopening the frontend module index.
 
+use super::expression_copy::InheritedFacts;
 use super::{IrParameterIdentity, IrStaticPlacement, Ty, TypeName};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -176,5 +177,16 @@ impl super::IrFile {
         self.referenced_module_classifiers
             .get(&classifier)
             .map(|classifier| classifier.kind)
+    }
+}
+
+impl InheritedFacts for IrModuleConstructions {
+    fn inherit(&mut self, source: super::ExprId, target: super::ExprId) {
+        // The constructor records belong to declarations, not to expressions.
+        let Self {
+            selected,
+            records: _,
+        } = self;
+        selected.inherit(source, target);
     }
 }
