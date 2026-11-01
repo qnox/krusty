@@ -1739,7 +1739,9 @@ impl<'a> SymbolResolver<'a> {
             .symbol_levels_in_scope(name)
             .into_iter()
             .map(|symbols| function_set_from_symbols(&symbols))
-            .find(|functions| !functions.overloads.is_empty())
+            // An extension needs a receiver, so a level that declares only extensions of this name
+            // offers nothing to a call without one and does not hide the next level's functions.
+            .find(|functions| functions.top_level().next().is_some())
             .unwrap_or_default();
         crate::trace_compiler!(
             "resolve",
