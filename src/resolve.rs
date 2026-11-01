@@ -59236,9 +59236,9 @@ impl<'a> Checker<'a> {
                 self.resolved_whole_array_vararg_args.insert(argument);
             }
         }
-        // `Array<out Bound>` / `Array<in Bound>` constrains the produced array but does not select its
-        // invariant element type. Infer that type from `arrayOf`'s arguments, then let the enclosing
-        // assignability check validate the concrete `Array<T>` against the projection.
+        // `Array<out Bound>` / `Array<in Bound>` constrains the produced array (and bounds a spread
+        // array) but does not select its invariant element type. Infer that type from the arguments,
+        // then let the enclosing assignability check validate `Array<T>` against the projection.
         let raw_hint = element_hint;
         let element_hint = raw_hint.filter(|element| element.projection_inner().is_none());
         if let SyntheticKind::PrimitiveVararg(elem) = synthetic.kind {
@@ -59270,8 +59270,11 @@ impl<'a> Checker<'a> {
                             None => self.expr(scope, argument),
                         };
                     }
-                    let array_expected =
-                        element_hint.map(|expected| Ty::obj_args("kotlin/Array", &[expected]));
+                    let spread_array =
+                        |element| Ty::obj_args("kotlin/Array", &[Ty::out_projection(element)]);
+                    let array_expected = raw_hint
+                        .filter(|hint| !matches!(hint.kind(), TyKind::InProjection(_)))
+                        .map(|hint| spread_array(hint.projection_read_ty()));
                     let actual = match array_expected {
                         Some(expected) => self.expr_expected(scope, argument, expected),
                         None => self.expr(scope, argument),
@@ -59285,9 +59288,8 @@ impl<'a> Checker<'a> {
                         }
                         return Ty::Error;
                     };
-                    let expected_array = Ty::obj_args("kotlin/Array", &[contributed]);
                     self.expect_assignable(
-                        expected_array,
+                        spread_array(contributed),
                         actual,
                         self.span(argument),
                         "array spread",
