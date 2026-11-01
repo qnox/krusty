@@ -42,7 +42,8 @@ class Publish(unittest.TestCase):
                 kotlinc=build(30.5, 2500, 120.0), krusty=build(10.0, 1400, 90.0))))
             write(f'{work}/run/corpus-fresh/logs/fresh.plugins.tsv', 'gradle\t:\tp\n')
             write(f'{work}/run/corpus-fresh/logs/fresh.krusty.svg', '<svg/>')
-            names = publish.publish(f'{work}/run', tree, {'kept', 'fresh'}, 'abc123', '2026-10-25',
+            source = dict(url='https://example.test/fresh', commit='f00d', patch=None, kotlin_pin=None)
+            names = publish.publish(f'{work}/run', tree, {'kept': {}, 'fresh': source}, 'abc123', '2026-10-25',
                                     'https://example.test/run/9')
             self.assertEqual(names, ['fresh'])
             self.assertEqual(sorted(os.listdir(f'{tree}/projects')), ['fresh', 'kept'])
@@ -50,6 +51,7 @@ class Publish(unittest.TestCase):
                 fresh = json.load(f)
             self.assertEqual((fresh['built'], fresh['measured']),
                              (2, dict(date='2026-10-25', commit='abc123', run='https://example.test/run/9')))
+            self.assertEqual(fresh['source'], source)
             self.assertEqual(fresh['flame_graph'], 'krusty-flamegraph.svg')
             with open(f'{tree}/projects/fresh/krusty-flamegraph.svg') as f:
                 self.assertEqual(f.read(), '<svg/>')
@@ -61,6 +63,20 @@ class Publish(unittest.TestCase):
                 self.assertEqual(f.read(), publish.HISTORY_HEADER + 'old line\n'
                                  '2026-10-25\tabc123\tfresh\t0\t2\t2\t2\t4\thttps://example.test/run/9\t'
                                  '30.5\t10.0\t2500\t1400\t120.0\t90.0\n')
+
+
+    def test_listed_records_what_run_sh_builds(self):
+        with tempfile.TemporaryDirectory() as work:
+            write(f'{work}/projects.tsv', '# comment\n'
+                  'patched\thttps://example.test/p\tc0ffee\t.\t21\tgradle/libs.versions.toml:kotlin\n'
+                  'plain\thttps://example.test/q\tbeef\tsub\t17\t-\tdemoDebug\n')
+            write(f'{work}/scripts/oss-corpus/patches/patched.patch', '')
+            projects = publish.listed(f'{work}/projects.tsv', work)
+            self.assertEqual(projects, {
+                'patched': dict(url='https://example.test/p', commit='c0ffee',
+                                patch='scripts/oss-corpus/patches/patched.patch',
+                                kotlin_pin='gradle/libs.versions.toml:kotlin'),
+                'plain': dict(url='https://example.test/q', commit='beef', patch=None, kotlin_pin=None)})
 
 
 if __name__ == '__main__':
