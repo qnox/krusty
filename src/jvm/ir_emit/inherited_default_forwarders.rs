@@ -280,6 +280,7 @@ fn forwarder(
         &semantic_params,
         semantic_ret,
         (&param_tys, ret),
+        default.suspend,
     );
     // A `suspend` member's PHYSICAL realization is its CPS shape — a trailing `Continuation` and an
     // `Object` return. kotlinc names the parameter `$completion`, annotates it `@NotNull`, and the
@@ -347,7 +348,9 @@ fn forwarder(
 }
 
 /// The generic `Signature` of a forwarder whose types have generic structure (`List<String>`, a
-/// class type parameter), or `None` when it would only repeat the descriptor.
+/// class type parameter), or `None` when it would only repeat the descriptor. A `suspend` member
+/// signs its CPS shape, as the member itself does: the declared result travels as the trailing
+/// `Continuation<? super R>` and the method returns `Object`.
 ///
 /// A member's own type parameters would need their declarations ahead of the parameter list,
 /// which the inherited record does not carry; such a forwarder keeps descriptor-only shape
@@ -358,6 +361,7 @@ fn forwarder_signature(
     semantic_params: &[Ty],
     semantic_ret: Ty,
     (param_tys, ret): (&[Ty], Ty),
+    suspend: bool,
 ) -> Option<String> {
     // A member's own type parameter (`fun <T> echo`) needs its declaration in the forwarder's
     // signature, which this record does not carry: keep the descriptor-only shape for it.
@@ -371,6 +375,11 @@ fn forwarder_signature(
     let mut signature = String::from("(");
     for parameter in semantic_params {
         signature.push_str(&formatter.method_ty(parameter, Wildcards::Declared)?);
+    }
+    if suspend {
+        signature.push_str(&formatter.continuation(semantic_ret, Wildcards::Declared)?);
+        signature.push_str(")Ljava/lang/Object;");
+        return Some(signature);
     }
     signature.push(')');
     signature.push_str(&formatter.method_ty(&semantic_ret, Wildcards::Suppressed)?);
