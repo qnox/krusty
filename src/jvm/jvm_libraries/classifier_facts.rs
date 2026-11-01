@@ -54,7 +54,11 @@ pub(super) fn classifier_constructor_generic_sig(
         })
         .collect::<Vec<_>>();
     Some(GenericSig {
-        formals: parameters.type_params.clone(),
+        formals: parameters
+            .type_params
+            .iter()
+            .map(crate::types::TyParamName::from)
+            .collect(),
         formal_bounds: parameters.type_param_bounds.clone(),
         receiver: None,
         params: value_parameters.to_vec(),
@@ -98,7 +102,7 @@ pub(super) fn align_mapped_owner_type_parameters(
         let mut bindings = owner_bindings.clone();
         for formal in &signature.formals {
             // A method formal shadows an identically named owner formal.
-            bindings.remove(formal);
+            bindings.remove(formal.as_str());
         }
         signature.receiver = signature
             .receiver

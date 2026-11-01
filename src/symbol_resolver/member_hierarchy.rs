@@ -33,9 +33,9 @@ pub(crate) fn member_is_inheritable(visibility: crate::types::Visibility) -> boo
 pub(crate) fn override_parameter_types_match(
     source: &dyn SymbolSource,
     inherited: &[Ty],
-    inherited_formals: &[String],
+    inherited_formals: &[crate::types::TyParamName],
     implementation: &[Ty],
-    implementation_formals: &[String],
+    implementation_formals: &[crate::types::TyParamName],
 ) -> bool {
     inherited.len() == implementation.len()
         && inherited
@@ -60,7 +60,7 @@ pub(crate) fn override_parameter_types_match(
 pub(crate) struct OverrideInputShape<'a> {
     pub params: &'a [Ty],
     pub receiver: Option<Ty>,
-    pub formals: &'a [String],
+    pub formals: &'a [crate::types::TyParamName],
     /// Declared upper bounds, parallel to `formals`; an empty slot is Kotlin's implicit `Any?`.
     pub formal_bounds: &'a [Vec<Ty>],
     pub context_count: usize,
@@ -246,7 +246,7 @@ fn specialize_declared_callables(
         let declared_nullability = property.ty;
         let mut bindings = base_bindings.clone();
         for formal in &property.formals {
-            if !classifier.type_params.contains(formal) {
+            if !classifier.type_params.iter().any(|owner| owner == formal) {
                 bindings.remove(formal.as_str());
             }
         }
@@ -903,7 +903,7 @@ fn normalized_function_result(function: &FunctionInfo) -> Ty {
                 [bound] => *bound,
                 bounds => Ty::intersection(bounds),
             };
-            (formal.clone(), bound)
+            (*formal, bound)
         })
         .collect::<crate::fx_hash::HashMap<_, _>>();
     crate::types::ty_canonicalize_params(
@@ -1921,7 +1921,7 @@ mod tests {
             let mut function = member("sample/Owner", 0, vec![result], None);
             function.callable.ret = result;
             function.generic_sig = Some(crate::libraries::GenericSig {
-                formals: vec![formal.to_string()],
+                formals: vec![crate::types::TyParamName::new(formal)],
                 formal_bounds: vec![Vec::new()],
                 receiver: None,
                 params: vec![result],
@@ -1977,7 +1977,7 @@ mod tests {
     #[test]
     fn override_input_shape_includes_type_parameter_bounds() {
         let source = crate::libraries::EmptySymbolSource;
-        let formals = ["S".to_string()];
+        let formals = [crate::types::TyParamName::new("S")];
         let param = [Ty::ty_param("S", Ty::nullable(Ty::obj("kotlin/Any")))];
         let wide = [vec![Ty::obj("app/Shape")]];
         let narrow = [vec![Ty::obj("app/Circle")]];

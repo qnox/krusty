@@ -204,7 +204,8 @@ fn a_class_application_requires_a_complete_frozen_member_contract() {
         .unwrap()
         .parameters
         .formals[0];
-    repeated.generic_sig.as_mut().unwrap().formals[0] = formal.ty_param_name().unwrap().to_owned();
+    repeated.generic_sig.as_mut().unwrap().formals[0] =
+        crate::types::TyParamName::new(formal.ty_param_name().unwrap());
     assert_eq!(
         instantiate_dependency_signature(&repeated, &application).err(),
         Some("a dependency class application repeats a formal identity")

@@ -29,14 +29,14 @@ pub(crate) struct CallSiteVariableMap {
 }
 
 impl CallSiteVariableMap {
-    fn from_call_owned(
-        formals: &[String],
+    fn from_call_owned<F: crate::types::TyParamKey>(
+        formals: &[F],
         mut call_owned_identity: impl FnMut(&'static str) -> Option<&'static str>,
     ) -> Self {
         let call_owned = formals
             .iter()
             .filter_map(|formal| {
-                let declared = crate::types::intern(formal);
+                let declared = crate::types::intern(formal.borrow());
                 call_owned_identity(declared).map(|call_owned| (declared, call_owned))
             })
             .collect::<HashMap<_, _>>();
@@ -50,7 +50,10 @@ impl CallSiteVariableMap {
         }
     }
 
-    pub(crate) fn new(formals: &[String], lexically_visible: impl Fn(&str) -> bool) -> Self {
+    pub(crate) fn new<F: crate::types::TyParamKey>(
+        formals: &[F],
+        lexically_visible: impl Fn(&str) -> bool,
+    ) -> Self {
         Self::from_call_owned(formals, |declared| {
             lexically_visible(declared).then(|| crate::types::call_site_type_variable(declared))
         })
@@ -59,8 +62,8 @@ impl CallSiteVariableMap {
     /// Give every still-open formal an identity owned by one postponed call expression. Repeated
     /// construction for different lambda arguments of that call returns the same identities;
     /// a nested call to the same declaration receives different ones.
-    pub(crate) fn for_postponed_call(
-        formals: &[String],
+    pub(crate) fn for_postponed_call<F: crate::types::TyParamKey>(
+        formals: &[F],
         compilation: u64,
         file: u32,
         expression: u32,
@@ -87,16 +90,12 @@ impl CallSiteVariableMap {
         crate::types::ty_rename_params(ty, &self.declared)
     }
 
-    pub(crate) fn instantiate_formal(&self, formal: &str) -> String {
-        self.call_owned
-            .get(formal)
-            .map_or_else(|| formal.to_string(), |identity| (*identity).to_string())
+    pub(crate) fn instantiate_formal(&self, formal: &str) -> crate::types::TyParamName {
+        crate::types::TyParamName::new(self.call_owned.get(formal).copied().unwrap_or(formal))
     }
 
-    pub(crate) fn declared_formal(&self, formal: &str) -> String {
-        self.declared
-            .get(formal)
-            .map_or_else(|| formal.to_string(), |identity| (*identity).to_string())
+    pub(crate) fn declared_formal(&self, formal: &str) -> crate::types::TyParamName {
+        crate::types::TyParamName::new(self.declared.get(formal).copied().unwrap_or(formal))
     }
 }
 
@@ -162,17 +161,12 @@ impl CallSiteVariables {
     /// Express a solution for [`Self::signature`] over the declaration's own formals.
     pub(crate) fn declared_bindings(&self, inferred: InferredCallBindings) -> InferredCallBindings {
         let ty = |ty: Ty| self.variables.declared_type(ty);
-        let formal = |formal: String| self.variables.declared_formal(&formal);
+        let formal = |formal: String| self.variables.declared_formal(&formal).to_string();
         InferredCallBindings {
             bindings: inferred
                 .bindings
                 .into_iter()
-                .map(|(name, binding)| {
-                    (
-                        crate::types::TyParamName::from(formal(name.to_string())),
-                        ty(binding),
-                    )
-                })
+                .map(|(name, binding)| (self.variables.declared_formal(&name), ty(binding)))
                 .collect(),
             lower_inputs: inferred
                 .lower_inputs
@@ -221,7 +215,7 @@ mod tests {
     fn cell_constructor(formal: &str) -> GenericSig {
         let item = Ty::ty_param(formal, Ty::nullable(Ty::obj("kotlin/Any")));
         GenericSig {
-            formals: vec![formal.to_string()],
+            formals: vec![crate::types::TyParamName::new(formal)],
             formal_bounds: vec![Vec::new()],
             receiver: None,
             params: vec![item],
@@ -284,7 +278,10 @@ mod tests {
         let first = Ty::ty_param("demo:Couple:A", any);
         let second = Ty::ty_param("demo:Couple:B", any);
         let signature = GenericSig {
-            formals: vec!["demo:Couple:A".to_string(), "demo:Couple:B".to_string()],
+            formals: vec![
+                crate::types::TyParamName::new("demo:Couple:A"),
+                crate::types::TyParamName::new("demo:Couple:B"),
+            ],
             formal_bounds: vec![Vec::new(), Vec::new()],
             receiver: None,
             params: vec![first, second],
@@ -324,7 +321,7 @@ mod tests {
         let formal_name = "demo:Owner:R";
         let formal = Ty::ty_param(formal_name, any);
         let signature = GenericSig {
-            formals: vec![formal_name.to_string()],
+            formals: vec![crate::types::TyParamName::new(formal_name)],
             formal_bounds: vec![vec![any]],
             receiver: None,
             params: vec![Ty::nullable(formal)],

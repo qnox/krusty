@@ -428,7 +428,7 @@ impl Checker<'_> {
                     binds.get(formal.as_str()),
                 );
                 if !widens {
-                    fixed_expectation_formals.insert(formal.clone());
+                    fixed_expectation_formals.insert(*formal);
                 }
             }
         }
@@ -456,24 +456,24 @@ impl Checker<'_> {
                         .copied()
                         .any(|input| ty_mentions_param(input, std::slice::from_ref(formal)))
                 {
-                    fixed_expectation_formals.insert(formal.clone());
+                    fixed_expectation_formals.insert(*formal);
                 }
             }
         }
         let mut expectation_binds = binds.clone();
         expectation_binds.retain(|formal, _| {
             !semantic.formals.iter().any(|declared| declared == formal)
-                || fixed_expectation_formals.contains(formal.as_str())
+                || fixed_expectation_formals.contains(formal)
         });
         if let Some(expected) = result_constraint.expected() {
             for (formal, actual) in self
                 .contextual_lambda_result_bindings(&result_semantic, expected)
                 .ok()?
             {
-                if !fixed_expectation_formals.contains(formal.as_str()) {
+                if !fixed_expectation_formals.contains(&formal) {
                     binds.insert(formal, actual);
                     expectation_binds.insert(formal, actual);
-                    fixed_expectation_formals.insert(formal.to_string());
+                    fixed_expectation_formals.insert(formal);
                 }
             }
         }
@@ -510,7 +510,7 @@ impl Checker<'_> {
                             formal,
                         ) == Some(crate::types::TypeVariance::Invariant)
                     {
-                        fixed_expectation_formals.insert(formal.clone());
+                        fixed_expectation_formals.insert(*formal);
                     }
                 }
             }
@@ -627,7 +627,7 @@ impl Checker<'_> {
                         .iter()
                         .filter(|formal| {
                             declared_return.is_some_and(|declared_return| {
-                                ty_mentions_param(declared_return, std::slice::from_ref(formal))
+                                ty_mentions_param(declared_return, std::slice::from_ref(*formal))
                             })
                         })
                         .collect::<Vec<_>>();

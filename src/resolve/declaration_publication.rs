@@ -737,7 +737,7 @@ impl Checker<'_> {
 
     fn constrain_flexible_parameters(
         &self,
-        formals: &[String],
+        formals: &[crate::types::TyParamName],
         declared: Ty,
         actual: Ty,
         fact: &FlexibleValue,

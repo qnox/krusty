@@ -120,12 +120,12 @@ impl Checker<'_> {
     /// Every variable currently owned by a postponed body-call frame. Nested member selection may
     /// observe these variables in an applied receiver or parameter, but their constraints must be
     /// committed by the owning frame after the nested candidate is selected.
-    pub(super) fn active_postponed_type_variables(&self) -> Vec<String> {
+    pub(super) fn active_postponed_type_variables(&self) -> Vec<crate::types::TyParamName> {
         let mut variables = Vec::new();
         for frame in &self.postponed_call_constraints {
             for formal in &frame.formals {
                 if !variables.contains(formal) {
-                    variables.push(formal.clone());
+                    variables.push(*formal);
                 }
             }
         }
@@ -133,14 +133,14 @@ impl Checker<'_> {
     }
 
     /// The type variables of active postponed calls that `ty` mentions.
-    pub(super) fn postponed_type_variables_in(&self, ty: Ty) -> Vec<String> {
+    pub(super) fn postponed_type_variables_in(&self, ty: Ty) -> Vec<crate::types::TyParamName> {
         let mut variables = Vec::new();
         for frame in &self.postponed_call_constraints {
             for formal in &frame.formals {
                 if !variables.contains(formal)
                     && ty_mentions_param(ty, std::slice::from_ref(formal))
                 {
-                    variables.push(formal.clone());
+                    variables.push(*formal);
                 }
             }
         }

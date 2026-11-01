@@ -694,7 +694,7 @@ impl BodyLowering<'_> {
                     "a call that leaves a type argument unset",
                 ))?;
                 let value = semantic_type(self.arena, self.header.type_parameters(), argument)?;
-                bindings.insert(parameter.clone(), value);
+                bindings.insert(*parameter, value);
             }
             for param in &mut linked.params {
                 *param = param.substitute_erased(&bindings);
@@ -726,7 +726,7 @@ impl BodyLowering<'_> {
                 "a call that leaves a type argument unset",
             ))?;
             let value = semantic_type(self.arena, self.header.type_parameters(), argument)?;
-            bindings.insert(parameter.clone(), value);
+            bindings.insert(*parameter, value);
             substitutions.push(IrCheckedSubstitution {
                 parameter: FirTypeParameterRef::External {
                     callable: *target,

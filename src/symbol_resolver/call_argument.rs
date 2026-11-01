@@ -336,7 +336,7 @@ mod tests {
         CallArgKind::ExpectedTypeCallable {
             provisional,
             generic_sig: std::sync::Arc::new(GenericSig {
-                formals: vec!["T".to_owned()],
+                formals: vec![crate::types::TyParamName::new("T")],
                 formal_bounds: vec![Vec::new()],
                 receiver: None,
                 params,

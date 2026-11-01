@@ -373,7 +373,7 @@ fn target_klibs_authenticate_only_the_complete_enum_entries_declaration() {
 
         let mut source_shaped_bound = exact.clone();
         let signature = source_shaped_bound.generic_sig.as_mut().unwrap();
-        let formal = signature.formals[0].clone();
+        let formal = signature.formals[0];
         let unbounded = Ty::ty_param(&formal, Ty::nullable(Ty::obj("kotlin/Any")));
         signature.formal_bounds = vec![vec![Ty::obj_args("kotlin/Enum", &[unbounded])]];
         assert!(!role.accepts_normalized_klib(&source_shaped_bound));

@@ -61,7 +61,7 @@ pub(super) struct LinkedCallee {
     pub(super) singleton_dispatch: Option<TypeName>,
     /// The semantic identities of the callee's own type parameters, which the receiver,
     /// parameters and result name and a call's type arguments bind, in declaration order.
-    pub(super) type_parameters: Vec<String>,
+    pub(super) type_parameters: Vec<crate::types::TyParamName>,
     /// The semantic identities of the type parameters of a member's generic class, which the
     /// receiver (the class applied to them), parameters and result name and a call binds from its
     /// dispatch receiver's type, in declaration order.

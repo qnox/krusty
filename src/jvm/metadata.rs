@@ -944,7 +944,10 @@ fn build_generic_sig(
     // `Class<E>` into a fictitious `fun <E>` and allow call inference to overwrite the owner's `E`.
     let inherited = class_tparams.len();
     Some(GenericSig {
-        formals: context.formals[inherited..].to_vec(),
+        formals: context.formals[inherited..]
+            .iter()
+            .map(crate::types::TyParamName::from)
+            .collect(),
         formal_bounds: context.formal_bounds[inherited..].to_vec(),
         receiver,
         params,
@@ -1051,7 +1054,10 @@ fn build_property_generic_sig(
             .collect::<Option<Vec<_>>>()?
     };
     Some(GenericSig {
-        formals: context.formals[property.inherited.len()..].to_vec(),
+        formals: context.formals[property.inherited.len()..]
+            .iter()
+            .map(crate::types::TyParamName::from)
+            .collect(),
         formal_bounds: context.formal_bounds[property.inherited.len()..].to_vec(),
         receiver,
         params,

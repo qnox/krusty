@@ -45,7 +45,7 @@ pub struct KlibInlineTemplate {
     /// The inline-only function holding the template.
     pub function: FunId,
     /// The semantic identities of the function's type parameters, in declaration order.
-    pub type_parameters: Vec<String>,
+    pub type_parameters: Vec<crate::types::TyParamName>,
 }
 
 /// The functions a template's body may call.
@@ -524,7 +524,7 @@ fn generic_call(
     declaration: &crate::metadata::klib_ir::tree::KlibIrFunction,
     target: ExternalCallableId,
     realization: &ExternalCallableRealization,
-    formals: Vec<String>,
+    formals: Vec<crate::types::TyParamName>,
 ) -> Result<LinkedCallee, KlibBodyDeclineReason> {
     if declaration.type_parameters.len() != formals.len() {
         return Err(KlibBodyDeclineReason::SignatureMismatch(format!(

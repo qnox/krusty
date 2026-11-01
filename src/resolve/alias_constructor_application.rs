@@ -56,7 +56,7 @@ impl Checker<'_> {
         // constructor selection; if it is, the array constructor consumes the same semantic shape.
         if arguments.is_empty() && !formals.is_empty() {
             let signature = GenericSig {
-                formals: formals.to_vec(),
+                formals: crate::types::TyParamName::all(formals),
                 formal_bounds: vec![vec![Ty::nullable(Ty::obj("kotlin/Any"))]; formals.len()],
                 receiver: None,
                 params: Vec::new(),

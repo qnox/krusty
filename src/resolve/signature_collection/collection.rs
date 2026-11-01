@@ -2391,11 +2391,12 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                                         .type_parameters
                                         .iter()
                                         .map(|source| {
-                                            symbolic_btp
-                                                .bound(source)
-                                                .ty_param_name()
-                                                .unwrap_or(source)
-                                                .to_string()
+                                            crate::types::TyParamName::new(
+                                                symbolic_btp
+                                                    .bound(source)
+                                                    .ty_param_name()
+                                                    .unwrap_or(source),
+                                            )
                                         })
                                         .collect(),
                                     type_param_bounds: property_header
@@ -3905,11 +3906,12 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                                     .type_parameters
                                     .iter()
                                     .map(|source| {
-                                        semantic_tparams
-                                            .bound(source)
-                                            .ty_param_name()
-                                            .unwrap_or(source)
-                                            .to_owned()
+                                        crate::types::TyParamName::new(
+                                            semantic_tparams
+                                                .bound(source)
+                                                .ty_param_name()
+                                                .unwrap_or(source),
+                                        )
                                     })
                                     .collect(),
                                 formal_bounds: property_header
@@ -4145,7 +4147,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                                 .type_parameters
                                 .iter()
                                 .filter_map(|source| property_tparams.bound(source).ty_param_name())
-                                .map(str::to_string)
+                                .map(crate::types::TyParamName::new)
                                 .collect(),
                             formal_bounds: property_header
                                 .type_parameters

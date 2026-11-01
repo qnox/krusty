@@ -1715,7 +1715,12 @@ fn publish_checked_local_signatures_selected(
                     }
                     let Some(semantic_name) = semantic_type_parameters
                         .and_then(|parameters| parameters.get(ordinal))
-                        .or_else(|| generic.and_then(|generic| generic.formals.get(ordinal)))
+                        .map(String::as_str)
+                        .or_else(|| {
+                            generic
+                                .and_then(|generic| generic.formals.get(ordinal))
+                                .map(|formal| formal.as_str())
+                        })
                     else {
                         type_parameters_failed = true;
                         break;

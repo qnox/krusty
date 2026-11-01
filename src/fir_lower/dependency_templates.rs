@@ -21,7 +21,7 @@ pub struct DependencyInlineTemplate {
     pub name: String,
     /// The semantic identities of the dependency function's type parameters, in declaration
     /// order: the template's types name them, and a call's substitutions bind them by ordinal.
-    pub type_parameters: Vec<String>,
+    pub type_parameters: Vec<crate::types::TyParamName>,
 }
 
 /// The compiler's source of templates for inline dependency functions.

@@ -606,7 +606,7 @@ fn generic_identity_header() -> (KlibIrArena, KlibIrFunction, Record) {
     record.formals = vec![semantic];
     record.ret = semantic;
     record.generic = Some(GenericSig {
-        formals: vec!["declaration-owned-formal".to_owned()],
+        formals: vec![crate::types::TyParamName::new("declaration-owned-formal")],
         formal_bounds: vec![Vec::new()],
         receiver: None,
         params: vec![semantic],
@@ -967,7 +967,7 @@ fn generic_headers_require_distinct_serialized_symbols_and_provider_formal_ident
             "second-owned-formal"
         };
         let signature = record.generic.as_mut().unwrap();
-        signature.formals.push(name.to_owned());
+        signature.formals.push(crate::types::TyParamName::new(name));
         signature.formal_bounds.push(Vec::new());
         record
             .formals

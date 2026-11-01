@@ -82,7 +82,7 @@ impl Hash for SemanticBoundSet {
     }
 }
 
-fn neutral_formal_bounds(formals: &[String]) -> crate::types::TyParamBindings {
+fn neutral_formal_bounds(formals: &[crate::types::TyParamName]) -> crate::types::TyParamBindings {
     formals
         .iter()
         .map(crate::types::TyParamName::from)
@@ -165,7 +165,7 @@ fn delegated_function_key(
     let formals = function
         .type_parameters
         .iter()
-        .map(|parameter| parameter.semantic_name.to_string())
+        .map(|parameter| crate::types::TyParamName::new(&parameter.semantic_name))
         .collect::<Vec<_>>();
     let neutral_bounds = neutral_formal_bounds(&formals);
     let normalize = |ty| {
@@ -273,7 +273,7 @@ fn normalized_property_result_type(property: &PropertyInfo) -> Ty {
                 [bound] => *bound,
                 bounds => Ty::intersection(bounds),
             };
-            (formal.clone(), bound)
+            (*formal, bound)
         })
         .collect::<crate::fx_hash::HashMap<_, _>>();
     crate::types::ty_canonicalize_params(
@@ -286,7 +286,7 @@ fn delegated_property_key(property: &crate::fir::ResolvedDelegatedProperty) -> P
     let formals = property
         .type_parameters
         .iter()
-        .map(|parameter| parameter.semantic_name.to_string())
+        .map(|parameter| crate::types::TyParamName::new(&parameter.semantic_name))
         .collect::<Vec<_>>();
     let neutral_bounds = neutral_formal_bounds(&formals);
     let normalize = |ty| {

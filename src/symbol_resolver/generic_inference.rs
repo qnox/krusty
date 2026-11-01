@@ -226,10 +226,10 @@ pub(crate) fn infer_constructor_type_args_for_formals(
 }
 
 /// Seed every unbound constructor formal from an expected applied supertype, or none of them.
-pub(crate) fn seed_unbound_constructor_result_from_symbols(
+pub(crate) fn seed_unbound_constructor_result_from_symbols<S: AsRef<str>>(
     source: &dyn SymbolSource,
     owner: TypeName,
-    type_params: &[String],
+    type_params: &[S],
     type_param_bounds: &[Vec<Ty>],
     expected: Option<Ty>,
     bindings: &mut GSigBinds,
@@ -237,6 +237,7 @@ pub(crate) fn seed_unbound_constructor_result_from_symbols(
     let Some(expected) = expected.filter(|expected| *expected != Ty::Error) else {
         return;
     };
+    let type_params = &crate::types::TyParamName::all(type_params);
     // The expected type may name the constructed classifier directly while carrying type
     // variables owned by the enclosing declaration. Generic return inference deliberately avoids
     // treating same-shaped symbolic identities as ordinary lower-bound evidence, but constructor
@@ -255,9 +256,7 @@ pub(crate) fn seed_unbound_constructor_result_from_symbols(
     {
         for formal in type_params {
             if let Some(&seed) = direct.get(formal.as_str()) {
-                bindings
-                    .entry(crate::types::TyParamName::new(formal))
-                    .or_insert(seed);
+                bindings.entry(*formal).or_insert(seed);
             }
         }
         return;
@@ -275,7 +274,7 @@ pub(crate) fn seed_unbound_constructor_result_from_symbols(
         })
         .collect::<Vec<_>>();
     let signature = GenericSig {
-        formals: type_params.to_vec(),
+        formals: crate::types::TyParamName::all(type_params),
         formal_bounds: type_param_bounds.to_vec(),
         receiver: None,
         params: Vec::new(),
@@ -290,7 +289,8 @@ pub(crate) fn seed_unbound_constructor_result_from_symbols(
     // expected owner, then preserve those cross-declaration identities before checking the ordinary
     // concrete-return path below.
     if let Some(projected) = return_shape_at_expected_owner(source, signature.ret, expected) {
-        let symbolic = infer_generic_symbolic_return_constraints(projected, expected, type_params);
+        let symbolic =
+            infer_generic_symbolic_return_constraints(projected, expected, &signature.formals);
         crate::trace_compiler!(
             "expected_call",
             "constructor symbolic result owner={owner:?} projected={projected:?} expected={expected:?} bindings={:?} constrained={:?} conflicts={:?}",
@@ -366,9 +366,9 @@ pub(crate) fn seed_unbound_constructor_result_from_symbols(
 
 /// Add the constructed value's expected type to the same inference bindings populated from
 /// constructor arguments. Materialization happens only after both constraint directions have run.
-pub(crate) fn constrain_constructor_result(
+pub(crate) fn constrain_constructor_result<F: crate::types::TyParamKey>(
     owner: TypeName,
-    type_params: &[String],
+    type_params: &[F],
     expected: Option<Ty>,
     binds: &mut GSigBinds,
 ) {
@@ -384,6 +384,7 @@ pub(crate) fn constrain_constructor_result(
         return;
     }
     for (formal, actual) in type_params.iter().zip(expected_args.iter().copied()) {
+        let formal: &str = formal.borrow();
         // A star projection contributes only an existential read approximation. It is not an
         // equality constraint on the constructed classifier's argument: in
         // `consume(LoadConstant(0, SInt32))` where `consume` takes `LoadConstant<*, *>`, the value
@@ -397,7 +398,7 @@ pub(crate) fn constrain_constructor_result(
         // concrete argument constraint already collected for this classifier (`A(0)` is `A<Int>`,
         // even while the outer callable's `T` is unresolved). The outer solver subsequently binds
         // its own variable from this concrete constructor result.
-        if binds.contains_key(formal.as_str()) && actual.mentions_ty_param() {
+        if binds.contains_key(formal) && actual.mentions_ty_param() {
             continue;
         }
         if matches!(actual.non_null().kind(), TyKind::TyParam(actual_formal, _) if actual_formal == formal)
@@ -627,12 +628,12 @@ pub(crate) fn unify_ty_from_symbols(
 pub(crate) fn collect_generic_identity_bindings(
     declared: Ty,
     actual: Ty,
-    formals: &[String],
+    formals: &[crate::types::TyParamName],
     bindings: &mut GSigBinds,
 ) {
     match (declared.kind(), actual.kind()) {
         (TyKind::TyParam(declared, _), TyKind::TyParam(found, _))
-            if declared == found && formals.iter().any(|formal| formal == declared) =>
+            if declared == found && formals.contains(&declared) =>
         {
             bindings.entry(declared).or_insert(actual);
         }
@@ -735,7 +736,7 @@ pub(crate) fn callable_reference_expected_bindings(
     parameter: usize,
     explicit_type_arguments: impl ExplicitTypeArgumentFixity,
     bindings: &GSigBinds,
-    selected_by_prior_callable_references: &crate::fx_hash::HashSet<String>,
+    selected_by_prior_callable_references: &crate::fx_hash::HashSet<crate::types::TyParamName>,
 ) -> GSigBinds {
     let Some(shape) = signature
         .params
@@ -771,7 +772,7 @@ pub(crate) fn expected_result_equality_formals(
     signature: &GenericSig,
     expected: Ty,
     expected_bindings: &GSigBinds,
-) -> crate::fx_hash::HashSet<String> {
+) -> crate::fx_hash::HashSet<crate::types::TyParamName> {
     let Some(declared) = return_shape_at_expected_owner(source, signature.ret, expected) else {
         return crate::fx_hash::HashSet::default();
     };
@@ -868,7 +869,7 @@ pub(crate) fn unprojected_expected_result_formals(
     signature: &GenericSig,
     expected: Ty,
     expected_bindings: &GSigBinds,
-) -> crate::fx_hash::HashSet<String> {
+) -> crate::fx_hash::HashSet<crate::types::TyParamName> {
     let Some(declared) = return_shape_at_expected_owner(source, signature.ret, expected) else {
         return crate::fx_hash::HashSet::default();
     };
@@ -2308,7 +2309,7 @@ pub(crate) struct SymbolicReturnConstraints {
 pub(crate) fn infer_generic_symbolic_return_constraints(
     declared: Ty,
     expected: Ty,
-    formals: &[String],
+    formals: &[crate::types::TyParamName],
 ) -> SymbolicReturnConstraints {
     fn symbolic_parameter(ty: Ty) -> bool {
         match ty.kind() {
@@ -2334,7 +2335,7 @@ pub(crate) fn infer_generic_symbolic_return_constraints(
     fn collect(
         declared: Ty,
         expected: Ty,
-        formals: &[String],
+        formals: &[crate::types::TyParamName],
         candidates: &mut crate::fx_hash::HashMap<String, (Option<Ty>, bool)>,
         constrained_formals: &mut crate::fx_hash::HashSet<String>,
     ) {
@@ -2427,13 +2428,11 @@ pub(crate) fn infer_generic_symbolic_return_constraints(
 pub(super) fn seed_undeclared_return_bindings(
     sig: Ty,
     actual: Ty,
-    declared_formals: &[String],
+    declared_formals: &[crate::types::TyParamName],
     binds: &mut GSigBinds,
 ) {
     match sig.kind() {
-        TyKind::TyParam(n, _)
-            if !declared_formals.iter().any(|formal| formal == n) && actual != Ty::Error =>
-        {
+        TyKind::TyParam(n, _) if !declared_formals.contains(&n) && actual != Ty::Error => {
             binds.entry(n).or_insert(actual);
         }
         TyKind::Fun(fsig) => {

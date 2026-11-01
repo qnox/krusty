@@ -205,7 +205,7 @@ mod tests {
 
     fn signature(ret: Ty) -> GenericSig {
         GenericSig {
-            formals: vec!["T".to_string()],
+            formals: vec![crate::types::TyParamName::new("T")],
             formal_bounds: vec![vec![Ty::nullable(Ty::obj("kotlin/Any"))]],
             params: Vec::new(),
             ret,
@@ -261,7 +261,7 @@ mod tests {
 
     fn bottom_signature() -> GenericSig {
         GenericSig {
-            formals: vec!["T".to_string()],
+            formals: vec![crate::types::TyParamName::new("T")],
             formal_bounds: vec![vec![Ty::nullable(Ty::obj("kotlin/Any"))]],
             params: vec![result_formal()],
             ret: result_formal(),

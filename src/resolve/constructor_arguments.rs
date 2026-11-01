@@ -15,7 +15,7 @@ pub(super) struct ConstructionExpectations {
     /// declaration provides them. This is the template call-site type arguments substitute into.
     pub(super) symbolic: Vec<Option<Ty>>,
     /// The constructed classifier's type parameters, in declaration order.
-    pub(super) type_params: Vec<String>,
+    pub(super) type_params: Vec<crate::types::TyParamName>,
     /// Declaration bounds parallel to `type_params`, used when an expected applied supertype
     /// supplies the classifier arguments before a contextual constructor argument is checked.
     pub(super) type_param_bounds: Vec<Vec<Ty>>,
@@ -98,7 +98,7 @@ impl Checker<'_> {
             return Some(ConstructionExpectations {
                 params: vec![Some((function, false))],
                 symbolic: vec![Some(function)],
-                type_params: classifier.type_params.clone(),
+                type_params: crate::types::TyParamName::all(&classifier.type_params),
                 type_param_bounds: classifier.type_param_bounds().to_vec(),
                 signatures: Vec::new(),
             });
@@ -126,7 +126,7 @@ impl Checker<'_> {
                         .flatten()
                 })
                 .collect(),
-            type_params: classifier.type_params.clone(),
+            type_params: crate::types::TyParamName::all(&classifier.type_params),
             type_param_bounds: classifier.type_param_bounds().to_vec(),
             signatures,
         })

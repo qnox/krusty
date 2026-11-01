@@ -202,7 +202,7 @@ pub(super) struct FunctionalArgumentExpectation {
     /// Stable identities of the selected callable's own type parameters. A result that mentions one
     /// remains open until this call's inference solves it. Other type parameters belong to an
     /// enclosing declaration and are fixed inside the body being checked.
-    callee_formals: Vec<String>,
+    callee_formals: Vec<crate::types::TyParamName>,
 }
 
 impl FunctionalArgumentExpectation {
@@ -354,7 +354,7 @@ mod tests {
             inlined: false,
             callee_formals: callee_formals
                 .iter()
-                .map(|formal| (*formal).to_string())
+                .map(|formal| crate::types::TyParamName::new(formal))
                 .collect(),
         }
     }

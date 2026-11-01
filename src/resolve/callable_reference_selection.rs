@@ -209,7 +209,7 @@ fn receiver_validated_projected_formals(
     for (&declared, classifier_formal) in declared_arguments.iter().zip(&classifier.type_params) {
         let declared = declared.projection_inner().unwrap_or(declared);
         if let TyKind::TyParam(method_formal, _) = declared.kind() {
-            if generic.formals.iter().any(|formal| formal == method_formal) {
+            if generic.formals.contains(&method_formal) {
                 alpha.insert(method_formal.to_string(), classifier_formal.clone());
             }
         }

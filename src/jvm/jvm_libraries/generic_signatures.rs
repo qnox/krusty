@@ -221,7 +221,10 @@ pub(super) fn parse_member_method_gsig_with(
     // The JVM `Signature` attribute is the fallback for NON-metadata callables (Java methods): an instance
     // method has no receiver parameter and a static none either, so the receiver is not modeled here.
     Some(GenericSig {
-        formals,
+        formals: formals
+            .iter()
+            .map(crate::types::TyParamName::from)
+            .collect(),
         formal_bounds,
         receiver: None,
         params,
@@ -331,6 +334,10 @@ pub(super) fn constructor_inference_signature(
     if class_formals.is_empty() {
         return method;
     }
+    let class_formals = class_formals
+        .iter()
+        .map(crate::types::TyParamName::from)
+        .collect::<Vec<_>>();
     let result_arguments = class_formals
         .iter()
         .zip(&class_bounds)
@@ -360,9 +367,9 @@ pub(super) fn constructor_inference_signature(
             let fresh =
                 crate::types::constructor_type_parameter(owner, declaration, ordinal, formal);
             rename.insert(formal.as_str(), fresh);
-            constructor_formals.push(fresh.to_string());
+            constructor_formals.push(crate::types::TyParamName::new(fresh));
         } else {
-            constructor_formals.push(formal.clone());
+            constructor_formals.push(*formal);
         }
     }
     if !rename.is_empty() {
@@ -710,7 +717,11 @@ mod constructor_inference_signature_tests {
 
     fn void_constructor(formals: &[&str], params: &[Ty]) -> GenericSig {
         GenericSig {
-            formals: formals.iter().map(|formal| (*formal).to_string()).collect(),
+            formals: formals
+                .iter()
+                .copied()
+                .map(crate::types::TyParamName::new)
+                .collect(),
             formal_bounds: vec![Vec::new(); formals.len()],
             receiver: None,
             params: params.to_vec(),
