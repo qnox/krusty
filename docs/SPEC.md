@@ -1,5 +1,18 @@
 # krusty — a memory-lean Kotlin→JVM compiler PoC
 
+## Checked applications of dependency class members
+
+FIR owns class-parameter application, including inherited members. A dependency export retains
+its declared receiver application and carriers, such as `[Crate<T>, T] -> T`. The shared signature
+boundary consumes the complete checked call types for slots depending on authenticated class
+formals. Fixed slots and results still require exact agreement after callable type arguments are
+applied. Callable ordinals retain their own target, completeness and reification checks. Targets
+convert between the declared export carriers and checked application types without reconstructing
+class substitutions from receiver types or argument values. The shared
+`multimoduleGenericClassMembers.kt` fixture covers primitive/reference/nullable applications,
+inherited final methods, zero-argument results, separate class/method formals, and inner classes
+with captured-only or own-and-captured declaration parameters.
+
 ## Inaccessible members against accessible extensions
 
 A member the call site cannot access ranks below every resolved candidate, as kotlinc's visibility
@@ -3306,8 +3319,6 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   nested-local declarations, anonymous objects, enum-entry bodies, and generated classes—join the
   frozen module/dependency facts by exact identity at each JVM realization boundary. Their absence
   is not retried through a provider or inferred from a generated class name.
-  An array receiver names the JVM array type (`[Ljava/lang/String;`, `[C`), not `kotlin/Array`
-  or `kotlin/CharArray`, which have no class file (`tests/inherited_member_owner_e2e.rs`).
 - `enum class`: compiled as a `final` class extending `java/lang/Enum` with a `public static final`
   constant per entry, a synthetic `$VALUES` array, a private `(String name, int ordinal, …userArgs)`
   constructor calling `super(name, ordinal)`, a `<clinit>` that constructs entries in declaration
@@ -5662,8 +5673,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   callee has no scopes, so its lambda takes the call's line. The table spells the names once it is
   complete (`src/jvm/classfile/inline_scope_frames.rs`), and a marker's call-site line moves from
   the method's lines into the class's with the method's line table, as kotlinc's
-  `SourceMapCopyingMethodVisitor` copies it. The command line still refuses the argument until
-  every inlining path numbers its scopes, and the box harness selects it with
+  `SourceMapCopyingMethodVisitor` copies it. The box harness selects it with
   `// USE_INLINE_SCOPES_NUMBERS` (`tests/box_regressions/inlineScopes/`).
 - **A block's local slots are reused after the block ends**, as kotlinc's `FrameMap` reuses them:
   its block end leaves each variable the block declared, and a variable left from the top of the
@@ -19568,7 +19578,22 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
     value index.
 
   The stability test is the read stability common IR publishes for each `GetValue`
-  (`IrFile::binding_read_stability`), not the shape of the FIR expression. In the 2.4.20 box
+  (`IrFile::binding_read_stability`), not the shape of the FIR expression. Reads authenticated as
+  a body's own receiver parameters or its by-value receiver captures publish this same immutable
+  binding fact. The referenced object may remain mutable; computed receivers and captured mutable
+  cells still require a snapshot. A JVM safe-cast snapshot of an object cell keeps the erased
+  `ObjectRef.element` slot until the type test, without an intermediate cast to the variable's
+  semantic type. Named declarations and primitive cells retain their existing storage rules.
+  `implicit_receiver_stability_e2e` compares complete modules and runtime results for own, captured
+  and inline receivers, computed operands and reassigned captured cells, including the complete
+  `bareCastTargetArguments.kt` regression.
+
+  Authenticated serialized receiver parameters publish the same immutable binding fact, including
+  prepared-inline, initializer and lifted closure frames. Declaration-role agreement still gates
+  those direct value reads; locals, mutable cells and structural receiver field reads retain their
+  separate stability decisions. Complete KLIB/source IR comparisons cover the retained fact.
+
+  In the 2.4.20 box
   corpus 8 more files become byte-identical to kotlinc (302 to 310: `array_to_any`, `fullForm`,
   `iterator`, `kt6434_2`, `multiDeclaration`, `nonNullArray`, `shortForm`,
   `typeAliasConstructorForArray`). Open: kotlinc folds a constant `when` subject, names the

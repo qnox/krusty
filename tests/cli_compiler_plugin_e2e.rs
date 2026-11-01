@@ -417,13 +417,13 @@ fn refusals_lists_the_arguments_and_plugins_krusty_refuses() {
     );
     assert_eq!(
         check(&[
-            "-Xuse-inline-scopes-numbers".to_string(),
+            "-Xvalidate-bytecode".to_string(),
             format!("-Xplugin={}", widget.display()),
         ]),
         (
             Some(1),
             format!(
-                "krusty does not implement the kotlinc argument '-Xuse-inline-scopes-numbers'\n{}",
+                "krusty does not implement the kotlinc argument '-Xvalidate-bytecode'\n{}",
                 refused(&widget.display().to_string())
             ),
             String::new()
@@ -475,14 +475,14 @@ fn refusals_lists_the_arguments_and_plugins_krusty_refuses() {
     assert_eq!(
         check(&[
             "-Xexplicit-api=sideways".to_string(),
-            "-Xuse-inline-scopes-numbers".to_string(),
+            "-Xvalidate-bytecode".to_string(),
         ]),
         (
             Some(2),
             String::new(),
             "krusty: error: unknown value for parameter -Xexplicit-api: 'sideways'. Value should be one \
              of {disable, strict, warning}\n\
-             krusty: error: krusty does not implement the kotlinc argument '-Xuse-inline-scopes-numbers'\n"
+             krusty: error: krusty does not implement the kotlinc argument '-Xvalidate-bytecode'\n"
                 .to_string()
         )
     );

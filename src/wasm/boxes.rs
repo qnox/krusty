@@ -66,12 +66,46 @@ pub(super) struct BoxForm {
 }
 
 /// The value field of a box struct, after the dispatch table.
-pub(super) const BOX_VALUE_FIELD: u32 = 1;
+const BOX_VALUE_FIELD: u32 = 1;
+
+impl BoxForm {
+    /// Whether boxing needs a scratch local of the value's carrier: every box but a `Boolean`'s,
+    /// which is one of two existing instances.
+    pub(super) fn needs_scratch(&self) -> bool {
+        self.booleans.is_none()
+    }
+
+    /// Replace the value on the stack with its box, through `scratch` when
+    /// [`Self::needs_scratch`].
+    pub(super) fn emit_box(&self, code: &mut Code, scratch: Option<u32>) {
+        if let Some([no, yes]) = self.booleans {
+            code.if_(BlockType::Value(super::objects::REFERENCE))
+                .global_get(yes)
+                .else_()
+                .global_get(no)
+                .end();
+            return;
+        }
+        let scratch = scratch.expect("a box built through a scratch local");
+        code.local_set(scratch)
+            .global_get(self.table)
+            .local_get(scratch)
+            .struct_new(self.structure);
+    }
+
+    /// Replace the reference on the stack, which the frontend checked is this box, with its value.
+    pub(super) fn emit_unbox(&self, code: &mut Code) {
+        code.ref_cast(false, HeapType::Concrete(self.structure))
+            .struct_get(self.structure, BOX_VALUE_FIELD);
+    }
+}
 
 /// The box types this module has declared.
 #[derive(Default)]
 pub(super) struct Boxes {
     forms: HashMap<Primitive, BoxForm>,
+    /// The global holding `kotlin.Unit`, once something reads it as a reference.
+    unit: Option<u32>,
 }
 
 impl Runtime {
@@ -124,6 +158,43 @@ impl Runtime {
         };
         self.boxes.forms.insert(primitive, form);
         Some(form)
+    }
+}
+
+impl Runtime {
+    /// The global holding `kotlin.Unit`: what a `Unit` expression is where a reference is expected
+    /// (a lambda's result, a type parameter's value). `Unit` has no carrier of its own, so it is
+    /// boxed like a primitive is, into the one instance it has.
+    pub(super) fn unit_object(&mut self, module: &mut Module) -> u32 {
+        if let Some(unit) = self.boxes.unit {
+            return unit;
+        }
+        let objects = &mut self.objects;
+        let structure = module.subtype(SubType {
+            composite: CompositeType::Struct(vec![immutable(ValType::reference(
+                objects.any_table,
+            ))]),
+            supertype: Some(objects.object),
+            open: false,
+        });
+        let [_, hash_code_ty, to_string_ty] = objects.any_slot_types;
+        let hash_code = objects.trap(module, hash_code_ty);
+        let to_string = objects.trap(module, to_string_ty);
+        let (_, itable) = objects
+            .interfaces
+            .class(module, objects.itable, vec![structure]);
+        let mut init = Code::default();
+        for function in [objects.identity_equals, hash_code, to_string] {
+            module.reference_function(function);
+            init.ref_func(function);
+        }
+        init.global_get(itable).struct_new(objects.any_table);
+        let table = module.constant_global(ValType::reference(objects.any_table), init);
+        let mut init = Code::default();
+        init.global_get(table).struct_new(structure);
+        let unit = module.constant_global(ValType::reference(structure), init);
+        self.boxes.unit = Some(unit);
+        unit
     }
 }
 

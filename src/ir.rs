@@ -2283,6 +2283,9 @@ pub struct IrFile {
     /// Class fq-internal-name → its generic-signature SHAPE (type parameters + bounds), for a generic
     /// class. The JVM backend formats it into the class `Signature` attribute.
     class_signatures: crate::fx_hash::HashMap<TypeName, IrGenericSig>,
+    /// Declared self applications in the checker's complete own-and-captured parameter order.
+    /// Source method exports consume these facts before target realization.
+    declared_class_self_types: crate::fx_hash::HashMap<TypeName, Ty>,
     /// A generated class's signature after its plugin's IR lowering, where that differs from the
     /// declaration in [`Self::class_signatures`] that metadata records. The classfile is written
     /// from the lowered one.
