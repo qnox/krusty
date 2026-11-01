@@ -1458,6 +1458,11 @@ fn compose_runtime_stability_is_byte_identical_to_kotlinc() {
     assert_compose_fixture_matches_kotlinc("runtimeStability");
 }
 
+#[test]
+fn compose_generic_stability_is_byte_identical_to_kotlinc() {
+    assert_compose_fixture_matches_kotlinc("genericStability");
+}
+
 fn assert_compose_fixture_matches_kotlinc(stem: &str) {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/compose")
