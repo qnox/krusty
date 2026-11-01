@@ -31,21 +31,56 @@ pub fn directory_fingerprint(root: &Path) -> std::io::Result<Digest> {
     let mut files = Vec::new();
     collect_files(root, String::new(), &mut files)?;
     files.sort();
-    // A generated client is tens of thousands of classes; each file's view is independent.
+    let views = in_parallel(&files, |(relative, path)| {
+        std::fs::read(path).map(|bytes| file_view(relative, &bytes))
+    })?;
+    Ok(fingerprint_of(
+        files.iter().map(|(relative, _)| relative.as_str()),
+        views,
+    ))
+}
+
+/// The fingerprint of every file in the archive at `path`, keyed by its entry name and read
+/// through the same view as a file of [`directory_fingerprint`]'s, so a dependency that reaches
+/// its dependents as a jar is keyed as it is from its class directory. A directory entry holds no
+/// file and enters as nothing, as a directory does; the archive's own layout (entry order,
+/// timestamps, compression) is no part of what the compilation reads and none of the fingerprint.
+pub fn archive_fingerprint(path: &Path) -> std::io::Result<Digest> {
+    let invalid = |error| std::io::Error::new(std::io::ErrorKind::InvalidData, error);
+    let mut archive = krusty::archive::open_file(std::fs::File::open(path)?).map_err(invalid)?;
+    let mut files = Vec::new();
+    for index in 0..archive.len() {
+        let mut entry = archive.by_index(index).map_err(invalid)?;
+        if entry.is_dir() {
+            continue;
+        }
+        let name = entry.name().map_err(invalid)?.into_owned();
+        let mut bytes = Vec::with_capacity(entry.size() as usize);
+        std::io::Read::read_to_end(&mut entry, &mut bytes)?;
+        files.push((name, bytes));
+    }
+    files.sort_by(|(left, _), (right, _)| left.cmp(right));
+    let views = in_parallel(&files, |(name, bytes)| Ok(file_view(name, bytes)))?;
+    Ok(fingerprint_of(
+        files.iter().map(|(name, _)| name.as_str()),
+        views,
+    ))
+}
+
+/// `view` of every item, in order. A generated client is tens of thousands of classes; each file's
+/// view is independent.
+fn in_parallel<T: Sync>(
+    items: &[T],
+    view: impl Fn(&T) -> std::io::Result<(&'static str, Digest)> + Sync,
+) -> std::io::Result<Vec<(&'static str, Digest)>> {
     let workers = std::thread::available_parallelism().map_or(1, usize::from);
-    let chunk = files.len().div_ceil(workers).max(1);
+    let chunk = items.len().div_ceil(workers).max(1);
+    let view = &view;
     let views = std::thread::scope(|scope| {
-        let handles: Vec<_> = files
+        let handles: Vec<_> = items
             .chunks(chunk)
             .map(|chunk| {
-                scope.spawn(move || {
-                    chunk
-                        .iter()
-                        .map(|(relative, path)| {
-                            std::fs::read(path).map(|bytes| file_view(relative, &bytes))
-                        })
-                        .collect::<std::io::Result<Vec<_>>>()
-                })
+                scope.spawn(move || chunk.iter().map(view).collect::<std::io::Result<Vec<_>>>())
             })
             .collect();
         handles
@@ -53,14 +88,22 @@ pub fn directory_fingerprint(root: &Path) -> std::io::Result<Digest> {
             .map(|handle| handle.join().expect("a fingerprint worker panicked"))
             .collect::<std::io::Result<Vec<_>>>()
     })?;
+    Ok(views.into_iter().flatten().collect())
+}
+
+/// The fingerprint of the files named `paths`, in that order, entering by `views`.
+fn fingerprint_of<'a>(
+    paths: impl ExactSizeIterator<Item = &'a str>,
+    views: Vec<(&'static str, Digest)>,
+) -> Digest {
     let mut hasher = Hasher::new();
-    hasher.count("files", files.len());
-    for ((relative, _), (view, digest)) in files.iter().zip(views.into_iter().flatten()) {
+    hasher.count("files", paths.len());
+    for (relative, (view, digest)) in paths.zip(views) {
         hasher.text("path", relative);
         hasher.text("view", view);
         hasher.nested("digest", digest);
     }
-    Ok(hasher.finish())
+    hasher.finish()
 }
 
 fn collect_files(
