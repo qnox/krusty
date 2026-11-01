@@ -18,9 +18,9 @@
 
 use crate::fx_hash::{HashMap, HashSet};
 
+mod absent_arguments;
 mod arrays;
 mod boxing;
-mod default_arguments;
 mod dependency_exports;
 mod exceptions;
 mod function_values;
@@ -43,10 +43,7 @@ pub(super) fn is_direct_operation(operation: crate::backend::BackendCompilerIntr
 use crate::backend::class_tables::module_interfaces::ModuleInterfaces;
 use crate::backend::class_tables::module_slots::ModuleSlotPlan;
 use crate::backend::{CheckedBackendCallables, DependencyExportSignatures};
-use crate::ir::{
-    module_override_callable, Callee, FunId, IrBinOp, IrConst, IrExpr, IrFile, IrIntrinsic,
-    IrTypeOp,
-};
+use crate::ir::{Callee, FunId, IrBinOp, IrConst, IrExpr, IrFile, IrIntrinsic, IrTypeOp};
 use crate::types::{EqualityMode, Ty, TyKind};
 
 use super::super::encode::{BlockType, Code, Function, HeapType, Module, ValType};
@@ -150,7 +147,6 @@ pub(super) fn lower_file(
         signatures.push(Some(module.func_type(params, results)));
     }
     let indices = callable_registry.declare_file(ir, module)?;
-    let default_indices = callable_registry.declare_file_defaults(ir, module)?;
     let call_targets = callable_registry.file_calls(ir, callables, module)?;
     let inert_singleton_bindings = crate::backend::inert_staged_singleton_bindings(
         ir,
@@ -203,7 +199,6 @@ pub(super) fn lower_file(
         numbers: plan.interfaces(),
         ir,
         functions: &indices,
-        default_functions: &default_indices,
         globals: &globals,
         classes: classes.as_ref(),
         calls: &call_targets,
@@ -293,7 +288,6 @@ pub(super) fn lower_file(
             }
         }
     }
-    default_arguments::define(&context, module, runtime)?;
     if let Some(classes) = &classes {
         objects::define_class_functions(&context, classes, module, runtime)?;
         objects::define_module_property_functions(
@@ -333,7 +327,7 @@ pub(super) fn lower_file(
     } else {
         None
     };
-    callable_registry.publish(ir, dependency_exports, &indices, &default_indices)?;
+    callable_registry.publish(ir, dependency_exports, &indices)?;
     Ok(LoweredFile {
         functions: indices,
         initializer,
@@ -351,8 +345,6 @@ struct FileContext<'a> {
     ir: &'a IrFile,
     /// The Wasm function of each emitted function, by `FunId`.
     functions: &'a [Option<u32>],
-    /// Default-argument mask entry for each emitted source function that declares defaults.
-    default_functions: &'a [Option<u32>],
     /// The global holding each of the file's top-level properties.
     globals: &'a [u32],
     classes: Option<&'a FileClasses>,
@@ -593,28 +585,6 @@ impl<'a> Body<'a> {
         module: &'a mut Module,
         runtime: &'a mut Runtime,
         parameters: &[Ty],
-        declared: HashMap<u32, Ty>,
-        result: Ty,
-    ) -> Self {
-        Self::with_physical_parameters(
-            context,
-            module,
-            runtime,
-            parameters,
-            parameters.len(),
-            declared,
-            result,
-        )
-    }
-
-    /// Build a body whose physical Wasm signature has trailing backend parameters that are not
-    /// semantic value slots (the default-argument entry's mask words).
-    fn with_physical_parameters(
-        context: &FileContext<'a>,
-        module: &'a mut Module,
-        runtime: &'a mut Runtime,
-        parameters: &[Ty],
-        physical_parameter_count: usize,
         mut declared: HashMap<u32, Ty>,
         result: Ty,
     ) -> Self {
@@ -644,7 +614,7 @@ impl<'a> Body<'a> {
             properties: context.properties,
             code: Code::default(),
             locals: Vec::new(),
-            next_local: physical_parameter_count as u32,
+            next_local: parameters.len() as u32,
             values: parameters
                 .iter()
                 .enumerate()
@@ -884,6 +854,7 @@ impl<'a> Body<'a> {
         match node {
             IrExpr::Const(constant) => self.constant(&constant)?,
             IrExpr::UnitInstance | IrExpr::InlineFrameMarker => {}
+            IrExpr::AbsentArgument { ty } => self.absent_argument(ty)?,
             IrExpr::GetValue(slot) if self.cells.contains_key(&slot) => {
                 return Err("a shared cell read as a value".to_string());
             }
@@ -1063,23 +1034,20 @@ impl<'a> Body<'a> {
                 callee: ref call_callee,
                 dispatch_receiver: None,
                 args,
-            } if let Callee::ModuleWithDefaults {
-                default_provider,
-                params,
-                defaults,
-                dispatch_receiver_ty: None,
-                extension_receiver_parameter: None,
-                ..
+            } if let Callee::ModuleDefaultEntry {
+                provider, params, ..
             } = &**call_callee =>
             {
-                let provider = module_override_callable(*default_provider).ok_or_else(|| {
-                    "a source default entry whose provider is not in the current module".to_string()
-                })?;
                 let function = self
                     .calls
-                    .module_default(provider)
+                    .module_default(*provider)
                     .ok_or_else(|| "an unregistered source default entry".to_string())?;
-                self.defaulted_call(function, params, defaults, &args)?;
+                let mut frame = params.clone();
+                frame.extend(std::iter::repeat_n(
+                    Ty::Int,
+                    crate::backend::default_arguments::mask_words(params.len()),
+                ));
+                self.direct_call(function, &frame, &args)?;
             }
             IrExpr::Call {
                 callee: ref call_callee,
