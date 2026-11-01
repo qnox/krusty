@@ -385,6 +385,7 @@ impl JvmLibraries {
                 metadata,
                 field,
                 FieldAccessors { getter, setter },
+                self.module_read_stability(metadata, field.owner),
                 field.deprecated_hidden,
                 properties,
             );

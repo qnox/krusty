@@ -84,13 +84,15 @@ pub(super) struct FieldAccessors {
 }
 
 /// Joins a receiver-less metadata property that has no accessor at all, a `@JvmField` one, with the
-/// static field realizing it: its value is read and written through `accessors`. An accessor-backed
-/// declaration of the same property, already among `properties`, is that property's realization.
+/// static field realizing it: its value is read and written through `accessors`, and its repeated
+/// reads have `read_stability` in this compilation. An accessor-backed declaration of the same
+/// property, already among `properties`, is that property's realization.
 pub(super) fn merge_metadata_field(
     source_name: &str,
     metadata: &MetaProp,
     field: &JvmStaticField,
     accessors: FieldAccessors,
+    read_stability: crate::libraries::PropertyReadStability,
     deprecated_hidden: bool,
     properties: &mut Vec<PropertyInfo>,
 ) {
@@ -121,7 +123,7 @@ pub(super) fn merge_metadata_field(
         None,
         deprecated_hidden,
     );
-    property.read_stability = metadata.read_stability;
+    property.read_stability = read_stability;
     properties.push(property);
 }
 
