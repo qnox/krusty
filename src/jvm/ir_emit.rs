@@ -4848,7 +4848,7 @@ fn method_signature_shape(
         (ir.signatures.get(&fid), ir.suspend_declared_sigs.get(&fid))
     {
         let ret = generic.ret.as_ref().unwrap_or(declared_ret);
-        return suspend_generic_method_sig(formatter, generic, ret);
+        return method_signatures::suspend_generic_method_sig(formatter, generic, ret);
     }
     if let Some(generic) = ir.jvm_value_class_member_signatures.get(&fid) {
         return formatter.method_signature(generic, f, None);
@@ -4862,7 +4862,7 @@ fn method_signature_shape(
         ir.member_semantic_sigs.get(&fid),
         ir.suspend_declared_sigs.get(&fid),
     ) {
-        return suspend_method_sig(formatter, params, ret);
+        return method_signatures::suspend_method_sig(formatter, params, ret);
     }
     if let Some((params, ret)) = value_class_signatures::physical_member_signature(ir, fid) {
         // A member using ENCLOSING-CLASS type parameters declares none: they belong to the class
@@ -4879,45 +4879,12 @@ fn method_signature_shape(
             .get(&fid)
             .map(|(_, _, value_class_ret)| value_class_ret)
             .unwrap_or(declared_ret);
-        return suspend_method_sig(formatter, params, ret);
+        return method_signatures::suspend_method_sig(formatter, params, ret);
     }
     if let Some((params, ret)) = value_class_signatures::declared_value_class_signature(ir, fid) {
         return formatter.method_positions(&params, &ret);
     }
     method_parameterized_sig(formatter, &signature_function_params(ir, fid), &f.ret)
-}
-
-fn suspend_generic_method_sig(
-    formatter: &JvmSignatureFormatter<'_>,
-    generic: &crate::ir::IrGenericSig,
-    ret: &Ty,
-) -> Option<String> {
-    let mut signature = jvm_type_params(formatter, generic)?;
-    signature.push_str(&suspend_method_sig(formatter, &generic.params, ret)?);
-    Some(signature)
-}
-
-/// The generic `Signature` of a `suspend fun`'s CPS method. The declared return type survives only in
-/// the trailing continuation's type argument — `suspend fun f(a: String)` compiles to
-/// `f(String, Continuation): Object` but signs as
-/// `(Ljava/lang/String;Lkotlin/coroutines/Continuation<-Lkotlin/Unit;>;)Ljava/lang/Object;`, the `-`
-/// being `? super`. Takes the DECLARED parameters and return, not the rewritten ones.
-fn suspend_method_sig(
-    formatter: &JvmSignatureFormatter<'_>,
-    params: &[Ty],
-    ret: &Ty,
-) -> Option<String> {
-    // The suspend return travels as `Continuation<-RET>`, a PARAMETER of the erased method, and
-    // kotlinc wildcards inside it: `suspend fun <U> f(): Cont<U>` signs
-    // `(Lkotlin/coroutines/Continuation<-LCont<+TU;>;>;)Ljava/lang/Object;`.
-    let continuation = formatter.continuation(*ret, Wildcards::Declared)?;
-    let mut s = String::from("(");
-    for p in params {
-        s.push_str(&formatter.parameter_ty(p)?);
-    }
-    s.push_str(&continuation);
-    s.push_str(")Ljava/lang/Object;");
-    Some(s)
 }
 
 /// A method's generic `Signature` when a concrete param/return type is parameterized (`getXs()` →
@@ -5644,16 +5611,21 @@ impl<'a> Emitter<'a> {
                         if keep_erased_invoke {
                             self.erased_invocations.insert(value);
                         }
-                        self.emit_value(value, code);
-                        if keep_erased_invoke {
+                        // Any other value reaches the slot as a declaration's initializer does,
+                        // in the slot an erased result leaves.
+                        let source = if keep_erased_invoke {
+                            self.emit_value(value, code);
                             self.erased_invocations.remove(&value);
-                        }
+                            self.value_ty(value)
+                        } else {
+                            self.emit_consumed_operand(value, code)
+                        };
                         self.unsigned_assignment_line = saved_assignment;
                         // Coerced to the slot's type as the initializer is: a value of another
                         // class is cast to the declared one, which is what a join of the two
                         // stores reads back. The erased invoke already left `Object`.
                         if !keep_erased_invoke {
-                            self.adapt_physical_operand_for(value, self.value_ty(value), jt, code);
+                            self.adapt_physical_operand_for(value, source, jt, code);
                         }
                         // An inlined `return` stores on the return's line, after the value.
                         self.mark_expression_start(e, code);

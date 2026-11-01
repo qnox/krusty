@@ -1916,22 +1916,19 @@ impl super::Emitter<'_> {
                 // kotlinc checks a value in the slot that produced it and narrows the checked
                 // value afterwards: a captured `var`'s `ObjectRef.element` is checked as `Object`
                 // and only then cast to the variable's type (`getfield; dup; checkNotNull;
-                // checkcast`). A suspension point's erased `Object` result is checked the same way
-                // before the cast to the callee's declared result.
-                let mut erased_suspension = None;
+                // checkcast`), and so is an erased result, such as a suspension point's `Object`.
+                let mut erased = None;
                 let shared_cell = match *self.ir.expr(*operand) {
                     IrExpr::RefGet { holder, elem } if ir_ty_to_jvm(&elem).is_reference() => {
                         self.emit_shared_cell_read(holder, elem, false, code);
                         Some(elem)
                     }
-                    _ if ir_ty_to_jvm(&self.value_ty(*operand)).is_reference()
-                        && self.emit_erased_suspension_result(
-                            *operand,
-                            Ty::obj("java/lang/Object"),
-                            code,
-                        ) =>
+                    _ if matches!(
+                        self.erased_reference_result(*operand),
+                        Some(super::operand_representation::ErasedResult::Suspension)
+                    ) =>
                     {
-                        erased_suspension = Some(self.value_ty(*operand));
+                        erased = Some(self.emit_consumed_operand(*operand, code));
                         None
                     }
                     _ => {
@@ -1952,12 +1949,8 @@ impl super::Emitter<'_> {
                 if let Some(elem) = shared_cell {
                     self.narrow_shared_cell_element(elem, code);
                 }
-                if let Some(declared) = erased_suspension {
-                    self.coerce_reference_on_stack(
-                        Ty::nullable(Ty::obj("kotlin/Any")),
-                        declared,
-                        code,
-                    );
+                if let Some(slot) = erased {
+                    self.coerce_reference_on_stack(slot, self.value_ty(*operand), code);
                 }
             }
             IrExpr::LateinitCheck { operand, name } => {

@@ -12,6 +12,9 @@ pub(super) enum ErasedResult {
     Coerced { call: crate::ir::ExprId, slot: Ty },
     /// A function value's `invoke`, whose result is `Object`.
     Invocation,
+    /// A suspension point's erased `Object` result, which kotlinc coerces only for a consumer
+    /// that needs a narrower type (see [`Emitter::erased_suspension_point`]).
+    Suspension,
 }
 
 /// How a reference value reaches a consumer's reference type.
@@ -76,6 +79,9 @@ impl Emitter<'_> {
         // bound needs narrowing; eagerly emitting the coercion can cast `Comparable` to `String`
         // and then back to `Comparable` for a function that returns the bound itself.
         let source = if matches!(
+            self.erased_reference_result(expression),
+            Some(ErasedResult::Suspension)
+        ) || matches!(
             self.erased_reference_result(expression),
             Some(ErasedResult::Coerced { call, slot })
                 if !jvm_is_erased_top(ir_ty_to_jvm(&slot))
@@ -187,6 +193,10 @@ impl Emitter<'_> {
                 self.emit_deferred_coercion(expression, call, code);
                 slot
             }
+            Some(ErasedResult::Suspension) => {
+                self.emit_erased_suspension(expression, code);
+                Ty::obj("java/lang/Object")
+            }
             Some(ErasedResult::Invocation) => {
                 // Scoped to this one emission: a copy of the node emitted elsewhere (a `finally`
                 // body) narrows as usual.
@@ -238,6 +248,22 @@ impl Emitter<'_> {
                     ReferenceCoercion::Cast(_)
                 )
         };
+        // A point's reference result reaches every consumer in the slot the point leaves. A
+        // scalar or value-class result is unboxed by the point itself when it closes.
+        let value = self.value_ty(expression);
+        if ir_ty_to_jvm(&value).is_reference()
+            && !self.is_value_class_ty(&value)
+            && self
+                .erased_suspension_point(expression)
+                .and_then(|point| self.transformed_result(point))
+                .is_some_and(|result| {
+                    ir_ty_to_jvm(&result).is_reference()
+                        && !self.is_value_class_ty(&result)
+                        && narrows(Ty::obj("java/lang/Object"), result)
+                })
+        {
+            return Some(ErasedResult::Suspension);
+        }
         match self.ir.expr(expression) {
             crate::ir::IrExpr::TypeOp {
                 op: crate::ir::IrTypeOp::ImplicitCoercion,
