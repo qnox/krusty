@@ -11,3 +11,6 @@ export KRUSTY_TARGET_CONFORMANCE_TIMEOUT_SECONDS="${KRUSTY_TARGET_CONFORMANCE_TI
 # The reference kotlinc runs once per CLI corpus invocation, a JVM start each, in
 # `conformance-regressions.sh`; it is one process with its own deadline.
 export KRUSTY_CLI_REFERENCE_TIMEOUT_SECONDS="${KRUSTY_CLI_REFERENCE_TIMEOUT_SECONDS:-1800}"
+# The reference kotlinc compiles every bytecode-text case once (cached between runs) in
+# `conformance-regressions.sh`; it is one process with its own deadline.
+export KRUSTY_BYTECODE_REFERENCE_TIMEOUT_SECONDS="${KRUSTY_BYTECODE_REFERENCE_TIMEOUT_SECONDS:-1800}"

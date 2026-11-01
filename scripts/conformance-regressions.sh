@@ -78,4 +78,18 @@ set -e
 if [ "$status" -eq 124 ]; then
   echo "conformance-regressions: CLI corpus reference run timed out after ${KRUSTY_CLI_REFERENCE_TIMEOUT_SECONDS}s: Kotlin $v" >&2
 fi
+[ "$status" -eq 0 ] || exit "$status"
+
+# The bytecode-text ratchet likewise: the reference kotlinc's classes run through the same runner
+# and must reproduce every case the not-applicable list does not excuse, and no listed one.
+set +e
+run_with_deadline "$KRUSTY_BYTECODE_REFERENCE_TIMEOUT_SECONDS" \
+  "$bin" \
+  --ignored \
+  --exact kotlin_bytecode_text_conformance::the_reference_compiler_reproduces_every_applicable_bytecode_text_case
+status=$?
+set -e
+if [ "$status" -eq 124 ]; then
+  echo "conformance-regressions: bytecode text reference run timed out after ${KRUSTY_BYTECODE_REFERENCE_TIMEOUT_SECONDS}s: Kotlin $v" >&2
+fi
 exit "$status"

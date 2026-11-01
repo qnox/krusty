@@ -91,6 +91,7 @@ mod field_write;
 mod frame_map;
 mod function_annotations;
 mod function_debug;
+mod main_bridge;
 mod function_invocation;
 mod static_function_calls;
 use function_invocation::{
@@ -1467,7 +1468,9 @@ fn emit_pass(
             && !lambdas.dead.contains(&i);
         emitted.then_some(i)
     });
-    for member in member_schedule::facade_source_ordered_members(ir, facade_functions) {
+    let facade_functions: Vec<u32> = facade_functions.collect();
+    let main_bridge = main_bridge::MainBridge::plan(ir, env, &facade_functions);
+    for member in member_schedule::facade_source_ordered_members(ir, facade_functions.into_iter()) {
         let i = match member {
             member_schedule::FacadeMember::Function(function) => function as usize,
             member_schedule::FacadeMember::DefaultAccessor(static_index, accessor) => {
@@ -1519,33 +1522,8 @@ fn emit_pass(
             &mut cw,
         );
         facade_has_method = true;
-        // A PARAMETERLESS `fun main()` is not a JVM entry point on its own: the launcher looks for
-        // `main([Ljava/lang/String;)V`, and the no-arg form is only recognized by JEP 445 (Java 21+
-        // preview, final in 25). kotlinc therefore emits a synthetic bridge that calls it, so the
-        // output runs on any JVM. A declared `fun main(args: Array<String>)` IS the entry point and
-        // gets no bridge; a `suspend fun main` has a continuation parameter after lowering and so is
-        // not parameterless here (its bridge needs the coroutine runner and is not emitted yet).
-        if f.name == "main" && f.params.is_empty() && matches!(f.ret, Ty::Unit) {
-            // kotlinc visits the bridge's header before its body's call to `main()`.
-            cw.reserve_method_pool("main", "([Ljava/lang/String;)V", None, &[]);
-            let mut bridge = CodeBuilder::new(1);
-            let target = cw.methodref(facade, "main", "()V");
-            bridge.invokestatic(target, 0, 0);
-            bridge.ret_void();
-            bridge.ensure_locals(1);
-            bridge.link();
-            cw.add_method(
-                0x1009, // PUBLIC | STATIC | SYNTHETIC
-                "main",
-                "([Ljava/lang/String;)V",
-                &bridge,
-            );
-            cw.set_method_debug(
-                "main",
-                "([Ljava/lang/String;)V",
-                None,
-                &[("args".to_string(), "[Ljava/lang/String;".to_string(), 0)],
-            );
+        if let Some(bridge) = main_bridge.as_ref().filter(|bridge| bridge.follows(i as u32)) {
+            bridge.emit(ir, facade, &mut cw);
         }
         // A top-level function (or extension) with parameter defaults gets kotlinc's
         // `foo$default(params…, int mask, Object marker)` synthetic (dispatches to the real method,
