@@ -6112,6 +6112,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   getter of an open property, and a lambda or local class there captures `this`. Plain parameters,
   supertype arguments, delegation expressions and parameter defaults keep reading the parameter
   (`tests/property_parameter_initializers_e2e.rs`).
+- Checked primary-constructor header initialization runs after the selected superclass delegation
+  and before source-ordered property initializers and `init` blocks. Interface delegate expressions
+  therefore run before those body initializers on every backend
+  (`tests/box_regressions/namedInterfaceDelegateOrder.kt`, with complete JVM constructor ABI and
+  runtime coverage in `tests/interface_delegation_e2e.rs`).
 - Constructing a classpath (non-IR) class (`RuntimeException("x")`, an imported Java type): `new` +
   `dup` + arguments + `invokespecial <init>`, with the constructor descriptor resolved from the
   classpath. JDK `Throwable` types fall back to the `()`/`(String)` constructors (the classpath reader
