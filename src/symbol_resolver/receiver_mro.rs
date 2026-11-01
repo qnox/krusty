@@ -113,7 +113,7 @@ fn contravariant_formals_read_nothing(decl_recv: Ty, recv: Ty, bindings: &mut GS
             continue;
         }
         if let TyKind::TyParam(name, _) = inner.non_null().kind() {
-            bindings.insert(name.to_string(), Ty::Nothing);
+            bindings.insert(name, Ty::Nothing);
         }
     }
 }
@@ -152,8 +152,9 @@ fn bind_receiver_type_variables(
     }
     let mut bindings = GSigBinds::default();
     unify_ty_from_symbols(src, recv, decl_recv, &mut bindings);
-    bindings
-        .retain(|variable, value| type_variables.contains(variable) && !value.mentions_ty_param());
+    bindings.retain(|variable, value| {
+        type_variables.iter().any(|formal| formal == variable) && !value.mentions_ty_param()
+    });
     ty_subst_keep_unbound(recv, &bindings)
 }
 

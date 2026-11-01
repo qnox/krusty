@@ -130,7 +130,7 @@ fn infer_generic_call_constraints_with_receiver_and_argument_ordinals(
             &mut constraints,
         );
         for formal in &generic_sig.formals {
-            if constraints.lower.contains_key(formal)
+            if constraints.lower.contains_key(formal.as_str())
                 && formal_variance_in_type(source, shape, formal)
                     == Some(crate::types::TypeVariance::Invariant)
             {
@@ -387,7 +387,7 @@ impl InferredCallBindings {
                         .iter()
                         .all(|upper| resolution_subtype(source, *candidate, *upper))
                 })?;
-                Some((formal.clone(), selected))
+                Some((crate::types::TyParamName::from(formal), selected))
             })
             .collect()
     }
@@ -429,7 +429,9 @@ pub(crate) fn seed_denotable_upper_placeholders(
     denotable: &[(String, Ty)],
 ) {
     for (formal, _) in denotable {
-        bindings.entry(formal.clone()).or_insert(Ty::Nothing);
+        bindings
+            .entry(crate::types::TyParamName::new(formal))
+            .or_insert(Ty::Nothing);
     }
 }
 
@@ -448,20 +450,20 @@ pub(crate) fn publish_denotable_upper_bindings(
     mut subtype: impl FnMut(Ty, Ty) -> bool,
 ) {
     for (formal, binding) in denotable {
-        let expected_fixed = expected_fixed.and_then(|fixed| fixed.get(&formal).copied());
-        match bindings.get(&formal).copied() {
+        let expected_fixed = expected_fixed.and_then(|fixed| fixed.get(formal.as_str()).copied());
+        match bindings.get(formal.as_str()).copied() {
             None => {
-                bindings.insert(formal, binding);
+                bindings.insert(crate::types::TyParamName::new(&formal), binding);
             }
             Some(Ty::Nothing) if binding != Ty::Nothing && expected_fixed.is_none() => {
-                bindings.insert(formal, binding);
+                bindings.insert(crate::types::TyParamName::new(&formal), binding);
             }
             Some(current)
                 if expected_fixed.is_some_and(|expected| expected == current)
                     && binding != current
                     && subtype(binding, current) =>
             {
-                bindings.insert(formal, binding);
+                bindings.insert(crate::types::TyParamName::new(&formal), binding);
             }
             _ => {}
         }
@@ -504,7 +506,8 @@ impl CallInferenceConstraints {
                     source,
                     &inputs.iter().map(|(actual, _)| *actual).collect::<Vec<_>>(),
                 );
-                self.lower.insert(name.to_string(), merged);
+                self.lower
+                    .insert(crate::types::TyParamName::new(name), merged);
             }
             ConstraintPosition::Upper => {
                 let bounds = self.upper.entry(name.to_string()).or_default();
@@ -636,7 +639,7 @@ impl CallInferenceConstraints {
                     .map(|known| merge_inferred_ty_from_symbols(Some(source), known, actual))
                     .unwrap_or(actual);
                 let mut trial_bindings = self.lower.clone();
-                trial_bindings.insert(formal.to_string(), merged);
+                trial_bindings.insert(crate::types::TyParamName::new(formal), merged);
                 if !bounds.iter().all(|bound| {
                     resolution_subtype(
                         source,
@@ -689,7 +692,7 @@ impl CallInferenceConstraints {
         // input until this point and select a declared bound only when it admits them all and the
         // complete declared-bound graph accepts that substitution.
         for (index, formal) in signature.formals.iter().enumerate() {
-            let Some(mut current) = self.lower.get(formal).copied() else {
+            let Some(mut current) = self.lower.get(formal.as_str()).copied() else {
                 continue;
             };
             let declared_bounds = signature
@@ -727,7 +730,8 @@ impl CallInferenceConstraints {
                         )
                     });
                 if original_fits {
-                    self.lower.insert(formal.clone(), original);
+                    self.lower
+                        .insert(crate::types::TyParamName::new(formal), original);
                     current = original;
                 }
             }
@@ -770,7 +774,7 @@ impl CallInferenceConstraints {
                 })
                 .filter(|candidate| {
                     let mut trial = self.lower.clone();
-                    trial.insert(formal.clone(), *candidate);
+                    trial.insert(crate::types::TyParamName::new(formal), *candidate);
                     bounds.iter().all(|bound| {
                         resolution_subtype(
                             source,
@@ -790,7 +794,8 @@ impl CallInferenceConstraints {
                         continue;
                     }
                 }
-                self.lower.insert(formal.clone(), candidate);
+                self.lower
+                    .insert(crate::types::TyParamName::new(formal), candidate);
                 continue;
             }
             bound_violations.extend(self.rejected_arguments(source, formal, index, &bounds));
@@ -804,7 +809,7 @@ impl CallInferenceConstraints {
             .upper
             .iter()
             .filter_map(|(formal, upper)| {
-                (!self.lower.contains_key(formal)
+                (!self.lower.contains_key(formal.as_str())
                     && upper.iter().any(|constraint| *constraint != Ty::Error))
                 .then_some(formal.clone())
             })

@@ -174,8 +174,12 @@ impl<'a> SymbolResolver<'a> {
             if arguments.is_empty() {
                 if let Some(classifier) = self.src.classifier(owner) {
                     for formal in &classifier.type_params {
-                        if let Some(inferred) = owner_argument_bindings.get(formal).copied() {
-                            bindings.entry(formal.clone()).or_insert(inferred);
+                        if let Some(inferred) =
+                            owner_argument_bindings.get(formal.as_str()).copied()
+                        {
+                            bindings
+                                .entry(crate::types::TyParamName::new(formal))
+                                .or_insert(inferred);
                         }
                     }
                 }
@@ -215,7 +219,7 @@ impl<'a> SymbolResolver<'a> {
                         classifier
                             .type_params
                             .iter()
-                            .map(|formal| bindings.get(formal).copied())
+                            .map(|formal| bindings.get(formal.as_str()).copied())
                             .collect::<Option<Vec<_>>>()?
                     } else {
                         return None;

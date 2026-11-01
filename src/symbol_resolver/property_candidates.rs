@@ -96,7 +96,10 @@ pub(super) fn generic_property_more_specific(
                 .and_then(|bounds| bounds.first())
                 .copied()
                 .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
-            (left_formal.clone(), Ty::ty_param(right_formal, bound))
+            (
+                crate::types::TyParamName::from(left_formal),
+                Ty::ty_param(right_formal, bound),
+            )
         })
         .collect::<GSigBinds>();
     if left

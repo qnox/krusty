@@ -82,10 +82,10 @@ impl Hash for SemanticBoundSet {
     }
 }
 
-fn neutral_formal_bounds(formals: &[String]) -> crate::fx_hash::HashMap<String, Ty> {
+fn neutral_formal_bounds(formals: &[String]) -> crate::types::TyParamBindings {
     formals
         .iter()
-        .cloned()
+        .map(crate::types::TyParamName::from)
         .map(|formal| (formal, Ty::nullable(Ty::obj("kotlin/Any"))))
         .collect()
 }

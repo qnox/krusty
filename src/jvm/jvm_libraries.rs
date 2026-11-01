@@ -3679,7 +3679,7 @@ impl JvmLibraries {
                 let receiver = raw_receiver
                     .map(|r| match r.kind() {
                         TyKind::TyParam(..) => r,
-                        _ => ty_subst(r, &crate::fx_hash::HashMap::default()),
+                        _ => ty_subst(r, &crate::types::TyParamBindings::default()),
                     })
                     .or_else(|| mf.receiver_class.map(kotlin_type_name_to_ty))
                     .unwrap_or_else(|| Ty::obj("kotlin/Any"));

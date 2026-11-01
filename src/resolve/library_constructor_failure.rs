@@ -148,7 +148,7 @@ impl Checker<'_> {
         }
         let bindings = formals
             .iter()
-            .cloned()
+            .map(crate::types::TyParamName::from)
             .zip(explicit.iter().copied())
             .collect::<crate::symbol_resolver::GSigBinds>();
         crate::symbol_resolver::generic_binding_bound_violation(

@@ -55,8 +55,13 @@ pub(super) fn initial_provider_bindings(
 ) -> GSigBinds {
     let mut bindings = inferred.clone();
     for formal in upper_only {
-        let binding = tightest_upper.get(formal).copied().unwrap_or(Ty::Nothing);
-        bindings.entry(formal.clone()).or_insert(binding);
+        let binding = tightest_upper
+            .get(formal.as_str())
+            .copied()
+            .unwrap_or(Ty::Nothing);
+        bindings
+            .entry(crate::types::TyParamName::new(formal))
+            .or_insert(binding);
     }
     crate::symbol_resolver::seed_unbound_constructor_result_from_symbols(
         source,
@@ -123,11 +128,11 @@ impl Checker<'_> {
             {
                 continue;
             }
-            let Some(&fixed) = expected_bindings.get(&formal) else {
+            let Some(&fixed) = expected_bindings.get(formal.as_str()) else {
                 continue;
             };
             let mut trial = bindings.clone();
-            trial.insert(formal, fixed);
+            trial.insert(crate::types::TyParamName::new(&formal), fixed);
             if !crate::symbol_resolver::generic_bindings_satisfy_bounds(
                 signature,
                 &trial,

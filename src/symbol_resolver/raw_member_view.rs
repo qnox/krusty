@@ -36,7 +36,10 @@ pub(super) fn bind_method_formals(signature: &GenericSig, bindings: &mut GSigBin
         .iter()
         .zip(crate::types::formal_erasures(&signature.formals, &bounds))
     {
-        bindings.insert(formal.clone(), Ty::raw_projection(erasure));
+        bindings.insert(
+            crate::types::TyParamName::new(formal),
+            Ty::raw_projection(erasure),
+        );
     }
 }
 

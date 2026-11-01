@@ -17,8 +17,7 @@ fn local_receiver_input_bounds(
         let identity = argument.non_null().ty_param_name()?;
         let primary = argument.non_null().ty_param_bound()?;
         let extra = parameters
-            .erasure
-            .iter()
+            .bindings()
             .find(|(_, binding)| binding.non_null().ty_param_name() == Some(identity))
             .map(|(source, _)| parameters.extra_bounds_of(source))
             .unwrap_or_else(|| captured_extra_bounds(argument));
@@ -373,7 +372,12 @@ impl Checker<'_> {
         let bindings = declaration_arguments
             .iter()
             .zip(applied_arguments)
-            .map(|(formal, &argument)| Some((formal.ty_param_name()?.to_owned(), argument)))
+            .map(|(formal, &argument)| {
+                Some((
+                    crate::types::TyParamName::from(formal.ty_param_name()?),
+                    argument,
+                ))
+            })
             .collect::<Option<crate::symbol_resolver::GSigBinds>>()?;
         let input_bounds = self
             .checked_local_classifier_input_bounds

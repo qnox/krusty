@@ -66,13 +66,14 @@ fn merge_active_constraints(
     constraints: crate::symbol_resolver::AssignabilityConstraints,
     active: &crate::fx_hash::HashSet<&str>,
 ) {
-    let inferred =
-        constraints
-            .lower
-            .into_iter()
-            .chain(constraints.upper.into_iter().flat_map(|(formal, bounds)| {
-                bounds.into_iter().map(move |bound| (formal.clone(), bound))
-            }));
+    let inferred = constraints
+        .lower
+        .into_iter()
+        .chain(constraints.upper.into_iter().flat_map(|(formal, bounds)| {
+            bounds
+                .into_iter()
+                .map(move |bound| (crate::types::TyParamName::from(&formal), bound))
+        }));
     for (formal, actual) in inferred {
         if active.contains(formal.as_str()) {
             bindings
@@ -491,7 +492,7 @@ impl ProductionSignatureSemantics<'_> {
                 collect_type_parameters(*parameter, &mut contextual);
                 for formal in contextual {
                     if let Some(value) = known.get(formal).copied() {
-                        bindings.insert(formal.to_string(), value);
+                        bindings.insert(crate::types::TyParamName::new(formal), value);
                     }
                 }
             }
@@ -543,7 +544,7 @@ impl ProductionSignatureSemantics<'_> {
             let committed = bindings
                 .iter()
                 .filter(|(formal, _)| active.contains(formal.as_str()))
-                .map(|(formal, ty)| (formal.clone(), *ty))
+                .map(|(formal, ty)| (*formal, *ty))
                 .collect();
 
             signature.receiver = signature

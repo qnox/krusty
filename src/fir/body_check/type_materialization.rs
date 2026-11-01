@@ -206,7 +206,12 @@ impl BodyFirChecker<'_> {
                             };
                             self.index
                                 .type_parameter_semantic_name(parameter)
-                                .map(|name| (name.to_owned(), substitution.value.get()))
+                                .map(|name| {
+                                    (
+                                        crate::types::TyParamName::from(name),
+                                        substitution.value.get(),
+                                    )
+                                })
                         })
                         .collect::<crate::symbol_resolver::GSigBinds>();
                     ResolvedTy::new(crate::types::ty_subst_keep_unbound(

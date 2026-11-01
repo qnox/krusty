@@ -170,6 +170,7 @@ impl ProductionSignatureSemantics<'_> {
                     .flatten()?;
                 let bindings = source_formals
                     .into_iter()
+                    .map(crate::types::TyParamName::from)
                     .zip(child_types.iter().copied())
                     .collect::<crate::symbol_resolver::GSigBinds>();
                 crate::types::ty_subst_alias_expansion(symbolic, &bindings)
@@ -204,7 +205,7 @@ impl ProductionSignatureSemantics<'_> {
                 let bindings = definition
                     .formals
                     .iter()
-                    .map(|formal| graph.name(*formal).map(str::to_owned))
+                    .map(|formal| graph.name(*formal).map(crate::types::TyParamName::from))
                     .collect::<Option<Vec<_>>>()?
                     .into_iter()
                     .zip(child_types.iter().copied())
@@ -244,7 +245,7 @@ impl ProductionSignatureSemantics<'_> {
                 let bindings = definition
                     .formals
                     .iter()
-                    .map(|formal| graph.name(*formal).map(str::to_owned))
+                    .map(|formal| graph.name(*formal).map(crate::types::TyParamName::from))
                     .collect::<Option<Vec<_>>>()?
                     .into_iter()
                     .zip(child_types.iter().copied())
@@ -359,7 +360,7 @@ impl ProductionSignatureSemantics<'_> {
                 .collect::<Result<Vec<_>, _>>()?;
             let bindings = formals
                 .iter()
-                .cloned()
+                .map(crate::types::TyParamName::from)
                 .zip(arguments.iter().copied())
                 .collect::<crate::symbol_resolver::GSigBinds>();
             let bound = self
@@ -502,7 +503,7 @@ impl ProductionSignatureSemantics<'_> {
                     .copied()
                     .ok_or_else(Self::failure)?
                     .get();
-                bindings.insert(formal.clone(), resolved);
+                bindings.insert(crate::types::TyParamName::new(formal), resolved);
             }
             if let Some(mut abbreviation) = self.selected_types.abbreviation(origin) {
                 abbreviation.arguments = abbreviation

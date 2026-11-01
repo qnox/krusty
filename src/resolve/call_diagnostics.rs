@@ -406,7 +406,7 @@ impl Checker<'_> {
                 if !inferred_from_callable_reference {
                     continue;
                 }
-                let satisfies_bounds = bindings.get(formal).is_some_and(|&actual| {
+                let satisfies_bounds = bindings.get(formal.as_str()).is_some_and(|&actual| {
                     signature
                         .formal_bounds
                         .get(formal_index)
@@ -438,7 +438,7 @@ impl Checker<'_> {
                 declaration
                     .receiver_bindings
                     .iter()
-                    .map(|(formal, &actual)| (formal.clone(), actual)),
+                    .map(|(formal, &actual)| (*formal, actual)),
             );
         }
         let whole_arrays = named_whole_array_varargs(parameters, argument_names, &shape.call_sig);
@@ -658,7 +658,7 @@ impl Checker<'_> {
             let Some(formal) = signature.formals.get(formal_index) else {
                 continue;
             };
-            let Some(&actual) = bindings.get(formal) else {
+            let Some(&actual) = bindings.get(formal.as_str()) else {
                 continue;
             };
             for &bound in signature
@@ -1175,7 +1175,7 @@ impl Checker<'_> {
                             || ty_mentions_param(receiver, std::slice::from_ref(*formal))
                     })
                     .any(|(index, formal)| {
-                        let Some(&actual) = bindings.get(formal) else {
+                        let Some(&actual) = bindings.get(formal.as_str()) else {
                             return false;
                         };
                         signature
@@ -1207,7 +1207,7 @@ impl Checker<'_> {
             }
             .bindings(&self.fed_source(), &signature);
             for formal in &signature.formals {
-                if !receiver_bindings.contains_key(formal) {
+                if !receiver_bindings.contains_key(formal.as_str()) {
                     self.diags.error(
                         self.call_callee_name_span(call),
                         format!(

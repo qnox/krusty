@@ -2971,7 +2971,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                         .iter()
                         .enumerate()
                     {
-                        if let Some(argument) = outer.get(captured).copied() {
+                        if let Some(argument) = outer.get(captured.as_str()).copied() {
                             if let Some(slot) = arguments.get_mut(own + index) {
                                 *slot = argument;
                             }
@@ -2989,7 +2989,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 let bindings = declaration
                     .type_params()
                     .iter()
-                    .cloned()
+                    .map(crate::types::TyParamName::from)
                     .zip(arguments.iter().copied())
                     .collect::<crate::symbol_resolver::GSigBinds>();
                 let declared_parameters = selected

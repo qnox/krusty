@@ -167,7 +167,12 @@ impl CallSiteVariables {
             bindings: inferred
                 .bindings
                 .into_iter()
-                .map(|(name, binding)| (formal(name), ty(binding)))
+                .map(|(name, binding)| {
+                    (
+                        crate::types::TyParamName::from(formal(name.to_string())),
+                        ty(binding),
+                    )
+                })
                 .collect(),
             lower_inputs: inferred
                 .lower_inputs
@@ -249,7 +254,7 @@ mod tests {
 
         assert_eq!(
             inferred.bindings,
-            GSigBinds::from_iter([("demo:Cell:E".to_string(), enclosing)])
+            GSigBinds::from_iter([("demo:Cell:E".into(), enclosing)])
         );
         assert_eq!(
             inferred.lower_inputs.get("demo:Cell:E"),
@@ -269,7 +274,7 @@ mod tests {
             .is_empty());
         assert_eq!(
             solve(&signature, Ty::String, false).bindings,
-            GSigBinds::from_iter([("demo:Cell:E".to_string(), Ty::String)])
+            GSigBinds::from_iter([("demo:Cell:E".into(), Ty::String)])
         );
     }
 
@@ -307,8 +312,8 @@ mod tests {
         assert_eq!(
             inferred.bindings,
             GSigBinds::from_iter([
-                ("demo:Couple:A".to_string(), first),
-                ("demo:Couple:B".to_string(), Ty::String),
+                ("demo:Couple:A".into(), first),
+                ("demo:Couple:B".into(), Ty::String),
             ])
         );
     }

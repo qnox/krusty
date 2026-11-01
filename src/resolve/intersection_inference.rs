@@ -97,7 +97,7 @@ impl SelectedGenericCall {
             self.arguments.resize(signature.formals.len(), None);
         }
         for (ordinal, formal) in signature.formals.iter().enumerate() {
-            if let Some(&completion) = completion_bindings.get(formal) {
+            if let Some(&completion) = completion_bindings.get(formal.as_str()) {
                 self.arguments[ordinal] = Some(completion);
             }
         }
@@ -613,7 +613,9 @@ impl Checker<'_> {
             .formals
             .iter()
             .zip(&arguments)
-            .filter_map(|(formal, argument)| argument.map(|argument| (formal.clone(), argument)))
+            .filter_map(|(formal, argument)| {
+                argument.map(|argument| (crate::types::TyParamName::from(formal), argument))
+            })
             .collect::<crate::symbol_resolver::GSigBinds>();
         let lower_inputs = self.positional_lower_inputs(signature, logical_arg_tys);
         let mut intersection_bindings = self.intersection_bindings_from_lower_inputs(&lower_inputs);
@@ -772,7 +774,7 @@ impl Checker<'_> {
             {
                 continue;
             }
-            let Some(&selected_argument) = selected_bindings.get(formal) else {
+            let Some(&selected_argument) = selected_bindings.get(formal.as_str()) else {
                 continue;
             };
             let direct_arguments = slots
@@ -831,7 +833,7 @@ impl Checker<'_> {
                 if !all_arguments_prove_parts {
                     continue;
                 }
-                selected_bindings.insert(formal.clone(), fact.parts[0]);
+                selected_bindings.insert(crate::types::TyParamName::new(formal), fact.parts[0]);
                 intersection_bindings.insert(formal.clone(), fact.parts.clone());
                 propagated.insert(formal.clone(), fact);
                 break;
@@ -884,7 +886,7 @@ impl Checker<'_> {
                     .get(index)
                     .copied()
                     .filter(|argument| *argument != Ty::Error)
-                    .or_else(|| selected_bindings.get(formal).copied())
+                    .or_else(|| selected_bindings.get(formal.as_str()).copied())
             })
             .collect::<Vec<_>>();
         self.publish_selected_call_intersections(
@@ -925,7 +927,10 @@ impl Checker<'_> {
             else {
                 continue;
             };
-            let selected_result = selected_bindings.get(formal).copied().unwrap_or(parts[0]);
+            let selected_result = selected_bindings
+                .get(formal.as_str())
+                .copied()
+                .unwrap_or(parts[0]);
             let through_flexible = propagated
                 .get(formal)
                 .is_some_and(|fact| fact.through_flexible);
@@ -1090,7 +1095,7 @@ mod tests {
             return_policy: crate::libraries::GenericReturnPolicy::Exact,
         };
         let mut completion = crate::symbol_resolver::GSigBinds::default();
-        completion.insert(formal, Ty::Int);
+        completion.insert(crate::types::TyParamName::from(formal), Ty::Int);
 
         let provisional = super::call_result_templates::SelectedGenericCallShape::source_for_test(
             81,
