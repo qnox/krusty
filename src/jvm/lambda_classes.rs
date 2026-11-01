@@ -1168,7 +1168,7 @@ fn realize_class(
         ir.expression_owners.insert(expression, site.class);
         crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
     }
-    if let Some(&line) = ir.expr_source_lines.get(&site.node) {
+    if let Some(line) = ir.source_line(site.node) {
         // The bridge maps its whole body to the lambda's line.
         ir.fn_decl_lines.insert(fid, line);
     }

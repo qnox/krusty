@@ -246,8 +246,8 @@ impl Emitter<'_> {
         // next line mark is the consumer's own.
         let initializer = self.transformed_suspensions.initializer == Some(e);
         let marked = block || (initializer && code.line_forgotten());
-        match self.ir.expr_source_lines.get(&e) {
-            Some(&line) if marked && !discarded && line != 0 => code.mark_line(line),
+        match self.ir.source_line(e) {
+            Some(line) if marked && !discarded && line != 0 => code.mark_line(line),
             _ => {}
         }
         let target = jvm_declared_ty(&result);

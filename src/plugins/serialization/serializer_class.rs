@@ -452,8 +452,8 @@ pub(super) fn complete(
     // constructor returns on its first.
     let init = if is_generic {
         ir.initializer_blocks.insert(init);
-        ir.expr_source_lines.insert(init, owner_start_line);
-        ir.expr_end_lines.insert(init, owner_end_line);
+        ir.set_source_line(init, owner_start_line);
+        ir.set_end_line(init, owner_end_line);
         ir.add_expr(IrExpr::Block {
             stmts: vec![init],
             value: None,

@@ -83,8 +83,8 @@ impl BodyLowering<'_> {
     /// Keep the operand's source line on that replay so the next direct operand can restore its own
     /// line, exactly as it would without the evaluation-order temporary.
     fn reordered_operand_replay(&mut self, source: ExprId, replay: ExprId) -> ExprId {
-        if let Some(&line) = self.ir.expr_source_lines.get(&source) {
-            self.ir.expr_source_lines.insert(replay, line);
+        if let Some(line) = self.ir.source_line(source) {
+            self.ir.set_source_line(replay, line);
         }
         replay
     }

@@ -106,8 +106,8 @@ impl BodyLowering<'_> {
                             }),
                         };
                         if line != 0 {
-                            self.ir.expr_source_lines.insert(subject, line);
-                            self.ir.expr_source_lines.insert(comparison, line);
+                            self.ir.set_source_line(subject, line);
+                            self.ir.set_source_line(comparison, line);
                         }
                         comparison
                     }
@@ -122,7 +122,7 @@ impl BodyLowering<'_> {
                             );
                             let line = self.body.expression_debug_lines(candidate).source;
                             if line != 0 {
-                                self.ir.expr_source_lines.insert(read, line);
+                                self.ir.set_source_line(read, line);
                             }
                             self.set_expression_state(expression, LoweringState::Lowered(read));
                         }

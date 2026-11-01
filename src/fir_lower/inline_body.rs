@@ -392,7 +392,7 @@ impl BodyLowering<'_> {
         };
         if matches!(self.ir.expr(expansion), IrExpr::Block { .. }) {
             if let Some(line) = source_line {
-                self.ir.expr_source_lines.insert(expansion, line);
+                self.ir.set_source_line(expansion, line);
             }
         }
         self.ir.external_inline_expansions.insert(expansion);
@@ -926,9 +926,7 @@ impl BodyLowering<'_> {
                 // frame carries that brace as the `Unit` value it ends in.
                 let brace = self
                     .ir
-                    .expr_end_lines
-                    .get(&inline_body)
-                    .copied()
+                    .end_line(inline_body)
                     .filter(|line| *line != 0 && ends_in_unit(self.ir, inline_body));
                 let lambda_frame = match brace {
                     Some(brace) => {
@@ -936,7 +934,7 @@ impl BodyLowering<'_> {
                             stmts: vec![parameter_declaration, marker],
                             value: Some(inline_body),
                         });
-                        self.ir.expr_end_lines.insert(frame, brace);
+                        self.ir.set_end_line(frame, brace);
                         frame
                     }
                     None => self.ir.add_expr(IrExpr::Block {
@@ -948,7 +946,7 @@ impl BodyLowering<'_> {
                     // The lambda frame closes on the body's invocation line, mapped under the
                     // call; the mark drives the frame's closing `nop`.
                     let line = u32::from(source.invoke_line);
-                    self.ir.expr_source_lines.insert(lambda_frame, line);
+                    self.ir.set_source_line(lambda_frame, line);
                     self.ir
                         .external_frame_lines
                         .insert(lambda_frame, external_frame_line(source, line, call_line));
@@ -1225,7 +1223,7 @@ impl BodyLowering<'_> {
         // below to reproduce kotlinc's physical temporary and landing sequence.
         let guarded = self.guarded_try(body, cleanup, cause, result_ty, plan_value)?;
         if let Some(line) = source_line {
-            self.ir.expr_source_lines.insert(guarded, line);
+            self.ir.set_source_line(guarded, line);
         }
         self.ir.inline_cleanup_results.insert(guarded);
         Some(guarded)
@@ -1551,8 +1549,8 @@ impl BodyLowering<'_> {
 
         let inline_body = if callable_reference {
             let (body, _) = crate::ir::clone_expression_dag(self.ir, template);
-            if let Some(line) = self.ir.expr_source_lines.get(&lambda).copied() {
-                self.ir.expr_source_lines.insert(body, line);
+            if let Some(line) = self.ir.source_line(lambda) {
+                self.ir.set_source_line(body, line);
             }
             body
         } else {
@@ -1602,11 +1600,11 @@ impl BodyLowering<'_> {
                     stmts: preamble,
                     value: Some(body),
                 });
-                if let Some(&end) = self.ir.expr_end_lines.get(&body) {
-                    self.ir.expr_end_lines.insert(wrapped, end);
+                if let Some(end) = self.ir.end_line(body) {
+                    self.ir.set_end_line(wrapped, end);
                 }
-                if let Some(&line) = self.ir.expr_source_lines.get(&body) {
-                    self.ir.expr_source_lines.insert(wrapped, line);
+                if let Some(line) = self.ir.source_line(body) {
+                    self.ir.set_source_line(wrapped, line);
                 }
                 if let Some(&ty) = self.ir.logical_types.get(&body) {
                     self.ir.logical_types.insert(wrapped, ty);

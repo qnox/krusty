@@ -580,7 +580,7 @@ impl Emitter<'_> {
         callee: &str,
     ) -> Result<LambdaArgument, &'static str> {
         let reference_line = matches!(self.ir.expr(argument), IrExpr::CallableReference(_))
-            .then(|| self.ir.expr_source_lines.get(&argument).copied())
+            .then(|| self.ir.source_line(argument))
             .flatten();
         let (lambda, _) = self.literal_lambda(argument)?;
         let value_class_parameters = lambda

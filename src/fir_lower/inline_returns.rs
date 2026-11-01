@@ -105,12 +105,12 @@ pub(super) fn frame_exit(
         .expr_lines
         .get(&source)
         .copied()
-        .or_else(|| ir.expr_source_lines.get(&source).copied());
+        .or_else(|| ir.source_line(source));
     if let Some(line) = line {
         ir.expr_lines.insert(exit, line);
-        ir.expr_source_lines.insert(exit, line);
+        ir.set_source_line(exit, line);
         if let Some(store) = store {
-            ir.expr_source_lines.insert(store, line);
+            ir.set_source_line(store, line);
             ir.copy_inline_copy_mark(source, store);
         }
     }
@@ -221,7 +221,7 @@ pub(super) fn prepare_inline_template(
 /// lines are not the result's end. A backend consumes this sparse decision after emitting the
 /// exact result expression, before any local-return paths rejoin it.
 fn record_evaluated_result_end(ir: &mut IrFile, root: ExprId) {
-    let template_end = ir.expr_end_lines.get(&root).copied();
+    let template_end = ir.end_line(root);
     let mut result = root;
     loop {
         let IrExpr::Block {
@@ -232,13 +232,10 @@ fn record_evaluated_result_end(ir: &mut IrFile, root: ExprId) {
         };
         result = *inner;
     }
-    if let Some(line) = ir.expr_end_lines.get(&result).copied().filter(|line| {
+    if let Some(line) = ir.end_line(result).filter(|line| {
         *line != 0
             && Some(*line) != template_end
-            && ir
-                .expr_source_lines
-                .get(&result)
-                .is_some_and(|start| start != line)
+            && ir.source_line(result).is_some_and(|start| start != *line)
     }) {
         ir.mark_evaluated_result_end_line(result, line);
     }

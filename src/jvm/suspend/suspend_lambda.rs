@@ -166,7 +166,7 @@ pub(super) fn route(
     let units = ensure_tail_return(ir, body, unit_return);
     if let Some(&close) = ir.fn_close_lines.get(&fid) {
         for unit in units {
-            ir.expr_source_lines.insert(unit, close);
+            ir.set_source_line(unit, close);
         }
     }
     let Some((form, explicit_suspend)) = ir

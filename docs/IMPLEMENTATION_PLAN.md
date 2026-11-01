@@ -1,5 +1,12 @@
 # krusty — implementation plan
 
+## Source positions on IR nodes
+
+The `expr_source_lines` and `expr_end_lines` tables become one `IrNodePosition` per expression
+node, in a column beside `IrFile::exprs`. Every reader and writer goes through `IrFile` accessors,
+and the JVM range, call-wrapper and operation-relocation copies take the node's position instead
+of naming the two tables. Line tables are unchanged. Step 1a of `docs/PHASE_FACTS.md`.
+
 ## Classify every IrFile field for expression copies
 
 `copy_expression_facts` destructures `IrFile` exhaustively, and each table-holding field

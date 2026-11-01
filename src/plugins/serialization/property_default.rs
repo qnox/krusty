@@ -219,7 +219,7 @@ fn copy_in_frame(
             }
             // The receiver it is read off is loaded as part of that read, on its line.
             for expression in reads.into_iter().chain(receivers.iter().copied()) {
-                ir.expr_source_lines.insert(expression, line);
+                ir.set_source_line(expression, line);
             }
         }
         for expression in receivers {
@@ -244,7 +244,7 @@ fn copy_in_frame(
     }
     if let Some(line) = frame.property_line {
         for &expression in &visited {
-            ir.expr_source_lines.entry(expression).or_insert(line);
+            ir.set_source_line_if_absent(expression, line);
         }
     }
     for (expression, field) in reads {
@@ -252,9 +252,11 @@ fn copy_in_frame(
         // The copied node keeps its identity (its parents point at it); it becomes the read.
         ir.exprs[expression as usize] = ir.exprs[read as usize].clone();
         match frame.read_line {
-            Some(line) => ir.expr_source_lines.insert(expression, line),
-            None => ir.expr_source_lines.remove(&expression),
-        };
+            Some(line) => ir.set_source_line(expression, line),
+            None => {
+                ir.take_source_line(expression);
+            }
+        }
     }
     // kotlinc marks the default's own line where it starts and keeps it there when the read it
     // starts with marks the class's line at the same offset.

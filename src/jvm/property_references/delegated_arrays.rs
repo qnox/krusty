@@ -296,7 +296,7 @@ pub(super) fn place(ir: &mut IrFile, operands: Vec<DelegatedOperand>) -> Delegat
             .map(|(element, line)| {
                 let expression = ir.add_expr(element);
                 if displaced && line != 0 {
-                    ir.expr_source_lines.insert(expression, line);
+                    ir.set_source_line(expression, line);
                 }
                 expression
             })

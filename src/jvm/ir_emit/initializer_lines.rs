@@ -57,11 +57,11 @@ impl Emitter<'_> {
         if !self.renders_initializer_boundary(block) {
             return;
         }
-        let lines = match closing {
-            true => &self.ir.expr_end_lines,
-            false => &self.ir.expr_source_lines,
+        let line = match closing {
+            true => self.ir.end_line(block),
+            false => self.ir.source_line(block),
         };
-        if let Some(&line) = lines.get(&block).filter(|&&line| line != 0) {
+        if let Some(line) = line.filter(|&line| line != 0) {
             code.mark_line_occupied(line);
         }
     }

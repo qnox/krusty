@@ -448,11 +448,7 @@ pub(super) fn plan(
     let reference_lines = ir
         .callable_reference_names
         .iter()
-        .filter_map(|(expression, class)| {
-            ir.expr_source_lines
-                .get(expression)
-                .map(|line| (*class, *line))
-        })
+        .filter_map(|(expression, class)| ir.source_line(*expression).map(|line| (*class, line)))
         .collect::<HashMap<_, _>>();
     let root_lines = synthesized_companion_accessor_lines(ir);
     // A constructor delegation is no expression the walk meets; kotlinc meets it at its call.
@@ -822,11 +818,7 @@ impl Walk<'_> {
         // Post-order: an operand's use precedes the use of the call or store consuming it.
         let mut stack = vec![(root, line, false)];
         while let Some((expression, inherited, expanded)) = stack.pop() {
-            let line = ir
-                .expr_source_lines
-                .get(&expression)
-                .copied()
-                .unwrap_or(inherited);
+            let line = ir.source_line(expression).unwrap_or(inherited);
             if !expanded {
                 // Kotlin discovers a store's target after its receiver but before its assigned
                 // value. Keep that local lowering order instead of globally preferring every

@@ -243,7 +243,7 @@ fn finish_membership(
         ir.exprs[expression as usize] = contains;
     }
     record_generated_origins(ir, expression, first_generated, inlined_calls);
-    if let Some(line) = ir.expr_source_lines.get(&expression).copied() {
+    if let Some(line) = ir.source_line(expression) {
         record_generated_line(ir, line, first_generated);
     }
     keep_written_offsets(ir, derived_constants);
@@ -621,7 +621,7 @@ fn record_generated_lines(ir: &mut IrFile, source: ExprId, first_generated: usiz
 /// offsets, so the comparison after an inlined `compareTo` marks that line at its jump.
 fn record_generated_line(ir: &mut IrFile, line: u32, first_generated: usize) {
     for raw in first_generated..ir.exprs.len() {
-        ir.expr_source_lines.insert(raw as ExprId, line);
+        ir.set_source_line(raw as ExprId, line);
     }
 }
 
@@ -629,13 +629,17 @@ fn record_generated_line(ir: &mut IrFile, line: u32, first_generated: usize) {
 /// nodes took the construct's line.
 fn keep_written_offsets(ir: &mut IrFile, derived_constants: &[DerivedConstant]) {
     for &DerivedConstant { written, built } in derived_constants {
-        match ir.expr_source_lines.get(&written).copied() {
-            Some(line) => ir.expr_source_lines.insert(built, line),
-            None => ir.expr_source_lines.remove(&built),
-        };
-        match ir.expr_end_lines.get(&written).copied() {
-            Some(line) => ir.expr_end_lines.insert(built, line),
-            None => ir.expr_end_lines.remove(&built),
-        };
+        match ir.source_line(written) {
+            Some(line) => ir.set_source_line(built, line),
+            None => {
+                ir.take_source_line(built);
+            }
+        }
+        match ir.end_line(written) {
+            Some(line) => ir.set_end_line(built, line),
+            None => {
+                ir.take_end_line(built);
+            }
+        }
     }
 }
