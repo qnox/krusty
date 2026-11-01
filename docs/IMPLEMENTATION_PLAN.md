@@ -5847,6 +5847,10 @@ regress.
     caller's: 1 more box file is byte-identical on 2.4.21
     (`coroutines/featureIntersection/suspendInlineSuspendFinally`), none regresses, and all 7,184
     applicable files run.
+    ✓ Suspend function-typed parameters (`SuspendFunctionParameter`): a non-suspend callee's
+    `noinline` suspend parameter is a value its compiled body only passes on, so the call's
+    suspend lambda is the caller's own object, as kotlinc's is; a `crossinline` one stays with
+    `CrossinlineParameter` (`tests/inline_same_module_suspend_values_e2e.rs`).
     ☐ `$default` calls, suspend callees (and the calls a suspend inline function holds),
     `crossinline` parameters, calls in default arguments, and callee bodies with local classes or
     enum switches.
