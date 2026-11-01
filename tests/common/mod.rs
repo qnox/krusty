@@ -145,8 +145,7 @@ pub fn krusty_binary() -> PathBuf {
 /// thread ends, forcing a cold respawn (measured: a reference compile ballooning 1.5s → 40-120s). Spawning
 /// from the single immortal owner thread instead binds the signal to a thread that lives for the whole
 /// process, so it fires only at real teardown.
-#[allow(dead_code)]
-fn die_with_parent(_cmd: &mut Command) {
+pub(crate) fn die_with_parent(_cmd: &mut Command) {
     // `_cmd` is consumed only by the Linux `pre_exec` below; on every other target the body compiles
     // out, so the leading underscore keeps it from reading as an unused parameter there.
     #[cfg(target_os = "linux")]
@@ -165,8 +164,7 @@ fn die_with_parent(_cmd: &mut Command) {
 /// set on it (see [`die_with_parent`]) binds to a thread that never exits until process teardown — not to
 /// a transient libtest worker thread. Every persistent JVM (box runner, kotlinc/java servers) MUST spawn
 /// through here; without it the parent-death signal mis-fires per test and the JVMs churn.
-#[allow(dead_code)]
-fn spawn_owned(cmd: Command) -> std::io::Result<Child> {
+pub(crate) fn spawn_owned(cmd: Command) -> std::io::Result<Child> {
     type Job = Box<dyn FnOnce() + Send>;
     static OWNER: OnceLock<Mutex<mpsc::Sender<Job>>> = OnceLock::new();
     let tx = OWNER.get_or_init(|| {
@@ -1412,7 +1410,11 @@ impl BoxRunner {
 
 /// Blocking `read_exact` with a wall-clock deadline (via `poll`), for the request/response JVM servers
 /// (`KotlincServer` et al.) whose one-pipe protocol reads directly rather than through a demux thread.
-fn read_exact_deadline(fd: i32, buf: &mut [u8], deadline: Instant) -> std::io::Result<()> {
+pub(crate) fn read_exact_deadline(
+    fd: i32,
+    buf: &mut [u8],
+    deadline: Instant,
+) -> std::io::Result<()> {
     let mut pos = 0;
     while pos < buf.len() {
         let remaining = deadline.saturating_duration_since(Instant::now());
