@@ -50,7 +50,7 @@ struct InheritedForwarder {
     value_class_params: Vec<Option<crate::jvm::bridge_adaptations::ValueClassAdapter>>,
     value_class_ret: Option<crate::jvm::bridge_adaptations::ValueClassAdapter>,
     /// The forwarder's generic `Signature`, when its substituted types have generic structure.
-    signature: Option<String>,
+    signature: Option<ForwarderSignature>,
     target_owner: String,
     target_descriptor: String,
     dispatch: ForwarderDispatch,
@@ -355,7 +355,7 @@ fn forwarder_signature(
     (semantic_params, semantic_ret): (&[Ty], Ty),
     (param_tys, ret): (&[Ty], Ty),
     suspend: bool,
-) -> Option<String> {
+) -> Option<ForwarderSignature> {
     let known = class_type_params
         .iter()
         .cloned()
@@ -377,7 +377,7 @@ fn forwarder_signature(
     {
         return None;
     }
-    let mut signature = super::type_parameter_signatures::jvm_type_parameter_declarations(
+    let declarations = super::type_parameter_signatures::jvm_type_parameter_declarations(
         formatter,
         type_parameters.iter().map(|parameter| {
             (
@@ -386,18 +386,46 @@ fn forwarder_signature(
             )
         }),
     )?;
-    signature.push('(');
+    let mut parameters = String::new();
     for parameter in semantic_params {
-        signature.push_str(&formatter.method_ty(parameter, Wildcards::Declared)?);
+        parameters.push_str(&formatter.method_ty(parameter, Wildcards::Declared)?);
     }
     if suspend {
-        signature.push_str(&formatter.continuation(semantic_ret, Wildcards::Declared)?);
-        signature.push_str(")Ljava/lang/Object;");
-        return Some(signature);
+        parameters.push_str(&formatter.continuation(semantic_ret, Wildcards::Declared)?);
+        return Some(ForwarderSignature {
+            declarations,
+            parameters,
+            result: "Ljava/lang/Object;".to_string(),
+        });
     }
-    signature.push(')');
-    signature.push_str(&formatter.method_ty(&semantic_ret, Wildcards::Suppressed)?);
-    (signature != method_descriptor(param_tys, ret)).then_some(signature)
+    let signature = ForwarderSignature {
+        declarations,
+        parameters,
+        result: formatter.method_ty(&semantic_ret, Wildcards::Suppressed)?,
+    };
+    (signature.render(None) != method_descriptor(param_tys, ret)).then_some(signature)
+}
+
+/// A forwarder's generic `Signature` in its grammar's parts: the type-parameter declaration
+/// section, the parameter types and the result type, each already written.
+struct ForwarderSignature {
+    declarations: String,
+    parameters: String,
+    result: String,
+}
+
+impl ForwarderSignature {
+    /// The signature, with `leading` written ahead of the forwarder's parameters (a value class's
+    /// static takes its carrier first).
+    fn render(&self, leading: Option<&str>) -> String {
+        format!(
+            "{}({}{}){}",
+            self.declarations,
+            leading.unwrap_or_default(),
+            self.parameters,
+            self.result
+        )
+    }
 }
 
 /// Whether `ty` mentions a type parameter not named in `known`.
@@ -463,6 +491,10 @@ fn write_forwarder(
         "an inherited forwarder needs every declaration parameter identity"
     );
     let desc = forwarder.descriptor();
+    let signature = forwarder
+        .signature
+        .as_ref()
+        .map(|signature| signature.render(None));
     let parameter_annotations = forwarder.parameter_annotations();
     // The forwarder is an instance method again, so an extension receiver is an ordinary,
     // unflagged parameter.
@@ -485,7 +517,7 @@ fn write_forwarder(
     cw.reserve_method_pool_with_annotations(
         name,
         &desc,
-        forwarder.signature.as_deref(),
+        signature.as_deref(),
         &header_annotations,
         &crate::ir::DeclarationAnnotations::default(),
         &reflected,
@@ -528,7 +560,7 @@ fn write_forwarder(
         &desc,
         &mut code,
         argument_words,
-        forwarder.signature.as_deref(),
+        signature.as_deref(),
     );
     cw.set_method_parameters(name, &desc, &reflected);
     let mut locals = vec![("this".to_string(), format!("L{};", c.fq_name()), 0)];
@@ -594,12 +626,11 @@ fn write_value_class_static(
     let mut params = vec![carrier];
     params.extend_from_slice(&forwarder.param_tys);
     let desc = method_descriptor(&params, forwarder.ret);
-    let signature = forwarder.signature.as_deref().map(|signature| {
-        let (declarations, parameters) = signature
-            .split_once('(')
-            .expect("a method signature has a parameter list");
-        format!("{declarations}({}{parameters}", type_descriptor(carrier))
-    });
+    let carrier_descriptor = type_descriptor(carrier);
+    let signature = forwarder
+        .signature
+        .as_ref()
+        .map(|signature| signature.render(Some(&carrier_descriptor)));
     let local_variable_names = forwarder.local_variable_names(ForwarderSite::ValueClassStatic);
     assert_eq!(
         local_variable_names.len(),
