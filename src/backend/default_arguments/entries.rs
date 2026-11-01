@@ -6,6 +6,10 @@
 //! this file, another file of the module, or another module. Defaults run in declaration order in
 //! the declaration's own frame, so a default reading an earlier parameter reads the value the call
 //! supplied or the default already filled in.
+//!
+//! An entry evaluates a copy of each default. Every copied expression is recorded with the
+//! checked expression it copies, so the facts a target froze per expression before this lowering
+//! reach the copy too.
 
 use crate::fir::{CallableId, ResolvedFunctionOverrideTarget};
 use crate::fx_hash::HashMap;
@@ -45,6 +49,8 @@ pub(super) struct Entries {
     built: HashMap<FunId, Option<(FunId, Option<StaticForm>)>>,
     /// The bodies of the entries built since they were last taken, for their own call sites.
     new_bodies: Vec<ExprId>,
+    /// Each checked expression a default was copied from, with its copy in an entry.
+    clones: Vec<(ExprId, ExprId)>,
 }
 
 impl Entries {
@@ -76,7 +82,7 @@ impl Entries {
             return built.and_then(|(entry, built_form)| (built_form == form).then_some(entry));
         }
         let built = forward(ir, declaration, form).map(|forward| {
-            let entry = build(ir, declaration, forward);
+            let entry = build(ir, declaration, forward, &mut self.clones);
             self.new_bodies.push(
                 ir.functions[entry as usize]
                     .body
@@ -90,6 +96,11 @@ impl Entries {
 
     pub(super) fn take_new_bodies(&mut self) -> Vec<ExprId> {
         std::mem::take(&mut self.new_bodies)
+    }
+
+    /// Each checked expression a default was copied from, with its copy, in the order copied.
+    pub(super) fn clones(&self) -> &[(ExprId, ExprId)] {
+        &self.clones
     }
 }
 
@@ -168,7 +179,12 @@ fn forward(ir: &IrFile, declaration: FunId, form: Option<StaticForm>) -> Option<
     })
 }
 
-fn build(ir: &mut IrFile, declaration: FunId, forward: Forward) -> FunId {
+fn build(
+    ir: &mut IrFile,
+    declaration: FunId,
+    forward: Forward,
+    clones: &mut Vec<(ExprId, ExprId)>,
+) -> FunId {
     let function = &ir.functions[declaration as usize];
     let name = format!("{}$default", function.name);
     let parameters = function.params.clone();
@@ -187,7 +203,10 @@ fn build(ir: &mut IrFile, declaration: FunId, forward: Forward) -> FunId {
     let mut fills = Vec::new();
     for (ordinal, default) in defaults.iter().enumerate() {
         let Some(default) = *default else { continue };
-        let (value, _) = crate::ir::clone_expression_dag(ir, default);
+        let (value, copied) = crate::ir::clone_expression_dag(ir, default);
+        let mut copied = copied.into_iter().collect::<Vec<_>>();
+        copied.sort_unstable();
+        clones.extend(copied);
         // The default's own locals move above the mask parameters.
         crate::ir::shift_value_indices(ir, value, frame_end, shift);
         let mask_slot = u32::try_from(frame + ordinal / 32).expect("too many parameters");

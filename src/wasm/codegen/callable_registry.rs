@@ -880,7 +880,10 @@ mod tests {
             args: Vec::new(),
         });
         caller.add_fun(function("box", Some(call)));
-        crate::backend::default_arguments::realize(&mut caller);
+        crate::backend::default_arguments::realize(
+            &mut caller,
+            &mut crate::backend::CheckedBackendCallables::default(),
+        );
         let calls = registry
             .file_calls(&caller, &CheckedBackendCallables::default(), &mut wasm)
             .expect("the inherited provider reserves its exact entry");
@@ -912,7 +915,10 @@ mod tests {
             Some(crate::fir::ResolvedFunctionOverrideTarget::Module(provider));
         declaration.fn_params.insert(function, parameters);
 
-        crate::backend::default_arguments::realize(&mut declaration);
+        crate::backend::default_arguments::realize(
+            &mut declaration,
+            &mut crate::backend::CheckedBackendCallables::default(),
+        );
         let entry = declaration.default_entries[&function];
         let functions = registry
             .declare_file(&declaration, &mut wasm)

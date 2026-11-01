@@ -187,7 +187,7 @@ fn a_published_entry_takes_the_frame_and_one_mask_word_per_32_parameters() {
     ir.checked_callable_functions
         .insert(CallableId::from_raw(4), function);
 
-    realize(&mut ir);
+    realize(&mut ir, &mut CheckedBackendCallables::default());
 
     let entry = ir.default_entries[&function];
     assert_eq!(ir.default_entries.len(), 1);
@@ -252,7 +252,7 @@ fn a_default_reads_an_earlier_parameter_and_its_own_locals_move_past_the_masks()
     });
     let caller = declare(&mut ir, "caller", Vec::new(), Ty::Int, Some(call), None);
 
-    realize(&mut ir);
+    realize(&mut ir, &mut CheckedBackendCallables::default());
 
     let entry = ir.default_entries[&function];
     assert_eq!(
@@ -301,7 +301,7 @@ fn a_call_site_passes_every_parameter_and_constant_mask_words() {
     });
     let caller = declare(&mut ir, "caller", Vec::new(), Ty::Unit, Some(call), None);
 
-    realize(&mut ir);
+    realize(&mut ir, &mut CheckedBackendCallables::default());
 
     let entry = ir.default_entries[&function];
     let mut expected = vec!["0".to_owned(), "absent Int".to_owned()];
@@ -357,7 +357,7 @@ fn a_member_entry_takes_the_receiver_and_dispatches_through_the_method() {
         None,
     );
 
-    realize(&mut ir);
+    realize(&mut ir, &mut CheckedBackendCallables::default());
 
     let entry = ir.default_entries[&function];
     let declaration = &ir.functions[entry as usize];
@@ -410,7 +410,7 @@ fn a_value_class_member_entry_calls_the_member_directly() {
         None,
     );
 
-    realize(&mut ir);
+    realize(&mut ir, &mut CheckedBackendCallables::default());
 
     let entry = ir.default_entries[&function];
     assert_eq!(
@@ -475,7 +475,7 @@ fn an_inherited_default_calls_the_entry_of_its_provider_in_this_file() {
         None,
     );
 
-    realize(&mut ir);
+    realize(&mut ir, &mut CheckedBackendCallables::default());
 
     assert_eq!(ir.default_entries.len(), 1);
     let entry = ir.default_entries[&provider];
@@ -534,7 +534,7 @@ fn an_override_narrowing_its_providers_result_coerces_the_entry_value() {
         None,
     );
 
-    realize(&mut ir);
+    realize(&mut ir, &mut CheckedBackendCallables::default());
 
     let entry = ir.default_entries[&provider];
     assert_eq!(ir.functions[entry as usize].ret, formal);
@@ -580,7 +580,7 @@ fn an_actual_entry_is_keyed_by_its_expect_and_calls_the_actual() {
     });
     let caller = declare(&mut ir, "caller", Vec::new(), Ty::String, Some(call), None);
 
-    realize(&mut ir);
+    realize(&mut ir, &mut CheckedBackendCallables::default());
 
     let entry = ir.default_entries[&function];
     assert_eq!(published_identities(&ir, function), [expect]);
@@ -700,9 +700,114 @@ fn shapes_this_lowering_cannot_realize_keep_their_checked_form() {
     let before = format!("{:?}", ir.exprs);
     let functions = ir.functions.len();
 
-    realize(&mut ir);
+    realize(&mut ir, &mut CheckedBackendCallables::default());
 
     assert_eq!(format!("{:?}", ir.exprs), before);
     assert_eq!(ir.functions.len(), functions);
     assert!(ir.default_entries.is_empty());
+}
+
+/// Answers one dependency member of a singleton, as a provider publishes it.
+struct SingletonMember(crate::fir::ExternalCallableId);
+
+impl crate::symbol_source::SymbolSource for SingletonMember {
+    fn external_callable(
+        &self,
+        identity: crate::fir::ExternalCallableId,
+    ) -> Option<crate::libraries::ExternalCallableRealization> {
+        (identity == self.0).then(|| crate::libraries::ExternalCallableRealization {
+            callable: crate::libraries::LibraryCallable::library(
+                type_name("dep/Registry"),
+                "next",
+                Vec::new(),
+                Ty::Int,
+                Ty::Int,
+                "()I",
+            ),
+            kind: crate::libraries::ExternalCallableKind::Member,
+            declaration_owner: None,
+            parameter_identities: Box::new([]),
+            declaration_signature: None,
+            dependency_callable: None,
+            direct_c_function: None,
+            klib_body_companion_receiver: None,
+            klib_body_type_parameters: Box::new([]),
+            klib_body_declaration_modifiers: None,
+            klib_body_class_contract: None,
+            klib_body_accessor: None,
+            klib_body_vararg_index: None,
+            klib_body_parameter_defaults: None,
+        })
+    }
+}
+
+#[test]
+fn an_entry_keeps_the_checked_facts_frozen_for_its_defaults() {
+    let mut ir = IrFile::default();
+    let target = crate::fir::ExternalCallableId::from_raw(9);
+    let registry = type_name("dep/Registry");
+    let unit = ir.add_expr(IrExpr::Block {
+        stmts: Vec::new(),
+        value: None,
+    });
+    let function = declare(&mut ir, "take", vec![Ty::Int], Ty::Unit, Some(unit), None);
+    // `fun take(id: Int = Registry.next())`, whose receiver the dependency erases.
+    let next = ir.add_expr(IrExpr::Call {
+        callee: Box::new(Callee::External {
+            target,
+            default_provider: None,
+            params: Vec::new(),
+            ret: Ty::Int,
+            substitutions: Vec::new(),
+            defaults: Vec::new(),
+            extension_receiver_parameter: None,
+        }),
+        dispatch_receiver: None,
+        args: Vec::new(),
+    });
+    ir.external_singleton_dispatches.insert(next, registry);
+    with_defaults(&mut ir, function, vec![Some(next)]);
+    ir.checked_callable_functions
+        .insert(CallableId::from_raw(4), function);
+    let mut facts = CheckedBackendCallables::freeze(&ir, &SingletonMember(target))
+        .expect("the selected dependency member has a frozen fact");
+
+    realize(&mut ir, &mut facts);
+
+    let entry = ir.default_entries[&function];
+    assert_eq!(ir.default_entries.len(), 1);
+    assert_eq!(ir.functions[entry as usize].params, vec![Ty::Int, Ty::Int]);
+    let IrExpr::Block { stmts, value } = ir.expr(ir.functions[entry as usize].body.unwrap()) else {
+        panic!("an entry body is a block");
+    };
+    assert_eq!(stmts.len(), 1);
+    assert_eq!(
+        render(&ir, value.expect("the entry calls the declaration")),
+        format!("fun{function}($0)")
+    );
+    let IrExpr::When { branches } = ir.expr(stmts[0]) else {
+        panic!("a fill is guarded by its mask bit");
+    };
+    assert_eq!(branches.len(), 1);
+    let (condition, fill) = branches[0];
+    assert_eq!(
+        render(&ir, condition.expect("a guarded fill")),
+        "(($1 BitAnd 1) Ne 0)"
+    );
+    let IrExpr::SetValue {
+        var: 0,
+        value: call,
+    } = *ir.expr(fill)
+    else {
+        panic!("a fill sets the omitted parameter's slot");
+    };
+    // The entry evaluates a copy of the checked call, which carries the original's frozen
+    // singleton dispatch; the declaration's own default keeps it as well.
+    assert_ne!(call, next);
+    assert_eq!(render(&ir, call), render(&ir, next));
+    let dispatch = Some(crate::libraries::SingletonDispatch {
+        classifier: registry,
+    });
+    assert_eq!(facts.singleton_dispatch(call), dispatch);
+    assert_eq!(facts.singleton_dispatch(next), dispatch);
 }
