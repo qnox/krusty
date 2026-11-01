@@ -44,7 +44,10 @@ pub use module_facts::{
     BackendClassifierFact, BackendClassifierSource, BackendFactError, BackendModuleFacts,
     CheckedBackendClassifiers, EnumEntriesAccessor, UndeterminedType,
 };
-pub use source_class_members::{SourceClassMembers, SourceFunctionSignature, SourceMemberFunction};
+pub use source_class_members::{
+    SourceClassMembers, SourceFunctionSignature, SourceMemberFunction, SourceMemberProperty,
+    SourcePropertyReceivers,
+};
 
 use crate::compilation_target::CompilationTarget;
 use crate::diag::DiagSink;
