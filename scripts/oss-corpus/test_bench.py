@@ -151,7 +151,7 @@ class Session(unittest.TestCase):
 
 
 class Report(unittest.TestCase):
-    def test_the_report_takes_medians_of_time_and_the_highest_peak_memory(self):
+    def test_the_report_takes_medians_and_peaks_of_successful_runs_and_no_figures_from_a_failed_session(self):
         def run(wall, rss):
             kinds = dict(total=rss, gradle=rss, kotlin_daemon=0, krusty=0, other=0)
             return dict(exit=0, wall_seconds=wall, compile_seconds=wall / 2, peak_rss_mb=kinds,
@@ -161,6 +161,8 @@ class Report(unittest.TestCase):
             write(f'{work}/p/plan.json', json.dumps(dict(tasks=[':a:compileKotlin'], compilations=3, edit='A.kt')))
             runs = dict(clean=[run(3, 100), run(1, 300), run(2, 200)], body=[run(1, 10)], abi=[])
             write(f'{work}/p/kotlinc.json', json.dumps(dict(mode='kotlinc', runs=runs, error=None)))
+            failed = dict(clean=[run(1, 50)], body=[dict(run(0.5, 40), exit=1)], abi=[])
+            write(f'{work}/p/krusty.json', json.dumps(dict(mode='krusty', runs=failed, error='krusty body build 1 exited 1')))
             subprocess.run([sys.executable, os.path.join(HERE, 'bench.py'), 'report', work, 'p'],
                            check=True, stdout=subprocess.DEVNULL)
             result = json.loads(read(f'{work}/p.json'))
@@ -168,7 +170,9 @@ class Report(unittest.TestCase):
         self.assertEqual((clean['runs'], clean['wall_seconds'], clean['wall_seconds_range'], clean['compile_seconds'],
                           clean['peak_rss_mb']), (3, 2, [1, 3], 1, 300))
         self.assertIsNone(result['modes']['kotlinc']['abi'])
-        self.assertEqual(result['modes']['krusty'], dict(error='not run'))
+        self.assertEqual(result['modes']['krusty'], dict(error='krusty body build 1 exited 1',
+                                                         clean=None, body=None, abi=None))
+        self.assertIsNone(bench.stats([dict(run(1, 10), exit=1)]))
 
 
 if __name__ == '__main__':

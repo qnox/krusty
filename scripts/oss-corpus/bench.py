@@ -255,7 +255,8 @@ def session(plan_path, mode, out, gradle_args):
 # --- report ---------------------------------------------------------------------------------------
 
 def stats(runs):
-    """The median wall and compile time and the highest peak memory of a scenario's runs."""
+    """The median wall and compile time and the highest peak memory of a scenario's successful runs."""
+    runs = [r for r in runs if r['exit'] == 0]
     if not runs:
         return None
     return dict(runs=len(runs),
@@ -282,7 +283,10 @@ def report(bench, name):
         if doc is None:
             modes[mode] = dict(error='not run')
             continue
-        modes[mode] = dict(error=doc['error'], **{s: stats(doc['runs'][s]) for s in SCENARIOS})
+        # A failed session reports no figures: its completed scenarios ran against a compiler that
+        # then failed, and a partial set of numbers must not read as that compiler's result.
+        modes[mode] = dict(error=doc['error'],
+                           **{s: None if doc['error'] else stats(doc['runs'][s]) for s in SCENARIOS})
     result = dict(project=name, tasks=plan_doc.get('tasks', []), compilations=plan_doc.get('compilations'),
                   edit=plan_doc.get('edit'), modes=modes)
     with open(os.path.join(bench, name + '.json'), 'w') as f:
@@ -300,7 +304,7 @@ def report(bench, name):
                 print(f'| {scenario} | {mode} | {s["wall_seconds"]} s | {s["compile_seconds"]} s '
                       f'| {s["peak_rss_mb"]} MB | {s["resident_after_mb"]} MB |')
             else:
-                print(f'| {scenario} | {mode} | {modes[mode]["error"] or "-"} | | | |')
+                print(f'| {scenario} | {mode} | failed: {modes[mode]["error"]} | | | |')
 
 
 def main():
