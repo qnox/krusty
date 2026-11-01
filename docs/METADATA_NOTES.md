@@ -1,5 +1,45 @@
 # `@kotlin.Metadata` — reverse-engineering notes (Phase 4b)
 
+## Declared class receivers and checked member applications
+
+Source KLIB method exports retain the complete declared self application recorded during FIR
+lowering, in the checker's own-and-captured parameter order, including captured-only inner classes.
+The exported receiver and parameters keep declaration-owned formals. A dependent checked call
+already carries its applied parameter/result types, including applications selected through an
+inherited receiver. The common dependency-signature boundary consumes those types for
+class-dependent slots while authenticating fixed types and callable type-argument records.
+This preserves one declared ABI for distinct Int, String, Long and nullable applications.
+
+## Classpath annotation query boundary
+
+`declaration_annotations` borrows the existing classpath for exact selected-method and all-method
+annotation queries. `class_entry_bytes` retains first-entry precedence and the existing directory
+`this_class` check, with the same archive, jimage and ct.sym reads. Neither collaborator creates a
+cache or changes metadata authority. Parsed class/field annotations stay with `ClassInfo`/`FieldSig`;
+classreader decodes arguments and JVM providers interpret them. No annotation interpretation or
+new lookup enters core or lowering.
+
+## Annotation classifier kind and JVM dispatch
+
+The JVM annotation realizer retains the exact declared interface in the generated carrier's
+`annotation_impl_of` identity. A fresh allocation exposes that representation to its consumer;
+reading a declared annotation parameter keeps the parameter's own slot contract. Existing selected
+Any-method roles and that construction evidence own interface dispatch and receiver materialization,
+without member spelling, generated-name checks, metadata changes or common semantic selection.
+
+Synthetic annotation method headers reserve their existing enabled nullability descriptors before
+body constants. Constructor parameter and equals annotations retain their payloads; shared toString
+finalization applies the same return contract to memberless implementations. The existing release
+policy and class-writer annotation filter own both reservation and attachment.
+
+## Native bound-receiver physical storage
+
+The common callable-reference record owns the bound-receiver capture coordinate. Native emission
+uses that coordinate to choose semantic object storage, even when a primitive or value class has
+an unboxed invocation carrier. Stored types and offsets jointly own the GC map and thunk loads.
+This representation choice changes no declaration identity, metadata or source-level type, and
+does not reconstruct receiver roles from a capture's spelling or machine carrier.
+
 ## Null-pointer exception storage
 
 The platform NullPointerException declaration carries the existing runtime-exception storage role.
@@ -147,12 +187,28 @@ raw qualified class name even though no physical classfile exists. Retain its pa
 exact segment before name-tree normalization, then publish that fact with the annotation shape.
 This preserves literal-dollar and nested names across separate metadata snapshots.
 
+## Closed annotation array operands
+
+Checked spreads and named whole-array operands contribute their elements to one annotation array
+payload. Both classfile annotation attributes and Kotlin metadata consume that same flattened value;
+ordinary operands remain individual elements. The recorded argument role owns this distinction.
+
 ## Serialization constructor handoff
 
 The serialization constructor's `named_params` retain nullable reference elements and the nullable
 serialization marker independently of the erased constructor parameter vector. The handoff test
 checks both exact vectors; the generated owner is also compared byte-for-byte with the matching
 official serialization plugin. This updates test coverage without changing metadata encoding.
+
+## Operand-holder physical reservation
+
+Common IR distinguishes an argument-evaluation holder from an expanded parameter or capture by
+semantic purpose, including through expression cloning and formal-receiver adoption. The JVM frame
+reserves an argument-order holder before its initializer uses scratch storage. Expanded formal
+bindings retain their existing timing. The holder keeps its CallOperand identity, while its semantic binding
+is published at the store. Before assignment, frame snapshots see the unpublished reservation as
+Top. Debug-local lifetimes still begin after the store; checked types, parameter metadata, argument
+evaluation order and the compiler/plugin wire model are unchanged.
 
 ## Anonymous superclass argument bindings
 
@@ -182,10 +238,14 @@ ordinary result denotability does not introduce a separate checking context.
 Parent templates are the same alias-expanded compact facts later published in classifier headers;
 metadata and anonymous exposure do not reconstruct arguments from transitional collector shapes.
 
-Complete anonymous-class metadata parity remains tracked by #2653 (own versus lexical-capture
-applications) and #2654 (package-local classifier facts and raw payloads). Their unchanged complete
-fixture oracles remain attached to those issues; ABI publication checks do not establish metadata
-payload parity.
+Package metadata retains the same authenticated local-classifier and enum-entry-body inventories as
+class metadata. Function and backing-field signature records use that locality evidence too: a
+reader cannot reconstruct a local classifier's physical JVM name from its metadata class ID.
+The original #2654 private-factory, explicitly typed getter and inferred-getter controls compare
+complete decoded and raw payloads; the inferred-getter and property-storage controls also compare
+the complete class ABI. Tests: `tests/facade_local_classifier_metadata_e2e.rs`.
+Own versus lexical-capture applications remain tracked by #2653 with its unchanged complete fixture
+oracles; ABI publication checks do not establish metadata payload parity.
 
 Layout reads use class headers and builtin declaration tables, not the enclosing `LibraryType` or
 its members. Physical mapped Java requests keep invariant formals independently of a Kotlin view's
@@ -247,6 +307,14 @@ dependency annotation payloads and preserves ordinary annotation defaults and en
 KLIB dependency-root classification retains authenticated intrinsic-support ownership independently
 of successful code emission. A declined wrapper does not become an ordinary body; its metadata and
 declaration identity remain unchanged, and ordinary roots retain their strict closure contracts.
+
+## Ordinary bottom-array values
+
+Finalized-expression array validity consumes already checked semantic types, including nested
+arguments, and changes no declaration or metadata layout. The class-literal feature policy remains
+separate; a suppressed bottom-array value retains its complete existing JVM method signature.
+JVM signature elements reuse the existing physical descriptor for `Nothing`, preventing a
+nonexistent `kotlin/Nothing` class from appearing in an otherwise nongeneric array signature.
 
 ## Constructor parameter annotation pool order
 
@@ -366,6 +434,11 @@ An interface's generated compatibility holder uses the shared `InnerClasses` ret
 for constant-pool publication. Its nesting relation and Kotlin metadata remain unchanged. Removing
 the earlier explicit class seed lets annotation-only references and declared children precede it
 when the ordinary table order requires that position.
+
+Equal qualified-name source rows use their retained declaration visitation order within the
+declaring writer's slots. Common lowering may evaluate a nested constructor operand first;
+that does not change the table's declaration order. Final pool relayout preserves this source
+order while retaining pool movement for generated and referenced rows and ancestor constraints.
 
 ## Module file — part ordering
 
@@ -1322,6 +1395,13 @@ JVM annotation interfaces use the same retained `InnerClasses` inventory as othe
 classifiers. Declared children and enclosing rows remain discoverable without a method or element
 referencing them. This changes the JVM class table, not Kotlin metadata or annotation values.
 
+## Declaration-result source provenance
+
+Declaration-result conversions retain the checked source position on their original producer and
+selected operand-bound call. Existing positions, return endpoints and inline origins remain intact;
+zero source positions stay absent. This is common debug provenance for target emission and changes
+neither semantic substitution nor a metadata wire format.
+
 ## Initializer inline debug ranges
 
 Class-initializer entry establishes the implicit callable frame. Initializer expressions record
@@ -1336,6 +1416,14 @@ Provider-normalized function classifiers supply their declared generic supertype
 subtype relation. A typed function signature supplies its canonical classifier application, and
 the hierarchy walk checks the nominal value against that application. Reflective function types
 retain their nominal identity; no new metadata payload or physical JVM descriptor is introduced.
+
+## Generated constructor-default source marks
+
+The JVM class writer clears constructor line tables before the owning emitter publishes its
+curation. Default-stub emission always supplies its recorded expression marks, including an empty
+set when no source positions exist. A zero owner declaration line suppresses entry/closing marks
+without discarding retained default-expression lines. Kotlin metadata and default payloads are
+unchanged; complete class artifacts pin the resulting debug attributes and constant-pool order.
 
 ## Superclass-argument receiver availability
 
@@ -1371,6 +1459,25 @@ checked lowering/type facts as super-argument disposition. Existing lexical capt
 shared-cell decisions and FIR constructor-prefix coordinates supply the resulting fields and
 closure parameters. No metadata naming, new capture identity or backend recovery is introduced.
 
+## Anonymous superclass closure capture ownership
+
+Constructor-use inventory distinguishes candidate storage discovery from checked publication.
+Ordinary lambda arguments use the existing construction-site forwarding record, preserving the
+caller's lexical owner and source lifting provenance. Their synthetic constructor input is the
+whole selected function value. Final retained-closure admission also checks the declaration-owned
+argument-slot/vararg mapping: the current packing path still needs prefix captures for vararg
+contributions. Existing lexical identities, shared-cell decisions and receiver provenance supply
+closure inputs. No source lookup, invented capture identity or JVM method reparenting is added.
+Anonymous constructor headers also publish receiver-coordinate projections authenticated by the
+existing receiver declaration roles. Checked FIR activates only the constructor frames omitted by
+an actual forward, in inner-to-outer order; constructor-resident closures keep their header frame.
+Receiver-use journals retain exact source sites. Capture retention and ordering exclude the current
+class's checked forwarded roots; diagnostic uses remain recorded. Nested constructions inside those
+roots reconnect to the original caller operands while retaining their class-body receiver coordinates.
+The nested setter's checked write names the original property and matches its lexical receiver
+capture; an anonymous constructor-prefix read is not a substitute for that caller-owned binding.
+This strengthens the ownership regression without changing metadata or the capture inventory.
+
 ## Serialized getter declaration contracts
 
 KLIB normalization tags a getter or setter from its actual property slot, retaining the property's
@@ -1382,6 +1489,14 @@ Declared getter results remain distinct from the checked read's applied result. 
 leaf capability reuses its existing accessor signature plans and does not import property bodies
 or reconstruct class storage. No metadata wire format changes.
 
+## Compound member singleton identity
+
+Checked FIR already records singleton declaration identity in `SingletonValue`. Compound member
+updates reuse that identity through `CompoundMemberReceiver::StableRead`, preserving the selected
+getter/setter and source facts. Repeated reads initialize the same declaration once; runtime calls
+and mutable receiver reads remain explicit snapshots. No metadata payload or compiler/plugin wire
+field changes are needed. Full raw JVM artifacts pin the eliminated receiver-local storage.
+
 ## Applied member input declarations
 
 `FunctionInfo` retains a common declaration-input facet before nominal specialization: the raw
@@ -1390,6 +1505,55 @@ inner constructors and checked body-local methods preserve the same evidence. Su
 the existing logical continuation normalization. Applied callable/physical parameter vectors keep
 their existing ABI and packing roles; the facet does not add class formals to callable arity.
 
+## Wasm constructor-prefix roles
+
+Wasm constructor admission consumes `IrCtorArg`'s forwarded-super ordinal and parameter provenance
+separately from the total constructor-prefix count. Only field-free ordinary forwards are admitted
+by this extension; source metadata and capture storage retain their existing contracts.
+
+## Receiver binding and safe-cast storage
+
+Checked receiver coordinates and declaration paths authenticate own receiver parameters and lifted
+receiver captures. Common lowering publishes their immutable binding-read fact on the resulting
+`GetValue`; it does not infer stability from a slot number or the referenced object's mutability.
+The existing cloning contract carries that fact. Shared-cell reads remain mutable semantic values.
+For a marked safe-cast snapshot only, the JVM retains a reference cell's erased element slot through
+the type test; source locals, primitive cells and semantic metadata keep their original types.
+`implicit_receiver_stability_e2e` checks complete class inventories and bytes against Kotlin, then
+compares execution of the same whole programs. No metadata wire format or capture ABI changes.
+
+## Package property annotation records
+
+Package property annotation presence follows checked PROPERTY/FIELD destinations. Getter, setter
+and setter-parameter applications keep independent accessor flags; their source prefix does not
+make the property's own metadata annotated. Optional expectations and SOURCE retention keep the
+same policy as each checked declaration partition.
+
+SOURCE presence survives independently of its dropped payload and false metadata annotation bit;
+an erased optional expectation gains no source carrier. JVM property markers consume that retained
+presence. An annotated default setter writes its value-parameter metadata like a class property's
+setter, and parameter annotation payloads intern before the physical method body.
+
+Package properties retain checked PROPERTY and FIELD payloads under their stable property identity;
+metadata uses the same declaration flag/record model as class properties. JVM records use fields
+14 and 34; KLIB records use 170 and 181. Accessor strings intern before the property records. KLIB
+file extensions intern before annotation records, while constant payloads intern afterward. The
+official Native property-message golden includes both integral and string constants to retain this
+ordering independently of JVM marker realization.
+
+## Annotation argument order
+
+An applied annotation retains declaration-ordered element values and the checker's written indices
+separately. The shared metadata encoder emits written values first and any materialized unwritten
+values afterward, recursively through nested annotations and arrays. A provider or generated
+application without source provenance keeps its stored order. JVM annotation attributes continue
+to use the declaration-ordered values. The complete annotation-order fixture covers declaration,
+constructor, function, parameter and property metadata alongside grouped and explicit vararg arrays.
+Method parameter annotation payloads intern at the JVM header boundary before body constants,
+with all visible parameters before invisible parameters and their nullability annotations.
+The parameter-payload oracle compares the entire module, including ordinary members, static
+companion forwards and interface compatibility holders with mixed retentions and nested values.
+
 ## Serialized Elvis provenance
 
 An `ELVIS` block supplies an immutable compiler variable followed by a two-branch conditional
@@ -1397,3 +1561,24 @@ without its own origin. The selected equality signature and both reads must name
 temporary/null proof; names never correlate these declarations. Declared temporary storage remains
 separate from the present branch's proven type. Common IR retains Elvis provenance with the absent
 source-line sentinel; no synthetic source line or metadata wire change is introduced.
+
+## Unsigned constant value messages
+
+`annotation_value_pb` writes field 10 = 1 for the four unsigned `IrConst` variants. The kind remains
+BYTE, SHORT, INT or LONG and `int_value` remains the zigzag encoding of its signed carrier, including
+high-bit values. Signed constants have no flags field. Recursive annotation and array values use
+the same encoder. The complete compile-time-value messages of the pinned official Native producer
+are the byte oracle; this does not infer unsigned identity when an earlier semantic model lost it.
+
+## Checked unsigned annotation identity
+
+The common annotation value model retains all four unsigned widths. Checked source literals and
+constant references publish those values; the latter interpret bits using the constant's semantic
+type before applying the declared element width. Common IR keeps the matching unsigned constant.
+The metadata type-annotation adapter accepts exactly `IS_UNSIGNED` on BYTE, SHORT, INT and LONG
+with valid signed carriers, and rejects other flags and incompatible kinds.
+
+KSP protocol 16 transports four unsigned value tags. Its JVM adapter boxes their declared carriers
+as Kotlin unsigned wrapper objects, matching KSP2's runtime classes and full values. The class
+reader and build ABI fingerprint remain physical JVM contracts. Raw dependency annotation-default
+normalization remains a declaration-type-owned provider follow-up.

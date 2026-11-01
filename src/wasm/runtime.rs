@@ -23,6 +23,7 @@ use super::encode::{
     BlockType, Code, CompositeType, FieldType, Function, HeapType, Module, StorageType, ValType,
 };
 use super::exception_transport::ExceptionTransport;
+use super::function_values::FunctionShapes;
 use super::host::Host;
 use super::objects::ObjectRoot;
 
@@ -55,6 +56,8 @@ pub(super) struct Runtime {
     pub(super) exceptions: ExceptionTransport,
     /// The box types of the primitives this module carries as references.
     pub(super) boxes: Boxes,
+    /// The table types of the function values this module creates.
+    pub(super) functions: FunctionShapes,
     /// Offsets of string constants already in the data segment.
     constants: HashMap<Vec<u16>, u32>,
 }
@@ -115,6 +118,7 @@ impl Runtime {
             objects,
             exceptions,
             boxes: Boxes::default(),
+            functions: FunctionShapes::default(),
             constants: HashMap::default(),
         };
         runtime.define_string_equals(module);
