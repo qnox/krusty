@@ -1,10 +1,11 @@
 //! Which classes a class's descriptors and generic signatures name, for `InnerClasses`.
 //!
 //! kotlinc lists a nested class in `InnerClasses` whenever the class it writes names it in a type
-//! position: a class constant, a declared field or method descriptor, a callee's descriptor, or a
-//! generic `Signature`. A dependency's nested class seen only in such a position (a parameter of
-//! type `Map.Entry`, a callee returning `Thread.State`, a `List<Map.Entry<K, V>>` signature) still
-//! gets its row, so the resolver is offered every class those positions name.
+//! position: a class constant, a declared field or method descriptor, a callee's descriptor, a
+//! local variable's descriptor, or a generic `Signature`. A dependency's nested class seen only in
+//! such a position (a parameter of type `Map.Entry`, a callee returning `Thread.State`, a
+//! `List<Map.Entry<K, V>>` signature) still gets its row, so the resolver is offered every class
+//! those positions name.
 
 use super::ClassWriter;
 
@@ -234,6 +235,13 @@ impl ClassWriter {
                     classes.insert(class.to_string());
                 });
             }
+        }
+        // A local variable's type is mapped where the class's own code declares it.
+        for value in self.members.local_types() {
+            record_mentioned_names(value, &mut names);
+            record_signature_classes(value, &mut |class| {
+                classes.insert(class.to_string());
+            });
         }
         self.cp
             .record_typed_descriptor_names(&self.copied_only_name_and_types(), &mut |value| {
