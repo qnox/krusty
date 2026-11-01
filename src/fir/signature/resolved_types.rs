@@ -119,6 +119,12 @@ mod tests {
                 "kotlin/collections/Map",
                 &[Ty::String, Ty::fun(Vec::new(), variable())],
             ),
+            Ty::ty_param("OuterT", variable()),
+            Ty::obj_args(
+                "kotlin/collections/List",
+                &[Ty::ty_param("OuterT", Ty::nullable(variable()))],
+            ),
+            Ty::ty_param("OuterT", Ty::ty_param("InnerT", variable())),
         ] {
             assert_eq!(ResolvedTy::new(ty), Err(rejected), "{ty:?}");
         }
@@ -137,11 +143,13 @@ mod tests {
     fn declaration_type_parameters_and_solved_calls_publish() {
         let declared = Ty::ty_param("T", Ty::nullable(Ty::obj("kotlin/Any")));
         let list_of_declared = Ty::obj_args("kotlin/collections/List", &[declared]);
-        assert_eq!(ResolvedTy::new(declared).map(ResolvedTy::get), Ok(declared));
-        assert_eq!(
-            ResolvedTy::new(list_of_declared).map(ResolvedTy::get),
-            Ok(list_of_declared)
-        );
+        let bounded_by_declared = Ty::ty_param("R", Ty::obj_args("kotlin/Comparable", &[declared]));
+        for published in [declared, list_of_declared, bounded_by_declared] {
+            assert_eq!(
+                ResolvedTy::new(published).map(ResolvedTy::get),
+                Ok(published)
+            );
+        }
 
         let unsolved = Ty::obj_args("kotlin/collections/List", &[variable()]);
         let solved = ty_subst(

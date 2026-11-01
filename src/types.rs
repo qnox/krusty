@@ -1156,13 +1156,20 @@ impl Ty {
         self.mentions_marker(&|ty| ty == Ty::Error)
     }
 
-    /// Whether a call's inference variable occurs anywhere inside this type.
+    /// Whether a call's inference variable occurs anywhere inside this type, including inside the
+    /// bound a type parameter carries.
     ///
     /// A variable belongs to the solver of the call that introduced it, so it is a third way a type
     /// can still be undetermined. Publication boundaries reject it rather than reading it as its
-    /// bound: the bound is a constraint on the eventual answer, not the answer.
+    /// bound: the bound is a constraint on the eventual answer, not the answer. A type parameter's
+    /// bound travels with the parameter into every later phase, so a variable stored there leaks
+    /// exactly as one written in the type itself.
     pub fn mentions_type_variable(self) -> bool {
-        self.mentions_marker(&|ty| matches!(ty.kind(), TyKind::Var(..)))
+        self.mentions_marker(&|ty| match ty.kind() {
+            TyKind::Var(..) => true,
+            TyKind::TyParam(_, bound) => bound.mentions_type_variable(),
+            _ => false,
+        })
     }
 
     /// The containment walk all three questions share: the type itself, a nullability/projection wrapper's

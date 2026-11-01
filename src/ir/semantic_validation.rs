@@ -965,6 +965,11 @@ mod tests {
             Ty::fun(vec![Ty::Int], inference_variable()),
             Ty::obj_args("kotlin/collections/List", &[inference_variable()]),
             Ty::type_variable(crate::types::TyParamName::new("\0call:R"), Ty::String),
+            Ty::ty_param("OuterT", inference_variable()),
+            Ty::obj_args(
+                "kotlin/collections/List",
+                &[Ty::ty_param("OuterT", inference_variable())],
+            ),
         ] {
             assert_eq!(
                 function_with_parameter(parameter).validate_determined_types(),
@@ -989,6 +994,7 @@ mod tests {
         for parameter in [
             declared,
             Ty::obj_args("kotlin/collections/List", &[declared]),
+            Ty::ty_param("R", Ty::obj_args("kotlin/Comparable", &[declared])),
             solved,
         ] {
             assert_eq!(
