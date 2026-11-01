@@ -10662,16 +10662,8 @@ fn unify_member_extension_slot(
     }
 }
 
-fn apply_inference_bindings(mut ty: Ty, bindings: &crate::symbol_resolver::GSigBinds) -> Ty {
-    let mut seen = crate::fx_hash::HashSet::default();
-    while seen.insert(ty) {
-        let next = crate::symbol_resolver::ty_subst_keep_unbound(ty, bindings);
-        if next == ty {
-            break;
-        }
-        ty = next;
-    }
-    ty
+fn apply_inference_bindings(ty: Ty, bindings: &crate::symbol_resolver::GSigBinds) -> Ty {
+    crate::types::ty_subst_keep_unbound_closed(ty, bindings)
 }
 
 impl<'a> Checker<'a> {
