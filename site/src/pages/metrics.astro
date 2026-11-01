@@ -30,6 +30,8 @@ const change = (kotlinc: number, krusty: number) => {
   return { text: delta === 0 ? "±0%" : `${delta > 0 ? "+" : "−"}${Math.abs(delta)}%`, worse: delta > 0 };
 };
 const newest = box?.versions[0];
+const comparableBuilds = (p: any) =>
+  p.referenceBuild === "ok" && p.built > 0 && p.notBuilt !== null && p.notBuilt.failed === 0 && p.notBuilt.notRun === 0;
 
 // The corpus run that measured the projects: one caption when they share it, per row otherwise.
 const measuredRuns = new Set((corpus?.projects ?? []).map((p) => p.measured?.run ?? ""));
@@ -260,7 +262,7 @@ const slot = plotW / Math.max(1, runs.length - 1);
       <div class="section-head">
         <p class="eyebrow">Time and memory</p>
         <h2>Build time and peak RSS</h2>
-        <p>The same two builds of each project, each alone on its own runner after a warm-up build, both offline from the same caches. Each cell shows krusty's build against kotlinc's: <span class="good">−40%</span> means 40% less. Whole-build wall time barely moves yet, because krusty builds only {corpus ? pct(corpus.total.built, corpus.total.compilations) : "a share"} of the compilations: kotlinc still compiles the rest in the krusty build, and Gradle's own work is the same in both. Compile time of what krusty built compares only the compilations krusty compiled itself. Compiler RSS is the Kotlin daemon's peak in the kotlinc build and krusty's in the other; where krusty built little, the Kotlin daemon still runs in the krusty build, so build RSS is the fairer memory figure.</p>
+        <p>The same two builds of each project, each alone on its own runner after a warm-up build, both offline from the same caches. Each cell shows krusty's build against kotlinc's: <span class="good">−40%</span> means 40% less. Whole builds are compared only where both did the same work: kotlinc's build succeeded and krusty's compiled something with no compilation failed or skipped; elsewhere one build stopped early or ran different tasks, so its numbers are shown but marked not comparable. Whole-build wall time barely moves yet, because krusty builds only {corpus ? pct(corpus.total.built, corpus.total.compilations) : "a share"} of the compilations: kotlinc still compiles the rest in the krusty build, and Gradle's own work is the same in both. Compile time of what krusty built compares only the compilations krusty compiled itself. Compiler RSS is the Kotlin daemon's peak in the kotlinc build and krusty's in the other; where krusty built little, the Kotlin daemon still runs in the krusty build, so build RSS is the fairer memory figure.</p>
       </div>
       {corpus ? (
         <div class="table-scroll">
@@ -273,17 +275,21 @@ const slot = plotW / Math.max(1, runs.length - 1);
                 const k = p.cost.kotlinc;
                 const r = p.cost.krusty;
                 if (!k || !r) return <tr><td>{p.name}</td><td colspan="4" class="na">not measured</td></tr>;
-                const cell = (kv: number, rv: number, unit: (v: number) => string) => {
-                  const c = change(kv, rv);
-                  return <td class="num">{c ? <span class={c.worse ? "bad" : "good"}>{c.text}</span> : <span class="na">—</span>}<div class="sub">{unit(kv)} → {unit(rv)}</div></td>;
+                // Two whole builds did the same work only when kotlinc's build succeeded and krusty's
+                // compiled something without failing a task or skipping one after a failure.
+                // Otherwise the builds are not comparable: their raw values stay, muted, with no change.
+                const sameWork = comparableBuilds(p);
+                const cell = (kv: number, rv: number, unit: (v: number) => string, comparable: boolean) => {
+                  const c = comparable ? change(kv, rv) : null;
+                  return <td class="num">{c ? <span class={c.worse ? "bad" : "good"}>{c.text}</span> : <span class="na">{comparable ? "—" : "not comparable"}</span>}<div class="sub">{unit(kv)} → {unit(rv)}</div></td>;
                 };
                 return (
                   <tr>
                     <td>{p.name}</td>
-                    {cell(k.wallSeconds, r.wallSeconds, seconds)}
-                    {cell(k.buildPeakRssMb, r.buildPeakRssMb, mb)}
-                    {p.built ? cell(k.builtCompileSeconds, r.builtCompileSeconds, seconds) : <td class="num na">nothing built</td>}
-                    {cell(k.compilerPeakRssMb, r.compilerPeakRssMb, mb)}
+                    {cell(k.wallSeconds, r.wallSeconds, seconds, sameWork)}
+                    {cell(k.buildPeakRssMb, r.buildPeakRssMb, mb, sameWork)}
+                    {p.built ? cell(k.builtCompileSeconds, r.builtCompileSeconds, seconds, true) : <td class="num na">nothing built</td>}
+                    {cell(k.compilerPeakRssMb, r.compilerPeakRssMb, mb, sameWork)}
                   </tr>
                 );
               })}
