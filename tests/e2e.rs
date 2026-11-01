@@ -287,6 +287,8 @@ mod callable_ref_generic_signature_e2e;
 mod callable_ref_to_inferred_member_e2e;
 #[path = "callable_ref_unresolved_e2e.rs"]
 mod callable_ref_unresolved_e2e;
+#[path = "callable_reference_misfit_e2e.rs"]
+mod callable_reference_misfit_e2e;
 #[path = "caller_type_param_receiver_e2e.rs"]
 mod caller_type_param_receiver_e2e;
 #[path = "cannot_infer_cascade_e2e.rs"]
@@ -497,6 +499,8 @@ mod classpath_value_class_builder_e2e;
 mod classpath_value_class_default_e2e;
 #[path = "classpath_value_class_member_e2e.rs"]
 mod classpath_value_class_member_e2e;
+#[path = "classpath_value_class_override_e2e.rs"]
+mod classpath_value_class_override_e2e;
 #[path = "classpath_value_class_param_e2e.rs"]
 mod classpath_value_class_param_e2e;
 #[path = "classpath_valueclass_param_ext_e2e.rs"]
@@ -3014,6 +3018,9 @@ mod intersection_bound_metadata_order_e2e;
 mod type_safe_override_call_e2e;
 #[path = "where_bound_arguments_e2e.rs"]
 mod where_bound_arguments_e2e;
+
+#[path = "immediate_lambda_invocation_e2e.rs"]
+mod immediate_lambda_invocation_e2e;
 
 #[path = "facade_local_classifier_metadata_e2e.rs"]
 mod facade_local_classifier_metadata_e2e;
