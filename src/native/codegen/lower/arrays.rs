@@ -164,9 +164,11 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
 
         // Elements first, then the allocation: an element that allocates must not leave a
         // half-built array for a collection to find. A SPREAD element is the array it spreads,
-        // which crosses as a reference whatever the elements are.
+        // which crosses as a reference whatever the elements are. Its elements are the ones it
+        // holds when it is evaluated, so a spread that a later element follows is copied there:
+        // the later element cannot change what it contributes.
         let mut values = Vec::with_capacity(elements.len());
-        for (value, spread) in elements.iter().zip(spreads) {
+        for (index, (value, spread)) in elements.iter().zip(spreads).enumerate() {
             let stored = if *spread { any() } else { shape.stored };
             let Some(value) = self.coerce(*value, stored)? else {
                 return Err("a `Unit` array element".into());
@@ -174,6 +176,11 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             if self.terminated {
                 return Ok(None);
             }
+            let value = if *spread && index + 1 < elements.len() {
+                self.snapshot_array(shape.descriptor, value)?
+            } else {
+                value
+            };
             values.push(value);
         }
         let descriptor = self.data_address(shape.descriptor);
@@ -242,6 +249,31 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
             at = self.builder.ins().iadd_imm_s(at, 1);
         }
         Ok(Some(array))
+    }
+
+    /// A new array of the `descriptor` type holding the elements `array` holds now.
+    fn snapshot_array(&mut self, descriptor: DataId, array: Value) -> Result<Value, Unsupported> {
+        let length = self
+            .builder
+            .ins()
+            .load(types::I32, trusted(), array, LENGTH);
+        let descriptor = self.data_address(descriptor);
+        let copy = self
+            .runtime_call(
+                "kt_array_new",
+                &[any(), Ty::Int],
+                any(),
+                &[descriptor, length],
+            )?
+            .expect("`kt_array_new` returns the array");
+        let start = self.builder.ins().iconst(types::I32, 0);
+        self.runtime_call(
+            "kt_array_copy_into",
+            &[any(), Ty::Int, any()],
+            Ty::Int,
+            &[copy, start, array],
+        )?;
+        Ok(copy)
     }
 
     /// Read one element. What comes out of memory is the ARRAY's element carrier, which is not
