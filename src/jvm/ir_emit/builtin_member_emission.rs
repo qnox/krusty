@@ -3,6 +3,16 @@
 use super::*;
 
 impl Emitter<'_> {
+    /// An `Array<T>` member, its own or inherited from `Any`, receives `[Ljava/lang/Object;`.
+    /// kotlinc coerces the dispatch receiver to that type, which casts an array of arrays, whose
+    /// dimensions differ.
+    pub(super) fn coerce_array_dispatch_receiver(&mut self, receiver: Ty, code: &mut CodeBuilder) {
+        if type_descriptor(receiver).starts_with("[[") {
+            let object_array = self.cw.class_ref("[Ljava/lang/Object;");
+            code.checkcast(object_array);
+        }
+    }
+
     pub(super) fn emit_builtin_member(
         &mut self,
         expression: crate::ir::ExprId,
@@ -14,12 +24,8 @@ impl Emitter<'_> {
         match operation {
             crate::ir::IrIntrinsic::ArraySize => {
                 self.emit_value(receiver, code);
-                // `Array<T>.size` receives `[Ljava/lang/Object;`. kotlinc coerces the receiver to
-                // that type, which casts an array of arrays, whose dimensions differ.
-                if type_descriptor(self.value_ty(receiver)).starts_with("[[") {
-                    let object_array = self.cw.class_ref("[Ljava/lang/Object;");
-                    code.checkcast(object_array);
-                }
+                self.coerce_array_dispatch_receiver(self.value_ty(receiver), code);
+                self.mark_intrinsic_instruction(expression, code);
                 code.arraylength();
             }
             crate::ir::IrIntrinsic::StringGet | crate::ir::IrIntrinsic::StringLength => {

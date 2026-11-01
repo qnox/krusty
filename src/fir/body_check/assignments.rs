@@ -200,9 +200,10 @@ impl BodyFirChecker<'_> {
     /// the block, including a prefix re-read after this write. A fresh local whose substitution
     /// is dropped at the end of the write would evaluate the receiver again on that re-read.
     ///
-    /// A read of an immutable binding is already its own snapshot: kotlinc's assignment desugaring
-    /// reuses an immutable `IrGetValue` receiver for both the get and the set instead of saving it
-    /// in a temporary, so the checked read itself becomes the substitution.
+    /// An immutable binding or a singleton declaration already has a stable receiver identity.
+    /// The member assignment reuses that checked read for its get and set; the first singleton
+    /// read still initializes the object before the right operand is evaluated. Index operands
+    /// retain their separately owned binding strategy.
     pub(super) fn bind_compound_member_receiver(
         &mut self,
         receiver: ExprId,
@@ -216,7 +217,14 @@ impl BodyFirChecker<'_> {
             return Ok(None);
         }
         let initializer = self.expression(receiver)?;
-        if self.is_immutable_binding_read(initializer) {
+        if self.is_immutable_binding_read(initializer)
+            || matches!(
+                self.body
+                    .expr(initializer)
+                    .map(|expression| &expression.kind),
+                Some(FirExprKind::SingletonValue { .. })
+            )
+        {
             self.expression_substitutions.insert(receiver, initializer);
             return Ok(Some(CompoundMemberReceiver::StableRead));
         }

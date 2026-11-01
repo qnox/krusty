@@ -1231,7 +1231,7 @@ pub fn assert_classes_identical_to_kotlinc_against(
     classes: &[&str],
     libraries: &[std::path::PathBuf],
 ) {
-    assert_classes_identical_to_kotlinc_full(stem, src, classes, libraries, false);
+    assert_classes_identical_to_kotlinc_full(stem, src, classes, libraries, libraries, false);
 }
 
 /// [`assert_classes_identical_to_kotlinc_against`] with the JDK modules on krusty's classpath.
@@ -1243,7 +1243,28 @@ pub fn assert_classes_identical_to_kotlinc_against_jdk(
     classes: &[&str],
     libraries: &[std::path::PathBuf],
 ) {
-    assert_classes_identical_to_kotlinc_full(stem, src, classes, libraries, true);
+    assert_classes_identical_to_kotlinc_full(stem, src, classes, libraries, libraries, true);
+}
+
+/// [`assert_classes_identical_to_kotlinc_against_jdk`] over a dependency each compiler built
+/// itself: kotlinc compiles `src` against `reference_libraries`, krusty against
+/// `krusty_libraries`. A consumer is then compared with what kotlinc writes over its own build of
+/// the dependency, not over krusty's.
+pub fn assert_classes_identical_to_kotlinc_over_own_libraries(
+    stem: &str,
+    src: &str,
+    classes: &[&str],
+    reference_libraries: &[std::path::PathBuf],
+    krusty_libraries: &[std::path::PathBuf],
+) {
+    assert_classes_identical_to_kotlinc_full(
+        stem,
+        src,
+        classes,
+        reference_libraries,
+        krusty_libraries,
+        true,
+    );
 }
 
 /// [`assert_classes_identical_to_kotlinc`] with the JDK modules beside the stdlib on the KRUSTY
@@ -1251,7 +1272,7 @@ pub fn assert_classes_identical_to_kotlinc_against_jdk(
 /// type (the `StringBuilder` typealias) does not resolve for krusty without them, while the
 /// reference kotlinc always has its own JDK.
 pub fn assert_classes_identical_to_kotlinc_jdk(stem: &str, src: &str, classes: &[&str]) {
-    assert_classes_identical_to_kotlinc_full(stem, src, classes, &[], true);
+    assert_classes_identical_to_kotlinc_full(stem, src, classes, &[], &[], true);
 }
 
 fn assert_classes_identical_to_kotlinc_full(
@@ -1259,6 +1280,7 @@ fn assert_classes_identical_to_kotlinc_full(
     src: &str,
     classes: &[&str],
     libraries: &[std::path::PathBuf],
+    krusty_libraries: &[std::path::PathBuf],
     jdk_modules: bool,
 ) {
     let dir = super::common_core::scratch_dir().expect("scratch directory");
@@ -1280,7 +1302,7 @@ fn assert_classes_identical_to_kotlinc_full(
         super::common_core::kotlinc_compile(&arguments).expect("reference kotlinc is provisioned");
     assert_eq!(code, 0, "kotlinc failed: {stderr}");
     let mut classpath = vec![super::common_core::stdlib_jar()];
-    classpath.extend_from_slice(libraries);
+    classpath.extend_from_slice(krusty_libraries);
     if jdk_modules {
         classpath.push(super::common_core::jdk_modules());
     }

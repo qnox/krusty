@@ -104,10 +104,20 @@ impl Emitter<'_> {
     /// A coercion that only reads a call's physical result as its semantic type: the checked
     /// declaration-result narrowing, or the boundary a dependency call's realization placed over
     /// the provider's erased result.
+    /// A null assertion over that result checks the same slot, so the boundary is the same.
     pub(super) fn is_call_result_boundary(&self, coercion: u32, arg: u32) -> bool {
+        let checked = self.asserted_value(arg);
         self.ir.declaration_result_coercions.contains(&coercion)
-            || (matches!(self.ir.expr(arg), IrExpr::Call { .. })
-                && self.ir.physical_types.contains_key(&arg))
+            || (matches!(self.ir.expr(checked), IrExpr::Call { .. })
+                && self.ir.physical_types.contains_key(&checked))
+    }
+
+    /// The value beneath every null assertion over `expression`: the slot those checks read.
+    fn asserted_value(&self, mut expression: crate::ir::ExprId) -> crate::ir::ExprId {
+        while let IrExpr::NotNullAssert { operand, .. } = self.ir.expr(expression) {
+            expression = *operand;
+        }
+        expression
     }
 
     /// Defer only a call-result boundary (the checked declaration-result conversion, or a
@@ -126,10 +136,17 @@ impl Emitter<'_> {
         {
             return false;
         }
-        if matches!(self.ir.expr(producer), IrExpr::PropertyRead { .. }) {
+        // A null assertion checks the same slot it reads, so a producer beneath one still owns it.
+        let checked = self.asserted_value(producer);
+        if matches!(self.ir.expr(checked), IrExpr::PropertyRead { .. }) {
             return self.value_ty(producer) == ir_ty_to_jvm(&slot);
         }
-        if self.ir.physical_types.get(&producer) != Some(&slot) {
+        let recorded = self
+            .ir
+            .physical_types
+            .get(&producer)
+            .or_else(|| self.ir.physical_types.get(&checked));
+        if recorded.map(ir_ty_to_jvm) != Some(ir_ty_to_jvm(&slot)) {
             return false;
         }
         let Some(call) =
@@ -137,11 +154,7 @@ impl Emitter<'_> {
         else {
             return false;
         };
-        !matches!(
-            self.ir.expr(call),
-            IrExpr::Call { callee, .. }
-                if matches!(&**callee, crate::ir::Callee::Static { inline, .. } if inline.can_inline())
-        ) && self.ir.compiled_inline_call(call).is_none()
+        crate::jvm::call_result_boundaries::emits_as_call(self.ir, call)
             && self.transformed_result(call).is_none()
     }
 
@@ -231,6 +244,24 @@ impl Emitter<'_> {
                 arg,
                 type_operand,
             } => {
+                // `!!` gives its non-null result a coercion of its own over the nullable one. Over
+                // a call-result boundary that keeps one JVM representation, that boundary's erased
+                // result is what reaches the consumer. A coercion that unboxes (`Int?` to `int`)
+                // or changes a value class's carrier is a representation the consumer needs.
+                if let IrExpr::TypeOp {
+                    op: crate::ir::IrTypeOp::ImplicitCoercion,
+                    arg: checked,
+                    type_operand: nullable,
+                } = self.ir.expr(*arg)
+                {
+                    if nullable.is_nullable()
+                        && nullable.non_null() == *type_operand
+                        && ir_ty_to_jvm(nullable) == ir_ty_to_jvm(type_operand)
+                        && self.is_call_result_boundary(*arg, *checked)
+                    {
+                        return self.erased_reference_result(*arg);
+                    }
+                }
                 // Keep the declaration-side erasure until the consumer chooses its physical type.
                 // This is not limited to `Object`: `T : Comparable<T>` arrives as `Comparable`.
                 // A String-only consumer casts that slot once to `String`; a consumer of the bound
@@ -400,10 +431,20 @@ impl Emitter<'_> {
         })
     }
 
-    /// Narrow an erased reference on top of the stack to its consumption type.
+    /// The declaration interface implemented by this exact generated physical carrier.
+    pub(super) fn annotation_implementation_interface(&self, physical: Ty) -> Option<TypeName> {
+        let owner = physical.non_null().obj_internal()?;
+        crate::jvm::annotation_constructions::implementation_interface(self.ir, owner)
+    }
+
+    /// Materialize an erased reference or generated annotation value at its consumption type.
     pub(super) fn narrow_on_stack(&mut self, source: Ty, expected: Ty, code: &mut CodeBuilder) {
         let source = ir_ty_to_jvm(&source);
-        if !jvm_is_erased_top(source) {
+        let annotation_implementation = source
+            .obj_internal()
+            .and_then(|owner| self.ir.class_id_by_name(owner))
+            .is_some_and(|class| self.ir.classes[class as usize].annotation_impl_of.is_some());
+        if !jvm_is_erased_top(source) && !annotation_implementation {
             return;
         }
         let expected = ir_ty_to_jvm(&expected);

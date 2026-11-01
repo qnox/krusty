@@ -1,0 +1,1135 @@
+diff --git a/build.gradle.kts b/build.gradle.kts
+index 9282da0..921fea5 100644
+--- a/build.gradle.kts
++++ b/build.gradle.kts
+@@ -37,8 +37,6 @@ plugins {
+     kotlin("plugin.serialization") version Versions.kotlinCompiler apply false
+     id("com.google.osdetector")
+     id("org.jetbrains.dokka") version Versions.dokka
+-    id("me.him188.kotlin-jvm-blocking-bridge") version Versions.blockingBridge
+-    id("me.him188.kotlin-dynamic-delegation") version Versions.dynamicDelegation apply false
+     id("me.him188.maven-central-publish") version Versions.mavenCentralPublish apply false
+     id("com.gradle.plugin-publish") version "1.1.0" apply false
+     id("org.jetbrains.kotlinx.binary-compatibility-validator") version Versions.binaryValidator apply false
+diff --git a/buildSrc/src/main/kotlin/Android.kt b/buildSrc/src/main/kotlin/Android.kt
+index f99f2a2..b1ea416 100644
+--- a/buildSrc/src/main/kotlin/Android.kt
++++ b/buildSrc/src/main/kotlin/Android.kt
+@@ -93,7 +93,7 @@ private fun Project.configureAndroidTargetWithSdk(androidNamespace: String) {
+         namespace = androidNamespace
+     }
+     extensions.getByType(KotlinMultiplatformExtension::class.java).apply {
+-        android {
++        androidTarget {
+             publishLibraryVariants("release", "debug")
+         }
+ 
+diff --git a/buildSrc/src/main/kotlin/BinaryCompatibilityConfigurator.kt b/buildSrc/src/main/kotlin/BinaryCompatibilityConfigurator.kt
+index 16d2a46..90f918d 100644
+--- a/buildSrc/src/main/kotlin/BinaryCompatibilityConfigurator.kt
++++ b/buildSrc/src/main/kotlin/BinaryCompatibilityConfigurator.kt
+@@ -8,7 +8,6 @@
+  */
+ 
+ import org.gradle.api.Project
+-import org.gradle.configurationcache.extensions.useToRun
+ import java.io.File
+ 
+ /*
+@@ -105,7 +104,7 @@ object BinaryCompatibilityConfigurator {
+     fun applyTemplate(projectPath: String, buildDirs: List<String>): String {
+         return this::class.java.classLoader
+             .getResourceAsStream("binary-compatibility-validator-build.txt")!!
+-            .useToRun { readBytes() }
++            .use { it.readBytes() }
+             .decodeToString()
+             .replace("$\$PROJECT_PATH$$", projectPath)
+             .replace("$\$BUILD_DIR$$", buildDirs.joinToString("\n"))
+diff --git a/buildSrc/src/main/kotlin/ProjectConfigure.kt b/buildSrc/src/main/kotlin/ProjectConfigure.kt
+index 474a1aa..b95aea2 100644
+--- a/buildSrc/src/main/kotlin/ProjectConfigure.kt
++++ b/buildSrc/src/main/kotlin/ProjectConfigure.kt
+@@ -48,22 +48,6 @@ fun Project.optInForTestSourceSets(qualifiedClassname: String) {
+     }
+ }
+ 
+-fun Project.enableLanguageFeatureForAllSourceSets(qualifiedClassname: String) {
+-    kotlinSourceSets!!.all {
+-        languageSettings {
+-            this.enableLanguageFeature(qualifiedClassname)
+-        }
+-    }
+-}
+-
+-fun Project.enableLanguageFeatureForTestSourceSets(name: String) {
+-    allTestSourceSets {
+-        languageSettings {
+-            this.enableLanguageFeature(name)
+-        }
+-    }
+-}
+-
+ fun Project.allTestSourceSets(action: KotlinSourceSet.() -> Unit) {
+     kotlinSourceSets!!.all {
+         if (this.name.contains("test", ignoreCase = true)) {
+@@ -76,8 +60,8 @@ fun Project.preConfigureJvmTarget() {
+     val defaultVer = jvmVersion()
+ 
+     tasks.withType(KotlinJvmCompile::class.java) {
+-        kotlinOptions.jvmTarget = defaultVer.toString()
+-        kotlinOptions.freeCompilerArgs += "-Xjvm-default=all"
++        compilerOptions.jvmTarget.set(JvmTarget.fromTarget(defaultVer.toString()))
++        compilerOptions.jvmDefault.set(JvmDefaultMode.NO_COMPATIBILITY)
+ 
+         // Support for parallel compilation: https://youtrack.jetbrains.com/issue/KT-46085
+         // Using /2 processors: jvm and android targets are compiled at the same time, sharing the processors.
+@@ -189,23 +173,11 @@ val experimentalAnnotations = arrayOf(
+     "kotlin.experimental.ExperimentalTypeInference",
+ )
+ 
+-val testLanguageFeatures = listOf(
+-    "ContextReceivers"
+-)
+-
+ fun Project.configureKotlinOptIns() {
+     val sourceSets = kotlinSourceSets ?: return
+     sourceSets.all {
+         configureKotlinOptIns()
+     }
+-
+-    for (name in testLanguageFeatures) {
+-        enableLanguageFeatureForTestSourceSets(name)
+-    }
+-
+-    allTestSourceSets {
+-        languageSettings.languageVersion = Versions.kotlinLanguageVersionForTests
+-    }
+ }
+ 
+ fun KotlinSourceSet.configureKotlinOptIns() {
+@@ -267,7 +239,7 @@ private inline fun <reified T> Project.namedDomainObjectListOf(vararg values: T)
+ val Project.isKotlinJvmProject: Boolean get() = extensions.findByName("kotlin") is KotlinJvmProjectExtension
+ val Project.isKotlinMpp: Boolean get() = extensions.findByName("kotlin") is KotlinMultiplatformExtension
+ 
+-fun Project.allKotlinCompilations(action: (KotlinCompilation<KotlinCommonOptions>) -> Unit) {
++fun Project.allKotlinCompilations(action: (KotlinCompilation<*>) -> Unit) {
+     allKotlinTargets().all {
+         compilations.all(action)
+     }
+diff --git a/buildSrc/src/main/kotlin/Versions.kt b/buildSrc/src/main/kotlin/Versions.kt
+index f58a80f..3a1ca2e 100644
+--- a/buildSrc/src/main/kotlin/Versions.kt
++++ b/buildSrc/src/main/kotlin/Versions.kt
+@@ -33,14 +33,13 @@ object Versions {
+ 
+     const val kotlinCompiler = "1.8.10"
+     const val kotlinStdlib = kotlinCompiler
+-    const val kotlinLanguageVersionForTests = "1.9" // be curious!
+ 
+     const val dokka = "1.8.10"
+ 
+     const val kotlinCompilerForIdeaPlugin = "1.8.20" // 232 bundles 1.8.20
+ 
+     const val coroutines = "1.6.4"
+-    const val atomicFU = "0.20.0"
++    const val atomicFU = "0.33.0"
+     const val serialization = "1.5.0"
+ 
+     /**
+diff --git a/buildSrc/src/main/kotlin/explicit-api.gradle.kts b/buildSrc/src/main/kotlin/explicit-api.gradle.kts
+index a0fe904..c46a8c5 100644
+--- a/buildSrc/src/main/kotlin/explicit-api.gradle.kts
++++ b/buildSrc/src/main/kotlin/explicit-api.gradle.kts
+@@ -7,7 +7,7 @@
+  * https://github.com/mamoe/mirai/blob/dev/LICENSE
+  */
+ 
+-import org.jetbrains.kotlin.gradle.dsl.KotlinCompile
++import org.jetbrains.kotlin.gradle.tasks.KotlinCompilationTask
+ 
+ /*
+  * Copyright 2019-2023 Mamoe Technologies and contributors.
+@@ -25,12 +25,12 @@ private val EXPLICIT_API = "-Xexplicit-api=strict"
+ // https://youtrack.jetbrains.com/issue/KT-37652/Support-explicit-mode-for-Android-projects#focus=Comments-27-4501224.0-0
+ 
+ project.tasks
+-    .matching { it is KotlinCompile<*> && !it.name.contains("test", ignoreCase = true) }
++    .matching { it is KotlinCompilationTask<*> && !it.name.contains("test", ignoreCase = true) }
+     .configureEach {
+         if (!project.hasProperty("kotlin.optOutExplicitApi")) {
+-            val kotlinCompile = this as KotlinCompile<*>
+-            if (EXPLICIT_API !in kotlinCompile.kotlinOptions.freeCompilerArgs) {
+-                kotlinCompile.kotlinOptions.freeCompilerArgs += EXPLICIT_API
++            val kotlinCompile = this as KotlinCompilationTask<*>
++            if (EXPLICIT_API !in kotlinCompile.compilerOptions.freeCompilerArgs.get()) {
++                kotlinCompile.compilerOptions.freeCompilerArgs.add(EXPLICIT_API)
+             }
+         }
+     }
+diff --git a/gradle/wrapper/gradle-wrapper.properties b/gradle/wrapper/gradle-wrapper.properties
+index 7067bcb..71755e2 100644
+--- a/gradle/wrapper/gradle-wrapper.properties
++++ b/gradle/wrapper/gradle-wrapper.properties
+@@ -9,6 +9,6 @@
+ 
+ distributionBase=GRADLE_USER_HOME
+ distributionPath=wrapper/dists
+-distributionUrl=https\://services.gradle.org/distributions/gradle-8.0-bin.zip
++distributionUrl=https\://services.gradle.org/distributions/gradle-8.2.1-bin.zip
+ zipStoreBase=GRADLE_USER_HOME
+ zipStorePath=wrapper/dists
+diff --git a/local.properties b/local.properties
+new file mode 100644
+index 0000000..cc793f8
+--- /dev/null
++++ b/local.properties
+@@ -0,0 +1,2 @@
++projects.mirai-core.targets=!android
++projects.mirai-console-intellij.enabled=false
+diff --git a/mirai-console/backend/mirai-console/build.gradle.kts b/mirai-console/backend/mirai-console/build.gradle.kts
+index ef5813f..5c69600 100644
+--- a/mirai-console/backend/mirai-console/build.gradle.kts
++++ b/mirai-console/backend/mirai-console/build.gradle.kts
+@@ -20,8 +20,6 @@ plugins {
+     kotlin("plugin.serialization")
+     id("java")
+     `maven-publish`
+-    id("me.him188.kotlin-jvm-blocking-bridge")
+-    id("me.him188.kotlin-dynamic-delegation")
+ }
+ 
+ version = Versions.console
+diff --git a/mirai-console/backend/mirai-console/src/extensions/SingletonExtensionSelector.kt b/mirai-console/backend/mirai-console/src/extensions/SingletonExtensionSelector.kt
+index c5bc435..b241c0f 100644
+--- a/mirai-console/backend/mirai-console/src/extensions/SingletonExtensionSelector.kt
++++ b/mirai-console/backend/mirai-console/src/extensions/SingletonExtensionSelector.kt
+@@ -70,7 +70,7 @@ public interface SingletonExtensionSelector : FunctionExtension {
+         @OptIn(ConsoleInternalApi::class)
+         internal fun init() {
+             check(instanceField == null) { "Internal error: reinitialize SingletonExtensionSelector" }
+-            val instances = GlobalComponentStorage.getExtensions<SingletonExtensionSelector>(ExtensionPoint).toList()
++            val instances = GlobalComponentStorage.getExtensions<SingletonExtensionSelector>(this).toList()
+             instanceField = when {
+                 instances.isEmpty() -> SingletonExtensionSelectorImpl
+                 instances.size == 1 -> {
+diff --git a/mirai-console/backend/mirai-console/src/internal/data/collectionUtil.kt b/mirai-console/backend/mirai-console/src/internal/data/collectionUtil.kt
+index 7ca1214..7d65bfa 100644
+--- a/mirai-console/backend/mirai-console/src/internal/data/collectionUtil.kt
++++ b/mirai-console/backend/mirai-console/src/internal/data/collectionUtil.kt
+@@ -137,7 +137,7 @@ internal open class ShadowMap<K, V, KR, VR>(
+     @Suppress("WRONG_TYPE_PARAMETER_NULLABILITY_FOR_JAVA_OVERRIDE")
+     override fun merge(key: KR, value: VR, remappingFunction: BiFunction<in VR, in VR, out VR?>): VR? {
+         @Suppress("NULLABLE_TYPE_PARAMETER_AGAINST_NOT_NULL_TYPE_PARAMETER")
+-        return originMapComputer().merge(key.let(kTransformBack), value.let(vTransformBack)) { k, v ->
++        return originMapComputer().merge(key.let(kTransformBack), value.let(vTransformBack) as (V & Any)) { k, v ->
+             remappingFunction.apply(k.let(vTransform), v.let(vTransform))?.let(vTransformBack)
+         }?.let(vTransform)
+     }
+@@ -151,7 +151,7 @@ internal open class ShadowMap<K, V, KR, VR>(
+ 
+     override fun replaceAll(function: BiFunction<in KR, in VR, out VR>) {
+         originMapComputer().replaceAll { t, u ->
+-            function.apply(t.let(kTransform), u.let(vTransform))?.let(vTransformBack)
++            function.apply(t.let(kTransform), u.let(vTransform))?.let(vTransformBack) as V
+         }
+     }
+ }
+@@ -440,7 +440,7 @@ internal fun <K, V> MutableMap<K, V>.observable(onChanged: () -> Unit): MutableM
+             this@observable.computeIfPresent(key, remappingFunction).also { onChanged() }
+ 
+         override fun merge(key: K, value: V, remappingFunction: BiFunction<in V, in V, out V?>): V? =
+-            this@observable.merge(key, value, remappingFunction).also { onChanged() }
++            this@observable.merge(key, value as (V & Any), remappingFunction).also { onChanged() }
+     }
+ 
+     return ObservableMap()
+diff --git a/mirai-console/backend/mirai-console/src/util/SemVersion.kt b/mirai-console/backend/mirai-console/src/util/SemVersion.kt
+index 83b0076..68659d9 100644
+--- a/mirai-console/backend/mirai-console/src/util/SemVersion.kt
++++ b/mirai-console/backend/mirai-console/src/util/SemVersion.kt
+@@ -56,6 +56,7 @@ import kotlin.LazyThreadSafetyMode.PUBLICATION
+  * @see SemVersion.invoke 由字符串解析
+  */
+ @Serializable(with = SemVersionAsStringSerializer::class)
++@ExposedCopyVisibility
+ public data class SemVersion
+ /**
+  * @see SemVersion.invoke 字符串解析
+@@ -86,6 +87,7 @@ internal constructor(
+      * @see [parseRangeRequirement]
+      */
+     @Serializable(Requirement.RequirementAsStringSerializer::class)
++    @ExposedCopyVisibility
+     public data class Requirement internal constructor(
+         /**
+          * 规则的字符串表示方式
+diff --git a/mirai-console/frontend/mirai-console-frontend-base/src/AbstractMiraiConsoleFrontendImplementation.kt b/mirai-console/frontend/mirai-console-frontend-base/src/AbstractMiraiConsoleFrontendImplementation.kt
+index e2df965..873e230 100644
+--- a/mirai-console/frontend/mirai-console-frontend-base/src/AbstractMiraiConsoleFrontendImplementation.kt
++++ b/mirai-console/frontend/mirai-console-frontend-base/src/AbstractMiraiConsoleFrontendImplementation.kt
+@@ -92,7 +92,7 @@ public abstract class AbstractMiraiConsoleFrontendImplementation(
+     // region Logging
+     @OptIn(MiraiInternalApi::class)
+     override fun createLoggerFactory(context: MiraiConsoleImplementation.FrontendLoggingInitContext): MiraiLogger.Factory {
+-        @Suppress("INVISIBLE_MEMBER")
++        @Suppress("INVISIBLE_MEMBER", "INVISIBLE_REFERENCE")
+         frontendBase.initScreen_forwardStdToScreen()
+ 
+         // region Default Fallback Implementation
+@@ -116,7 +116,7 @@ public abstract class AbstractMiraiConsoleFrontendImplementation(
+ 
+         val factoryImpl = context.acquirePlatformImplementation()
+         context.invokeAfterInitialization {
+-            @Suppress("INVISIBLE_MEMBER")
++            @Suppress("INVISIBLE_MEMBER", "INVISIBLE_REFERENCE")
+             frontendBase.initScreen_forwardStdToMiraiLogger()
+         }
+         return factoryImpl
+diff --git a/mirai-console/tools/gradle-plugin/src/main/kotlin/BuildMiraiPluginV2.kt b/mirai-console/tools/gradle-plugin/src/main/kotlin/BuildMiraiPluginV2.kt
+index 92a2a7b..03c7e5a 100644
+--- a/mirai-console/tools/gradle-plugin/src/main/kotlin/BuildMiraiPluginV2.kt
++++ b/mirai-console/tools/gradle-plugin/src/main/kotlin/BuildMiraiPluginV2.kt
+@@ -277,11 +277,10 @@ public open class BuildMiraiPluginV2 : Jar() {
+         duplicatesStrategy = DuplicatesStrategy.WARN
+ 
+         val compilations = target.compilations.filter { it.name == KotlinCompilation.MAIN_COMPILATION_NAME }
+-        @Suppress("DEPRECATION") // New API requires Kotlin 1.8.0, but we must support lower versions
+         compilations.forEach {
+-            dependsOn(it.compileKotlinTask)
++            dependsOn(it.compileTaskProvider)
+             from(it.output.allOutputs)
+-            metadataTask.dependsOn(it.compileKotlinTask)
++            metadataTask.dependsOn(it.compileTaskProvider)
+         }
+         exclude { elm ->
+             elm.path.startsWith("META-INF/") && elm.name.endsWith(".sf", ignoreCase = true)
+diff --git a/mirai-console/tools/gradle-plugin/src/main/kotlin/MiraiConsoleGradlePlugin.kt b/mirai-console/tools/gradle-plugin/src/main/kotlin/MiraiConsoleGradlePlugin.kt
+index e4bf2a5..0cd54e5 100644
+--- a/mirai-console/tools/gradle-plugin/src/main/kotlin/MiraiConsoleGradlePlugin.kt
++++ b/mirai-console/tools/gradle-plugin/src/main/kotlin/MiraiConsoleGradlePlugin.kt
+@@ -22,7 +22,9 @@ import org.gradle.api.plugins.JavaPlugin
+ import org.gradle.api.plugins.JavaPluginExtension
+ import org.gradle.api.tasks.JavaExec
+ import org.gradle.api.tasks.compile.JavaCompile
+-import org.jetbrains.kotlin.gradle.dsl.KotlinJvmOptions
++import org.jetbrains.kotlin.gradle.dsl.JvmDefaultMode
++import org.jetbrains.kotlin.gradle.dsl.JvmTarget
++import org.jetbrains.kotlin.gradle.dsl.KotlinJvmCompilerOptions
+ import org.jetbrains.kotlin.gradle.dsl.KotlinMultiplatformExtension
+ import org.jetbrains.kotlin.gradle.dsl.KotlinProjectExtension
+ import org.jetbrains.kotlin.gradle.dsl.KotlinSingleTargetExtension
+@@ -31,6 +33,7 @@ import org.jetbrains.kotlin.gradle.plugin.KotlinDependencyHandler
+ import org.jetbrains.kotlin.gradle.plugin.KotlinPlatformType
+ import org.jetbrains.kotlin.gradle.plugin.KotlinSourceSet
+ import org.jetbrains.kotlin.gradle.plugin.KotlinTarget
++import org.jetbrains.kotlin.gradle.tasks.KotlinCompilationTask
+ 
+ public class MiraiConsoleGradlePlugin : Plugin<Project> {
+     public companion object {
+@@ -42,27 +45,18 @@ public class MiraiConsoleGradlePlugin : Plugin<Project> {
+     }
+ 
+     private fun KotlinSourceSet.configureSourceSet(project: Project, target: KotlinTarget) {
+-        try {
+-            languageSettings.optIn("kotlin.RequiresOptIn")
+-        } catch (e: NoSuchMethodError) {
+-            // User is using < 1.6
+-            target.compilations.forEach { compilation ->
+-                compilation.kotlinOptions.freeCompilerArgs += "-Xopt-in=kotlin.RequiresOptIn"
+-            }
+-        }
++        languageSettings.optIn("kotlin.RequiresOptIn")
+         dependencies { configureDependencies(project, this@configureSourceSet, target) }
+     }
+ 
+     private fun Project.configureTarget(target: KotlinTarget) {
+         val miraiExtension = project.miraiExtension
+ 
+-        for (compilation in target.compilations) with(compilation) {
+-            kotlinOptions {
+-                if (this !is KotlinJvmOptions) return@kotlinOptions
+-                jvmTarget = miraiExtension.jvmTarget.toString()
+-                if (!miraiExtension.dontConfigureKotlinJvmDefault) freeCompilerArgs =
+-                    freeCompilerArgs + "-Xjvm-default=all"
+-            }
++        for (compilation in target.compilations) compilation.compileTaskProvider.configure {
++            val options = (this as KotlinCompilationTask<*>).compilerOptions as? KotlinJvmCompilerOptions
++                ?: return@configure
++            options.jvmTarget.set(JvmTarget.fromTarget(miraiExtension.jvmTarget.toString()))
++            if (!miraiExtension.dontConfigureKotlinJvmDefault) options.jvmDefault.set(JvmDefaultMode.NO_COMPATIBILITY)
+         }
+         when (target.platformType) {
+             KotlinPlatformType.jvm,
+@@ -153,8 +147,7 @@ public class MiraiConsoleGradlePlugin : Plugin<Project> {
+                 val compilations = target.compilations.filter { it.name == MAIN_COMPILATION_NAME }
+ 
+                 compilations.forEach {
+-                    @Suppress("DEPRECATION") // We need to support older Kotlin versions
+-                    dependsOn(it.compileKotlinTask)
++                    dependsOn(it.compileTaskProvider)
+                     from(it.output.allOutputs)
+                 }
+ 
+diff --git a/mirai-console/tools/gradle-plugin/src/main/kotlin/publishing.kt b/mirai-console/tools/gradle-plugin/src/main/kotlin/publishing.kt
+index 05ffe40..a12897b 100644
+--- a/mirai-console/tools/gradle-plugin/src/main/kotlin/publishing.kt
++++ b/mirai-console/tools/gradle-plugin/src/main/kotlin/publishing.kt
+@@ -87,7 +87,10 @@ private fun Project.registerPublishPluginTasks(target: KotlinTarget, isSingleTar
+ 
+             fun getConfigurationsToInclude(): List<Configuration> {
+                 val compilation = target.compilations["main"]
+-                return compilation.relatedConfigurationNames.map { configurations[it] }
++                return listOfNotNull(
++                    compilation.compileDependencyConfigurationName,
++                    compilation.runtimeDependencyConfigurationName,
++                ).map { configurations[it] }
+             }
+ 
+             val dependencies = getConfigurationsToInclude().flatMap { it.allDependencies }.map {
+diff --git a/mirai-core-all/build.gradle.kts b/mirai-core-all/build.gradle.kts
+index 28dfef2..9cc6ad0 100644
+--- a/mirai-core-all/build.gradle.kts
++++ b/mirai-core-all/build.gradle.kts
+@@ -16,7 +16,6 @@ plugins {
+     kotlin("jvm")
+     kotlin("plugin.serialization")
+     `maven-publish`
+-    id("me.him188.kotlin-jvm-blocking-bridge")
+ }
+ 
+ version = Versions.project
+diff --git a/mirai-core-api/build.gradle.kts b/mirai-core-api/build.gradle.kts
+index c5bcf13..1a99c42 100644
+--- a/mirai-core-api/build.gradle.kts
++++ b/mirai-core-api/build.gradle.kts
+@@ -15,10 +15,8 @@ plugins {
+     kotlin("multiplatform")
+     kotlin("plugin.serialization")
+ 
+-    id("kotlinx-atomicfu")
++    id("org.jetbrains.kotlinx.atomicfu")
+     id("signing")
+-    id("me.him188.kotlin-jvm-blocking-bridge")
+-    id("me.him188.kotlin-dynamic-delegation")
+ //    id("me.him188.maven-central-publish")
+ 
+     `maven-publish`
+diff --git a/mirai-core-api/src/commonMain/kotlin/event/MessageSubscribersBuilder.kt b/mirai-core-api/src/commonMain/kotlin/event/MessageSubscribersBuilder.kt
+index 73dc5fe..369428c 100644
+--- a/mirai-core-api/src/commonMain/kotlin/event/MessageSubscribersBuilder.kt
++++ b/mirai-core-api/src/commonMain/kotlin/event/MessageSubscribersBuilder.kt
+@@ -72,19 +72,19 @@ public open class MessageSubscribersBuilder<M : MessageEvent, out Ret, R : RR, R
+         public val filter: M.(String) -> Boolean
+     ) {
+         /** 进行逻辑 `or`. */
+-        public infix fun or(another: ListeningFilter): ListeningFilter =
++        public infix fun or(another: MessageSubscribersBuilder<M, @UnsafeVariance Ret, R, RR>.ListeningFilter): ListeningFilter =
+             newListeningFilter { filter.invoke(this, it) || another.filter.invoke(this, it) }
+ 
+         /** 进行逻辑 `and`. */
+-        public infix fun and(another: ListeningFilter): ListeningFilter =
++        public infix fun and(another: MessageSubscribersBuilder<M, @UnsafeVariance Ret, R, RR>.ListeningFilter): ListeningFilter =
+             newListeningFilter { filter.invoke(this, it) && another.filter.invoke(this, it) }
+ 
+         /** 进行逻辑 `xor`. */
+-        public infix fun xor(another: ListeningFilter): ListeningFilter =
++        public infix fun xor(another: MessageSubscribersBuilder<M, @UnsafeVariance Ret, R, RR>.ListeningFilter): ListeningFilter =
+             newListeningFilter { filter.invoke(this, it) xor another.filter.invoke(this, it) }
+ 
+         /** 进行逻辑 `nand`, 即 `not and`. */
+-        public infix fun nand(another: ListeningFilter): ListeningFilter =
++        public infix fun nand(another: MessageSubscribersBuilder<M, @UnsafeVariance Ret, R, RR>.ListeningFilter): ListeningFilter =
+             newListeningFilter { !filter.invoke(this, it) || !another.filter.invoke(this, it) }
+ 
+         /** 进行逻辑 `not` */
+@@ -97,13 +97,13 @@ public open class MessageSubscribersBuilder<M : MessageEvent, out Ret, R : RR, R
+ 
+     /** 启动监听器, 在 [Bot] 未被禁言且消息满足条件 [this] 时回复原消息 */
+     @MessageDsl
+-    public open infix fun ListeningFilter.reply(toReply: String): Ret =
++    public open infix fun (MessageSubscribersBuilder<M, @UnsafeVariance Ret, R, RR>.ListeningFilter).reply(toReply: String): Ret =
+         content(filter) { if ((this as? GroupMessageEvent)?.group?.isBotMuted != true) subject.sendMessage(toReply);this@MessageSubscribersBuilder.stub }
+ 
+ 
+     /** 启动监听器, 在 [Bot] 未被禁言且消息满足条件 [this] 时回复原消息 */
+     @MessageDsl
+-    public open infix fun ListeningFilter.reply(message: Message): Ret =
++    public open infix fun (MessageSubscribersBuilder<M, @UnsafeVariance Ret, R, RR>.ListeningFilter).reply(message: Message): Ret =
+         content(filter) { if ((this as? GroupMessageEvent)?.group?.isBotMuted != true) subject.sendMessage(message);this@MessageSubscribersBuilder.stub }
+ 
+     /**
+@@ -111,7 +111,7 @@ public open class MessageSubscribersBuilder<M : MessageEvent, out Ret, R : RR, R
+      * 返回值 [Unit] 将被忽略, [Message] 将被直接回复, 其他内容将会 [Any.toString] 后发送.
+      */
+     @MessageDsl
+-    public open infix fun ListeningFilter.reply(
++    public open infix fun (MessageSubscribersBuilder<M, @UnsafeVariance Ret, R, RR>.ListeningFilter).reply(
+         replier: (@MessageDsl suspend M.(String) -> Any?)
+     ): Ret =
+         content(filter) {
+@@ -122,12 +122,12 @@ public open class MessageSubscribersBuilder<M : MessageEvent, out Ret, R : RR, R
+ 
+     /** 启动监听器, 在 [Bot] 未被禁言且消息满足条件 [this] 时引用回复原消息 */
+     @MessageDsl
+-    public open infix fun ListeningFilter.quoteReply(toReply: String): Ret =
++    public open infix fun (MessageSubscribersBuilder<M, @UnsafeVariance Ret, R, RR>.ListeningFilter).quoteReply(toReply: String): Ret =
+         content(filter) { if ((this as? GroupMessageEvent)?.group?.isBotMuted != true) subject.sendMessage(message.quote() + toReply); this@MessageSubscribersBuilder.stub }
+ 
+     /** 启动监听器, 在 [Bot] 未被禁言且消息满足条件 [this] 时引用回复原消息 */
+     @MessageDsl
+-    public open infix fun ListeningFilter.quoteReply(toReply: Message): Ret =
++    public open infix fun (MessageSubscribersBuilder<M, @UnsafeVariance Ret, R, RR>.ListeningFilter).quoteReply(toReply: Message): Ret =
+         content(filter) { if ((this as? GroupMessageEvent)?.group?.isBotMuted != true) subject.sendMessage(message.quote() + toReply);this@MessageSubscribersBuilder.stub }
+ 
+     /**
+@@ -135,7 +135,7 @@ public open class MessageSubscribersBuilder<M : MessageEvent, out Ret, R : RR, R
+      * 返回值 [Unit] 将被忽略, [Message] 将被直接回复, 其他内容将会 [Any.toString] 后发送
+      */
+     @MessageDsl
+-    public open infix fun ListeningFilter.quoteReply(replier: (@MessageDsl suspend M.(String) -> Any?)): Ret =
++    public open infix fun (MessageSubscribersBuilder<M, @UnsafeVariance Ret, R, RR>.ListeningFilter).quoteReply(replier: (@MessageDsl suspend M.(String) -> Any?)): Ret =
+         content(filter) {
+             if ((this as? GroupMessageEvent)?.group?.isBotMuted != true)
+                 this@MessageSubscribersBuilder.executeAndQuoteReply(this, replier)
+diff --git a/mirai-core-api/src/commonMain/kotlin/message/code/internal/impl.kt b/mirai-core-api/src/commonMain/kotlin/message/code/internal/impl.kt
+index 3ca1412..4a5127b 100644
+--- a/mirai-core-api/src/commonMain/kotlin/message/code/internal/impl.kt
++++ b/mirai-core-api/src/commonMain/kotlin/message/code/internal/impl.kt
+@@ -7,7 +7,7 @@
+  * https://github.com/mamoe/mirai/blob/dev/LICENSE
+  */
+ 
+-@file:Suppress("INVISIBLE_MEMBER")
++@file:Suppress("INVISIBLE_MEMBER", "INVISIBLE_REFERENCE")
+ 
+ package net.mamoe.mirai.message.code.internal
+ 
+diff --git a/mirai-core-api/src/commonMain/kotlin/utils/DeviceInfo.kt b/mirai-core-api/src/commonMain/kotlin/utils/DeviceInfo.kt
+index eae7a36..f58d07d 100644
+--- a/mirai-core-api/src/commonMain/kotlin/utils/DeviceInfo.kt
++++ b/mirai-core-api/src/commonMain/kotlin/utils/DeviceInfo.kt
+@@ -255,10 +255,6 @@ public constructor(
+     override fun hashCode(): Int {
+         return DeviceInfoCommonImpl.hashCodeImpl(this)
+     }
+-
+-    @Suppress("ClassName")
+-    @Deprecated("For binary compatibility", level = DeprecationLevel.HIDDEN)
+-    public object `$serializer` : KSerializer<DeviceInfo> by DeviceInfoV1LegacySerializer
+ }
+ 
+ /**
+diff --git a/mirai-core-api/src/commonMain/kotlin/utils/MiraiLogger.kt b/mirai-core-api/src/commonMain/kotlin/utils/MiraiLogger.kt
+index 1fb6177..99910fa 100644
+--- a/mirai-core-api/src/commonMain/kotlin/utils/MiraiLogger.kt
++++ b/mirai-core-api/src/commonMain/kotlin/utils/MiraiLogger.kt
+@@ -329,7 +329,19 @@ public inline fun MiraiLogger.error(message: () -> String?, e: Throwable?) {
+ @MiraiInternalApi
+ public expect open class PlatformLogger @JvmOverloads constructor(
+     identity: String? = "Mirai",
+-) : MiraiLoggerPlatformBase
++) : MiraiLoggerPlatformBase {
++    override val identity: String?
++    public override fun verbose0(message: String?)
++    public override fun verbose0(message: String?, e: Throwable?)
++    public override fun debug0(message: String?)
++    public override fun debug0(message: String?, e: Throwable?)
++    public override fun info0(message: String?)
++    public override fun info0(message: String?, e: Throwable?)
++    public override fun warning0(message: String?)
++    public override fun warning0(message: String?, e: Throwable?)
++    public override fun error0(message: String?)
++    public override fun error0(message: String?, e: Throwable?)
++}
+ 
+ /**
+  * 不做任何事情的 logger, keep silent.
+diff --git a/mirai-core-api/src/jvmMain/kotlin/utils/PlatformLogger.jvm.kt b/mirai-core-api/src/jvmMain/kotlin/utils/PlatformLogger.jvm.kt
+index e8a34ed..aa2515c 100644
+--- a/mirai-core-api/src/jvmMain/kotlin/utils/PlatformLogger.jvm.kt
++++ b/mirai-core-api/src/jvmMain/kotlin/utils/PlatformLogger.jvm.kt
+@@ -44,7 +44,7 @@ import java.util.*
+  */
+ @MiraiInternalApi
+ public actual open class PlatformLogger constructor(  // same as StdoutLogger but doesn't matter
+-    public override val identity: String? = "Mirai",
++    public actual override val identity: String? = "Mirai",
+     /**
+      * 日志输出. 不会自动添加换行
+      */
+@@ -79,33 +79,33 @@ public actual open class PlatformLogger constructor(  // same as StdoutLogger bu
+             SimpleLogger.LogPriority.DEBUG -> Color.LIGHT_CYAN
+         }
+ 
+-    public override fun verbose0(message: String?): Unit = printLog(message, SimpleLogger.LogPriority.VERBOSE)
++    public actual override fun verbose0(message: String?): Unit = printLog(message, SimpleLogger.LogPriority.VERBOSE)
+ 
+-    public override fun verbose0(message: String?, e: Throwable?) {
++    public actual override fun verbose0(message: String?, e: Throwable?) {
+         if (e != null) verbose((message ?: e.toString()) + "\n${e.stackTraceToString()}")
+         else verbose(message.toString())
+     }
+ 
+-    public override fun info0(message: String?): Unit = printLog(message, SimpleLogger.LogPriority.INFO)
+-    public override fun info0(message: String?, e: Throwable?) {
++    public actual override fun info0(message: String?): Unit = printLog(message, SimpleLogger.LogPriority.INFO)
++    public actual override fun info0(message: String?, e: Throwable?) {
+         if (e != null) info((message ?: e.toString()) + "\n${e.stackTraceToString()}")
+         else info(message.toString())
+     }
+ 
+-    public override fun warning0(message: String?): Unit = printLog(message, SimpleLogger.LogPriority.WARNING)
+-    public override fun warning0(message: String?, e: Throwable?) {
++    public actual override fun warning0(message: String?): Unit = printLog(message, SimpleLogger.LogPriority.WARNING)
++    public actual override fun warning0(message: String?, e: Throwable?) {
+         if (e != null) warning((message ?: e.toString()) + "\n${e.stackTraceToString()}")
+         else warning(message.toString())
+     }
+ 
+-    public override fun error0(message: String?): Unit = printLog(message, SimpleLogger.LogPriority.ERROR)
+-    public override fun error0(message: String?, e: Throwable?) {
++    public actual override fun error0(message: String?): Unit = printLog(message, SimpleLogger.LogPriority.ERROR)
++    public actual override fun error0(message: String?, e: Throwable?) {
+         if (e != null) error((message ?: e.toString()) + "\n${e.stackTraceToString()}")
+         else error(message.toString())
+     }
+ 
+-    public override fun debug0(message: String?): Unit = printLog(message, SimpleLogger.LogPriority.DEBUG)
+-    public override fun debug0(message: String?, e: Throwable?) {
++    public actual override fun debug0(message: String?): Unit = printLog(message, SimpleLogger.LogPriority.DEBUG)
++    public actual override fun debug0(message: String?, e: Throwable?) {
+         if (e != null) debug((message ?: e.toString()) + "\n${e.stackTraceToString()}")
+         else debug(message.toString())
+     }
+diff --git a/mirai-core-mock/build.gradle.kts b/mirai-core-mock/build.gradle.kts
+index a1b28bb..7e07d6d 100644
+--- a/mirai-core-mock/build.gradle.kts
++++ b/mirai-core-mock/build.gradle.kts
+@@ -12,7 +12,6 @@ plugins {
+     kotlin("jvm")
+     kotlin("plugin.serialization")
+     `maven-publish`
+-    id("me.him188.kotlin-jvm-blocking-bridge")
+ }
+ 
+ version = Versions.project
+diff --git a/mirai-core-mock/src/internal/MockBotFactoryImpl.kt b/mirai-core-mock/src/internal/MockBotFactoryImpl.kt
+index f6b2e6e..9f7cded 100644
+--- a/mirai-core-mock/src/internal/MockBotFactoryImpl.kt
++++ b/mirai-core-mock/src/internal/MockBotFactoryImpl.kt
+@@ -94,7 +94,7 @@ internal class MockBotFactoryImpl : MockBotFactory {
+                 )
+             }
+ 
+-            @Suppress("INVISIBLE_MEMBER")
++            @Suppress("INVISIBLE_MEMBER", "INVISIBLE_REFERENCE")
+             override fun create(): MockBot {
+                 return createNoInstanceRegister().also {
+                     Bot._instances[id] = it
+diff --git a/mirai-core-mock/src/internal/contact/active/MockGroupActive.kt b/mirai-core-mock/src/internal/contact/active/MockGroupActive.kt
+index e7fbd55..faea8b1 100644
+--- a/mirai-core-mock/src/internal/contact/active/MockGroupActive.kt
++++ b/mirai-core-mock/src/internal/contact/active/MockGroupActive.kt
+@@ -83,7 +83,7 @@ internal class MockGroupActiveImpl(
+ 
+     private var honorHistories: MutableMap<GroupHonorType, ActiveHonorList> = ConcurrentHashMap()
+ 
+-    @Suppress("INVISIBLE_MEMBER") // for ActiveHonorInfo
++    @Suppress("INVISIBLE_MEMBER", "INVISIBLE_REFERENCE") // for ActiveHonorInfo
+     override fun changeHonorMember(member: MockNormalMember, honorType: GroupHonorType) {
+         val old = honorHistories[honorType]
+ 
+diff --git a/mirai-core-utils/build.gradle.kts b/mirai-core-utils/build.gradle.kts
+index 1fe3e8d..b366ba0 100644
+--- a/mirai-core-utils/build.gradle.kts
++++ b/mirai-core-utils/build.gradle.kts
+@@ -15,8 +15,7 @@ plugins {
+     kotlin("multiplatform")
+     kotlin("plugin.serialization")
+ 
+-    id("kotlinx-atomicfu")
+-    id("me.him188.kotlin-jvm-blocking-bridge")
++    id("org.jetbrains.kotlinx.atomicfu")
+ //    id("me.him188.maven-central-publish")
+     `maven-publish`
+ }
+@@ -98,4 +97,7 @@ configureMppPublishing()
+ //    developer("Mamoe Technologies", email = "support@mamoe.net", url = "https://github.com/mamoe")
+ //    licenseFromGitHubProject("AGPLv3", "dev")
+ //    publishPlatformArtifactsInRootModule = "jvm"
+-//}
+\ No newline at end of file
++//}
++atomicfu {
++    transformJvm = false
++}
+diff --git a/mirai-core-utils/src/commonTest/kotlin/net/mamoe/mirai/utils/EitherTest.kt b/mirai-core-utils/src/commonTest/kotlin/net/mamoe/mirai/utils/EitherTest.kt
+index 8e04a5e..5f17339 100644
+--- a/mirai-core-utils/src/commonTest/kotlin/net/mamoe/mirai/utils/EitherTest.kt
++++ b/mirai-core-utils/src/commonTest/kotlin/net/mamoe/mirai/utils/EitherTest.kt
+@@ -159,7 +159,7 @@ internal class EitherTest {
+ 
+         // normal case
+         Either<CharSequence, Int?>(null).run {
+-            val result = flatMapNull { right(true) } // can interlace type
++            val result = flatMapNull<CharSequence, Int, CharSequence, Any?> { right(true) } // can interlace type
+             assertEquals(true, result.right)
+         }
+     }
+diff --git a/mirai-core-utils/src/commonTest/kotlin/net/mamoe/mirai/utils/channels/OnDemandChannelTest.kt b/mirai-core-utils/src/commonTest/kotlin/net/mamoe/mirai/utils/channels/OnDemandChannelTest.kt
+index 0264db6..46b5933 100644
+--- a/mirai-core-utils/src/commonTest/kotlin/net/mamoe/mirai/utils/channels/OnDemandChannelTest.kt
++++ b/mirai-core-utils/src/commonTest/kotlin/net/mamoe/mirai/utils/channels/OnDemandChannelTest.kt
+@@ -76,7 +76,7 @@ class OnDemandChannelTest {
+ 
+     @Test
+     fun `producer receives initial ticket`() = runTest {
+-        val channel = OnDemandChannel(currentCoroutineContext()) { initialTicket ->
++        val channel = OnDemandChannel<Int, Int>(currentCoroutineContext()) { initialTicket ->
+             assertEquals(1, initialTicket)
+             emit(2)
+         }
+diff --git a/mirai-core-utils/src/jvmBaseMain/kotlin/StructureToStringTransformerLegacy.kt b/mirai-core-utils/src/jvmBaseMain/kotlin/StructureToStringTransformerLegacy.kt
+index 9a5be84..a551589 100644
+--- a/mirai-core-utils/src/jvmBaseMain/kotlin/StructureToStringTransformerLegacy.kt
++++ b/mirai-core-utils/src/jvmBaseMain/kotlin/StructureToStringTransformerLegacy.kt
+@@ -155,7 +155,7 @@ public class StructureToStringTransformerLegacy : StructureToStringTransformer {
+                     }
+                     .joinToStringPrefixed(
+                         prefix = newPrefix
+-                    ) { (name: String, value: Any?) ->
++                    ) { (name: String, value: Any) ->
+                         if (value.canBeIgnored()) ""
+                         else {
+                             "$name=" + kotlin.runCatching {
+diff --git a/mirai-core/build.gradle.kts b/mirai-core/build.gradle.kts
+index 42fbda9..4eaed9e 100644
+--- a/mirai-core/build.gradle.kts
++++ b/mirai-core/build.gradle.kts
+@@ -15,10 +15,8 @@ import shadow.relocateImplementation
+ 
+ plugins {
+     kotlin("multiplatform")
+-    id("kotlinx-atomicfu")
++    id("org.jetbrains.kotlinx.atomicfu")
+     kotlin("plugin.serialization")
+-    id("me.him188.kotlin-jvm-blocking-bridge")
+-    id("me.him188.kotlin-dynamic-delegation")
+ //    id("me.him188.maven-central-publish")
+     `maven-publish`
+ }
+diff --git a/mirai-core/src/commonMain/kotlin/MiraiImpl.kt b/mirai-core/src/commonMain/kotlin/MiraiImpl.kt
+index ede668b..dacc3c8 100644
+--- a/mirai-core/src/commonMain/kotlin/MiraiImpl.kt
++++ b/mirai-core/src/commonMain/kotlin/MiraiImpl.kt
+@@ -495,7 +495,7 @@ internal open class MiraiImpl : IMirai, LowLevelApiAccessor {
+         // 1001: No message meets the requirements (实际上是没权限, 管理员在尝试撤回群主的消息)
+         // 154: timeout
+         // 3: <no message>
+-        check(response is PbMessageSvc.PbMsgWithDraw.Response.Success) { "Failed to recall message #${source.ids.contentToString()}: $response" }
++        check(response is PbMessageSvc.PbMsgWithDraw.Response.Success) { "Failed to recall message #${(source as MessageSource).ids.contentToString()}: $response" }
+     }
+ 
+     private val json = Json {
+diff --git a/mirai-core/src/commonMain/kotlin/contact/AbstractMember.kt b/mirai-core/src/commonMain/kotlin/contact/AbstractMember.kt
+index f819cae..e8acaf9 100644
+--- a/mirai-core/src/commonMain/kotlin/contact/AbstractMember.kt
++++ b/mirai-core/src/commonMain/kotlin/contact/AbstractMember.kt
+@@ -11,6 +11,7 @@ package net.mamoe.mirai.internal.contact
+ 
+ import net.mamoe.mirai.contact.Member
+ import net.mamoe.mirai.contact.MemberPermission
++import net.mamoe.mirai.message.MessageReceipt
+ import net.mamoe.mirai.data.MemberInfo
+ import net.mamoe.mirai.internal.contact.info.MemberInfoImpl
+ import net.mamoe.mirai.utils.cast
+@@ -21,6 +22,8 @@ internal sealed class AbstractMember(
+     parentCoroutineContext: CoroutineContext,
+     memberInfo: MemberInfo,
+ ) : AbstractUser(group.bot, parentCoroutineContext, memberInfo), Member {
++    abstract override suspend fun sendMessage(message: String): MessageReceipt<Member>
++
+ 
+     final override val info: MemberInfoImpl = memberInfo.cast()
+ 
+diff --git a/mirai-core/src/commonMain/kotlin/contact/AnonymousMemberImpl.kt b/mirai-core/src/commonMain/kotlin/contact/AnonymousMemberImpl.kt
+index abef0d8..944539b 100644
+--- a/mirai-core/src/commonMain/kotlin/contact/AnonymousMemberImpl.kt
++++ b/mirai-core/src/commonMain/kotlin/contact/AnonymousMemberImpl.kt
+@@ -22,6 +22,10 @@ internal class AnonymousMemberImpl(
+     parentCoroutineContext: CoroutineContext,
+     memberInfo: MemberInfo,
+ ) : AnonymousMember, AbstractMember(group, parentCoroutineContext, memberInfo) {
++    @Deprecated(level = DeprecationLevel.ERROR, message = "无法发送信息至 AnonymousMember")
++    override suspend fun sendMessage(message: String): Nothing =
++        throw UnsupportedOperationException("Cannot send message to AnonymousMember")
++
+     init {
+         requireNotNull(memberInfo.anonymousId) { "anonymousId must not be null" }
+     }
+diff --git a/mirai-core/src/commonMain/kotlin/contact/NormalMemberImpl.kt b/mirai-core/src/commonMain/kotlin/contact/NormalMemberImpl.kt
+index 38a958c..faee5af 100644
+--- a/mirai-core/src/commonMain/kotlin/contact/NormalMemberImpl.kt
++++ b/mirai-core/src/commonMain/kotlin/contact/NormalMemberImpl.kt
+@@ -39,6 +39,9 @@ internal class NormalMemberImpl constructor(
+     parentCoroutineContext: CoroutineContext,
+     memberInfo: MemberInfo,
+ ) : NormalMember, AbstractMember(group, parentCoroutineContext, memberInfo) {
++    override suspend fun sendMessage(message: String): MessageReceipt<NormalMember> =
++        super<NormalMember>.sendMessage(message)
++
+ 
+     override val joinTimestamp: Int get() = info.joinTimestamp
+     override val lastSpeakTimestamp: Int get() = info.lastSpeakTimestamp
+diff --git a/mirai-core/src/commonMain/kotlin/contact/active/GroupActiveImpl.kt b/mirai-core/src/commonMain/kotlin/contact/active/GroupActiveImpl.kt
+index b2b864d..01030e9 100644
+--- a/mirai-core/src/commonMain/kotlin/contact/active/GroupActiveImpl.kt
++++ b/mirai-core/src/commonMain/kotlin/contact/active/GroupActiveImpl.kt
+@@ -184,7 +184,7 @@ internal abstract class CommonGroupActiveImpl(
+             }
+         }
+ 
+-        @Suppress("INVISIBLE_MEMBER")
++        @Suppress("INVISIBLE_MEMBER", "INVISIBLE_REFERENCE")
+         return ActiveHonorList(
+             type = type,
+             current = data.current?.toActiveHonorInfo(group),
+@@ -199,7 +199,7 @@ internal abstract class CommonGroupActiveImpl(
+     override suspend fun queryActiveRank(): List<ActiveRankRecord> {
+         val data = getMemberScoreData()
+ 
+-        @Suppress("INVISIBLE_MEMBER")
++        @Suppress("INVISIBLE_MEMBER", "INVISIBLE_REFERENCE")
+         return data.members.map {
+             ActiveRankRecord(
+                 memberId = it.uin,
+@@ -233,7 +233,7 @@ internal abstract class CommonGroupActiveImpl(
+             if (item.wearTs != 0) worn = type
+         }
+ 
+-        @Suppress("INVISIBLE_MEMBER")
++        @Suppress("INVISIBLE_MEMBER", "INVISIBLE_REFERENCE")
+         return MemberMedalInfo(
+             title = info.weared,
+             color = info.wearedColor,
+diff --git a/mirai-core/src/commonMain/kotlin/contact/active/GroupActiveProtocol.kt b/mirai-core/src/commonMain/kotlin/contact/active/GroupActiveProtocol.kt
+index 2cead47..9876069 100644
+--- a/mirai-core/src/commonMain/kotlin/contact/active/GroupActiveProtocol.kt
++++ b/mirai-core/src/commonMain/kotlin/contact/active/GroupActiveProtocol.kt
+@@ -594,14 +594,14 @@ internal suspend fun QQAndroidBot.getRawGroupActiveData(
+         .loadAs(GroupActiveData.serializer())
+ }
+ 
+-@Suppress("INVISIBLE_MEMBER")
++@Suppress("INVISIBLE_MEMBER", "INVISIBLE_REFERENCE")
+ internal fun GroupActiveData.MostActive.toActiveRecord(group: Group): ActiveRecord {
+     return ActiveRecord(
+         memberId = uin, memberName = name, periodDays = sentencesNum, messagesCount = sta, member = group.get(id = uin)
+     )
+ }
+ 
+-@Suppress("INVISIBLE_MEMBER")
++@Suppress("INVISIBLE_MEMBER", "INVISIBLE_REFERENCE")
+ internal fun GroupActiveData.ActiveInfo.toActiveChart(): ActiveChart {
+     return ActiveChart(
+         actives = actNum?.associate { it.date to it.num }.orEmpty(),
+@@ -612,7 +612,7 @@ internal fun GroupActiveData.ActiveInfo.toActiveChart(): ActiveChart {
+     )
+ }
+ 
+-@Suppress("INVISIBLE_MEMBER")
++@Suppress("INVISIBLE_MEMBER", "INVISIBLE_REFERENCE")
+ internal fun MemberHonorInfo.toActiveHonorInfo(group: GroupImpl): ActiveHonorInfo {
+     return ActiveHonorInfo(
+         memberName = nick,
+diff --git a/mirai-core/src/commonMain/kotlin/contact/file/AbsoluteFolderImpl.kt b/mirai-core/src/commonMain/kotlin/contact/file/AbsoluteFolderImpl.kt
+index 39f4566..60681ad 100644
+--- a/mirai-core/src/commonMain/kotlin/contact/file/AbsoluteFolderImpl.kt
++++ b/mirai-core/src/commonMain/kotlin/contact/file/AbsoluteFolderImpl.kt
+@@ -239,7 +239,7 @@ internal abstract class CommonAbsoluteFolderImpl(
+                         commandId = 71,
+                         extendInfo = ext,
+                         dataFlag = 0,
+-                        callback = if (callback == null) null else fun(it: Long) {
++                        callback = if (callback == null) null else Highway.ProgressionCallback {
+                             callback.onProgression(file, content, it)
+                         }
+                     )
+diff --git a/mirai-core/src/commonMain/kotlin/contact/info/MemberInfoImpl.kt b/mirai-core/src/commonMain/kotlin/contact/info/MemberInfoImpl.kt
+index 9c45c58..6436c86 100644
+--- a/mirai-core/src/commonMain/kotlin/contact/info/MemberInfoImpl.kt
++++ b/mirai-core/src/commonMain/kotlin/contact/info/MemberInfoImpl.kt
+@@ -77,7 +77,7 @@ internal data class MemberInfoImpl(
+                 if (type.toInt() == 8) {
+                     val value = bytes.getOrNull(index + 1) ?: break
+                     try {
+-                        @Suppress("INVISIBLE_MEMBER")
++                        @Suppress("INVISIBLE_MEMBER", "INVISIBLE_REFERENCE")
+                         add(GroupHonorType(value.toInt()))
+                     } catch (_: Exception) {
+                     }
+diff --git a/mirai-core/src/commonMain/kotlin/message/RefinableMessage.kt b/mirai-core/src/commonMain/kotlin/message/RefinableMessage.kt
+index 05e5fec..5af4431 100644
+--- a/mirai-core/src/commonMain/kotlin/message/RefinableMessage.kt
++++ b/mirai-core/src/commonMain/kotlin/message/RefinableMessage.kt
+@@ -200,7 +200,7 @@ internal object LightMessageRefiner : MessageRefiner() {
+         val originalMessage = this
+         source.originalMessageLazy = lazy {
+             originalMessage.filterNot { it is MessageSource }.toMessageChain()
+-//            @Suppress("INVISIBLE_MEMBER")
++//            @Suppress("INVISIBLE_MEMBER", "INVISIBLE_REFERENCE")
+ //            createMessageChainImplOptimized(originalMessage.filterNot { it is MessageSource })
+         }
+         return this
+diff --git a/mirai-core/src/commonMain/kotlin/message/data/LongMessageInternal.kt b/mirai-core/src/commonMain/kotlin/message/data/LongMessageInternal.kt
+index b003873..1052e56 100644
+--- a/mirai-core/src/commonMain/kotlin/message/data/LongMessageInternal.kt
++++ b/mirai-core/src/commonMain/kotlin/message/data/LongMessageInternal.kt
+@@ -25,6 +25,7 @@ import net.mamoe.mirai.utils.encodeHtmlEscape
+ import net.mamoe.mirai.utils.safeCast
+ 
+ // internal runtime value, not serializable
++@ExposedCopyVisibility
+ internal data class LongMessageInternal internal constructor(override val content: String, val resId: String) :
+     AbstractServiceMessage(), RefinableMessage {
+     override val serviceId: Int get() = 35
+diff --git a/mirai-core/src/commonMain/kotlin/message/data/MarketFaceImpl.kt b/mirai-core/src/commonMain/kotlin/message/data/MarketFaceImpl.kt
+index eb94988..5810aef 100644
+--- a/mirai-core/src/commonMain/kotlin/message/data/MarketFaceImpl.kt
++++ b/mirai-core/src/commonMain/kotlin/message/data/MarketFaceImpl.kt
+@@ -20,6 +20,7 @@ import net.mamoe.mirai.message.data.visitor.MessageVisitor
+ 
+ @SerialName(MarketFace.SERIAL_NAME)
+ @Serializable
++@ExposedCopyVisibility
+ internal data class MarketFaceImpl internal constructor(
+     internal val delegate: ImMsgBody.MarketFace,
+ ) : MarketFace {
+diff --git a/mirai-core/src/commonMain/kotlin/message/image/InternalImageProtocolImpl.kt b/mirai-core/src/commonMain/kotlin/message/image/InternalImageProtocolImpl.kt
+index e2a81e1..56b2cf1 100644
+--- a/mirai-core/src/commonMain/kotlin/message/image/InternalImageProtocolImpl.kt
++++ b/mirai-core/src/commonMain/kotlin/message/image/InternalImageProtocolImpl.kt
+@@ -181,7 +181,7 @@ internal class InternalImageProtocolImpl : InternalImageProtocol {
+                 OfflineFriendImage(imageId, width, height, size, type, isEmoji)
+             }
+             else ->
+-                @Suppress("INVISIBLE_MEMBER")
++                @Suppress("INVISIBLE_MEMBER", "INVISIBLE_REFERENCE")
+                 throw IllegalArgumentException("Illegal imageId: $imageId. ${net.mamoe.mirai.message.data.ILLEGAL_IMAGE_ID_EXCEPTION_MESSAGE}")
+         }
+     }
+diff --git a/mirai-core/src/commonMain/kotlin/message/source/MessageSourceInternal.kt b/mirai-core/src/commonMain/kotlin/message/source/MessageSourceInternal.kt
+index 1bfdc39..134d8c2 100644
+--- a/mirai-core/src/commonMain/kotlin/message/source/MessageSourceInternal.kt
++++ b/mirai-core/src/commonMain/kotlin/message/source/MessageSourceInternal.kt
+@@ -42,7 +42,8 @@ internal interface MessageSourceInternal : MessageMetadata {
+     fun toJceData(): ImMsgBody.SourceMsg
+ 
+     override fun <D, R> accept(visitor: MessageVisitor<D, R>, data: D): R {
+-        return visitor.ex()?.visitMessageSourceInternal(this.cast(), data) ?: super.accept(visitor, data)
++        this as MessageSource
++        return visitor.ex()?.visitMessageSourceInternal(this, data) ?: super.accept(visitor, data)
+     }
+ }
+ 
+diff --git a/mirai-core/src/commonMain/kotlin/network/components/CacheValidator.kt b/mirai-core/src/commonMain/kotlin/network/components/CacheValidator.kt
+index dc0eeda..dd94e15 100644
+--- a/mirai-core/src/commonMain/kotlin/network/components/CacheValidator.kt
++++ b/mirai-core/src/commonMain/kotlin/network/components/CacheValidator.kt
+@@ -59,7 +59,7 @@ internal class CacheValidatorImpl(
+ 
+             val device = ssoProcessorContext.device
+ 
+-            @Suppress("INVISIBLE_MEMBER")
++            @Suppress("INVISIBLE_MEMBER", "INVISIBLE_REFERENCE")
+             writeFully(device.serializeToString().encodeToByteArray())
+         }.let { pkg ->
+             try {
+diff --git a/mirai-core/src/commonMain/kotlin/network/handler/NetworkHandlerFactory.kt b/mirai-core/src/commonMain/kotlin/network/handler/NetworkHandlerFactory.kt
+index 6bc293a..079c8b2 100644
+--- a/mirai-core/src/commonMain/kotlin/network/handler/NetworkHandlerFactory.kt
++++ b/mirai-core/src/commonMain/kotlin/network/handler/NetworkHandlerFactory.kt
+@@ -27,7 +27,7 @@ internal expect fun interface NetworkHandlerFactory<out H : NetworkHandler> {
+     }
+ }
+ 
+-internal expect abstract class SocketAddress
++internal expect class SocketAddress
+ 
+ @Suppress("EXTENSION_SHADOWED_BY_MEMBER")
+ internal expect fun SocketAddress.getHost(): String
+diff --git a/mirai-core/src/commonMain/kotlin/network/protocol/packet/chat/NewContact.kt b/mirai-core/src/commonMain/kotlin/network/protocol/packet/chat/NewContact.kt
+index 97169f5..f3a378f 100644
+--- a/mirai-core/src/commonMain/kotlin/network/protocol/packet/chat/NewContact.kt
++++ b/mirai-core/src/commonMain/kotlin/network/protocol/packet/chat/NewContact.kt
+@@ -7,7 +7,7 @@
+  * https://github.com/mamoe/mirai/blob/dev/LICENSE
+  */
+ 
+-@file:Suppress("INVISIBLE_MEMBER")
++@file:Suppress("INVISIBLE_MEMBER", "INVISIBLE_REFERENCE")
+ 
+ package net.mamoe.mirai.internal.network.protocol.packet.chat
+ 
+diff --git a/mirai-core/src/commonMain/kotlin/network/protocol/packet/login/StatSvc.kt b/mirai-core/src/commonMain/kotlin/network/protocol/packet/login/StatSvc.kt
+index 43a3e1e..209a2c9 100644
+--- a/mirai-core/src/commonMain/kotlin/network/protocol/packet/login/StatSvc.kt
++++ b/mirai-core/src/commonMain/kotlin/network/protocol/packet/login/StatSvc.kt
+@@ -295,7 +295,7 @@ internal class StatSvc {
+ 
+         override suspend fun ByteReadPacket.decode(bot: QQAndroidBot, sequenceId: Int): MsfOfflinePacket {
+             val decodeUniPacket = readUniPacket(RequestMSFForceOffline.serializer())
+-            @Suppress("INVISIBLE_MEMBER")
++            @Suppress("INVISIBLE_MEMBER", "INVISIBLE_REFERENCE")
+             return MsfOfflinePacket(MsfOfflineToken(decodeUniPacket.uin, decodeUniPacket.iSeqno, 0))
+         }
+ 
+diff --git a/mirai-core/src/commonTest/kotlin/testFramework/rules/DisabledOnJvmLikePlatform.kt b/mirai-core/src/commonTest/kotlin/testFramework/rules/DisabledOnJvmLikePlatform.kt
+index d76e649..b201440 100644
+--- a/mirai-core/src/commonTest/kotlin/testFramework/rules/DisabledOnJvmLikePlatform.kt
++++ b/mirai-core/src/commonTest/kotlin/testFramework/rules/DisabledOnJvmLikePlatform.kt
+@@ -21,5 +21,5 @@ import kotlin.reflect.KClass
+ @OptIn(ExperimentalMultiplatform::class)
+ @OptionalExpectation
+ expect annotation class DisabledOnJvmLikePlatform(
+-    vararg val values: KClass<out Platform.JvmLike> // don't read this property
++    vararg val values: KClass<out Platform> // don't read this property
+ )
+\ No newline at end of file
+diff --git a/mirai-core/src/jvmBaseMain/kotlin/network/impl/netty/NettyNetworkHandler.kt b/mirai-core/src/jvmBaseMain/kotlin/network/impl/netty/NettyNetworkHandler.kt
+index a514108..7c1e955 100644
+--- a/mirai-core/src/jvmBaseMain/kotlin/network/impl/netty/NettyNetworkHandler.kt
++++ b/mirai-core/src/jvmBaseMain/kotlin/network/impl/netty/NettyNetworkHandler.kt
+@@ -51,7 +51,7 @@ internal open class NettyNetworkHandler(
+     ///////////////////////////////////////////////////////////////////////////
+ 
+     private inner class IncomingPacketDecoder(
+-        private val decodePipeline: PacketDecodePipeline,
++        private val decodePipeline: CommonNetworkHandler<NettyChannel>.PacketDecodePipeline,
+     ) : SimpleChannelInboundHandler<ByteBuf>(ByteBuf::class.java) {
+         override fun channelRead0(ctx: ChannelHandlerContext, msg: ByteBuf) {
+             decodePipeline.send(msg.toReadPacket())
+diff --git a/mirai-core/src/jvmBaseMain/kotlin/utils/RemoteFileImpl.kt b/mirai-core/src/jvmBaseMain/kotlin/utils/RemoteFileImpl.kt
+index 5f018c7..4276d7a 100644
+--- a/mirai-core/src/jvmBaseMain/kotlin/utils/RemoteFileImpl.kt
++++ b/mirai-core/src/jvmBaseMain/kotlin/utils/RemoteFileImpl.kt
+@@ -66,13 +66,6 @@ internal fun RemoteFile.checkIsImpl(): CommonRemoteFileImpl {
+     return this as? RemoteFileImpl ?: error("RemoteFile must not be implemented manually.")
+ }
+ 
+-internal expect class RemoteFileImpl(
+-    contact: Group,
+-    path: String, // absolute
+-) : CommonRemoteFileImpl {
+-    constructor(contact: Group, parent: String, name: String)
+-}
+-
+ internal abstract class CommonRemoteFileImpl(
+     override val contact: Group,
+     override val path: String, // absolute
+@@ -498,7 +491,7 @@ internal abstract class CommonRemoteFileImpl(
+                 commandId = 71,
+                 extendInfo = ext,
+                 dataFlag = 0,
+-                callback = if (callback == null) null else fun(it: Long) {
++                callback = if (callback == null) null else Highway.ProgressionCallback {
+                     callback.onProgression(this, resource, it)
+                 }
+             )
+@@ -586,11 +579,11 @@ internal abstract class CommonRemoteFileImpl(
+     }
+ }
+ 
+-internal actual class RemoteFileImpl actual constructor(
++internal class RemoteFileImpl(
+     contact: Group,
+     path: String
+ ) : CommonRemoteFileImpl(contact, path), RemoteFile {
+-    actual constructor(contact: Group, parent: String, name: String) : this(contact, FileSystem.normalize(parent, name))
++    constructor(contact: Group, parent: String, name: String) : this(contact, FileSystem.normalize(parent, name))
+ 
+     // compiler bug
+     @Deprecated(
+diff --git a/mirai-core/src/jvmBaseTest/kotlin/testFramework/DebugProbes.kt b/mirai-core/src/jvmBaseTest/kotlin/testFramework/DebugProbes.kt
+index ee724b8..7707775 100644
+--- a/mirai-core/src/jvmBaseTest/kotlin/testFramework/DebugProbes.kt
++++ b/mirai-core/src/jvmBaseTest/kotlin/testFramework/DebugProbes.kt
+@@ -9,8 +9,40 @@
+ 
+ package net.mamoe.mirai.internal.testFramework
+ 
++import kotlinx.coroutines.CoroutineScope
+ import kotlinx.coroutines.ExperimentalCoroutinesApi
++import kotlinx.coroutines.Job
++import kotlinx.coroutines.debug.DebugProbes as CoroutinesDebugProbes
+ 
+-@Suppress("ACTUAL_WITHOUT_EXPECT", "NO_ACTUAL_CLASS_MEMBER_FOR_EXPECTED_CLASS")
+ @OptIn(ExperimentalCoroutinesApi::class)
+-actual typealias DebugProbes = kotlinx.coroutines.debug.DebugProbes
+\ No newline at end of file
++actual object DebugProbes {
++    actual var sanitizeStackTraces: Boolean
++        get() = CoroutinesDebugProbes.sanitizeStackTraces
++        set(value) {
++            CoroutinesDebugProbes.sanitizeStackTraces = value
++        }
++
++    actual var enableCreationStackTraces: Boolean
++        get() = CoroutinesDebugProbes.enableCreationStackTraces
++        set(value) {
++            CoroutinesDebugProbes.enableCreationStackTraces = value
++        }
++
++    actual val isInstalled: Boolean get() = CoroutinesDebugProbes.isInstalled
++
++    actual fun install(): Unit = CoroutinesDebugProbes.install()
++
++    actual fun uninstall(): Unit = CoroutinesDebugProbes.uninstall()
++
++    actual inline fun withDebugProbes(block: () -> Unit): Unit = CoroutinesDebugProbes.withDebugProbes(block)
++
++    actual fun jobToString(job: Job): String = CoroutinesDebugProbes.jobToString(job)
++
++    actual fun scopeToString(scope: CoroutineScope): String = CoroutinesDebugProbes.scopeToString(scope)
++
++    actual fun printJob(job: Job): Unit = CoroutinesDebugProbes.printJob(job)
++
++    actual fun printScope(scope: CoroutineScope): Unit = CoroutinesDebugProbes.printScope(scope)
++
++    actual fun dumpCoroutines(): Unit = CoroutinesDebugProbes.dumpCoroutines()
++}
+\ No newline at end of file
+diff --git a/mirai-core/src/jvmBaseTest/kotlin/testFramework/DynamicTest.kt b/mirai-core/src/jvmBaseTest/kotlin/testFramework/DynamicTest.kt
+index c0af1b4..f3bda25 100644
+--- a/mirai-core/src/jvmBaseTest/kotlin/testFramework/DynamicTest.kt
++++ b/mirai-core/src/jvmBaseTest/kotlin/testFramework/DynamicTest.kt
+@@ -13,12 +13,11 @@ actual typealias TestFactory = org.junit.jupiter.api.TestFactory
+ 
+ actual typealias DynamicTest = org.junit.jupiter.api.DynamicTest
+ 
+-@Suppress("ACTUAL_TYPE_ALIAS_TO_CLASS_WITH_DECLARATION_SITE_VARIANCE", "ACTUAL_WITHOUT_EXPECT")
+-actual typealias DynamicTestsResult = List<*>
++actual class DynamicTestsResult(private val tests: List<DynamicTest>) : Iterable<DynamicTest> by tests
+ 
+ actual fun dynamicTest(displayName: String, action: () -> Unit): DynamicTest {
+     return DynamicTest.dynamicTest(displayName, action)
+ }
+ 
+ 
+-actual fun runDynamicTests(dynamicTests: List<DynamicTest>): DynamicTestsResult = dynamicTests
+\ No newline at end of file
++actual fun runDynamicTests(dynamicTests: List<DynamicTest>): DynamicTestsResult = DynamicTestsResult(dynamicTests)
+\ No newline at end of file
+diff --git a/mirai-core/src/jvmTest/kotlin/netinternalkit/LogCapture.kt b/mirai-core/src/jvmTest/kotlin/netinternalkit/LogCapture.kt
+index d551191..29fd576 100644
+--- a/mirai-core/src/jvmTest/kotlin/netinternalkit/LogCapture.kt
++++ b/mirai-core/src/jvmTest/kotlin/netinternalkit/LogCapture.kt
+@@ -26,7 +26,7 @@ internal object LogCapture {
+     fun setupCapture(maxLine: Int = 200) {
+         logCache = SizedCache(maxLine)
+ 
+-        @Suppress("INVISIBLE_MEMBER")
++        @Suppress("INVISIBLE_MEMBER", "INVISIBLE_REFERENCE")
+         MiraiLoggerFactoryImplementationBridge.wrapCurrent {
+             object : MiraiLogger.Factory {
+                 override fun create(requester: Class<*>, identity: String?): MiraiLogger {

@@ -68,8 +68,17 @@ pub(super) fn java_type_nullability(ty: Ty, nullability: Option<JavaNullability>
         .map(super::super::classpath::kotlin_name_to_ty)
         .unwrap_or(ty);
     match nullability {
-        // `@NotNull T` is `T & Any`: a nullable argument substituted for `T` stays non-null.
-        Some(JavaNullability::NotNull) => ty.definitely_non_null(),
+        // `@NotNull T` is `T & Any`: a nullable argument substituted for `T` stays non-null. A
+        // collection keeps the mutability its Java type leaves open: `@NotNull List<T>` is
+        // `(Mutable)List<T!>`, not `MutableList<T!>`.
+        Some(JavaNullability::NotNull) => {
+            let ty = ty.definitely_non_null();
+            if super::super::jvm_class_map::platform_flexible_upper_bound(ty) != ty {
+                Ty::mutability_flexible(ty)
+            } else {
+                ty
+            }
+        }
         Some(JavaNullability::Nullable) => Ty::nullable(ty),
         None => Ty::platform_nullable(ty),
     }

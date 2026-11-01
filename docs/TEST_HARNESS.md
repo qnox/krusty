@@ -242,8 +242,11 @@ keys before the normal `BOX_ONLY`/`BOX_LIMIT` selection. There is no separate ru
 Every owned portable case first requires the actual JVM/kotlinc oracle to return `OK`, on every
 backend. Native module graphs also require the Native oracle. JVM is strict: krusty must return
 `OK`. Native/Wasm use the existing `tests/box_expected_failures/` inventories and canonical release
-inheritance, with no applicability exclusions for owned sources. Harness errors, unavailable setup,
-compiler panics and target skips are fatal before any expectation write. The ordinary upstream
+inheritance. An owned source leaves a target only by naming its backends with `// TARGET_BACKEND:`,
+as a fixture for a JVM-only compiler argument (`-Xuse-inline-scopes-numbers`) does. It is then
+outside that lane, not one of the lane's not-applicable entries: it leaves the lane's scanned
+and applicable counts, and the report line counts it as `outside-lane`. Harness errors, unavailable setup,
+compiler panics and every other target skip are fatal before any expectation write. The ordinary upstream
 per-case applicability policy is unchanged. Full sweeps require the provisioned upstream corpus;
 the separate vendored smoke test does not replace missing setup.
 

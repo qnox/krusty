@@ -3,10 +3,10 @@
 
 usage: pin.py <file> <key> <version>
 
-`<file>` is a `.toml` version catalog (`<key> = "<version>"`) or a `.properties` file
-(`<key>=<version>`). Exactly one line must assign `<key>`; no such line, or more than one, is an
-error and leaves the file unchanged. The file is read again afterwards to verify that the key now
-holds `<version>`.
+`<file>` is a `.toml` version catalog (`<key> = "<version>"`), a `.properties` file
+(`<key>=<version>`) or a Kotlin source file (`[const] val <key> = "<version>"`). Exactly one line
+must assign `<key>`; no such line, or more than one, is an error and leaves the file unchanged. The
+file is read again afterwards to verify that the key now holds `<version>`.
 """
 import re
 import sys
@@ -18,6 +18,8 @@ def assignment(path, key):
         return re.compile(r'^(' + re.escape(key) + r'\s*=\s*")([^"]*)(".*)$')
     if path.endswith('.properties'):
         return re.compile(r'^(' + re.escape(key) + r'\s*[=:]\s*)(\S*)(\s*)$')
+    if path.endswith('.kt'):
+        return re.compile(r'^(\s*(?:const\s+)?val\s+' + re.escape(key) + r'\s*=\s*")([^"]*)(".*)$')
     raise ValueError(f'unsupported Kotlin version pin file: {path}')
 
 

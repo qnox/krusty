@@ -33,7 +33,11 @@ impl JvmBuiltInsCustomizer {
         let mut classifier = if internal.matches("kotlin/Cloneable") {
             base.unwrap_or_else(Self::cloneable_classifier)
         } else if Ty::obj_name(internal).is_array() {
-            base.unwrap_or_else(LibraryType::declaration_header)
+            base.unwrap_or_else(|| {
+                let mut classifier = LibraryType::declaration_header();
+                classifier.declaration_name = crate::types::array_declaration_name(internal);
+                classifier
+            })
         } else {
             base?
         };
@@ -79,7 +83,7 @@ impl JvmBuiltInsCustomizer {
     fn cloneable_classifier() -> LibraryType {
         let mut supertypes = TypeNameList::new();
         supertypes.push("kotlin/Any");
-        builtin_library_type(
+        let mut classifier = builtin_library_type(
             crate::libraries::TypeKind::Interface,
             ClassifierAccess::Public,
             false,
@@ -92,7 +96,12 @@ impl JvmBuiltInsCustomizer {
                 type_param_variances: Vec::new(),
                 supertype_templates: vec![Ty::obj("kotlin/Any")],
             },
-        )
+        );
+        classifier.declaration_name = Some(crate::types::ClassifierDeclarationName::TopLevel {
+            package: crate::types::wk::kotlin_package(),
+            name: "Cloneable".into(),
+        });
+        classifier
     }
 
     fn clone_member(ret: Ty, visibility: Visibility) -> LibraryMember {
@@ -131,10 +140,21 @@ impl JvmBuiltInsCustomizer {
             Self::install_supertype(classifier, type_name(supertype));
         }
 
+        // `clone(): Array<T>` returns the receiver's own type argument, so each formal keeps its
+        // declared bound: `Array<T>`'s `T` is implicitly bounded by `Any?`, and a non-null bound
+        // would turn `Array<String?>.clone()` into `Array<String>`.
         let arguments = classifier
             .type_params
             .iter()
-            .map(|formal| Ty::ty_param(formal, Ty::obj("kotlin/Any")))
+            .enumerate()
+            .map(|(index, formal)| {
+                let bound = classifier
+                    .type_param_bounds
+                    .get(index)
+                    .and_then(|bounds| bounds.first().copied())
+                    .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
+                Ty::ty_param(formal, bound)
+            })
             .collect::<Vec<_>>();
         let ret = Ty::obj_args_name(internal, &arguments);
         let replacement = Self::clone_member(ret, Visibility::Public);

@@ -1,6 +1,22 @@
 //! Declaration provenance attached to a resolved classifier facet, including typealias expansion.
 
-use crate::types::{Ty, TypeName};
+use crate::types::{ClassifierDeclarationName, Ty, TypeName};
+
+/// The already-selected declaration whose own name is required. An ordinary classifier and an
+/// alias may share a flattened identity while occupying different semantic declaration keys.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ClassifierDeclarationKey {
+    Ordinary(TypeName),
+    TypeAlias(TypeName),
+}
+
+/// A source alias's retained expansion before a use selects its target classifier.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TypeAliasTemplate {
+    pub declaration_name: Option<ClassifierDeclarationName>,
+    pub formals: Vec<String>,
+    pub expansion: Ty,
+}
 
 /// A classpath typealias expansion as a selected use site needs it.
 #[derive(Clone, Debug, PartialEq)]
@@ -8,6 +24,10 @@ pub struct AliasExpansion {
     /// Stable qualified identity of the alias declaration. Source spelling is resolved to this
     /// identity before the template is selected.
     pub identity: TypeName,
+    /// The alias's own declared container and exact segment, independent of its target.
+    /// `None` means that the selected snapshot supplies no declaration-name evidence.
+    /// Provider copies share this immutable fact, keeping the enclosing declaration enums compact.
+    pub declaration_name: Option<std::sync::Arc<ClassifierDeclarationName>>,
     /// The alias's target classifier. A template applies only when the spelling that named it
     /// actually resolved to this classifier.
     pub target: TypeName,

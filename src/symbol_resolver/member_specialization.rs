@@ -298,6 +298,16 @@ fn specialize_member_type_with_unbound(
                 Ty::platform_nullable(specialized)
             }
         }
+        TyKind::MutabilityFlexible(inner) => {
+            Ty::mutability_flexible(specialize_member_type_with_unbound(
+                source,
+                inner,
+                bindings,
+                position,
+                unbound,
+                input_projection,
+            ))
+        }
         TyKind::InProjection(inner) => Ty::in_projection(specialize_member_type_with_unbound(
             source,
             inner,
@@ -539,6 +549,7 @@ fn contains_flexible_variable(ty: Ty) -> bool {
         TyKind::DefinitelyNotNull(inner)
         | TyKind::Nullable(inner)
         | TyKind::PlatformNullable(inner)
+        | TyKind::MutabilityFlexible(inner)
         | TyKind::InProjection(inner)
         | TyKind::OutProjection(inner)
         | TyKind::StarProjection(inner) => contains_flexible_variable(inner),

@@ -16,6 +16,7 @@ mod body_local_ownership;
 mod body_trace;
 #[cfg(test)]
 mod bottom_value_tests;
+mod builtin_calls;
 #[cfg(test)]
 mod builtin_operation_tests;
 #[cfg(test)]
@@ -411,6 +412,9 @@ struct BodyLowering<'a> {
     /// Nesting depth of the recursive expression funnel, used to decide when to re-check the
     /// remaining stack. See [`BodyLowering::expression`].
     expression_depth: u32,
+    /// The start line of the elvis chain whose next link is being lowered. kotlinc folds
+    /// `a ?: b ?: c` into one chain, so every later link declares its temporary at the chain's start.
+    elvis_chain_start: Option<u32>,
     /// The executable scope the classes this body declares or generates belong to.
     enclosure: Option<crate::ir::IrEnclosure>,
     /// The declaration whose body or default fragment contains an inline expansion. Unlike
@@ -426,10 +430,6 @@ struct BodyLowering<'a> {
     /// The lambdas and local functions written in this body that read one of those values.
     callables_reading_inline_parameters: crate::fx_hash::HashSet<crate::ir::FunId>,
     declaration_lambda: Option<crate::ir::FunId>,
-    /// Whether this body is a suspend local function or lambda, or a lambda written in one, whose
-    /// code may run in that callable's state machine. A named function's own `suspend` modifier is
-    /// read from its declaration instead.
-    suspend_context: bool,
     /// Whether the expression currently being lowered belongs to a default-argument fragment.
     in_default_argument: bool,
     /// The checked block this body's root evaluates, when it is one, and the block it lowered to.
@@ -730,9 +730,9 @@ impl<'a> BodyLowering<'a> {
             inline_parameter_values: Default::default(),
             callables_reading_inline_parameters: Default::default(),
             declaration_lambda: None,
-            suspend_context: false,
             in_default_argument: body.is_default_fragment(),
             expression_depth: 0,
+            elvis_chain_start: None,
             root_block: root_scope_block(body),
             lowered_root_block: None,
             operand_bound_calls: HashMap::default(),
@@ -1213,6 +1213,11 @@ fn consume_trailing_unit_result(ir: &mut IrFile, roots: &mut Vec<ExprId>) {
             // intact: flattening it would also flatten its lexical scope and extend the inlined
             // locals through the caller's return.
             if ir.retains_inline_unit_line(*value) {
+                return;
+            }
+            // A dependency's inline expansion closes its frame on the block itself, which writes
+            // the declaration's closing line on a `nop`. A replacement block would not own it.
+            if ir.external_frame_closes.contains_key(&trailing) {
                 return;
             }
             let effects = stmts.clone();
