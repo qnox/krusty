@@ -45,6 +45,12 @@ fun Screen(count: Int, name: String) {
     Greet(2, name)
     Empty()
     Flags(true, 1.5, 3L, 'x')
+    Frame { Empty() }
+}
+
+@Composable
+fun Frame(content: @Composable () -> Unit) {
+    content()
 }
 
 // FILE: box.kt
@@ -69,7 +75,8 @@ fun box(): String {
             "endRestartGroup" -> scope
             "sourceInformation", "sourceInformationMarkerStart", "sourceInformationMarkerEnd" -> null
             "changed" -> {
-                log.append("changed ${args[0]};")
+                val value = args[0]
+                log.append("changed ${if (value is Function<*>) "lambda" else value};")
                 true
             }
             "getSkipping" -> false
@@ -80,6 +87,6 @@ fun box(): String {
     Class.forName("app.ScreenKt")
         .getMethod("Screen", Integer.TYPE, String::class.java, Composer::class.java, Integer.TYPE)
         .invoke(null, 7, "n", composer, 0)
-    val expected = "changed 7;changed n;1 a;7 n;changed 8;8 b;2 n;empty;true 1.5 3 x;"
+    val expected = "changed 7;changed n;1 a;7 n;changed 8;8 b;2 n;empty;true 1.5 3 x;changed lambda;empty;"
     return if (log.toString() == expected) "OK" else log.toString()
 }
