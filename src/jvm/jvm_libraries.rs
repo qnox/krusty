@@ -79,7 +79,7 @@ use crate::jvm::names::type_descriptor;
 use crate::libraries::{
     CallSig, EmptySymbolSource, FnFlags, FnKind, FunctionInfo, FunctionSet, GenericReturnPolicy,
     GenericSig, InlineKind, LibraryCallable, LibraryConst, LibraryMember, LibraryType, PropKind,
-    PropertyInfo, PropertyProducer, PropertySet, ReturnInfo, SemanticPlatform, Visibility,
+    PropertyInfo, PropertyProducer, PropertySet, ReturnInfo, Visibility,
 };
 use crate::runtime::{PlatformRangeCtor, RangeConstruction};
 use crate::symbol_resolver::{ty_subst, ty_subst_all, ty_subst_keep_unbound};
@@ -2486,6 +2486,7 @@ impl JvmLibraries {
                 annotation_targets: (kind == crate::libraries::TypeKind::Annotation)
                     .then(|| classpath_annotation_targets(&ci)),
                 mapped_collection: None,
+                mapped_builtin: is_mapped_builtin,
                 annotation_element_defaults: annotation_element_defaults(&ci),
                 deprecation,
             })
@@ -3329,17 +3330,7 @@ impl JvmLibraries {
                         .member_functions_with_renames(recv, &setter_name, function_renames)
                         .overloads
                         .into_iter()
-                        .find(|setter| {
-                            // Java synthetic-property pairing is declaration-shape matching, not
-                            // call overload selection. A `setX` is the setter when its single
-                            // value parameter is the getter's exact semantic storage type. The
-                            // method's return type is not part of that shape: a fluent or
-                            // otherwise non-void Java setter is still a `var`, and the assignment
-                            // discards the result. Core assignability belongs above this boundary.
-                            setter.callable.params.len() == 1
-                                && self.library_value_form(ty)
-                                    == self.library_value_form(setter.callable.params[0])
-                        });
+                        .find(|setter| self.pairs_java_setter(ty, &setter.semantic_params()));
                     let setter_visibility = setter
                         .as_ref()
                         .map_or(visibility, |setter| setter.visibility);
@@ -4909,13 +4900,7 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
                 let setter = setter_callables
                     .functions()
                     .iter()
-                    .find(|setter| {
-                        // Same pairing as a setter declared on the receiver: one value parameter
-                        // of the getter's storage type. The Java method may return anything.
-                        setter.semantic_params().len() == 1
-                            && self.library_value_form(ty)
-                                == self.library_value_form(setter.semantic_params()[0])
-                    })
+                    .find(|setter| self.pairs_java_setter(ty, &setter.semantic_params()))
                     .cloned();
                 let getter_declaration = function.stable_declaration;
                 let setter_declaration =

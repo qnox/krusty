@@ -18,9 +18,12 @@
 
 use crate::fx_hash::{HashMap, HashSet};
 
+mod arrays;
+mod boxing;
 mod default_arguments;
 mod dependency_exports;
 mod exceptions;
+mod function_values;
 mod intrinsic_operations;
 mod objects;
 mod scalar_instructions;
@@ -34,6 +37,7 @@ pub(super) use scalar_instructions::is_scalar_operation;
 pub(super) fn is_direct_operation(operation: crate::backend::BackendCompilerIntrinsic) -> bool {
     is_scalar_operation(operation)
         || operation == crate::backend::BackendCompilerIntrinsic::ThrowableMessage
+        || operation == crate::backend::BackendCompilerIntrinsic::ArrayGet
 }
 
 use crate::backend::class_tables::module_interfaces::ModuleInterfaces;
@@ -66,6 +70,7 @@ pub(super) struct LoweredFile {
 
 /// One file's checked IR and the facts frozen beside it.
 pub(super) struct FileInput<'a> {
+    pub(super) array_range_checks: bool,
     pub(super) classifiers: &'a dyn crate::backend::BackendClassifierSource,
     pub(super) ir: &'a IrFile,
     pub(super) properties: &'a RealizedProperties,
@@ -90,6 +95,7 @@ pub(super) fn lower_file(
     state: ModuleState<'_>,
 ) -> Result<LoweredFile, Unsupported> {
     let FileInput {
+        array_range_checks,
         classifiers,
         ir,
         properties,
@@ -191,6 +197,7 @@ pub(super) fn lower_file(
         Some(classes)
     };
     let context = FileContext {
+        array_range_checks,
         classifiers,
         module_name,
         numbers: plan.interfaces(),
@@ -326,7 +333,7 @@ pub(super) fn lower_file(
     } else {
         None
     };
-    callable_registry.publish(ir, dependency_exports, &indices)?;
+    callable_registry.publish(ir, dependency_exports, &indices, &default_indices)?;
     Ok(LoweredFile {
         functions: indices,
         initializer,
@@ -336,6 +343,7 @@ pub(super) fn lower_file(
 /// What every body of one file reads: the file, and where its functions, properties and classes
 /// went in the module.
 struct FileContext<'a> {
+    array_range_checks: bool,
     classifiers: &'a dyn crate::backend::BackendClassifierSource,
     module_name: &'a str,
     /// The module-wide numbers of the module's interface members.
@@ -380,6 +388,12 @@ pub(super) fn carrier(ty: Ty) -> Result<Option<ValType>, Unsupported> {
         TyKind::Obj(..) | TyKind::TyParam(..) => REFERENCE,
         TyKind::Intersection(..) if is_reference_intersection(ty) => REFERENCE,
         TyKind::DefinitelyNotNull(inner) if inner.is_ty_param() => REFERENCE,
+        // A function value is an object (see `super::super::function_values`).
+        TyKind::Fun(signature) if !signature.suspend => REFERENCE,
+        TyKind::Fun(_) => return Err("a suspend function value".into()),
+        TyKind::Nullable(inner) if matches!(inner.kind(), TyKind::Fun(signature) if !signature.suspend) => {
+            REFERENCE
+        }
         TyKind::Nullable(inner)
             if matches!(inner.kind(), TyKind::Obj(..) | TyKind::TyParam(..))
                 || is_reference_intersection(inner) =>
@@ -494,6 +508,9 @@ fn expression_type(
         {
             result
         }
+        // A SAM-converted lambda may have no checked type to ask about; it declines here as
+        // it does where it is lowered.
+        IrExpr::Lambda { sam: Some(_), .. } => return Err(function_values::SAM_CONVERSION.into()),
         node => ir
             .checked_type(id)
             .ok_or_else(|| format!("{} without a checked type", describe_node(node)))?,
@@ -545,6 +562,7 @@ struct Loop {
 }
 
 struct Body<'a> {
+    array_range_checks: bool,
     classifiers: &'a dyn crate::backend::BackendClassifierSource,
     module_name: &'a str,
     numbers: &'a ModuleInterfaces,
@@ -624,6 +642,7 @@ impl<'a> Body<'a> {
         );
         Self {
             module_name: context.module_name,
+            array_range_checks: context.array_range_checks,
             classifiers: context.classifiers,
             numbers: context.numbers,
             ir: context.ir,
@@ -816,6 +835,11 @@ impl<'a> Body<'a> {
             return Ok(());
         };
         let Some(source) = carrier(source)? else {
+            if source == Ty::Unit && target == REFERENCE {
+                let unit = self.runtime.unit_object(self.module);
+                self.code.global_get(unit);
+                return Ok(());
+            }
             return Err("a `Unit` value where a value is expected".to_string());
         };
         if source == target {
@@ -848,6 +872,11 @@ impl<'a> Body<'a> {
             }
             return Ok(());
         }
+        match (source, target) {
+            (ValType::Ref { .. }, _) => return self.unbox(target_ty),
+            (_, ValType::Ref { .. }) if target == REFERENCE => return self.box_value(source_ty),
+            _ => {}
+        }
         match (rank(source), rank(target)) {
             (Some(from), Some(to)) if from < to => {
                 widen(&mut self.code, source, target);
@@ -872,8 +901,15 @@ impl<'a> Body<'a> {
                 return Err("a shared cell read as a value".to_string());
             }
             IrExpr::GetValue(slot) => {
-                if let Some((local, _)) = self.values.get(&slot) {
-                    self.code.local_get(*local);
+                if let Some(&(local, declared)) = self.values.get(&slot) {
+                    self.code.local_get(local);
+                    // A smart cast reads the slot at a narrower type: `Int` out of an `Int?`
+                    // local holding a box.
+                    if let Some(read) = self.type_of(id)? {
+                        if carrier(read)? != carrier(declared)? {
+                            self.coerce_emitted_value(declared, read)?;
+                        }
+                    }
                 } else if !self.unit_values.contains(&slot) {
                     return Err(format!("a read of value {slot} before its declaration"));
                 }
@@ -1064,6 +1100,29 @@ impl<'a> Body<'a> {
                 args,
             } if let Callee::External {
                 target,
+                params,
+                defaults,
+                extension_receiver_parameter: None,
+                ..
+            } = &**call_callee
+                && defaults.is_empty()
+                && params.as_slice() == [Ty::Int]
+                && self.callables.callable(*target).is_some_and(|fact| {
+                    fact.compiler_operation()
+                        == Some(crate::backend::BackendCompilerIntrinsic::ArrayGet)
+                }) =>
+            {
+                let (Some(receiver), [index]) = (dispatch_receiver, args.as_slice()) else {
+                    return Err("an authenticated array read with malformed operands".into());
+                };
+                self.reference_array_get(receiver, *index)?;
+            }
+            IrExpr::Call {
+                callee: ref call_callee,
+                dispatch_receiver,
+                args,
+            } if let Callee::External {
+                target,
                 ret,
                 defaults,
                 ..
@@ -1138,6 +1197,8 @@ impl<'a> Body<'a> {
                                     (source, target),
                                     (ValType::Ref { .. }, ValType::Ref { .. })
                                 )
+                                && !(op == IrTypeOp::ImplicitCoercion
+                                    && (rank(source).is_none() || rank(target).is_none()))
                         }) =>
                     {
                         if op != IrTypeOp::ImplicitCoercion {
@@ -1160,11 +1221,10 @@ impl<'a> Body<'a> {
                         "a not-null assertion requiring a scalar reference conversion".into(),
                     );
                 }
-                // A reference assertion alone supplies neither scalar unboxing nor a typed null
-                // failure. Keep the existing reference path without claiming either capability.
-                self.expression(operand)?;
-                if matches!(operand_carrier, Some(ValType::Ref { .. })) {
-                    self.code.ref_as_non_null();
+                if let Some(reference @ ValType::Ref { .. }) = operand_carrier {
+                    self.assert_nonnull_reference(operand, reference)?;
+                } else {
+                    self.expression(operand)?;
                 }
             }
             IrExpr::New {
@@ -1184,6 +1244,13 @@ impl<'a> Body<'a> {
                 )?;
             }
             IrExpr::Throw { operand } => self.throw_value(operand)?,
+            IrExpr::Vararg {
+                array_type,
+                spreads,
+                elements,
+            } => {
+                self.reference_array_literal(array_type, &spreads, &elements)?;
+            }
             IrExpr::Try {
                 body,
                 catches,
@@ -1286,6 +1353,28 @@ impl<'a> Body<'a> {
                     self.code.unreachable();
                 }
             }
+            IrExpr::Lambda {
+                impl_fn,
+                captures,
+                sam: None,
+                ..
+            } => self.function_value(
+                impl_fn,
+                &captures,
+                function_values::FunctionEquality::Identity,
+            )?,
+            IrExpr::Lambda { sam: Some(_), .. } => {
+                return Err(function_values::SAM_CONVERSION.into());
+            }
+            IrExpr::CallableReference(reference) if !reference.declaration_suspend => {
+                self.callable_reference(&reference)?
+            }
+            IrExpr::InvokeFunction {
+                func,
+                args,
+                params,
+                ret,
+            } => self.invoke_function(func, &args, &params, ret)?,
             IrExpr::Call { callee, .. } => {
                 return Err(format!("a call to {}", callee_kind(&callee)));
             }
@@ -1747,6 +1836,7 @@ mod tests {
         );
         lower_file(
             FileInput {
+                array_range_checks: super::super::super::array_access::default_range_checks(),
                 classifiers: &classifiers,
                 ir,
                 properties,

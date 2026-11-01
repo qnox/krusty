@@ -37,6 +37,8 @@ pub(super) struct CallableRegistry {
     module: HashMap<CallableId, u32>,
     module_defaults: HashMap<CallableId, u32>,
     dependencies: HashMap<KlibDependencyCallable, u32>,
+    /// The default entry of each published declaration that declares a default.
+    dependency_defaults: HashMap<KlibDependencyCallable, u32>,
     signatures: HashMap<KlibDependencyCallable, DependencyFunctionSignature>,
     member_receivers: HashMap<KlibDependencyCallable, DependencyMemberReceiver>,
     singleton_member_receivers: HashMap<KlibDependencyCallable, SingletonMemberReceiver>,
@@ -48,6 +50,7 @@ pub(super) struct FileCallTargets {
     module: HashMap<CallableId, u32>,
     module_defaults: HashMap<CallableId, u32>,
     external: HashMap<ExternalCallableId, u32>,
+    external_defaults: HashMap<ExternalCallableId, u32>,
     signatures: HashMap<ExternalCallableId, DependencyFunctionSignature>,
     member_receivers: HashMap<ExternalCallableId, DependencyMemberReceiver>,
     singleton_member_receivers: HashMap<ExternalCallableId, SingletonMemberReceiver>,
@@ -177,6 +180,7 @@ impl CallableRegistry {
             module: HashMap::default(),
             module_defaults: HashMap::default(),
             external: HashMap::default(),
+            external_defaults: HashMap::default(),
             signatures: HashMap::default(),
             member_receivers: HashMap::default(),
             singleton_member_receivers: HashMap::default(),
@@ -241,10 +245,20 @@ impl CallableRegistry {
                     defaults,
                     extension_receiver_parameter,
                     ..
-                } if defaults.is_empty() => {
+                } => {
                     let callable = callables.callable(*target).ok_or_else(|| {
                         "a dependency call without frozen callable facts".to_string()
                     })?;
+                    // A call leaving arguments out is realized only through the default entry
+                    // of the declaration's own module.
+                    let default_entry = callable
+                        .dependency_callable
+                        .as_ref()
+                        .and_then(|identity| self.dependency_defaults.get(identity))
+                        .copied();
+                    if !defaults.is_empty() && default_entry.is_none() {
+                        continue;
+                    }
                     if callable
                         .compiler_operation()
                         .is_some_and(super::lower::is_direct_operation)
@@ -303,6 +317,9 @@ impl CallableRegistry {
                         "a dependency callable whose target code was not emitted".to_string()
                     })?;
                     targets.external.insert(*target, index);
+                    if let Some(entry) = default_entry {
+                        targets.external_defaults.insert(*target, entry);
+                    }
                     targets.signatures.insert(
                         *target,
                         self.signatures
@@ -337,12 +354,16 @@ impl CallableRegistry {
         ir: &IrFile,
         exports: &DependencyExportSignatures,
         functions: &[Option<u32>],
+        default_entries: &[Option<u32>],
     ) -> Result<(), Unsupported> {
         for (function, identity) in exports.callables() {
             let emitted = functions
                 .get(function as usize)
                 .copied()
                 .ok_or_else(|| "an invalid exported callable identity".to_string())?;
+            if let Some(entry) = default_entries.get(function as usize).copied().flatten() {
+                self.dependency_defaults.insert(identity.clone(), entry);
+            }
             let index = emitted
                 .ok_or_else(|| "an inline-only function exported as Wasm code".to_string())?;
             let signature = DependencyFunctionSignature::from_ir(
@@ -451,7 +472,6 @@ pub(super) fn emits_default_entry(ir: &IrFile, function: crate::ir::FunId) -> bo
     declaration.body.is_some()
         && declaration.dispatch_receiver.is_none()
         && !ir.inline_only_fns.contains(&function)
-        && !ir.extension_receiver_fns.contains(&function)
         && ir
             .checked_callable_functions
             .values()
@@ -480,6 +500,11 @@ impl FileCallTargets {
 
     pub(super) fn external(&self, target: ExternalCallableId) -> Option<u32> {
         self.external.get(&target).copied()
+    }
+
+    /// The default entry of the dependency declaration `target`, when its module published one.
+    pub(super) fn external_default(&self, target: ExternalCallableId) -> Option<u32> {
+        self.external_defaults.get(&target).copied()
     }
 
     pub(super) fn signature(
@@ -640,8 +665,10 @@ mod tests {
             klib_body_type_parameters: Box::new([]),
             klib_body_declaration_modifiers: None,
             klib_body_class_contract: None,
+            klib_body_accessor: None,
             klib_body_vararg_index: None,
             klib_body_parameter_defaults: None,
+            annotations: Box::new([]),
         }
     }
 
@@ -713,7 +740,7 @@ mod tests {
         let mut ir = IrFile::default();
         ir.add_fun(function("answer", None));
         registry
-            .publish(&ir, &exports, &[Some(library_index)])
+            .publish(&ir, &exports, &[Some(library_index)], &[None])
             .expect("the library export is valid");
         assert_eq!(
             registry.singleton_extension_unread_receivers[&identity].semantic_type(),
@@ -749,7 +776,9 @@ mod tests {
         let mut exports = DependencyExportSignatures::default();
         exports.record_callable(0, identity.clone());
         let index = wasm.declare();
-        registry.publish(&ir, &exports, &[Some(index)]).unwrap();
+        registry
+            .publish(&ir, &exports, &[Some(index)], &[None])
+            .unwrap();
         assert_eq!(registry.dependencies[&identity], index);
         assert_eq!(registry.signatures[&identity].parameters(), [formal]);
         assert_eq!(registry.signatures[&identity].result(), formal);
@@ -762,7 +791,7 @@ mod tests {
         ir.functions[0].params = vec![Ty::Int];
         ir.functions[0].ret = Ty::Int;
         assert_eq!(
-            registry.publish(&ir, &exports, &[Some(index)]),
+            registry.publish(&ir, &exports, &[Some(index)], &[None]),
             Err("two functions exported incompatible dependency signatures".to_owned())
         );
         assert_eq!(registry.signatures[&identity].parameters(), [formal]);

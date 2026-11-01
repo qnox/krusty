@@ -131,6 +131,23 @@ fn indexed_value_symbol(
     })
 }
 
+pub(in super::super) fn realizes_dependency_getter(
+    getter: crate::backend::DependencyGetterSignature<'_>,
+) -> bool {
+    let signature = super::super::super::intrinsics::FunctionSignature::new(
+        super::super::super::intrinsics::DeclarationOwner::callable(
+            getter.owner,
+            Some(crate::types::SemanticCallableOwner::Classifier(
+                getter.owner,
+            )),
+        ),
+        getter.name,
+        getter.parameters,
+        getter.result,
+    );
+    pair_symbol(signature).is_some() || indexed_value_symbol(signature).is_some()
+}
+
 /// The type one of those reads answers with: the index is an `Int`, the value a reference.
 pub(super) fn indexed_value_getter_ty(name: &str) -> Ty {
     match name {

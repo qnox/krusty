@@ -260,7 +260,9 @@ pub(crate) fn lower_suspend(
             if expr_calls_suspend(ir, b, &suspend_set) {
                 let clones = crate::ir::make_expression_children_unique_tracked(ir, b);
                 for (source, target) in clones {
-                    let IrExpr::Call { args, .. } = &ir.exprs[target as usize] else {
+                    let (IrExpr::Call { args, .. } | IrExpr::New { args, .. }) =
+                        &ir.exprs[target as usize]
+                    else {
                         continue;
                     };
                     if !outputs
@@ -1651,6 +1653,7 @@ fn build_state_machine(
                 &physical_parameters(ir, fid, &ir.functions[fid as usize].params),
                 &ir.functions[fid as usize].ret,
             ),
+            enclosing_function: Some(fid),
         };
         continuation_metadata.insert(cont_internal.clone(), metadata);
     }

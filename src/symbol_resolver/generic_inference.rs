@@ -20,13 +20,11 @@ pub(crate) use bound_relations::{
     generic_bindings_admit_expected_return_intersection, generic_bindings_satisfy_bounds,
     resolve_bound_violating_bindings, unsolved_formal_bound,
 };
-#[cfg(test)]
-use call_constraints::GenericBoundViolation;
 pub(crate) use call_constraints::{
     collect_assignability_constraints_from_symbols, infer_generic_call_constraints_from_symbols,
     infer_generic_call_constraints_with_argument_ordinals,
     infer_generic_call_constraints_with_receiver_from_symbols, publish_denotable_upper_bindings,
-    seed_denotable_upper_placeholders, AssignabilityConstraints,
+    seed_denotable_upper_placeholders, AssignabilityConstraints, GenericBoundViolation,
 };
 pub(crate) use call_site_variables::{CallSiteVariableMap, CallSiteVariables};
 pub(crate) use conditional_result::generic_return_expectation_from_sibling;
@@ -518,8 +516,17 @@ fn unify_ty_impl(source: Option<&dyn SymbolSource>, sig: Ty, actual: Ty, binds: 
             let actual = actual.projection_inner().unwrap_or(actual);
             let flexible_upper = platform_flexible_upper_bound(source, actual).map(Ty::non_null);
             let mut actual = actual.non_null();
-            while let (Some(_), TyKind::TyParam(_, bound)) = (source, actual.kind()) {
-                actual = bound.projection_inner().unwrap_or(bound).non_null();
+            // A caller's variable stands for its bound here, and `V & Any` for the non-null bound
+            // of `V`: binding `E` from `V` through a nullable formal `E?` must still read `T` from
+            // `V : EntityID<String>?` in `E : EntityID<T>`.
+            while source.is_some() {
+                actual = match actual.kind() {
+                    TyKind::TyParam(_, bound) => {
+                        bound.projection_inner().unwrap_or(bound).non_null()
+                    }
+                    TyKind::DefinitelyNotNull(inner) => inner.non_null(),
+                    _ => break,
+                };
             }
             let projected = match actual.kind() {
                 TyKind::Obj(actual_name, _) if name == actual_name => Some(actual),
@@ -1146,6 +1153,64 @@ pub(crate) fn formal_variance_in_type(
         }
         _ => None,
     }
+}
+
+/// Whether every occurrence of `formal` in `shape` sits on an invariant path, so an argument at
+/// this parameter fixes the formal exactly. [`formal_variance_in_type`] also answers `Invariant`
+/// for mixed occurrences such as `(T) -> T`, which keep independent lower and upper bounds.
+pub(crate) fn formal_fixed_exactly_by(source: &dyn SymbolSource, shape: Ty, formal: &str) -> bool {
+    use crate::types::TypeVariance;
+
+    fn occurrences(
+        source: &dyn SymbolSource,
+        shape: Ty,
+        formal: &str,
+        invariant_path: bool,
+        found: &mut Vec<bool>,
+    ) {
+        if matches!(shape.non_null().kind(), TyKind::TyParam(name, _) if name == formal) {
+            found.push(invariant_path);
+            return;
+        }
+        match shape.non_null().kind() {
+            TyKind::InProjection(inner) | TyKind::OutProjection(inner) => {
+                occurrences(source, inner, formal, invariant_path, found)
+            }
+            TyKind::Obj(owner, arguments) => {
+                let classifier = source.classifier(owner);
+                for (index, argument) in arguments.iter().enumerate() {
+                    let invariant = !matches!(
+                        argument.kind(),
+                        TyKind::InProjection(_)
+                            | TyKind::OutProjection(_)
+                            | TyKind::StarProjection(_)
+                    ) && classifier
+                        .as_ref()
+                        .and_then(|classifier| classifier.type_param_variances.get(index).copied())
+                        .unwrap_or(TypeVariance::Invariant)
+                        == TypeVariance::Invariant;
+                    occurrences(
+                        source,
+                        *argument,
+                        formal,
+                        invariant_path || invariant,
+                        found,
+                    );
+                }
+            }
+            TyKind::Fun(function) => {
+                for parameter in &function.params {
+                    occurrences(source, *parameter, formal, invariant_path, found);
+                }
+                occurrences(source, function.ret, formal, invariant_path, found);
+            }
+            _ => {}
+        }
+    }
+
+    let mut found = Vec::new();
+    occurrences(source, shape, formal, false, &mut found);
+    !found.is_empty() && found.iter().all(|invariant| *invariant)
 }
 
 pub(super) fn unify_inferred_ty_impl(
@@ -2477,6 +2542,9 @@ pub(super) fn merge_specialized_return(provider: Ty, inferred: Ty) -> Ty {
                 .collect::<Vec<_>>();
             Ty::obj_args_name(provider_name, &args)
         }
+        // The declaration's formal specialized to a caller variable (`A := X` for `X : Number?`)
+        // names that variable; restoring the declaration formal would leak it out of the call.
+        (TyKind::TyParam(..), TyKind::TyParam(..)) => inferred,
         _ => provider,
     }
 }

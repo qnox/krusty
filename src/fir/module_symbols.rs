@@ -719,6 +719,7 @@ impl<'a> StreamedModuleSymbols<'a> {
             member_realization: MemberRealization::Dispatch,
             inline: InlineKind::None,
             default_call: false,
+            defaults_from_declaration: false,
             vararg_elem: None,
             vararg_index: None,
             signature: None,
@@ -1898,8 +1899,8 @@ impl SymbolSource for StreamedModuleSymbols<'_> {
         self.type_parameter_bounds(name)
     }
 
-    fn sam_with_receiver_annotations(&self) -> &[TypeName] {
-        self.index.sam_with_receiver_annotations()
+    fn annotation_conventions(&self) -> &crate::symbol_source::AnnotationConventions {
+        self.index.annotation_conventions()
     }
 
     fn package_exists(&self, parent: TypeName, name: &str) -> bool {
