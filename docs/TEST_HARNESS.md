@@ -454,6 +454,19 @@ kotlinc does not reproduce through this runner, each group under a comment sayin
 `scripts/conformance-regressions.sh` under `KRUSTY_BYTECODE_REFERENCE_TIMEOUT_SECONDS`. Its
 reference classes come from the box lane's reference-class cache.
 
+## Bytecode Listing Ratchet
+
+`kotlin_bytecode_listing_conformance` compiles `compiler/testData/codegen/bytecodeListing` the same
+way and compares each module's class listing with the case's `.txt`, as JetBrains'
+`BytecodeListingHandler` does: Kotlin classes read without code, sorted by output path, rendered by
+`tests/common/asm_text/BytecodeListing.java` (a port of `BytecodeListingTextCollectingVisitor`)
+under `WITH_SIGNATURES`, `IGNORE_ANNOTATIONS` and `DONT_SORT_DECLARATIONS`, with a `Module:` header
+per module when a case has several. Its inventories are `tests/bytecode_listing_expected_failures`
+and `tests/bytecode_listing_expected_not_applicable`, blessed with
+`KRUSTY_BLESS_BYTECODE_LISTING_EXPECTATIONS=1` and focused with `KRUSTY_BYTECODE_LISTING_ONLY`;
+`the_reference_compiler_reproduces_every_applicable_bytecode_listing_case` runs in
+`scripts/conformance-regressions.sh` beside the bytecode-text one.
+
 ## JVM processes
 
 kotlinc, `javac`, and `java` that the suite runs on every test are pooled. A cache hit does not

@@ -82,10 +82,13 @@ pub struct TestFile {
 pub struct TestModule {
     pub name: String,
     pub files: Vec<TestFile>,
+    /// Supplied by the harness (the coroutine helpers' `support` module), not by the case.
+    pub additional: bool,
 }
 
 /// One prepared case.
 pub struct Case {
+    pub path: PathBuf,
     pub src: String,
     pub stem: String,
     pub modules: Vec<TestModule>,
@@ -138,6 +141,7 @@ fn test_modules(src: &str, stem: &str) -> Result<Vec<TestModule>, String> {
                 TestModule {
                     files: kotlin(unit.files, additional),
                     name: unit.name,
+                    additional,
                 }
             })
             .collect());
@@ -164,6 +168,7 @@ fn test_modules(src: &str, stem: &str) -> Result<Vec<TestModule>, String> {
     Ok(vec![TestModule {
         name: box_reference_classes::MAIN_MODULE.to_string(),
         files,
+        additional: false,
     }])
 }
 
@@ -239,7 +244,9 @@ impl<'s> Corpus<'s> {
             .and_then(|stem| stem.to_str())
             .unwrap_or("File")
             .to_string();
-        let modules = test_modules(&src, &stem).map_err(Outcome::Unavailable)?;
+        // A topology the box harness declines is a fixed property of the case, not of this run:
+        // it fails both compilers alike, so the not-applicable list can name it with its reason.
+        let modules = test_modules(&src, &stem).map_err(Outcome::Fail)?;
         let mut classpath = krusty::toolchain::classpath_jars_for(&src);
         if let Some(reflect) = &self.reflect {
             if !classpath.contains(reflect) {
@@ -247,6 +254,7 @@ impl<'s> Corpus<'s> {
             }
         }
         Ok(Case {
+            path: path.to_path_buf(),
             src,
             stem,
             modules,

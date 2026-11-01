@@ -14,6 +14,7 @@ import java.util.regex.PatternSyntaxException;
 import org.jetbrains.org.objectweb.asm.ClassReader;
 import org.jetbrains.org.objectweb.asm.ClassVisitor;
 import org.jetbrains.org.objectweb.asm.Opcodes;
+import org.jetbrains.org.objectweb.asm.tree.ClassNode;
 import org.jetbrains.org.objectweb.asm.util.Textifier;
 import org.jetbrains.org.objectweb.asm.util.TraceClassVisitor;
 
@@ -25,6 +26,9 @@ import org.jetbrains.org.objectweb.asm.util.TraceClassVisitor;
  * <ul>
  *   <li>{@code T n (len bytes)*}: for each class file, the source file it names (empty when it
  *       names none) and the class as ASM's {@link Textifier} prints it.</li>
+ *   <li>{@code L withSignatures withAnnotations sortDeclarations n (len bytes)*}: for each class
+ *       file (flags are bytes, 0 or 1), the source file it names, its internal name and its
+ *       {@link BytecodeListing}, read as JetBrains' {@code BytecodeListingHandler} reads it.</li>
  *   <li>{@code C text n needle*}: for each needle, how many times {@code Pattern.compile("(" +
  *       needle + ")")} is found in {@code text}, as {@code StringUtil.findMatches} counts it; -1 for
  *       a needle that is not a valid pattern.</li>
@@ -48,6 +52,7 @@ public final class AsmText {
             switch (command) {
                 case 'T': textify(in, out); break;
                 case 'C': count(in, out); break;
+                case 'L': listing(in, out); break;
                 default: throw new IllegalStateException("unknown command " + command);
             }
             out.flush();
@@ -83,6 +88,38 @@ public final class AsmText {
         for (int i = 0; i < n; i++) {
             string(out, sources[i]);
             string(out, texts[i]);
+        }
+    }
+
+    private static void listing(DataInputStream in, DataOutputStream out) throws Exception {
+        boolean withSignatures = in.readUnsignedByte() != 0;
+        boolean withAnnotations = in.readUnsignedByte() != 0;
+        boolean sortDeclarations = in.readUnsignedByte() != 0;
+        int n = in.readInt();
+        byte[][] classes = new byte[n][];
+        for (int i = 0; i < n; i++) classes[i] = bytes(in);
+        String[] sources = new String[n];
+        String[] names = new String[n];
+        String[] listings = new String[n];
+        try {
+            for (int i = 0; i < n; i++) {
+                ClassNode node = new ClassNode(Opcodes.API_VERSION);
+                new ClassReader(classes[i]).accept(node, ClassReader.SKIP_CODE);
+                BytecodeListing listing = new BytecodeListing(withSignatures, withAnnotations, sortDeclarations);
+                node.accept(listing);
+                sources[i] = node.sourceFile == null ? "" : node.sourceFile;
+                names[i] = node.name;
+                listings[i] = listing.text();
+            }
+        } catch (RuntimeException | AssertionError failure) {
+            error(out, failure);
+            return;
+        }
+        out.writeInt(0);
+        for (int i = 0; i < n; i++) {
+            string(out, sources[i]);
+            string(out, names[i]);
+            string(out, listings[i]);
         }
     }
 
