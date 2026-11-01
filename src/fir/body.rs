@@ -37,7 +37,9 @@ pub use ranges::{
 };
 mod indexed_iteration;
 pub use indexed_iteration::{FirBuiltinIterableKind, FirCharSequenceIndexing};
+mod constant_sources;
 mod with_index;
+pub use constant_sources::FirConstantSource;
 pub use with_index::{FirIndexedValueComponent, FirWithIndexLoop};
 mod callable_dispatch;
 pub use callable_dispatch::{
@@ -1771,16 +1773,6 @@ pub struct FirStatement {
     pub kind: FirStatementKind,
 }
 
-/// Why a `FirExprKind::Constant` that source did not write as a literal holds a value.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FirConstantSource {
-    /// The selected value of a `const val` or a Java constant field.
-    DeclarationRead,
-    /// A call the checker evaluated over a constant receiver (`trimIndent`, `trimMargin`); kotlinc
-    /// folds it only after its frontend, so it is not a constant expression to the frontend.
-    FoldedCall,
-}
-
 /// One checked body unit. Its arenas are body-local and are moved as a single value into lowering;
 /// parser ids and unresolved types cannot be represented here.
 #[derive(Clone, Debug, PartialEq)]
@@ -2578,24 +2570,6 @@ impl FirBody {
         self.expressions.push(expression);
         self.debug_lines.add_expression();
         id
-    }
-
-    pub(crate) fn record_constant_source(
-        &mut self,
-        expression: FirExprId,
-        source: FirConstantSource,
-    ) {
-        self.constant_sources.insert(expression, source);
-    }
-
-    /// Where a constant that source did not write as a literal came from; `None` for a literal.
-    pub fn constant_source(&self, expression: FirExprId) -> Option<FirConstantSource> {
-        self.constant_sources.get(&expression).copied()
-    }
-
-    /// Whether this constant is a read of a constant declaration rather than a literal.
-    pub fn is_constant_read(&self, expression: FirExprId) -> bool {
-        self.constant_source(expression) == Some(FirConstantSource::DeclarationRead)
     }
 
     pub(crate) fn record_postfix_update(&mut self, block: FirExprId) {
