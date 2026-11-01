@@ -1734,43 +1734,6 @@ impl<'a> SymbolResolver<'a> {
         Some(self.commit_selected_member_function_result(receiver, selected, result))
     }
 
-    pub(crate) fn top_level_candidates(&self, name: &str) -> Vec<FunctionInfo> {
-        let functions = self
-            .symbol_levels_in_scope(name)
-            .into_iter()
-            .map(|symbols| function_set_from_symbols(&symbols))
-            // An extension needs a receiver, so a level that declares only extensions of this name
-            // offers nothing to a call without one and does not hide the next level's functions.
-            .find(|functions| functions.top_level().next().is_some())
-            .unwrap_or_default();
-        crate::trace_compiler!(
-            "resolve",
-            "top-level candidate inventory {name}: {:?}",
-            functions
-                .overloads
-                .iter()
-                .map(|function| (
-                    function.kind,
-                    function.callable.owner.render(),
-                    function.callable.name.as_str(),
-                    function.semantic_params(),
-                    function.semantic_receiver(),
-                    function
-                        .generic_sig
-                        .as_ref()
-                        .map(|signature| signature.formal_bounds.as_slice()),
-                ))
-                .collect::<Vec<_>>()
-        );
-        functions
-            .into_top_level()
-            // `$default` is a physical realization attached to its source declaration, never a
-            // source-level overload candidate. Letting it into this family can select a synthetic
-            // by declaration order and later append `$default` a second time.
-            .filter(|function| !function.callable.default_call)
-            .collect()
-    }
-
     /// Select from a caller-provided projection of one top-level callable family.
     ///
     /// Contextual calls with explicitly named context parameters first project every declaration
