@@ -129,6 +129,7 @@ mod provider_constructor_selection;
 use constructor_arguments::ConstructionExpectations;
 mod script_receivers;
 pub(crate) use delegated_properties::DelegateGetValueTarget;
+mod call_argument_position;
 mod contract_declarations;
 mod contract_effects;
 mod declaration_rendering;
@@ -150,6 +151,8 @@ mod explicit_property_write;
 mod explicit_receiver_levels;
 mod expression_qualifier_tree;
 mod expression_qualifiers;
+mod misfit_callable_references;
+use misfit_callable_references::{MisfitReference, ReferenceCandidateLevels};
 mod nested_type_aliases;
 use explicit_receiver_levels::{FunctionValueLevel, FunctionValueRungs};
 mod expected_expression;
@@ -31000,6 +31003,9 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         expr_stack: Vec::new(),
         callable_reference_types: HashMap::default(),
         reflective_callable_references: crate::fx_hash::HashSet::default(),
+        misfit_callable_references: crate::fx_hash::HashSet::default(),
+        checked_calls: Vec::new(),
+        checked_call_argument: None,
         exhaustive_whens: crate::fx_hash::HashSet::default(),
         when_subject_plans: when_flow::WhenSubjectPlans::default(),
         resolved_type_tys: HashMap::default(),
@@ -33393,6 +33399,15 @@ struct Checker<'a> {
     expr_stack: Vec<ExprId>,
     callable_reference_types: HashMap<ExprId, Ty>,
     reflective_callable_references: crate::fx_hash::HashSet<ExprId>,
+    /// References no candidate of which fits their expected function shape, typed by their only
+    /// nearest candidate for the enclosing check (see `misfit_callable_references`). Selection
+    /// records one and the same visit consumes it, so a later fitting revisit is unaffected.
+    misfit_callable_references: crate::fx_hash::HashSet<ExprId>,
+    /// The calls whose value arguments are being checked and the argument
+    /// [`Self::check_argument_expected`] is committing to its parameter, so a misfit reference
+    /// knows whether it is postponed into a call.
+    checked_calls: Vec<ExprId>,
+    checked_call_argument: Option<ExprId>,
     exhaustive_whens: crate::fx_hash::HashSet<ExprId>,
     /// See [`TypeInfo::when_subject_plans`].
     when_subject_plans: when_flow::WhenSubjectPlans,
@@ -49195,10 +49210,12 @@ impl<'a> Checker<'a> {
             || (self.postponed_empty_reference_array_factory(scope, argument)
                 && expected.non_null().is_reference_array()
                 && expected.non_null().array_elem().is_some())
-            || (matches!(self.file.expr(argument), Expr::CallableRef { .. })
-                && expected.non_null().is_fun())
         {
             self.expr_expected(scope, argument, expected)
+        } else if matches!(self.file.expr(argument), Expr::CallableRef { .. })
+            && expected.non_null().is_fun()
+        {
+            self.check_argument_expected(scope, argument, expected, false, None)
         } else if self.lambda_needs_selected_shape(scope, argument, actual, expected) {
             self.check_argument_expected(
                 scope,
@@ -52817,7 +52834,9 @@ impl<'a> Checker<'a> {
                     .is_some_and(|arguments| !arguments.is_empty());
                 self.record_flexible_call_inputs(e, Some(receiver), explicit);
                 self.record_flexible_nullable_result(e);
-                return self.expr_inner_safe_call(scope, e, expected, receiver, name, args);
+                return self.checking_call(e, |c| {
+                    c.expr_inner_safe_call(scope, e, expected, receiver, name, args)
+                });
             }
             Expr::Name(n) if n == "this" => {
                 // A smart-cast narrowing (`this != null` in a nullable-prim-receiver extension)
@@ -53055,7 +53074,9 @@ impl<'a> Checker<'a> {
                     .get(&e.0)
                     .is_some_and(|arguments| !arguments.is_empty());
                 self.record_flexible_call_inputs(e, receiver, explicit);
-                let called = self.check_call(scope, e, callee, &args, self.span(e), expected);
+                let span = self.span(e);
+                let called = self
+                    .checking_call(e, |c| c.check_call(scope, e, callee, &args, span, expected));
                 // The callee's own return may not be determined yet — its body is an expression the
                 // walk could not type. Ask for that declaration rather than taking the marker as
                 // the call's type, which would publish it into whatever this call initializes.
@@ -57070,6 +57091,7 @@ impl<'a> Checker<'a> {
         let previous_callable_reference = self.active_callable_reference.replace(e);
         let nominal = self.callable_ref_function_type(scope, e, selection_expected, receiver, name);
         self.active_callable_reference = previous_callable_reference;
+        let misfit = self.misfit_callable_references.remove(&e);
         if nominal.mentions_error() || nominal.mentions_pending() {
             self.selected_callable_reference_diagnostics.remove(&e);
         }
@@ -57088,7 +57110,7 @@ impl<'a> Checker<'a> {
         // A callable reference in a (possibly nullable) function-typed context is the adapted value
         // selected above. Its reflection classifier stays the natural standalone type, but must not
         // replace the contextual function type after overload/default/vararg adaptation succeeded.
-        if expected.is_some_and(|expected| expected.non_null().is_fun()) {
+        if expected.is_some_and(|expected| expected.non_null().is_fun()) && !misfit {
             return self.set(e, function_type.unwrap_or(nominal));
         }
         if let Some(reflect) = function_type
@@ -57706,7 +57728,20 @@ impl<'a> Checker<'a> {
                     return Some(Ty::Error);
                 }
             }
-            None
+            let levels = expected_function
+                .and_then(|_| ReferenceCandidateLevels::of(&extension_candidates))?;
+            match self.report_misfit_callable_reference(expression, name, &levels) {
+                MisfitReference::Reported => Some(Ty::Error),
+                MisfitReference::Natural => {
+                    match self.select_unbound_ref(scope, expression, None, receiver, name) {
+                        UnboundRefSelection::Selected(ty) => {
+                            self.misfit_callable_references.insert(expression);
+                            Some(ty)
+                        }
+                        UnboundRefSelection::Missing | UnboundRefSelection::NotClassifier => None,
+                    }
+                }
+            }
         })();
         selected
             .map(UnboundRefSelection::Selected)
@@ -60212,7 +60247,8 @@ impl<'a> Checker<'a> {
         )
     }
 
-    fn check_argument_expected(
+    /// Check `expression` against `expected`, giving a lambda its contextual function shape.
+    pub(super) fn check_expected_operand(
         &mut self,
         scope: &CheckerScope<'_>,
         expression: ExprId,
