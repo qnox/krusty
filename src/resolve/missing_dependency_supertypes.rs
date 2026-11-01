@@ -212,7 +212,7 @@ impl Checker<'_> {
             return;
         };
         let mut upper = checked;
-        while let TyKind::TyParam(_, bound) = upper.non_null().kind() {
+        while let TyKind::TyParam(_, bound) | TyKind::Var(_, bound) = upper.non_null().kind() {
             upper = bound;
         }
         if let Some(classifier) = upper.non_null().kotlin_class_internal() {

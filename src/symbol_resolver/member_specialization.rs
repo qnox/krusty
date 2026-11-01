@@ -153,7 +153,10 @@ pub(super) fn preserve_receiver_identity_bindings(
     bindings: &mut GSigBinds,
 ) {
     match (declared.non_null().kind(), actual.non_null().kind()) {
-        (TyKind::TyParam(declared, _), TyKind::TyParam(found, _)) if declared == found => {
+        (TyKind::TyParam(declared, _), TyKind::TyParam(found, _))
+        | (TyKind::Var(declared, _), TyKind::Var(found, _))
+            if declared == found =>
+        {
             bindings
                 .entry(crate::types::TyParamName::new(&declared))
                 .or_insert(actual.non_null());
@@ -202,7 +205,7 @@ fn specialize_member_type_with_unbound(
     input_projection: &mut Option<InputProjection>,
 ) -> Ty {
     match ty.kind() {
-        TyKind::TyParam(name, bound) => {
+        TyKind::TyParam(name, bound) | TyKind::Var(name, bound) => {
             let Some(binding) = bindings
                 .get(name.as_str())
                 .copied()
@@ -828,7 +831,7 @@ pub(super) fn specialize_callable(
     // A declared bare type parameter stays one: bound to a value class it is still a box read out
     // of an erased slot, and only the unsubstituted declaration says so.
     callable.declared_ret = callable.declared_ret.map(|ty| match ty.kind() {
-        TyKind::TyParam(..) => ty,
+        TyKind::TyParam(..) | TyKind::Var(..) => ty,
         _ => specialize_member_type(source, ty, bindings, TypePosition::Out),
     });
 }

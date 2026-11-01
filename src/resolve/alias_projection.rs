@@ -141,7 +141,7 @@ fn alias_target_star_bounds(
         // Alias formals have already been substituted. Any remaining variable belongs to an
         // enclosing declaration and keeps its declaration-owned bound; following an F-bound here
         // would revisit the same variable.
-        TyKind::TyParam(_, _) => ty,
+        TyKind::TyParam(_, _) | TyKind::Var(_, _) => ty,
         _ => ty,
     }
 }
@@ -586,14 +586,16 @@ fn note_template_conflicts(
                 note_template_conflicts(*part, bindings, conflicting);
             }
         }
-        TyKind::TyParam(_, bound) => note_template_conflicts(bound, bindings, conflicting),
+        TyKind::TyParam(_, bound) | TyKind::Var(_, bound) => {
+            note_template_conflicts(bound, bindings, conflicting)
+        }
         TyKind::Unit | TyKind::Null | TyKind::Nothing | TyKind::Error | TyKind::Pending => {}
     }
 }
 
 fn projected_formal(inner: Ty) -> Option<String> {
     match inner.kind() {
-        TyKind::TyParam(name, _) => Some(name.to_string()),
+        TyKind::TyParam(name, _) | TyKind::Var(name, _) => Some(name.to_string()),
         TyKind::Nullable(inner)
         | TyKind::PlatformNullable(inner)
         | TyKind::MutabilityFlexible(inner)

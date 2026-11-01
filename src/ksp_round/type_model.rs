@@ -66,7 +66,7 @@ impl TypeParameterScope {
             TyKind::Obj(class, arguments) => self.applied(class, &arguments),
             TyKind::Unit => Some(class_type("kotlin.Unit")),
             TyKind::Nothing => Some(class_type("kotlin.Nothing")),
-            TyKind::TyParam(identity, _) => {
+            TyKind::TyParam(identity, _) | TyKind::Var(identity, _) => {
                 let parameter = self
                     .parameters
                     .iter()

@@ -2,8 +2,8 @@
 
 use crate::types::Ty;
 
-/// A type proven suitable for publication. The field is private: pending/error types cannot be
-/// manufactured by users of the resolved module index.
+/// A type proven suitable for publication. The field is private: pending/error types and a call's
+/// inference variables cannot be manufactured by users of the resolved module index.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ResolvedTy(Ty);
 
@@ -11,6 +11,9 @@ pub struct ResolvedTy(Ty);
 pub enum UnpublishableType {
     Pending,
     Error,
+    /// A call's inference variable outlived that call's solver. Only the solver owns it, so no
+    /// declaration, caller or backend may receive it, not even approximated by its bound.
+    InferenceVariable,
 }
 
 impl ResolvedTy {
@@ -20,6 +23,8 @@ impl ResolvedTy {
             Err(UnpublishableType::Pending)
         } else if ty.mentions_error() {
             Err(UnpublishableType::Error)
+        } else if ty.mentions_type_variable() {
+            Err(UnpublishableType::InferenceVariable)
         } else {
             Ok(Self(ty))
         }
@@ -85,5 +90,74 @@ impl ResolvedSignature {
             inferred_body_result: None,
             result_abbreviation: None,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ResolvedTy, UnpublishableType};
+    use crate::fx_hash::HashMap;
+    use crate::types::{ty_subst, Ty, TyParamName};
+
+    fn variable() -> Ty {
+        Ty::type_variable(
+            TyParamName::new("\0call:T"),
+            Ty::nullable(Ty::obj("kotlin/Any")),
+        )
+    }
+
+    #[test]
+    fn an_inference_variable_is_rejected_at_the_root_and_nested() {
+        let rejected = UnpublishableType::InferenceVariable;
+        for ty in [
+            variable(),
+            Ty::nullable(variable()),
+            Ty::fun(vec![Ty::Int], variable()),
+            Ty::fun(vec![variable()], Ty::Unit),
+            Ty::obj_args("kotlin/collections/List", &[variable()]),
+            Ty::obj_args(
+                "kotlin/collections/Map",
+                &[Ty::String, Ty::fun(Vec::new(), variable())],
+            ),
+            Ty::ty_param("OuterT", variable()),
+            Ty::obj_args(
+                "kotlin/collections/List",
+                &[Ty::ty_param("OuterT", Ty::nullable(variable()))],
+            ),
+            Ty::ty_param("OuterT", Ty::ty_param("InnerT", variable())),
+        ] {
+            assert_eq!(ResolvedTy::new(ty), Err(rejected), "{ty:?}");
+        }
+    }
+
+    #[test]
+    fn a_variable_bounded_by_an_ordinary_type_is_still_rejected() {
+        let bounded = Ty::type_variable(TyParamName::new("\0call:T"), Ty::String);
+        assert_eq!(
+            ResolvedTy::new(Ty::obj_args("kotlin/collections/List", &[bounded])),
+            Err(UnpublishableType::InferenceVariable)
+        );
+    }
+
+    #[test]
+    fn declaration_type_parameters_and_solved_calls_publish() {
+        let declared = Ty::ty_param("T", Ty::nullable(Ty::obj("kotlin/Any")));
+        let list_of_declared = Ty::obj_args("kotlin/collections/List", &[declared]);
+        let bounded_by_declared = Ty::ty_param("R", Ty::obj_args("kotlin/Comparable", &[declared]));
+        for published in [declared, list_of_declared, bounded_by_declared] {
+            assert_eq!(
+                ResolvedTy::new(published).map(ResolvedTy::get),
+                Ok(published)
+            );
+        }
+
+        let unsolved = Ty::obj_args("kotlin/collections/List", &[variable()]);
+        let solved = ty_subst(
+            unsolved,
+            &HashMap::from_iter([(TyParamName::new("\0call:T"), Ty::String)]),
+        );
+        let expected = Ty::obj_args("kotlin/collections/List", &[Ty::String]);
+        assert_eq!(solved, expected);
+        assert_eq!(ResolvedTy::new(solved).map(ResolvedTy::get), Ok(expected));
     }
 }

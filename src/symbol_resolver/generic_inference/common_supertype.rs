@@ -327,7 +327,7 @@ fn type_size(ty: Ty) -> usize {
         | TyKind::OutProjection(inner)
         | TyKind::StarProjection(inner)
         | TyKind::DefinitelyNotNull(inner) => 1 + type_size(inner),
-        TyKind::TyParam(_, bound) => 1 + type_size(bound),
+        TyKind::TyParam(_, bound) | TyKind::Var(_, bound) => 1 + type_size(bound),
         TyKind::Intersection(parts) => 1 + parts.iter().copied().map(type_size).sum::<usize>(),
         _ => 1,
     }

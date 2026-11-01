@@ -321,7 +321,7 @@ fn collect_upper_bounds(
     {
         let other = ty.non_null();
         match other.kind() {
-            TyKind::TyParam(name, bound) => {
+            TyKind::TyParam(name, bound) | TyKind::Var(name, bound) => {
                 if !seen.insert(name.as_str()) {
                     return;
                 }

@@ -137,7 +137,7 @@ pub(super) fn solved_member_extension_type_argument(
     let solution = bindings.get(formal).copied()?;
     (solution != Ty::Error
         && !solution.mentions_pending()
-        && !matches!(solution.non_null().kind(), TyKind::TyParam(identity, _) if identity == formal))
+        && !matches!(solution.non_null().kind(), TyKind::TyParam(identity, _) | TyKind::Var(identity, _) if identity == formal))
     .then_some(solution)
 }
 

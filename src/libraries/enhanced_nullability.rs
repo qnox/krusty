@@ -117,7 +117,7 @@ impl TypeEnhancement {
         binding: &dyn Fn(&str) -> Option<TypeEnhancement>,
     ) -> TypeEnhancement {
         match declared.kind() {
-            TyKind::TyParam(name, _) => match binding(name.as_str()) {
+            TyKind::TyParam(name, _) | TyKind::Var(name, _) => match binding(name.as_str()) {
                 Some(argument) => argument.with_head(self.head),
                 None => self.clone(),
             },
@@ -194,7 +194,9 @@ pub fn enhance_from_overridden(java: Ty, overridden: Ty) -> (Ty, TypeEnhancement
             let (inner, layout) = enhance_from_overridden(inner, overridden.non_null());
             (Ty::platform_nullable(inner), layout)
         }
-        TyKind::TyParam(_, bound) if fixes_not_null && bound.is_platform_nullable() => {
+        TyKind::TyParam(_, bound) | TyKind::Var(_, bound)
+            if fixes_not_null && bound.is_platform_nullable() =>
+        {
             (java, TypeEnhancement::new(true, Vec::new()))
         }
         TyKind::InProjection(inner) | TyKind::OutProjection(inner) => {

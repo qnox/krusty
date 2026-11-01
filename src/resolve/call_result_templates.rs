@@ -437,7 +437,9 @@ impl Checker<'_> {
             formals: &[crate::types::TyParamName],
         ) -> bool {
             match (symbolic.kind(), actual.kind()) {
-                (TyKind::TyParam(formal, bound), _) if formals.contains(&formal) => {
+                (TyKind::TyParam(formal, bound) | TyKind::Var(formal, bound), _)
+                    if formals.contains(&formal) =>
+                {
                     // An alias formal (`E` of `typealias HashSet<E> = java.util.HashSet<E>`) is
                     // bounded by `Any?`; the Java target completes the same position from its own
                     // flexible bound `Any!`. Both are the declaration fallback.

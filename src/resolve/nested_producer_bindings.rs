@@ -17,7 +17,7 @@ pub(super) fn open_variable<'a>(
     type_args: &[Ty],
     declared: Ty,
 ) -> Option<&'a str> {
-    let TyKind::TyParam(name, _) = declared.non_null().kind() else {
+    let (TyKind::TyParam(name, _) | TyKind::Var(name, _)) = declared.non_null().kind() else {
         return None;
     };
     let index = signature
@@ -162,7 +162,9 @@ pub(super) fn producer_expectation(
     );
     // A still-open bare variable offers the producer its own bound.
     match substituted.kind() {
-        TyKind::TyParam(_, bound) => crate::symbol_resolver::ty_subst_keep_unbound(bound, bindings),
+        TyKind::TyParam(_, bound) | TyKind::Var(_, bound) => {
+            crate::symbol_resolver::ty_subst_keep_unbound(bound, bindings)
+        }
         _ => substituted,
     }
 }

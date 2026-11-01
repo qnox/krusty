@@ -371,7 +371,7 @@ mod tests {
         let [Some(argument)] = arguments.as_slice() else {
             panic!("the captured `T` must be recorded as the lexical parameter: {arguments:?}")
         };
-        let TyKind::TyParam(name, bound) = argument.kind() else {
+        let (TyKind::TyParam(name, bound) | TyKind::Var(name, bound)) = argument.kind() else {
             panic!("the captured `T` must be recorded as the lexical parameter: {arguments:?}")
         };
         assert_eq!(crate::types::type_parameter_source_name(&name), "T");

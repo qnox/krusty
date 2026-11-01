@@ -1015,7 +1015,7 @@ fn encode_type_with_parameter(
     match base.kind() {
         // The engine turns an undetermined declaration into a decline before anything is written,
         // so a pending type here is a broken invariant rather than a shape to encode.
-        TyKind::Pending => return Err(TypeEncodeError::NotDetermined),
+        TyKind::Pending | TyKind::Var(..) => return Err(TypeEncodeError::NotDetermined),
         TyKind::DefinitelyNotNull(inner) => {
             let mut intersection = spelled.clone();
             intersection.definitely_non_null = true;

@@ -337,6 +337,11 @@ pub(crate) fn type_parameters_named_by(ty: Ty, names: &mut Vec<&'static str>) {
         }
         // A star names no type; the bound it keeps is the parameter's.
         TyKind::StarProjection(_) => {}
-        TyKind::Unit | TyKind::Null | TyKind::Nothing | TyKind::Error | TyKind::Pending => {}
+        TyKind::Unit
+        | TyKind::Null
+        | TyKind::Nothing
+        | TyKind::Error
+        | TyKind::Pending
+        | TyKind::Var(..) => {}
     }
 }

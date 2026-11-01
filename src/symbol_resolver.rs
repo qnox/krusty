@@ -3051,7 +3051,7 @@ fn select_instance_member_ty(
 fn receiver_allows_member_dispatch(receiver: Ty) -> bool {
     match receiver.kind() {
         TyKind::Nullable(_) | TyKind::Null => false,
-        TyKind::TyParam(_, bound) => receiver_allows_member_dispatch(bound),
+        TyKind::TyParam(_, bound) | TyKind::Var(_, bound) => receiver_allows_member_dispatch(bound),
         // Kotlin permits direct member calls on Java platform types despite uncertain nullability.
         TyKind::PlatformNullable(_) => true,
         _ => true,
