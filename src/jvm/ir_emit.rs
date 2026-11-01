@@ -213,9 +213,7 @@ use declared_property_accessor::{
 use signature_formatter::{JvmPropertySignatures, JvmSignatureFormatter, Wildcards};
 use singleton_instance::{add_singleton_instance_field, emit_singleton_instance_clinit};
 use synth_debug_tables::attach_synth_debug_tables;
-use type_parameter_signatures::{
-    jvm_class_signature, jvm_type_parameter_declarations, jvm_type_params,
-};
+use type_parameter_signatures::{jvm_class_signature, jvm_type_params};
 
 use super::method_parameters::OwnerConstructorPrefix;
 pub(crate) use checked_facts::{CheckedEmitFacts, EmitMetadata};

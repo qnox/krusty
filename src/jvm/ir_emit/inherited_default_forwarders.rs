@@ -377,7 +377,7 @@ fn forwarder_signature(
     {
         return None;
     }
-    let mut signature = jvm_type_parameter_declarations(
+    let mut signature = super::type_parameter_signatures::jvm_type_parameter_declarations(
         formatter,
         type_parameters.iter().map(|parameter| {
             (
