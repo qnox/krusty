@@ -867,7 +867,7 @@ fn write_group(dir: &Path, blocks: &[(String, String)]) -> Result<Vec<PathBuf>, 
 /// An open marker is recognized only when an upper-snake-case name follows `<!` AND a closing `!>`
 /// appears on the same line, so a real `a < !b` is left intact. Markers never span a line, so
 /// removing them preserves line numbers — and thus `LineNumberTable` bytes — on both sides.
-fn strip_diagnostic_markers(src: &str) -> String {
+pub fn strip_diagnostic_markers(src: &str) -> String {
     let b = src.as_bytes();
     let mut out: Vec<u8> = Vec::with_capacity(b.len());
     let mut i = 0;
