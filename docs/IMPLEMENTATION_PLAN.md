@@ -6439,13 +6439,28 @@ and the pass rejects every construct it does not cover yet.
 
 ## Anonymous superclass closure captures
 
-Align shared constructor-use discovery with the checked retained-closure decision for #2657.
-Early read/write discovery provisions candidate lexical dependencies from lambda syntax; final
-publication admits closure roots from the checked lowering and non-error type. Preserve existing
-binding identities, forwarding rules and field reconciliation. Feed the existing FIR constructor-
-prefix and nested-capture operations rather than adding a new capture ABI or lookup in lowering.
-Validate both original issue programs, direct/nested generic lambdas, shared mutable storage and
-parameter shadowing against Kotlin, together with the existing constructor capture regressions.
+Use the checked superclass argument mapping to forward ordinary lambda values at the anonymous
+construction site for #2833. Their existing FIR forwarding path retains caller ownership and
+evaluates each value once. Early read/write discovery provisions candidates; final publication
+retains closure dependencies only where the selected vararg slot still packs contributions in the
+constructor. Preserve lexical identities, receiver provenance and nested capture finalization.
+Validate the original #2657 programs, complete class ABI across all ordinary capture forms, the
+named-class distinction, shared vararg cells and spread/neighbor ordering. Forwarding a whole packed
+vararg array remains a separate representation step rather than forwarding individual fragments.
+Project header receiver coordinates through checked declaration-role matches and activate those
+projections only for forwarded values. Cover mixed vararg/ordinary nesting and same-typed receivers.
+Keep source diagnostic uses separate from class-owned capture evidence. Reconcile nested captures
+against the caller's original operands when their construction moves with a forwarded argument.
+Keep the nested-setter fixture and anonymous capture inventory intact. Assert the forwarded
+lambda's exact property declaration, receiver provenance and assigned value, then verify deferred
+execution against the Kotlin oracle and every backend with two distinct caller instances.
+The independent immediate-function-literal invocation ABI gap, proven byte-identical on the exact
+parent, retains its complete broader oracle in #2838 and uses a separate common-inlining follow-up.
+
+Implement #2838 by selecting direct synchronous source-lambda invocations in common lowering,
+preflighting the existing declared-parameter splice contract, then consuming the retained template.
+Keep escaping and suspension operations on their existing paths. Restore the complete preserved
+oracle and validate capture/argument evaluation, local returns and the escaping implementation.
 
 ## Link target-owned serialized getter leaves
 

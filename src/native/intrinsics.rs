@@ -1970,6 +1970,16 @@ pub(super) fn builtin_companion(classifier: crate::types::TypeName) -> Option<&'
     .find_map(|(owner, symbol)| classifier.matches(owner).then_some(symbol))
 }
 
+/// The runtime entry point answering a stdlib object the runtime lays out itself, if this names one.
+///
+/// `EmptySet` is the one shared read-only empty set the runtime's own `emptySet()` answers, so a
+/// library body reading the object reads that one.
+pub(super) fn runtime_object(classifier: crate::types::TypeName) -> Option<&'static str> {
+    classifier
+        .matches("kotlin/collections/EmptySet")
+        .then_some("kt_set_empty")
+}
+
 /// A member of a COMPANION the runtime realizes, whose receiver carries nothing.
 ///
 /// Such an object has no state and no instance in any file krusty compiles, so there is no

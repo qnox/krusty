@@ -3829,7 +3829,9 @@ fn typed_suspension_operands(
                 | Callee::LocalDefault(_)
                 | Callee::ClassStaticWithDefaults { .. }
                 | Callee::ClassStaticDefault { .. } => return None,
-                Callee::ModuleWithDefaults { .. } => return None,
+                Callee::ModuleWithDefaults { .. } | Callee::ModuleDefaultEntry { .. } => {
+                    return None
+                }
             };
             zip(args, &params, &mut out)?;
         }

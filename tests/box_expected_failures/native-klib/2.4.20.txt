@@ -114,8 +114,6 @@ boxingOptimization/explicitEqualsOnDouble.kt
 boxingOptimization/fold.kt
 boxingOptimization/foldRange.kt
 boxingOptimization/kt19767_2.kt
-boxingOptimization/kt49548.kt
-boxingOptimization/kt49548a.kt
 boxingOptimization/kt5844.kt
 boxingOptimization/kt6842.kt
 boxingOptimization/maxMinByOrNull.kt
@@ -139,7 +137,6 @@ bridges/internalMethodOverrideInOtherModule.kt
 bridges/internalMethodOverrideMultipleInheritance.kt
 bridges/internalMethodOverridePublishedApi.kt
 bridges/kt46389.kt
-bridges/kt74377.kt
 bridges/multipleModules1.kt
 bridges/multipleModules2.kt
 bridges/noBridgeOnMutableCollectionInheritance.kt
@@ -165,7 +162,6 @@ callableReference/adaptedReferences/inlineDefault.kt
 callableReference/adaptedReferences/inlineVararg.kt
 callableReference/adaptedReferences/inlineVarargInts.kt
 callableReference/adaptedReferences/manyDefaultsAndVararg.kt
-callableReference/adaptedReferences/referenceToFakeOverrideWithTypeParameter.kt
 callableReference/adaptedReferences/suspendConversion/adaptedWithCoercionToUnit.kt
 callableReference/adaptedReferences/suspendConversion/adaptedWithDefaultArguments.kt
 callableReference/adaptedReferences/suspendConversion/adaptedWithVarargs.kt
@@ -211,9 +207,6 @@ callableReference/function/genericCallableReferencesWithOverload.kt
 callableReference/function/kt32462.kt
 callableReference/function/local/enumExtendsTrait.kt
 callableReference/function/sortListOfStrings.kt
-callableReference/kt49526.kt
-callableReference/kt49526b.kt
-callableReference/kt50172.kt
 callableReference/kt52270.kt
 callableReference/property/accessorForPropertyWithPrivateSetter.kt
 callableReference/property/kt15447.kt
@@ -992,7 +985,6 @@ delegation/withDefaultsMultipleFilesOrder.kt
 devirtualization/anonymousObject.kt
 devirtualization/inline_getter.kt
 devirtualization/lateinitInterface.kt
-diagnostics/functions/tailRecursion/recursiveCallInInlineLambdaWithCapture.kt
 elvis/ofNonNullableResultType.kt
 enum/defaultCtor/noPrimaryConstructor.kt
 enum/enumEntriesMultimoduleNoMappings.kt
@@ -1155,8 +1147,6 @@ inference/pcla/issues/kt48633.kt
 inference/pcla/issues/kt49887.kt
 inference/pcla/issues/kt54767a.kt
 inference/pcla/issues/kt54767b.kt
-inference/pcla/issues/kt60291a.kt
-inference/pcla/issues/kt63840a.kt
 inference/pcla/issues/kt64066.kt
 inference/pcla/issues/kt64069.kt
 inference/pcla/issues/kt66229.kt
@@ -1263,7 +1253,6 @@ inline/inlineOrder.kt
 inline/inlineSimpleAssignment.kt
 inline/innerInlineFunCapturesOuter.kt
 inline/iteratorOnInlineFunctionResult.kt
-inline/kt26117.kt
 inline/kt66017.kt
 inline/lambdaInLambda.kt
 inline/lambdaReassignment.kt
@@ -1380,7 +1369,6 @@ inlineClasses/kt44141.kt
 inlineClasses/kt44867.kt
 inlineClasses/kt45991.kt
 inlineClasses/kt50974_resultMultiModule.kt
-inlineClasses/kt57973.kt
 inlineClasses/kt70461.kt
 inlineClasses/multifileClass.kt
 inlineClasses/privateConstructorFunInterfaceMultiModule.kt
@@ -1707,7 +1695,6 @@ primitiveTypes/booleanHashCode.kt
 primitiveTypes/conversions.kt
 primitiveTypes/equalsHashCodeToString.kt
 primitiveTypes/kt13023.kt
-primitiveTypes/kt16732.kt
 primitiveTypes/kt3517.kt
 primitiveTypes/kt3576.kt
 primitiveTypes/kt79977.kt
@@ -1783,7 +1770,6 @@ ranges/contains/inDoubleRangeLiteralVsComparableRangeLiteral.kt
 ranges/contains/inExtensionRange.kt
 ranges/contains/inFloatingPointRangeWithNaNBound.kt
 ranges/contains/inIntRange.kt
-ranges/contains/inIterable.kt
 ranges/contains/inOptimizableDoubleRange.kt
 ranges/contains/inOptimizableFloatRange.kt
 ranges/contains/inOptimizableIntRange.kt

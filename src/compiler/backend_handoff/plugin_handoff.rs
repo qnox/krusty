@@ -110,7 +110,7 @@ impl PluginRuntime for HandoffRuntime<'_> {
             kind: fact.kind.into(),
             is_kotlin: fact.is_kotlin || fact.mapped_builtin,
             is_final: !fact.is_extensible,
-            is_value: fact.value_declaration.is_some(),
+            value_class: fact.value_declaration.clone(),
             in_module: fact.source,
             is_inner: fact.outer_instance.is_some(),
             type_parameters: fact.own_type_parameter_count,
