@@ -1595,7 +1595,10 @@ pub fn facade_package_metadata_from_ir(
             {
                 physical
                     .map(|function| {
-                        crate::jvm::names::method_descriptor(&function.params, function.ret)
+                        crate::jvm::method_descriptors::ir_method_desc(
+                            &function.params,
+                            &function.ret,
+                        )
                     })
                     .expect("a rewritten package function has its IR realization")
             } else {
@@ -1685,9 +1688,15 @@ pub fn facade_package_metadata_from_ir(
                 .expect("the property type was pushed last");
             let descriptor_parameters = accessor_types
                 .iter()
-                .map(|parameter| crate::jvm::names::type_descriptor(*parameter))
+                .map(|parameter| {
+                    crate::jvm::names::type_descriptor(
+                        crate::jvm::method_descriptors::jvm_value_ty(parameter),
+                    )
+                })
                 .collect::<String>();
-            let ty_descriptor = crate::jvm::names::type_descriptor(erased_ty);
+            let ty_descriptor = crate::jvm::names::type_descriptor(
+                crate::jvm::method_descriptors::jvm_declared_ty(&erased_ty),
+            );
             // A value class is stored as its carrier. The getter kotlinc records, and the field
             // descriptor a reader cannot derive from `S`, both name that carrier.
             let value_descriptor =
@@ -1803,9 +1812,9 @@ fn value_class_accessor_descriptor(
 ) -> Option<String> {
     let accessor = accessor.filter(|accessor| ir.vc_declared_sigs.contains_key(accessor))?;
     let function = &ir.functions[accessor as usize];
-    Some(crate::jvm::names::method_descriptor(
+    Some(crate::jvm::method_descriptors::ir_method_desc(
         &function.params,
-        function.ret,
+        &function.ret,
     ))
 }
 
@@ -1864,26 +1873,13 @@ fn declared_method_descriptor(declaration: &crate::ir::IrPackageFunction) -> Str
     if let Some(receiver) = declaration.receiver.filter(|_| !declaration.companion) {
         physical.insert(declaration.context_count.min(physical.len()), receiver);
     }
-    // Each parameter is a value slot: a `Unit` one is the `kotlin.Unit` reference, not `void`.
-    let mut descriptor = physical
-        .iter()
-        .map(|parameter| {
-            crate::jvm::names::type_descriptor(crate::jvm::method_descriptors::jvm_value_ty(
-                parameter,
-            ))
-        })
-        .collect::<String>();
-    if declaration.suspend {
-        descriptor.push_str("Lkotlin/coroutines/Continuation;");
-    }
-    format!(
-        "({descriptor}){}",
-        if declaration.suspend {
-            "Ljava/lang/Object;".to_owned()
-        } else {
-            crate::jvm::names::type_descriptor(declaration.ret)
-        }
-    )
+    let result = if declaration.suspend {
+        physical.push(Ty::obj("kotlin/coroutines/Continuation"));
+        Ty::obj("java/lang/Object")
+    } else {
+        declaration.ret
+    };
+    crate::jvm::method_descriptors::ir_method_desc(&physical, &result)
 }
 
 fn build_facade_metadata(

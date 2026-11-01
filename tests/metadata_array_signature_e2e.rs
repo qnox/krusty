@@ -184,3 +184,29 @@ fn an_annotation_class_vararg_records_a_projected_array() {
         annotation class Names(vararg val names: String)\n";
     assert_identical("AnnotationVarargProjection", SRC, "app/Names");
 }
+
+/// An `Array` of an unsigned (value-class) element is a reference array of the boxed class, never
+/// its carrier: `Array<UInt>` is `[Lkotlin/UInt;`, not `[I`. The recorded descriptor is the one the
+/// method is emitted with, for a package function's return and a facade property's getter.
+#[test]
+fn a_package_unsigned_array_records_the_boxed_element_descriptor() {
+    const SRC: &str = "package app\n\
+        \n\
+        fun d(): Array<UInt> = arrayOf(7u)\n\
+        \n\
+        val c: Array<ULong>? = null\n";
+    assert_identical("UnsignedArrayPackage", SRC, "app/UnsignedArrayPackageKt");
+}
+
+/// The same rule for a class member's return, parameter and property getter.
+#[test]
+fn a_members_unsigned_array_records_the_boxed_element_descriptor() {
+    const SRC: &str = "package app\n\
+        \n\
+        class Holder {\n\
+        \x20   val p: Array<UInt> = arrayOf()\n\
+        \x20   fun a(): Array<UByte> = arrayOf()\n\
+        \x20   fun b(xs: Array<UShort>): Int = xs.size\n\
+        }\n";
+    assert_identical("UnsignedArrayMember", SRC, "app/Holder");
+}
