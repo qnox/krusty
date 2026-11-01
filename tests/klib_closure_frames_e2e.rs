@@ -42,6 +42,29 @@ fn official_dependency_closures_preserve_nested_values_and_once_only_operands() 
 }
 
 #[test]
+fn dependency_top_level_callable_references_keep_declaration_identity_and_invocation() {
+    let library = include_str!("fixtures/klib_closure_frames/TopLevelReferences.kt");
+    let consumer = include_str!("fixtures/klib_closure_frames/TopLevelReferenceConsumer.kt");
+    let dependency = common::kotlinc_lib_out(&[("Library.kt", library)])
+        .expect("reference compiler required for callable-reference oracle");
+    let packaged_consumer = format!("package fixture\n{consumer}");
+    assert_eq!(
+        common::kotlinc_box_files_result_with_classpath(
+            &[("Consumer.kt", &packaged_consumer)],
+            "fixture.ConsumerKt",
+            &[dependency],
+        ),
+        "OK"
+    );
+    assert_official_dependency_closures(
+        library,
+        consumer,
+        "SerializedTopLevelReference",
+        DependencyConsumer::Native,
+    );
+}
+
+#[test]
 fn a_dependency_constructor_used_only_inside_nested_closures_is_prepared() {
     let library = include_str!("fixtures/klib_closure_frames/DependencyCalls.kt");
     // Imported class storage is an independent Native capability. Observe the actual checked

@@ -12,7 +12,8 @@ use crate::fx_hash::HashMap;
 use std::collections::VecDeque;
 
 use super::body_lowering::{
-    BodyLowering, CallLinker, LinkedAccessor, LinkedCallee, LinkedConstructor, LoweredFunction,
+    BodyLowering, CallLinker, LinkedAccessor, LinkedCallableReference, LinkedCallee,
+    LinkedConstructor, LoweredFunction,
 };
 use super::callee_facts::{KlibCalleeFact, KlibCalleeFacts};
 use super::decline::{KlibBodyDecline, KlibBodyDeclineReason};
@@ -613,6 +614,22 @@ impl CallLinker for Linker<'_, '_> {
         sup: Ty,
     ) -> bool {
         self.sources.callees.is_subtype(parameters, sub, sup)
+            || super::callable_references::function_supertype(sub, sup)
+    }
+
+    fn link_reference(
+        &mut self,
+        ir: &mut IrFile,
+        callee: &KlibPublicIdSignature,
+    ) -> Result<LinkedCallableReference, KlibBodyDeclineReason> {
+        let identity = self.callee_identity(callee)?;
+        let (declaration, kind) = self.sources.callees.reference_declaration(&identity)?;
+        let call = self.link(ir, callee)?;
+        Ok(LinkedCallableReference {
+            declaration,
+            kind,
+            call,
+        })
     }
 
     fn link_constructor(

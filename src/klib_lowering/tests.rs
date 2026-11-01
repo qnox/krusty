@@ -5,6 +5,7 @@ use std::path::PathBuf;
 
 mod accessor_calls;
 mod body_forms;
+mod callable_references;
 mod callee_headers;
 mod closure_frames;
 mod closure_producers;

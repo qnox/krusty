@@ -17,6 +17,9 @@ pub struct KlibCalleeFacts<'a> {
     callables: HashMap<&'a KlibDependencyCallable, IndexedKlibCallee<'a>>,
     /// Header evidence is not a checked source call which requires an executable export.
     selected: HashSet<&'a KlibDependencyCallable>,
+    /// Same-compilation declaration identities for reference equality. These do not grant an
+    /// executable external export or turn header evidence into a checked source selection.
+    reference_targets: HashMap<&'a KlibDependencyCallable, crate::fir::ExternalCallableId>,
     /// Explicit same-compilation hierarchy evidence for authenticated dependency types.
     class_type_oracle: Option<&'a dyn crate::assignable::TypeOracle>,
     /// The classifiers whose representation the target owns, and so their singleton values too.
@@ -40,6 +43,51 @@ pub(super) enum KlibCalleeFact<'facts, 'callable> {
 }
 
 impl<'a> KlibCalleeFacts<'a> {
+    pub(crate) fn with_reference_declarations(
+        selected: impl IntoIterator<Item = KlibBodyCallable<'a>>,
+        declarations: impl IntoIterator<Item = (crate::fir::ExternalCallableId, KlibBodyCallable<'a>)>,
+    ) -> Self {
+        let mut facts = Self::new(selected);
+        for (target, declaration) in declarations {
+            facts.record(declaration, false);
+            if facts
+                .reference_targets
+                .insert(declaration.identity(), target)
+                .is_some_and(|previous| previous != target)
+            {
+                facts
+                    .callables
+                    .insert(declaration.identity(), IndexedKlibCallee::Ambiguous);
+            }
+        }
+        facts
+    }
+
+    pub(super) fn reference_declaration(
+        &self,
+        identity: &KlibDependencyCallable,
+    ) -> Result<
+        (
+            crate::fir::ExternalCallableId,
+            crate::libraries::ExternalCallableKind,
+        ),
+        super::decline::KlibBodyDeclineReason,
+    > {
+        match self.get(identity) {
+            Some(KlibCalleeFact::Selected(callables)) => self
+                .reference_targets
+                .get(identity)
+                .copied()
+                .map(|target| (target, callables[0].kind()))
+                .ok_or(super::decline::KlibBodyDeclineReason::UnsupportedOperation(
+                    "a callable reference without an exact provider declaration",
+                )),
+            _ => Err(super::decline::KlibBodyDeclineReason::SignatureMismatch(
+                "a callable reference has no unique provider declaration".to_owned(),
+            )),
+        }
+    }
+
     pub(crate) fn with_type_oracle(
         mut self,
         oracle: &'a dyn crate::assignable::TypeOracle,
@@ -247,6 +295,7 @@ impl<'a> KlibCalleeFacts<'a> {
     }
 
     /// Add exact provider header contracts without inventing source-call/export obligations.
+    #[cfg(test)]
     pub(crate) fn with_declarations(
         selected: impl IntoIterator<Item = KlibBodyCallable<'a>>,
         declarations: impl IntoIterator<Item = KlibBodyCallable<'a>>,
