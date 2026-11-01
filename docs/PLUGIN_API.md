@@ -202,7 +202,8 @@ module, a composable lambda that captures a local value or a composable lambda p
 another lambda or is empty, a composable
 whose lambda numbering another lambda or overload shares, and a class whose stability its file
 does not decide. Every other public or internal class gets kotlinc's `$stable` field and
-`@StabilityInferred`; the inference reads the classifiers of fields and supertypes that the file
+`@StabilityInferred`, whose initializer reads the `$stable` of fields' classes from other files
+and Compose libraries; the inference reads the classifiers of fields and supertypes that the file
 does not declare through `PluginRuntime::classifier`, which the handoff answers from the module's
 and the dependencies' classifier facts.
 

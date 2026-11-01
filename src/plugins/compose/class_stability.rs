@@ -22,8 +22,9 @@
 //! time.
 
 use crate::ir::{
-    AnnoRetention, AnnoValue, AppliedAnnotation, DeclarationAnnotations, FieldAnnotations,
-    IrAccessorLines, IrConst, IrExpr, IrFile, IrStatic, IrStaticAccessors, RetainedAnnotation,
+    AnnoRetention, AnnoValue, AppliedAnnotation, DeclarationAnnotations, ExprId, FieldAnnotations,
+    IrAccessorLines, IrBinOp, IrConst, IrExpr, IrFile, IrStatic, IrStaticAccessors,
+    RetainedAnnotation,
 };
 use crate::plugins::runtime_declarations::{PluginClassifier, PluginRuntime};
 use crate::plugins::{PluginRejection, PluginSourceView};
@@ -81,6 +82,9 @@ const PROTOBUF_MESSAGES: &[&str] = &[
 enum Stability {
     Certain(bool),
     Unknown,
+    /// The class's `$stable`, read when the class initializes: a class of another file, or a
+    /// dependency class compiled with Compose.
+    Runtime(TypeName),
     Combined(Vec<Stability>),
 }
 
@@ -99,26 +103,44 @@ impl Stability {
         }
     }
 
-    /// kotlinc's `normalize`: an unstable part decides, and unknown parts of a combination drop out.
+    /// kotlinc's `normalize`: an unstable part decides, unknown parts of a combination drop out, and
+    /// the run-time parts remain in the order kotlinc's work stack pops them.
     fn normalize(self) -> Self {
         let Self::Combined(elements) = self else {
             return self;
         };
         let mut pending = elements;
+        let mut parts = Vec::new();
         while let Some(element) = pending.pop() {
             match element {
                 Self::Combined(nested) => pending.extend(nested),
                 Self::Certain(false) => return Self::UNSTABLE,
+                runtime @ Self::Runtime(_) => parts.push(runtime),
                 Self::Certain(true) | Self::Unknown => {}
             }
         }
-        Self::Combined(Vec::new())
+        Self::Combined(parts)
+    }
+
+    /// kotlinc's `irStableExpression`: the `$stable` fields the class's own `$stable` ors together,
+    /// none for a stable class, or nothing when the stability is not known.
+    fn runtime_reads(&self) -> Option<Vec<TypeName>> {
+        match self {
+            Self::Certain(true) => Some(Vec::new()),
+            Self::Certain(false) | Self::Unknown => None,
+            Self::Runtime(class) => Some(vec![*class]),
+            Self::Combined(elements) => elements
+                .iter()
+                .map(Self::runtime_reads)
+                .collect::<Option<Vec<_>>>()
+                .map(|reads| reads.concat()),
+        }
     }
 
     fn known_stable(&self) -> bool {
         match self {
             Self::Certain(stable) => *stable,
-            Self::Unknown => false,
+            Self::Unknown | Self::Runtime(_) => false,
             Self::Combined(elements) => elements.iter().all(Self::known_stable),
         }
     }
@@ -150,7 +172,7 @@ pub(super) fn declare(
             }
         };
         if marker {
-            markers.push((index, STABLE, None));
+            markers.push((index, Some(Vec::new()), None));
             continue;
         }
         if !class.type_params.is_empty() {
@@ -165,14 +187,13 @@ pub(super) fn declare(
             Ok(stability) => {
                 let stability = stability.normalize();
                 let stable = stability.known_stable();
-                let bits = if stable { STABLE } else { UNSTABLE };
-                markers.push((index, bits, Some(i32::from(stable))));
+                markers.push((index, stability.runtime_reads(), Some(i32::from(stable))));
             }
             Err(what) => rejections.push(super::source_facts::class_rejection(source, class, what)),
         }
     }
-    for (index, bits, parameters) in markers {
-        mark(ir, index, bits, parameters);
+    for (index, reads, parameters) in markers {
+        mark(ir, index, reads, parameters);
     }
 }
 
@@ -200,9 +221,26 @@ fn records_stability(ir: &IrFile, class: &crate::ir::IrClass) -> bool {
 
 /// Add `@JvmField public static final int $stable = bits` and, unless the class carries a stable
 /// marker, `@StabilityInferred(parameters)`.
-fn mark(ir: &mut IrFile, index: usize, bits: i32, parameters: Option<i32>) {
-    let init = ir.add_expr(IrExpr::Const(IrConst::Int(bits)));
-    ir.mark_positionless(init);
+/// Give the class its `$stable`: unstable without `reads`, else the `$stable` fields it reads ored
+/// together in kotlinc's order, or stable when it reads none.
+fn mark(ir: &mut IrFile, index: usize, reads: Option<Vec<TypeName>>, parameters: Option<i32>) {
+    let init = match reads.as_deref() {
+        None => stable_bits(ir, UNSTABLE),
+        Some([]) => stable_bits(ir, STABLE),
+        Some([first, rest @ ..]) => {
+            let mut value = read_stable(ir, *first);
+            for &class in rest {
+                let rhs = read_stable(ir, class);
+                value = ir.add_expr(IrExpr::PrimitiveBinOp {
+                    op: IrBinOp::BitOr,
+                    lhs: value,
+                    rhs,
+                });
+                ir.mark_positionless(value);
+            }
+            value
+        }
+    };
     let class = &mut ir.classes[index];
     let owner = class.fq_name;
     let mut field_annotations = DeclarationAnnotations::default();
@@ -238,6 +276,19 @@ fn mark(ir: &mut IrFile, index: usize, bits: i32, parameters: Option<i32>) {
         source_order: u32::MAX,
         property_delegate: false,
     });
+}
+
+fn stable_bits(ir: &mut IrFile, bits: i32) -> ExprId {
+    let value = ir.add_expr(IrExpr::Const(IrConst::Int(bits)));
+    ir.mark_positionless(value);
+    value
+}
+
+/// Read `class`'s `$stable`.
+fn read_stable(ir: &mut IrFile, class: TypeName) -> ExprId {
+    let value = ir.external_static_field_name(class, "$stable", "I");
+    ir.mark_positionless(value);
+    value
 }
 
 fn binary(annotation: &str, values: Vec<(String, AnnoValue)>) -> RetainedAnnotation {
@@ -445,9 +496,21 @@ impl Inference<'_> {
                 .iter()
                 .any(|annotation| annotation.annotation == stability_inferred)
         {
-            return Err(
-                "a class whose stability depends on a class of another file or a Compose library",
-            );
+            if declared.type_parameters > 0 {
+                return Err(
+                    "a class whose stability depends on a generic class of another file or \
+                     a Compose library",
+                );
+            }
+            if declared.in_module
+                && (declared.is_inner || declared.kind == ClassifierDeclarationKind::Annotation)
+            {
+                return Err(
+                    "a class whose stability depends on another file's class without \
+                     `$stable`",
+                );
+            }
+            return Ok(Stability::Runtime(name));
         }
         Ok(Stability::UNSTABLE)
     }

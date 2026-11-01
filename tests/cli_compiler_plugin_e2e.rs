@@ -648,18 +648,21 @@ fn the_compose_pass_rejects_what_it_does_not_cover() {
          numbered reflection function type yet",
     );
     assert_compose_rejects(
-        "compose-other-file-class-field",
-        "class Card(val point: Point)\n",
-        &[("Point.kt", "package probe\nclass Point(val x: Int)\n")],
-        "3:1: error: krusty's Compose compiler plugin does not support a class whose stability \
-         depends on a class of another file or a Compose library yet",
-    );
-    assert_compose_rejects(
-        "compose-library-class-field",
-        "class Clock(val clock: androidx.compose.runtime.BroadcastFrameClock)\n",
+        "compose-library-generic-class-field",
+        "class Holder(val value: androidx.compose.runtime.ProvidedValue<Int>)\n",
         &[],
         "3:1: error: krusty's Compose compiler plugin does not support a class whose stability \
-         depends on a class of another file or a Compose library yet",
+         depends on a generic class of another file or a Compose library yet",
+    );
+    assert_compose_rejects(
+        "compose-other-file-inner-class-field",
+        "class Card(val inner: Outer.Inner)\n",
+        &[(
+            "Outer.kt",
+            "package probe\nclass Outer { inner class Inner(val x: Int) }\n",
+        )],
+        "3:1: error: krusty's Compose compiler plugin does not support a class whose stability \
+         depends on another file's class without `$stable` yet",
     );
 }
 
