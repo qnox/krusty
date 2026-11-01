@@ -8,7 +8,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use krusty_build::dependency_view::directory_fingerprint;
+use krusty_build::dependency_view::{archive_fingerprint, directory_fingerprint};
 use krusty_build::Digest;
 
 fn krusty_binary() -> Option<PathBuf> {
@@ -52,7 +52,8 @@ const BASE: &str = "package library\n\
     const val LIMIT = 30\n\
     fun greet(name: String): String = \"Hello, \" + name\n\
     object Shouting { inline fun shout(name: String): String = name.uppercase() }\n\
-    class Counter(var count: Int) { fun bump() { count += 1 } }\n";
+    class Counter(var count: Int) { fun bump() { count += 1 } }\n\
+    class Names { fun of(values: List<Int>): List<String> = values.map { it.toString() } }\n";
 
 #[test]
 fn only_what_a_dependent_observes_moves_the_fingerprint() {
@@ -69,6 +70,12 @@ fn only_what_a_dependent_observes_moves_the_fingerprint() {
         ("recompiled", BASE.to_string()),
         ("function-body", BASE.replace("\"Hello, \"", "\"Hi, \"")),
         ("member-body", BASE.replace("count += 1", "count += 2")),
+        // The lines of both classes below `Shouting` move, and with them the source map of the
+        // inline `map` spliced into `Names.of`.
+        (
+            "moved-lines",
+            BASE.replace("class Counter", "\nclass Counter"),
+        ),
     ];
     for (tag, source) in unchanged {
         assert_eq!(fingerprint(&krusty, &scratch, tag, &source), base, "{tag}");
@@ -90,6 +97,59 @@ fn only_what_a_dependent_observes_moves_the_fingerprint() {
     for (tag, source) in moved {
         assert_ne!(fingerprint(&krusty, &scratch, tag, &source), base, "{tag}");
     }
+    let _ = std::fs::remove_dir_all(&scratch);
+}
+
+/// Compiles `source` into `<tag>/classes` and into `<tag>/library.jar`.
+fn compile_both(krusty: &Path, scratch: &Path, tag: &str, source: &str) -> (PathBuf, PathBuf) {
+    let directory = scratch.join(tag);
+    std::fs::create_dir_all(&directory).expect("create the scratch directory");
+    let file = directory.join("Library.kt");
+    std::fs::write(&file, source).expect("write the source");
+    let outputs = (directory.join("classes"), directory.join("library.jar"));
+    for output in [&outputs.0, &outputs.1] {
+        let result = Command::new(krusty)
+            .arg(&file)
+            .arg("-d")
+            .arg(output)
+            .output()
+            .expect("run krusty");
+        assert!(
+            result.status.success(),
+            "krusty failed on {tag}:\n{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+    outputs
+}
+
+/// A jar is read entry by entry through the same view as a class directory: a body-only edit
+/// leaves a module's jar fingerprint unchanged, as it leaves its class directory's, and an edit a
+/// dependent observes moves both.
+#[test]
+fn a_jar_is_read_through_the_dependency_view() {
+    let Some(krusty) = krusty_binary() else {
+        eprintln!("skipping dependency_view: needs the krusty binary");
+        return;
+    };
+    let scratch =
+        std::env::temp_dir().join(format!("krusty-dependency-jar-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&scratch);
+    let both = |tag: &str, source: &str| {
+        let (classes, jar) = compile_both(&krusty, &scratch, tag, source);
+        (
+            directory_fingerprint(&classes).expect("fingerprint the classes"),
+            archive_fingerprint(&jar).expect("fingerprint the jar"),
+        )
+    };
+    let base = both("base", BASE);
+    assert_eq!(
+        both("function-body", &BASE.replace("\"Hello, \"", "\"Hi, \"")),
+        base
+    );
+    let inline = both("inline-body", &BASE.replace("uppercase()", "lowercase()"));
+    assert_ne!(inline.0, base.0, "the class directory");
+    assert_ne!(inline.1, base.1, "the jar");
     let _ = std::fs::remove_dir_all(&scratch);
 }
 

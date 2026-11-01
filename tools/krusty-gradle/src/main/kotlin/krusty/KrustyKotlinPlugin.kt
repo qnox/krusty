@@ -29,6 +29,7 @@ import org.gradle.api.tasks.TaskProvider
 import org.gradle.build.event.BuildEventsListenerRegistry
 import org.gradle.jvm.toolchain.JavaToolchainService
 import org.gradle.process.ExecOperations
+import org.gradle.work.DisableCachingByDefault
 import org.jetbrains.kotlin.buildtools.api.ExperimentalBuildToolsApi
 import org.jetbrains.kotlin.gradle.ExperimentalKotlinGradlePluginApi
 import org.jetbrains.kotlin.gradle.dsl.KotlinTopLevelExtension
@@ -51,8 +52,11 @@ import javax.inject.Inject
  * kotlinc's fragments: one per source set, refining the source sets it depends on.
  *
  * A dirty task always compiles the complete source set into a clean output directory. Gradle owns
- * task incrementality; krusty does not try to infer Kotlin dependency invalidation from class-file
- * names or partial ABI snapshots.
+ * task incrementality. A compile is keyed on its classpath through `krusty classpath-fingerprint`,
+ * krusty's own reading of what a dependent compilation observes of each entry, not on the
+ * classpath's bytes: a body-only edit in a dependency leaves its dependents up to date, and every
+ * edit a dependent could observe still recompiles it. krusty does not infer Kotlin dependency
+ * invalidation from class-file names or partial ABI snapshots.
  *
  * A compile that requests a compiler plugin (Compose, Parcelize, any third-party FIR/IR plugin) or
  * a kotlinc argument krusty does not implement stays with kotlinc: a check task asks the krusty
@@ -228,6 +232,17 @@ private fun replaceKotlinJvmCompiles(
             binary.set(project.layout.file(binaryPath.map(::File)))
             refusals.set(compilerChoice)
         }
+        val classpathFingerprint = project.tasks.register(
+            "${kotlinTask.name}KrustyClasspath",
+            KrustyClasspathFingerprintTask::class.java,
+        ) {
+            description = "Fingerprints what ${kotlinTask.path} observes of its classpath"
+            libraries.from(kotlinTask.libraries)
+            friendPaths.from(kotlinTask.friendPaths)
+            binary.set(project.layout.file(binaryPath.map(::File)))
+            viewCache.set(File(project.gradle.gradleUserHomeDir, "caches/krusty/dependency-views").absolutePath)
+            fingerprint.set(project.layout.buildDirectory.file("krusty/${kotlinTask.name}/classpath-fingerprint.txt"))
+        }
         // Both krusty compiles of this Kotlin task, the replacement and the verify compile beside
         // kotlinc, receive the same request.
         val configureCompilation: KrustyCompilation.() -> Unit = {
@@ -236,6 +251,7 @@ private fun replaceKotlinJvmCompiles(
             )
             libraries.from(kotlinTask.libraries)
             friendPaths.from(kotlinTask.friendPaths)
+            this.classpathFingerprint.set(classpathFingerprint.flatMap { it.fingerprint })
             val jvmCompilation = compilation
             if (jvmCompilation != null) {
                 val fragments = project.provider { fragmentStructure(jvmCompilation, project.projectDir) }
@@ -381,11 +397,21 @@ abstract class KrustyCompilation : DefaultTask() {
     @get:PathSensitive(PathSensitivity.RELATIVE)
     abstract val javaSourceFiles: ConfigurableFileCollection
 
-    @get:Classpath
+    /**
+     * The compile's classpath. The compile reads it, but is keyed on [classpathFingerprint] in its
+     * place, which the fingerprint task takes after every task producing an entry has run.
+     */
+    @get:Internal
     abstract val libraries: ConfigurableFileCollection
 
-    @get:Classpath
+    /** The classpath entries whose internal declarations the compile sees, keyed like [libraries]. */
+    @get:Internal
     abstract val friendPaths: ConfigurableFileCollection
+
+    /** `krusty classpath-fingerprint` of [libraries] and [friendPaths]. */
+    @get:InputFile
+    @get:PathSensitive(PathSensitivity.NONE)
+    abstract val classpathFingerprint: RegularFileProperty
 
     @get:Input
     abstract val compilerArguments: ListProperty<String>
@@ -534,6 +560,76 @@ abstract class KrustyCompileTask @Inject constructor(
         if (result.exitValue != 0) {
             throw GradleException("$executable exited with ${result.exitValue} for $path")
         }
+    }
+}
+
+/**
+ * `krusty classpath-fingerprint` of a compile's classpath and friend paths: what the compilation
+ * observes of them. A class directory or a jar enters by its declarations and by the bytecode an
+ * inline call copies out of it, not by its method bodies, so a dependency's body-only edit reruns
+ * this task and leaves the fingerprint, and with it the compile keyed on it, unchanged.
+ */
+@DisableCachingByDefault(because = "Reading the classpath again is what a cache lookup would cost")
+abstract class KrustyClasspathFingerprintTask @Inject constructor(
+    private val execOperations: ExecOperations,
+) : DefaultTask() {
+    @get:Classpath
+    abstract val libraries: ConfigurableFileCollection
+
+    @get:Classpath
+    abstract val friendPaths: ConfigurableFileCollection
+
+    @get:InputFile
+    @get:PathSensitive(PathSensitivity.NONE)
+    abstract val binary: RegularFileProperty
+
+    /**
+     * Where krusty keeps each jar's view by the digest of its bytes, shared by every build of this
+     * Gradle user home, so an unchanged library jar is parsed once. An entry is keyed by contents
+     * alone and never stale, so the directory is no input.
+     */
+    @get:Internal
+    abstract val viewCache: Property<String>
+
+    @get:OutputFile
+    abstract val fingerprint: RegularFileProperty
+
+    @TaskAction
+    fun digest() {
+        // The compile's own classpath arguments; the JDK and the compile's other inputs are keyed
+        // by the compile task itself.
+        val arguments = mutableListOf(
+            "classpath-fingerprint",
+            "--view-cache",
+            viewCache.get(),
+            "-no-stdlib",
+            "-no-reflect",
+            "-no-jdk",
+        )
+        if (!libraries.isEmpty) {
+            arguments.add("-classpath")
+            arguments.add(libraries.files.joinToString(File.pathSeparator, transform = File::getAbsolutePath))
+        }
+        if (!friendPaths.isEmpty) {
+            arguments.add("-Xfriend-paths=" + friendPaths.files.joinToString(",", transform = File::getAbsolutePath))
+        }
+        val executable = binary.get().asFile.absolutePath
+        val output = ByteArrayOutputStream()
+        val errors = ByteArrayOutputStream()
+        val result = execOperations.exec {
+            this.executable = executable
+            args(arguments)
+            standardOutput = output
+            errorOutput = errors
+            isIgnoreExitValue = true
+        }
+        if (result.exitValue != 0) {
+            throw GradleException(
+                "$executable classpath-fingerprint exited with ${result.exitValue} for $path\n" +
+                    errors.toString(Charsets.UTF_8).trimEnd(),
+            )
+        }
+        fingerprint.get().asFile.writeText(output.toString(Charsets.UTF_8))
     }
 }
 
