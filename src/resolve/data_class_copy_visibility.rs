@@ -49,7 +49,7 @@ impl Checker<'_> {
             self.file
                 .data_class_copy_visibility_change_warning
                 .as_deref(),
-            crate::diag::CompilerWarningName::DataClassCopyVisibilityWillBeChanged,
+            crate::diag::names::DATA_CLASS_COPY_VISIBILITY_WILL_BE_CHANGED_WARNING,
             DATA_CLASS_COPY_VISIBILITY,
         );
     }
@@ -103,7 +103,7 @@ impl Checker<'_> {
             span,
             self.file.error_about_data_class_copy_visibility_change,
             self.file.data_class_invisible_copy_usage_warning.as_deref(),
-            crate::diag::CompilerWarningName::DataClassInvisibleCopyUsage,
+            crate::diag::names::DATA_CLASS_INVISIBLE_COPY_USAGE_WARNING,
             DATA_CLASS_INVISIBLE_COPY_USAGE,
         );
     }

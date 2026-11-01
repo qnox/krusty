@@ -345,7 +345,7 @@ mod tests {
                 span: Span::new(0, 1),
                 editor_span: None,
                 identity: None,
-                warning_name: None,
+                name: None,
                 severity: Severity::Error,
                 kind: DiagnosticKind::Compiler,
                 msg: "broken".to_string(),

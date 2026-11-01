@@ -189,8 +189,8 @@ fn recursion_warning_keeps_its_typed_policy_identity() {
     assert_eq!(diagnostic.editor_span, None);
     assert_eq!(diagnostic.severity, krusty::diag::Severity::Warning);
     assert_eq!(
-        diagnostic.warning_name,
-        Some(krusty::diag::CompilerWarningName::ValueClassCannotBeRecursiveViaTypeParameters,)
+        diagnostic.name,
+        Some(krusty::diag::names::VALUE_CLASS_CANNOT_BE_RECURSIVE_VIA_TYPE_PARAMETERS_WARNING,)
     );
     assert_eq!(diagnostic.kind, krusty::diag::DiagnosticKind::Compiler);
     assert_eq!(

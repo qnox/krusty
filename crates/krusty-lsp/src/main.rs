@@ -70,7 +70,7 @@ fn finish_analysis(
                         span: krusty::diag::Span::new(0, 0),
                         editor_span: None,
                         identity: None,
-                        warning_name: None,
+                        name: None,
                         severity: krusty::diag::Severity::Error,
                         kind: krusty::diag::DiagnosticKind::Compiler,
                         msg: format!("analysis worker failed: {error}"),
