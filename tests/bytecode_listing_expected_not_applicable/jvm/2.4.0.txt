@@ -1,0 +1,52 @@
+# Kotlin 2.4.0 compiler/testData/codegen/bytecodeListing cases the reference kotlinc does not
+# reproduce through this runner, relative to that directory. Each group says why. The conformance
+# job runs
+# kotlin_bytecode_listing_conformance::the_reference_compiler_reproduces_every_applicable_bytecode_listing_case
+# for this release, which requires kotlinc to pass every other case and no listed one.
+
+# The reference compiler rejects the configuration the case requests: a feature whose first
+# release is no longer supported cannot be disabled.
+main/parameterlessMain_before.kt
+
+# The case selects a code-generation mode (`JVM_DEFAULT_MODE`, `SAM_CONVERSIONS`) in the text
+# before its first `// FILE:` (or between `// MODULE:` and that module's first `// FILE:`). JetBrains'
+# test infrastructure applies those directives to the module; the box harness's file split drops
+# that text, so both compilers build the case under kotlinc's default modes.
+jvm8/defaults/defaultCompatibilityBridges/annotations.kt
+jvm8/defaults/defaultCompatibilityBridges/noBridgeIfSuperMethodIsAbstract.kt
+jvm8/defaults/disable/differentModeParents.kt
+jvm8/defaults/enable/differentModeParents.kt
+jvm8/defaults/enable/differentModeParentsAnnotatedClass.kt
+jvm8/defaults/noCompatibility/bridgeWithJava.kt
+jvm8/defaults/noCompatibility/differentModeParents.kt
+jvm8/defaults/noCompatibility/differentModeParentsAnnotatedClass.kt
+nullabilityAnnotations/samAdapterForJavaInterfaceWithNullability.kt
+sam/callableRefGenericSamInterface.kt
+sam/callableRefSpecializedSamInterface.kt
+sam/genericSamInterface.kt
+sam/kt16650.kt
+sam/kt84931.kt
+sam/lambdaGenericFunInterface.kt
+sam/lambdaGenericSamInterface.kt
+sam/lambdaSpecializedFunInterface.kt
+sam/lambdaSpecializedSamInterface.kt
+sam/specializedSamInterface.kt
+
+# The case selects a compiler option through a directive the box harness does not translate yet:
+# `INHERIT_MULTIFILE_PARTS`, or `API_VERSION: LATEST`.
+annotations/repeatable/kotlinAnnotationWithBothRepeatables.kt
+defaultArguments/functionInMultifileClassWithInheritedParts.kt
+
+# The expectation lists a particular JDK's members. The `FULL_JDK` cases were recorded against a
+# JDK older than 21, whose `List` has no `SequencedCollection` methods (`addFirst` and the rest);
+# `JDK_KIND: FULL_JDK_17` names a JDK the harness does not model, and its mock JDK has no
+# `java.lang.Record`.
+collectionStubs/ListAndSet.kt
+collectionStubs/collectionByDelegation2WithFullJdk.kt
+collectionStubs/collectionByDelegation3WithFullJdk.kt
+collectionStubs/collectionByDelegationWithFullJdk.kt
+collectionStubs/collectionsWithFullJdk.kt
+jvmRecordStructure.kt
+
+# The case declares a single `// MODULE:`, a shape the box harness's module split declines.
+properties/backingField/explicitBackingFieldsInJava.kt
