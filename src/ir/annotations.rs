@@ -70,9 +70,10 @@ pub(crate) struct PackagePropertyAnnotations {
 #[derive(Clone, Debug, Default)]
 pub struct DeclarationAnnotations {
     retained: Vec<RetainedAnnotation>,
-    /// A checked SOURCE application still belongs to this declaration although its payload is
-    /// absent from class files and Kotlin metadata. Erased optional expectations have no carrier.
-    source_application: bool,
+    /// The identities of checked SOURCE applications. They still belong to this declaration
+    /// although their payload is absent from class files and Kotlin metadata; a backend may map one
+    /// to a physical modifier (`@Synchronized`). Erased optional expectations have no carrier.
+    source_applications: Vec<TypeName>,
     /// The declaration also carried non-SOURCE `@OptionalExpectation` applications with no actual
     /// on this platform. kotlinc removes them from IR with their `expect` classes, so no class
     /// file or metadata record names them, yet the declaration's metadata flags still report
@@ -111,7 +112,7 @@ impl DeclarationAnnotations {
     pub fn new(annotations: Vec<RetainedAnnotation>) -> Self {
         Self {
             retained: annotations,
-            source_application: false,
+            source_applications: Vec::new(),
             erased_optional_expectations: false,
             suppressed_source_application: false,
             lowered: 0,
@@ -127,7 +128,9 @@ impl DeclarationAnnotations {
         let mut annotations = Self::default();
         for (checked, annotation) in applications {
             if checked.retention == crate::types::AnnotationRetention::Source {
-                annotations.source_application |= !checked.facts.optional_expectation;
+                if !checked.facts.optional_expectation {
+                    annotations.source_applications.push(annotation.internal);
+                }
                 continue;
             }
             if checked.facts.optional_expectation {
@@ -148,7 +151,7 @@ impl DeclarationAnnotations {
     /// Never derive it from [`Self::retains_none`].
     pub fn declares_annotations(&self) -> bool {
         !self.retained.is_empty()
-            || self.source_application
+            || !self.source_applications.is_empty()
             || self.erased_optional_expectations
             || self.suppressed_source_application
     }
@@ -161,7 +164,15 @@ impl DeclarationAnnotations {
 
     /// Whether ordinary SOURCE presence survives independently of its dropped payload.
     pub(crate) fn has_source_application(&self) -> bool {
-        self.source_application
+        !self.source_applications.is_empty()
+    }
+
+    /// Whether a checked application of `annotation`, of any retention, is written on the
+    /// declaration.
+    pub(crate) fn declares(&self, annotation: TypeName) -> bool {
+        self.applications()
+            .any(|application| application.internal == annotation)
+            || self.source_applications.contains(&annotation)
     }
 
     pub(crate) fn with_suppressed_source_application(mut self, retained: bool) -> Self {
