@@ -13385,9 +13385,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   computed from a parameter, any other use of a composable lambda parameter, a grouping annotation
   or explicit applier target, a call to another file's composable, a name an overload with lambdas
   shares, a recursive function with composable lambda parameters, and a class whose stability its
-  file does not decide (a field of a generic class or of a generic value class whose underlying
-  type names a type parameter, of another file's `inner` or annotation class, or of a numbered
-  `KFunctionN` type). A nonempty `metricsDestination`/`reportsDestination` is an
+  file does not decide (a field of a generic value class whose underlying type names a type
+  parameter, of another file's `inner` or annotation class, or of a numbered `KFunctionN` type). A nonempty `metricsDestination`/`reportsDestination` is an
   `UnimplementedOption` error. The runtime functions the code calls are selected at the handoff by
   their Kotlin signatures, or the module is rejected. Covered:
   `Unit` top-level composables with a block body whose parameters are primitives or `String`. Each
@@ -23650,6 +23649,15 @@ by a class-body method still has the ordinary capture field; both uses preserve 
 Nested superclass setters preserve the same lexical instance after both anonymous objects have
 been constructed. `box_regressions/nestedAnonymousSuperSetter.kt` distinguishes two same-typed
 callers through the shared backend inventory; its JVM companion compares the complete class ABI.
+
+## Immediately invoked source lambdas
+
+A synchronous source lambda invoked directly uses its checked inline template at that call site.
+Capture operands precede context and value arguments, each is evaluated once, and local returns
+leave that lambda invocation. An escaping function value retains its implementation. The common
+lowering supplies this operation to all backends. Full ABI controls, including the complete #2838
+oracle, live in `immediate_lambda_invocation_e2e`; operand-order and return behavior share
+`box_regressions/immediateFunctionLiteralOperands.kt` across the backend matrix.
 
 ## Runtime-owned dependency getter leaves
 

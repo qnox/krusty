@@ -580,6 +580,7 @@ fn remap_direct_children(expression: &mut IrExpr, mut map: impl FnMut(ExprId) ->
         | IrExpr::ReifiedClassMarker { .. }
         | IrExpr::UnitInstance
         | IrExpr::CurrentContinuation
+        | IrExpr::AbsentArgument { .. }
         | IrExpr::InlineFrameMarker => {}
     }
 }
