@@ -481,7 +481,7 @@ pub(super) fn complete_deserialization_constructor(
     // Each store keeps its property's place among the class's initializers, so the `init` blocks
     // can run between them as they do in the primary constructor.
     let mut body_stmts = Vec::with_capacity(named_fields.len());
-    for (field, (field_name, field_ty)) in named_fields.iter().enumerate() {
+    for (field, (_, field_ty)) in named_fields.iter().enumerate() {
         let order = super::property_default::field_initialization_order(ir, class_id, field);
         let element = elements
             .fields()
@@ -528,15 +528,6 @@ pub(super) fn complete_deserialization_constructor(
                 class_id,
                 field,
                 super::property_default::DefaultFrame {
-                    // The initializer's own code is the property's, as in `write$Self`.
-                    property_line: ir
-                        .prop_decl_lines
-                        .get(&(
-                            ir.classes[class_id as usize].fq_name_id(),
-                            field_name.to_string(),
-                        ))
-                        .copied()
-                        .filter(|line| *line != 0),
                     // A constructor property re-read off the object is the constructor's own read,
                     // which kotlinc attributes to the class's start line. A read through the
                     // receiver is still the initializer's own.
@@ -565,9 +556,7 @@ pub(super) fn complete_deserialization_constructor(
             // initializer, or nothing for a `lateinit` transient property.
             let store = store_argument.or_else(|| {
                 let value = default?;
-                Some(store_field_default(
-                    ir, class_id, this, field, field_name, value,
-                ))
+                Some(store_field_default(ir, class_id, this, field, value))
             });
             body_stmts.extend(store.map(|store| (order, store)));
             continue;
@@ -584,7 +573,7 @@ pub(super) fn complete_deserialization_constructor(
             lhs: masked,
             rhs: zero,
         });
-        let store_default = store_field_default(ir, class_id, this, field, field_name, default);
+        let store_default = store_field_default(ir, class_id, this, field, default);
         let defaulted = ir.add_expr(IrExpr::Block {
             stmts: vec![store_default],
             value: None,
@@ -721,22 +710,19 @@ fn constructor_frame<'a>(
             .expect("a constructor's parameters fit u32"),
         read_field,
         receiver: Some(0),
-        property_line: None,
         read_line: None,
         receiver_read_line: None,
     }
 }
 
-/// Store property `field`'s default. kotlinc attributes the DEFAULT VALUE to the property's own
-/// declaration line and the store that follows it back to the class's start line, so stepping
-/// through the constructor lands on the property whose default is being applied. The value is a
-/// nested expression and the store is a statement, which is why the two go through different maps.
+/// Store property `field`'s default. The default keeps the lines of its own source, as kotlinc's
+/// copy of the initializer keeps its offsets. The store is the constructor's own statement, at the
+/// class's start line.
 fn store_field_default(
     ir: &mut IrFile,
     class_id: ClassId,
     this: u32,
     field: usize,
-    field_name: &str,
     default: u32,
 ) -> u32 {
     let store = ir.add_expr(IrExpr::SetField {
@@ -745,18 +731,9 @@ fn store_field_default(
         index: field as u32,
         value: default,
     });
-    let owner = ir.classes[class_id as usize].fq_name_id();
-    let property_line = ir
-        .prop_decl_lines
-        .get(&(owner, field_name.to_string()))
-        .copied()
-        .filter(|line| *line != 0);
-    if let Some(line) = property_line {
-        ir.expr_source_lines.insert(default, line);
-        let start_line = ir.classes[class_id as usize].decl_start_line;
-        if start_line != 0 {
-            ir.expr_lines.insert(store, start_line);
-        }
+    let start_line = ir.classes[class_id as usize].decl_start_line;
+    if start_line != 0 {
+        ir.expr_lines.insert(store, start_line);
     }
     store
 }
