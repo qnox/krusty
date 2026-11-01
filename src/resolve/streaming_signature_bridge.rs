@@ -18,6 +18,7 @@ mod classifier_associated;
 mod classifier_identities;
 mod classifier_parents;
 mod constructor_results;
+mod context_receivers;
 mod convention_results;
 mod declaration_aliases;
 mod declaration_conflicts;
@@ -95,6 +96,7 @@ struct ProductionSignatureSemantics<'a> {
     source_orders: HashMap<crate::fir::DeclarationId, u32>,
     signature_origins: HashMap<crate::fir::DeclarationId, crate::fir::OriginId>,
     scoped_receivers: RefCell<HashMap<crate::fir::DeclarationId, Vec<SignatureImplicitReceiver>>>,
+    context_headers_in_resolution: context_receivers::ContextHeadersInResolution,
     scoped_constraint_inputs: RefCell<HashMap<crate::fir::DeclarationId, Vec<Vec<Ty>>>>,
     scoped_constraints:
         RefCell<HashMap<crate::fir::DeclarationId, Vec<crate::symbol_resolver::GSigBinds>>>,
@@ -2350,70 +2352,6 @@ impl ProductionSignatureSemantics<'_> {
         }
     }
 
-    fn classifier_context_receivers(
-        &self,
-        declaration: crate::fir::DeclarationId,
-        source: crate::fir::SourceFileId,
-    ) -> Vec<Ty> {
-        let Some(crate::fir::HeaderDeclarationKind::Classifier {
-            context_parameters, ..
-        }) = self
-            .headers
-            .syntax
-            .declaration(declaration)
-            .map(|header| header.kind)
-        else {
-            return Vec::new();
-        };
-        let scope = crate::fir::SignatureScope {
-            owner: declaration,
-            source,
-        };
-        self.headers
-            .syntax
-            .parameters(context_parameters)
-            .iter()
-            .rev()
-            .filter_map(|parameter| self.resolve_compact_header_type(scope, parameter.ty))
-            .collect()
-    }
-
-    fn declaration_context_receivers(&self, scope: crate::fir::SignatureScope) -> Vec<Ty> {
-        let compact_parameters =
-            self.headers
-                .syntax
-                .declaration(scope.owner)
-                .and_then(|declaration| match declaration.kind {
-                    crate::fir::HeaderDeclarationKind::Callable {
-                        parameters,
-                        context_count,
-                        ..
-                    } => self
-                        .headers
-                        .syntax
-                        .parameters(parameters)
-                        .get(..context_count as usize)
-                        .map(<[_]>::to_vec),
-                    crate::fir::HeaderDeclarationKind::Property {
-                        context_parameters, ..
-                    } => Some(self.headers.syntax.parameters(context_parameters).to_vec()),
-                    crate::fir::HeaderDeclarationKind::Classifier { .. }
-                    | crate::fir::HeaderDeclarationKind::Constructor { .. }
-                    | crate::fir::HeaderDeclarationKind::TypeAlias { .. } => None,
-                });
-        if let Some(parameters) = compact_parameters {
-            return parameters
-                .iter()
-                .filter_map(|parameter| self.resolve_compact_header_type(scope, parameter.ty))
-                .collect();
-        }
-        self.callable_signature(scope.owner)
-            .map(|signature| {
-                signature.params[..signature.context_count.min(signature.params.len())].to_vec()
-            })
-            .unwrap_or_default()
-    }
-
     fn declaration_implicit_receiver_entries(
         &self,
         scope: crate::fir::SignatureScope,
@@ -3433,6 +3371,7 @@ pub(crate) fn finalized_streamed_signature_index(
         source_orders: HashMap::default(),
         signature_origins: HashMap::default(),
         scoped_receivers: RefCell::new(HashMap::default()),
+        context_headers_in_resolution: Default::default(),
         scoped_constraint_inputs: RefCell::new(HashMap::default()),
         scoped_constraints: RefCell::new(HashMap::default()),
         completed_scoped_constraints: RefCell::new(HashMap::default()),
@@ -4204,6 +4143,7 @@ pub(crate) fn finalized_streamed_signature_index(
         source_orders,
         signature_origins,
         scoped_receivers: RefCell::new(HashMap::default()),
+        context_headers_in_resolution: Default::default(),
         scoped_constraint_inputs: RefCell::new(HashMap::default()),
         scoped_constraints: RefCell::new(HashMap::default()),
         completed_scoped_constraints: RefCell::new(HashMap::default()),
