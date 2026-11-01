@@ -87,6 +87,24 @@ function box(dir) {
   };
 }
 
+/**
+ * Why the compilations krusty did not build were not built, from the per-compilation rows:
+ * left to kotlinc (the Gradle plugin found a plugin or argument krusty does not implement and let
+ * kotlinc compile it), failed (krusty reported an error), or not run (a task it depends on failed).
+ * Null for a result without rows.
+ */
+function notBuilt(p) {
+  if (!Array.isArray(p.rows)) return null;
+  const out = { leftToKotlinc: 0, failed: 0, notRun: 0 };
+  for (const row of p.rows) {
+    if (row.built) continue;
+    if (row.fallback) out.leftToKotlinc += 1;
+    else if (typeof row.error === "string" && row.error.startsWith("not run:")) out.notRun += 1;
+    else out.failed += 1;
+  }
+  return out;
+}
+
 function corpusProject(p) {
   const cost = (side) => {
     const c = p.cost?.[side];
@@ -118,6 +136,7 @@ function corpusProject(p) {
     // the measured commit) and the Kotlin version pin. Absent for results published before the
     // corpus recorded it.
     source: p.source ?? null,
+    notBuilt: notBuilt(p),
     cost: { kotlinc: cost("kotlinc"), krusty: cost("krusty") },
   };
 }
