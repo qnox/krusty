@@ -10,7 +10,8 @@ use crate::fx_hash::HashSet;
 use std::collections::VecDeque;
 
 use super::super::hierarchy_projection::{direct_supertypes, intersection_components};
-use super::super::{ClassifierJoinFailure, SourceOracle};
+use super::super::SourceOracle;
+use super::classifier_application_join::{join_classifier_applications, ClassifierJoinFailure};
 use crate::symbol_source::SymbolSource;
 use crate::types::{Ty, TyKind, TypeName};
 
@@ -236,13 +237,9 @@ impl<'a> CommonSupertypeSolver<'a> {
     fn combine_classifier_inner(&mut self, classifier: TypeName, types: &[Ty]) -> Option<Ty> {
         let source = self.source;
         let oracle = SourceOracle(source);
-        match super::super::join_classifier_applications(
-            source,
-            &oracle,
-            classifier,
-            types,
-            &mut |arguments| self.common_at(arguments),
-        ) {
+        match join_classifier_applications(source, &oracle, classifier, types, &mut |arguments| {
+            self.common_at(arguments)
+        }) {
             Ok(joined) => Some(joined),
             Err(ClassifierJoinFailure::UnknownShape) => {
                 self.invalid_classifier_shape = true;

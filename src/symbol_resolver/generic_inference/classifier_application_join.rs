@@ -24,7 +24,7 @@ use crate::assignable::TypeOracle;
 use crate::symbol_source::SymbolSource;
 use crate::types::{Ty, TyKind, TypeName, TypeVariance};
 
-use super::{ty_subst_keep_unbound, GSigBinds};
+use crate::symbol_resolver::{ty_subst_keep_unbound, GSigBinds};
 
 /// Why a classifier's applications have no join.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
