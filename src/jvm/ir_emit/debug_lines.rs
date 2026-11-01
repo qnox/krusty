@@ -182,6 +182,19 @@ impl Emitter<'_> {
     /// IR supplies the semantic declaration owner, the callee's source file, and the call line;
     /// this boundary chooses JVM source paths and output line numbers.
     pub(super) fn mark_expression_start(&mut self, expression: ExprId, code: &mut CodeBuilder) {
+        self.mark_start_line(expression, false, code);
+    }
+
+    /// kotlinc's `visitVariable` marks the initializer's line once its value is on the stack, then
+    /// the declaration's line. Both entries stay when they share an offset: a multi-line
+    /// `val x =\n    if (…) … else …` records the `if`'s line and then the `val`'s at the store.
+    pub(super) fn mark_initializer_end(&mut self, initializer: ExprId, code: &mut CodeBuilder) {
+        self.mark_start_line(initializer, true, code);
+    }
+
+    /// Mark `expression`'s start line; `kept` keeps the entry when the next mark at this offset
+    /// names another line.
+    fn mark_start_line(&mut self, expression: ExprId, kept: bool, code: &mut CodeBuilder) {
         if self.ir.callable_scopes.contains(&expression)
             || self.ir.dispatch_line(expression).is_some()
         {
@@ -200,34 +213,11 @@ impl Emitter<'_> {
         else {
             return;
         };
-        self.mark_expression_line(expression, line, code);
-    }
-
-    /// kotlinc's `visitVariable` marks the initializer's line once its value is on the stack, then
-    /// the declaration's line. Both entries stay when they share an offset: a multi-line
-    /// `val x =\n    if (…) … else …` records the `if`'s line and then the `val`'s at the store.
-    pub(super) fn mark_initializer_end(&mut self, initializer: ExprId, code: &mut CodeBuilder) {
-        if self.ir.callable_scopes.contains(&initializer)
-            || self.ir.dispatch_line(initializer).is_some()
-        {
-            return;
-        }
-        if self.keeps_start_line(initializer) {
-            self.mark_kept_start_line(initializer, code);
-            return;
-        }
-        let Some(line) = self
-            .ir
-            .expr_source_lines
-            .get(&initializer)
-            .copied()
-            .or_else(|| safe_call_read_line(self.ir, initializer))
-        else {
-            return;
-        };
-        if line != 0 && !code.is_dead() {
-            self.note_inlined_expression(initializer, code);
-            let line = self.mapped_expression_line(initializer, line);
+        if !kept {
+            self.mark_expression_line(expression, line, code);
+        } else if line != 0 && !code.is_dead() {
+            self.note_inlined_expression(expression, code);
+            let line = self.mapped_expression_line(expression, line);
             code.mark_line_kept(line);
         }
     }
