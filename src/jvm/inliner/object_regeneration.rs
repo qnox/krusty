@@ -46,14 +46,16 @@ pub(crate) struct ObjectLambda<'a> {
 
 /// Where the objects of one inlined call are regenerated.
 pub(crate) trait AnonymousObjects {
-    /// Regenerate `class`, which the body constructs through `constructor_desc` passing `lambdas`:
-    /// the copy's name and the descriptor of its constructor. The copy takes each lambda's
-    /// captured values, in order, after the arguments that are not lambdas.
+    /// Regenerate `class`, which the body constructs through `constructor_desc` passing `lambdas`
+    /// and, at the arguments `suspend_values`, function values of inline suspend parameters the
+    /// call does not inline: the copy's name and the descriptor of its constructor. The copy takes
+    /// each lambda's captured values, in order, after the arguments that are not lambdas.
     fn regenerate(
         &mut self,
         class: &str,
         constructor_desc: &str,
         lambdas: &[ObjectLambda<'_>],
+        suspend_values: &[usize],
         prior_classes: &[(String, String)],
     ) -> Result<RegeneratedObject, InlineError>;
 
@@ -178,6 +180,7 @@ pub(super) fn regenerate_objects(
                 class,
                 &constructions.descriptors[&constructor],
                 &object_lambdas,
+                &constructions.suspend_values[&constructor],
                 &prior_classes,
             )?;
             if !passed.is_empty() {
@@ -472,6 +475,9 @@ struct Constructions {
     descriptors: HashMap<usize, String>,
     /// The inline lambdas each constructor call passes, as `(argument, lambda)`.
     lambdas: HashMap<usize, Vec<(usize, usize)>>,
+    /// The arguments of each constructor call that pass a function value of an inline suspend
+    /// parameter the call does not inline.
+    suspend_values: HashMap<usize, Vec<usize>>,
 }
 
 /// Pair every reachable anonymous `new` in `node` with the one `<init>` call whose receiver is the
@@ -489,6 +495,7 @@ fn pair_constructions(
         by_constructor: HashMap::default(),
         descriptors: HashMap::default(),
         lambdas: HashMap::default(),
+        suspend_values: HashMap::default(),
     };
     let constructs = node.instructions().any(|insn| {
         matches!(insn, Insn::Type { op: NEW, class } if classes.is_regenerated(class))
@@ -549,17 +556,23 @@ fn pair_constructions(
                     return Err(unpaired());
                 }
                 let mut passed: Vec<(usize, usize)> = Vec::new();
+                let mut suspend_values = Vec::new();
                 for (argument, value) in stack[stack.len() - arguments..].iter().enumerate() {
-                    if let ConstructionValue::Lambda(lambda, _) = value {
-                        if passed.iter().any(|&(_, known)| known == *lambda) {
-                            return Err(InlineError::LambdaParameterAccess);
+                    match value {
+                        ConstructionValue::Lambda(lambda, _) => {
+                            if passed.iter().any(|&(_, known)| known == *lambda) {
+                                return Err(InlineError::LambdaParameterAccess);
+                            }
+                            passed.push((argument, *lambda));
                         }
-                        passed.push((argument, *lambda));
+                        ConstructionValue::SuspendValue(_) => suspend_values.push(argument),
+                        _ => {}
                     }
                 }
                 constructions.by_constructor.insert(at, new);
                 constructions.descriptors.insert(at, desc.clone());
                 constructions.lambdas.insert(at, passed);
+                constructions.suspend_values.insert(at, suspend_values);
             }
             _ => {}
         }
@@ -571,13 +584,14 @@ fn pair_constructions(
 }
 
 /// A value of the body: a plain value, the uninitialized result of one of the anonymous `new`s at
-/// these indices (more than one only where paths from different `new`s join), or one of the call's
-/// inline lambdas.
+/// these indices (more than one only where paths from different `new`s join), one of the call's
+/// inline lambdas, or a function value of an inline suspend parameter the call does not inline.
 #[derive(Clone, Debug, PartialEq)]
 enum ConstructionValue {
     Basic(BasicValue),
     Uninitialized(BTreeSet<usize>, BasicValue),
     Lambda(usize, BasicValue),
+    SuspendValue(BasicValue),
 }
 
 impl ConstructionValue {
@@ -585,7 +599,8 @@ impl ConstructionValue {
         match self {
             ConstructionValue::Basic(value)
             | ConstructionValue::Uninitialized(_, value)
-            | ConstructionValue::Lambda(_, value) => value,
+            | ConstructionValue::Lambda(_, value)
+            | ConstructionValue::SuspendValue(value) => value,
         }
     }
 }
@@ -618,6 +633,9 @@ impl Interpreter for ConstructionInterpreter<'_> {
         let value = BasicInterpreter.new_parameter_value(slot, ty);
         match self.parameters.lambda_at(slot) {
             Some(lambda) => ConstructionValue::Lambda(lambda, value),
+            None if self.parameters.non_inline_suspend_at(slot) => {
+                ConstructionValue::SuspendValue(value)
+            }
             None => ConstructionValue::Basic(value),
         }
     }
@@ -709,6 +727,9 @@ impl Interpreter for ConstructionInterpreter<'_> {
                 if first == second =>
             {
                 ConstructionValue::Lambda(*first, basic)
+            }
+            (ConstructionValue::SuspendValue(_), ConstructionValue::SuspendValue(_)) => {
+                ConstructionValue::SuspendValue(basic)
             }
             _ => ConstructionValue::Basic(basic),
         }

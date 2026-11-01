@@ -170,6 +170,7 @@ fn method_parameters(
             parameters: own,
             captured,
             capture_owners: Vec::new(),
+            non_inline_suspend: Vec::new(),
         },
         placed,
     ))
@@ -223,6 +224,7 @@ fn own_parameters(method: &MethodNode, lambdas: usize) -> Result<Parameters, Reg
         parameters,
         captured,
         capture_owners: Vec::new(),
+        non_inline_suspend: Vec::new(),
     })
 }
 

@@ -15,3 +15,17 @@ pub(crate) fn is_inline_parameter(ir: &IrFile, call: ExprId, parameter: usize) -
     let declared = *ir.call_declared_params.get(&call)?.get(parameter)?;
     Some(modifier != InlineParameterModifier::Noinline && declared.is_fun())
 }
+
+/// Whether operand `parameter` of the realized inline call `call` is an inline parameter of a
+/// suspend function type, whose function value, when the call does not inline it, the inlined
+/// code invokes as a suspension point. `None` when the call published either fact for no such
+/// operand.
+pub(crate) fn is_inline_suspend_parameter(
+    ir: &IrFile,
+    call: ExprId,
+    parameter: usize,
+) -> Option<bool> {
+    let declared = *ir.call_declared_params.get(&call)?.get(parameter)?;
+    let suspend = matches!(declared.non_null().kind(), crate::types::TyKind::Fun(signature) if signature.suspend);
+    Some(is_inline_parameter(ir, call, parameter)? && suspend)
+}

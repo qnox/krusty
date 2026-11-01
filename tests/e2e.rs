@@ -1718,6 +1718,8 @@ mod super_delegation_line_e2e;
 mod suspend;
 #[path = "suspend_lambda_regeneration_e2e.rs"]
 mod suspend_lambda_regeneration_e2e;
+#[path = "suspend_value_invokes_e2e.rs"]
+mod suspend_value_invokes_e2e;
 #[path = "suspending_concat_operands_e2e.rs"]
 mod suspending_concat_operands_e2e;
 #[path = "type_parameter_nullability_annotations_e2e.rs"]

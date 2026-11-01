@@ -361,6 +361,7 @@ impl AnonymousObjects for CallObjects<'_> {
         class: &str,
         constructor_desc: &str,
         lambdas: &[ObjectLambda<'_>],
+        suspend_values: &[usize],
         prior_classes: &[(String, String)],
     ) -> Result<RegeneratedObject, InlineError> {
         let unsupported =
@@ -428,6 +429,7 @@ impl AnonymousObjects for CallObjects<'_> {
                 major: self.major,
                 metadata_stamp: self.metadata_stamp,
                 lambdas,
+                suspend_values,
                 caller_lines: &self.caller_lines,
                 classes: &self.bodies,
                 value_classes: &self.value_classes,
@@ -482,7 +484,7 @@ impl AnonymousObjects for CallObjects<'_> {
             return Err(unsupported("more than one constructor"));
         }
         let descriptor = constructor.desc.clone();
-        self.regenerate(class, &descriptor, &[], prior_classes)
+        self.regenerate(class, &descriptor, &[], &[], prior_classes)
     }
 }
 

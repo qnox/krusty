@@ -5764,8 +5764,12 @@ regress.
     `topicDao::getTopicEntities`): the template's arity counts the adapter's continuation, and a
     bound receiver is `receiver$inlined`. ☐ A reference to a suspend declaration
     (`flatMapLatest(::fetch)`): its template's call is a suspension point the coroutine pass places
-    only in a literal's inline body, so the template is declined. ☐ `surroundInvokesWithSuspendMarkersIfNeeded`
-    for a captured function value the call does not inline (such a copy is refused).
+    only in a literal's inline body, so the template is declined. ✅ `surroundInvokesWithSuspendMarkersIfNeeded`
+    in a regenerated copy's machine for a function value of an inline suspend parameter the call
+    does not inline (`OTHER`). ☐ The same marking where such a value is invoked directly in the
+    body a suspend caller inlines (`suspend inline fun f(b: suspend () -> Int) = listOf(b()).first()`
+    called with a value): the caller still reads the invoke's result without a suspension. ☐ kotlinc's conditional marking of a
+    recaptured suspend lambda (`INLINE_LAMBDA_AS_VARIABLE`).
     ☐ krusty's own `$$forInline` copy of an object's suspend method in an inline function it
     compiles.
 - ☐ 5. `$default` inline functions (mask expansion) and `finally` blocks around inlined returns.

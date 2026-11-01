@@ -26,8 +26,7 @@ pub(crate) enum SuspendMarker {
     BeforeSuspendGenericCall = 12,
 }
 
-/// The two instructions of a `mark(id)` call, id first.
-#[cfg(test)]
+/// The two instructions of a `mark(id)` call, id first (`addSuspendMarker`).
 pub(crate) fn mark(marker: SuspendMarker) -> Vec<Node> {
     vec![
         Node::Insn(int_constant_insn(marker as i32)),
