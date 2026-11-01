@@ -40,6 +40,12 @@ class Placed(val base: String) {\n\
     \x20       return around { trimmed.load(path) }\n\
     \x20   }\n\
 }\n\
+class Continued(val base: String) {\n\
+    \x20   suspend fun inSuspendLambda(path: String): String {\n\
+    \x20       val trimmed = base.trim()\n\
+    \x20       return around { trimmed.load(path); path }\n\
+    \x20   }\n\
+}\n\
 fun drive(block: suspend () -> String): String {\n\
     \x20   var r = \"none\"\n\
     \x20   block.startCoroutine(Continuation(EmptyCoroutineContext) { r = it.getOrThrow() })\n\
@@ -58,31 +64,47 @@ fun box(): String {\n\
     \x20   if (lambda != \"</l\") return \"lambda: $lambda\"\n\
     \x20   val suspending = drive { Placed(\" a \").inSuspendLambda(\"/s\") }\n\
     \x20   if (suspending != \"</s\") return \"suspend lambda: $suspending\"\n\
+    \x20   val continued = drive { Continued(\" a \").inSuspendLambda(\"/p\") }\n\
+    \x20   if (continued != \"/p\") return \"continued suspend lambda: $continued\"\n\
     \x20   return \"OK\"\n\
 }\n";
 
-/// Each call resumes through its suspension with the callee's continuation in its own local.
+/// Each call resumes through its suspension with the callee's continuation in its own local. The
+/// reference compiler's consumer, built against the same krusty-built dependency, establishes the
+/// result first.
 #[test]
 fn an_inline_suspend_call_in_an_inline_lambda_resumes() {
+    let library = common::compile_lib("inline_lambda_suspend_completion", LIB)
+        .expect("krusty builds the library");
+    assert_eq!(
+        common::kotlinc_box_result_with_classpath(MAIN, &[library]),
+        "OK",
+        "kotlinc's consumer must succeed"
+    );
     assert_eq!(
         common::expect_box_run_against("inline_lambda_suspend_completion", LIB, MAIN).as_deref(),
         Some("OK")
     );
 }
 
-/// The functions and their continuations, spill fields included, are the reference compiler's.
+/// Every listed class, spill fields included, is the reference compiler's, byte for byte.
 #[test]
 fn an_inline_suspend_call_in_an_inline_lambda_matches_kotlinc() {
     let library = common::compile_lib("inline_lambda_suspend_completion", LIB)
         .expect("krusty builds the library");
     let classpath = [library, common::stdlib_jar()];
-    // `Placed` itself is compared through its continuation only: the method inliner does not
-    // yet end a placed suspend lambda's expansion with the `nop` kotlinc writes there.
+    // `Placed` itself is compared through its continuation only, and is not byte-identical: when
+    // the inline call is the placed suspend lambda's whole value, kotlinc ends the expansion with
+    // one more `nop` than krusty writes, a separate gap. `Continued` continues the lambda after
+    // the same call, which avoids it, so its host method and the `$completion$iv` local and
+    // scope the placed lambda gives the call are compared whole.
     for class in [
         "Api",
         "Api$direct$1",
         "Api$inLambda$1",
         "Placed$inSuspendLambda$1",
+        "Continued",
+        "Continued$inSuspendLambda$1",
     ] {
         let compared =
             common::compare_with_kotlinc_plugin("Main", MAIN, class, &classpath, "25", &[])
