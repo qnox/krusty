@@ -111,3 +111,34 @@ fn a_dependency_generic_default_forwarder_declares_its_type_parameters() {
         &[library.krusty_out().to_path_buf()],
     );
 }
+
+/// A bound whose JVM name holds a parenthesis: the value-class static's carrier goes ahead of the
+/// forwarder's parameter list, never inside the declaration section.
+const PARENTHESIZED_BOUND: &str = "\
+open class `Bound(Ok`\n\
+\n\
+interface Picker {\n\
+    fun <T : `Bound(Ok`> echo(x: T): T = x\n\
+}\n\
+\n\
+@JvmInline\n\
+value class Wrapped(val payload: String) : Picker\n\
+\n\
+fun box(): String {\n\
+    val input = `Bound(Ok`()\n\
+    return if (Wrapped(\"x\").echo(input) === input) \"OK\" else \"fail\"\n\
+}\n\
+";
+
+#[test]
+fn a_value_class_static_signature_keeps_a_parenthesized_bound_whole() {
+    common::byte_diff_against_kotlinc_cp(
+        "ParenthesizedBoundForwarder",
+        PARENTHESIZED_BOUND,
+        "Wrapped",
+        &[common::stdlib_jar()],
+    )
+    .expect("reference kotlinc is provisioned")
+    .unwrap_or_else(|diff| panic!("Wrapped differs from kotlinc: {diff}"));
+    common::expect_box_ok_with_stdlib(PARENTHESIZED_BOUND, "ParenthesizedBoundForwarder");
+}
