@@ -110,9 +110,8 @@ pub(super) fn regenerate_objects(
     let mut prior_classes = Vec::new();
     // `new` / `getstatic INSTANCE` sites whose copy still uses a reified parameter.
     let mut reemit_markers = Vec::new();
-    // The copies those markers ask the caller to specialize in turn.
-    let mut still_reified = Vec::new();
     let marker_sites = need_class_reification_sites(node);
+    let marker_targets = reification_targets(node, &marker_sites);
     // kotlinc's `awaitClassReification`: a `needClassReification` marker asks the next object
     // to be specialized for this call.
     let mut await_reification = false;
@@ -137,7 +136,6 @@ pub(super) fn regenerate_objects(
             prior_classes.push((owner, copy.name.clone()));
             if copy.reified_parameters_remain {
                 reemit_markers.push(at);
-                still_reified.push(copy.name.clone());
             }
             let Node::Insn(insn) = &mut node.nodes[at] else {
                 unreachable!("a singleton load is a field instruction")
@@ -189,7 +187,6 @@ pub(super) fn regenerate_objects(
             }
             if copy.reified_parameters_remain {
                 reemit_markers.push(at);
-                still_reified.push(copy.name.clone());
             }
             remapper.add_mapping(class, &copy.name);
             prior_classes.push((class.clone(), copy.name.clone()));
@@ -220,7 +217,7 @@ pub(super) fn regenerate_objects(
     for local in &mut node.local_variables {
         local.desc = remapper.map_desc(&local.desc).map_err(malformed)?;
     }
-    if !marker_sites.is_empty() && names_unreified_class(node, classes, &still_reified) {
+    if left_unreified(&marker_targets, &prior_classes, classes) {
         return Err(InlineError::UnreifiedClass);
     }
     remove_nodes(node, &marker_sites);
@@ -277,31 +274,40 @@ pub(super) fn is_need_class_reification(insn: &Insn) -> bool {
         if !*interface && owner == INTRINSICS && name == "needClassReification" && desc == "()V")
 }
 
-/// Whether `node` still names a class whose methods call `reifiedOperationMarker`, other than the
-/// `still_reified` copies whose loads keep their marker for the caller.
-fn names_unreified_class(
-    node: &MethodNode,
+/// The class each `needClassReification` marker asks to be specialized: the first class the
+/// instructions after it name (kotlinc's `awaitClassReification` applies it to the next object).
+fn reification_targets(node: &MethodNode, marker_sites: &[usize]) -> Vec<String> {
+    marker_sites
+        .iter()
+        .filter_map(|&site| {
+            node.nodes[site + 1..].iter().find_map(|entry| {
+                let Node::Insn(insn) = entry else {
+                    return None;
+                };
+                let mut named = Vec::new();
+                note_classes(insn, &mut named);
+                named.into_iter().next()
+            })
+        })
+        .collect()
+}
+
+/// Whether a class a `needClassReification` marker asks to be specialized was left as it is
+/// although its methods call `reifiedOperationMarker`. Only a marker's own target is asked: any
+/// other class the body names, such as a library class declaring inline functions with reified
+/// parameters, is not copied by kotlinc either.
+fn left_unreified(
+    targets: &[String],
+    regenerated: &[(String, String)],
     classes: &dyn ClassRoles,
-    still_reified: &[String],
 ) -> bool {
-    let mut named = Vec::new();
-    for insn in node.instructions() {
-        note_classes(insn, &mut named);
-    }
-    for block in &node.try_catch_blocks {
-        if let Some(class) = &block.catch_type {
-            named.push(class.clone());
-        }
-    }
-    for local in &node.local_variables {
-        internal_names(&local.desc, &mut named);
-    }
-    named.iter().any(|class| {
-        let marked = !still_reified.contains(class) && classes.contains_reified_marker(class);
-        if marked {
+    targets.iter().any(|class| {
+        let left = !regenerated.iter().any(|(original, _)| original == class)
+            && classes.contains_reified_marker(class);
+        if left {
             crate::trace_compiler!("splice", "unreified class {class}");
         }
-        marked
+        left
     })
 }
 
