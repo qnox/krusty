@@ -14,6 +14,11 @@ pub struct IrNodePosition {
     pub source_line: Option<u32>,
     /// The line the expression's source text ends on.
     pub end_line: Option<u32>,
+    /// The line the source statement this node roots begins on, where no node inside it carries
+    /// that line of its own yet. kotlinc has no such fact: its statement's first instruction comes
+    /// from a node that carries the statement's start offset itself. Once lowering gives every
+    /// node its FIR expression's position this goes, and the JVM line rule reads node kinds only.
+    pub statement_line: Option<u32>,
 }
 
 /// The positions of every expression node, by [`ExprId`].
@@ -44,6 +49,7 @@ impl InheritedFacts for IrNodePositions {
         let IrNodePosition {
             source_line,
             end_line,
+            statement_line,
         } = self.get(source);
         let copy = self.get_mut(target);
         if source_line.is_some() {
@@ -51,6 +57,9 @@ impl InheritedFacts for IrNodePositions {
         }
         if end_line.is_some() {
             copy.end_line = end_line;
+        }
+        if statement_line.is_some() {
+            copy.statement_line = statement_line;
         }
     }
 }
@@ -103,6 +112,20 @@ impl IrFile {
     /// Remove `expression`'s source line, returning it.
     pub fn take_source_line(&mut self, expression: ExprId) -> Option<u32> {
         self.positions.get_mut(expression).source_line.take()
+    }
+
+    /// The line the source statement `expression` roots begins on.
+    pub fn statement_line(&self, expression: ExprId) -> Option<u32> {
+        self.positions.get(expression).statement_line
+    }
+
+    pub fn set_statement_line(&mut self, expression: ExprId, line: u32) {
+        self.positions.get_mut(expression).statement_line = Some(line);
+    }
+
+    /// Remove `expression`'s statement line, returning it.
+    pub fn take_statement_line(&mut self, expression: ExprId) -> Option<u32> {
+        self.positions.get_mut(expression).statement_line.take()
     }
 
     /// Remove `expression`'s end line, returning it.

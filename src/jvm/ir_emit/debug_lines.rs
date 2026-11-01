@@ -50,7 +50,7 @@ pub(super) fn evaluates_to(ir: &IrFile, value: ExprId, expression: ExprId) -> bo
 
 /// Mark a source statement or block value at the first instruction it emits.
 pub(super) fn mark_statement(ir: &IrFile, expression: ExprId, code: &mut CodeBuilder) {
-    if let Some(&line) = ir.expr_lines.get(&expression) {
+    if let Some(line) = ir.statement_line(expression) {
         code.mark_line(line);
     }
 }
@@ -60,7 +60,7 @@ pub(super) fn mark_statement(ir: &IrFile, expression: ExprId, code: &mut CodeBui
 /// An unsigned assignment whose right operand is itself unsigned records the line twice at the
 /// receiver load: once for the assignment, once for the inlined operation.
 pub(super) fn mark_statement_retained(ir: &IrFile, expression: ExprId, code: &mut CodeBuilder) {
-    if let Some(&line) = ir.expr_lines.get(&expression) {
+    if let Some(line) = ir.statement_line(expression) {
         if line != 0 {
             code.mark_line_retained(line);
         }
@@ -115,7 +115,7 @@ impl Emitter<'_> {
     ) {
         let mut expression = first_block_expression(self.ir, block);
         let entry = loop {
-            if let Some(&line) = self.ir.expr_lines.get(&expression) {
+            if let Some(line) = self.ir.statement_line(expression) {
                 break (line != 0).then_some((expression, line));
             }
             let crate::ir::IrExpr::Block { stmts, value } = self.ir.expr(expression) else {
@@ -133,7 +133,7 @@ impl Emitter<'_> {
             // when the normal-path finalizer left that same line in effect. An entirely one-line
             // `try { ... } finally { ... }` has no line transition at all, and kotlinc keeps only
             // the entry at pc 0 instead of repeating it at the catch-all handler.
-            if self.ir.source_line(try_expression) == self.ir.expr_lines.get(&expression).copied() {
+            if self.ir.source_line(try_expression) == self.ir.statement_line(expression) {
                 code.mark_line(line);
             } else {
                 code.mark_control_entry_line(line);
@@ -153,7 +153,7 @@ impl Emitter<'_> {
             .ir
             .implicit_return_end_line(returned)
             .or_else(|| self.ir.source_line(returned))
-            .or_else(|| self.ir.expr_lines.get(&returned).copied())
+            .or_else(|| self.ir.statement_line(returned))
         {
             self.mark_expression_line(returned, line, code);
         }

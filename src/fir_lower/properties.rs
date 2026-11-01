@@ -1298,7 +1298,7 @@ fn materialize_member_property(
             ir.property_initializer_stores.insert(store);
             // kotlinc's initializer store sits at its initializer expression, not the declaration.
             if let Some(line) = ir.source_line(initializer) {
-                ir.expr_lines.insert(store, line);
+                ir.set_statement_line(store, line);
             }
             initialization.entry(class_id).or_default().push((
                 property.initialization_order.ok_or(

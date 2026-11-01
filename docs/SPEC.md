@@ -23775,3 +23775,15 @@ call within an operand-evaluation block, preserving any existing origin. The JVM
 call's position at its invoke after inline operands reset the active line. Return endpoints, inline
 origins and positionless expressions keep their existing contracts. Complete class artifacts and
 runtime controls cover expression/explicit returns, reordered operands and source/compiled inlining.
+
+## Statement lines are node positions
+
+The line a source statement begins on is part of the position of the IR node that roots it
+(`IrNodePosition::statement_line`), beside its source and end lines, not an entry in a side table.
+A copy of the node therefore carries it with the node's other lines, through the expression copy
+and the external call wrapper alike, and the `LineNumberTable` is unchanged. kotlinc has no such
+fact: its first instruction of a statement is marked by the first node inside it, which carries
+the statement's start offset itself. The field is removed once lowering gives every node its FIR
+expression's position (`docs/PHASE_FACTS.md`, "The JVM line rule"). Covered by
+`ir::expression_copy::tests::a_copy_inherits_the_facts_its_owning_modules_record` and the line
+table differentials in `lnt_parity_e2e` and `expression_line_marks_e2e`.

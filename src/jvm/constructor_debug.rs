@@ -65,20 +65,11 @@ pub(super) fn property_store_line(
         return Some(field.constructor_store_line);
     }
     if ir.property_initializer_stores.contains(&expression) {
-        return ir
-            .expr_lines
-            .get(&expression)
-            .copied()
-            .filter(|&line| line != 0);
+        return ir.statement_line(expression).filter(|&line| line != 0);
     }
     // An `init` assignment already records the statement line. The property's declaration line is
     // only the fallback for a store lowering did not attach to a source statement.
-    if let Some(line) = ir
-        .expr_lines
-        .get(&expression)
-        .copied()
-        .filter(|&line| line != 0)
-    {
+    if let Some(line) = ir.statement_line(expression).filter(|&line| line != 0) {
         return Some(line);
     }
     ir.prop_decl_lines

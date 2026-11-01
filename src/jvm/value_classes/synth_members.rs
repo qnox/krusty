@@ -960,7 +960,7 @@ fn reframe_value_class_secondary(ir: &mut IrFile, root: ExprId, this_value: u32,
 
 fn mark_line(ir: &mut IrFile, statement: ExprId, line: u32) {
     if line != 0 {
-        ir.expr_lines.insert(statement, line);
+        ir.set_statement_line(statement, line);
     }
 }
 

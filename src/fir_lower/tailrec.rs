@@ -86,7 +86,7 @@ pub(super) fn finish_tailrec_body(
         origin,
     );
     if let Some(&line) = ir.fn_decl_lines.get(&frame.function) {
-        ir.expr_lines.insert(exit, line);
+        ir.set_statement_line(exit, line);
     }
     roots.push(exit);
     let loop_body = generated(
@@ -224,7 +224,7 @@ fn tail_calls(ir: &IrFile, roots: &[ExprId], frame: &Frame, unit: bool) -> TailC
             if let Some(line) = self
                 .ir
                 .source_line(expression)
-                .or_else(|| self.ir.expr_lines.get(&expression).copied())
+                .or_else(|| self.ir.statement_line(expression))
             {
                 self.line = Some(line);
             }
@@ -1319,7 +1319,7 @@ impl Held<'_> {
             self.origin,
         );
         if let Some(line) = self.line {
-            ir.expr_lines.insert(declaration, line);
+            ir.set_statement_line(declaration, line);
         }
         ir.call_operand_bindings.insert(declaration);
         statements.push(declaration);
@@ -1455,7 +1455,7 @@ fn step_assignments(
 fn forget_lines(ir: &mut IrFile, root: ExprId) {
     let mut pending = vec![root];
     while let Some(expression) = pending.pop() {
-        ir.expr_lines.remove(&expression);
+        ir.take_statement_line(expression);
         ir.take_source_line(expression);
         ir.take_end_line(expression);
         crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));

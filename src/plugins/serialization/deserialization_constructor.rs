@@ -600,7 +600,7 @@ pub(super) fn complete_deserialization_constructor(
         // after an `init` block that line is no longer current.
         let start_line = ir.classes[class_id as usize].decl_start_line;
         if start_line != 0 {
-            ir.expr_lines.insert(applied, start_line);
+            ir.set_statement_line(applied, start_line);
         }
         body_stmts.push((order, applied));
     }
@@ -755,7 +755,7 @@ fn store_field_default(
         ir.set_source_line(default, line);
         let start_line = ir.classes[class_id as usize].decl_start_line;
         if start_line != 0 {
-            ir.expr_lines.insert(store, start_line);
+            ir.set_statement_line(store, start_line);
         }
     }
     store

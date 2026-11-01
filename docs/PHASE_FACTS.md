@@ -80,3 +80,59 @@ line-number work is waiting on: once every node has offsets, kotlinc's line-mark
 once instead of per construct. Each step also deletes its tables from the other hand-written copy
 sites (`jvm/operation_relocation.rs`, `jvm/external_calls/arguments.rs`, `jvm/ranges.rs`,
 `fir_lower/inlining::specialize_recorded_facts`), which today each keep their own list.
+
+## The JVM line rule
+
+kotlinc 2.4.21 decides every `LineNumberTable` entry in one place, from IR node kinds and offsets
+(`compiler/ir/backend.jvm/codegen/src/org/jetbrains/kotlin/backend/jvm/codegen/`):
+
+- `LineNumberMapper.markLineNumber` (`LineNumberMapper.kt:30-42`) maps the node's start or end
+  offset to a line, writes nothing for a negative offset or inside a no-line-number scope, and
+  writes `visitLineNumber(line, newLabel)` only when the line differs from `lastLineNumber`. The
+  dedupe is against the last line marked, not against a pc. Entries at one offset are reduced
+  later, by label normalization; last wins.
+- Kinds that mark their start before their operands (`ExpressionCodegen.kt`): `IrGetValue` (743),
+  `IrConst` (897, with a `nop` for a Boolean), `IrGetField`/`IrSetField` (809, and again before
+  `putfield`, 832), `IrWhen` (1011, with a `nop` for a source `when`), `IrThrow` (1448), `IrTry`
+  (1277), `IrBreak`/`IrContinue` (1258, then a `nop`), `IrConstructorCall` (694, again before
+  `invokespecial`, 700), `IrDelegatingConstructorCall` (664, again at 677), an intrinsic call (504)
+  and a suspend call (516).
+- Kinds that mark after their operands: a call marks before its `invoke*` (546-548); `IrReturn` after
+  its value and any `finally` (1000); `IrVariable` marks its initializer's start after the
+  initializer, then its own start before the store (724-726; 733 without an initializer); `IrSetValue` marks its value's start
+  first and its own before the store (883-890). Loop conditions mark their start (1132, 1176,
+  1193); a catch clause marks at its handler (1314); a constant branch condition marks
+  its start on a `nop` (1037).
+- Kinds that mark nothing: blocks and statement containers (481-499; only a `SYNTHESIZED_INIT_BLOCK`
+  marks its start and end with `nop`s, 413-431), type operators (1069), string concatenation (1459)
+  and loops themselves. There is no statement mark: a statement's first line comes from the first
+  node inside it that marks.
+- Ends: a body that does not end in `IrReturn` marks the function's end offset, or a primary
+  constructor's start, and a `nop`, except in `<clinit>` (`setExtraLineNumberForVoidReturningFunction`,
+  256-266). A `finally` copy on the normal path marks the finally block's end before its `goto`
+  (1415); the catch-all handler marks the finally block's first statement (1347).
+- No-line-number scopes: `@JvmOverloads` wrappers (251), destructured lambda parameter variables
+  (720), the `$$delegatedProperties` initializer (855), finally copies generated for an inline
+  call in such a scope (`IrSourceCompilerForInline.kt:124`).
+- Inline calls: the call site line is `lastLineNumber` (`IrInlineCodegen.kt:327`). After the body,
+  `markLineNumberAfterInlineIfNeeded` (`LineNumberMapper.kt:62-74`, from `IrInlineCodegen.kt:74`)
+  writes the last line again inside a condition or a no-line-number scope, and otherwise resets
+  `lastLineNumber` so the next mark is written even for the same line.
+
+krusty instead marks each expression's line where its emission starts, statement roots from
+`statement_line`, and restores a call's line at its dispatch (`dispatch_line`). Because the order
+differs from kotlinc's, the line builder carries compensations for it: withdrawn, deferred,
+retained, kept and occupied marks, value boundaries and operand withdrawal. Synthetic method
+bodies (accessors, bridges, default stubs, `$jvmStatic`/DefaultImpls forwarders, constructors) are
+written directly as bytecode, each with its own marks from the `fn_*`, `ctor_*`, `prop_decl_lines`
+and `primary_ctor_lines` tables, where kotlinc builds IR with the declaration's offsets.
+
+The port is one module, `src/jvm/line_numbers.rs`, owning `lastLineNumber`, the no-line-number
+scope and the after-inline reset, with one entry point per kotlinc mark site above taking only the
+node's kind and its `source_line`/`end_line`. Emission calls it where kotlinc's visitor does. It
+replaces `mark_expression_start`, `mark_statement`, `mark_dispatch_line` and the compensations in
+`classfile/line_numbers.rs`, which keeps only the table and label normalization. It can land only
+once every node has its FIR expression's position: until then a receiver or operand without one
+leaves its line to the statement mark, and a call marked only at its dispatch would lose it.
+`statement_line` is then deleted. Synthetic bodies follow when lowering builds them as IR with
+their declaration's positions; their `mark_line` calls and declaration line tables go with them.

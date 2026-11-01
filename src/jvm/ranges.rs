@@ -262,8 +262,8 @@ fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId) {
         };
         ir.fir_origins.insert(target, origin);
     }
-    if let Some(line) = ir.expr_lines.get(&source).copied() {
-        ir.expr_lines.insert(target, line);
+    if let Some(line) = ir.statement_line(source) {
+        ir.set_statement_line(target, line);
     }
     ir.copy_position(source, target);
 }

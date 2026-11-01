@@ -1697,10 +1697,6 @@ pub struct IrFile {
     /// initializer. A later assignment can target the same field with the same value, so backend
     /// storage passes must consume this linkage instead of recognizing stores by shape or spelling.
     pub(crate) property_initializer_stores: crate::fx_hash::HashSet<ExprId>,
-    /// Sparse `ExprId` → 1-based source line for the `LineNumberTable`: statement roots, loop
-    /// updates, and the implicit `Unit` return (the block's closing-brace line, kotlinc's mapping).
-    /// Absent = no line mark starts at that expression.
-    pub expr_lines: crate::fx_hash::HashMap<u32, u32>,
     /// The source position of every expression node; see `node_positions`.
     positions: node_positions::IrNodePositions,
     /// Lines generated expressions map to at one physical point; see `debug_lines`.

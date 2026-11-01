@@ -47,7 +47,6 @@ pub(super) fn copy_call_facts(
         };
     }
     copy!(fir_origins);
-    copy!(expr_lines);
     ir.copy_position(source, target);
     copy!(logical_types);
     copy!(physical_types);

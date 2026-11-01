@@ -343,10 +343,9 @@ pub(crate) fn lower_body_with_context(
                 });
             };
             let stmts = stmts.clone();
-            if let (Some(&first), Some(&line)) =
-                (stmts.first(), lowering.ir.expr_lines.get(&lowered))
+            if let (Some(&first), Some(line)) = (stmts.first(), lowering.ir.statement_line(lowered))
             {
-                lowering.ir.expr_lines.insert(first, line);
+                lowering.ir.set_statement_line(first, line);
             }
             roots.extend(stmts.iter().copied());
         } else {

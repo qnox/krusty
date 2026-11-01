@@ -167,7 +167,7 @@ impl BodyLowering<'_> {
         self.record_expression_origins(first_generated, lowered, origin);
         let line = self.body.statement_debug_line(statement_id);
         if line != 0 {
-            self.ir.expr_lines.insert(lowered, line);
+            self.ir.set_statement_line(lowered, line);
             for expression in first_generated..self.ir.exprs.len() {
                 self.ir
                     .record_inline_copy_call_line(expression as u32, line);

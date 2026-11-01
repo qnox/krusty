@@ -1440,7 +1440,7 @@ impl BodyLowering<'_> {
                 // physical instruction. Put that source point on the generated bindings; an
                 // enclosing inline copy maps it through the caller frame retained below.
                 for &declaration in &declarations {
-                    self.ir.expr_lines.insert(declaration, line);
+                    self.ir.set_statement_line(declaration, line);
                     self.ir.copy_inline_copy_mark(invocation, declaration);
                 }
                 self.ir.copy_inline_copy_mark(invocation, unit);

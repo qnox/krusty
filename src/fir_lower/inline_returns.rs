@@ -101,13 +101,9 @@ pub(super) fn frame_exit(
     let exit = ir.add_expr(IrExpr::Break {
         label: Some(label.to_string()),
     });
-    let line = ir
-        .expr_lines
-        .get(&source)
-        .copied()
-        .or_else(|| ir.source_line(source));
+    let line = ir.statement_line(source).or_else(|| ir.source_line(source));
     if let Some(line) = line {
-        ir.expr_lines.insert(exit, line);
+        ir.set_statement_line(exit, line);
         ir.set_source_line(exit, line);
         if let Some(store) = store {
             ir.set_source_line(store, line);

@@ -152,14 +152,14 @@ impl Emitter<'_> {
         // entry of the inlined call's, which the constructor's curated table keeps.
         if self.ir.property_initializer_stores.contains(&statement) {
             super::debug_lines::restore_initializer_store_line(
-                self.ir.expr_lines.get(&statement).copied(),
+                self.ir.statement_line(statement),
                 code,
             );
         }
         if self.ir.source_line(value).is_some()
             || super::debug_lines::enters_nested_copied_lambda_frame(self.ir, statement, value)
         {
-            if let Some(&statement_line) = self.ir.expr_lines.get(&statement) {
+            if let Some(statement_line) = self.ir.statement_line(statement) {
                 self.mark_expression_line(statement, statement_line, code);
             }
         }
@@ -192,7 +192,7 @@ impl Emitter<'_> {
         // offset; a line the value marks there (an argument on a line of its own) follows the
         // store's entry instead of replacing it, as kotlinc keeps both.
         if self.render_initializer_boundaries {
-            if let Some(&line) = self.ir.expr_lines.get(&statement) {
+            if let Some(line) = self.ir.statement_line(statement) {
                 code.mark_line_retained(line);
             }
         }
@@ -204,7 +204,7 @@ impl Emitter<'_> {
         let field_ref = self.cw.fieldref(owner, name, &type_descriptor(field_ty));
         if self.ir.property_initializer_stores.contains(&statement) {
             super::debug_lines::restore_initializer_store_line(
-                self.ir.expr_lines.get(&statement).copied(),
+                self.ir.statement_line(statement),
                 code,
             );
         }

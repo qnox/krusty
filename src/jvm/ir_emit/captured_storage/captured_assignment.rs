@@ -49,7 +49,7 @@ pub(in crate::jvm::ir_emit) fn emit(
         debug_lines::mark_statement(emitter.ir, expression, code);
     }
     if emitter.ir.source_line(value).is_some() || enters_nested_frame {
-        if let Some(&statement_line) = emitter.ir.expr_lines.get(&expression) {
+        if let Some(statement_line) = emitter.ir.statement_line(expression) {
             emitter.mark_expression_line(expression, statement_line, code);
         }
     }

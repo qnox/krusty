@@ -340,7 +340,7 @@ fn lambda_group(ir: &mut IrFile, runtime: &ComposeRuntime, lambda: &ComposableLa
         value: None,
     };
     // kotlinc builds the group without offsets: the first line is its first statement's.
-    ir.expr_lines.remove(&body.block);
+    ir.take_statement_line(body.block);
     let root = ir.functions[lambda.implementation as usize]
         .body
         .expect("a lambda has a body");
@@ -1012,6 +1012,6 @@ fn next_value_slot(ir: &IrFile, function: FunId) -> u32 {
 
 fn mark_line(ir: &mut IrFile, expression: ExprId, line: u32) {
     if line != 0 {
-        ir.expr_lines.insert(expression, line);
+        ir.set_statement_line(expression, line);
     }
 }

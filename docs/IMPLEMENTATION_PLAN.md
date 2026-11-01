@@ -1,5 +1,13 @@
 # krusty — implementation plan
 
+## Statement lines on IR nodes
+
+`expr_lines`, the sparse table of statement-root lines, becomes the `statement_line` of each node's
+`IrNodePosition`. Copies inherit it with the node's other lines, so the expression copy and the
+external call wrapper no longer name it. Line tables are unchanged. The kotlinc line rule
+(`docs/PHASE_FACTS.md`, "The JVM line rule") deletes the field once lowering stamps every node with
+its position.
+
 ## Source positions on IR nodes
 
 The `expr_source_lines` and `expr_end_lines` tables become one `IrNodePosition` per expression

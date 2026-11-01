@@ -1629,10 +1629,8 @@ fn build_state_machine(
                 return (line as i32, resume_line as i32);
             }
             let line = ir
-                .expr_lines
-                .get(&call)
-                .or_else(|| ir.fn_decl_lines.get(&fid))
-                .copied()
+                .statement_line(call)
+                .or_else(|| ir.fn_decl_lines.get(&fid).copied())
                 .unwrap_or_default() as i32;
             (line, line)
         };

@@ -1286,7 +1286,7 @@ impl BodyLowering<'_> {
                         // statements do; emission only consumes this map.
                         let line = self.body.expression_debug_lines(result).source;
                         if line != 0 {
-                            self.ir.expr_lines.insert(lowered, line);
+                            self.ir.set_statement_line(lowered, line);
                         }
                         Ok(lowered)
                     })

@@ -1403,7 +1403,7 @@ impl Emitter<'_> {
     }
 
     pub(super) fn mark_statement_line(&mut self, statement: u32, code: &mut CodeBuilder) {
-        let Some(&line) = self.ir.expr_lines.get(&statement) else {
+        let Some(line) = self.ir.statement_line(statement) else {
             return;
         };
         // kotlinc's `visitStatementContainer` marks no line for a statement apart from its

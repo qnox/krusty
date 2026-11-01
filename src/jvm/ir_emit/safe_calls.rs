@@ -266,7 +266,7 @@ fn mark_safe_call_line(emitter: &mut Emitter<'_>, block: u32, code: &mut CodeBui
     let Some(line) = emitter
         .ir
         .source_line(block)
-        .or_else(|| emitter.ir.expr_lines.get(&block).copied())
+        .or_else(|| emitter.ir.statement_line(block))
         .filter(|line| *line != 0)
     else {
         return;

@@ -1292,7 +1292,7 @@ impl Emitter<'_> {
             .ir
             .property_initializer_stores
             .contains(&statement)
-            .then(|| self.ir.expr_lines.get(&statement).copied())
+            .then(|| self.ir.statement_line(statement))
             .flatten();
         let jt = jvm_declared_ty(&s.ty);
         let name = s.name.clone();
@@ -1361,7 +1361,7 @@ impl Emitter<'_> {
         // An inlined value leaves its own line in effect; kotlinc marks the statement's line
         // again at the store, as an instance field store does.
         if self.ir.source_line(value).is_some() {
-            if let Some(&statement_line) = self.ir.expr_lines.get(&statement) {
+            if let Some(statement_line) = self.ir.statement_line(statement) {
                 self.mark_expression_line(statement, statement_line, code);
             }
         }
