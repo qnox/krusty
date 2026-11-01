@@ -1282,6 +1282,11 @@ impl super::IrFile {
                 default.result = ty(default.result, names);
                 tys(&mut default.applied_parameters, names);
                 default.applied_result = ty(default.applied_result, names);
+                for parameter in default.type_parameters.iter_mut() {
+                    for (bound, _) in parameter.bounds.iter_mut() {
+                        *bound = ty(*bound, names);
+                    }
+                }
             }
         }
         for overrides in self.function_overrides.values_mut() {

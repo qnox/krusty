@@ -172,6 +172,11 @@ pub(super) fn inherited_defaults(
                 let Some(body) = accessor.body(is_kotlin) else {
                     continue;
                 };
+                let (applied_parameters, applied_result) = rebound_member_formals(
+                    &accessor.type_parameters,
+                    applied_parameters,
+                    applied_result,
+                );
                 defaults.push(ResolvedInheritedDefault {
                     name: accessor.name,
                     function: accessor.function,
@@ -192,6 +197,69 @@ pub(super) fn inherited_defaults(
         }
     }
     defaults
+}
+
+/// The applied shape with each occurrence of the member's own type parameter carrying its bound
+/// as the applied supertype substitutes it. `fun <T : E> f(x: T)` seen through `I<String>` takes a
+/// `T` bounded by `String`, so a realization erases it to `String`, as kotlinc's fake override
+/// does; an occurrence whose bound the substitution leaves alone stays as it is.
+fn rebound_member_formals<P: AsRef<[Ty]> + FromIterator<Ty>>(
+    type_parameters: &[crate::fir::InheritedTypeParameter],
+    parameters: P,
+    result: Ty,
+) -> (P, Ty) {
+    let occurrence = |name: &str| {
+        parameters
+            .as_ref()
+            .iter()
+            .chain(std::iter::once(&result))
+            .find_map(|ty| occurrence_bound(*ty, name))
+    };
+    let bounds = type_parameters
+        .iter()
+        .filter_map(|parameter| {
+            let bound = parameter
+                .bounds
+                .first()
+                .map_or(Ty::nullable(Ty::obj("kotlin/Any")), |(bound, _)| *bound);
+            let name = &*parameter.semantic_name;
+            occurrence(name)
+                .is_some_and(|current| current != bound)
+                .then(|| (name.to_string(), bound))
+        })
+        .collect::<crate::fx_hash::HashMap<_, _>>();
+    if bounds.is_empty() {
+        return (parameters, result);
+    }
+    let rebound = |ty: Ty| crate::types::ty_with_param_bounds(ty, &bounds);
+    let parameters = parameters.as_ref().iter().map(|ty| rebound(*ty)).collect();
+    (parameters, rebound(result))
+}
+
+/// The bound an occurrence of type parameter `name` carries inside `ty`, if it occurs.
+fn occurrence_bound(ty: Ty, name: &str) -> Option<Ty> {
+    use crate::types::TyKind;
+    match ty.kind() {
+        TyKind::TyParam(parameter, bound) if parameter.as_str() == name => Some(bound),
+        TyKind::DefinitelyNotNull(inner)
+        | TyKind::Nullable(inner)
+        | TyKind::PlatformNullable(inner)
+        | TyKind::MutabilityFlexible(inner)
+        | TyKind::InProjection(inner)
+        | TyKind::OutProjection(inner)
+        | TyKind::StarProjection(inner)
+        | TyKind::RawProjection(inner) => occurrence_bound(inner, name),
+        TyKind::Intersection(parts) => parts.iter().find_map(|part| occurrence_bound(*part, name)),
+        TyKind::Obj(_, arguments) => arguments
+            .iter()
+            .find_map(|argument| occurrence_bound(*argument, name)),
+        TyKind::Fun(signature) => signature
+            .params
+            .iter()
+            .chain(std::iter::once(&signature.ret))
+            .find_map(|part| occurrence_bound(*part, name)),
+        _ => None,
+    }
 }
 
 fn is_interface(source: &dyn SymbolSource, classifier: TypeName) -> bool {

@@ -3,6 +3,8 @@
 //! class's supertype substitutes it, the class bound ahead of the interface bounds, and a
 //! `suspend` member's CPS shape after the declaration section. A type-parameter position is
 //! annotated `@NotNull` only when its bound excludes null, and `@Nullable` when marked `T?`.
+//! A type parameter bounded by the interface's own (`fun <T : E>` through `Picker<String>`) erases
+//! to the substituted bound, beside an erased bridge, and a local class bound keeps its emitted name.
 
 use super::common;
 
@@ -15,6 +17,7 @@ interface Picker<E> {\n\
     fun <T> describe(x: T): String = \"$x\"\n\
     fun <T> count(): Int = 1\n\
     fun <T> orNull(x: T?): T? = x\n\
+    fun <T : E> narrow(x: T): T = x\n\
     suspend fun <T> echo(x: T): T = x\n\
 }\n\
 ";
@@ -28,6 +31,7 @@ interface Picker<E> {\n\
     fun <T> describe(x: T): String = \"$x\"\n\
     fun <T> count(): Int = 1\n\
     fun <T> orNull(x: T?): T? = x\n\
+    fun <T : E> narrow(x: T): T = x\n\
     suspend fun <T> echo(x: T): T = x\n\
     fun <T, R> T.convert(r: R): R where T : CharSequence, T : Runnable = r\n\
     fun <T : Number> E.pair(x: T): Pair<E, T> = this to x\n\
@@ -36,6 +40,12 @@ interface Picker<E> {\n\
 object Strings : Picker<String>\n\
 \n\
 class Numbers<Q : Number> : Picker<Q>\n\
+\n\
+fun locals(): Any {\n\
+    class Bound\n\
+    class Local : Picker<Bound>\n\
+    return Local()\n\
+}\n\
 ";
 
 const CONSUMER: &str = "\
@@ -50,7 +60,11 @@ class Numbers<Q : Number> : Picker<Q>\n\
 
 #[test]
 fn a_generic_default_forwarder_declares_its_type_parameters() {
-    for class in ["app/Strings", "app/Numbers"] {
+    for class in [
+        "app/Strings",
+        "app/Numbers",
+        "app/GenericDefaultForwarderSignatureKt$locals$Local",
+    ] {
         common::byte_diff_against_kotlinc_cp(
             "GenericDefaultForwarderSignature",
             SAME_MODULE,
