@@ -13,9 +13,9 @@ pub(in crate::fir::body_check) struct MemberExtensionFirTarget {
     /// The extension receiver parameter's type as the checker applied it, which an explicit
     /// receiver argument is converted to.
     pub(in crate::fir::body_check) extension_receiver: Ty,
-    /// The vararg's index among the parameters the call's source arguments address, after the
-    /// leading context parameters. The selected call records it among all declared parameters.
-    pub(in crate::fir::body_check) argument_vararg_index: Option<usize>,
+    /// The vararg among the parameters the call's source arguments address. The selected call
+    /// records it among all declared parameters, contexts included.
+    pub(in crate::fir::body_check) argument_vararg: Option<super::ArgumentVararg>,
 }
 
 /// The declaration's annotations mark it `@IntrinsicConstEvaluation`: kotlinc evaluates a call to
@@ -54,7 +54,7 @@ pub(in crate::fir::body_check) struct SelectedOperatorTarget {
     pub(in crate::fir::body_check) extension: bool,
     pub(in crate::fir::body_check) context_parameters: Box<[ResolvedTy]>,
     pub(in crate::fir::body_check) value_parameters: Box<[ResolvedTy]>,
-    pub(in crate::fir::body_check) vararg_index: Option<usize>,
+    pub(in crate::fir::body_check) vararg: Option<super::ArgumentVararg>,
     pub(in crate::fir::body_check) context_arguments:
         Vec<Option<crate::resolve::ResolvedContextArgument>>,
 }

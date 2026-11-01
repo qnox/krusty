@@ -123,7 +123,7 @@ impl BodyFirChecker<'_> {
         receiver_ty: ResolvedTy,
     ) -> Result<FirIteratorCall, BodyCheckFailure> {
         let selected_target = self.selected_call_target(span, Some(selected))?;
-        if !selected_target.value_parameters.is_empty() || selected_target.vararg_index.is_some() {
+        if !selected_target.value_parameters.is_empty() || selected_target.vararg.is_some() {
             return Err(self.failure(
                 span,
                 BodyCheckFailureKind::UnsupportedStatement(StatementForm::ForEach),

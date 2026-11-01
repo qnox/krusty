@@ -1183,18 +1183,7 @@ pub struct CallSig {
     pub required: usize,
     /// True if a logical param is `vararg` (callers pack values into its array).
     pub vararg: bool,
-    /// Index of the `vararg` among the logical parameters, leading context parameters included.
     pub vararg_index: Option<usize>,
-}
-
-impl CallSig {
-    /// Index of the `vararg` among the parameters a call's source arguments address: the logical
-    /// index without the `context_count` leading context parameters, which no source argument
-    /// fills positionally.
-    pub fn argument_vararg_index(&self, context_count: usize) -> Option<usize> {
-        self.vararg_index
-            .and_then(|vararg| vararg.checked_sub(context_count))
-    }
 }
 
 #[derive(Clone, Default, Debug, PartialEq, Eq)]

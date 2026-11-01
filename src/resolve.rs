@@ -8141,7 +8141,7 @@ pub struct ResolvedTopLevelCall {
     pub source_file: Option<u32>,
     pub source_decl: Option<DeclId>,
     pub stable_declaration: Option<crate::fir::DeclarationId>,
-    /// The `vararg`'s index among the parameters source arguments address, after any contexts.
+    /// Source parameter index of `vararg`.
     pub vararg_index: Option<usize>,
     pub param_meta: Vec<(String, Option<ExprId>)>,
     pub param_default_values: Vec<Option<CtorDefaultValue>>,
@@ -34320,10 +34320,11 @@ impl<'a> Checker<'a> {
             source: selected.source_key,
             stable_declaration: selected.stable_declaration,
             vararg: selected.call_sig.vararg,
-            vararg_index: selected
-                .call_sig
-                .argument_vararg_index(selected.context_count)
-                .filter(|index| *index < selected.callable.params.len()),
+            vararg_index: selected.call_sig.vararg_index.and_then(|index| {
+                index
+                    .checked_sub(selected.context_count)
+                    .filter(|index| *index < selected.callable.params.len())
+            }),
             param_default_values: param_default_values
                 .get(selected.context_count..)
                 .unwrap_or_default()
@@ -39316,6 +39317,7 @@ impl<'a> Checker<'a> {
         self.record_selected_qualifier_call(call, selected);
         let source_file = selected.source_key.map(|(file, _)| file);
         let source_decl = selected.source_key.map(|(_, decl)| DeclId(decl));
+        let vararg_index = selected.call_sig.vararg_index;
         self.mark_source_call(call, selected.source_key);
         let source_fun = selected
             .source_key
@@ -39350,9 +39352,7 @@ impl<'a> Checker<'a> {
                 source_file,
                 source_decl,
                 stable_declaration: selected.stable_declaration,
-                vararg_index: selected
-                    .call_sig
-                    .argument_vararg_index(selected.context_count),
+                vararg_index,
                 param_meta,
                 param_default_values,
                 projected_return_hazard,

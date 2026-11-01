@@ -1,6 +1,7 @@
 //! Transient AST to checked FIR construction.
 //! Owns source traversal; semantic facts come from the checker and migration seams fail explicitly.
 
+mod argument_vararg;
 mod arguments;
 mod arrays;
 #[cfg(test)]
@@ -106,6 +107,7 @@ pub use failure::{BodyCheckFailure, BodyCheckFailureKind, CheckedBodyDriverFailu
 
 use crate::fx_hash::{HashMap, HashSet};
 
+use argument_vararg::ArgumentVararg;
 use receiver_provenance::ReceiverFrame;
 
 use crate::ast::{BinOp, Expr, ExprId, File, RangeKind, Stmt, StmtId, TemplatePart, UnOp};

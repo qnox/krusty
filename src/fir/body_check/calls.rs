@@ -334,7 +334,7 @@ impl BodyFirChecker<'_> {
                     arguments,
                     &target.parameters,
                     context_args.iter().map(Option::as_ref),
-                    target.argument_vararg_index,
+                    target.argument_vararg,
                 )?;
                 let parameter_types = self.published_parameter_types(
                     self.file.expr_span(expression),
@@ -416,7 +416,7 @@ impl BodyFirChecker<'_> {
                 arguments,
                 &target.parameters,
                 context_args.iter().map(Option::as_ref),
-                target.argument_vararg_index,
+                target.argument_vararg,
             )?;
             let parameter_types = self
                 .published_parameter_types(self.file.expr_span(expression), &target.parameters)?;
@@ -540,7 +540,7 @@ impl BodyFirChecker<'_> {
                 arguments,
                 &parameter_types,
                 std::iter::empty(),
-                member.call_sig.vararg_index,
+                ArgumentVararg::of_declaration(member.call_sig.vararg_index, 0),
             )?,
             substitutions: Box::new([]),
         }))
@@ -616,7 +616,7 @@ impl BodyFirChecker<'_> {
                 arguments,
                 &parameters,
                 std::iter::empty(),
-                member.call_sig.vararg_index,
+                ArgumentVararg::of_declaration(member.call_sig.vararg_index, 0),
             )?,
             substitutions,
         }))
@@ -752,7 +752,7 @@ impl BodyFirChecker<'_> {
             arguments,
             &parameters,
             extension.context_args.iter().map(Option::as_ref),
-            extension.vararg_index,
+            ArgumentVararg::of_source_parameters(extension.vararg_index),
         )?;
         Ok(FirExprKind::Call(FirCall {
             target,
@@ -969,7 +969,7 @@ impl BodyFirChecker<'_> {
             Box<[FirTypeSubstitution]>,
             bool,
             Vec<Option<crate::resolve::ResolvedContextArgument>>,
-            Option<usize>,
+            Option<ArgumentVararg>,
             Vec<Ty>,
         ),
         BodyCheckFailure,
@@ -992,10 +992,10 @@ impl BodyFirChecker<'_> {
                     substitutions,
                     false,
                     selected.context_args.clone(),
-                    selected
-                        .member
-                        .call_sig
-                        .argument_vararg_index(selected.context_args.len()),
+                    ArgumentVararg::of_declaration(
+                        selected.member.call_sig.vararg_index,
+                        selected.context_args.len(),
+                    ),
                     parameters,
                 ))
             }
@@ -1020,7 +1020,7 @@ impl BodyFirChecker<'_> {
                     substitutions,
                     true,
                     selected.context_args.clone(),
-                    selected.vararg_index,
+                    ArgumentVararg::of_source_parameters(selected.vararg_index),
                     parameters,
                 ))
             }
@@ -1151,10 +1151,10 @@ impl BodyFirChecker<'_> {
                     extension: false,
                     context_parameters,
                     value_parameters: parameters,
-                    vararg_index: selected
-                        .member
-                        .call_sig
-                        .argument_vararg_index(selected.context_args.len()),
+                    vararg: ArgumentVararg::of_declaration(
+                        selected.member.call_sig.vararg_index,
+                        selected.context_args.len(),
+                    ),
                     context_arguments: selected.context_args.clone(),
                 })
             }
@@ -1250,7 +1250,7 @@ impl BodyFirChecker<'_> {
                     extension: true,
                     context_parameters,
                     value_parameters: parameters,
-                    vararg_index: selected.vararg_index,
+                    vararg: ArgumentVararg::of_source_parameters(selected.vararg_index),
                     context_arguments: selected.context_args.clone(),
                 })
             }
@@ -1344,7 +1344,7 @@ impl BodyFirChecker<'_> {
                     extension: true,
                     context_parameters,
                     value_parameters: parameters,
-                    vararg_index: *vararg_index,
+                    vararg: ArgumentVararg::of_declaration(*vararg_index, context_count),
                     context_arguments: context_args.clone(),
                 })
             }
@@ -1526,16 +1526,7 @@ impl BodyFirChecker<'_> {
             "publish member-extension expression={expression:?} span={:?} stable={stable_declaration:?} external={external_identity:?} owner={owner:?} name={name} dispatch={dispatch_receiver:?} extension={extension_receiver:?} params={params:?}",
             self.file.expr_span(expression),
         );
-        let argument_vararg_index = vararg_index
-            .map(|vararg| {
-                vararg.checked_sub(context_args.len()).ok_or_else(|| {
-                    self.failure(
-                        self.file.expr_span(expression),
-                        BodyCheckFailureKind::UnsupportedCallShape,
-                    )
-                })
-            })
-            .transpose()?;
+        let argument_vararg = ArgumentVararg::of_declaration(*vararg_index, context_args.len());
         let mut parameters =
             self.selected_call_parameters(expression, *stable_declaration, params)?;
         // Resolution exposes a vararg's element type in `params` so applicability and inference see
@@ -1585,7 +1576,7 @@ impl BodyFirChecker<'_> {
                 parameters,
                 extension_parameter: None,
                 extension_receiver: *extension_receiver,
-                argument_vararg_index,
+                argument_vararg,
             });
         }
 
@@ -1656,7 +1647,7 @@ impl BodyFirChecker<'_> {
             parameters,
             extension_parameter: Some(extension_parameter),
             extension_receiver: *extension_receiver,
-            argument_vararg_index,
+            argument_vararg,
         })
     }
 
@@ -1989,7 +1980,7 @@ impl BodyFirChecker<'_> {
                 arguments,
                 &parameters,
                 selected.context_args.iter().map(Option::as_ref),
-                selected.vararg_index,
+                ArgumentVararg::of_declaration(selected.vararg_index, selected.context_args.len()),
             )?,
             substitutions,
         }))
@@ -2246,10 +2237,10 @@ impl BodyFirChecker<'_> {
                     arguments,
                     &selected.member.params,
                     selected.context_args.iter().map(Option::as_ref),
-                    selected
-                        .member
-                        .call_sig
-                        .argument_vararg_index(selected.context_args.len()),
+                    ArgumentVararg::of_declaration(
+                        selected.member.call_sig.vararg_index,
+                        selected.context_args.len(),
+                    ),
                 )?,
                 substitutions: Box::new([]),
             }));
@@ -2320,10 +2311,10 @@ impl BodyFirChecker<'_> {
                 arguments,
                 &parameters,
                 selected.context_args.iter().map(Option::as_ref),
-                selected
-                    .member
-                    .call_sig
-                    .argument_vararg_index(selected.context_args.len()),
+                ArgumentVararg::of_declaration(
+                    selected.member.call_sig.vararg_index,
+                    selected.context_args.len(),
+                ),
             )?,
             substitutions,
         }))
@@ -2579,7 +2570,7 @@ impl BodyFirChecker<'_> {
                 operands,
                 &target.parameters,
                 context_args.iter().map(Option::as_ref),
-                target.argument_vararg_index,
+                target.argument_vararg,
             )?;
             let parameter_types = self
                 .published_parameter_types(self.file.expr_span(expression), &target.parameters)?;
@@ -2672,7 +2663,12 @@ impl BodyFirChecker<'_> {
             let parameter = slots
                 .as_deref()
                 .and_then(|slots| slots.iter().position(|slot| *slot == Some(operand)))
-                .or_else(|| selected.vararg_index.filter(|vararg| source >= *vararg))
+                .or_else(|| {
+                    selected
+                        .vararg
+                        .map(ArgumentVararg::index)
+                        .filter(|vararg| source >= *vararg)
+                })
                 .unwrap_or(source);
             let parameter_ty = selected
                 .value_parameters
@@ -2682,7 +2678,7 @@ impl BodyFirChecker<'_> {
             let parameter_id = u32::try_from(parameter + selected.context_arguments.len())
                 .map_err(|_| self.failure(span, BodyCheckFailureKind::UnsupportedCallShape))?;
             let value = self.expression(operand)?;
-            if selected.vararg_index != Some(parameter) {
+            if selected.vararg.map(ArgumentVararg::index) != Some(parameter) {
                 arguments.push(FirCallArgument::Expression {
                     parameter: parameter_id,
                     value,
@@ -2742,7 +2738,11 @@ impl BodyFirChecker<'_> {
                 .into_boxed_slice(),
             });
         }
-        if let Some(parameter) = selected.vararg_index.filter(|_| !saw_vararg) {
+        if let Some(parameter) = selected
+            .vararg
+            .map(ArgumentVararg::index)
+            .filter(|_| !saw_vararg)
+        {
             arguments.push(FirCallArgument::Vararg {
                 parameter: u32::try_from(parameter + selected.context_arguments.len())
                     .map_err(|_| self.failure(span, BodyCheckFailureKind::UnsupportedCallShape))?,
@@ -2754,7 +2754,7 @@ impl BodyFirChecker<'_> {
         }
         if let Some(slots) = slots {
             for (parameter, slot) in slots.iter().enumerate() {
-                if slot.is_none() && selected.vararg_index != Some(parameter) {
+                if slot.is_none() && selected.vararg.map(ArgumentVararg::index) != Some(parameter) {
                     arguments.push(FirCallArgument::Default {
                         parameter: u32::try_from(parameter + selected.context_arguments.len())
                             .map_err(|_| {
@@ -2839,7 +2839,7 @@ impl BodyFirChecker<'_> {
         let selected = self.statement_operator_target(statement, convention)?;
         let parameter_types = selected.parameter_types();
         let span = self.file.stmt_spans.get(statement.0 as usize).copied();
-        if selected.vararg_index.is_some() {
+        if selected.vararg.is_some() {
             return Err(self.failure(span, BodyCheckFailureKind::UnsupportedCallShape));
         }
         let cause = self.statement_origin(statement)?;
