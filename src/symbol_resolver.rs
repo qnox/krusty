@@ -15,6 +15,7 @@ use crate::libraries::{
 use crate::symbol_source::{SymbolNamespace, SymbolSource};
 use crate::types::{Ty, TyKind, TypeName, Visibility};
 mod access_site;
+pub(crate) use access_site::MemberAccessSite;
 mod argument_compatibility;
 mod call_argument;
 mod callable_shapes;
@@ -33,6 +34,7 @@ mod extension_specialization;
 mod generic_inference;
 pub(crate) use generic_inference::reified_runtime_type;
 mod hierarchy_projection;
+mod indexed_convention_selection;
 mod lambda_call_shape;
 mod member_hierarchy;
 mod member_property_selection;
@@ -120,7 +122,8 @@ use overload_selection::{
     integer_literal_overload_with_ties, logical_call_params, logical_value_params, select_overload,
     select_overload_tracking_with_functions, select_receiver_overload_from_functions_tracking,
     semantic_arg_assignable, unique_most_specific, unique_most_specific_with_conflicts,
-    unique_most_specific_with_conflicts_and_ties, ExtCtx, IndexedConvention, SelectionMode,
+    unique_most_specific_with_conflicts_and_ties, ExtCtx, IndexedConvention, OverloadCall,
+    SelectionMode,
 };
 use property_candidates::{
     generic_property_more_specific, source_property_visible, specialize_property,
@@ -811,6 +814,8 @@ pub struct SymbolResolver<'a> {
     visibility_suppressed: bool,
     /// Type variables of the enclosing postponed calls; extension receivers match over them.
     type_variables: &'a [String],
+    /// The access site's member visibility ([`MemberAccessSite`]), when the caller has a site.
+    member_access: Option<&'a dyn MemberAccessSite>,
 }
 
 /// Which accessor a property selection will execute. Provider-normalized candidate availability
@@ -1010,6 +1015,15 @@ impl<'a> SymbolResolver<'a> {
         self
     }
 
+    fn ext_ctx(&self) -> ExtCtx<'_> {
+        ExtCtx {
+            fn_scope: self.fn_scope,
+            source: &self.src,
+            type_variables: self.type_variables,
+            member_access: self.member_access,
+        }
+    }
+
     fn receiver_mro(&self, receiver: Ty) -> ReceiverMro {
         ReceiverMro::new(&self.src, receiver).with_type_variables(self.type_variables)
     }
@@ -1119,178 +1133,6 @@ impl<'a> SymbolResolver<'a> {
             return ErrorReceiverSelection::Bind(candidates);
         }
         ErrorReceiverSelection::Absent
-    }
-
-    pub(crate) fn select_receiver_indexed_get_function_with_params(
-        &self,
-        receiver: Ty,
-        name: &str,
-        args: &[CallArgKind],
-        type_args: &[Ty],
-        callables: &Callables,
-    ) -> CandidateSelection<(FunctionInfo, Vec<Ty>, Ty, GSigBinds)> {
-        let selected = match select_receiver_overload_from_functions_tracking(
-            self.lib,
-            receiver,
-            name,
-            args,
-            type_args,
-            ExtCtx {
-                fn_scope: self.fn_scope,
-                source: &self.src,
-                type_variables: self.type_variables,
-            },
-            callables.functions(),
-            IndexedConvention::Get,
-        ) {
-            CandidateSelectionWithTies::Selected(selected) => selected,
-            CandidateSelectionWithTies::Ambiguous(_) => return CandidateSelection::Ambiguous,
-            CandidateSelectionWithTies::None => return CandidateSelection::None,
-        };
-        let binding_receiver = selected
-            .semantic_receiver()
-            .and_then(|declared| {
-                self.receiver_mro(receiver)
-                    .binding_receiver(&self.src, declared)
-            })
-            .unwrap_or(receiver);
-        if selected.call_sig.vararg_index.is_none() {
-            let params =
-                logical_call_params(&self.src, &selected, binding_receiver, args, type_args);
-            // The bindings are published with the call; the receiver binds `V` of `Map.get`.
-            let (resolved, bindings) = if selected.generic_sig.is_some() && selected.is_extension()
-            {
-                let arg_tys = args.iter().map(CallArgKind::ty).collect::<Vec<_>>();
-                let semantic = selected.semantic_signature();
-                let (ret, bindings) = bind_ext_ret_tracking(
-                    &self.src,
-                    &semantic,
-                    binding_receiver,
-                    &arg_tys,
-                    type_args,
-                );
-                (
-                    specialized_extension_return(self.lib, &selected, ret),
-                    bindings,
-                )
-            } else if selected.is_extension() {
-                (
-                    selected.ret.apply(selected.callable.ret),
-                    GSigBinds::default(),
-                )
-            } else {
-                let (member, bindings) = resolved_member_from_info_tracking(
-                    self.lib,
-                    &self.src,
-                    receiver,
-                    args,
-                    type_args,
-                    selected.clone(),
-                );
-                (member.ret, bindings)
-            };
-            return CandidateSelection::Selected((selected, params, resolved, bindings));
-        }
-        let Some((params, ret, bindings)) = indexed_call_shape(
-            self.lib,
-            &self.src,
-            &selected,
-            binding_receiver,
-            args,
-            type_args,
-            false,
-        ) else {
-            return CandidateSelection::None;
-        };
-        CandidateSelection::Selected((selected, params, ret, bindings))
-    }
-
-    /// Select the `set` convention used by indexed assignment. The assignment RHS binds the final
-    /// value parameter even when the preceding index parameter is a vararg; ordinary positional
-    /// calls deliberately do not permit that mapping.
-    pub(crate) fn select_receiver_indexed_set_function(
-        &self,
-        receiver: Ty,
-        name: &str,
-        args: &[CallArgKind],
-        type_args: &[Ty],
-        callables: &Callables,
-    ) -> CandidateSelection<FunctionInfo> {
-        select_receiver_overload_from_functions_tracking(
-            self.lib,
-            receiver,
-            name,
-            args,
-            type_args,
-            ExtCtx {
-                fn_scope: self.fn_scope,
-                source: &self.src,
-                type_variables: self.type_variables,
-            },
-            callables.functions(),
-            IndexedConvention::Set,
-        )
-        .collapse()
-    }
-
-    pub(crate) fn select_receiver_indexed_set_function_with_params(
-        &self,
-        receiver: Ty,
-        name: &str,
-        args: &[CallArgKind],
-        type_args: &[Ty],
-        callables: &Callables,
-    ) -> CandidateSelection<(FunctionInfo, Vec<Ty>, Ty)> {
-        let selected = match self
-            .select_receiver_indexed_set_function(receiver, name, args, type_args, callables)
-        {
-            CandidateSelection::Selected(selected) => selected,
-            CandidateSelection::Ambiguous => return CandidateSelection::Ambiguous,
-            CandidateSelection::None => return CandidateSelection::None,
-        };
-        let binding_receiver = selected
-            .semantic_receiver()
-            .and_then(|declared| {
-                self.receiver_mro(receiver)
-                    .binding_receiver(&self.src, declared)
-            })
-            .unwrap_or(receiver);
-        if selected.call_sig.vararg_index.is_none() {
-            let params =
-                logical_call_params(&self.src, &selected, binding_receiver, args, type_args);
-            let arg_tys = args.iter().map(CallArgKind::ty).collect::<Vec<_>>();
-            let inferred_ret = selected
-                .generic_sig
-                .as_ref()
-                .map_or(selected.callable.ret, |sig| {
-                    if selected.is_extension() {
-                        bind_ext_ret(&self.src, sig, binding_receiver, &arg_tys, type_args)
-                    } else {
-                        bind_member_return(
-                            &self.src,
-                            sig,
-                            binding_receiver,
-                            &arg_tys,
-                            type_args,
-                            selected.callable.ret,
-                        )
-                    }
-                });
-            let ret = selected.ret.apply(inferred_ret);
-            return CandidateSelection::Selected((selected, params, ret));
-        }
-        let Some((params, ret, _)) = indexed_call_shape(
-            self.lib,
-            &self.src,
-            &selected,
-            binding_receiver,
-            args,
-            type_args,
-            true,
-        ) else {
-            return CandidateSelection::None;
-        };
-        CandidateSelection::Selected((selected, params, ret))
     }
 
     /// Select one receiver callable and return the value parameters specialized by the receiver and
@@ -1878,20 +1720,18 @@ impl<'a> SymbolResolver<'a> {
                 let mut call_ambiguous = false;
                 let selected_call = select_overload_tracking_with_functions(
                     self.lib,
-                    ty,
-                    name,
-                    args,
-                    type_args,
-                    SelectionMode::Receiver,
-                    ExtCtx {
-                        fn_scope: self.fn_scope,
-                        source: &self.src,
-                        type_variables: self.type_variables,
+                    OverloadCall {
+                        recv: ty,
+                        name,
+                        args,
+                        type_args,
+                        indexed: IndexedConvention::Ordinary,
                     },
+                    SelectionMode::Receiver,
+                    self.ext_ctx(),
                     Some(callables.functions()),
                     &mut call_ambiguous,
                     None,
-                    IndexedConvention::Ordinary,
                 );
                 let call = selected_call
                     .as_ref()
@@ -3345,6 +3185,7 @@ fn select_instance_info(
             fn_scope: None,
             source,
             type_variables: &[],
+            member_access: None,
         },
     )
 }

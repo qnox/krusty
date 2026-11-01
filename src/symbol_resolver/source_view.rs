@@ -42,6 +42,7 @@ impl<'a> SymbolResolver<'a> {
             access_file: None,
             visibility_suppressed: false,
             type_variables: &[],
+            member_access: None,
         }
     }
 
@@ -57,6 +58,7 @@ impl<'a> SymbolResolver<'a> {
             access_file: None,
             visibility_suppressed: false,
             type_variables: &[],
+            member_access: None,
         }
     }
 
@@ -76,6 +78,7 @@ impl<'a> SymbolResolver<'a> {
             access_file: None,
             visibility_suppressed: false,
             type_variables: &[],
+            member_access: None,
         }
     }
 
@@ -94,6 +97,7 @@ impl<'a> SymbolResolver<'a> {
             access_file: None,
             visibility_suppressed: false,
             type_variables: &[],
+            member_access: None,
         }
     }
 

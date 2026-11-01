@@ -4,7 +4,14 @@
 
 use super::*;
 
-impl SymbolResolver<'_> {
+/// Whether a use site can see a member function through a receiver. The checker owns the
+/// decision (lexical classes, module ownership, protected receivers, suppression); this resolver
+/// only consumes it when it ranks candidates.
+pub(crate) trait MemberAccessSite {
+    fn member_accessible(&self, member: &FunctionInfo, receiver: Ty) -> bool;
+}
+
+impl<'a> SymbolResolver<'a> {
     pub(crate) fn with_access_context(
         mut self,
         package: TypeName,
@@ -22,6 +29,14 @@ impl SymbolResolver<'_> {
     /// `kotlin.Suppress` applications in force at the site; this resolver never derives it.
     pub(crate) fn with_visibility_suppression(mut self, suppressed: bool) -> Self {
         self.visibility_suppressed = suppressed;
+        self
+    }
+
+    /// Install the access site's member visibility. Overload selection then ranks a member this
+    /// site cannot see below every accessible applicable candidate, as Kotlin ranks a visibility
+    /// error below a resolved call.
+    pub(crate) fn with_member_access(mut self, site: &'a dyn MemberAccessSite) -> Self {
+        self.member_access = Some(site);
         self
     }
 
