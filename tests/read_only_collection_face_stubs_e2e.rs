@@ -106,25 +106,6 @@ const LATER_REALIZATIONS: &[&str] = &[
     "public java.lang.Object[] toArray();",
 ];
 
-/// The `javap -v -p` block of each method `listing` declares, keyed by its declaration line. A
-/// blank line ends each member's block.
-fn method_blocks(listing: &str) -> Vec<(String, String)> {
-    let mut blocks: Vec<(String, String)> = Vec::new();
-    let mut current: Option<(String, Vec<&str>)> = None;
-    for line in listing.lines().map(str::trim) {
-        if line.is_empty() || line == "}" {
-            if let Some((declaration, body)) = current.take() {
-                blocks.push((declaration, body.join("\n")));
-            }
-        } else if let Some((_, body)) = current.as_mut() {
-            body.push(line);
-        } else if line.contains('(') && line.ends_with(';') {
-            current = Some((line.to_string(), Vec::new()));
-        }
-    }
-    blocks
-}
-
 /// The fake-override bridges an abstract class's unimplemented `contains` and `size` get, a later
 /// realization as well.
 const ABSTRACT_FAKE_OVERRIDE_BRIDGES: &[&str] = &[
@@ -163,8 +144,7 @@ fn assert_members_match_kotlinc_beside(source: &str, members: &[&str], later: &[
             .collect::<Vec<_>>()
     };
     assert_eq!(realized_here(krusty), realized_here(reference));
-    let (reference, krusty) = classes.class_listing("faces/Bag");
-    let (reference, krusty) = (method_blocks(&reference), method_blocks(&krusty));
+    let (reference, krusty) = classes.method_blocks("faces/Bag");
     for member in members {
         let block = |blocks: &[(String, String)]| {
             blocks
