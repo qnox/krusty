@@ -12,10 +12,12 @@
 //! the rest rather than answer with a part of it.
 
 mod accessors;
+mod all_members;
 mod annotations;
 mod backing_field;
 mod declarations;
 mod library;
+mod overridees;
 mod platform_names;
 mod type_model;
 
@@ -54,6 +56,7 @@ pub fn ksp_round(
     let resolved = Resolved::new(analysis);
     let ids = TypeParameterIds::default();
     let platform = PlatformNames::new(analysis, module_name);
+    let ledger = all_members::Ledger::default();
     let mut files = Vec::with_capacity(paths.len());
     for (index, (file, path)) in analysis.files.iter().zip(paths).enumerate() {
         let source = Source {
@@ -65,9 +68,13 @@ pub fn ksp_round(
             resolved: &resolved,
             ids: &ids,
             platform: platform.as_ref(),
+            ledger: &ledger,
         };
         files.push(source.file()?);
     }
+    let ledger = ledger.into_classes();
+    all_members::order(&mut files, &ledger, analysis);
+    overridees::assign(&mut files, &ledger, analysis);
     Ok(KspRound { files })
 }
 
@@ -149,6 +156,8 @@ struct Source<'a> {
     ids: &'a TypeParameterIds,
     /// The names the platform's binary interface gives declarations, if it has one.
     platform: Option<&'a PlatformNames<'a>>,
+    /// What each classifier's member lists are built from, once every file is described.
+    ledger: &'a all_members::Ledger,
 }
 
 /// A declaration a refusal names: what it is, its name and its line.
@@ -288,14 +297,26 @@ impl Source<'_> {
         let type_parameters = type_parameters(class, signature, &scope);
         let header = declarations::ClassHeader {
             id,
+            file: self.file,
             class,
             signature,
             kind,
             qualified_name: &qualified_name,
             type_parameters: &type_parameters,
             scope: &scope,
+            primary_spellings: signature
+                .stable_declaration
+                .and_then(|class| self.analysis.constructor_declaration(class, 0))
+                .and_then(|constructor| self.analysis.declared_type_spellings(constructor)),
         };
-        let (declarations, declarations_complete) = self.class_declarations(&header)?;
+        let described = self.class_declarations(&header)?;
+        self.ledger.record(
+            qualified_name.clone(),
+            all_members::ClassLedger {
+                resolved: described.resolved,
+                generated: self.data_object_members(&header),
+            },
+        );
         Ok(KspClass {
             simple_name,
             qualified_name: qualified_name.clone(),
@@ -305,11 +326,14 @@ impl Source<'_> {
             modifiers: self.written_modifiers(class.name_span.lo),
             type_parameters,
             super_types: super_types(signature, &scope),
-            declarations,
-            declarations_complete,
+            declarations: described.declarations,
+            declarations_complete: described.complete,
             jvm_signature: self
                 .platform
                 .and_then(|platform| platform.type_signature(Ty::obj_name(signature.internal))),
+            // Filled in once every file is described, as they depend on the supertypes'.
+            all_properties: None,
+            all_functions: None,
         })
     }
 
@@ -890,6 +914,24 @@ mod tests {
                 ("entries.Choice.First", false),
                 ("entries.Choice.Second", false),
                 ("entries.Choice.Third", true),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_inline_member_leaves_its_classifiers_members_resolved() {
+        let round = round(&[(
+            "/src/Members.kt",
+            "package members\n\nclass Holder {\n    inline fun twice(x: Int): Int = x * 2\n    fun named(label: String): String = label\n}\n",
+        )])
+        .expect("every declaration is readable");
+        assert_eq!(
+            dumped(&round),
+            [
+                "CLASS members.Holder modifiers= typeParameters= supertypes=kotlin.Any",
+                "  fun twice kind=MEMBER abstract=false modifiers=INLINE typeParameters= receiver=null (x: kotlin.Int vararg=false default=false): kotlin.Int",
+                "  fun named kind=MEMBER abstract=false modifiers= typeParameters= receiver=null (label: kotlin.String vararg=false default=false): kotlin.String",
+                "  fun <init> kind=MEMBER abstract=false modifiers=FINAL,PUBLIC typeParameters= receiver=null (): members.Holder",
             ]
         );
     }

@@ -1,7 +1,7 @@
 //! The primitive specialized array classes (`IntArray`, `UByteArray`, ...) and the element each
 //! holds, with the lookups between a class, its creator functions, and its element type.
 
-use super::{InternalName, Ty};
+use super::{ClassifierDeclarationName, InternalName, Ty, TypeName};
 
 /// Every primitive specialized array class and the element it holds — THE inventory, in one place.
 ///
@@ -24,6 +24,24 @@ const PRIM_ARRAY_CLASSES: [(&str, Ty); 12] = [
     ("kotlin/UIntArray", Ty::UInt),
     ("kotlin/ULongArray", Ty::ULong),
 ];
+
+/// The declaration owned by an admitted Kotlin array family, from the canonical inventory.
+pub(crate) fn array_declaration_name(internal: TypeName) -> Option<ClassifierDeclarationName> {
+    let name = if internal == super::wk::array() {
+        "Array"
+    } else {
+        PRIM_ARRAY_CLASSES
+            .iter()
+            .find(|(name, _)| internal.internal_matches(name))?
+            .0
+            .strip_prefix("kotlin/")
+            .expect("the primitive array inventory declares Kotlin classes")
+    };
+    Some(ClassifierDeclarationName::TopLevel {
+        package: super::wk::kotlin_package(),
+        name: name.into(),
+    })
+}
 
 /// The element type of a primitive specialized array class (`kotlin/IntArray` → `Int`), or `None`
 /// for a non-primitive-array name. A lookup in [`PRIM_ARRAY_CLASSES`], which is the canonical table

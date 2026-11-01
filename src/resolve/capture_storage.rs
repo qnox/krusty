@@ -206,13 +206,76 @@ pub(super) fn local_class_capture_expressions(class: &ClassDecl) -> Vec<ExprId> 
     expressions
 }
 
-pub(super) fn anonymous_body_expressions(file: &File, declaration: DeclId) -> Vec<ExprId> {
+/// Early storage discovery sees candidate closure dependencies before contextual checking. Final
+/// publication admits a retained closure only from the checker's expression decision and type.
+#[derive(Clone, Copy)]
+pub(super) enum ConstructorArgumentUses<'a> {
+    Candidates,
+    Checked {
+        expressions: &'a HashMap<ExprId, ExprLowering>,
+        types: &'a [Ty],
+        delegations: &'a HashMap<DeclId, ResolvedCtorDelegation>,
+    },
+}
+
+impl ConstructorArgumentUses<'_> {
+    fn retains_closure(self, file: &File, declaration: DeclId, expression: ExprId) -> bool {
+        match self {
+            Self::Candidates => matches!(file.expr(expression), Expr::Lambda { .. }),
+            Self::Checked {
+                expressions,
+                types,
+                delegations,
+            } => {
+                matches!(expressions.get(&expression), Some(ExprLowering::Lambda(_)))
+                    && types
+                        .get(expression.0 as usize)
+                        .is_some_and(|ty| *ty != Ty::Error && !ty.mentions_error())
+                    && selected_vararg_super_argument(file, declaration, expression, delegations)
+            }
+        }
+    }
+}
+
+/// The existing forward record represents one whole superclass parameter. A vararg groups
+/// multiple source contributions, so its closure still needs constructor-prefix capture transport
+/// until that packed array can be forwarded as one value.
+fn selected_vararg_super_argument(
+    file: &File,
+    declaration: DeclId,
+    expression: ExprId,
+    delegations: &HashMap<DeclId, ResolvedCtorDelegation>,
+) -> bool {
+    let Some(selected) = delegations.get(&declaration) else {
+        return false;
+    };
+    let Some(vararg) = selected.vararg else {
+        return false;
+    };
+    let Decl::Class(class) = file.decl(declaration) else {
+        return false;
+    };
+    class.base_args.len() == selected.argument_slots.len()
+        && class
+            .base_args
+            .iter()
+            .zip(&selected.argument_slots)
+            .any(|(argument, slot)| {
+                *slot == vararg && peel_super_type_operators(file, *argument) == expression
+            })
+}
+
+pub(super) fn anonymous_body_expressions(
+    file: &File,
+    declaration: DeclId,
+    constructor_uses: ConstructorArgumentUses<'_>,
+) -> Vec<ExprId> {
     let Decl::Class(class) = file.decl(declaration) else {
         return Vec::new();
     };
     // A non-constant super-constructor argument is evaluated at the construction site and forwarded.
-    // Only the bare name that stays in the anonymous constructor (after a cast or not-null assertion)
-    // is a use of this class. Names inside the forwarded expression are uses of the caller.
+    // Bare names and retained closures stay in the anonymous constructor. Dependencies inside a
+    // forwarded expression belong to the construction site instead.
     let forwarded = class
         .base_args
         .iter()
@@ -223,7 +286,9 @@ pub(super) fn anonymous_body_expressions(file: &File, declaration: DeclId) -> Ve
         .filter(|expression| !forwarded.contains(expression))
         .collect::<Vec<_>>();
     for argument in &class.base_args {
-        if let Some(observed) = anonymous_super_argument_constructor_use(file, *argument) {
+        if let Some(observed) =
+            anonymous_super_argument_constructor_use(file, declaration, *argument, constructor_uses)
+        {
             expressions.push(observed);
         }
     }
@@ -231,23 +296,33 @@ pub(super) fn anonymous_body_expressions(file: &File, declaration: DeclId) -> Ve
 }
 
 /// The subexpression of an anonymous super-constructor argument that the anonymous constructor
-/// itself still evaluates. A bare name stays. A larger expression is forwarded from the
-/// construction site, so names inside it are not uses of the anonymous class.
+/// itself still evaluates. A bare name or retained closure stays. Other expressions are forwarded
+/// from the construction site, so their dependencies are not uses of the anonymous class.
 pub(super) fn anonymous_super_argument_constructor_use(
     file: &File,
+    declaration: DeclId,
     mut expression: ExprId,
+    constructor_uses: ConstructorArgumentUses<'_>,
 ) -> Option<ExprId> {
     loop {
         match file.expr(expression) {
             Expr::As { operand, .. } | Expr::NotNull { operand } => expression = *operand,
             Expr::Name(_) => return Some(expression),
+            _ if constructor_uses.retains_closure(file, declaration, expression) => {
+                return Some(expression)
+            }
             _ => return None,
         }
     }
 }
 
-pub(super) fn anonymous_body_writes_name(file: &File, declaration: DeclId, name: &str) -> bool {
-    anonymous_body_expressions(file, declaration)
+pub(super) fn anonymous_body_writes_name(
+    file: &File,
+    declaration: DeclId,
+    name: &str,
+    constructor_uses: ConstructorArgumentUses<'_>,
+) -> bool {
+    anonymous_body_expressions(file, declaration, constructor_uses)
         .into_iter()
         .any(|expression| expression_writes_name(file, expression, name))
 }
@@ -309,8 +384,14 @@ fn expression_has_member_call_named(file: &File, expression: ExprId, name: &str)
         })
 }
 
-fn anonymous_body_uses_name(file: &File, declaration: DeclId, name: &str, ty: Ty) -> bool {
-    let expressions = anonymous_body_expressions(file, declaration);
+fn anonymous_body_uses_name(
+    file: &File,
+    declaration: DeclId,
+    name: &str,
+    ty: Ty,
+    constructor_uses: ConstructorArgumentUses<'_>,
+) -> bool {
+    let expressions = anonymous_body_expressions(file, declaration, constructor_uses);
     expressions
         .iter()
         .any(|expression| file.expr_uses_name_deep(*expression, name))
@@ -327,10 +408,11 @@ pub(super) fn anonymous_descendant_uses_name(
     name: &str,
     ty: Ty,
     function_local: bool,
+    constructor_uses: ConstructorArgumentUses<'_>,
 ) -> bool {
     anonymous_descendants(declaration, lexical_scope).any(|candidate| {
         enclosing_value_visible_beside_member(file, candidate, name, function_local)
-            && (anonymous_body_uses_name(file, candidate, name, ty)
+            && (anonymous_body_uses_name(file, candidate, name, ty, constructor_uses)
                 || candidate != declaration
                     && matches!(file.decl(candidate), Decl::Class(class) if class
                         .interface_delegations
@@ -362,10 +444,11 @@ pub(super) fn anonymous_descendant_writes_name(
     lexical_scope: &AnonymousLexicalClassScope,
     name: &str,
     function_local: bool,
+    constructor_uses: ConstructorArgumentUses<'_>,
 ) -> bool {
     anonymous_descendants(declaration, lexical_scope).any(|candidate| {
         enclosing_value_visible_beside_member(file, candidate, name, function_local)
-            && (anonymous_body_writes_name(file, candidate, name)
+            && (anonymous_body_writes_name(file, candidate, name, constructor_uses)
                 || candidate != declaration
                     && matches!(file.decl(candidate), Decl::Class(class) if class
                         .interface_delegations
@@ -608,8 +691,12 @@ impl Checker<'_> {
                 let body = if anonymous_super_argument {
                     // The forwarded expression runs outside this constructor. A bare captured name
                     // still does not: it is read here, after the value has been passed in.
-                    let Some(observed) = anonymous_super_argument_constructor_use(self.file, body)
-                    else {
+                    let Some(observed) = anonymous_super_argument_constructor_use(
+                        self.file,
+                        declaration,
+                        body,
+                        ConstructorArgumentUses::Candidates,
+                    ) else {
                         return;
                     };
                     observed
@@ -679,7 +766,11 @@ impl Checker<'_> {
                 for bound in anonymous_body_bound_value_names(self.file, anonymous) {
                     visible.remove(&bound);
                 }
-                for nested_body in anonymous_body_expressions(self.file, anonymous) {
+                for nested_body in anonymous_body_expressions(
+                    self.file,
+                    anonymous,
+                    ConstructorArgumentUses::Candidates,
+                ) {
                     record_construction_uses(nested_body, &visible, false);
                 }
             }
@@ -920,11 +1011,16 @@ impl Checker<'_> {
         if ty == Ty::Error || ty.mentions_error() {
             return AnonymousSuperDisposition::Unresolved;
         }
-        // A checked lambda is a deferred closure value constructed in the anonymous constructor.
-        // Forwarding its literal to the call site would bind captured receivers outside that
-        // constructor and bypass the exact capture fields selected for its body. Consume the
-        // checker-owned expression decision rather than rediscovering the syntax shape here.
-        if matches!(self.expr_lowers.get(&core), Some(ExprLowering::Lambda(_))) {
+        // An anonymous-super argument is evaluated at its construction site, including closure
+        // creation. The current forward record transports a whole selected parameter; vararg
+        // contributions retain their existing constructor path until their array is packed there.
+        if (ConstructorArgumentUses::Checked {
+            expressions: &self.expr_lowers,
+            types: &self.expr_types,
+            delegations: &self.resolved_primary_ctor_delegations,
+        })
+        .retains_closure(self.file, declaration, core)
+        {
             return AnonymousSuperDisposition::StayClosure;
         }
         if checked_constant_expression(
@@ -1001,7 +1097,10 @@ impl Checker<'_> {
                     // Only a bare selected property stays in the anonymous constructor. Its exact
                     // receiver is therefore a constructor capture use; complex expressions remain
                     // construction-site forwards and never reach this accounting path.
-                    self.implicit_receiver_identity_uses.record(identity);
+                    self.implicit_receiver_identity_uses.record(
+                        identity,
+                        receiver_uses::ReceiverUseSite::Expression(*argument),
+                    );
                 }
                 AnonymousSuperDisposition::StayLexical
                 | AnonymousSuperDisposition::StayClosure

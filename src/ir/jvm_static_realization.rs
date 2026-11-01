@@ -7,6 +7,27 @@
 use super::{IrFile, IrStaticAccessor, TypeName};
 
 impl IrFile {
+    /// Every exact property annotation carrier recorded by the JVM, on classes and package parts.
+    pub(crate) fn jvm_property_annotation_markers(&self) -> impl Iterator<Item = u32> + '_ {
+        self.property_annotation_markers
+            .values()
+            .chain(self.jvm_package_property_annotation_markers.values())
+            .copied()
+    }
+
+    /// The checked field payload of the package declaration whose layout owns this static.
+    pub(crate) fn package_static_field_annotations(
+        &self,
+        storage: u32,
+    ) -> Option<&super::DeclarationAnnotations> {
+        self.local_property_layouts.iter().find_map(|(property, layout)| {
+            matches!(layout, super::IrLocalPropertyLayout::TopLevelStorage { storage: selected, .. } if *selected == storage)
+                .then(|| self.package_property_annotations.get(property))
+                .flatten()
+                .map(|annotations| &annotations.field)
+        })
+    }
+
     pub(crate) fn mark_jvm_package_property_annotation_marker(
         &mut self,
         property: crate::fir::PropertyId,
@@ -48,6 +69,27 @@ impl IrFile {
         property: u32,
     ) -> Option<u32> {
         self.jvm_companion_property_statics
+            .get(&(companion, property))
+            .copied()
+    }
+
+    pub(crate) fn mark_jvm_companion_delegate_static(
+        &mut self,
+        companion: TypeName,
+        property: u32,
+        index: u32,
+    ) {
+        self.jvm_companion_delegate_statics
+            .insert((companion, property), index);
+    }
+
+    /// The outer-class static holding a delegated companion property's `x$delegate`.
+    pub(crate) fn jvm_companion_delegate_static(
+        &self,
+        companion: TypeName,
+        property: u32,
+    ) -> Option<u32> {
+        self.jvm_companion_delegate_statics
             .get(&(companion, property))
             .copied()
     }

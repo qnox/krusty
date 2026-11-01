@@ -87,6 +87,17 @@ pub(super) fn build_class_metadata_with_facts(
             d2: vec![],
         });
     }
+    // A class a plugin generates with no declaration behind it has a synthetic-class record, whose
+    // `xi` carries no visibility, since no lowering of kotlinc's own made it.
+    if ir.is_declarationless_class(c.fq_name_id()) {
+        return Some(KotlinMetadata {
+            k: 3,
+            stamp: opts.metadata_stamp(),
+            xi: super::metadata_policy::class_xi(ir, c),
+            d1: vec![],
+            d2: vec![],
+        });
+    }
     if !class_metadata_common_shape_admitted(ir, c) {
         return None;
     }
@@ -146,16 +157,37 @@ pub(super) fn build_class_metadata_with_facts(
         &secondary_ctors,
         &nested,
     );
-    let declaration = record.declaration(&tail, &enum_entries);
-    let (d1_bytes, d2) = build_class(
-        declaration.name,
+    let classifier = record.classifier();
+    let class_id = if tail.local_classifiers.contains(&classifier) {
+        crate::metadata::class_id::ResolvedClassId::local(classifier)
+    } else {
+        match crate::metadata::class_id::ResolvedClassId::resolve(
+            crate::libraries::ClassifierDeclarationKey::Ordinary(classifier),
+            &|key| signature_symbols.classifier_declaration_name(key),
+        ) {
+            Ok(name) => name,
+            Err(error) => {
+                run.set_emit_error(format!("cannot encode class metadata name: {error}"));
+                return None;
+            }
+        }
+    };
+    let declaration = record.declaration(&class_id, &tail, &enum_entries);
+    let (d1_bytes, d2) = match build_class(
+        declaration.class_id,
         declaration.ctor_params,
         declaration.props,
         declaration.methods,
         declaration.enum_entries,
         declaration.tail,
         &signatures,
-    );
+    ) {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            run.set_emit_error(format!("cannot encode class metadata name: {error}"));
+            return None;
+        }
+    };
     // d1 is the protobuf payload as one `char` per byte, in parts that each fit one `CONSTANT_Utf8`
     // entry (the constant pool writes them as modified UTF-8).
     let d1 = crate::metadata::encoding::bytes_to_strings(&d1_bytes);
@@ -404,6 +436,8 @@ impl<'a> JvmClassRealization<'a> {
             .delegate_field
             .and_then(|i| c.fields.get(i as usize));
         let hoisted = static_fields::hoisted_static_declaration_for(ir, c, property_index);
+        // A delegated companion property's `x$delegate`, hoisted onto the outer class.
+        let hoisted_delegate = static_fields::hoisted_delegate_static_for(ir, c, property_index);
         let (default_getter, default_setter) = accessor_jvm_names(c, &property.name);
         // A getter's descriptor is its physical one: a scalar getter result over a reference-returning
         // overridden property returns the wrapper (see `jvm::override_results`).
@@ -468,7 +502,10 @@ impl<'a> JvmClassRealization<'a> {
         // hoisted onto its outer class is stored there.
         let has_field = !c.is_annotation
             && !c.is_interface
-            && (backing.is_some() || delegate.is_some() || hoisted.is_some());
+            && (backing.is_some()
+                || delegate.is_some()
+                || hoisted.is_some()
+                || hoisted_delegate.is_some());
         let field = has_field.then(|| JvmFieldSignature {
             // The PHYSICAL field name when the JVM realization mangles it — an instance property
             // beside a same-named hoisted companion static (`result` → `result$1`).
@@ -478,13 +515,20 @@ impl<'a> JvmClassRealization<'a> {
                 .or(property.delegate_field.filter(|_| delegate.is_some()))
                 .map(|index| instance_field_jvm_name(ir, self.run, c, index as usize))
                 .or_else(|| {
-                    hoisted.map(|(static_id, _)| ir.static_field_jvm_name(static_id).to_string())
+                    hoisted
+                        .map(|(static_id, _)| static_id)
+                        .or(hoisted_delegate)
+                        .map(|static_id| ir.static_field_jvm_name(static_id).to_string())
                 })
                 .filter(|physical| *physical != property.name),
             desc: backing
                 .map(|field| jvm_value_ty(&field.ty))
                 .or(delegate.map(|field| jvm_value_ty(&field.ty)))
                 .or_else(|| hoisted.map(|(_, storage)| jvm_value_ty(&storage.ty)))
+                .or_else(|| {
+                    hoisted_delegate
+                        .map(|static_id| jvm_value_ty(&ir.statics[static_id as usize].ty))
+                })
                 .map(desc)
                 .filter(|physical| {
                     record.spellings.ret.actualized_expect
@@ -567,8 +611,12 @@ impl<'a> JvmClassRealization<'a> {
         // A value-class-parametered primary ctor's physical handle is the PUBLIC synthetic marker
         // ctor (`(…;Lkotlin/jvm/internal/DefaultConstructorMarker;)V`) — the private erased
         // `<init>` is not callable cross-class. The marker ctor spells EVERY parameter, an inner
-        // class's leading outer instance included.
-        if !c.is_enum && ir.vc_ctor_declared_params(c.fq_name_id()).is_some() {
+        // class's leading outer instance included. A private primary is not hidden: kotlinc calls
+        // its erased `<init>` directly and names that one, the marker ctor being only its accessor.
+        if !c.is_enum
+            && ir.vc_ctor_declared_params(c.fq_name_id()).is_some()
+            && ir.ctor_visibilities.get(&c.fq_name_id()) != Some(&crate::types::Visibility::Private)
+        {
             return JvmConstructorSignature::init(format!(
                 "({}Lkotlin/jvm/internal/DefaultConstructorMarker;)V",
                 arguments.iter().map(|arg| desc(arg.ty)).collect::<String>()

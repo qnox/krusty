@@ -48,21 +48,22 @@ pub(super) fn declarations(
             .callees
             .target_intrinsic(&identity, bodies, capabilities.target_realizes_intrinsic)
             .map_err(|reason| format!("an invalid target declaration: {reason:?}"))?;
-        let realization = match platform.external_callable_by_dependency(&identity) {
-            Some((_, realization)) => realization,
-            None if raw_header_capability && known_target.is_none() => {
-                pending.extend(bodies.emitted_body_callables(
-                    &identity,
-                    crate::klib_lowering::emitted_closure_function,
-                ));
-                continue;
-            }
-            None => {
-                return Err(format!(
+        let realization =
+            match platform.external_callable_by_dependency(&identity) {
+                Some((_, realization)) => realization,
+                None if raw_header_capability && known_target.is_none() => {
+                    pending.extend(bodies.emitted_body_callables(
+                        &identity,
+                        crate::klib_lowering::EMITTED_CALL_FORMS,
+                    ));
+                    continue;
+                }
+                None => {
+                    return Err(format!(
                     "a KLIB dependency has no required exact provider declaration: {identity:?}"
                 ))
-            }
-        };
+                }
+            };
         if realization.dependency_callable.as_ref() != Some(&identity) {
             return Err("an ordinary KLIB body provider changed its exact identity".to_owned());
         }
@@ -87,10 +88,22 @@ pub(super) fn declarations(
         let target = facts
             .target_intrinsic(&identity, bodies, capabilities.target_realizes_intrinsic)
             .map_err(|reason| format!("an invalid target declaration: {reason:?}"))?;
+        let getter = !externals.contains_key(&identity)
+            && primitive.is_none()
+            && target.is_none()
+            && intrinsics.get(&identity).is_none()
+            && facts
+                .target_getter(&identity, bodies, capabilities.target_realizes_getter)
+                .map_err(|reason| format!("an invalid target getter declaration: {reason:?}"))?;
+        let member = facts
+            .target_member(&identity, capabilities.target_represents_classifier)
+            .map_err(|reason| format!("an invalid target member declaration: {reason:?}"))?;
         let emits_body = !externals.contains_key(&identity)
+            && !member
             && !constructor
             && primitive.is_none()
             && target.is_none()
+            && !getter
             && intrinsics.get(&identity).is_none()
             && bodies.function_has_body(&identity) == Some(true);
         if requires_ordinary
@@ -106,10 +119,7 @@ pub(super) fn declarations(
         }
         if emits_body {
             pending.extend(
-                bodies.emitted_body_callables(
-                    &identity,
-                    crate::klib_lowering::emitted_closure_function,
-                ),
+                bodies.emitted_body_callables(&identity, crate::klib_lowering::EMITTED_CALL_FORMS),
             );
         }
         declarations.push(realization);

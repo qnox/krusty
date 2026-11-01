@@ -6,15 +6,28 @@
 //! results are checked separately. This module never reconstructs that relation from source
 //! parameter or result spellings.
 
+use super::assignment_targets::ASSIGNMENT_CONVENTION;
 use super::*;
 use crate::types::TyKind;
 
 #[derive(Clone, Copy)]
 pub(super) enum OperatorDeclarationSite {
-    NonMember,
+    /// A top-level or local function, with its extension receiver.
+    NonMember(Option<Ty>),
     /// Exact stable declaration of a member. A missing identity means the caller is a legacy
-    /// signature-inference traversal, not an alternate path for deciding override semantics.
-    Member(Option<crate::fir::DeclarationId>),
+    /// signature-inference traversal, not an alternate path for deciding override semantics. The
+    /// type is the receiver a call binds: the extension receiver, else the dispatch receiver.
+    Member(Option<crate::fir::DeclarationId>, Option<Ty>),
+}
+
+impl OperatorDeclarationSite {
+    /// The receiver a call of the declaration binds, if any.
+    fn call_receiver(self) -> Option<Ty> {
+        match self {
+            OperatorDeclarationSite::NonMember(receiver)
+            | OperatorDeclarationSite::Member(_, receiver) => receiver,
+        }
+    }
 }
 
 #[derive(Clone, Default)]
@@ -225,7 +238,9 @@ impl Checker<'_> {
         owner: Option<TypeName>,
     ) {
         for (method_index, function) in class.methods.iter().enumerate() {
-            if !matches!(function.body, FunBody::None) || !function.is_operator() {
+            if !matches!(function.body, FunBody::None)
+                || !(function.is_operator() || function.name == ASSIGNMENT_CONVENTION)
+            {
                 continue;
             }
             let declaration = self.member_declaration(parser_declaration, owner, method_index);
@@ -245,10 +260,14 @@ impl Checker<'_> {
                 &function.annotations,
                 &function.annotation_args,
             );
+            let receiver = match &function.receiver {
+                Some(receiver) => Some(self.type_ref_ty_silent(scope, receiver)),
+                None => owner.map(Ty::obj_name),
+            };
             self.check_operator_declaration(
                 function,
                 ret,
-                OperatorDeclarationSite::Member(declaration),
+                OperatorDeclarationSite::Member(declaration, receiver),
             );
             self.active_lexical_policies.truncate(suppression_depth);
         }
@@ -279,6 +298,7 @@ impl Checker<'_> {
                 "context parameters on delegation operators are unsupported.".to_string(),
             );
         }
+        self.check_assignment_declaration(function, ret, site.call_receiver());
         if !function.is_operator() {
             return;
         }
@@ -293,11 +313,11 @@ impl Checker<'_> {
                 );
             }
             "equals" => match site {
-                OperatorDeclarationSite::NonMember => self.diags.error(
+                OperatorDeclarationSite::NonMember(_) => self.diags.error(
                     operator,
                     "'operator' modifier is not applicable to function: must be a member function.",
                 ),
-                OperatorDeclarationSite::Member(declaration) => {
+                OperatorDeclarationSite::Member(declaration, _) => {
                     let facts = declaration.zip(self.resolved_index).map_or_else(
                         EqualsMemberFacts::default,
                         |(declaration, index)| {
