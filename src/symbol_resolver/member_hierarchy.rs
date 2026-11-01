@@ -1698,6 +1698,31 @@ pub(crate) fn lexical_enclosing_classifier_names(
     owners
 }
 
+/// Whether a scope inherits nested classifiers through `supertype`. Kotlin inherits them along the
+/// superclass chain only: an interface's nested classifiers reach neither an implementing class nor
+/// a sub-interface by simple name (kotlinc 2.4.21 reports `unresolved reference`), whether the
+/// interface is Kotlin or Java.
+pub(crate) fn inherits_nested_classifiers_through(
+    source: &dyn SymbolSource,
+    supertype: TypeName,
+) -> bool {
+    source
+        .classifier(supertype)
+        .is_none_or(|classifier| !classifier.is_interface())
+}
+
+/// The direct supertypes through which `owner` inherits nested classifiers.
+pub(crate) fn nested_classifier_supertypes(
+    source: &dyn SymbolSource,
+    owner: TypeName,
+) -> Vec<TypeName> {
+    super::direct_supertypes(source, Ty::obj_name(owner))
+        .into_iter()
+        .filter_map(Ty::kotlin_class_internal)
+        .filter(|&supertype| inherits_nested_classifiers_through(source, supertype))
+        .collect()
+}
+
 pub(crate) fn inherited_nested_classifier_name(
     name: &str,
     roots: Vec<TypeName>,
