@@ -32,6 +32,16 @@ pub enum IrParameterRole {
     Generated(IrGeneratedParameterRole),
 }
 
+impl IrParameterRole {
+    /// A source value parameter, the parameters a declaration's value-parameter ordinals count.
+    pub const fn is_declared_value(self) -> bool {
+        matches!(
+            self,
+            Self::Value | Self::UnusedValue | Self::DestructuredValue
+        )
+    }
+}
+
 /// What a lifted callable's captured value was declared as, and what kind of callable captures
 /// it. Both are source facts; a target that names the lifted parameter after them (kotlinc's
 /// `LocalDeclarationsLowering` keeps a variable's own name for a named local function or an

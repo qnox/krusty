@@ -4923,16 +4923,24 @@ fn suspend_method_sig(
     Some(s)
 }
 
+/// The position of `fid`'s `vararg` among its lowered parameters. The recorded index counts the
+/// source value parameters; captures, context parameters and the extension receiver come before
+/// them, so the position is the parameter whose identity is that declared value parameter.
+fn vararg_parameter_position(ir: &IrFile, fid: u32) -> Option<usize> {
+    let vararg = ir.fn_varargs.get(&fid)?;
+    ir.fn_params
+        .get(&fid)?
+        .identities
+        .iter()
+        .enumerate()
+        .filter(|(_, identity)| identity.role.is_declared_value())
+        .nth(vararg.index)
+        .map(|(position, _)| position)
+}
+
 /// A method's generic `Signature` when a concrete param/return type is parameterized (`getXs()` →
 /// `()Ljava/util/List<Ljava/lang/String;>;`); non-generic positions keep their erased descriptor,
 /// `None` when none are parameterized.
-/// The position of `fid`'s `vararg` among its JVM parameters. The recorded index counts the
-/// declared parameters; an extension receiver comes before the value parameters.
-fn vararg_parameter_position(ir: &IrFile, fid: u32) -> Option<usize> {
-    let vararg = ir.fn_varargs.get(&fid)?;
-    Some(vararg.index + usize::from(ir.extension_receiver_fns.contains(&fid)))
-}
-
 fn method_parameterized_sig(
     formatter: &JvmSignatureFormatter<'_>,
     params: &[Ty],
