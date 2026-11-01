@@ -99,7 +99,9 @@ scripts/oss-corpus/bench.sh <name> <work dir> <krusty binary> <plugin repository
 
 A krusty probe build first finds the compilations krusty builds today (`bench.py plan`): only those
 are benchmarked, both compilers build exactly that task set, and both builds must succeed. Each
-compiler then gets its own session against its own Gradle daemon (`bench.py session`): unrecorded
+compiler then gets its own session against its own Gradle and Kotlin daemons (`bench.py session`),
+which it starts under a Gradle user home and Kotlin daemon directory of its own, checks that every
+build ran in, and stops, leaving any other daemon on the machine alone: unrecorded
 warm-up builds, clean builds (`--rerun-tasks`), and an edit loop that changes one Kotlin file
 between builds, first without changing its ABI (the body of a private function) and then with an
 ABI change (a public function renamed). The file is the median-sized source of the benchmarked

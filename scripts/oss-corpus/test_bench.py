@@ -74,26 +74,41 @@ class Edits(unittest.TestCase):
         self.assertEqual(bench.edited('package p\n', 'abi', 3), 'package p\n\npublic fun corpusBenchAbi3(): Int = 3\n')
 
 
-# A stand-in `gradlew`: the first build starts a detached daemon that holds 64 MB, every build logs
-# its arguments and the edited file, `--stop` stops the daemon, and `$FAIL_ON` names an
-# invocation (1-based) that fails.
+GRADLE_DAEMON = 'org.gradle.launcher.daemon.bootstrap.GradleDaemon'
+KOTLIN_DAEMON = 'org.jetbrains.kotlin.daemon.KotlinCompileDaemon'
+
+# A stand-in `gradlew` with Gradle's daemon contract: a build runs in the daemon registered in its
+# Gradle user home when that one is alive, and otherwise starts one (64 MB) and registers it; the
+# build's Kotlin compile likewise runs in the Kotlin daemon registered under `$XDG_DATA_HOME` (16
+# MB). `$FOREIGN_REGISTRY` stands for a build handed to a daemon outside the session: the build
+# then runs in the daemon registered there and starts none. Every build logs its arguments and the
+# edited file, and `$FAIL_ON` names an invocation (1-based) that fails.
 GRADLEW = textwrap.dedent('''\
     #!/usr/bin/env bash
-    if [ "$1" = --stop ]; then
-      [ -f daemon.pid ] && kill "$(cat daemon.pid)" && rm daemon.pid
-      exit 0
-    fi
     n=$(( $(wc -l < calls.log 2>/dev/null || echo 0) + 1 ))
     echo "$* | $(tail -n 1 src/A.kt)" >> calls.log
-    if [ ! -f daemon.pid ]; then
-      setsid python3 -c "import time; b = bytearray(64 << 20); time.sleep(600)" </dev/null >/dev/null 2>&1 &
-      echo $! > daemon.pid
-      sleep 0.5
-    fi
+    echo "$GRADLE_RO_DEP_CACHE" > ro-cache.log
+    daemon() {  # <registry> <main class> <MB>
+      if [ -f "$1" ] && kill -0 "$(cat "$1")" 2>/dev/null; then return; fi
+      [ -n "$FOREIGN_REGISTRY" ] && return
+      setsid python3 -c "import time; b = bytearray($3 << 20); time.sleep(600)" "$2" </dev/null >/dev/null 2>&1 &
+      echo $! > "$1"
+    }
+    daemon "${FOREIGN_REGISTRY:-$GRADLE_USER_HOME/daemon.pid}" %s 64
+    daemon "${FOREIGN_REGISTRY:-$XDG_DATA_HOME/kotlin.pid}" %s 16
+    sleep 0.5
     printf ':a:compileKotlin\\t1000\\t3500\\texecuted\\n' > "$CORPUS_TASK_TIMES"
     [ "$n" = "${FAIL_ON:-0}" ] && exit 1
     exit 0
-''')
+''' % (GRADLE_DAEMON, KOTLIN_DAEMON))
+
+
+def alive(pid):
+    try:
+        with open(f'/proc/{pid}/stat') as f:
+            return f.read().rsplit(')', 1)[1].split()[0] != 'Z'
+    except OSError:
+        return False
 
 
 class Session(unittest.TestCase):
@@ -103,19 +118,37 @@ class Session(unittest.TestCase):
         os.chmod(f'{root}/gradlew', 0o755)
         write(f'{root}/src/A.kt', 'package a\nclass A\n')
         write(f'{work}/plan.json', json.dumps(dict(tasks=[':a:compileKotlin'], edit='src/A.kt')))
-        environment = dict(os.environ, BENCH_WARMUPS='1', BENCH_CLEAN_RUNS='1', BENCH_EDIT_RUNS='2', **env)
+        environment = dict(os.environ, BENCH_WARMUPS='1', BENCH_CLEAN_RUNS='1', BENCH_EDIT_RUNS='2',
+                           GRADLE_USER_HOME=f'{work}/shared', XDG_DATA_HOME=f'{work}/shared-xdg', **env)
+        os.makedirs(f'{work}/shared', exist_ok=True)
+        os.makedirs(f'{work}/shared-xdg', exist_ok=True)
         code = subprocess.run([sys.executable, os.path.join(HERE, 'bench.py'), 'session', f'{work}/plan.json',
                                'kotlinc', f'{work}/kotlinc.json', '-Ix'],
                               cwd=root, env=environment, stderr=subprocess.DEVNULL).returncode
         return code, root
 
-    def test_every_build_runs_against_one_daemon_which_is_measured_and_stopped(self):
+    def start_outside(self, registry, main):
+        """A compatible daemon started outside the session, registered where the caller's builds
+        would find it."""
+        daemon = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(600)', main],
+                                  start_new_session=True)
+        self.addCleanup(daemon.wait)
+        self.addCleanup(daemon.kill)
+        write(registry, str(daemon.pid))
+        return daemon.pid
+
+    def test_every_build_runs_in_the_sessions_own_daemons_which_are_measured_and_stopped(self):
         with tempfile.TemporaryDirectory() as work:
+            outside = [self.start_outside(f'{work}/shared/daemon.pid', GRADLE_DAEMON),
+                       self.start_outside(f'{work}/shared-xdg/kotlin.pid', KOTLIN_DAEMON)]
             code, root = self.run_session(work)
             result = json.loads(read(f'{work}/kotlinc.json'))
             calls = read(f'{root}/calls.log').splitlines()
-            daemon_gone = not os.path.exists(f'{root}/daemon.pid')
+            ro_cache = read(f'{root}/ro-cache.log').strip()
             restored = read(f'{root}/src/A.kt')
+            home_left = os.path.exists(f'{work}/kotlinc.home')
+            time.sleep(0.2)
+            outside_alive = [alive(pid) for pid in outside]
         self.assertEqual(code, 0)
         self.assertIsNone(result['error'])
         self.assertEqual(calls, [
@@ -128,22 +161,38 @@ class Session(unittest.TestCase):
             '--daemon -Ix --offline --no-build-cache :a:compileKotlin | public fun corpusBenchAbi5(): Int = 5',
             '--daemon -Ix --offline --no-build-cache :a:compileKotlin | public fun corpusBenchAbi6(): Int = 6',
         ])
+        self.assertEqual(ro_cache, f'{work}/shared/caches')
         self.assertEqual({s: len(r) for s, r in result['runs'].items()}, dict(clean=1, body=2, abi=2))
-        for runs in result['runs'].values():
-            for r in runs:
-                self.assertEqual((r['exit'], r['compile_seconds']), (0, 2.5))
-                # The daemon an earlier build started is resident during and after this one.
-                self.assertGreaterEqual(r['peak_rss_mb']['other'], 64)
-                self.assertGreaterEqual(r['resident_after_mb']['total'], 64)
-        self.assertTrue(daemon_gone, 'the session left its daemon running')
+        runs = [r for scenario in result['runs'].values() for r in scenario]
+        owned = runs[0]['daemons']
+        self.assertEqual(set(owned), {'gradle', 'kotlin'})
+        self.assertFalse(set(owned.values()) & set(outside))
+        for r in runs:
+            self.assertEqual((r['exit'], r['compile_seconds'], r['daemons']), (0, 2.5, owned))
+            # The daemons an earlier build started are resident during and after this one.
+            self.assertGreaterEqual(r['peak_rss_mb']['gradle'], 64)
+            self.assertGreaterEqual(r['peak_rss_mb']['kotlin_daemon'], 16)
+            self.assertGreaterEqual(r['resident_after_mb']['total'], 80)
+        self.assertFalse(any(alive(pid) for pid in owned.values()), 'the session left its daemons running')
+        self.assertEqual(outside_alive, [True, True], 'the session stopped a daemon it does not own')
+        self.assertFalse(home_left)
         self.assertEqual(restored, 'package a\nclass A\n')
+
+    def test_a_build_served_by_a_daemon_outside_the_session_ends_it(self):
+        with tempfile.TemporaryDirectory() as work:
+            outside = self.start_outside(f'{work}/foreign.pid', GRADLE_DAEMON)
+            code, root = self.run_session(work, FOREIGN_REGISTRY=f'{work}/foreign.pid')
+            result = json.loads(read(f'{work}/kotlinc.json'))
+            outside_alive = alive(outside)
+        self.assertEqual(code, 1)
+        self.assertEqual(result['error'], 'kotlinc: a build ran in 0 gradle daemons of this session, not one')
+        self.assertTrue(outside_alive)
 
     def test_a_failed_build_ends_the_session_and_restores_the_edited_file(self):
         with tempfile.TemporaryDirectory() as work:
             code, root = self.run_session(work, FAIL_ON='4')
             result = json.loads(read(f'{work}/kotlinc.json'))
             restored = read(f'{root}/src/A.kt')
-            time.sleep(0.2)
         self.assertEqual(code, 1)
         self.assertEqual(result['error'], 'kotlinc body build 1 exited 1')
         self.assertEqual({s: len(r) for s, r in result['runs'].items()}, dict(clean=1, body=1, abi=0))

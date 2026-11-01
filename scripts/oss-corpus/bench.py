@@ -23,8 +23,13 @@ private top-level function appended to the edited file, which leaves its ABI alo
 replaces a public top-level function with one of a new name each time. Recorded builds run
 offline and without the build cache. The original file is restored afterwards.
 
-Like `measure.py`, the session is the child subreaper of everything it starts, so the Gradle
-daemon, the Kotlin daemon and every krusty process stay its descendants. Each build records its wall
+Each session owns its daemons. It runs its builds with a Gradle user home and a Kotlin daemon
+directory of its own (dependencies come from the shared Gradle cache, read-only), so no build can
+be handed to a compatible daemon started elsewhere. Like `measure.py`, the session is the child
+subreaper of everything it starts, so the Gradle daemon, the Kotlin daemon and every krusty process
+stay its descendants. Every build must run in exactly one Gradle daemon (and, for kotlinc, one
+Kotlin daemon) among them, the same as the first build's, or the session fails. At the end it stops
+its descendants and nothing else. Each build records its wall
 time, the summed time of the benchmarked compilations' tasks, the peak of the descendants' summed
 resident memory during the build (sampled every 100 ms, split by kind; the warm daemons count), and
 what stays resident once the build is done.
@@ -36,6 +41,7 @@ import ctypes
 import json
 import os
 import re
+import shutil
 import statistics
 import subprocess
 import sys
@@ -122,18 +128,45 @@ def edited(original, kind, n):
     return text + f'\npublic fun corpusBenchAbi{n}(): Int = {n}\n'
 
 
+# The main classes of the two daemons a build runs in.
+DAEMONS = dict(gradle='org.gradle.launcher.daemon.bootstrap.GradleDaemon',
+               kotlin='org.jetbrains.kotlin.daemon.KotlinCompileDaemon')
+
+
+def daemons(root):
+    """{daemon kind: {pid}} of the daemons among this process's descendants."""
+    found = {k: set() for k in DAEMONS}
+    for pid in measure.descendants(root):
+        try:
+            with open(f'/proc/{pid}/cmdline', 'rb') as f:
+                argv = [a.decode(errors='replace') for a in f.read().split(b'\0')]
+        except OSError:
+            continue
+        for k, main in DAEMONS.items():
+            if main in argv:
+                found[k].add(pid)
+    return found
+
+
 class Sampler:
-    """Samples the summed resident memory of this process's descendants until stopped."""
+    """Samples the summed resident memory of this process's descendants until stopped, and records
+    the daemons among them."""
 
     def __init__(self, root):
         self.root = root
         self.peak = dict.fromkeys(('total',) + measure.KINDS, 0)
+        self.daemons = {k: set() for k in DAEMONS}
         self.done = threading.Event()
         self.thread = threading.Thread(target=self.run, daemon=True)
 
+    def observe(self):
+        measure.sample(self.root, self.peak)
+        for k, pids in daemons(self.root).items():
+            self.daemons[k] |= pids
+
     def run(self):
         while not self.done.is_set():
-            measure.sample(self.root, self.peak)
+            self.observe()
             self.done.wait(0.1)
 
     def __enter__(self):
@@ -143,7 +176,7 @@ class Sampler:
     def __exit__(self, *_):
         self.done.set()
         self.thread.join()
-        measure.sample(self.root, self.peak)
+        self.observe()
 
 
 def resident(root):
@@ -156,19 +189,57 @@ def mb(sizes):
     return {k: round(v / 2**20) for k, v in sizes.items()}
 
 
+def session_home(home):
+    """The environment that gives a session daemons of its own: a Gradle user home and a Kotlin
+    daemon directory nobody else's build uses, so neither Gradle nor the Kotlin Gradle plugin can
+    hand a build to a compatible daemon started elsewhere. Gradle resolves dependencies from the
+    shared user home's cache read-only (`GRADLE_RO_DEP_CACHE`), which Gradle never writes or cleans
+    up, and the Gradle wrapper's distributions are shared; the session's user home starts with the
+    shared `gradle.properties`. Everything else Gradle caches is the session's own and is rebuilt
+    by the warm-up builds."""
+    shared = os.environ.get('GRADLE_USER_HOME') or os.path.expanduser('~/.gradle')
+    gradle, xdg = os.path.join(home, 'gradle'), os.path.join(home, 'xdg')
+    os.makedirs(gradle)
+    os.makedirs(xdg)
+    if os.path.isdir(os.path.join(shared, 'wrapper')):
+        os.symlink(os.path.join(shared, 'wrapper'), os.path.join(gradle, 'wrapper'))
+    if os.path.isfile(os.path.join(shared, 'gradle.properties')):
+        shutil.copy(os.path.join(shared, 'gradle.properties'), os.path.join(gradle, 'gradle.properties'))
+    return dict(GRADLE_USER_HOME=gradle, GRADLE_RO_DEP_CACHE=os.path.join(shared, 'caches'), XDG_DATA_HOME=xdg)
+
+
 class Session:
-    def __init__(self, plan_doc, mode, gradle_args, log, times):
+    def __init__(self, plan_doc, mode, gradle_args, log, times, env):
         self.plan = plan_doc
         self.mode = mode
         self.gradle_args = gradle_args
         self.log = log
         self.times = times
+        self.env = env
         self.root = os.getpid()
         self.runs = {s: [] for s in SCENARIOS}
+        # The daemons of the session's first build: every later build must run in the same ones.
+        self.daemons = None
+
+    def owned_daemons(self, seen):
+        """Checks that a build ran in this session's own warm daemons: one Gradle daemon and, for
+        kotlinc, one Kotlin daemon, both descendants of this session and the same as in its first
+        build. Returns {kind: pid}."""
+        needed = ('gradle', 'kotlin') if self.mode == 'kotlinc' else ('gradle',)
+        found = {}
+        for k in needed:
+            if len(seen[k]) != 1:
+                raise RuntimeError(f'{self.mode}: a build ran in {len(seen[k])} {k} daemons of this session, not one')
+            found[k] = next(iter(seen[k]))
+        if self.daemons is None:
+            self.daemons = found
+        elif found != self.daemons:
+            raise RuntimeError(f'{self.mode}: a build ran in daemons {found}, not the session\'s {self.daemons}')
+        return found
 
     def build(self, *extra):
         command = ['./gradlew', '--daemon', *self.gradle_args, *extra, *self.plan['tasks']]
-        env = dict(os.environ, CORPUS_TASK_TIMES=self.times)
+        env = dict(os.environ, CORPUS_TASK_TIMES=self.times, **self.env)
         with open(self.log, 'a') as log:
             log.write(f'\n$ {" ".join(command)}\n')
             log.flush()
@@ -182,7 +253,8 @@ class Session:
         compiled = [compare.compile_seconds(times, t, self.mode) for t in self.plan['tasks']]
         return dict(exit=code, wall_seconds=round(wall, 2),
                     compile_seconds=round(sum(s for s in compiled if s is not None), 2),
-                    peak_rss_mb=mb(sampler.peak), resident_after_mb=mb(resident(self.root)))
+                    peak_rss_mb=mb(sampler.peak), resident_after_mb=mb(resident(self.root)),
+                    daemons=self.owned_daemons(sampler.daemons) if code == 0 else None)
 
     def run(self):
         runs = self.runs
@@ -233,7 +305,9 @@ def session(plan_path, mode, out, gradle_args):
     for suffix in ('.log', '.tasks.tsv'):
         if os.path.exists(stem + suffix):
             os.remove(stem + suffix)
-    s = Session(plan_doc, mode, gradle_args, stem + '.log', stem + '.tasks.tsv')
+    home = stem + '.home'
+    shutil.rmtree(home, ignore_errors=True)
+    s = Session(plan_doc, mode, gradle_args, stem + '.log', stem + '.tasks.tsv', session_home(home))
     error = None
     try:
         if not plan_doc['tasks'] or not plan_doc['edit']:
@@ -242,8 +316,10 @@ def session(plan_path, mode, out, gradle_args):
     except RuntimeError as e:
         error = str(e)
     finally:
-        subprocess.run(['./gradlew', '--stop'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # Only the session's own processes are stopped: its descendants, which include every daemon
+        # its builds started and no other.
         measure.stop_leftovers(os.getpid())
+        shutil.rmtree(home, ignore_errors=True)
     result = dict(mode=mode, runs=s.runs, error=error)
     with open(out, 'w') as f:
         json.dump(result, f, indent=1)
