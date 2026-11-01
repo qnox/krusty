@@ -141,6 +141,8 @@ mod destructuring;
 mod diagnostic_selection;
 mod eager_lambda_analysis;
 mod elvis_expression;
+mod type_test_narrowing;
+use type_test_narrowing::TypeTest;
 mod enum_entries;
 mod enum_entry_method_owner;
 mod explicit_backing_fields;
@@ -22852,6 +22854,7 @@ fun after(): Int = 2
             retention: None,
             annotation_targets: None,
             mapped_collection: None,
+            mapped_builtin: false,
             annotation_element_defaults: Vec::new(),
             deprecation: None,
         }
@@ -25255,6 +25258,7 @@ fun box(): String {
                     retention: None,
                     annotation_targets: None,
                     mapped_collection: None,
+                    mapped_builtin: false,
                     annotation_element_defaults: Vec::new(),
                     deprecation: None,
                 }));
@@ -25395,6 +25399,7 @@ fun box(): String {
                     retention: None,
                     annotation_targets: None,
                     mapped_collection: None,
+                    mapped_builtin: false,
                     annotation_element_defaults: Vec::new(),
                     deprecation: None,
                 })
@@ -43917,6 +43922,11 @@ impl<'a> Checker<'a> {
             while let Expr::SafeCall { receiver, .. } = self.file.expr(root) {
                 root = *receiver;
             }
+            // A non-null safe cast (`x as? T`, or a safe-call chain rooted at one) proves `x is T`.
+            if let Some(test) = self.safe_cast_type_test(root) {
+                self.type_test_narrowings(scope, test, out, declined);
+                return;
+            }
             if let Some(root_path) = self
                 .expr_access_path(root)
                 .filter(|path| path.segments.is_empty())
@@ -44081,58 +44091,17 @@ impl<'a> Checker<'a> {
         if negated != for_else {
             return out;
         }
-        let Some(path) = self.expr_access_path(operand) else {
-            crate::trace_compiler!(
-                "smartcast",
-                "condition expression={} rejected: operand has no stable access path",
-                cond.0,
-            );
-            return out;
-        };
-        // The target is computed before the stability gate so a DECLINED proof can still name it.
-        let site = self.span(cond);
-        let stable_ty = self.stable_path_ty(scope, &path, site);
-        let tt = self
-            .resolved_type_tys
-            .get(&(ty.span.lo, ty.span.hi))
-            .copied()
-            .unwrap_or_else(|| self.type_ref_ty_silent(scope, &ty));
-        let narrowed = self.type_test_target(stable_ty, tt, ty.nullable(), ty.targs.is_empty());
-        // Only stable values smart-cast soundly — a `var`/computed property could change.
-        if stable_ty.is_none() {
-            if let Some(narrowed) = narrowed {
-                if let Some((name, _)) = self.closure_mutated_decline(scope, &path, site) {
-                    declined.push((name, narrowed));
-                }
-            }
-            crate::trace_compiler!(
-                "smartcast",
-                "condition expression={} path={path:?} rejected: unstable",
-                cond.0,
-            );
-            return out;
-        }
-        if let Some(narrowed) = narrowed {
-            crate::trace_compiler!(
-                "smartcast",
-                "condition expression={} path={path:?} target={narrowed:?} else={for_else}",
-                cond.0,
-            );
-            out.push((path, narrowed));
-            // A non-null type test can succeed on a safe-call chain only when every guarded
-            // receiver was non-null. Publish those prefix facts as part of the same proof:
-            // `holder?.value is T` permits an ordinary `holder.value` read in the guarded branch.
-            // Nullable tests (`is T?`) deliberately do not imply this because `null is T?` holds.
-            if !ty.nullable() && matches!(self.file.expr(operand), Expr::SafeCall { .. }) {
-                self.null_check_narrowings(scope, operand, &mut out, declined);
-            }
-        } else {
-            crate::trace_compiler!(
-                "smartcast",
-                "condition expression={} path={path:?} rejected: target={tt:?}",
-                cond.0,
-            );
-        }
+        self.type_test_narrowings(
+            scope,
+            TypeTest {
+                operand,
+                ty: &ty,
+                nullable: ty.nullable(),
+                site: self.span(cond),
+            },
+            &mut out,
+            declined,
+        );
         out
     }
 

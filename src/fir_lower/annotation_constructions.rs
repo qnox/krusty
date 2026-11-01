@@ -192,6 +192,7 @@ fn element_value(ir: &IrFile, expression: ExprId, declared: Ty) -> Option<AnnoVa
                 return None;
             }
             AnnoValue::Annotation(AppliedAnnotation {
+                written_order: None,
                 internal: construction.interface,
                 values,
             })

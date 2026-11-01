@@ -114,6 +114,8 @@ pub use inline_body::{
     InlineCollectionCapacity, InlineCollectionLocalNames, InlineIterationIndex,
     InlineIterationTraversal,
 };
+#[cfg(test)]
+pub(crate) use klib_body_class::test_fixture as klib_body_class_fixture;
 pub(crate) use klib_body_class::{KlibBodyClassContract, KlibBodyClassParameters};
 pub use member_flags::LmFlags;
 pub(crate) use metadata_normalization::{
@@ -2274,6 +2276,12 @@ pub struct LibraryType {
     /// map pairs them. Published by the provider that owns that map; `None` for every other
     /// classifier.
     pub mapped_collection: Option<crate::types::MappedCollection>,
+    /// This classifier is a Kotlin builtin declaration that the platform realizes by a distinct
+    /// class (`kotlin/collections/List` by `java/util/List`), as the platform's builtin class map
+    /// pairs them. It is a Kotlin declaration although its class carries no Kotlin metadata.
+    /// Published by the provider that owns that map; `false` for every other classifier,
+    /// including a platform class that merely shares a builtin's package.
+    pub mapped_builtin: bool,
     /// For an annotation classifier: each element that declares a default, as the provider's
     /// declaration format records it. A module annotation publishes none; its defaults are
     /// checked default expressions.
@@ -2381,6 +2389,7 @@ impl LibraryType {
             retention: None,
             annotation_targets: None,
             mapped_collection: None,
+            mapped_builtin: false,
             annotation_element_defaults: Vec::new(),
             deprecation: None,
         }
@@ -2677,6 +2686,7 @@ mod tests {
             retention: None,
             annotation_targets: None,
             mapped_collection: None,
+            mapped_builtin: false,
             annotation_element_defaults: Vec::new(),
             deprecation: None,
         };

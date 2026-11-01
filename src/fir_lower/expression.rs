@@ -157,7 +157,11 @@ impl BodyLowering<'_> {
                 let slot = self
                     .implicit_receiver_slot(*current, *depth)
                     .ok_or(FirLoweringFailure::MissingImplicitReceiver { origin })?;
-                self.ir.add_expr(IrExpr::GetValue(slot))
+                let read = self.ir.add_expr(IrExpr::GetValue(slot));
+                self.ir
+                    .binding_read_stability
+                    .insert(read, crate::ir::IrBindingStability::Stable);
+                read
             }
             FirExprKind::EnclosingReceiver { path } => self.enclosing_receiver(path, origin)?,
             FirExprKind::CapturedImplicitReceiver {
@@ -169,7 +173,11 @@ impl BodyLowering<'_> {
                 let slot = self
                     .implicit_receiver_capture_slot(*enclosing_depth, *current, *depth, path)
                     .ok_or(FirLoweringFailure::MissingImplicitReceiver { origin })?;
-                self.ir.add_expr(IrExpr::GetValue(slot))
+                let read = self.ir.add_expr(IrExpr::GetValue(slot));
+                self.ir
+                    .binding_read_stability
+                    .insert(read, crate::ir::IrBindingStability::Stable);
+                read
             }
             FirExprKind::SingletonValue { classifier } => self.checked_singleton(*classifier),
             FirExprKind::EnumEntry {
@@ -225,6 +233,7 @@ impl BodyLowering<'_> {
                 context_arguments,
                 substitutions,
             } => {
+                let source_line = self.body.expression_debug_lines(expression_id).source;
                 let lowered = self.checked_property_read(
                     target,
                     *dispatch_receiver,
@@ -240,7 +249,7 @@ impl BodyLowering<'_> {
                         .map(|signature| signature.result.get()),
                     crate::fir::FirPropertyTarget::External { result, .. } => Some(result.get()),
                 };
-                self.declaration_result(lowered, declared, expression.ty.get())
+                self.declaration_result(lowered, declared, expression.ty.get(), source_line)
             }
             FirExprKind::PropertyWrite {
                 target,
@@ -321,8 +330,8 @@ impl BodyLowering<'_> {
                 })
             }
             FirExprKind::Call(call) => {
-                let lowered = self
-                    .checked_call(call, self.body.expression_debug_lines(expression_id).source)?;
+                let source_line = self.body.expression_debug_lines(expression_id).source;
+                let lowered = self.checked_call(call, source_line)?;
                 let declared_result = match call.target {
                     crate::fir::FirCallTarget::Module(target) => self
                         .index
@@ -340,7 +349,7 @@ impl BodyLowering<'_> {
                         ..
                     } => Some(physical_result.get()),
                 };
-                self.declaration_result(lowered, declared_result, expression.ty.get())
+                self.declaration_result(lowered, declared_result, expression.ty.get(), source_line)
             }
             FirExprKind::ConstructorCall(call) => self.checked_constructor_call(call)?,
             FirExprKind::AnonymousObject(object) => self.anonymous_object(object)?,
@@ -1446,13 +1455,14 @@ impl BodyLowering<'_> {
                 arguments,
                 parameter_types,
             } => {
+                let source_line = self.body.expression_debug_lines(expression_id).source;
                 let (call, declared) = self.checked_local_call(
                     target.clone(),
                     *extension_receiver,
                     arguments,
                     parameter_types,
                 )?;
-                self.declaration_result(call, Some(declared), expression.ty.get())
+                self.declaration_result(call, Some(declared), expression.ty.get(), source_line)
             }
             FirExprKind::Lambda {
                 callable,
@@ -1519,14 +1529,6 @@ impl BodyLowering<'_> {
             // A call whose operands were stored first keeps the call's line on the call itself, which
             // kotlinc marks once those operands are evaluated.
             if let Some(&call) = self.operand_bound_calls.get(&lowered) {
-                self.ir
-                    .expr_source_lines
-                    .entry(call)
-                    .or_insert(debug.source);
-            }
-            // So does a call one of whose operands is inlined from a compiled body: the inlined
-            // code ran under the callee's lines.
-            if let Some(call) = self.ir.call_after_compiled_inline_operand(lowered) {
                 self.ir
                     .expr_source_lines
                     .entry(call)
@@ -1650,9 +1652,26 @@ impl BodyLowering<'_> {
     /// Preserve the checked semantic conversion from a declaration's result to its call-site
     /// substitution. Whether that conversion crosses a physical ABI boundary is target-owned; the
     /// JVM records its answer after generic erasure.
-    fn declaration_result(&mut self, call: ExprId, declared: Option<Ty>, result: Ty) -> ExprId {
+    fn declaration_result(
+        &mut self,
+        call: ExprId,
+        declared: Option<Ty>,
+        result: Ty,
+        source_line: u32,
+    ) -> ExprId {
         if declared.is_none_or(|declared| declared == result) {
             return call;
+        }
+        // The conversion remains the same checked source operation. Keep its position on the
+        // original producer and on the selected call inside an operand-evaluation block.
+        if source_line != 0 {
+            self.ir.expr_source_lines.entry(call).or_insert(source_line);
+            if let Some(&selected) = self.operand_bound_calls.get(&call) {
+                self.ir
+                    .expr_source_lines
+                    .entry(selected)
+                    .or_insert(source_line);
+            }
         }
         let coercion = self.ir.add_expr(IrExpr::TypeOp {
             op: IrTypeOp::ImplicitCoercion,

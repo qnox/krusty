@@ -109,6 +109,7 @@ use inline_call_outcome::InlineCallOutcome;
 mod inline_frame_marker;
 mod inline_lambda_aliases;
 mod inline_return_frames;
+mod inline_scope_frames;
 mod instance_field_names;
 use instance_field_names::instance_field_jvm_name;
 mod inherited_default_forwarders;
@@ -157,6 +158,7 @@ mod shared_cell_declaration;
 mod signature_formatter;
 mod singleton_instance;
 mod singleton_instance_load;
+mod spliced_locals;
 mod suspend_lambda_class;
 mod value_class_adapters;
 use value_class_adapters::{emit_value_class_box_adapter, emit_value_class_unbox_adapter};
@@ -2644,7 +2646,7 @@ fn emit_class(
                 e.record_locals = false;
                 let lines = (&mut ctor_lines, &mut ctor_restored_lines);
                 initializer_lines::record_initializer_lines(&ctor, marks_before, lines);
-                init_locals.extend(ctor.local_entries().iter().filter_map(
+                init_locals.extend(ctor.named_local_entries().iter().filter_map(
                     |&(start, length, slot, ref name, ref desc)| {
                         length.map(|length| (start, length, slot, name.clone(), desc.clone()))
                     },
@@ -4447,13 +4449,6 @@ fn emit_placed_method(
         .get(&fid)
         .map(Vec::as_slice)
         .unwrap_or(&[]);
-    let ann_types = function_annotations::header_annotation_types(
-        ret_ann,
-        user_param_anns,
-        &emitted_param_anns,
-        nullability_annotated,
-    );
-    let ann_types: Vec<&str> = ann_types.iter().map(String::as_str).collect();
     let method_parameters = if env.java_parameters {
         super::method_parameters::function(ir, fid, &param_tys, holder_receiver)
     } else {
@@ -4463,9 +4458,15 @@ fn emit_placed_method(
         &method_name,
         &reserved_desc,
         reserved_sig.as_deref(),
-        &ann_types,
+        &[],
         &declared_annotations,
         &method_parameters,
+    );
+    e.cw.reserve_method_parameter_annotation_pool(
+        ret_ann,
+        user_param_anns,
+        &emitted_param_anns,
+        nullability_annotated,
     );
     let mut code = CodeBuilder::new(e.frame.size());
     method_entry::emit(
@@ -4668,9 +4669,8 @@ fn emit_placed_method(
     }
     // Method locals precede `this` and parameters in kotlinc's table order.
     if e.record_locals {
-        for local in std::mem::take(&mut e.open_locals) {
-            local.record(None, &mut code);
-        }
+        let locals = std::mem::take(&mut e.open_locals);
+        e.record_open_locals(locals, |_| None, &mut code);
     }
     // Suspend rewriting invalidates source-local expression ids, but its physical parameters remain
     // stable and reflection/debug tooling still expects `$completion` (plus the declared receiver and
@@ -4768,7 +4768,7 @@ fn emit_placed_method(
     {
         e.cw.set_method_nullability(&method_name, &desc, ret_ann, &emitted_param_anns);
     }
-    // The USER parameter annotations (their types are already interned, above).
+    // The USER parameter annotations (their complete payloads are already interned, above).
     if !user_param_anns.is_empty() {
         e.cw.set_method_param_annotations(&method_name, &desc, user_param_anns);
     }
@@ -5192,6 +5192,8 @@ struct Emitter<'a> {
     inline_string_concat: bool,
     /// The scope numbering of the method being emitted, under `-Xuse-inline-scopes-numbers`.
     inline_scopes: Option<crate::jvm::inliner::InlineScopes>,
+    /// Placed lambdas whose bodies are being emitted, innermost last, with their callers' numbering.
+    inline_scope_units: Vec<(u64, Option<crate::jvm::inliner::InlineScopes>)>,
     /// Active `finally` bodies, outermost first. A source-level control transfer executes these
     /// before leaving its protected region; the stack carries exact IR identities, not syntax.
     return_finalizers: Vec<u32>,
@@ -5305,6 +5307,7 @@ impl<'a> Emitter<'a> {
             inline_scopes: env
                 .inline_scopes_numbers
                 .then(crate::jvm::inliner::InlineScopes::default),
+            inline_scope_units: Vec::new(),
             return_finalizers: Vec::new(),
             protected_regions: Vec::new(),
             terminal_statement_target: None,
@@ -5531,30 +5534,6 @@ impl<'a> Emitter<'a> {
         );
         code.invokespecial(constructor, 2, 0);
         code.athrow();
-    }
-
-    /// Describe a spliced body's own locals in the caller's debug table.
-    ///
-    /// They are real locals of the method that now contains them; the reference compiler names every
-    /// one. `shift` is where the splice landed for a body laid out at offset 0 — a branchless splice
-    /// is appended wherever the caller happens to be — and zero for one already laid out in place.
-    fn record_spliced_locals(
-        &mut self,
-        locals: &[(u16, u16, u16, String, String)],
-        inline_only: bool,
-        shift: usize,
-        code: &mut CodeBuilder,
-    ) {
-        // An `@InlineOnly` body contributes no debug locals either, for the same reason.
-        if !self.record_locals || inline_only {
-            return;
-        }
-        for (start, length, slot, name, descriptor) in locals {
-            let Ok(start) = u16::try_from(*start as usize + shift) else {
-                continue;
-            };
-            code.add_local_entry(start, Some(*length), *slot, name, descriptor);
-        }
     }
 
     /// Slot-indexed caller locals for `0..upto` (long/double take two slots; `Top` fills the gaps).
