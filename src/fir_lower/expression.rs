@@ -1215,10 +1215,13 @@ impl BodyLowering<'_> {
                         }
                         Ok(IrCatch {
                             var: self.value_slot(catch.parameter),
-                            binding: self
-                                .body
-                                .debug_value_name(catch.parameter)
-                                .map(|name| crate::ir::IrCatchBinding::source(name.to_owned())),
+                            binding: if catch.unused {
+                                Some(crate::ir::IrCatchBinding::unused())
+                            } else {
+                                self.body
+                                    .debug_value_name(catch.parameter)
+                                    .map(|name| crate::ir::IrCatchBinding::source(name.to_owned()))
+                            },
                             ty: parameter_ty,
                             body: self.expression(catch.body)?,
                             line: (catch.debug_line != 0).then_some(catch.debug_line),

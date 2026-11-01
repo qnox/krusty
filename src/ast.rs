@@ -264,6 +264,8 @@ pub enum UnsupportedAnnotationArgument {
 #[derive(Clone, Debug)]
 pub struct CatchClause {
     pub name: String,
+    /// `catch (_: E)`: the parameter declares no name.
+    pub unused: bool,
     pub ty: TypeRef,
     pub body: ExprId,
     /// The full catch parameter (`name: ty`) span used by parameter diagnostics.

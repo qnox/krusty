@@ -27,6 +27,7 @@ fn catch_parameter_name_survives_checked_fir_lowering() {
                 origin,
                 parameter,
                 parameter_ty: resolved(Ty::obj("java/lang/Exception")),
+                unused: false,
                 body: two,
                 debug_line: 0,
             }]),

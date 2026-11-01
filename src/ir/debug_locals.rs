@@ -205,6 +205,13 @@ impl IrCatchBinding {
         }
     }
 
+    /// The binding of `catch (_: E)`. It is named kotlinc's `<unused var>`
+    /// (`SpecialNames.UNDERSCORE_FOR_UNUSED_VAR`), the name the same parameter carries in a KLIB's
+    /// IR, so a deserialized catch and a source one are one binding shape.
+    pub(crate) fn unused() -> Self {
+        Self::source("<unused var>".to_owned())
+    }
+
     /// Carry this binding one inline expansion deeper. A binding with no provenance yet is one
     /// this expansion is the first to clone, so it starts at depth one like any copied local.
     pub(crate) fn nest_inline(&mut self) {
