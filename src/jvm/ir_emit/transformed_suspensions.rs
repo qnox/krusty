@@ -39,6 +39,9 @@ pub(super) struct TransformedSuspensions {
     initializer: Option<ExprId>,
     /// The body is a suspend lambda's placed one, whose calls pass the bare fake continuation.
     placed_lambda: bool,
+    /// While an inline lambda's body the emitter places is emitted, the number of inline frames
+    /// open in the frame when it began.
+    inline_lambda_frames: Option<usize>,
 }
 
 /// What a suspension point leaves on the stack after its invoke.
@@ -66,8 +69,10 @@ impl Emitter<'_> {
 
     /// Write continuation read `e` as kotlinc's fake continuation, when it is one: the transformer
     /// replaces it with the machine's continuation. `false`, having written nothing, otherwise.
+    /// A suspend lambda's placed body reads every continuation as one: kotlinc compiled it as a
+    /// lambda method of its own.
     pub(super) fn emit_fake_continuation(&mut self, e: ExprId, code: &mut CodeBuilder) -> bool {
-        if !self.is_fake_continuation(e) {
+        if !self.is_fake_continuation(e) && !self.transformed_suspensions.placed_lambda {
             return false;
         }
         if self.transformed_suspensions.placed_lambda {
@@ -83,6 +88,41 @@ impl Emitter<'_> {
     /// Whether `e` reads kotlinc's fake continuation rather than the function's own.
     pub(super) fn is_fake_continuation(&self, e: ExprId) -> bool {
         self.transformed_suspensions.fake_continuations.contains(&e)
+    }
+
+    /// Enter an inline lambda's body placed in the current frame, returning the previous state
+    /// for [`Self::leave_inline_lambda_body`].
+    pub(super) fn enter_inline_lambda_body(&mut self) -> Option<usize> {
+        let open = self.frame.open_inline_frames().count();
+        self.transformed_suspensions
+            .inline_lambda_frames
+            .replace(open)
+    }
+
+    /// Restore the state [`Self::enter_inline_lambda_body`] returned.
+    pub(super) fn leave_inline_lambda_body(&mut self, previous: Option<usize>) {
+        self.transformed_suspensions.inline_lambda_frames = previous;
+    }
+
+    /// Whether the innermost frame the code being emitted belongs to is an inline lambda's
+    /// rather than a function's. kotlinc compiles each lambda body as a method of its own, which
+    /// reads the continuation as a value the inliner binds, never as a local of the method it
+    /// is inlined into. A frame common lowering spliced is the innermost when it is open above
+    /// the lambda body the emitter placed.
+    pub(super) fn continuation_is_lambda_value(&self) -> bool {
+        let placed = self.transformed_suspensions.inline_lambda_frames;
+        let innermost_spliced = self
+            .frame
+            .open_inline_frames()
+            .skip(placed.unwrap_or(0))
+            .last();
+        match innermost_spliced {
+            Some(marker) => matches!(
+                self.ir.debug_local_provenance(marker),
+                Some(crate::ir::IrDebugLocalProvenance::LambdaFrameMarker { .. })
+            ),
+            None => placed.is_some(),
+        }
     }
 
     /// kotlinc's fake continuation, cast to the interface the block's parameter and the probe take.
@@ -318,6 +358,7 @@ impl Emitter<'_> {
             inlined: HashSet::default(),
             initializer: None,
             placed_lambda: false,
+            inline_lambda_frames: None,
         };
         self.suspend_lambda_parameter_reads = machine
             .lambda
