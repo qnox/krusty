@@ -3923,6 +3923,15 @@ impl JvmLibraries {
                             public: method.public,
                         })
                 };
+                // A property with no accessor (`const val`, `@JvmField`) is realized by the
+                // field its metadata names on this facade. Each facade's declaration is joined
+                // with its own field, so the same name in two libraries stays two candidates.
+                if mp.getter.is_none() {
+                    if let Some(field) = self.metadata_static_field(facade, mp) {
+                        self.merge_metadata_field_realization(name, mp, &field, &mut props);
+                    }
+                    continue;
+                }
                 props.extend(self.static_metadata_property(mp, facade, package, accessor));
             }
         }
@@ -3941,13 +3950,6 @@ impl JvmLibraries {
             SymbolNamespace::Package(package) => self.top_level_static_field(package, name),
             SymbolNamespace::Classifier(owner) => self.static_field_name(owner, name),
         };
-        if let (SymbolNamespace::Package(_), Some(field)) = (namespace, static_field.as_ref()) {
-            if let Some(metadata) =
-                self.metadata_property_for_field(field.owner, &field.name, &field.descriptor)
-            {
-                self.merge_metadata_field_realization(name, &metadata, field, &mut props);
-            }
-        }
         let hidden = self.withhold_hidden_declarations(package, name, &mut props);
         let platform_callables = match (overloads.is_empty(), props.is_empty()) {
             (false, false) => Callables::Both {

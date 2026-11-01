@@ -89,3 +89,45 @@ fn a_top_level_jvmfield_property_is_read_and_written() {
         result.unwrap_or_else(|difference| panic!("{difference}"));
     }
 }
+
+const DUPLICATE_A: &str = "package dep\n@JvmField val duplicate: String = \"A\"\n";
+const DUPLICATE_B: &str = "package dep\n@JvmField val duplicate: Int = 1\n";
+const DUPLICATE_MAIN: &str = "\
+import dep.duplicate
+
+fun text(): String = duplicate
+";
+
+/// Two independently compiled libraries that declare the same top-level `@JvmField` property are
+/// two candidates, and the one earlier on the classpath shadows the other, as kotlinc resolves
+/// it: with the `String` declaration first the use compiles, with the `Int` one first it is a
+/// return type mismatch. Neither order loses a declaration before that choice.
+#[test]
+fn the_same_top_level_jvmfield_property_in_two_libraries_follows_classpath_order() {
+    let Some(string) = common::kotlinc_libraries(&[("LibA.kt", DUPLICATE_A)]) else {
+        return;
+    };
+    let Some(int) = common::kotlinc_libraries(&[("LibB.kt", DUPLICATE_B)]) else {
+        return;
+    };
+    let sources = [("Main.kt", DUPLICATE_MAIN)];
+    let accepted = common::compiler_diagnostics(
+        &sources,
+        &[string.clone(), int.clone(), common::stdlib_jar()],
+    );
+    assert_eq!(
+        (accepted.reference_code, accepted.krusty_code),
+        (0, 0),
+        "string-first: kotlinc {}\nkrusty {}{}",
+        accepted.reference_stderr,
+        accepted.krusty_stdout,
+        accepted.krusty_stderr
+    );
+    assert_eq!(
+        common::compiler_errors(&accepted.krusty_stderr),
+        common::compiler_errors(&accepted.reference_stderr),
+        "string-first: the complete error ledgers"
+    );
+    let rejected = common::compiler_diagnostics(&sources, &[int, string, common::stdlib_jar()]);
+    common::expect_identical_rejection(&rejected, "int-first");
+}

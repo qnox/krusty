@@ -191,6 +191,28 @@ impl JvmLibraries {
         internal: TypeName,
         name: &str,
     ) -> Option<JvmStaticField> {
+        self.static_field_where(internal, |field| field.name == name)
+    }
+
+    /// The static field of `facade` that `metadata`'s `JvmPropertySignature` names: the exact
+    /// name and descriptor of the field realizing a property with no accessor.
+    pub(super) fn metadata_static_field(
+        &self,
+        facade: TypeName,
+        metadata: &super::metadata::MetaProp,
+    ) -> Option<JvmStaticField> {
+        let signature = metadata.field.as_ref()?;
+        self.static_field_where(facade, |field| {
+            field.name == signature.name && field.descriptor == signature.desc
+        })
+    }
+
+    /// The first non-private static field `matches` selects on `internal` or its supertypes.
+    fn static_field_where(
+        &self,
+        internal: TypeName,
+        matches: impl Fn(&crate::jvm::classreader::FieldSig) -> bool,
+    ) -> Option<JvmStaticField> {
         let mut stack = vec![internal];
         let mut seen = crate::fx_hash::HashSet::default();
         while let Some(cur) = stack.pop() {
@@ -201,7 +223,7 @@ impl JvmLibraries {
                 continue;
             };
             if let Some(f) = ci.fields.iter().find(|f| {
-                f.name == name
+                matches(f)
                     && f.access & 0x0008 != 0
                     // Publish every non-private associated declaration. Kotlin visibility is
                     // enforced by the resolver at the lexical use site; dropping `protected`
@@ -237,7 +259,7 @@ impl JvmLibraries {
                 let mut field = JvmStaticField {
                     external_identity: None,
                     owner: cur,
-                    name: name.to_string(),
+                    name: f.name.clone(),
                     descriptor: f.descriptor.clone(),
                     ty,
                     constant,
