@@ -97,6 +97,7 @@ fn decompose(ty: Ty, inherited_nullable: bool, out: &mut Vec<Piece>) {
         TyKind::Error => {}
         TyKind::Nullable(inner) => decompose(inner, true, out),
         TyKind::PlatformNullable(inner) => decompose(inner, true, out),
+        TyKind::MutabilityFlexible(inner) => decompose(inner, inherited_nullable, out),
         TyKind::Intersection(parts) => {
             for part in parts.iter().copied() {
                 decompose(part, inherited_nullable, out);
@@ -193,6 +194,7 @@ fn structural_rank(ty: Ty) -> u8 {
         TyKind::DefinitelyNotNull(_) => 13,
         TyKind::Intersection(_) => 14,
         TyKind::RawProjection(_) => 15,
+        TyKind::MutabilityFlexible(_) => 16,
     }
 }
 

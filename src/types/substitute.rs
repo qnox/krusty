@@ -106,6 +106,12 @@ where
             preserve_unbound,
             enforce_bound_nullability,
         )),
+        TyKind::MutabilityFlexible(inner) => Ty::mutability_flexible(substitute_type_parameters(
+            inner,
+            lookup,
+            preserve_unbound,
+            enforce_bound_nullability,
+        )),
         TyKind::InProjection(inner) => compose_in_projection(substitute_type_parameters(
             inner,
             lookup,
@@ -191,6 +197,7 @@ pub(crate) fn ty_subst_alias_expansion(ty: Ty, bindings: &HashMap<String, Ty>) -
             ),
             TyKind::Nullable(inner) => Ty::nullable(normalize(inner)),
             TyKind::PlatformNullable(inner) => Ty::platform_nullable(normalize(inner)),
+            TyKind::MutabilityFlexible(inner) => Ty::mutability_flexible(normalize(inner)),
             TyKind::DefinitelyNotNull(inner) => {
                 Ty::from(TyKind::DefinitelyNotNull(normalize(inner)))
             }
@@ -223,6 +230,7 @@ pub(crate) fn ty_subst_alias_expansion(ty: Ty, bindings: &HashMap<String, Ty>) -
             | TyKind::RawProjection(inner) => function_component(inner),
             TyKind::Nullable(inner) => Ty::nullable(function_component(inner)),
             TyKind::PlatformNullable(inner) => Ty::platform_nullable(function_component(inner)),
+            TyKind::MutabilityFlexible(inner) => Ty::mutability_flexible(function_component(inner)),
             TyKind::DefinitelyNotNull(inner) => {
                 Ty::from(TyKind::DefinitelyNotNull(function_component(inner)))
             }
@@ -276,6 +284,9 @@ pub(crate) fn ty_with_param_bounds(ty: Ty, bounds: &HashMap<String, Ty>) -> Ty {
         TyKind::Nullable(inner) => Ty::nullable(ty_with_param_bounds(inner, bounds)),
         TyKind::PlatformNullable(inner) => {
             Ty::platform_nullable(ty_with_param_bounds(inner, bounds))
+        }
+        TyKind::MutabilityFlexible(inner) => {
+            Ty::mutability_flexible(ty_with_param_bounds(inner, bounds))
         }
         TyKind::InProjection(inner) => Ty::in_projection(ty_with_param_bounds(inner, bounds)),
         TyKind::OutProjection(inner) => Ty::out_projection(ty_with_param_bounds(inner, bounds)),
@@ -333,6 +344,9 @@ pub(crate) fn ty_with_transitive_param_bounds(ty: Ty, bounds: &HashMap<String, T
             TyKind::PlatformNullable(inner) => {
                 Ty::platform_nullable(hydrate(inner, bounds, visiting))
             }
+            TyKind::MutabilityFlexible(inner) => {
+                Ty::mutability_flexible(hydrate(inner, bounds, visiting))
+            }
             TyKind::InProjection(inner) => Ty::in_projection(hydrate(inner, bounds, visiting)),
             TyKind::OutProjection(inner) => Ty::out_projection(hydrate(inner, bounds, visiting)),
             TyKind::StarProjection(inner) => Ty::star_projection(hydrate(inner, bounds, visiting)),
@@ -386,6 +400,9 @@ pub(crate) fn ty_rename_params(ty: Ty, identities: &HashMap<&str, &'static str>)
         TyKind::Nullable(inner) => Ty::nullable(ty_rename_params(inner, identities)),
         TyKind::PlatformNullable(inner) => {
             Ty::platform_nullable(ty_rename_params(inner, identities))
+        }
+        TyKind::MutabilityFlexible(inner) => {
+            Ty::mutability_flexible(ty_rename_params(inner, identities))
         }
         TyKind::InProjection(inner) => Ty::in_projection(ty_rename_params(inner, identities)),
         TyKind::OutProjection(inner) => Ty::out_projection(ty_rename_params(inner, identities)),

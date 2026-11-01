@@ -83,7 +83,10 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                 })
             },
         ));
-    table.sam_with_receiver_annotations = frontend_plugins.sam_with_receiver_annotations();
+    table.annotation_conventions = crate::symbol_source::AnnotationConventions {
+        sam_with_receiver: frontend_plugins.sam_with_receiver_annotations(),
+        assignment: frontend_plugins.assignment_annotations(),
+    };
     let mut declaration_annotation_resolution_attempts = crate::fx_hash::HashSet::default();
     for file_index in 0..source_packages.len() {
         diags.set_file(file_index as u32);
@@ -2867,58 +2870,58 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                         for (i, ((property, ty), (shape, _))) in data_properties.iter().enumerate()
                         {
                             let generated_name = format!("component{}", i + 1);
-                            declared_callable_order.push(generated_name.clone());
-                            methods.insert(
-                                generated_name.clone(),
-                                vec![Signature {
-                                    params: vec![],
-                                    ret: **ty,
-                                    generic_sig: Some(GenericSig {
-                                        formals: Vec::new(),
-                                        formal_bounds: Vec::new(),
-                                        receiver: None,
-                                        params: Vec::new(),
-                                        ret: *shape,
-                                        return_policy: GenericReturnPolicy::Exact,
-                                    }),
-                                    projected_return_hazard: false,
-                                    flags: SigFlags::default()
-                                        .with_vararg(false)
-                                        .with_is_inline(false)
-                                        .with_is_operator(true)
-                                        .with_is_override(false)
-                                        .with_is_final(true)
-                                        .with_is_suspend(false),
-                                    annotations: Vec::new(),
-                                    equality_bound: None,
-                                    vararg_index: None,
-                                    required: 0,
-                                    param_defaults: Vec::new().into(),
-                                    exact_params: Vec::new().into(),
-                                    no_infer_params: Vec::new().into(),
-                                    implicit_integer_coercion: Vec::new().into(),
-                                    param_default_values: Vec::new(),
-                                    param_names: Vec::new(),
-                                    parameter_identities: Vec::new(),
-                                    lambda_param_types: Vec::new(),
-                                    lambda_recv: Vec::new().into(),
-                                    inline_modifiers: Vec::new(),
-                                    visibility: property.visibility,
-                                    context_count: 0,
-                                    source_decl: None,
-                                    stable_declaration: compact_generated_member_declaration(
-                                        compact_headers,
-                                        compact_classifier.map(|stub| stub.id),
-                                        &generated_name,
-                                    ),
-                                    source_file: None,
-                                    source_member: None,
-                                    source_receiver: None,
-                                    package: TypeName::ROOT,
-                                    contract: None,
-                                    plugin_expression: None,
-                                }],
-                            );
+                            if !declared_callable_order.contains(&generated_name) {
+                                declared_callable_order.push(generated_name.clone());
+                            }
+                            let overloads = methods.entry(generated_name.clone()).or_default();
+                            overloads.push(Signature {
+                                params: vec![],
+                                ret: **ty,
+                                generic_sig: Some(GenericSig {
+                                    formals: Vec::new(),
+                                    formal_bounds: Vec::new(),
+                                    receiver: None,
+                                    params: Vec::new(),
+                                    ret: *shape,
+                                    return_policy: GenericReturnPolicy::Exact,
+                                }),
+                                projected_return_hazard: false,
+                                flags: SigFlags::default()
+                                    .with_vararg(false)
+                                    .with_is_inline(false)
+                                    .with_is_operator(true)
+                                    .with_is_override(false)
+                                    .with_is_final(true)
+                                    .with_is_suspend(false),
+                                annotations: Vec::new(),
+                                equality_bound: None,
+                                vararg_index: None,
+                                required: 0,
+                                param_defaults: Vec::new().into(),
+                                exact_params: Vec::new().into(),
+                                no_infer_params: Vec::new().into(),
+                                implicit_integer_coercion: Vec::new().into(),
+                                param_default_values: Vec::new(),
+                                param_names: Vec::new(),
+                                parameter_identities: Vec::new(),
+                                lambda_param_types: Vec::new(),
+                                lambda_recv: Vec::new().into(),
+                                inline_modifiers: Vec::new(),
+                                visibility: property.visibility,
+                                context_count: 0,
+                                source_decl: None,
+                                stable_declaration: compact_generated_member_declaration(
+                                    compact_headers,
+                                    compact_classifier.map(|stub| stub.id),
+                                    &generated_name,
+                                ),
+                                source_file: None,
+                                source_member: None,
+                                source_receiver: None,
+                                package: TypeName::ROOT,
+                                contract: None,
+                                plugin_expression: None,
+                            });
                         }
                         if !declared_callable_order.iter().any(|name| name == "copy") {
                             declared_callable_order.push("copy".to_string());
@@ -4292,6 +4295,10 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
         for (alias, formals, target) in &file_type_aliases[file_index] {
             let alias = SourceAlias {
                 identity: crate::types::type_name_child(package, alias),
+                declaration_name: crate::types::ClassifierDeclarationName::TopLevel {
+                    package,
+                    name: alias.as_str().into(),
+                },
                 nested_in: None,
                 formals,
                 target,
@@ -4380,6 +4387,10 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                     .fold(package, crate::types::type_name_child);
                 let source_alias = SourceAlias {
                     identity: crate::types::type_name_child(owner, &alias.name),
+                    declaration_name: crate::types::ClassifierDeclarationName::Nested {
+                        owner: alias_owner,
+                        name: alias.name.as_str().into(),
+                    },
                     nested_in: Some((alias_owner, &alias.name)),
                     formals: &alias.type_params,
                     target: &alias.target,

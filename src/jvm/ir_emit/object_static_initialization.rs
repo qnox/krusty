@@ -20,7 +20,7 @@ pub(super) fn emit(
             Some((
                 index as u32,
                 property,
-                static_fields::clinit_initializer(ir, property)?,
+                static_fields::stored_clinit_initializer(ir, property)?,
             ))
         })
         .collect();
@@ -46,7 +46,7 @@ pub(super) fn emit(
     delegated_property_array::declare(env, c.fq_name, cw);
 
     // An interface companion interleaves const fields with instance fields in source order; a named
-    // object's backing fields were declared ahead of its static storage (`declare_fields`).
+    // object's backing fields were declared beside its static storage (`declared_fields`).
     if interface_companion {
         emit_interface_companion_member_fields(ir, env.run, c, signature_formatter, fq_name, cw);
     }
@@ -146,23 +146,27 @@ pub(super) fn emit(
     }
 }
 
-/// Declare a named object's backing fields ahead of its static storage. Like an interface
-/// companion's, they intern at the field-table visit: after `<clinit>` and the accessors, so a
-/// field's generic `Signature` follows the initializer's constants.
-pub(super) fn declare_fields(
-    ir: &IrFile,
-    run: &EmitRun,
-    c: &IrClass,
-    signature_formatter: &JvmSignatureFormatter<'_>,
-    fq_name: &str,
-    cw: &mut ClassWriter,
-) {
+/// A named object's backing fields with the source position of each, for the field-table visit.
+/// Like an interface companion's, they intern after `<clinit>` and the accessors, so a field's
+/// generic `Signature` follows the initializer's constants. A field with no property of its own
+/// takes the position of the field before it.
+pub(super) fn declared_fields(ir: &IrFile, c: &IrClass) -> Vec<(u32, usize)> {
     if !static_storage(ir, c) || companion_of_interface(ir, c) {
-        return;
+        return Vec::new();
     }
-    for field_index in 0..c.fields.len() {
-        add_late_member_field(ir, run, c, signature_formatter, fq_name, cw, field_index);
-    }
+    let mut position = 0;
+    (0..c.fields.len())
+        .map(|field_index| {
+            if let Some(property) = c
+                .properties
+                .iter()
+                .find(|property| property.backing_field == Some(field_index as u32))
+            {
+                position = property.source_order;
+            }
+            (position, field_index)
+        })
+        .collect()
 }
 
 /// Instance backing fields and companion-owned `const val`s, in source order, after `$$INSTANCE`.
@@ -240,7 +244,7 @@ fn emit_interface_companion_member_fields(
 
 /// Declare an object's backing field for the field-table visit, with its generic `Signature`,
 /// nullability and declared annotations.
-fn add_late_member_field(
+pub(super) fn add_late_member_field(
     ir: &IrFile,
     run: &EmitRun,
     c: &IrClass,
@@ -256,8 +260,12 @@ fn add_late_member_field(
         .and_then(|signatures| signatures.iter().find(|(name, _)| *name == field.name))
         .map(|(_, parameter)| parameter.as_str())
         .or(field.type_param.as_deref());
-    let field_sig = property_jvm_signatures(signature_formatter, &field.ty, type_parameter)
-        .field
+    let field_sig = signature_formatter
+        .field_signature(
+            &field.ty,
+            type_parameter,
+            field_visibility::backs_var_property(c, field_index),
+        )
         .filter(|_| !field.is_property_delegate());
     let physical_name = instance_field_jvm_name(ir, run, c, field_index);
     let descriptor = ir_type_desc(&field.ty);

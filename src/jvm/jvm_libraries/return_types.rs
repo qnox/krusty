@@ -43,6 +43,9 @@ pub(super) fn java_collection_return_lower_bound(ty: Ty) -> Ty {
         TyKind::PlatformNullable(inner) => {
             Ty::platform_nullable(java_collection_return_lower_bound(inner))
         }
+        TyKind::MutabilityFlexible(inner) => {
+            Ty::mutability_flexible(java_collection_return_lower_bound(inner))
+        }
         TyKind::InProjection(inner) => Ty::in_projection(java_collection_return_lower_bound(inner)),
         TyKind::OutProjection(inner) => {
             Ty::out_projection(java_collection_return_lower_bound(inner))

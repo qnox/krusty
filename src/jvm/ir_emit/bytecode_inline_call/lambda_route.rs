@@ -34,6 +34,11 @@ pub(in crate::jvm::ir_emit) enum SpliceReason {
     /// A lambda the callee may pass to an object it creates reaches a private declaration, which
     /// kotlinc reaches from the regenerated object through synthetic accessors.
     PrivateMemberInObject,
+    /// An object the callee constructs reads a suspend lambda of the call from a method without
+    /// the `$$forInline` copy kotlinc writes for it
+    /// ([`inliner::suspend_lambda_without_for_inline_copy`]): a library krusty compiled, which
+    /// writes no such copy yet.
+    SuspendMethodWithoutForInlineCopy,
 }
 
 impl Emitter<'_> {
@@ -99,8 +104,8 @@ impl Emitter<'_> {
                 return splice(SpliceReason::CaptureOutsideFrame);
             }
         }
-        // Whether the call's objects regenerate is settled before any code is emitted: the body is
-        // inlined once with each lambda's shape in place of its body, and nothing of it is kept.
+        // Whether the call's objects regenerate is settled from the callee's facts before any code
+        // is emitted; once routed here, a failure to regenerate is an error, never another route.
         if inliner::constructs_regenerated_object(&callee, &self.bodies) {
             for &argument in &lambda_arguments {
                 if self.lambda_reaches_private_members(argument)? {
@@ -148,30 +153,19 @@ impl Emitter<'_> {
                 captured,
                 &lambdas,
             );
-            let probe = inliner::inline(
+            // kotlinc's `MethodInliner` regenerates every object it meets; only a body krusty wrote
+            // can lack the `$$forInline` copy a regenerated suspend method is built over.
+            if inliner::suspend_lambda_without_for_inline_copy(
                 &callee,
                 &parameters,
                 &lambdas,
-                target.inline_only,
-                self.inline_splice_base(self.frame.size()),
-                call.reified,
-                inliner::InliningContext {
-                    lines: &mut UnmappedLines,
-                    classes: &self.bodies,
-                    objects: &mut self.call_objects(
-                        call_expression,
-                        target.name,
-                        false,
-                        SourceMap::default(),
-                    ),
-                    enum_entries: &mut self.call_enum_entries(false),
-                },
-            );
-            if let Err(error) = probe {
-                crate::trace_compiler!("splice", "the call's objects do not regenerate: {error:?}");
-                return splice(SpliceReason::CalleeShape(
-                    inliner::UnsupportedShape::AnonymousObject,
-                ));
+                &self.bodies,
+            )
+            .map_err(|error| {
+                crate::trace_compiler!("splice", "the call's objects do not read: {error:?}");
+                "an anonymous object a compiled inline body constructs cannot be read"
+            })? {
+                return splice(SpliceReason::SuspendMethodWithoutForInlineCopy);
             }
         }
         Ok(LambdaCallRoute::MethodInliner(callee, default_lambdas))

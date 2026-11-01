@@ -8,6 +8,53 @@
 use super::*;
 use crate::types::TyKind;
 
+fn local_receiver_input_bounds(
+    arguments: &[Ty],
+    parameters: &TParams,
+    captured_extra_bounds: impl Fn(Ty) -> Vec<Ty>,
+) -> crate::libraries::ReceiverInputBounds {
+    crate::libraries::ReceiverInputBounds::from_declared(arguments.iter().filter_map(|&argument| {
+        let identity = argument.non_null().ty_param_name()?;
+        let primary = argument.non_null().ty_param_bound()?;
+        let extra = parameters
+            .erasure
+            .iter()
+            .find(|(_, binding)| binding.non_null().ty_param_name() == Some(identity))
+            .map(|(source, _)| parameters.extra_bounds_of(source))
+            .unwrap_or_else(|| captured_extra_bounds(argument));
+        Some((
+            identity.to_owned(),
+            std::iter::once(primary).chain(extra).collect(),
+        ))
+    }))
+}
+
+#[cfg(test)]
+mod receiver_input_tests {
+    use super::*;
+
+    #[test]
+    fn a_shadowed_captured_formal_keeps_its_own_complete_bounds() {
+        let number = Ty::obj("kotlin/Number");
+        let first = Ty::obj("sample/First");
+        let second = Ty::obj("sample/Second");
+        let own = Ty::ty_param("local:T", number);
+        let captured = Ty::ty_param("outer:T", first);
+        let dependent = Ty::ty_param("local:U", captured);
+        let mut parameters = TParams::default();
+        parameters.insert_binding("T", own, vec![second]);
+        parameters.insert_binding("U", dependent, vec![second]);
+        let bounds =
+            local_receiver_input_bounds(&[own, dependent, captured], &parameters, |argument| {
+                assert_eq!(argument, captured);
+                vec![second]
+            });
+        assert_eq!(bounds.get("local:T"), Some([number, second].as_slice()));
+        assert_eq!(bounds.get("local:U"), Some([captured, second].as_slice()));
+        assert_eq!(bounds.get("outer:T"), Some([first, second].as_slice()));
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct LocalMethodDependency {
     source: crate::libraries::SourceMember,
@@ -286,6 +333,23 @@ impl Checker<'_> {
         (receiver, functions.overloads, true)
     }
 
+    /// Publish the applied layout and its complete declaration input bounds together.
+    pub(super) fn record_body_local_classifier_arguments(
+        &mut self,
+        declaration: crate::fir::DeclarationId,
+        arguments: &[Ty],
+        parameters: &TParams,
+        scope: &CheckerScope<'_>,
+    ) {
+        let bounds = local_receiver_input_bounds(arguments, parameters, |argument| {
+            self.semantic_tparam_extra_bounds(scope, argument)
+        });
+        self.checked_local_classifier_input_bounds
+            .insert(declaration, bounds);
+        self.checked_local_classifier_type_arguments
+            .insert(declaration, arguments.to_vec());
+    }
+
     /// Candidate union at one exact receiver rung. The provider and active checked-local overlay
     /// contribute the same normalized shape; callers decide whether to stop at this rung or combine
     /// several direct supertypes for override matching.
@@ -293,7 +357,10 @@ impl Checker<'_> {
         &self,
         owner: TypeName,
         receiver: Ty,
-    ) -> Option<crate::symbol_resolver::GSigBinds> {
+    ) -> Option<(
+        crate::symbol_resolver::GSigBinds,
+        &crate::libraries::ReceiverInputBounds,
+    )> {
         let declaration = self.resolved_index?.classifier_declaration(owner)?;
         let declaration_arguments = self
             .checked_local_classifier_type_arguments
@@ -303,11 +370,15 @@ impl Checker<'_> {
         if declaration_arguments.len() != applied_arguments.len() {
             return None;
         }
-        declaration_arguments
+        let bindings = declaration_arguments
             .iter()
             .zip(applied_arguments)
             .map(|(formal, &argument)| Some((formal.ty_param_name()?.to_owned(), argument)))
-            .collect()
+            .collect::<Option<crate::symbol_resolver::GSigBinds>>()?;
+        let input_bounds = self
+            .checked_local_classifier_input_bounds
+            .get(&declaration)?;
+        Some((bindings, input_bounds))
     }
 
     /// The declaration a class method overriding a supertype member is matched as. Pass 2 binds
@@ -378,7 +449,7 @@ impl Checker<'_> {
         })
     }
 
-    fn body_local_declared_member_candidates_at(
+    pub(super) fn body_local_declared_member_candidates_at(
         &self,
         receiver: Ty,
         name: &str,
@@ -403,7 +474,8 @@ impl Checker<'_> {
                     .iter()
                     .filter(|candidate| candidate.kind == crate::libraries::FnKind::Member)
                 {
-                    let Some(classifier_bindings) = classifier_bindings.as_ref() else {
+                    let Some((classifier_bindings, input_bounds)) = classifier_bindings.as_ref()
+                    else {
                         // The active classifier layout and the applied receiver are one checked
                         // contract. A partial or mismatched layout cannot publish an unspecialized
                         // member candidate as if it were semantically complete.
@@ -416,6 +488,7 @@ impl Checker<'_> {
                         receiver,
                         &mut candidate,
                         classifier_bindings,
+                        input_bounds,
                     );
                     if let Some(existing) = candidates.iter().position(|existing| {
                         existing.stable_declaration == candidate.stable_declaration

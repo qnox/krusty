@@ -205,13 +205,6 @@ fn emit_companion_bridge(
         .fn_param_annotations
         .get(&function)
         .map_or(&[], Vec::as_slice);
-    let annotation_types = function_annotations::header_annotation_types(
-        result_nullability,
-        parameter_annotations,
-        &parameter_nullability,
-        nullability_annotated,
-    );
-    let annotation_types: Vec<&str> = annotation_types.iter().map(String::as_str).collect();
     let method_parameters = if env.java_parameters {
         crate::jvm::method_parameters::function(ir, function, &parameters, None)
     } else {
@@ -222,9 +215,15 @@ fn emit_companion_bridge(
         name,
         &descriptor,
         signature.as_deref(),
-        &annotation_types,
+        &[],
         &annotations,
         &method_parameters,
+    );
+    cw.reserve_method_parameter_annotation_pool(
+        result_nullability,
+        parameter_annotations,
+        &parameter_nullability,
+        nullability_annotated,
     );
 
     let argument_words = parameters.iter().map(|ty| slot_words(*ty)).sum::<u16>();
@@ -232,7 +231,7 @@ fn emit_companion_bridge(
     let companion_internal = companion.render();
     let field = cw.fieldref(
         &outer.render(),
-        companion.nested_segment_ref(),
+        crate::jvm::companion_storage::field_name(outer, companion),
         &format!("L{companion_internal};"),
     );
     code.getstatic(field, 1);

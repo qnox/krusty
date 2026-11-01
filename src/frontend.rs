@@ -1789,6 +1789,14 @@ where
         // genuine signature error would make every use of an unrelated inferred declaration look
         // unresolved in an editor's steady state. Failed declarations remain absent.
         crate::resolve::project_finalized_signatures(&index, &mut symbols);
+        // File-level policies (`@file:Suppress`, opt-ins) govern the recovery diagnostics too.
+        crate::resolve::publish_file_annotations(
+            &files[..inferred_end],
+            &symbols,
+            target,
+            &mut index,
+            diags,
+        );
         crate::resolve::check_finalized_top_level_type_alias_bounds(
             &files[..inferred_end],
             &index,

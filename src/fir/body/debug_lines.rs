@@ -12,6 +12,7 @@ use super::*;
 fn expression_lines(file: &crate::ast::File, span: Span) -> Option<FirExpressionDebugLines> {
     let raw = file.expression_at_span(span)? as usize;
     Some(FirExpressionDebugLines {
+        start: file.expr_lines.get(raw).copied().unwrap_or(0),
         source: file.expr_source_lines.get(raw).copied().unwrap_or(0),
         end: file.expr_end_lines.get(raw).copied().unwrap_or(0),
         positionless: false,
@@ -33,6 +34,9 @@ fn statement_lines(file: &crate::ast::File, span: Span) -> Option<FirStatementDe
 /// Line-only source metadata for one EXPRESSION.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct FirExpressionDebugLines {
+    /// The line the expression's text starts on, kotlinc's `startOffset` line: a temporary holding
+    /// the expression is declared there.
+    pub start: u32,
     pub source: u32,
     pub end: u32,
     /// kotlinc builds this expression without source offsets, so no line may begin at it: an

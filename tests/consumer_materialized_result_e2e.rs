@@ -356,3 +356,122 @@ mod bound_results {
         );
     }
 }
+
+/// A result erased to its declaration's slot keeps that slot through `!!` and string templates, as
+/// kotlinc's consumers do. `!!` checks the erased value and only then narrows it for a consumer
+/// that needs the narrower type, for a property read as for a call. A template part reaches
+/// `String.valueOf(Object)`, `StringBuilder.append(Object)`, and an `invokedynamic` argument in
+/// its erased slot; only `append(String)` narrows it, to `String`.
+mod bound_result_order {
+    use super::common;
+
+    const DECLARATIONS: &str = "package order\n\
+        \n\
+        open class Base\n\
+        \n\
+        class Both : Base() { override fun toString(): String = \"both\" }\n\
+        \n\
+        class Simple<T : Base>(val value: T, val nul: T?) {\n\
+        \x20   fun get(): T = value\n\
+        \x20   fun getN(): T? = nul\n\
+        }\n\
+        \n\
+        class Plain<T>(val value: T, val nul: T?) {\n\
+        \x20   fun get(): T = value\n\
+        \x20   fun getN(): T? = nul\n\
+        }\n";
+
+    const USES: &str = "package order\n\
+        \n\
+        fun readChecked(s: Simple<Both>): Both = s.nul!!\n\
+        \n\
+        fun callChecked(s: Simple<Both>): Both = s.getN()!!\n\
+        \n\
+        fun erasedReadChecked(p: Plain<Both>): Both = p.nul!!\n\
+        \n\
+        fun boundChecked(s: Simple<Both>): Base = s.nul!!\n\
+        \n\
+        fun identityChecked(s: Simple<Both>): Boolean = s.nul!! === s.value\n\
+        \n\
+        fun single(s: Simple<Both>): String = \"${s.value}\"\n\
+        \n\
+        fun singleCall(p: Plain<Both>): String = \"${p.get()}\"\n\
+        \n\
+        fun singleNullable(s: Simple<Both>): String = \"${s.nul}\"\n\
+        \n\
+        fun parts(s: Simple<Both>): String = \"a${s.value}b${s.get()}\"\n\
+        \n\
+        fun erasedParts(p: Plain<Both>): String = \"a${p.value}b${p.get()}\"\n\
+        \n\
+        fun stringPart(p: Plain<String>): String = \"x${p.get()}\"\n\
+        \n\
+        fun box(): String {\n\
+        \x20   val b = Both()\n\
+        \x20   val s = Simple(b, b)\n\
+        \x20   val p = Plain(b, b)\n\
+        \x20   if (readChecked(s) !== b || callChecked(s) !== b) return \"checked\"\n\
+        \x20   if (erasedReadChecked(p) !== b || boundChecked(s) !== b) return \"erased\"\n\
+        \x20   if (!identityChecked(s)) return \"identity\"\n\
+        \x20   try {\n\
+        \x20       readChecked(Simple(b, null))\n\
+        \x20       return \"no check\"\n\
+        \x20   } catch (e: NullPointerException) {}\n\
+        \x20   if (single(s) != \"both\" || singleCall(p) != \"both\") return \"single\"\n\
+        \x20   if (singleNullable(Simple(b, null)) != \"null\") return \"nullable\"\n\
+        \x20   if (parts(s) != \"abothbboth\" || erasedParts(p) != \"abothbboth\") return \"parts\"\n\
+        \x20   return if (stringPart(Plain(\"y\", null)) == \"xy\") \"OK\" else \"string\"\n\
+        }\n";
+
+    /// The declarations and their uses as one default-package file.
+    fn one_file() -> String {
+        format!(
+            "{}\n{}",
+            DECLARATIONS.replacen("package order\n", "", 1),
+            USES.replacen("package order\n", "", 1)
+        )
+    }
+
+    #[test]
+    fn checked_and_interpolated_results_in_one_file_match_kotlinc_classfiles() {
+        let source = one_file();
+        let classes = common::classes_against_kotlinc_module(&[("ResultOrder.kt", &source)]);
+        assert_eq!(classes.differences(), Vec::<String>::new());
+    }
+
+    /// The `StringBuilder` form below JVM 9 and the `invokedynamic` form from JVM 9 on.
+    #[test]
+    fn checked_and_interpolated_results_of_a_kotlinc_dependency_match_kotlinc() {
+        let consumer = USES.replacen("package order\n", "import order.*\n", 1);
+        for target in [None, Some(11)] {
+            let classes = common::classes_against_kotlinc_lib_target(
+                "ResultOrderUses",
+                &[("Declarations.kt", DECLARATIONS)],
+                &consumer,
+                target,
+            )
+            .expect("reference kotlinc is provisioned");
+            assert_eq!(classes.differences(), Vec::<String>::new(), "{target:?}");
+        }
+        assert_eq!(
+            common::expect_box_run_against_kotlinc(DECLARATIONS, &consumer)
+                .expect("reference kotlinc is provisioned"),
+            "OK"
+        );
+    }
+
+    #[test]
+    fn checked_and_interpolated_results_run() {
+        let source = one_file();
+        assert_eq!(common::kotlinc_box_result(&source), "OK");
+        assert_eq!(
+            common::compile_and_run_box(
+                &source,
+                "ResultOrder",
+                &[common::stdlib_jar()],
+                Some(&common::jdk_modules()),
+            )
+            .expect("checked and interpolated results compile and run"),
+            "OK"
+        );
+    }
+}

@@ -17,7 +17,7 @@ pub struct KlibCalleeFacts<'a> {
     callables: HashMap<&'a KlibDependencyCallable, IndexedKlibCallee<'a>>,
     /// Header evidence is not a checked source call which requires an executable export.
     selected: HashSet<&'a KlibDependencyCallable>,
-    /// Explicit same-compilation hierarchy evidence, used only for constructor bounds.
+    /// Explicit same-compilation hierarchy evidence for authenticated dependency types.
     class_type_oracle: Option<&'a dyn crate::assignable::TypeOracle>,
 }
 
@@ -52,7 +52,16 @@ impl<'a> KlibCalleeFacts<'a> {
         argument: crate::types::Ty,
         bound: crate::types::Ty,
     ) -> bool {
-        super::constructor_bounds::satisfies(self.class_type_oracle, parameters, argument, bound)
+        super::type_evidence::satisfies(self.class_type_oracle, parameters, argument, bound)
+    }
+
+    pub(super) fn is_subtype(
+        &self,
+        parameters: &super::klib_types::KlibTypeParameters,
+        sub: crate::types::Ty,
+        sup: crate::types::Ty,
+    ) -> bool {
+        super::type_evidence::ordinary_subtype(self.class_type_oracle, parameters, sub, sup)
     }
 
     pub(super) fn constructor(
@@ -144,6 +153,49 @@ impl<'a> KlibCalleeFacts<'a> {
         let mut facts = self.clone();
         facts.record(declaration, false);
         facts
+    }
+
+    pub(crate) fn target_getter(
+        &self,
+        identity: &KlibDependencyCallable,
+        bodies: &crate::klib_libraries::KlibDeclarationBodies,
+        supports: &dyn Fn(crate::libraries::DependencyGetterSignature<'_>) -> bool,
+    ) -> Result<bool, super::decline::KlibBodyDeclineReason> {
+        let selected = match self.get(identity) {
+            Some(KlibCalleeFact::Ambiguous) => {
+                return Err(super::decline::KlibBodyDeclineReason::SignatureMismatch(
+                    "conflicting provider contracts for a getter declaration".to_owned(),
+                ));
+            }
+            Some(KlibCalleeFact::Selected(callables)) => callables[0],
+            None => return Ok(false),
+        };
+        if !super::accessor_calls::signature(selected).is_some_and(supports) {
+            return Ok(false);
+        }
+        super::accessor_calls::authenticate(selected, bodies).map(|getter| getter.is_some())
+    }
+
+    /// Whether `identity` is a member of a classifier whose representation the target owns.
+    pub(crate) fn target_member(
+        &self,
+        identity: &KlibDependencyCallable,
+        represents: &dyn Fn(crate::types::TypeName) -> bool,
+    ) -> Result<bool, super::decline::KlibBodyDeclineReason> {
+        let selected = match self.get(identity) {
+            Some(KlibCalleeFact::Ambiguous) => {
+                return Err(super::decline::KlibBodyDeclineReason::SignatureMismatch(
+                    "conflicting provider contracts for a member declaration".to_owned(),
+                ));
+            }
+            Some(KlibCalleeFact::Selected(callables)) => callables[0],
+            None => return Ok(false),
+        };
+        Ok(selected.is_member()
+            && matches!(
+                selected.declaration_owner(),
+                Some(crate::types::SemanticCallableOwner::Classifier(owner)) if represents(owner)
+            ))
     }
 
     pub(crate) fn common_primitive(

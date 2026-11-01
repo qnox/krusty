@@ -88,10 +88,22 @@ pub(super) fn declarations(
         let target = facts
             .target_intrinsic(&identity, bodies, capabilities.target_realizes_intrinsic)
             .map_err(|reason| format!("an invalid target declaration: {reason:?}"))?;
+        let getter = !externals.contains_key(&identity)
+            && primitive.is_none()
+            && target.is_none()
+            && intrinsics.get(&identity).is_none()
+            && facts
+                .target_getter(&identity, bodies, capabilities.target_realizes_getter)
+                .map_err(|reason| format!("an invalid target getter declaration: {reason:?}"))?;
+        let member = facts
+            .target_member(&identity, capabilities.target_represents_classifier)
+            .map_err(|reason| format!("an invalid target member declaration: {reason:?}"))?;
         let emits_body = !externals.contains_key(&identity)
+            && !member
             && !constructor
             && primitive.is_none()
             && target.is_none()
+            && !getter
             && intrinsics.get(&identity).is_none()
             && bodies.function_has_body(&identity) == Some(true);
         if requires_ordinary
