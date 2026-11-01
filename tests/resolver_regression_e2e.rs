@@ -1236,6 +1236,19 @@ fun <U : Marker> outer(): Duo<U, String> = build { it.mark() }
     assert_rejection_same_as_kotlinc("MixedContextResult", source);
 }
 
+/// The rejected call still checks its lambda against the selected declaration's whole function
+/// shape, so a context input stays a context and `it` is the one value parameter.
+#[test]
+fn conflicting_contextual_result_keeps_the_lambda_context_parameter_shape() {
+    let source = r#"
+class Duo<A, B>
+class C
+fun <T> select(f: context(C) (T) -> String): Duo<T, T> = TODO()
+fun test() { val x: Duo<Int, String> = select { it.toString() } }
+"#;
+    assert_rejection_same_as_kotlinc("ContextualLambdaContextResult", source);
+}
+
 #[test]
 fn nested_contextual_nullable_result_keeps_the_lambda_input_nullable() {
     let source = r#"

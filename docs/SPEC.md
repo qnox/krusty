@@ -23609,9 +23609,13 @@ of one, a selected higher-order or fun-interface parameter, and an explicit type
 such a type the lambda declares no parameters, so a use of `it` in its body is "unresolved
 reference 'it'". This holds for an `Any` or type-variable expectation, a `() -> R` parameter, a
 collection element, a branch with no expectation, and a bare `val f = { it }`. The name in the
-body never creates the parameter. Tests:
-`diagnostics_language_parity_e2e::implicit_it_without_a_function_type_is_unresolved_like_kotlinc`
-and `::implicit_it_with_a_one_parameter_function_type_runs_like_kotlinc`.
+body never creates the parameter. A call whose result constraints leave a formal uninferred still
+checks its lambda against the selected declaration's whole function shape, with only that formal
+erased to `Any`: context inputs stay contexts, so `select { it.toString() }` for
+`f: context(C) (T) -> String` binds `it` to the one value parameter. Tests:
+`diagnostics_language_parity_e2e::implicit_it_without_a_function_type_is_unresolved_like_kotlinc`,
+`::implicit_it_with_a_one_parameter_function_type_runs_like_kotlinc` and
+`resolver_regression_e2e::conflicting_contextual_result_keeps_the_lambda_context_parameter_shape`.
 
 ## Extension receivers bound to caller variables
 

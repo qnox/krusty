@@ -51399,15 +51399,6 @@ impl<'a> Checker<'a> {
         ty
     }
 
-    /// Whether an UNTYPED lambda that omits its parameter list must synthesize Kotlin's implicit `it`.
-    ///
-    /// Merely finding the token in the body is insufficient: when a lexical value named `it` already
-    /// exists, the inner lambda CAPTURES that value and remains `Function0`. Keep this decision in one
-    /// helper because overload probing and rejected-call diagnostics must infer the same arity.
-    fn untyped_lambda_binds_implicit_it(&self, scope: &CheckerScope<'_>, body: ExprId) -> bool {
-        self.file.expr_uses_name(body, "it") && self.lookup(scope, "it").is_none()
-    }
-
     /// A lambda argument's expected shape at one parameter position of a semantic-provider
     /// candidate: the
     /// VALUE parameter types, plus the receiver type when the parameter is a receiver function
@@ -53178,21 +53169,8 @@ impl<'a> Checker<'a> {
                     implicit_label,
                 );
             }
-            // A lambda literal `{ a, b -> body }` — type is `Fun(arity)`. Without an expected
-            // function type, a lambda that omits its parameter list declares none: only a
-            // contextual one-parameter function type introduces the implicit `it`. A postponed
-            // call argument is checked here only provisionally, before a candidate supplies its
-            // shape, so it keeps the arity overload probing infers; the selected or rejected call
-            // checks it again against the declared shape.
-            let bind_names: Vec<String> = if !params.is_empty() {
-                params.clone()
-            } else if self.postponed_argument_depth != 0
-                && self.untyped_lambda_binds_implicit_it(scope, body)
-            {
-                vec!["it".to_string()]
-            } else {
-                vec![]
-            };
+            // A lambda literal `{ a, b -> body }` — type is `Fun(arity)`.
+            let bind_names = self.unshaped_lambda_parameter_names(scope, &params, body);
             let arity = bind_names.len() as u8;
             // Type each parameter from its explicit annotation (`{ x: Int -> … }`) if present, so a
             // bare-value lambda checks its body correctly; otherwise the erased `Any` (an expected
