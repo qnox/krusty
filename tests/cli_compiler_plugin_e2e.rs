@@ -627,18 +627,11 @@ fn the_compose_pass_rejects_what_it_does_not_cover() {
          function from another file yet",
     );
     assert_compose_rejects(
-        "compose-generic-class-field",
-        "class Box<T>(val value: T)\nclass User(val box: Box<Int>)\n",
+        "compose-generic-value-class-field",
+        "@JvmInline value class Id<T>(val raw: T)\nclass User(val id: Id<Int>)\n",
         &[],
-        "4:1: error: krusty's Compose compiler plugin does not support a class whose stability \
-         depends on a generic class yet",
-    );
-    assert_compose_rejects(
-        "compose-value-class-field",
-        "@JvmInline value class Id(val raw: Int)\nclass User(val id: Id)\n",
-        &[],
-        "4:1: error: krusty's Compose compiler plugin does not support a class with a value-class \
-         field yet",
+        "4:1: error: krusty's Compose compiler plugin does not support a class with a field of a \
+         generic value class yet",
     );
     assert_compose_rejects(
         "compose-reflection-function-field",
@@ -646,13 +639,6 @@ fn the_compose_pass_rejects_what_it_does_not_cover() {
         &[],
         "3:1: error: krusty's Compose compiler plugin does not support a class with a field of a \
          numbered reflection function type yet",
-    );
-    assert_compose_rejects(
-        "compose-library-generic-class-field",
-        "class Holder(val value: androidx.compose.runtime.ProvidedValue<Int>)\n",
-        &[],
-        "3:1: error: krusty's Compose compiler plugin does not support a class whose stability \
-         depends on a generic class of another file or a Compose library yet",
     );
     assert_compose_rejects(
         "compose-other-file-inner-class-field",

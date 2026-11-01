@@ -5,6 +5,7 @@
 pub(crate) mod class_tables;
 pub(crate) mod coroutines;
 pub(crate) mod counted_loops;
+pub(crate) mod default_arguments;
 mod dependency_accessor;
 mod dependency_call_shape;
 mod dependency_facts;
