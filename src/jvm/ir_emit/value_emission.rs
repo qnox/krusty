@@ -1138,8 +1138,8 @@ impl super::Emitter<'_> {
                             return;
                         }
                         let owner_identity = *owner;
-                        // Array `clone` names the JVM array type. That decision reads the receiver's
-                        // type; the dispatch classifier still selects every other owner.
+                        // A member an array inherits names the erased JVM array type. That decision
+                        // reads the receiver's type; the dispatch classifier selects every other owner.
                         let Some((owner, interface)) =
                             self.source_virtual_call_owner(e, owner_identity, interface, recv)
                         else {

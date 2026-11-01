@@ -18,13 +18,7 @@ fn checked_source(optional_expectation: bool) -> DeclarationAnnotations {
         targets: crate::types::AnnotationTargets::DEFAULT,
         property_sites: None,
     };
-    DeclarationAnnotations::from_checked([(
-        &checked,
-        AppliedAnnotation {
-            internal,
-            values: Vec::new(),
-        },
-    )])
+    DeclarationAnnotations::from_checked([(&checked, AppliedAnnotation::from(&checked.resolved()))])
 }
 
 #[test]

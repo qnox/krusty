@@ -24,13 +24,6 @@ impl CheckedAnnotationApplications {
         self.checked.get(key)
     }
 
-    pub(super) fn take_checked(
-        &mut self,
-        key: &(u32, u32),
-    ) -> Option<crate::types::AppliedAnnotation> {
-        self.checked.remove(key)
-    }
-
     fn discard(&mut self, annotation: &AnnotationRef) {
         let key = (annotation.span.lo, annotation.span.hi);
         self.checked.remove(&key);

@@ -4,6 +4,8 @@
 //! expansion may specialize the local's semantic type, but that does not change the JVM erasure of
 //! the declaration that owns its slot. This boundary chooses both the erased slot and its matching
 //! physical zero; common lowering never rewrites a semantic type to encode either decision.
+//! A safe-cast snapshot of a reference cell likewise retains the holder field's erased slot until
+//! the type test chooses its result. Ordinary source declarations still materialize their type.
 
 use super::*;
 use crate::ir::{ExprId, IrExpr};
@@ -15,6 +17,9 @@ use crate::types::TyKind;
 /// entered, and the body-wide declaration table ([`super::collect_body_var_types`]) once its scope has
 /// closed or before it opens.
 pub(super) fn slot_type(ir: &IrFile, declaration: ExprId, semantic: Ty) -> Ty {
+    if let Some((_, _, slot)) = shared_cell_snapshot(ir, declaration) {
+        return slot;
+    }
     let declared = ir
         .deferred_local_types
         .get(&declaration)
@@ -22,6 +27,28 @@ pub(super) fn slot_type(ir: &IrFile, declaration: ExprId, semantic: Ty) -> Ty {
         .unwrap_or(semantic);
     let slot = ir_ty_to_jvm(&stored_value_ty(declared));
     erased_inline_parameter_slot(ir, declaration, semantic).unwrap_or(slot)
+}
+
+/// A safe cast snapshots an object cell's field before testing it, without narrowing that field
+/// to the captured variable's semantic type. Named locals and primitive cells keep their storage.
+fn shared_cell_snapshot(ir: &IrFile, declaration: ExprId) -> Option<(ExprId, Ty, Ty)> {
+    if !ir.safe_cast_temporaries.contains(&declaration) {
+        return None;
+    }
+    let IrExpr::Variable {
+        init: Some(initializer),
+        named: false,
+        ..
+    } = ir.expr(declaration)
+    else {
+        return None;
+    };
+    let IrExpr::RefGet { holder, elem } = ir.expr(*initializer) else {
+        return None;
+    };
+    let (_, descriptor) = crate::jvm::shared_captures::holder_class(elem);
+    let slot = crate::jvm::physical_type::descriptor_operand_ty(descriptor);
+    (ir_ty_to_jvm(elem).is_reference() && slot.is_reference()).then_some((*holder, *elem, slot))
 }
 
 /// The verifier type of an inlined type-parameter value.
@@ -330,6 +357,8 @@ impl Emitter<'_> {
                     let source = self.emit_consumed_operand(initializer, code);
                     self.declared_try = outer_try;
                     source
+                } else if let Some((holder, elem, _)) = shared_cell_snapshot(self.ir, declaration) {
+                    self.emit_shared_cell_read(holder, elem, false, code)
                 } else {
                     self.emit_consumed_operand(initializer, code)
                 }

@@ -22854,6 +22854,7 @@ fun after(): Int = 2
             retention: None,
             annotation_targets: None,
             mapped_collection: None,
+            mapped_builtin: false,
             annotation_element_defaults: Vec::new(),
             deprecation: None,
         }
@@ -25257,6 +25258,7 @@ fun box(): String {
                     retention: None,
                     annotation_targets: None,
                     mapped_collection: None,
+                    mapped_builtin: false,
                     annotation_element_defaults: Vec::new(),
                     deprecation: None,
                 }));
@@ -25397,6 +25399,7 @@ fun box(): String {
                     retention: None,
                     annotation_targets: None,
                     mapped_collection: None,
+                    mapped_builtin: false,
                     annotation_element_defaults: Vec::new(),
                     deprecation: None,
                 })
