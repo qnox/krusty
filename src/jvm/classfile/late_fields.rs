@@ -151,7 +151,7 @@ impl ClassWriter {
             });
             // A user annotation interns before the nullability one, matching the attribute order
             // (`RuntimeVisibleAnnotations` precedes `RuntimeInvisibleAnnotations`).
-            let visible_anns: Vec<Vec<u8>> = lf
+            let mut visible_anns: Vec<Vec<u8>> = lf
                 .user_visible
                 .iter()
                 .map(|annotation| self.encode_annotation(annotation))
@@ -166,6 +166,15 @@ impl ClassWriter {
                 let ti = self.cp.utf8(a);
                 vec![(ti >> 8) as u8, ti as u8, 0, 0]
             }));
+            // kotlinc adds the Java deprecation after every declared and nullability annotation:
+            // its type interns last and it ends the runtime-visible list.
+            if lf.deprecated {
+                visible_anns.push(self.encode_annotation(&crate::ir::AppliedAnnotation {
+                    internal: crate::types::type_name("java/lang/Deprecated"),
+                    values: Vec::new(),
+                    written_order: None,
+                }));
+            }
             let info = FieldInfo {
                 access: lf.access,
                 name: n,
@@ -202,15 +211,10 @@ impl ClassWriter {
     }
 
     /// Deprecate the most recently DEFERRED field for Java: `@java.lang.Deprecated` after its
-    /// other runtime-visible annotations, and the `Deprecated` attribute.
+    /// other annotations, and the `Deprecated` attribute.
     pub fn deprecate_last_late_field(&mut self) {
         if let Some(field) = self.late_fields.last_mut() {
             field.deprecated = true;
-            field.user_visible.push(crate::ir::AppliedAnnotation {
-                internal: crate::types::type_name("java/lang/Deprecated"),
-                values: Vec::new(),
-                written_order: None,
-            });
         }
     }
 }

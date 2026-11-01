@@ -718,9 +718,11 @@ fn declare_static(
     if let Some(annotations) = static_field_annotations(ir, c, static_index) {
         cw.set_last_late_field_annotations(annotations);
     }
-    // A public field that leaks a private companion's property onto the outer class is deprecated
-    // for Java, as kotlinc's companion-field lowering marks it.
-    if acc & 0x0001 != 0 && moved_from_private_companion(ir, c, static_index) {
+    // A non-private field that leaks a private companion's property onto the outer class is
+    // deprecated for Java, as kotlinc's companion-field lowering marks it.
+    if acc & crate::jvm::classfile::ACC_PRIVATE == 0
+        && moved_from_private_companion(ir, c, static_index)
+    {
         cw.deprecate_last_late_field();
     }
 }
