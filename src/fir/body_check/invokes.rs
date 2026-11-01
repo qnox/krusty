@@ -517,9 +517,18 @@ impl BodyFirChecker<'_> {
         cause: OriginId,
         argument: &ResolvedContextArgument,
     ) -> Result<FirReceiver, BodyCheckFailure> {
-        let origin = self
-            .origins
-            .synthetic(cause, SyntheticOriginKind::ContextArgument);
+        // kotlinc reads a context parameter passed on with no source offsets, so the call marks
+        // its line only after the load; a dispatch, extension or lambda receiver passed as a
+        // context argument is read at the call's own offsets, like any implicit receiver.
+        let kind = match argument {
+            ResolvedContextArgument::ImplicitReceiver(selection)
+                if !selection.context_parameter =>
+            {
+                SyntheticOriginKind::ImplicitReceiver
+            }
+            _ => SyntheticOriginKind::ContextArgument,
+        };
+        let origin = self.origins.synthetic(cause, kind);
         let value = match argument {
             ResolvedContextArgument::Binding {
                 name, shadow_depth, ..

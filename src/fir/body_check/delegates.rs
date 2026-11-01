@@ -634,6 +634,7 @@ impl BodyFirChecker<'_> {
                     classifier: None,
                     context_binding: None,
                     singleton: None,
+                    context_parameter: false,
                     construction_sites: Vec::new(),
                 }
             }
@@ -652,6 +653,7 @@ impl BodyFirChecker<'_> {
                     flow_identity: None,
                 }),
                 singleton: None,
+                context_parameter: true,
                 construction_sites: Vec::new(),
             },
             FirDelegateDispatchReceiver::Singleton { ty, classifier } => {
@@ -665,6 +667,7 @@ impl BodyFirChecker<'_> {
                         classifier: *classifier,
                         companion_owner: None,
                     }),
+                    context_parameter: false,
                     construction_sites: Vec::new(),
                 }
             }

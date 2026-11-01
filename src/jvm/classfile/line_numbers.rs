@@ -393,6 +393,9 @@ impl CodeBuilder {
                 .last()
                 .is_some_and(|(lpc, _)| *lpc as usize == pc)
         {
+            // The method's declaration line is not to stand in for the withdrawn entry at its
+            // start, as with every other withdrawal.
+            self.suppress_entry_line |= pc == 0;
             self.line_marks.pop();
         }
     }
