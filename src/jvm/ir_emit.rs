@@ -5065,8 +5065,8 @@ struct Emitter<'a> {
     /// Safe-call guards that share one null exit (`a?.b?.c`), by guard `When`: the label, and whether
     /// this guard is the chain's outermost one, which binds it and yields the null result.
     safe_call_null_exits: HashMap<u32, (Label, bool)>,
-    /// A safe-call receiver already on the operand stack. The one read of this temporary consumes
-    /// it in place (`dup; ifnull`) instead of loading a slot that was never stored.
+    /// An inline return frame's result already on the operand stack at its landing label. The one
+    /// read of this value consumes it in place instead of loading a slot that was never stored.
     stack_resident_value: Option<u32>,
     /// The exact selector currently emitted by a safe-call guard. Its copied inline frame may
     /// need to adapt a value before the selector joins the null arm.
@@ -6339,7 +6339,7 @@ impl<'a> Emitter<'a> {
         // The jump that reaches this label already pushed the result. The linear tracker still
         // shows the dead path in front of the label (an `athrow` leaves height 0), so the landing
         // use would load the slot again. A label that does not carry a result leaves whatever
-        // value is already stack-resident: a safe-call receiver can cross an unrelated bind.
+        // value is already stack-resident.
         if let Some(value) = resident {
             if joins_fallthrough {
                 self.stack_resident_value = None;

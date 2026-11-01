@@ -10675,23 +10675,28 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `resolve::integer_constants::tests::division_by_zero_adapts_to_long_without_a_folded_value`,
   `tests/integer_literal_branch_join_e2e.rs::division_by_zero_int_constant_throws_after_adapting_to_long`,
   `tests/classpath_jdk_static_e2e.rs::non_literal_int_does_not_match_long_parameter`.
-- **A one-word safe call duplicates its receiver.** `a?.close()`, `foo()?.close()`, `a?.foo(x)`,
-  and `a?.n` evaluate the receiver once, `dup` it, and `ifnull` to a `pop`. The non-null path uses
-  the value still on the stack as the call or property receiver; that receiver is not stored in a
-  temporary. A classpath `inline` callee that needs an empty stack (a loop or a `try`) still takes
-  the method inliner: the duplicated receiver is that call's own argument and is stored before the
-  body. Only a value left underneath the argument keeps the call on the byte splice. After that
-  inline the caller's line is marked again on the null path's `pop`. The expression-body `return`
-  marks the body's end line as it does after any call, so it adds no entry on a one-line body and
-  marks the last line of a safe call spanning several (`tests/safe_call_return_line_e2e.rs`). The same holds when the safe call's receiver is folded out of its temporary
-  (`simplifyKnownSafeCallPatterns`) after a same-module inline selector: kotlinc's label
-  normalization merges the null result's line label into the jump's own, and the fold puts the
-  `pop` right after that label, so the line describes the `pop`. A discarded null result leaves a
-  `nop` behind it. Tests: `tests/safe_call_null_line_e2e.rs`,
-  `temporaries::tests::a_line_at_a_label_adjacent_to_the_null_target_describes_its_pop`. A chain
-  (`a?.b?.c`), a scalar receiver (`Int?`), a receiver wider than one word, and a selector that
-  reads the receiver more than once keep the temporary. Tests: `tests/safe_call_dup_e2e.rs`,
-  `tests/safe_call_inline_callable_reference_e2e.rs`.
+- **A one-word safe call duplicates its receiver through kotlinc's fold, not in the emitter.**
+  `a?.close()`, `foo()?.close()`, `a?.foo(x)`, and `a?.n` evaluate the receiver once, `dup` it,
+  and `ifnull` to a `pop`; the non-null path uses the value still on the stack. kotlinc's codegen
+  stores the receiver in a temporary that the null check and the selector load, and its optimizer
+  (`simplifyKnownSafeCallPatterns`, then temporary elimination) folds the store and the loads into
+  that `dup`. krusty emits the same temporary and leaves the fold to its port of those passes
+  (`bytecode_passes::temporaries`). The emitter used to predict the fold and write the `dup`
+  itself; the prediction could not reproduce where the fold leaves the null path's line, so a
+  discarded safe call over an inline selector (`c?.resume(x)`, `c?.resumeWithException(e)`) lost
+  the `nop` kotlinc keeps there. The fold places the `pop` right after the null target's label,
+  in front of the line the caller marks again after the inlined selector, so that line describes
+  the `pop`, and the `nop` the discarded null result leaves is the line's only other instruction,
+  which `RedundantNopsCleanup` keeps. A classpath `inline` callee that needs an empty stack (a
+  loop or a `try`) reads the receiver from the temporary like any argument. The expression-body
+  `return` marks the body's end line as it does after any call, so it adds no entry on a one-line
+  body and marks the last line of a safe call spanning several
+  (`tests/safe_call_return_line_e2e.rs`). A chain (`a?.b?.c`), a scalar receiver (`Int?`), a
+  receiver wider than one word, and a selector that reads the receiver more than once keep the
+  temporary, as kotlinc's fold leaves them. Tests: `tests/safe_call_null_line_e2e.rs` (a
+  same-file inline selector and a library `@InlineOnly` one),
+  `temporaries::tests::a_line_at_a_label_adjacent_to_the_null_target_describes_its_pop`,
+  `tests/safe_call_dup_e2e.rs`, `tests/safe_call_inline_callable_reference_e2e.rs`.
 - **An access on a receiver that spans lines states its own line.**
   - **Intrinsics state their line before their operands.** This covers `.size`, `[i]` on an
     array or a string, primitive `compareTo`, a unary operator other than `+`, a binary operator

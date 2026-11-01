@@ -97,7 +97,7 @@ pub(in crate::jvm::ir_emit) fn inversion_mask_line(ir: &IrFile, expression: Expr
 
 /// The line a read of a safe call's receiver temporary carries: the null test at the safe call's
 /// line, the selector's receiver at the line the receiver starts on.
-pub(in crate::jvm::ir_emit) fn safe_call_read_line(ir: &IrFile, read: ExprId) -> Option<u32> {
+pub(super) fn safe_call_read_line(ir: &IrFile, read: ExprId) -> Option<u32> {
     match ir.safe_call_reads.get(&read)? {
         IrSafeCallRead::NullCheck { line } => Some(*line),
         IrSafeCallRead::Receiver { start_line } => Some(*start_line),

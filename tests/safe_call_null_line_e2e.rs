@@ -27,3 +27,46 @@ fn a_safe_call_over_an_inline_function_marks_its_null_path_like_kotlinc() {
         &["SafeCallNullLineKt"],
     );
 }
+
+/// A library `@InlineOnly` selector (`Continuation.resume`) moves the line into its body just as a
+/// same-file inline function does, so the null path marks the call's line again. A discarded safe
+/// call, before another statement or at the end of a `Unit` body, keeps the null result's `nop`
+/// behind that line; a returned one has `aconst_null` there instead.
+const INLINE_ONLY_SOURCE: &str = r#"import kotlin.coroutines.*
+
+var c: Continuation<Any>? = null
+var s: String? = null
+
+fun beforeStatement(): String {
+    c?.resume("OK")
+    s?.length
+    return "OK"
+}
+
+fun beforeReturn(): String {
+    c?.resume("OK")
+    return "OK"
+}
+
+fun atEnd() {
+    c?.resumeWithException(IllegalStateException())
+}
+
+fun returned(): Any? {
+    return c?.resume("OK")
+}
+
+fun notInlined(): String {
+    s?.hashCode()
+    return "OK"
+}
+"#;
+
+#[test]
+fn a_safe_call_over_an_inline_only_library_function_marks_its_null_path_like_kotlinc() {
+    common::assert_classes_identical_to_kotlinc(
+        "SafeCallInlineOnlyNullLine",
+        INLINE_ONLY_SOURCE,
+        &["SafeCallInlineOnlyNullLineKt"],
+    );
+}
