@@ -37,7 +37,9 @@ pub use ranges::{
 };
 mod indexed_iteration;
 pub use indexed_iteration::{FirBuiltinIterableKind, FirCharSequenceIndexing};
+mod conversions;
 mod with_index;
+pub use conversions::{FirConversion, FirConversionKind};
 pub use with_index::{FirIndexedValueComponent, FirWithIndexLoop};
 mod callable_dispatch;
 pub use callable_dispatch::{
@@ -64,40 +66,6 @@ use super::inline_body::FirInlineBodyPlan;
 use super::local_class_capture::FirLocalClassCapture;
 use super::signature::ResolvedTy;
 use super::source_lambda::FirSourceLambda;
-
-/// A checked implicit conversion selected by the frontend. Lowering applies this decision and does
-/// not decide assignability, boxing, coercion, or smart-cast eligibility again.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum FirConversionKind {
-    NumericWidening {
-        to: ResolvedTy,
-    },
-    NumericConversion {
-        to: ResolvedTy,
-    },
-    NullabilityWidening {
-        to: ResolvedTy,
-    },
-    SmartCast {
-        to: ResolvedTy,
-    },
-    Sam(FirSamConversionId),
-    /// A Java/platform value committed to Kotlin's non-null type. The checker records both the
-    /// boundary and the source expression text used by Kotlin's failure; common lowering merely
-    /// realizes the already-selected yields-or-throws operation.
-    PlatformNarrowing {
-        narrowing: FirPlatformNarrowingId,
-        to: ResolvedTy,
-    },
-    /// A regular function value converted to a suspend and/or `Unit`-returning function type, both
-    /// shapes selected by the frontend; `ordinal` is its source-order place in its innermost callable.
-    FunctionValue {
-        from: ResolvedTy,
-        to: ResolvedTy,
-        ordinal: u32,
-    },
-    CoerceToUnit,
-}
 
 /// Exact semantic SAM declaration selected by the ordinary checker. Backend descriptors and holder
 /// classes are deliberately absent; the classifier, method declaration shape, and source function
@@ -150,12 +118,6 @@ pub enum FirSamMethod {
 pub struct FirPlatformNarrowing {
     /// The checked producer's name; `None` for a value kotlinc cannot name, such as a block's.
     pub message: Option<Box<str>>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct FirConversion {
-    pub origin: OriginId,
-    pub kind: FirConversionKind,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2569,36 +2531,6 @@ impl FirBody {
         self.expressions.push(expression);
         self.debug_lines.add_expression();
         id
-    }
-
-    /// Wrap the checked `value` in an implicit conversion to `target`.
-    ///
-    /// kotlinc builds an implicit cast, coercion, widening or SAM wrap at its operand's offsets:
-    /// the conversion has no source extent of its own, so it takes the operand's origin. A block
-    /// is no operand of its own either: kotlinc converts the statement that yields its value (a
-    /// lambda's last expression is its return value), so the conversion takes that value's
-    /// origin. What required the conversion (a call argument, a lambda's result, an assignment)
-    /// stays on [`FirConversion::origin`].
-    pub fn add_implicit_conversion(
-        &mut self,
-        value: FirExprId,
-        target: ResolvedTy,
-        conversion: FirConversion,
-    ) -> FirExprId {
-        let mut yielded = value;
-        while let FirExprKind::Block {
-            result: Some(result),
-            ..
-        } = self.expressions[yielded.raw() as usize].kind
-        {
-            yielded = result;
-        }
-        let origin = self.expressions[yielded.raw() as usize].origin;
-        self.add_expr(FirExpr {
-            origin,
-            ty: target,
-            kind: FirExprKind::ImplicitConversion { value, conversion },
-        })
     }
 
     pub(crate) fn record_constant_read(&mut self, expression: FirExprId) {
