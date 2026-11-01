@@ -21,13 +21,15 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Set;
+import java.util.function.Supplier;
 import kotlin.sequences.Sequence;
 
 // A source function or constructor, a function the language contributes to a classifier, or a
 // library classifier's.
 final class SourceFunction implements KSFunctionDeclaration {
-    // Null for a library classifier's.
-    private final SourceFile file;
+    // Null for a library classifier's. An intersection member's is set once the round's files are
+    // read, as the member it is made from may be declared in a later one.
+    SourceFile file;
     // The classifier that declares it, or null for a top-level function.
     private final KSDeclaration owner;
     private final Name simpleName;
@@ -47,6 +49,8 @@ final class SourceFunction implements KSFunctionDeclaration {
     String jvmSignature;
     // The name KSP2 reports; null also when krusty does not name it the way KSP2 does yet.
     String jvmName;
+    // What `findOverridee` answers, or null when the round cannot say.
+    Supplier<KSDeclaration> overridee;
     // The extension receiver; `receiverUndescribed` when it has one krusty could not describe.
     KSTypeReference extensionReceiver;
     boolean receiverUndescribed;
@@ -110,7 +114,10 @@ final class SourceFunction implements KSFunctionDeclaration {
 
     @Override
     public KSDeclaration findOverridee() {
-        throw Nodes.notImplemented("KSFunctionDeclaration.findOverridee");
+        if (overridee == null) {
+            throw Nodes.notImplemented("KSFunctionDeclaration.findOverridee");
+        }
+        return overridee.get();
     }
 
     @Override

@@ -7,7 +7,7 @@ use crate::jvm::classfile::CodeBuilder;
 use crate::types::Ty;
 
 use super::inline_lambda_aliases::InlineLambdaAlias;
-use super::local_variable_representation::slot_type;
+use super::local_variable_representation::{boxed_scalar_slot, slot_type};
 use super::Emitter;
 
 /// Map each declaration index reachable inside one body to the JVM type of the slot it owns.
@@ -21,23 +21,48 @@ pub(super) fn collect_body_var_types(
     roots: impl IntoIterator<Item = u32>,
 ) -> HashMap<u32, Ty> {
     let mut declarations = HashMap::default();
+    // The slot the declaration owns, exactly as its emission enters it: a `Unit` declaration
+    // is a `kotlin/Unit` reference, and reading it pushes one operand.
+    visit_body_declarations(ir, roots, |index, declaration, ty| {
+        declarations.insert(index, slot_type(ir, declaration, ty));
+    });
+    declarations
+}
+
+/// The values of a body whose built-in primitive is held boxed in an erased slot.
+pub(super) fn collect_boxed_scalar_values(
+    ir: &IrFile,
+    roots: impl IntoIterator<Item = u32>,
+) -> HashMap<u32, Ty> {
+    let mut values = HashMap::default();
+    visit_body_declarations(ir, roots, |index, declaration, ty| {
+        match boxed_scalar_slot(ir, declaration, ty) {
+            Some(primitive) => values.insert(index, primitive),
+            None => values.remove(&index),
+        };
+    });
+    values
+}
+
+fn visit_body_declarations(
+    ir: &IrFile,
+    roots: impl IntoIterator<Item = u32>,
+    mut visit: impl FnMut(u32, u32, Ty),
+) {
     let mut seen = HashSet::default();
     let mut pending = roots.into_iter().collect::<Vec<_>>();
     while let Some(expression) = pending.pop() {
         if !seen.insert(expression) {
             continue;
         }
-        // The slot the declaration owns, exactly as its emission enters it: a `Unit` declaration
-        // is a `kotlin/Unit` reference, and reading it pushes one operand.
         if let IrExpr::Variable { index, ty, .. } = ir.expr(expression) {
-            declarations.insert(*index, slot_type(ir, expression, *ty));
+            visit(*index, expression, *ty);
         }
         match ir.expr(expression) {
             IrExpr::Lambda { captures, .. } => pending.extend(captures.iter().copied()),
             _ => crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child)),
         }
     }
-    declarations
 }
 
 impl Emitter<'_> {
@@ -99,6 +124,10 @@ impl Emitter<'_> {
             &mut self.var_types,
             collect_body_var_types(self.ir, std::iter::once(inline_body)),
         );
+        let saved_boxed_scalars = std::mem::replace(
+            &mut self.boxed_scalar_values,
+            collect_boxed_scalar_values(self.ir, std::iter::once(inline_body)),
+        );
         for (index, &(slot, ty)) in param_slots.iter().enumerate() {
             if !aliases.contains_key(&(index as u32)) {
                 self.slots.insert(index as u32, (slot, ty));
@@ -110,6 +139,7 @@ impl Emitter<'_> {
         self.constructor_initializer_class = saved_initializer_class;
         self.slots = saved_slots;
         self.var_types = saved_var_types;
+        self.boxed_scalar_values = saved_boxed_scalars;
         self.stack_resident_value = saved_resident;
         result
     }

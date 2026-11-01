@@ -1,0 +1,46 @@
+# What KSP2 2.3.12 (KSPJvmMain) logs with Members.kt over grouping/: a classifier lists its
+# callables by name, in the order each name first appears, functions before properties.
+w: [ksp] INTERFACE grouping.Named modifiers= typeParameters= supertypes=kotlin.Any
+w: [ksp]   fun first kind=MEMBER abstract=true modifiers= typeParameters= receiver=null (): kotlin.Int
+w: [ksp]   fun first kind=MEMBER abstract=true modifiers= typeParameters= receiver=null (x: kotlin.Int vararg=false default=false): kotlin.Int
+w: [ksp]   property first mutable=false backingField=false modifiers=: kotlin.Int
+w: [ksp]   fun name kind=MEMBER abstract=true modifiers= typeParameters= receiver=null (prefix: kotlin.String vararg=false default=false): kotlin.String
+w: [ksp]   fun name kind=MEMBER abstract=true modifiers= typeParameters= receiver=null (): kotlin.String
+w: [ksp]   property name mutable=false backingField=false modifiers=: kotlin.String
+w: [ksp]   fun other kind=MEMBER abstract=true modifiers= typeParameters= receiver=null (): kotlin.Int
+w: [ksp]   property name2 mutable=true backingField=false modifiers=: kotlin.Int
+w: [ksp] CLASS grouping.WithCtor modifiers= typeParameters= supertypes=kotlin.Any
+w: [ksp]   fun key kind=MEMBER abstract=false modifiers= typeParameters= receiver=null (scale: kotlin.Int vararg=false default=false): kotlin.Int
+w: [ksp]   property key mutable=false backingField=true modifiers=: kotlin.Int
+w: [ksp]   fun count kind=MEMBER abstract=false modifiers= typeParameters= receiver=null (): kotlin.Int
+w: [ksp]   property count mutable=true backingField=true modifiers=: kotlin.Int
+w: [ksp]   fun <init> kind=MEMBER abstract=false modifiers=FINAL typeParameters= receiver=null (key: kotlin.Int vararg=false default=false, count: kotlin.Int vararg=false default=false): grouping.WithCtor
+w: [ksp]   OBJECT grouping.WithCtor.Companion modifiers= typeParameters= supertypes=kotlin.Any
+w: [ksp]     fun key kind=MEMBER abstract=false modifiers= typeParameters= receiver=null (): kotlin.Int
+w: [ksp]     fun <init> kind=MEMBER abstract=false modifiers=FINAL,PUBLIC typeParameters= receiver=null (): grouping.WithCtor.Companion
+w: [ksp]   CLASS grouping.WithCtor.key modifiers= typeParameters= supertypes=kotlin.Any
+w: [ksp]     fun <init> kind=MEMBER abstract=false modifiers=FINAL,PUBLIC typeParameters= receiver=null (): grouping.WithCtor.key
+w: [ksp] CLASS grouping.Pair2 modifiers=DATA typeParameters= supertypes=kotlin.Any
+w: [ksp]   fun left kind=MEMBER abstract=false modifiers= typeParameters= receiver=null (): kotlin.Int
+w: [ksp]   property left mutable=false backingField=true modifiers=: kotlin.Int
+w: [ksp]   property right mutable=false backingField=true modifiers=: kotlin.Int
+w: [ksp]   fun component1 kind=MEMBER abstract=false modifiers= typeParameters= receiver=null (x: kotlin.Int vararg=false default=false): kotlin.Int
+w: [ksp]   fun component1 kind=MEMBER abstract=false modifiers=FINAL,OPERATOR,OVERRIDE,PUBLIC typeParameters= receiver=null (): kotlin.Int
+w: [ksp]   fun copy kind=MEMBER abstract=false modifiers= typeParameters= receiver=null (): kotlin.Int
+w: [ksp]   fun copy kind=MEMBER abstract=false modifiers=FINAL,PUBLIC typeParameters= receiver=null (left: kotlin.Int vararg=false default=true, right: kotlin.Int vararg=false default=true): grouping.Pair2
+w: [ksp]   fun component2 kind=MEMBER abstract=false modifiers=FINAL,OPERATOR,OVERRIDE,PUBLIC typeParameters= receiver=null (): kotlin.Int
+w: [ksp]   fun <init> kind=MEMBER abstract=false modifiers=FINAL typeParameters= receiver=null (left: kotlin.Int vararg=false default=false, right: kotlin.Int vararg=false default=false): grouping.Pair2
+w: [ksp] ENUM_CLASS grouping.Mode modifiers=ENUM typeParameters= supertypes=kotlin.Enum<grouping.Mode>
+w: [ksp]   property A mutable=false backingField=false modifiers=: kotlin.Int
+w: [ksp]   fun name kind=MEMBER abstract=false modifiers= typeParameters= receiver=null (x: kotlin.Int vararg=false default=false): kotlin.Int
+w: [ksp]   fun <init> kind=MEMBER abstract=false modifiers=FINAL,PRIVATE typeParameters= receiver=null (): grouping.Mode
+w: [ksp]   ENUM_ENTRY grouping.Mode.A modifiers= typeParameters= supertypes=
+w: [ksp]   ENUM_ENTRY grouping.Mode.B modifiers= typeParameters= supertypes=
+w: [ksp]   fun values kind=STATIC abstract=false modifiers=FINAL,JAVA_STATIC,PUBLIC typeParameters= receiver=null (): kotlin.Array<grouping.Mode>
+w: [ksp]   fun valueOf kind=STATIC abstract=false modifiers=FINAL,JAVA_STATIC,PUBLIC typeParameters= receiver=null (value: kotlin.String vararg=false default=false): grouping.Mode
+w: [ksp]   property entries mutable=false backingField=false modifiers=FINAL,JAVA_STATIC,PUBLIC: kotlin.enums.EnumEntries<grouping.Mode>
+w: [ksp] OBJECT grouping.Holder modifiers= typeParameters= supertypes=kotlin.Any
+w: [ksp]   fun x kind=MEMBER abstract=false modifiers= typeParameters= receiver=null (p: kotlin.Int vararg=false default=false): kotlin.Unit
+w: [ksp]   property x mutable=false backingField=true modifiers=: kotlin.Int
+w: [ksp]   fun y kind=MEMBER abstract=false modifiers= typeParameters= receiver=null (): kotlin.Unit
+w: [ksp]   fun <init> kind=MEMBER abstract=false modifiers=FINAL,PUBLIC typeParameters= receiver=null (): grouping.Holder

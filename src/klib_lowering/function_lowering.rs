@@ -34,8 +34,8 @@ pub(super) mod vararg_parameters;
 #[derive(Clone, Copy, Debug)]
 pub(super) struct ParameterValue {
     pub(super) index: u32,
-    /// Whether a read publishes the binding as stable. Checked FIR lowering publishes it for a
-    /// read of a value or context parameter, and not for a receiver, which is read as `this`.
+    /// Whether a read publishes the binding as stable. Authenticated receiver, value and context
+    /// parameters are immutable bindings, as are their by-value closure captures.
     pub(super) stable_read: bool,
     /// The type the body reads the parameter at when that is the erasure of its declared type,
     /// as in a prepared-inline copy; `None` when the body reads the declared type itself.
@@ -338,7 +338,7 @@ pub(super) fn prepared_inline_header(
                 receiver.base.symbol.clone(),
                 ParameterValue {
                     index: 0,
-                    stable_read: false,
+                    stable_read: true,
                     erased: None,
                 },
             );
@@ -374,15 +374,10 @@ pub(super) fn prepared_inline_header(
         }
         extension_receiver |= receiver;
         let erased = read_type(parameter.ty, ty)?.filter(|_| !ty.is_fun());
-        let stable_read = !matches!(
-            identity,
-            ResolvedParameterIdentity::ExtensionReceiver
-                | ResolvedParameterIdentity::LegacyContextReceiver { .. }
-        );
         let index = u32::try_from(index).expect("a parameter list fits u32") + first_slot;
         let value = ParameterValue {
             index,
-            stable_read,
+            stable_read: true,
             erased,
         };
         if values
@@ -879,18 +874,14 @@ fn companion_extension_classifier(
 /// stable binding read.
 fn parameter_role(role: SerializedRole, identity: &ResolvedParameterIdentity) -> Option<bool> {
     match (role, identity) {
-        (SerializedRole::Context, ResolvedParameterIdentity::LegacyContextReceiver { .. }) => {
-            Some(false)
-        }
         (
             SerializedRole::Context,
-            ResolvedParameterIdentity::ContextValue { .. }
+            ResolvedParameterIdentity::LegacyContextReceiver { .. }
+            | ResolvedParameterIdentity::ContextValue { .. }
             | ResolvedParameterIdentity::AnonymousContextParameter { .. },
-        ) => Some(true),
-        (SerializedRole::ExtensionReceiver, ResolvedParameterIdentity::ExtensionReceiver) => {
-            Some(false)
-        }
-        (
+        )
+        | (SerializedRole::ExtensionReceiver, ResolvedParameterIdentity::ExtensionReceiver)
+        | (
             SerializedRole::Value,
             ResolvedParameterIdentity::Source(_) | ResolvedParameterIdentity::Unnamed { .. },
         ) => Some(true),

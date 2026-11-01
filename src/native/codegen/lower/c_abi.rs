@@ -43,7 +43,22 @@ impl<'a> FileLowering<'a> {
             function,
             &export.symbol,
             export.signature.parameters().to_vec(),
-        )
+        )?;
+        let Some(symbol) = &export.default_entry else {
+            return Ok(());
+        };
+        // The module default entry takes the declaration's operands and the omission masks, so
+        // its export is the same trampoline over that entry.
+        let Some(&(_, entry)) = self
+            .module_default_entries
+            .iter()
+            .find(|(declared, _)| *declared == function)
+        else {
+            return Err(declined!("`{symbol}` has no module default entry"));
+        };
+        let mut params = export.signature.parameters().to_vec();
+        params.extend(super::defaults::module_default_masks(params.len()));
+        self.define_trampoline(file_init, entry, function, symbol, params)
     }
 
     pub(super) fn define_c_exports(
@@ -81,16 +96,28 @@ impl<'a> FileLowering<'a> {
         symbol: &str,
         params: Vec<Ty>,
     ) -> Result<(), Unsupported> {
-        let declared = &self.ir.functions[function as usize];
-        let ret = declared.ret;
+        let Some(target) = self.functions[function as usize] else {
+            return Err(declined!("`{symbol}` has no body"));
+        };
+        self.define_trampoline(file_init, target, function, symbol, params)
+    }
+
+    /// Export `symbol`, which runs the file's initializer and then calls `target` with its own
+    /// operands, returning what `function` returns.
+    fn define_trampoline(
+        &mut self,
+        file_init: FuncId,
+        target: FuncId,
+        function: u32,
+        symbol: &str,
+        params: Vec<Ty>,
+    ) -> Result<(), Unsupported> {
+        let ret = self.ir.functions[function as usize].ret;
         let signature = self.signature_of(&params, ret)?;
         let id = self
             .module
             .declare_function(symbol, Linkage::Export, &signature)
             .map_err(|error| format!("declaring `{symbol}` ({error})"))?;
-        let Some(target) = self.functions[function as usize] else {
-            return Err(declined!("`{symbol}` has no body"));
-        };
         self.emit_function(id, signature, ret, symbol, &mut |body, arguments| {
             let init = body.func_ref(file_init);
             body.emit_call(init, &[])?;

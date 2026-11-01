@@ -84,7 +84,7 @@ pub(super) fn archive_entry_name<'a>(
 }
 
 fn open_jar(jar: &Path) -> Option<zip::ZipArchive<File>> {
-    zip::ZipArchive::new(File::open(jar).ok()?).ok()
+    crate::archive::open_file(File::open(jar).ok()?).ok()
 }
 
 fn parse_metadata_class(
@@ -565,10 +565,7 @@ mod tests {
     #[test]
     fn metadata_index_scans_cataloged_and_conventional_facades() {
         let module = crate::metadata::module::build_kotlin_module(
-            &[(
-                "p".to_string(),
-                vec!["Utils".to_string(), "HelpersKt".to_string()],
-            )],
+            &[("p".to_string(), vec!["Utils".into(), "HelpersKt".into()])],
             [2, 4, 0],
         );
         let mut packages = JarPackages::default();

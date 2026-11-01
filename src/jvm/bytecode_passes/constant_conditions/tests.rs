@@ -8,6 +8,7 @@ const ICONST_1: u8 = 0x04;
 const ICONST_2: u8 = 0x05;
 const ICONST_3: u8 = 0x06;
 const NOP: u8 = 0x00;
+const ACONST_NULL: u8 = 0x01;
 
 /// One node of a test body; `At(k)` places label `k`, and a jump names the label it goes to.
 enum N {
@@ -344,4 +345,49 @@ fn a_method_without_an_int_constant_is_left_as_it_is() {
         Op(IRETURN),
     ];
     folds("(I)I", 1, &source, &source, false);
+}
+
+#[test]
+fn a_label_beside_a_reached_jump_target_is_not_retained_from_deleted_code() {
+    // After the `goto`, label 0 stands right in front of the jump target, label 1. kotlinc's label
+    // normalization makes them one reached label, so neither is a label kept from dead code.
+    let source = [
+        Var(ILOAD, 0),
+        Jump(IFEQ, 1),
+        Op(ICONST_1),
+        Jump(GOTO, 2),
+        At(0),
+        At(1),
+        Line(9, 0),
+        Op(ICONST_2),
+        At(2),
+        Op(IRETURN),
+    ];
+    let (mut method, _) = body("(I)I", 1, &source);
+    let (unchanged, _) = body("(I)I", 1, &source);
+    let result = eliminate(&mut method, "T").expect("analysis succeeds");
+    assert_eq!(result, Elimination::default());
+    assert_eq!(method.nodes, unchanged.nodes);
+}
+
+#[test]
+fn a_label_after_a_throw_beside_a_reached_jump_target_stays_retained() {
+    // kotlinc has a dead continuation after the `athrow` that the pass deletes, which keeps
+    // label 0 apart from the jump target, label 1: it is one retained from deleted code.
+    let source = [
+        Var(ILOAD, 0),
+        Jump(IFEQ, 1),
+        Op(ACONST_NULL),
+        Op(ATHROW),
+        At(0),
+        At(1),
+        Op(ICONST_2),
+        Op(IRETURN),
+    ];
+    let (mut method, labels) = body("(I)I", 1, &source);
+    let result = eliminate(&mut method, "T").expect("analysis succeeds");
+    assert_eq!(
+        result.preserved_unreachable_labels,
+        BTreeSet::from([labels[0]])
+    );
 }

@@ -48,3 +48,25 @@ fn arguments_below_a_supertype_write_every_wildcard_like_kotlinc() {
             .unwrap_or_else(|diff| panic!("{class}: {diff}"));
     }
 }
+
+/// A parameter position drops `out` over a final class, but kotlinc never counts an enum as final
+/// there: a source enum (with or without entry bodies), a nested one and a Java enum all keep
+/// `? extends`, at the top level and below another `out` argument.
+const ENUM_ARGUMENTS: &str = r##"import java.util.concurrent.TimeUnit
+enum class Plain { A }
+enum class WithBodies { A { override fun f() = 1 }; abstract fun f(): Int }
+class Box<out T>(val t: T)
+class Holder(val nested: List<Holder.Kind>?, val plain: List<Plain>) {
+    enum class Kind(val v: String) { X("x") }
+}
+fun enums(a: List<Plain>, b: List<WithBodies>, c: List<TimeUnit>, d: List<Box<Plain>>, e: List<Box<String>>) {}
+"##;
+
+#[test]
+fn an_enum_argument_keeps_its_parameter_wildcard_like_kotlinc() {
+    for class in ["EnumArgumentsKt", "Holder"] {
+        common::byte_diff_against_kotlinc("EnumArguments", ENUM_ARGUMENTS, class)
+            .expect("reference kotlinc is provisioned")
+            .unwrap_or_else(|diff| panic!("{class}: {diff}"));
+    }
+}

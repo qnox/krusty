@@ -280,6 +280,33 @@ impl IrFile {
             .push(member);
     }
 
+    /// Publish the debug contract of a generated top-level function, which the file facade owns.
+    pub(crate) fn publish_generated_facade_function(
+        &mut self,
+        member: IrGeneratedFunctionPublication,
+    ) {
+        assert!(
+            member.metadata.is_none(),
+            "a generated facade function publishes debug only"
+        );
+        assert!(
+            self.generated_function_publication(member.function)
+                .is_none(),
+            "a generated function has one owning publication"
+        );
+        assert!(
+            !self.fn_params.contains_key(&member.function),
+            "a generated publication is the function's sole parameter-identity contract"
+        );
+        assert!(
+            member.parameter_identities.iter().all(|identity| {
+                identity.provenance == IrParameterProvenance::CompilerGenerated
+            }),
+            "a generated declaration publishes generated parameter provenance"
+        );
+        self.generated_facade_functions.push(member);
+    }
+
     pub(crate) fn generated_member_publication(
         &self,
         owner: TypeName,
@@ -294,6 +321,7 @@ impl IrFile {
         self.generated_member_publications
             .values()
             .flat_map(|publication| publication.functions.iter())
+            .chain(&self.generated_facade_functions)
             .find(|member| member.function == function)
     }
 

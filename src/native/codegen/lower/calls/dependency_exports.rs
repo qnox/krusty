@@ -38,24 +38,22 @@ impl BodyLowering<'_, '_, '_> {
         args: &[u32],
     ) -> Result<Option<Value>, Unsupported> {
         let Callee::External {
-            target,
             params,
             ret,
-            substitutions,
             extension_receiver_parameter,
+            defaults,
             ..
         } = callee
         else {
             return Err("an emitted dependency call without a checked external identity".into());
         };
-        if args.len() != params.len() {
+        if args.len() + defaults.len() != params.len() {
             return Err(
                 "a dependency call whose operands disagree with its checked parameters".into(),
             );
         }
-        let instantiated =
-            crate::backend::instantiate_dependency_signature(realization, *target, substitutions)
-                .map_err(Unsupported::from)?;
+        let instantiated = crate::backend::instantiate_dependency_signature(realization, callee)
+            .map_err(Unsupported::from)?;
         if realization
             .generic_sig
             .as_ref()
@@ -102,7 +100,7 @@ impl BodyLowering<'_, '_, '_> {
         }
         .authenticate()
         .map_err(Unsupported::from)?;
-        let abi = export.signature.parameters();
+        let declared = export.signature.parameters();
         let inserts_receiver = matches!(
             call,
             DependencyExportCall::Member
@@ -111,11 +109,32 @@ impl BodyLowering<'_, '_, '_> {
                 | DependencyExportCall::SourceSingletonExtension { .. }
                 | DependencyExportCall::ClassifierAssociated { .. }
         );
-        if abi.len() != args.len() + usize::from(inserts_receiver) {
+        if declared.len() != params.len() + usize::from(inserts_receiver) {
             return Err(
                 "a dependency export whose declared operand count disagrees with its call".into(),
             );
         }
+        // The operands the call supplies, at their declared positions. Only a value parameter
+        // whose declaration owns a default is omitted, so it follows the contexts and receiver.
+        let omitted = call
+            .omitted_operands(
+                defaults,
+                crate::backend::DeclaredOperandRoles {
+                    context_count: realization.context_count,
+                    defaults: realization
+                        .klib_body_parameter_defaults
+                        .map(|defaults| defaults.as_slice()),
+                    declared: declared.len(),
+                },
+            )
+            .map_err(Unsupported::from)?;
+        let supplied = declared
+            .iter()
+            .enumerate()
+            .filter(|(position, _)| !omitted.contains(position))
+            .map(|(_, ty)| *ty)
+            .collect::<Vec<_>>();
+        let abi = supplied.as_slice();
         let arguments = match call {
             DependencyExportCall::TopLevel | DependencyExportCall::SerializedExtension => {
                 self.arguments(args, abi)?
@@ -233,9 +252,37 @@ impl BodyLowering<'_, '_, '_> {
         if self.terminated {
             return Ok(None);
         }
+        let (symbol, signature, arguments) = match &export.default_entry {
+            Some(entry) if !omitted.is_empty() => {
+                // A zero in each omitted slot and its bit in the mask; the entry evaluates the
+                // marked defaults in the declaring module, in declaration order.
+                let mut supplied = arguments.into_iter();
+                let mut masks = vec![0u32; declared.len().div_ceil(32)];
+                let mut operands = Vec::with_capacity(declared.len() + masks.len());
+                for (position, ty) in declared.iter().enumerate() {
+                    if omitted.contains(&position) {
+                        masks[position / 32] |= 1 << (position % 32);
+                        operands.push(self.zero_of(*ty));
+                    } else {
+                        operands.push(supplied.next().expect("one value per supplied operand"));
+                    }
+                }
+                for mask in masks {
+                    operands.push(
+                        self.builder
+                            .ins()
+                            .iconst(types::I32, i64::from(mask as i32)),
+                    );
+                }
+                let mut signature = declared.to_vec();
+                signature.extend(super::super::defaults::module_default_masks(declared.len()));
+                (entry.as_str(), signature, operands)
+            }
+            _ => (export.symbol.as_str(), declared.to_vec(), arguments),
+        };
         let id = self
             .file
-            .import(&export.symbol, abi, export.signature.result())?;
+            .import(symbol, &signature, export.signature.result())?;
         let func_ref = self.func_ref(id);
         let call = self.emit_call(func_ref, &arguments)?;
         match self.builder.inst_results(call).first().copied() {
