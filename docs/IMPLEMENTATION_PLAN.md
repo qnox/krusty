@@ -13,14 +13,20 @@ as a template in three independent steps:
    frame; operand-stack words become `ValueId`s with stack-carried values passed as block
    parameters, locals stay typed `(slot, category)` locals, calls and fields keep their exact
    owner/name/descriptor, and lines and the exception table are kept per operation and as
-   handlers over blocks. It drops no instruction and interprets no call. Not yet consumed.
-2. **Normalization into common IR**: map a `DecodedBody` onto the common inline-body form keyed
-   only on exact JVM owner, name and descriptor: boxing/unboxing (`Integer.valueOf`,
-   `UInt.unbox-impl`, `UIntArray.constructor-impl`), function-type `invoke` of a lambda
-   parameter, parameter null checks (kept as checks a non-JVM target still performs), inline
-   markers and `$i$f`/`$i$a` locals. An unrecognised call stays an ordinary call of its exact
-   declaration or declines the template; reified bodies keep declining as today. No spelling or
-   simple-name matching, and no fallback lowering path.
+   handlers over blocks. It drops no instruction and interprets no call.
+2. **Normalization into a template** (`JvmLibraries::dependency_inline_template`, in
+   `src/jvm/jvm_libraries/inline_body_plan/template`, landed): a `DecodedBody` becomes a
+   target-neutral `DependencyInlineTemplate` (`src/libraries/inline_template.rs`): structured
+   statements (Ramsey's "Beyond Relooper" loops and labeled blocks over the reducible block graph)
+   over semantically typed expressions. Calls are classified by exact owner/name/descriptor only:
+   primitive box/unbox and value-class `box-impl`/`unbox-impl` round trips and the casts that
+   restore an erased value disappear, `FunctionN.invoke` of a function-typed parameter becomes the
+   lambda invocation, `InlineMarker` calls and unread `$i$f`/`$i$a` stores are dropped, the
+   parameter null check stays a statement, and every other target must normalize to exactly one
+   non-inline, non-generic metadata declaration (top-level, extension, member or constructor).
+   Anything else declines the whole template with a `TemplateDecline`: reified declarations and
+   reification markers (as today), suspend or context-parameter declarations, exception tables,
+   switches, irreducible flow, fields, monitors, type tests, reference arrays. Not yet consumed.
 3. **`ExpandInIr` hookup**: publish the normalized template for a `JvmLibraries` inline
    declaration the way KLIB providers publish theirs, so the Native/Wasm lanes expand it with the
    existing machinery; Native `UIntArray(n) { … }` is the first regression, checked against the

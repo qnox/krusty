@@ -7,6 +7,7 @@ mod collection_transform;
 mod dependencies;
 mod iteration;
 mod recovery;
+mod template;
 
 use super::inline_capability::metadata_inline;
 use super::JvmLibraries;

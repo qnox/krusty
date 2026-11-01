@@ -26,6 +26,7 @@ pub(crate) mod function_classifiers;
 mod generic_signature;
 mod inline_body;
 mod inline_kind;
+mod inline_template;
 mod klib_body_class;
 mod member_flags;
 mod member_records;
@@ -102,6 +103,11 @@ pub use inline_body::{
     InlineBodyRecovery, InlineBodySource, InlineBodyValue, InlineCollectionAppend,
     InlineCollectionCapacity, InlineCollectionLocalNames, InlineIterationIndex,
     InlineIterationTraversal,
+};
+pub use inline_template::{
+    DependencyInlineTemplate, TemplateBinaryOp, TemplateCallee, TemplateComparison,
+    TemplateCondition, TemplateDecline, TemplateExpr, TemplateExprId, TemplateExprKind,
+    TemplateLabel, TemplateLocal, TemplateLocalId, TemplateStmt, TemplateStmtId, TemplateStmtKind,
 };
 pub(crate) use klib_body_class::{KlibBodyClassContract, KlibBodyClassParameters};
 pub use member_flags::LmFlags;
