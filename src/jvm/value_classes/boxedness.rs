@@ -45,7 +45,7 @@ impl ReprCtx<'_> {
             ..
         } = *self;
         let is_x = |t: &Ty| t.non_null().obj_internal().is_some_and(|n| n == x);
-        if physical.get(&id).is_some_and(is_x) {
+        if physical.physical(id).as_ref().is_some_and(is_x) {
             return true;
         }
         // A callee declared to return `x` itself hands back `x`'s carrier, whatever its descriptor.
@@ -58,8 +58,8 @@ impl ReprCtx<'_> {
         // `Object` (`value class Box(val item: Any)`) records the same physical type once this pass has
         // unboxed that result, so the recorded unbox of `x` decides. A property declared as `x`
         // (`val boxed: Boxed<String>`) returns the carrier, which a generic `x` erases to `Object`.
-        if types.get(&id).is_some_and(is_x)
-            && physical.get(&id).is_some_and(|ty| ty.is_erased_top())
+        if types.get(&id).as_ref().is_some_and(is_x)
+            && physical.physical(id).is_some_and(|ty| ty.is_erased_top())
             && types.declared_value_class(id, under) != Some(x)
             && !self.declares_unboxed_property(id, x)
             && self.carrier_unboxes.get(&id) != Some(&x)
@@ -80,7 +80,7 @@ impl ReprCtx<'_> {
                 if self.declares_unboxed_property(id, x) {
                     false
                 } else {
-                    (is_x(ty) && physical.get(&id).is_some_and(|ty| ty.is_erased_top()))
+                    (is_x(ty) && physical.physical(id).is_some_and(|ty| ty.is_erased_top()))
                         || matches!(repr_of_ty(ty, under), Repr::Boxed(c) if c == x)
                 }
             }

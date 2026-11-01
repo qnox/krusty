@@ -580,7 +580,7 @@ struct DelegateMethod {
 fn add_delegate_method(ir: &mut IrFile, method: DelegateMethod) -> u32 {
     let result = Ty::nullable(Ty::obj("kotlin/Any"));
     let value = ir.add_expr(ir.expr(method.delegate).clone());
-    ir.logical_types.insert(value, method.storage_ty);
+    ir.set_logical_type(value, method.storage_ty);
     let value = if method.storage_ty.is_jvm_scalar() {
         ir.add_expr(IrExpr::TypeOp {
             op: IrTypeOp::ImplicitCoercion,

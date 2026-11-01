@@ -113,8 +113,7 @@ fn unboxed_vc_class(
 fn carrier_field_value_class(ir: &IrFile, under: &Under, id: ExprId) -> Option<TypeName> {
     match &ir.exprs[id as usize] {
         IrExpr::GetField { .. } | IrExpr::GetStatic(_) => ir
-            .logical_types
-            .get(&id)
+            .logical_type(id)
             .and_then(|ty| ty.non_null().obj_internal())
             .filter(|name| under.contains_key(name)),
         _ => None,

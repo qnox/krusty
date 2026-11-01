@@ -543,7 +543,7 @@ fn realize_expressions(
                 ir.ext_call_source_receiver.remove(&expression);
                 operation.commit(ir, expression);
                 if matches!(result.canonical_semantic().non_null(), Ty::UInt | Ty::ULong) {
-                    ir.logical_types.insert(expression, result);
+                    ir.set_logical_type(expression, result);
                 }
                 continue;
             }
@@ -1714,8 +1714,8 @@ pub(super) fn bridge_external_result(
     // value-class lowering needs both facts on the cloned operation to distinguish an erased generic
     // read (`Iterator<X>.next(): Object`, which returns a boxed `X`) from a declaration whose value-
     // class result is already returned as its unboxed carrier.
-    ir.logical_types.insert(call, semantic);
-    ir.physical_types.insert(call, physical);
+    ir.set_logical_type(call, semantic);
+    ir.set_physical_type(call, physical);
     ir.exprs[index] = IrExpr::TypeOp {
         op: crate::ir::IrTypeOp::ImplicitCoercion,
         arg: call,

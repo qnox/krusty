@@ -787,7 +787,7 @@ pub(super) fn assert_unit_is_empty(unit: &DependencyBodyUnit) {
     let ir = unit.ir();
     assert!(ir.exprs.is_empty());
     assert!(ir.functions.is_empty());
-    assert!(ir.logical_types.is_empty());
+    assert_eq!(ir.logical_types().count(), 0);
     assert!(ir.binding_read_stability.is_empty());
     assert!(ir.checked_return_depths.is_empty());
     assert!(ir.callable_scopes.is_empty());

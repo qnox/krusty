@@ -189,8 +189,8 @@ impl EnumWhenLowering {
         // was, and the key stands where the right one was.
         ir.exprs[lhs as usize] = IrExpr::GetValue(ordinal);
         ir.exprs[rhs as usize] = key;
-        ir.logical_types.remove(&lhs);
-        ir.logical_types.remove(&rhs);
+        ir.take_logical_type(lhs);
+        ir.take_logical_type(rhs);
         // The checked enum equality is now a generated integer-key comparison.
         ir.exprs[expression as usize] = IrExpr::PrimitiveBinOp {
             op: IrBinOp::Eq,

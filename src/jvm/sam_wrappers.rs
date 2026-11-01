@@ -127,19 +127,17 @@ pub(super) fn realize(
         // construction is cast to the interface it converts to.
         let construction = if enclosed_by_cast {
             ir.exprs[node as usize] = construction;
-            ir.logical_types
-                .insert(node, Ty::obj_name(target.classifier));
+            ir.set_logical_type(node, Ty::obj_name(target.classifier));
             node
         } else {
             let construction = ir.add_expr(construction);
-            ir.logical_types.insert(construction, Ty::obj_name(wrapper));
+            ir.set_logical_type(construction, Ty::obj_name(wrapper));
             ir.exprs[node as usize] = IrExpr::TypeOp {
                 op: crate::ir::IrTypeOp::Cast,
                 arg: construction,
                 type_operand: Ty::obj_name(target.classifier),
             };
-            ir.logical_types
-                .insert(node, Ty::obj_name(target.classifier));
+            ir.set_logical_type(node, Ty::obj_name(target.classifier));
             construction
         };
         if target.nullable {
@@ -365,13 +363,7 @@ fn assign_expression_function(
 /// without the continuation (`() -> Unit` into `suspend fun invoke()` is a `Function0`).
 fn wrapped_function_arity(ir: &IrFile, value: ExprId, target: &IrSamTarget, arity: u8) -> usize {
     let suspend_carrier = usize::from(arity) + usize::from(target.suspend);
-    if let Some(TyKind::Fun(signature)) = ir
-        .logical_types
-        .get(&value)
-        .copied()
-        .map(Ty::non_null)
-        .map(Ty::kind)
-    {
+    if let Some(TyKind::Fun(signature)) = ir.logical_type(value).map(Ty::non_null).map(Ty::kind) {
         if target.suspend && !signature.suspend {
             return signature.params.len();
         }

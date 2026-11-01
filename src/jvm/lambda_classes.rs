@@ -293,7 +293,7 @@ fn site_in_roots(
         Some(class) => class,
         None => crate::jvm::local_class_names::callable_reference_name(ir, node)?,
     };
-    let function_type = ir.logical_types.get(&node).copied()?;
+    let function_type = ir.logical_type(node)?;
     let mut template_copies = inline_template_copies(ir, fid, every_emitted_root);
     if shared {
         template_copies.extend(nodes.into_iter().filter(|&other| other != node));
@@ -623,10 +623,7 @@ pub(super) fn realize(
         let every_emitted_root =
             ir.lambda_origins.contains_key(&fid) || runtime_reified || inline_anonymous;
         let values = reachable.reachable(ir, fid, every_emitted_root);
-        let Some(function_type) = values
-            .first()
-            .and_then(|node| ir.logical_types.get(node).copied())
-        else {
+        let Some(function_type) = values.first().and_then(|node| ir.logical_type(*node)) else {
             continue;
         };
         let TyKind::Fun(signature) = function_type.non_null().kind() else {
@@ -846,7 +843,7 @@ fn delegate_sites(ir: &IrFile, fid: FunId, class_name: Option<TypeName>) -> Resu
                 node,
                 template_copies: Vec::new(),
                 class,
-                function_type: ir.logical_types.get(&node).copied().ok_or(())?,
+                function_type: ir.logical_type(node).ok_or(())?,
                 captures: captures.clone(),
             })
         })
@@ -1237,7 +1234,7 @@ fn construct(ir: &mut IrFile, site: &Site, constructor: Option<Vec<Ty>>, fresh_i
             }
         };
         // The value's type is the class's: a consumer that needs its `FunctionN` casts it.
-        ir.logical_types.insert(node, Ty::obj_name(internal));
+        ir.set_logical_type(node, Ty::obj_name(internal));
     }
 }
 

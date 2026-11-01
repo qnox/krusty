@@ -114,7 +114,7 @@ impl BodyLowering<'_> {
                             // hoisting snapshots every effectful part before a later suspension and
                             // consumes this producer-owned type rather than rediscovering it.
                             let ty = self.converted_type(part.value, part.conversion)?;
-                            self.ir.logical_types.insert(lowered, ty);
+                            self.ir.set_logical_type(lowered, ty);
                             Ok(lowered)
                         }
                     })
@@ -360,7 +360,7 @@ impl BodyLowering<'_> {
                 // result is the `Int` that the relational operator compares with zero; the outer
                 // FIR expression records only the final Boolean, so keep the nested operand's
                 // checked type explicitly too.
-                self.ir.logical_types.insert(call, Ty::Int);
+                self.ir.set_logical_type(call, Ty::Int);
                 if let IrExpr::Call {
                     callee: call_callee,
                     ..
@@ -391,7 +391,7 @@ impl BodyLowering<'_> {
                 // The selected `contains` convention call is the Boolean operand of a synthesized
                 // negation for `!in`. The outer FIR expression records the negation's type, not
                 // this nested call's, so preserve the checker-owned result before building it.
-                self.ir.logical_types.insert(call, Ty::Boolean);
+                self.ir.set_logical_type(call, Ty::Boolean);
                 if *negated {
                     self.ir.add_negation(call)
                 } else {
@@ -417,7 +417,7 @@ impl BodyLowering<'_> {
                 ) {
                     return Err(FirLoweringFailure::InvalidComparableRangeOrdering { origin });
                 }
-                self.ir.logical_types.insert(lower, Ty::Int);
+                self.ir.set_logical_type(lower, Ty::Int);
                 let end = self.expression(*upper_bound)?;
                 self.ir.add_expr(IrExpr::Checked(Box::new(
                     crate::ir::IrCheckedOperation::ComparableRangeContains {
@@ -545,9 +545,7 @@ impl BodyLowering<'_> {
                             check: crate::ir::NullCheck::Source,
                         });
                         let asserted = if operand_ty != target.get() {
-                            self.ir
-                                .logical_types
-                                .insert(asserted, operand_ty.non_null());
+                            self.ir.set_logical_type(asserted, operand_ty.non_null());
                             self.ir.add_expr(IrExpr::TypeOp {
                                 op: IrTypeOp::ImplicitCoercion,
                                 arg: asserted,
@@ -872,9 +870,7 @@ impl BodyLowering<'_> {
                         (None, present_comparison),
                     ],
                 });
-                self.ir
-                    .logical_types
-                    .insert(lhs_present_result, Ty::Boolean);
+                self.ir.set_logical_type(lhs_present_result, Ty::Boolean);
                 let lhs_is_null = null_test(self, lhs_temporary);
                 let rhs_null_comparison = null_test(self, rhs_temporary);
                 let lhs_null_result = if *operation == FirBinaryOperation::Equal {
@@ -888,7 +884,7 @@ impl BodyLowering<'_> {
                         (None, lhs_present_result),
                     ],
                 });
-                self.ir.logical_types.insert(result, Ty::Boolean);
+                self.ir.set_logical_type(result, Ty::Boolean);
                 self.ir.add_expr(IrExpr::Block {
                     stmts: vec![lhs_variable, rhs_variable],
                     value: Some(result),
@@ -1121,7 +1117,7 @@ impl BodyLowering<'_> {
                 let result = self.ir.add_expr(IrExpr::When {
                     branches: vec![(Some(condition), rhs), (None, lhs)],
                 });
-                self.ir.logical_types.insert(result, expression.ty.get());
+                self.ir.set_logical_type(result, expression.ty.get());
                 // The fold's right-side condition marks the elvis's line. Where the right side is
                 // the chain's next link, kotlinc's chain marks that link's operand line there
                 // instead, and the last link marks the line the chain started on.
@@ -1499,9 +1495,9 @@ impl BodyLowering<'_> {
                 lambda
             }
         };
-        self.ir.logical_types.insert(lowered, expression.ty.get());
+        self.ir.set_logical_type(lowered, expression.ty.get());
         let lowered = crate::ir::complete_bottom_value(self.ir, lowered, expression.ty.get());
-        self.ir.logical_types.insert(lowered, expression.ty.get());
+        self.ir.set_logical_type(lowered, expression.ty.get());
         // A lambda's own provenance went to its node above; the references in its body carry
         // theirs.
         if !matches!(expression.kind, FirExprKind::Lambda { .. }) {
@@ -1717,7 +1713,7 @@ impl BodyLowering<'_> {
             let first_generated = self.ir.exprs.len();
             let constant = lower_constant(&folded.value, folded.ty, origin)?;
             let lowered = self.ir.add_expr(IrExpr::Const(constant));
-            self.ir.logical_types.insert(lowered, folded.ty);
+            self.ir.set_logical_type(lowered, folded.ty);
             let debug = self.body.expression_debug_lines(value);
             if debug.positionless {
                 self.ir.mark_positionless(lowered);
@@ -1816,9 +1812,7 @@ impl BodyLowering<'_> {
                         check,
                     });
                     if source_type != to.get() {
-                        self.ir
-                            .logical_types
-                            .insert(asserted, source_type.non_null());
+                        self.ir.set_logical_type(asserted, source_type.non_null());
                         self.ir.add_expr(IrExpr::TypeOp {
                             op: IrTypeOp::ImplicitCoercion,
                             arg: asserted,
@@ -1979,7 +1973,7 @@ impl BodyLowering<'_> {
         self.ir
             .short_circuits
             .insert(when, crate::ir::IrShortCircuitKind::And);
-        self.ir.logical_types.insert(when, Ty::Boolean);
+        self.ir.set_logical_type(when, Ty::Boolean);
         when
     }
 
@@ -1991,7 +1985,7 @@ impl BodyLowering<'_> {
         self.ir
             .short_circuits
             .insert(when, crate::ir::IrShortCircuitKind::Or);
-        self.ir.logical_types.insert(when, Ty::Boolean);
+        self.ir.set_logical_type(when, Ty::Boolean);
         when
     }
 
@@ -2004,7 +1998,7 @@ impl BodyLowering<'_> {
             stmts: vec![effect],
             value: Some(unit),
         });
-        self.ir.logical_types.insert(block, Ty::Unit);
+        self.ir.set_logical_type(block, Ty::Unit);
         block
     }
 
@@ -2089,13 +2083,13 @@ impl BodyLowering<'_> {
             branches: vec![(Some(condition), null_result), (None, selector)],
         });
         self.ir.whens.exhaustive.insert(guarded, result_type);
-        self.ir.logical_types.insert(guarded, result_type);
+        self.ir.set_logical_type(guarded, result_type);
         self.ir.null_guards.insert(guarded);
         let block = self.ir.add_expr(IrExpr::Block {
             stmts: vec![variable],
             value: Some(guarded),
         });
-        self.ir.logical_types.insert(block, result_type);
+        self.ir.set_logical_type(block, result_type);
         Ok(block)
     }
 
@@ -2182,7 +2176,7 @@ impl BodyLowering<'_> {
         // common-IR `when`; a backend may choose its physical representation but must not
         // reconstruct `Nothing`, nullability, or another result from the branch instructions.
         self.ir.whens.exhaustive.insert(guarded, result_type);
-        self.ir.logical_types.insert(guarded, result_type);
+        self.ir.set_logical_type(guarded, result_type);
         self.ir.null_guards.insert(guarded);
         let block = self.ir.add_expr(IrExpr::Block {
             stmts: vec![variable],

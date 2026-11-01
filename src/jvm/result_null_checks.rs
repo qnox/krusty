@@ -247,7 +247,7 @@ fn materialize_unnamed_checks_before_result_coercion(ir: &mut IrFile) {
             };
             *value = Some(coerced);
         }
-        ir.physical_types.insert(produced, slot);
+        ir.set_physical_type(produced, slot);
         ir.declaration_result_coercions.remove(&coercion);
     }
 }

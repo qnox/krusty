@@ -106,7 +106,7 @@ fn range_loop_records_an_exact_type_stable_bound_read() {
         ir.binding_read_stability.get(&end),
         Some(&crate::ir::IrBindingStability::Stable)
     );
-    assert_eq!(ir.logical_types.get(&end), Some(&Ty::Int));
+    assert_eq!(ir.logical_type(end), Some(Ty::Int));
 }
 
 #[test]

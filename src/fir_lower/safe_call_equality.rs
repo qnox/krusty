@@ -84,8 +84,8 @@ fn fold(ir: &mut IrFile, equality: ExprId) {
         branches: vec![(Some(condition), absent), (None, compared)],
     };
     ir.whens.exhaustive.insert(guard, Ty::Boolean);
-    ir.logical_types.insert(guard, Ty::Boolean);
-    ir.logical_types.insert(block, Ty::Boolean);
+    ir.set_logical_type(guard, Ty::Boolean);
+    ir.set_logical_type(block, Ty::Boolean);
     if op == crate::ir::IrBinOp::Ne {
         ir.replace_with_negation(equality, block);
     } else {
@@ -93,7 +93,7 @@ fn fold(ir: &mut IrFile, equality: ExprId) {
             stmts: Vec::new(),
             value: Some(block),
         };
-        ir.logical_types.insert(equality, Ty::Boolean);
+        ir.set_logical_type(equality, Ty::Boolean);
     }
 }
 

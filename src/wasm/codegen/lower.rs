@@ -455,8 +455,8 @@ fn expression_type(
         IrExpr::Block {
             value: Some(value), ..
         } if ir.checked_type(id).is_none() => return expression_type(ir, declared, *value),
-        IrExpr::GetValue(slot) => match ir.logical_types.get(&id) {
-            Some(ty) => *ty,
+        IrExpr::GetValue(slot) => match ir.logical_type(id) {
+            Some(ty) => ty,
             None => *declared
                 .get(slot)
                 .ok_or_else(|| format!("a read of value {slot} before its declaration"))?,
@@ -1815,19 +1815,18 @@ mod tests {
     ) -> Result<(), Unsupported> {
         let mut ir = IrFile::default();
         let seven = ir.add_expr(IrExpr::Const(IrConst::Int(7)));
-        ir.logical_types.insert(seven, Ty::Int);
+        ir.set_logical_type(seven, Ty::Int);
         let statement = if diverges {
             ir.add_expr(IrExpr::Return(Some(seven)))
         } else {
             ir.add_expr(IrExpr::UnitInstance)
         };
-        ir.logical_types
-            .insert(statement, if diverges { Ty::Nothing } else { Ty::Unit });
+        ir.set_logical_type(statement, if diverges { Ty::Nothing } else { Ty::Unit });
         let operand = ir.add_expr(IrExpr::Block {
             stmts: vec![statement],
             value: None,
         });
-        ir.logical_types.insert(operand, Ty::Unit);
+        ir.set_logical_type(operand, Ty::Unit);
         let returned = ir.add_expr(IrExpr::Return(Some(operand)));
         let body = ir.add_expr(IrExpr::Block {
             stmts: vec![returned],
@@ -1882,7 +1881,7 @@ mod tests {
             type_operand: Ty::String,
         });
         ir.call_declared_ret.insert(call, formal);
-        ir.logical_types.insert(coercion, Ty::String);
+        ir.set_logical_type(coercion, Ty::String);
         assert_eq!(ir.checked_type(call), None);
         assert_eq!(
             expression_type(&ir, &HashMap::default(), call),
@@ -1919,7 +1918,7 @@ mod tests {
             args: Vec::new(),
         });
         ir.call_declared_ret.insert(call, declared);
-        ir.logical_types.insert(call, Ty::String);
+        ir.set_logical_type(call, Ty::String);
         assert_eq!(
             expression_type(&ir, &HashMap::default(), call),
             Ok(Some(Ty::String))
@@ -1951,7 +1950,7 @@ mod tests {
             stmts: Vec::new(),
             value: Some(value),
         });
-        ir.logical_types.insert(block, Ty::Byte);
+        ir.set_logical_type(block, Ty::Byte);
         let declared = HashMap::from_iter([(7, Ty::Int)]);
 
         assert_eq!(expression_type(&ir, &declared, block), Ok(Some(Ty::Byte)));

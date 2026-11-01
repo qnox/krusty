@@ -56,7 +56,7 @@ impl BodyLowering<'_> {
             });
             // This synthesized value-bearing block has no source FIR node whose finalization can
             // attach the result of the settled semantic check.
-            self.ir.logical_types.insert(block, Ty::Boolean);
+            self.ir.set_logical_type(block, Ty::Boolean);
             return block;
         }
         let op = if negated {
@@ -151,14 +151,14 @@ impl BodyLowering<'_> {
         let test = self.ir.add_expr(IrExpr::When {
             branches: vec![(Some(null_test), true_value), (None, instance_test)],
         });
-        self.ir.logical_types.insert(test, Ty::Boolean);
+        self.ir.set_logical_type(test, Ty::Boolean);
         match declaration {
             Some(declaration) => {
                 let block = self.ir.add_expr(IrExpr::Block {
                     stmts: vec![declaration],
                     value: Some(test),
                 });
-                self.ir.logical_types.insert(block, Ty::Boolean);
+                self.ir.set_logical_type(block, Ty::Boolean);
                 block
             }
             None => test,
@@ -268,9 +268,7 @@ impl BodyLowering<'_> {
         let result = self.ir.add_expr(IrExpr::When {
             branches: vec![(Some(matches), cast), (None, null)],
         });
-        self.ir
-            .logical_types
-            .insert(result, Ty::nullable(cast_target));
+        self.ir.set_logical_type(result, Ty::nullable(cast_target));
         Ok(match declaration {
             Some(declaration) => self.ir.add_expr(IrExpr::Block {
                 stmts: vec![declaration],

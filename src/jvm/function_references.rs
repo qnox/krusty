@@ -531,7 +531,7 @@ fn install_carrier(
 ) -> ExprId {
     ir.exprs[expression] = carrier;
     let carrier = ExprId::try_from(expression).expect("an expression id fits its index");
-    ir.logical_types.insert(carrier, Ty::obj_name(class));
+    ir.set_logical_type(carrier, Ty::obj_name(class));
     carrier
 }
 

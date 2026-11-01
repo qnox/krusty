@@ -1576,7 +1576,7 @@ fn emit_pass(
                     .map(|d| d.map(|d| format!(
                         "{:?} logical={:?}",
                         ir.exprs[d as usize],
-                        ir.logical_types.get(&d)
+                        ir.logical_type(d)
                     )))
                     .collect::<Vec<_>>())
             );
@@ -6437,8 +6437,8 @@ impl<'a> Emitter<'a> {
             IrExpr::PropertyRead { ty, .. } => {
                 // A read keeps its LOGICAL type in the IR; a value-class property's accessor returns
                 // the carrier, which the value-class pass records beside it. The stack holds that.
-                if let Some(physical) = self.ir.physical_types.get(&e) {
-                    return jvm_value_ty(physical);
+                if let Some(physical) = self.ir.physical_type(e) {
+                    return jvm_value_ty(&physical);
                 }
                 // A property read always yields a stored value. `Unit` therefore occupies the
                 // `kotlin/Unit` reference slot; only a function's control-flow return uses `V`.
@@ -6510,8 +6510,7 @@ impl<'a> Emitter<'a> {
                         other => other,
                     };
                     self.ir
-                        .logical_types
-                        .get(&e)
+                        .logical_type(e)
                         .map(|semantic| ir_ty_to_jvm(&semantic.non_null()))
                         .unwrap_or(physical)
                 }

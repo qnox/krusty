@@ -154,7 +154,7 @@ pub(super) fn aliased_invocation(
     if params.len() != arguments {
         return Err("an aliased lambda's invocation has no semantic type for each argument");
     }
-    let Some(&result) = ir.logical_types.get(&inline_body) else {
+    let Some(result) = ir.logical_type(inline_body) else {
         return Err("an aliased lambda's body has no checked result type");
     };
     Ok(AliasedInvocation {
@@ -332,7 +332,7 @@ mod tests {
     fn an_aliased_invocation_reads_every_fact_from_checked_ir() {
         let mut ir = IrFile::default();
         let (lambda, body) = placed_literal(&mut ir, vec![Ty::Long, Ty::Int]);
-        ir.logical_types.insert(body, Ty::UInt);
+        ir.set_logical_type(body, Ty::UInt);
         assert_eq!(
             aliased_invocation(&ir, lambda, &[Ty::UInt], 1),
             Ok(AliasedInvocation {
@@ -349,7 +349,7 @@ mod tests {
     fn a_missing_semantic_argument_type_rejects_the_invocation() {
         let mut ir = IrFile::default();
         let (lambda, body) = placed_literal(&mut ir, vec![Ty::Long, Ty::Int]);
-        ir.logical_types.insert(body, Ty::Int);
+        ir.set_logical_type(body, Ty::Int);
         for params in [&[][..], &[Ty::Int, Ty::Int][..]] {
             assert_eq!(
                 aliased_invocation(&ir, lambda, params, 1),
@@ -372,13 +372,13 @@ mod tests {
     fn a_mis_sized_method_rejects_the_invocation() {
         let mut ir = IrFile::default();
         let (short, short_body) = placed_literal(&mut ir, Vec::new());
-        ir.logical_types.insert(short_body, Ty::Int);
+        ir.set_logical_type(short_body, Ty::Int);
         assert_eq!(
             aliased_invocation(&ir, short, &[Ty::Int], 1),
             Err("an aliased lambda's method takes fewer parameters than it has captures")
         );
         let (long, long_body) = placed_literal(&mut ir, vec![Ty::Long, Ty::Int, Ty::Int]);
-        ir.logical_types.insert(long_body, Ty::Int);
+        ir.set_logical_type(long_body, Ty::Int);
         assert_eq!(
             aliased_invocation(&ir, long, &[Ty::Int], 1),
             Err("an aliased lambda is invoked with another arity")

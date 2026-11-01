@@ -58,7 +58,7 @@ fn add_ulong_shift<'a>(
     let lhs = ir.add_expr(IrExpr::Const(IrConst::ULong(lhs)));
     let rhs = ir.add_expr(IrExpr::Const(IrConst::Int(rhs)));
     let value = ir.add_expr(IrExpr::PrimitiveBinOp { op, lhs, rhs });
-    ir.logical_types.insert(value, Ty::ULong);
+    ir.set_logical_type(value, Ty::ULong);
     add_ir_function(ir, name, value, Ty::ULong);
     (name, expected)
 }
@@ -129,8 +129,7 @@ fn ulong_backend_ir_uses_one_node_carrier() {
         ),
     ];
     let present_zero = ir.add_expr(IrExpr::Const(IrConst::ULong(0)));
-    ir.logical_types
-        .insert(present_zero, Ty::nullable(Ty::ULong));
+    ir.set_logical_type(present_zero, Ty::nullable(Ty::ULong));
     let null = ir.add_expr(IrExpr::Const(IrConst::Null));
     let present_is_null = ir.add_expr(IrExpr::PrimitiveBinOp {
         op: IrBinOp::Eq,
@@ -139,7 +138,7 @@ fn ulong_backend_ir_uses_one_node_carrier() {
     });
     add_ir_function(&mut ir, "presentIsNull", present_is_null, Ty::Boolean);
     let absent = ir.add_expr(IrExpr::Const(IrConst::Null));
-    ir.logical_types.insert(absent, Ty::nullable(Ty::ULong));
+    ir.set_logical_type(absent, Ty::nullable(Ty::ULong));
     let null = ir.add_expr(IrExpr::Const(IrConst::Null));
     let absent_is_null = ir.add_expr(IrExpr::PrimitiveBinOp {
         op: IrBinOp::Eq,
@@ -149,7 +148,7 @@ fn ulong_backend_ir_uses_one_node_carrier() {
     add_ir_function(&mut ir, "absentIsNull", absent_is_null, Ty::Boolean);
     let null = ir.add_expr(IrExpr::Const(IrConst::Null));
     let absent = ir.add_expr(IrExpr::Const(IrConst::Null));
-    ir.logical_types.insert(absent, Ty::nullable(Ty::ULong));
+    ir.set_logical_type(absent, Ty::nullable(Ty::ULong));
     let null_is_absent = ir.add_expr(IrExpr::PrimitiveBinOp {
         op: IrBinOp::Eq,
         lhs: null,

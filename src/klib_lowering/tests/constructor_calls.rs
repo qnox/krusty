@@ -453,10 +453,7 @@ fn klib_generic_constructor_ordinary_body_retains_class_formals() {
     assert_eq!(*target, Some(constructor_target));
     assert!(defaults.is_empty());
     assert_eq!(*prefix, 0);
-    assert_eq!(
-        unit.ir().logical_types.get(expression),
-        Some(&to.callable.ret)
-    );
+    assert_eq!(unit.ir().logical_type(*expression), Some(to.callable.ret));
     assert_eq!(
         arguments
             .iter()

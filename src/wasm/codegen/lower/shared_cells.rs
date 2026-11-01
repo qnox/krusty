@@ -136,7 +136,7 @@ mod tests {
             value: one,
         });
         if let Some(checked) = checked {
-            ir.logical_types.insert(write, checked);
+            ir.set_logical_type(write, checked);
         }
         let (stmts, value) = if ret == Ty::Unit {
             (vec![declaration, write], None)

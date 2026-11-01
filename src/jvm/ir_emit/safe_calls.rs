@@ -164,12 +164,7 @@ impl Emitter<'_> {
         if self.diverges(plan.init) {
             return true;
         }
-        let semantic = self
-            .ir
-            .logical_types
-            .get(&plan.init)
-            .copied()
-            .unwrap_or(source);
+        let semantic = self.ir.logical_type(plan.init).unwrap_or(source);
         // `this?.close()` duplicates the inlined receiver. That receiver is stored as its erased
         // bound (`T : AutoCloseable?` is `AutoCloseable`). Narrowing the duplicate to the call-site
         // class and widening it again for the member leaves a pair of `checkcast`s kotlinc never

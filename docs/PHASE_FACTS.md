@@ -75,6 +75,13 @@ that expression's position, as fir2ir does, and the JVM backend decides by node 
 begins instead of by which nodes happen to carry a line. That second half changes line tables, so
 it lands together with the JVM line-marking work.
 
+Step 2 follows the same shape: `logical_types` and `physical_types` become one `IrNodeTypes` per
+node (`src/ir/node_types.rs`). Views that borrow the types beside other parts of the file (the JVM
+value-class representation context) borrow the node type column, and passes that rewrite every
+type (classifier renaming, specialization) go through `IrFile::rewrite_types` and the per-node
+accessors. `deferred_local_types` stays a sparse table: it holds a declaration's type before
+specialization, which only deferred locals have.
+
 Positions come first although types were patched more often, because positions are what the JVM
 line-number work is waiting on: once every node has offsets, kotlinc's line-marking rule is ported
 once instead of per construct. Each step also deletes its tables from the other hand-written copy

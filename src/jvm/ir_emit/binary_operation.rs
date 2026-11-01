@@ -34,8 +34,7 @@ impl Emitter<'_> {
 
     fn is_unsigned_bitwise_result(&self, expression: u32) -> bool {
         self.ir
-            .logical_types
-            .get(&expression)
+            .logical_type(expression)
             .is_some_and(|ty| matches!(ty.canonical_semantic().non_null(), Ty::UInt | Ty::ULong))
     }
 
@@ -149,9 +148,7 @@ impl Emitter<'_> {
                 };
                 let semantic_result = self
                     .ir
-                    .logical_types
-                    .get(&expression)
-                    .copied()
+                    .logical_type(expression)
                     .unwrap_or(arithmetic_result);
                 emit_num_conv(
                     arithmetic_result,
@@ -249,9 +246,7 @@ impl Emitter<'_> {
     fn rebuild_unsigned_bitwise_result(&mut self, expression: u32, code: &mut CodeBuilder) {
         let semantic = self
             .ir
-            .logical_types
-            .get(&expression)
-            .copied()
+            .logical_type(expression)
             .map(|ty| ty.canonical_semantic().non_null());
         let Some(semantic @ (Ty::UInt | Ty::ULong)) = semantic else {
             return;

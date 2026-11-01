@@ -855,7 +855,7 @@ fn update_scope(ir: &mut IrFile, runtime: &ComposeRuntime, facts: &RestartableFu
         branches: vec![(Some(condition), null_result), (None, update)],
     });
     ir.whens.exhaustive.insert(guarded, Ty::Unit);
-    ir.logical_types.insert(guarded, Ty::Unit);
+    ir.set_logical_type(guarded, Ty::Unit);
     ir.null_guards.insert(guarded);
     let block = ir.add_expr(IrExpr::Block {
         stmts: vec![variable],

@@ -53,7 +53,7 @@ pub(super) fn unbox_tail(
     inputs: ReprInputs<'_>,
     null_slot: Option<u32>,
 ) {
-    let boxed = ir.physical_types.get(&id).is_some_and(|ty| {
+    let boxed = ir.physical_type(id).is_some_and(|ty| {
         ty.non_null()
             .obj_internal()
             .is_some_and(|classifier| classifier == x)

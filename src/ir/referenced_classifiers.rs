@@ -86,8 +86,8 @@ pub(crate) fn referenced_classifier_names(ir: &IrFile) -> Vec<TypeName> {
             }
         }
     }
-    for ty in ir.logical_types.values() {
-        collect_classifier_names(*ty, &mut out);
+    for (_, ty) in ir.logical_types() {
+        collect_classifier_names(ty, &mut out);
     }
     for expression in &ir.exprs {
         match expression {

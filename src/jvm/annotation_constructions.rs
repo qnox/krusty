@@ -439,7 +439,7 @@ mod tests {
         }));
         assert_eq!(construction_interface(&ir, construction), Some(interface));
         let parameter = ir.add_expr(IrExpr::GetValue(0));
-        ir.logical_types.insert(parameter, Ty::obj_name(interface));
+        ir.set_logical_type(parameter, Ty::obj_name(interface));
         assert_eq!(construction_interface(&ir, parameter), None);
     }
 }

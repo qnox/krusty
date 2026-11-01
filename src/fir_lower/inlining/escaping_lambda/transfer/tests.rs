@@ -218,7 +218,7 @@ fn captured_lambda_substitution_refreshes_the_retained_inline_body() {
         params: Vec::new(),
         ret: Ty::Unit,
     });
-    ir.logical_types.insert(retained_inline_body, Ty::Unit);
+    ir.set_logical_type(retained_inline_body, Ty::Unit);
     let copy = ir.add_expr(IrExpr::Lambda {
         impl_fn: implementation,
         arity: 0,
@@ -271,7 +271,7 @@ fn captured_lambda_substitution_refreshes_the_retained_inline_body() {
         .expect("the specialized implementation retains a body");
     assert_eq!(*specialized_inline_body, retained_inline_body);
     assert_ne!(*specialized_inline_body, specialized_body);
-    assert_eq!(ir.logical_types[specialized_inline_body], Ty::Unit);
+    assert_eq!(ir.logical_type(*specialized_inline_body), Some(Ty::Unit));
     let IrExpr::Block {
         stmts: outer_statements,
         value: Some(frame),
@@ -962,7 +962,7 @@ fn invalid_nested_specialization_invalidates_the_outer_plan() {
         sam: None,
         inline_body: Some(outer_body),
     });
-    ir.logical_types.insert(copy, Ty::obj_name(anonymous));
+    ir.set_logical_type(copy, Ty::obj_name(anonymous));
     let construction = ir.add_expr(IrExpr::New {
         internal: anonymous,
         args: vec![copy],

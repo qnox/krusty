@@ -1,5 +1,12 @@
 # krusty — implementation plan
 
+## Checked types on IR nodes
+
+The `logical_types` and `physical_types` tables become one `IrNodeTypes` per expression node, in a
+column beside `IrFile::exprs`. Readers and writers go through `IrFile` accessors, borrowing views
+hold the node type column, and the call-wrapper and operation-relocation copies take the node's
+types instead of naming the two tables. Emitted code is unchanged. Step 2 of `docs/PHASE_FACTS.md`.
+
 ## Source positions on IR nodes
 
 The `expr_source_lines` and `expr_end_lines` tables become one `IrNodePosition` per expression

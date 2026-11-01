@@ -1152,8 +1152,8 @@ fn nested_value_text(
         dispatch_receiver: None,
         args: vec![value],
     });
-    ir.physical_types.insert(call, Ty::String);
-    ir.logical_types.insert(call, Ty::obj_name(nested));
+    ir.set_physical_type(call, Ty::String);
+    ir.set_logical_type(call, Ty::obj_name(nested));
     rendered_value_class_text.insert(call);
     call
 }

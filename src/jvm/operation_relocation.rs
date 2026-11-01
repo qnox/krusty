@@ -17,8 +17,7 @@ pub(super) fn clone_below_representation_wrapper(ir: &mut IrFile, source: ExprId
             }
         };
     }
-    copy_fact!(physical_types);
-    copy_fact!(logical_types);
+    ir.copy_types(source, target);
     copy_fact!(property_declaration_types);
     if ir.jvm_erased_primitive_wrapper_values.contains(&source) {
         ir.jvm_erased_primitive_wrapper_values.insert(target);
@@ -86,7 +85,7 @@ mod tests {
         ir.reified_call_subst.insert(source, substitutions.clone());
         ir.inline_call_type_arguments
             .insert(source, substitutions.clone());
-        ir.logical_types.insert(source, Ty::String);
+        ir.set_logical_type(source, Ty::String);
 
         let target = clone_below_representation_wrapper(&mut ir, source);
 
@@ -97,8 +96,8 @@ mod tests {
             ir.inline_call_type_arguments.get(&target),
             Some(&substitutions)
         );
-        assert_eq!(ir.logical_types.get(&source), Some(&Ty::String));
-        assert_eq!(ir.logical_types.get(&target), Some(&Ty::String));
+        assert_eq!(ir.logical_type(source), Some(Ty::String));
+        assert_eq!(ir.logical_type(target), Some(Ty::String));
     }
 
     #[test]
