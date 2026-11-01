@@ -421,7 +421,6 @@ callableReference/adaptedReferences/nestedClassConstructorWithDefault.kt
 callableReference/adaptedReferences/referenceToFakeOverrideWithTypeParameter.kt
 callableReference/adaptedReferences/referenceToVarargWithDefaults.kt
 callableReference/adaptedReferences/simpleDefaultArgument.kt
-callableReference/adaptedReferences/simpleEmptyVararg.kt
 callableReference/adaptedReferences/suspendConversion/adaptedWithCoercionToUnit.kt
 callableReference/adaptedReferences/suspendConversion/adaptedWithDefaultArguments.kt
 callableReference/adaptedReferences/suspendConversion/adaptedWithVarargs.kt
@@ -972,7 +971,6 @@ controlStructures/breakContinueInExpressions/inlinedBreakContinue/lambdaPassedTo
 controlStructures/breakContinueInExpressions/inlinedBreakContinue/loopWithinInlineFunction.kt
 controlStructures/breakContinueInExpressions/inlinedBreakContinue/stdlibFunctions.kt
 controlStructures/breakContinueInExpressions/inlinedBreakContinue/withReturnValueNested.kt
-controlStructures/breakContinueInExpressions/kt17384.kt
 controlStructures/breakContinueInExpressions/kt45704_elvisInInlineFun.kt
 controlStructures/breakContinueInExpressions/popSizes.kt
 controlStructures/breakContinueInExpressions/tryFinally1.kt
@@ -1006,7 +1004,6 @@ controlStructures/forInArrayWithIndex/forInArrayWithIndexBreakAndContinue.kt
 controlStructures/forInArrayWithIndex/forInArrayWithIndexContinuesAsUnmodified.kt
 controlStructures/forInArrayWithIndex/forInArrayWithIndexNameBasedDestructuringShortForm.kt
 controlStructures/forInArrayWithIndex/forInArrayWithIndexNoElementVar.kt
-controlStructures/forInArrayWithIndex/forInArrayWithIndexNoIndexOrElementVar.kt
 controlStructures/forInArrayWithIndex/forInArrayWithIndexNoIndexVar.kt
 controlStructures/forInArrayWithIndex/forInArrayWithIndexNotDestructured.kt
 controlStructures/forInArrayWithIndex/forInArrayWithIndexWithExplicitlyTypedIndexVariable.kt
@@ -2147,7 +2144,6 @@ extensionFunctions/classMethodCallExtensionSuper.kt
 extensionFunctions/defaultMethodInterfaceCallExtensionSuper.kt
 extensionFunctions/delegatedPropertyWithExtensionType.kt
 extensionFunctions/executionOrder.kt
-extensionFunctions/extensionFunctionAndSpreadOperator.kt
 extensionFunctions/extensionFunctionAsASupertypeOfValueClass.kt
 extensionFunctions/extensionFunctionAsATypeLocal.kt
 extensionFunctions/extensionFunctionAsAnExpression.kt
@@ -2435,7 +2431,6 @@ increment/argumentWithSideEffects.kt
 increment/arrayElement.kt
 increment/augmentedAssignmentWithComplexRhs.kt
 increment/classVarargGetSet.kt
-increment/classVarargGetSetEvaluationOrder.kt
 increment/classWithGetSet.kt
 increment/genericClassWithGetSet.kt
 increment/mutableListElement.kt
@@ -3550,7 +3545,6 @@ inlineSizeReduction/simpleReturnFunction.kt
 inlineSizeReduction/this.kt
 inlineSizeReduction/valAssignment.kt
 inlineSizeReduction/valDeclaration.kt
-inlineSizeReduction/varargTemporaryVar.kt
 inlineStdlib/callableRefToFunInCurrentModule.kt
 innerClass/doubleInner.kt
 innerClass/getOuterVal.kt
@@ -3787,9 +3781,6 @@ multiDecl/forIterator/longIterator/MultiDeclForComponentMemberExtensionsInExtens
 multiDecl/forRange/UnderscoreNamesDontCallComponent.kt
 multiDecl/forRange/explicitRangeToWithDot/long/MultiDeclForComponentExtensions.kt
 multiDecl/kt9828_hashMap.kt
-multiDecl/nameBasedDestructuringFullForm.kt
-multiDecl/nameBasedDestructuringShortForm.kt
-multiDecl/nameBasedDestructuringUnderscoreWithRenaming.kt
 multiDecl/positionalDestructuringFullForm.kt
 multiDecl/positionalDestructuringShortForm.kt
 multiDecl/returnInElvis.kt
@@ -4159,7 +4150,6 @@ primitiveTypes/kt79977.kt
 primitiveTypes/kt79977_withIncrementalCompilation.kt
 primitiveTypes/kt887.kt
 primitiveTypes/nullAsNullableIntIsNull.kt
-primitiveTypes/nullableAsIndex.kt
 primitiveTypes/nullableCharBoolean.kt
 primitiveTypes/numberEqualsHashCodeToString.kt
 primitiveTypes/numberToChar/abstractMethodInSuperinterface.kt
@@ -5242,7 +5232,6 @@ reified/reifiedIntersectionTypeArgument.kt
 reified/reifiedIntersectionTypeArgumentCrossModule.kt
 reified/reifiedNullableNothing1.kt
 reified/reifiedNullableNothing2.kt
-reified/reifiedNullableNothing3.kt
 reified/reifiedNullableNothing4.kt
 reified/reifiedTypeArgumentWithIntersectionTypeAsTypeArgument.kt
 reified/reifiedTypeArgumentWithRecursion.kt
@@ -5308,7 +5297,6 @@ secondaryConstructors/innerClassesInheritance.kt
 secondaryConstructors/localClasses.kt
 secondaryConstructors/superCallPrimary.kt
 secondaryConstructors/superCallSecondary.kt
-secondaryConstructors/varargs.kt
 secondaryConstructors/withNonLocalReturn.kt
 secondaryConstructors/withReturnUnit.kt
 serialization/deserializedMembers.kt
@@ -5624,7 +5612,6 @@ vararg/evaluationOrder.kt
 vararg/inlineClassArraysAsNamedArgumentInVararg.kt
 vararg/kt10926.kt
 vararg/kt37715.kt
-vararg/kt37779.kt
 vararg/kt581.kt
 vararg/kt6192.kt
 vararg/kt796_797.kt
