@@ -129,13 +129,16 @@ fn infer_generic_call_constraints_with_receiver_and_argument_ordinals(
             ConstraintOrigin::Argument(argument),
             &mut constraints,
         );
-        for formal in &generic_sig.formals {
+        for (index, formal) in generic_sig.formals.iter().enumerate() {
             if constraints.lower.contains_key(formal)
                 && formal_variance_in_type(source, shape, formal)
                     == Some(crate::types::TypeVariance::Invariant)
             {
                 invariantly_fixed.insert(formal.clone());
-                if formal_fixed_exactly_by(source, shape, formal) {
+                let nullable_formal = generic_sig.formal_bounds.get(index).is_none_or(|bounds| {
+                    bounds.iter().all(|bound| bound.upper_bound_admits_null())
+                });
+                if formal_fixed_exactly_by(source, shape, formal, nullable_formal) {
                     constraints
                         .invariant_arguments
                         .entry(formal.clone())
