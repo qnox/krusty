@@ -257,11 +257,13 @@ impl BodyLowering<'_, '_, '_> {
                 // A zero in each omitted slot and its bit in the mask; the entry evaluates the
                 // marked defaults in the declaring module, in declaration order.
                 let mut supplied = arguments.into_iter();
-                let mut masks = vec![0u32; declared.len().div_ceil(32)];
+                let masks = crate::backend::default_arguments::omission_masks(
+                    declared.len(),
+                    omitted.iter().copied(),
+                );
                 let mut operands = Vec::with_capacity(declared.len() + masks.len());
                 for (position, ty) in declared.iter().enumerate() {
                     if omitted.contains(&position) {
-                        masks[position / 32] |= 1 << (position % 32);
                         operands.push(self.zero_of(*ty));
                     } else {
                         operands.push(supplied.next().expect("one value per supplied operand"));
@@ -275,7 +277,10 @@ impl BodyLowering<'_, '_, '_> {
                     );
                 }
                 let mut signature = declared.to_vec();
-                signature.extend(super::super::defaults::module_default_masks(declared.len()));
+                signature.extend(std::iter::repeat_n(
+                    Ty::Int,
+                    crate::backend::default_arguments::mask_words(declared.len()),
+                ));
                 (entry.as_str(), signature, operands)
             }
             _ => (export.symbol.as_str(), declared.to_vec(), arguments),

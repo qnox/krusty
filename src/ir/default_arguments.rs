@@ -3,7 +3,7 @@
 use super::Callee;
 
 /// The stable current-module identity, when an override target belongs to the source module.
-pub(crate) fn module_override_callable(
+fn module_override_callable(
     target: crate::fir::ResolvedFunctionOverrideTarget,
 ) -> Option<crate::fir::CallableId> {
     match target {

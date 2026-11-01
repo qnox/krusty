@@ -88,6 +88,8 @@ impl BodyLowering<'_, '_, '_> {
                 ir.classes[class as usize].fields[field as usize].ty
             }
             IrExpr::GetStatic(index) => ir.statics[*index as usize].ty,
+            // The zero of the omitted parameter's own carrier.
+            IrExpr::AbsentArgument { ty } => *ty,
             IrExpr::RefGet { elem, .. } | IrExpr::RefSet { elem, .. } => *elem,
             // An object this lowering or the runtime builds: a captured variable's cell, a
             // lambda's closure, a reflection object.
@@ -119,6 +121,7 @@ impl BodyLowering<'_, '_, '_> {
                 | Callee::Intrinsic { ret, .. }
                 | Callee::Module { ret, .. }
                 | Callee::ModuleWithDefaults { ret, .. }
+                | Callee::ModuleDefaultEntry { ret, .. }
                 | Callee::Super { ret, .. }
                 // Another file's function returns what its declaration fixes; both files carry
                 // that type by the same projection, a value class as its value.
