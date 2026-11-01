@@ -38,7 +38,7 @@ pub(super) fn at_receiver(
         bindings: declaration
             .type_params()
             .iter()
-            .cloned()
+            .map(crate::types::TyParamName::from)
             .zip(receiver.type_args().iter().copied())
             .collect(),
         input_bounds: ReceiverInputBounds::from_parameters(&declaration.type_parameters),

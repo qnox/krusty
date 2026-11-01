@@ -89,7 +89,10 @@ pub(super) fn concrete_generic_ret(gsig: &GenericSig) -> Option<Ty> {
             // it, a classpath property `items: List<Int>` reads as raw `java/util/List<Integer>`:
             // `xs.sum()` is unresolved and `for (x in xs) { s += x }` compares `Int` vs `java/lang/Integer`.
             Some(canonicalize_jvm_collections(
-                crate::symbol_resolver::ty_subst(gsig.ret, &crate::fx_hash::HashMap::default()),
+                crate::symbol_resolver::ty_subst(
+                    gsig.ret,
+                    &crate::types::TyParamBindings::default(),
+                ),
             ))
         }
         _ => None,

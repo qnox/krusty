@@ -247,7 +247,7 @@ fn specialize_declared_callables(
         let mut bindings = base_bindings.clone();
         for formal in &property.formals {
             if !classifier.type_params.contains(formal) {
-                bindings.remove(formal);
+                bindings.remove(formal.as_str());
             }
         }
         match property.kind {
@@ -335,7 +335,7 @@ pub(crate) fn specialize_member_function(
             // A method formal always owns its name. In `class Box<T> { fun <T> echo(T): T }`, the
             // method's `T` shadows the receiver-bound class `T`; retaining the class binding here
             // would specialize `Box<String>.echo(42)` before overload inference.
-            bindings.remove(formal);
+            bindings.remove(formal.as_str());
         }
     }
     let raw_receiver = super::raw_member_view::is_raw_receiver(receiver);

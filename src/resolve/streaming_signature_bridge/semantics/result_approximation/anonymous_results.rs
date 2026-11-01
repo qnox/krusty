@@ -134,8 +134,13 @@ impl Projection<'_> {
         // factory. Expose that captured slot through its readable bound, without rewriting stars in
         // other classifiers or losing a bound reconstructed from the complete application.
         for formal in &class.captured_type_parameters.type_params {
-            if let Some(TyKind::StarProjection(bound)) = bindings.get(formal).map(|ty| ty.kind()) {
-                bindings.insert(formal.clone(), Ty::out_projection(bound));
+            if let Some(TyKind::StarProjection(bound)) =
+                bindings.get(formal.as_str()).map(|ty| ty.kind())
+            {
+                bindings.insert(
+                    crate::types::TyParamName::new(formal),
+                    Ty::out_projection(bound),
+                );
             }
         }
         let declaration = class

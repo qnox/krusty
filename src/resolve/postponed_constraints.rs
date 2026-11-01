@@ -208,7 +208,7 @@ impl PostponedCallConstraints {
         let mut lower = self.lower_inputs.clone();
         for contribution in self.function_result_lower.values() {
             for (formal, actual) in contribution {
-                let inputs = lower.entry(formal.clone()).or_default();
+                let inputs = lower.entry(formal.to_string()).or_default();
                 if !inputs.contains(actual) {
                     inputs.push(*actual);
                 }
@@ -220,7 +220,7 @@ impl PostponedCallConstraints {
                 let merged = crate::symbol_resolver::merge_inferred_lower_bounds_from_symbols(
                     source, &inputs,
                 );
-                (formal, merged)
+                (crate::types::TyParamName::from(formal), merged)
             })
             .collect();
 
@@ -329,12 +329,12 @@ impl PostponedCallConstraints {
             .filter(|formal| !formals.contains(formal))
             .cloned()
             .collect::<crate::fx_hash::HashSet<_>>();
-        let lower: HashMap<String, Ty> = inferred
+        let lower: crate::types::TyParamBindings = inferred
             .lower
             .into_iter()
             .filter(|(formal, actual)| {
-                self.formals.contains(formal)
-                    && !excluded.contains(formal)
+                self.formals.iter().any(|allowed| allowed == formal)
+                    && !excluded.contains(formal.as_str())
                     && !self.is_trivial_self_bound(formal, *actual, true)
             })
             .map(|(formal, actual)| (formal, crate::symbol_resolver::inference_actual(actual)))
@@ -376,8 +376,8 @@ impl PostponedCallConstraints {
         };
         let fixed_result_bindings = bindings
             .iter()
-            .filter(|(formal, _)| !self.formals.contains(*formal))
-            .map(|(formal, actual)| (formal.clone(), *actual))
+            .filter(|(formal, _)| !self.formals.iter().any(|allowed| allowed == *formal))
+            .map(|(formal, actual)| (*formal, *actual))
             .collect();
         let expectation = Ty::fun_with_shape(
             function
@@ -437,7 +437,12 @@ impl PostponedCallConstraints {
                 argument,
                 lower
                     .into_iter()
-                    .map(|(formal, actual)| (receive_formal(&formal), receive_type(actual)))
+                    .map(|(formal, actual)| {
+                        (
+                            crate::types::TyParamName::from(receive_formal(&formal)),
+                            receive_type(actual),
+                        )
+                    })
                     .collect(),
             );
         }
@@ -492,14 +497,14 @@ impl Checker<'_> {
     ) -> UnresolvedLambdaFormals {
         let mut unresolved = UnresolvedLambdaFormals::default();
         for formal in &generic.formals {
-            let postponed_solution = postponed_solutions.get(formal).copied();
+            let postponed_solution = postponed_solutions.get(formal.as_str()).copied();
             let depends_on_open_result = postponed_solution.is_some_and(|solution| {
                 self.lambda_arguments_have_open_result(arguments, solution)
             });
             let included = constraints.formals.contains(formal)
                     && (postponed_solution.is_none() || depends_on_open_result)
                     && (depends_on_open_result
-                        || known_bindings.get(formal).is_none_or(|binding| {
+                        || known_bindings.get(formal.as_str()).is_none_or(|binding| {
                             ty_mentions_param(*binding, std::slice::from_ref(formal))
                         }))
                     && (depends_on_open_result
@@ -614,8 +619,8 @@ impl Checker<'_> {
             let constrained_formals = constraints
                 .lower
                 .keys()
-                .chain(constraints.upper.keys())
-                .cloned()
+                .map(|formal| formal.to_string())
+                .chain(constraints.upper.keys().cloned())
                 .collect::<crate::fx_hash::HashSet<_>>();
             let mut changed = Vec::new();
             for formal in constrained_formals {
@@ -626,14 +631,14 @@ impl Checker<'_> {
                     "lambda_apply",
                     "call={} postponed solution formal={formal} solution={solution:?} lower={:?} upper={:?}",
                     site.call_name,
-                    constraints.lower.get(&formal),
+                    constraints.lower.get(formal.as_str()),
                     constraints.upper.get(&formal),
                 );
-                if prior_solutions.get(&formal) == Some(&solution) {
+                if prior_solutions.get(formal.as_str()) == Some(&solution) {
                     continue;
                 }
-                known_bindings.insert(formal.clone(), solution);
-                prior_solutions.insert(formal.clone(), solution);
+                known_bindings.insert(crate::types::TyParamName::new(&formal), solution);
+                prior_solutions.insert(crate::types::TyParamName::new(&formal), solution);
                 changed.push(formal);
             }
             if changed.is_empty() {
@@ -841,7 +846,7 @@ impl Checker<'_> {
         bindings: &mut crate::symbol_resolver::GSigBinds,
     ) {
         for formal in formals {
-            if bindings.contains_key(formal)
+            if bindings.contains_key(formal.as_str())
                 || !inputs
                     .iter()
                     .any(|input| ty_mentions_param(*input, std::slice::from_ref(formal)))
@@ -858,7 +863,7 @@ impl Checker<'_> {
                 "lambda_apply",
                 "fixed lambda input formal={formal} solution={solution:?}",
             );
-            bindings.insert(formal.clone(), solution);
+            bindings.insert(crate::types::TyParamName::new(formal), solution);
         }
     }
 
@@ -895,7 +900,7 @@ impl Checker<'_> {
             for formal in &trial.formals {
                 if !shadowed.contains(formal) {
                     if let Some(solution) = self.postponed_solution(&trial, formal) {
-                        bindings.insert(formal.clone(), solution);
+                        bindings.insert(crate::types::TyParamName::new(formal), solution);
                     }
                 }
             }
@@ -948,7 +953,12 @@ impl Checker<'_> {
         let lexical_bindings = scope
             .lexical_tparam_identities()
             .into_iter()
-            .map(|formal| (formal, Ty::obj("kotlin/Any")))
+            .map(|formal| {
+                (
+                    crate::types::TyParamName::from(formal),
+                    Ty::obj("kotlin/Any"),
+                )
+            })
             .collect::<crate::symbol_resolver::GSigBinds>();
         !crate::symbol_resolver::ty_subst_keep_unbound(ty, &lexical_bindings).mentions_ty_param()
     }
@@ -997,7 +1007,7 @@ mod tests {
 
         let mut declared = PostponedCallConstraints::default();
         declared.merge(&EmptySymbolSource, call);
-        assert_eq!(declared.lower[&name], enclosing);
+        assert_eq!(declared.lower[name.as_str()], enclosing);
     }
 
     #[test]
@@ -1016,7 +1026,10 @@ mod tests {
             declared,
             Ty::fun(vec![Ty::obj("example/Base")], Ty::obj("kotlin/Any")),
         );
-        assert_eq!(constraints.lower[&formals[0]], Ty::obj("kotlin/Any"));
+        assert_eq!(
+            constraints.lower[formals[0].as_str()],
+            Ty::obj("kotlin/Any")
+        );
 
         constraints.constrain_function_result(
             &EmptySymbolSource,
@@ -1025,6 +1038,6 @@ mod tests {
             declared,
             Ty::fun(vec![Ty::obj("example/Derived")], Ty::String),
         );
-        assert_eq!(constraints.lower[&formals[0]], Ty::String);
+        assert_eq!(constraints.lower[formals[0].as_str()], Ty::String);
     }
 }

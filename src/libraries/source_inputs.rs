@@ -35,7 +35,7 @@ impl ReceiverInputBounds {
 #[derive(Clone)]
 pub(crate) struct SourceInputDeclaration {
     pub(crate) signature: GenericSig,
-    pub(crate) receiver_bindings: HashMap<String, Ty>,
+    pub(crate) receiver_bindings: crate::types::TyParamBindings,
     pub(crate) receiver_bounds: ReceiverInputBounds,
 }
 
@@ -52,7 +52,7 @@ impl SourceInputDeclaration {
                 } else {
                     Ty::intersection(bounds)
                 };
-                Some((formal.clone(), upper))
+                Some((*formal, upper))
             })
             .collect();
         Some(crate::types::ty_with_param_bounds(declared, &bounds))
@@ -60,17 +60,14 @@ impl SourceInputDeclaration {
 
     pub(crate) fn apply_receiver(
         &mut self,
-        bindings: &HashMap<String, Ty>,
+        bindings: &crate::types::TyParamBindings,
         bounds: &ReceiverInputBounds,
     ) {
         for actual in self.receiver_bindings.values_mut() {
             *actual = crate::types::ty_subst_keep_unbound(*actual, bindings);
         }
-        self.receiver_bindings.extend(
-            bindings
-                .iter()
-                .map(|(name, actual)| (name.clone(), *actual)),
-        );
+        self.receiver_bindings
+            .extend(bindings.iter().map(|(name, actual)| (*name, *actual)));
         self.receiver_bounds.0.extend(bounds.0.clone());
     }
 }

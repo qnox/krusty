@@ -581,6 +581,7 @@ impl ProductionSignatureSemantics<'_> {
         }
         let bindings = formals
             .into_iter()
+            .map(crate::types::TyParamName::from)
             .zip(arguments)
             .collect::<crate::symbol_resolver::GSigBinds>();
         Some(crate::types::ty_subst_alias_expansion(expansion, &bindings))

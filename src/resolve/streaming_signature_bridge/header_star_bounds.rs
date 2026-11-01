@@ -48,7 +48,8 @@ pub(super) fn compact_header_star_bounds(
                     .zip(arguments.iter())
                     .enumerate()
                     .filter_map(|(ordinal, (formal, actual))| {
-                        (ordinal != index).then_some((formal.clone(), *actual))
+                        (ordinal != index)
+                            .then_some((crate::types::TyParamName::from(formal), *actual))
                     })
                     .collect::<crate::symbol_resolver::GSigBinds>();
                 let upper_bound = classifier

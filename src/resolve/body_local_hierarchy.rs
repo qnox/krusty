@@ -67,6 +67,7 @@ impl Checker<'_> {
                 .unwrap_or_default();
             formals
                 .into_iter()
+                .map(crate::types::TyParamName::from)
                 .zip(receiver.type_args().iter().copied())
                 .collect()
         };

@@ -259,20 +259,20 @@ pub(super) fn receiver_domain(
     receiver: Ty,
     type_params: &[String],
     type_param_bounds: &[Ty],
-    class_bindings: &HashMap<String, Ty>,
+    class_bindings: &crate::types::TyParamBindings,
 ) -> Ty {
     let mut bindings = class_bindings.clone();
     for parameter in type_params {
-        bindings.remove(parameter);
+        bindings.remove(parameter.as_str());
     }
     for (parameter, bound) in type_params.iter().zip(type_param_bounds) {
-        bindings.insert(parameter.clone(), *bound);
+        bindings.insert(crate::types::TyParamName::new(parameter), *bound);
     }
     for _ in 0..type_params.len() {
         let previous = bindings.clone();
         for (parameter, bound) in type_params.iter().zip(type_param_bounds) {
             bindings.insert(
-                parameter.clone(),
+                crate::types::TyParamName::new(parameter),
                 crate::symbol_resolver::ty_subst(*bound, &previous),
             );
         }
@@ -495,7 +495,7 @@ impl Checker<'_> {
         candidate.type_arguments = signature
             .formals
             .iter()
-            .map(|formal| candidate.bindings.get(formal).copied())
+            .map(|formal| candidate.bindings.get(formal.as_str()).copied())
             .collect();
         result
     }

@@ -1658,8 +1658,8 @@ pub struct GenericMethod {
 
 struct GenericMemberPlan {
     method: GenericMethod,
-    class_bindings: HashMap<String, Ty>,
-    call_bindings: HashMap<String, Ty>,
+    class_bindings: crate::types::TyParamBindings,
+    call_bindings: crate::types::TyParamBindings,
 }
 
 struct GenericMemberQuery<'a> {
@@ -1815,7 +1815,7 @@ impl ClassSig {
         self.flags = self.flags.with_final(on);
     }
 
-    pub(crate) fn type_parameter_bindings(&self, applied: Ty) -> HashMap<String, Ty> {
+    pub(crate) fn type_parameter_bindings(&self, applied: Ty) -> crate::types::TyParamBindings {
         let mut bindings = self
             .type_params
             .iter()
@@ -1827,11 +1827,11 @@ impl ClassSig {
                     .copied()
                     .filter(|bound| *bound != Ty::Error)
                     .unwrap_or_else(|| Ty::obj("kotlin/Any"));
-                (name.clone(), bound)
+                (crate::types::TyParamName::from(name), bound)
             })
             .collect::<HashMap<_, _>>();
         for (name, argument) in self.type_params.iter().zip(applied.type_args()) {
-            bindings.insert(name.clone(), *argument);
+            bindings.insert(crate::types::TyParamName::from(name), *argument);
         }
         bindings.extend(
             self.captured_type_parameters
@@ -1846,7 +1846,7 @@ impl ClassSig {
                         .copied()
                         .filter(|bound| *bound != Ty::Error)
                         .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
-                    (name.clone(), bound)
+                    (crate::types::TyParamName::from(name), bound)
                 }),
         );
         for (name, argument) in self
@@ -1855,7 +1855,7 @@ impl ClassSig {
             .iter()
             .zip(applied.type_args().iter().skip(self.type_params.len()))
         {
-            bindings.insert(name.clone(), *argument);
+            bindings.insert(crate::types::TyParamName::from(name), *argument);
         }
         bindings
     }
@@ -2490,7 +2490,12 @@ fn extension_property_headers_alpha_equivalent(left: &ExtPropSig, right: &ExtPro
         .formals
         .iter()
         .zip(right.formals.iter().zip(&right.formal_bounds))
-        .map(|(left, (right, bound))| (left.clone(), Ty::ty_param(right, *bound)))
+        .map(|(left, (right, bound))| {
+            (
+                crate::types::TyParamName::from(left),
+                Ty::ty_param(right, *bound),
+            )
+        })
         .collect::<crate::symbol_resolver::GSigBinds>();
     crate::symbol_resolver::ty_subst_keep_unbound(left.receiver, &placeholders) == right.receiver
         && left
@@ -7162,13 +7167,13 @@ fn unify_ty_common(
     shape: Ty,
     actual: Ty,
     tparams: &[String],
-    binds: &mut HashMap<String, Ty>,
+    binds: &mut crate::types::TyParamBindings,
     join: &dyn Fn(Ty, Ty) -> Ty,
 ) {
     match (shape.kind(), actual.kind()) {
         (TyKind::TyParam(name, _), _) if tparams.iter().any(|parameter| parameter == name) => {
             binds
-                .entry(name.to_string())
+                .entry(crate::types::TyParamName::new(&name))
                 .and_modify(|bound| {
                     if *bound != actual {
                         *bound = join(*bound, actual);
@@ -9186,7 +9191,7 @@ impl TypeInfo {
                 .iter()
                 .zip(arguments)
                 .filter_map(|(formal, argument)| {
-                    argument.map(|argument| (formal.clone(), argument))
+                    argument.map(|argument| (crate::types::TyParamName::from(formal), argument))
                 })
                 .collect::<crate::symbol_resolver::GSigBinds>();
             crate::symbol_resolver::ty_subst_keep_unbound(result, &bindings)
@@ -9462,7 +9467,7 @@ struct Wanted {
 /// `(I)I`, not `(Object)Object`); every other parameter erases to `java/lang/Object`.
 #[derive(Default, Clone)]
 pub struct TParams {
-    erasure: crate::fx_hash::HashMap<String, Ty>,
+    erasure: crate::types::TyParamBindings,
     /// The subset declared `reified` (only an `inline fun` may). A class literal `T::class` is
     /// valid only on one of these. Kept HERE rather than beside the parameters so the two cannot
     /// Bounds BEYOND the first, for a parameter declared with several (`where T : A, T : B`). Kotlin
@@ -9477,7 +9482,8 @@ impl TParams {
     /// same name — used to reassemble a `TParams` view from the scope chain's classifier bindings,
     /// outermost rung first, so an inner declaration's parameter shadows the outer one.
     pub(crate) fn insert_binding(&mut self, name: &str, bound: Ty, extra_bounds: Vec<Ty>) {
-        self.erasure.insert(name.to_string(), bound);
+        self.erasure
+            .insert(crate::types::TyParamName::new(name), bound);
         if extra_bounds.is_empty() {
             self.extra_bounds.remove(name);
         } else {
@@ -9508,7 +9514,10 @@ impl TParams {
     /// concrete types so `ty_of_ref` realizes `T`/`R` to `String`/`Int` rather than the erased `Object`.
     pub(crate) fn from_bindings(bindings: impl IntoIterator<Item = (String, Ty)>) -> Self {
         TParams {
-            erasure: bindings.into_iter().collect(),
+            erasure: bindings
+                .into_iter()
+                .map(|(name, ty)| (crate::types::TyParamName::from(name), ty))
+                .collect(),
             ..Default::default()
         }
     }
@@ -9546,7 +9555,9 @@ impl TParams {
         let mut declared = TParams::erased_with(names, bounds, resolve);
         for name in names {
             if let Some(bound) = self.enclosing_bound_erasure(name, names, bounds) {
-                declared.erasure.insert(name.clone(), bound);
+                declared
+                    .erasure
+                    .insert(crate::types::TyParamName::new(name), bound);
             }
         }
         out.erasure.extend(declared.erasure);
@@ -9587,7 +9598,7 @@ impl TParams {
                         other => break tparam_bound_erasure(other, resolve),
                     }
                 };
-                (n.clone(), erased)
+                (crate::types::TyParamName::from(n), erased)
             })
             .collect();
         // Every bound after the first for each name. The first IS the erasure above; the rest are only
@@ -9650,7 +9661,9 @@ impl TParams {
         let mut declared = TParams::from_decl_with(names, bounds, resolve);
         for name in names {
             if let Some(bound) = self.enclosing_bound_erasure(name, names, bounds) {
-                declared.erasure.insert(name.clone(), bound);
+                declared
+                    .erasure
+                    .insert(crate::types::TyParamName::new(name), bound);
             }
         }
         out.erasure.extend(declared.erasure);
@@ -9684,7 +9697,7 @@ impl TParams {
                 current = &bound.name;
                 continue;
             }
-            let mut erased = self.erasure.get(&bound.name).copied()?;
+            let mut erased = self.erasure.get(bound.name.as_str()).copied()?;
             let mut bound_names = crate::fx_hash::HashSet::default();
             while let TyKind::TyParam(parameter, upper) = erased.kind() {
                 if !bound_names.insert(parameter) {
@@ -9810,7 +9823,10 @@ impl TParams {
                 })
                 .collect::<Vec<_>>();
             let bound = direct_bounds.first().copied().unwrap_or(implicit);
-            out.erasure.insert(name.clone(), Ty::ty_param(name, bound));
+            out.erasure.insert(
+                crate::types::TyParamName::new(name),
+                Ty::ty_param(name, bound),
+            );
             let mut extra_bounds = direct_bounds.into_iter().skip(1).collect::<Vec<_>>();
             // `direct_bounds` already contains every constraint written on this parameter. Flatten
             // additional constraints only through a bare type-parameter edge (`T : X`); starting
@@ -10656,7 +10672,10 @@ fn unify_member_extension_slot(
     crate::symbol_resolver::unify_ty(applied, actual, &mut inferred);
     crate::symbol_resolver::unify_ty(declared, actual, &mut inferred);
     for (formal, solution) in inferred {
-        if !deferred_type_variables.contains(&formal) {
+        if !deferred_type_variables
+            .iter()
+            .any(|deferred| *deferred == formal)
+        {
             bindings.insert(formal, solution);
         }
     }
@@ -12541,12 +12560,18 @@ impl<'a> Checker<'a> {
     /// allowed to consider an extension overload. Deferring this check until the outer call is
     /// solved loses the overload decision and reports the violation at the wrong call.
     fn postponed_argument_constraint_is_satisfiable(&self, expected: Ty, actual: Ty) -> bool {
-        fn collect_declared_bounds(ty: Ty, formals: &[String], bounds: &mut HashMap<String, Ty>) {
+        fn collect_declared_bounds(
+            ty: Ty,
+            formals: &[String],
+            bounds: &mut crate::types::TyParamBindings,
+        ) {
             match ty.kind() {
                 TyKind::TyParam(formal, bound)
                     if formals.iter().any(|candidate| candidate == formal) =>
                 {
-                    bounds.entry(formal.to_string()).or_insert(bound);
+                    bounds
+                        .entry(crate::types::TyParamName::new(&formal))
+                        .or_insert(bound);
                 }
                 TyKind::Obj(_, arguments) => {
                     for &argument in arguments {
@@ -12591,7 +12616,7 @@ impl<'a> Checker<'a> {
                 &shadowed_formals,
             );
             for (formal, &lower) in &trial.lower {
-                if shadowed_formals.contains(formal)
+                if shadowed_formals.contains(formal.as_str())
                     || lower == Ty::Error
                     // Evidence may itself be a lexically fixed outer type parameter (`T? <: FT`).
                     // It is not a concrete bound violation and must remain available to PCLA.
@@ -12602,7 +12627,7 @@ impl<'a> Checker<'a> {
                 let bounds = declared_bounds.get(formal).copied().into_iter().chain(
                     trial
                         .upper
-                        .get(formal)
+                        .get(formal.as_str())
                         .into_iter()
                         .flat_map(|bounds| bounds.iter().copied()),
                 );
@@ -12750,15 +12775,15 @@ impl<'a> Checker<'a> {
             let mut bindings =
                 crate::symbol_resolver::seeded_gsig_binds(&signature, generics.type_args);
             for (formal, actual) in generics.fixed_bindings {
-                if signature.formals.contains(formal) {
-                    bindings.insert(formal.clone(), *actual);
+                if signature.formals.iter().any(|declared| declared == formal) {
+                    bindings.insert(*formal, *actual);
                 }
             }
             let contextual_result_is_bound = signature
                 .formals
                 .iter()
                 .filter(|formal| ty_mentions_param(signature.ret, std::slice::from_ref(*formal)))
-                .all(|formal| bindings.contains_key(formal));
+                .all(|formal| bindings.contains_key(formal.as_str()));
             if !contextual_result_is_bound {
                 if let Some(expected) = generics.expected_result {
                     let Ok(contextual) =
@@ -12806,8 +12831,8 @@ impl<'a> Checker<'a> {
                 // Fixed bindings were supplied by the enclosing inference frame and are not
                 // candidates for refinement by this argument.
                 for (formal, actual) in generics.fixed_bindings {
-                    if signature.formals.contains(formal) {
-                        bindings.insert(formal.clone(), *actual);
+                    if signature.formals.iter().any(|declared| declared == formal) {
+                        bindings.insert(*formal, *actual);
                     }
                 }
             }
@@ -13426,7 +13451,7 @@ impl<'a> Checker<'a> {
                 "expected_call",
                 "member {name} applied_return={applied_return:?} expected={expected:?} result_bindings={inferred:?}",
             );
-            inferred.retain(|formal, _| signature.formals.contains(formal));
+            inferred.retain(|formal, _| signature.formals.iter().any(|declared| declared == formal));
             (!inferred.is_empty()).then_some(inferred)
         });
         if let Some(inferred) = expected_bindings.as_ref() {
@@ -13555,7 +13580,7 @@ impl<'a> Checker<'a> {
                 let resolved = signature
                     .formals
                     .iter()
-                    .map(|formal| bindings.get(formal).copied())
+                    .map(|formal| bindings.get(formal.as_str()).copied())
                     .collect::<Vec<_>>();
                 if !resolved.is_empty() && resolved.iter().all(Option::is_some) {
                     inferred_member_type_args = Some(resolved);
@@ -14196,7 +14221,7 @@ impl<'a> Checker<'a> {
                     let resolved = signature
                         .formals
                         .iter()
-                        .map(|formal| selected.bindings.get(formal).copied())
+                        .map(|formal| selected.bindings.get(formal.as_str()).copied())
                         .collect::<Vec<_>>();
                     self.replace_selected_generic_call(
                         call,
@@ -17602,7 +17627,10 @@ impl<'a> Checker<'a> {
                             if argument.is_inference_placeholder() {
                                 continue;
                             }
-                            bindings.insert(formal.clone(), self.type_ref_ty(scope, &argument));
+                            bindings.insert(
+                                crate::types::TyParamName::new(formal),
+                                self.type_ref_ty(scope, &argument),
+                            );
                         }
                     }
                     if let Some(expected) = expected {
@@ -18042,7 +18070,7 @@ impl<'a> Checker<'a> {
                                     let postponed = plan
                                         .type_params
                                         .iter()
-                                        .filter(|formal| !binds.contains_key(*formal))
+                                        .filter(|formal| !binds.contains_key((*formal).as_str()))
                                         .cloned()
                                         .collect();
                                     Some((
@@ -18363,7 +18391,9 @@ impl<'a> Checker<'a> {
                             // turns that fixed caller identity back into a callee-owned variable.
                             let postponed_formals = selected_lambda_formals
                                 .iter()
-                                .filter(|formal| !known_generic_bindings.contains_key(*formal))
+                                .filter(|formal| {
+                                    !known_generic_bindings.contains_key((*formal).as_str())
+                                })
                                 .cloned()
                                 .collect::<Vec<_>>();
                             let (
@@ -18590,7 +18620,8 @@ impl<'a> Checker<'a> {
                                             .formals
                                             .iter()
                                             .filter(|formal| {
-                                                !known_generic_bindings.contains_key(*formal)
+                                                !known_generic_bindings
+                                                    .contains_key((*formal).as_str())
                                             })
                                             .cloned()
                                             .collect::<Vec<_>>()
@@ -18648,8 +18679,9 @@ impl<'a> Checker<'a> {
                                                 generic,
                                                 std::iter::once((pi, inference_actual)),
                                             );
-                                        callable_reference_constraints
-                                            .extend(inferred.keys().cloned());
+                                        callable_reference_constraints.extend(
+                                            inferred.keys().map(|formal| formal.to_string()),
+                                        );
                                         crate::symbol_resolver::merge_generic_bindings(
                                             generic,
                                             explicit_type_args.as_slice(),
@@ -18675,7 +18707,8 @@ impl<'a> Checker<'a> {
                                     generic,
                                     std::iter::once((pi, checked)),
                                 );
-                                callable_reference_constraints.extend(inferred.keys().cloned());
+                                callable_reference_constraints
+                                    .extend(inferred.keys().map(|formal| formal.to_string()));
                                 crate::trace_compiler!(
                                         "resolve",
                                         "callable-reference argument call={fname} parameter={pi} declared={:?} nominal={checked:?} inferred={inferred:?}",
@@ -18746,7 +18779,7 @@ impl<'a> Checker<'a> {
                                         .formals
                                         .iter()
                                         .filter(|formal| {
-                                            !known_generic_bindings.contains_key(*formal)
+                                            !known_generic_bindings.contains_key((*formal).as_str())
                                         })
                                         .cloned()
                                         .collect::<Vec<_>>()
@@ -18773,7 +18806,7 @@ impl<'a> Checker<'a> {
                                         });
                                     declared.and_then(Ty::fun_ret).is_some_and(|result| {
                                         generic.formals.iter().any(|formal| {
-                                            !known_generic_bindings.contains_key(formal)
+                                            !known_generic_bindings.contains_key(formal.as_str())
                                                 && ty_mentions_param(
                                                     result,
                                                     std::slice::from_ref(formal),
@@ -18931,7 +18964,7 @@ impl<'a> Checker<'a> {
                                 let has_open_callee_formal =
                                     sig.generic_sig.as_ref().is_some_and(|generic| {
                                         generic.formals.iter().any(|formal| {
-                                            !known_generic_bindings.contains_key(formal)
+                                            !known_generic_bindings.contains_key(formal.as_str())
                                                 && ty_mentions_param(
                                                     expected,
                                                     std::slice::from_ref(formal),
@@ -18997,7 +19030,7 @@ impl<'a> Checker<'a> {
                             .and_then(|shape| Some((shape, *shape.argument_parameters.get(i)?)))
                             .is_some_and(|(shape, declared)| {
                                 shape.generic_formals.iter().any(|formal| {
-                                    !known_generic_bindings.contains_key(formal)
+                                    !known_generic_bindings.contains_key(formal.as_str())
                                         && ty_mentions_param(declared, std::slice::from_ref(formal))
                                 })
                             }),
@@ -21810,9 +21843,12 @@ impl<'a> Checker<'a> {
             .erasure
             .iter()
             .filter_map(|(source, semantic)| {
-                semantic
-                    .ty_param_name()
-                    .map(|identity| (identity.to_string(), physical_tparams.bound(source)))
+                semantic.ty_param_name().map(|identity| {
+                    (
+                        crate::types::TyParamName::from(identity),
+                        physical_tparams.bound(source),
+                    )
+                })
             })
             .collect::<crate::symbol_resolver::GSigBinds>();
 
@@ -30374,8 +30410,14 @@ pub(crate) fn join_applied_classifier(
             visiting,
         )?;
         let formal = classifier.type_params[index].clone();
-        left_formals.insert(formal.clone(), left.projection_inner().unwrap_or(left));
-        right_formals.insert(formal, right.projection_inner().unwrap_or(right));
+        left_formals.insert(
+            crate::types::TyParamName::new(&formal),
+            left.projection_inner().unwrap_or(left),
+        );
+        right_formals.insert(
+            crate::types::TyParamName::new(&formal),
+            right.projection_inner().unwrap_or(right),
+        );
         arguments.push(argument);
     }
     Some(Ty::obj_args_name(owner, &arguments))
@@ -33239,7 +33281,7 @@ struct MemberExtensionFunctionShape {
     /// Selection failure must not trigger another symbol lookup or reconstruct this declaration
     /// from its owner/name/arity.
     diagnostic_candidate: crate::libraries::FunctionInfo,
-    class_bindings: HashMap<String, Ty>,
+    class_bindings: crate::types::TyParamBindings,
     /// Applied declaration parameter types, retained beside the receiver so inherited `operator`
     /// capability can be matched without re-reading either provider's source representation.
     declared_params: Vec<Ty>,
@@ -34004,7 +34046,7 @@ struct SourceConstructorBindings<'a> {
     lower: &'a mut [Vec<(Ty, ExprId)>],
     upper: &'a mut [Vec<(Ty, ExprId)>],
     explicitly_bound: &'a [bool],
-    seeded: &'a HashMap<String, Ty>,
+    seeded: &'a crate::types::TyParamBindings,
     lexically_fixed_seed: &'a [bool],
     argument_fits_seed: &'a dyn Fn(Ty, Ty) -> bool,
 }
@@ -36721,7 +36763,7 @@ impl<'a> Checker<'a> {
                         }
                         for &upper in upper_bounds {
                             let mut trial = bindings.clone();
-                            trial.insert(formal.clone(), upper);
+                            trial.insert(crate::types::TyParamName::new(formal), upper);
                             let expected_receiver = crate::symbol_resolver::ty_subst_keep_unbound(
                                 declared_receiver,
                                 &trial,
@@ -36740,8 +36782,8 @@ impl<'a> Checker<'a> {
             }
             if let Some((formal, upper, coerced)) = unit_coerced_receiver {
                 inference_receiver = Some(coerced);
-                bindings.insert(formal.clone(), upper);
-                receiver_bindings.insert(formal, upper);
+                bindings.insert(crate::types::TyParamName::new(&formal), upper);
+                receiver_bindings.insert(crate::types::TyParamName::new(&formal), upper);
                 inferred = crate::symbol_resolver::CallSiteVariables::solve(
                     &signature,
                     at_call_site,
@@ -36808,7 +36850,7 @@ impl<'a> Checker<'a> {
                         result_bindings,
                     );
                     let mut contextual = result_bindings.clone();
-                    contextual.retain(|formal, _| unprojected.contains(formal));
+                    contextual.retain(|formal, _| unprojected.contains(formal.as_str()));
                     crate::symbol_resolver::merge_generic_upper_bindings(
                         &signature,
                         type_args,
@@ -36947,7 +36989,9 @@ impl<'a> Checker<'a> {
                 // evidence. The nested producer contributes Kotlin's most-specific bottom
                 // solution here; its readable upper is a bound, not a concrete outer binding.
                 for formal in nested_constraints.upper_only {
-                    inferred_nested.entry(formal).or_insert(Ty::Nothing);
+                    inferred_nested
+                        .entry(crate::types::TyParamName::new(&formal))
+                        .or_insert(Ty::Nothing);
                 }
                 // The producer's result is a lower bound for a bare outer variable.
                 if open_formal.is_some() {
@@ -36991,8 +37035,8 @@ impl<'a> Checker<'a> {
                 {
                     let widening_bindings = result_bindings
                         .iter()
-                        .filter(|(formal, _)| !nullable_flexible_roots.contains(*formal))
-                        .map(|(formal, &binding)| (formal.clone(), binding))
+                        .filter(|(formal, _)| !nullable_flexible_roots.contains(formal.as_str()))
+                        .map(|(formal, &binding)| (*formal, binding))
                         .collect::<crate::symbol_resolver::GSigBinds>();
                     crate::symbol_resolver::widen_invariant_expected_bindings(
                         &source,
@@ -37018,18 +37062,18 @@ impl<'a> Checker<'a> {
                         if nullable_flexible_roots.contains(&formal) {
                             continue;
                         }
-                        let Some(&fixed_ty) = result_bindings.get(&formal) else {
+                        let Some(&fixed_ty) = result_bindings.get(formal.as_str()) else {
                             continue;
                         };
-                        if bindings.get(&formal).copied() == Some(fixed_ty)
+                        if bindings.get(formal.as_str()).copied() == Some(fixed_ty)
                             || non_value_argument_bindings
-                                .get(&formal)
+                                .get(formal.as_str())
                                 .is_some_and(|&ty| ty != fixed_ty)
                         {
                             continue;
                         }
                         let mut trial = bindings.clone();
-                        trial.insert(formal.clone(), fixed_ty);
+                        trial.insert(crate::types::TyParamName::new(&formal), fixed_ty);
                         if !crate::symbol_resolver::generic_bindings_satisfy_bounds(
                             &signature,
                             &trial,
@@ -37223,7 +37267,7 @@ impl<'a> Checker<'a> {
                             .filter(|identity| flow_intersections.contains_key(identity))
                             .and_then(|_| actual.non_null().ty_param_bound())
                             .unwrap_or(actual);
-                        (formal.clone(), runtime)
+                        (*formal, runtime)
                     })
                     .collect::<crate::symbol_resolver::GSigBinds>()
             };
@@ -37485,7 +37529,10 @@ impl<'a> Checker<'a> {
                     {
                         declared = declared.array_read_elem().unwrap_or(declared);
                     }
-                    Some(crate::types::ty_subst(declared, &HashMap::default()))
+                    Some(crate::types::ty_subst(
+                        declared,
+                        &crate::types::TyParamBindings::default(),
+                    ))
                 })
                 .collect::<Option<Vec<_>>>()?;
             let inferred_ret = crate::symbol_resolver::instantiate_slot(
@@ -37553,7 +37600,7 @@ impl<'a> Checker<'a> {
                     flow_intersections
                         .get(identity)
                         .cloned()
-                        .map(|bounds| (formal.clone(), bounds))
+                        .map(|bounds| (formal.to_string(), bounds))
                 })
                 .collect::<HashMap<_, _>>();
             for (formal, inputs) in &inferred_lower_inputs {
@@ -37567,7 +37614,7 @@ impl<'a> Checker<'a> {
                 if type_args
                     .get(formal_index)
                     .is_some_and(|argument| *argument != Ty::Error)
-                    || intersection_bindings.contains_key(formal)
+                    || intersection_bindings.contains_key(formal.as_str())
                     || inputs.len() < 2
                     || inputs
                         .iter()
@@ -37784,9 +37831,12 @@ impl<'a> Checker<'a> {
                 let receiver = candidate
                     .is_extension()
                     .then(|| {
-                        candidate
-                            .semantic_receiver()
-                            .map(|receiver| crate::types::ty_subst(receiver, &HashMap::default()))
+                        candidate.semantic_receiver().map(|receiver| {
+                            crate::types::ty_subst(
+                                receiver,
+                                &crate::types::TyParamBindings::default(),
+                            )
+                        })
                     })
                     .flatten();
                 let member_owner = (candidate.kind == crate::libraries::FnKind::Member)
@@ -37850,7 +37900,7 @@ impl<'a> Checker<'a> {
                                     candidate
                                         .semantic_receiver()
                                         .map(|receiver| {
-                                            crate::types::ty_subst(receiver, &HashMap::default())
+                                            crate::types::ty_subst(receiver, &crate::types::TyParamBindings::default())
                                         })
                                 })
                                 .flatten()
@@ -38769,7 +38819,7 @@ impl<'a> Checker<'a> {
                 &mut bindings,
             );
         }
-        bindings.retain(|formal, _| property.formals.contains(formal));
+        bindings.retain(|formal, _| property.formals.iter().any(|declared| declared == formal));
         if !bindings.is_empty() {
             crate::symbol_resolver::apply_property_bindings(&source, property, &bindings);
         }
@@ -39442,7 +39492,7 @@ impl<'a> Checker<'a> {
         // `String <: E(call)` to the surrounding builder inference problem.
         if let Some(signature) = selected.generic_sig.as_ref() {
             for (index, formal) in signature.formals.iter().enumerate() {
-                let Some(actual) = selected_bindings.get(formal).copied() else {
+                let Some(actual) = selected_bindings.get(formal.as_str()).copied() else {
                     continue;
                 };
                 for &bound in signature.formal_bounds.get(index).into_iter().flatten() {
@@ -39545,8 +39595,8 @@ impl<'a> Checker<'a> {
             let has_postponed_constraints =
                 !inferred.is_empty() || !constraints.upper_only.is_empty();
             for (formal, upper) in constraints.denotable_upper_bindings(&source) {
-                if !selected_bindings.contains_key(&formal) {
-                    inferred.insert(formal, upper);
+                if !selected_bindings.contains_key(formal.as_str()) {
+                    inferred.insert(crate::types::TyParamName::new(&formal), upper);
                 }
             }
             crate::trace_compiler!(
@@ -39840,7 +39890,7 @@ impl<'a> Checker<'a> {
                         // A concrete reference input (or an explicit type argument) binds the
                         // formal before this diagnostic path.
                         let unresolved = bindings
-                            .get(formal)
+                            .get(formal.as_str())
                             .is_none_or(|binding| binding.non_null() == Ty::Nothing);
                         if inferred_from_callable_reference && unresolved {
                             self.diags.error(
@@ -39852,7 +39902,7 @@ impl<'a> Checker<'a> {
                             );
                             return true;
                         }
-                        if bindings.contains_key(formal) {
+                        if bindings.contains_key(formal.as_str()) {
                             continue;
                         }
                     }
@@ -40318,7 +40368,10 @@ impl<'a> Checker<'a> {
                 if type_ref.is_inference_placeholder() {
                     continue;
                 }
-                bindings.insert(formal.clone(), self.type_ref_ty_silent(scope, type_ref));
+                bindings.insert(
+                    crate::types::TyParamName::new(formal),
+                    self.type_ref_ty_silent(scope, type_ref),
+                );
                 explicitly_bound.insert(formal.clone());
             }
         }
@@ -40332,7 +40385,7 @@ impl<'a> Checker<'a> {
                 continue;
             };
             let null_only = bindings
-                .get(formal)
+                .get(formal.as_str())
                 .is_some_and(|binding| Self::null_only_type(*binding));
             if explicitly_bound.contains(formal) || !null_only {
                 continue;
@@ -40349,7 +40402,7 @@ impl<'a> Checker<'a> {
                         "cannot infer type for type parameter '{name}'. Specify it explicitly."
                     ),
                 );
-                bindings.insert(formal.clone(), Ty::Error);
+                bindings.insert(crate::types::TyParamName::new(formal), Ty::Error);
             }
         }
 
@@ -40371,7 +40424,7 @@ impl<'a> Checker<'a> {
             let Some(formal) = semantic_formal(&declared.name) else {
                 continue;
             };
-            let Some(mut expected) = bindings.get(formal).copied() else {
+            let Some(mut expected) = bindings.get(formal.as_str()).copied() else {
                 continue;
             };
             if declared.definitely_non_null() {
@@ -43580,7 +43633,7 @@ impl<'a> Checker<'a> {
         let star = Ty::star_projection(Ty::nullable(Ty::obj("kotlin/Any")));
         let bindings = formals
             .into_iter()
-            .map(|formal| (formal, star))
+            .map(|formal| (crate::types::TyParamName::from(formal), star))
             .collect::<crate::symbol_resolver::GSigBinds>();
         let mut resolved = crate::types::ty_subst_alias_expansion(expansion, &bindings);
         if reference.definitely_non_null() {
@@ -45147,7 +45200,7 @@ impl<'a> Checker<'a> {
                         });
                         let receiver = receiver_bindings
                             .iter()
-                            .find_map(|bindings| bindings.get(semantic).copied());
+                            .find_map(|bindings| bindings.get(semantic.as_str()).copied());
                         match lexical.or(receiver) {
                             Some(argument) => dispatch_arguments.push(argument),
                             None => {
@@ -48949,9 +49002,9 @@ impl<'a> Checker<'a> {
             .filter(|formal| ty_mentions_param(signature.ret, std::slice::from_ref(formal)))
             .filter_map(|formal| {
                 defaults
-                    .get(formal)
+                    .get(formal.as_str())
                     .copied()
-                    .map(|completion| (formal.clone(), completion))
+                    .map(|completion| (crate::types::TyParamName::from(formal), completion))
             })
             .collect::<crate::symbol_resolver::GSigBinds>();
         crate::symbol_resolver::unify_ty(signature.ret, completed, &mut completion_bindings);
@@ -49519,7 +49572,7 @@ impl<'a> Checker<'a> {
             if explicitly_bound.get(index).copied().unwrap_or(false) {
                 continue;
             }
-            if let Some(expected) = expected_bindings.get(name).copied() {
+            if let Some(expected) = expected_bindings.get(name.as_str()).copied() {
                 *binding = expected.projection_inner().unwrap_or(expected);
             }
         }
@@ -49530,17 +49583,13 @@ impl<'a> Checker<'a> {
         let mut seeded = class
             .type_params
             .iter()
-            .cloned()
+            .map(crate::types::TyParamName::from)
             .zip(bindings.iter().copied())
             .filter(|(_, binding)| *binding != Ty::Error)
             .collect::<HashMap<_, _>>();
         let captured_bindings =
             self.source_constructor_captured_bindings(scope, class, bound_outer);
-        seeded.extend(
-            captured_bindings
-                .iter()
-                .map(|(name, ty)| (name.clone(), *ty)),
-        );
+        seeded.extend(captured_bindings.iter().map(|(name, ty)| (*name, *ty)));
         let mut contextual_actuals = HashMap::default();
         for (slot, &(shape, definitely_non_null)) in parameter_shapes.iter().enumerate() {
             let Some((argument, _)) = self.source_constructor_argument(slot, slots, args, arg_tys)
@@ -49557,7 +49606,7 @@ impl<'a> Checker<'a> {
                 class.type_params.iter().enumerate().any(|(index, formal)| {
                     ty_mentions_param(expected, std::slice::from_ref(formal))
                         && !explicitly_bound.get(index).copied().unwrap_or(false)
-                        && !expected_bindings.contains_key(formal)
+                        && !expected_bindings.contains_key(formal.as_str())
                 });
             if retains_constructor_formal {
                 continue;
@@ -49739,7 +49788,7 @@ impl<'a> Checker<'a> {
         let mut result_bindings = class
             .type_params
             .iter()
-            .cloned()
+            .map(crate::types::TyParamName::from)
             .zip(bindings.iter().copied())
             .filter(|(_, binding)| *binding != Ty::Error)
             .collect::<HashMap<_, _>>();
@@ -49753,7 +49802,7 @@ impl<'a> Checker<'a> {
         );
         for (index, formal) in class.type_params.iter().enumerate() {
             if bindings[index] == Ty::Error {
-                if let Some(&seed) = result_bindings.get(formal) {
+                if let Some(&seed) = result_bindings.get(formal.as_str()) {
                     bindings[index] = seed;
                 }
             }
@@ -49905,14 +49954,10 @@ impl<'a> Checker<'a> {
         let mut constructor_bindings = class
             .type_params
             .iter()
-            .cloned()
+            .map(crate::types::TyParamName::from)
             .zip(bindings.iter().copied())
             .collect::<HashMap<_, _>>();
-        constructor_bindings.extend(
-            captured_bindings
-                .iter()
-                .map(|(name, ty)| (name.clone(), *ty)),
-        );
+        constructor_bindings.extend(captured_bindings.iter().map(|(name, ty)| (*name, *ty)));
         if let Some(written) = explicit_refs.as_ref() {
             let declaration = self
                 .resolved_type_name(class.internal_name())
@@ -50073,7 +50118,7 @@ impl<'a> Checker<'a> {
         scope: &CheckerScope<'_>,
         class: &ClassSig,
         bound_outer: Option<Ty>,
-    ) -> HashMap<String, Ty> {
+    ) -> crate::types::TyParamBindings {
         let captured = &class.captured_type_parameters.type_params;
         if captured.is_empty() {
             return HashMap::default();
@@ -50090,7 +50135,7 @@ impl<'a> Checker<'a> {
             if let Some(applied_outer) = applied_outer {
                 return captured
                     .iter()
-                    .cloned()
+                    .map(crate::types::TyParamName::from)
                     .zip(applied_outer.type_args().iter().copied())
                     .collect();
             }
@@ -50104,7 +50149,7 @@ impl<'a> Checker<'a> {
                     .values()
                     .copied()
                     .find(|binding| binding.ty_param_name() == Some(captured.as_str()))
-                    .map(|binding| (captured.clone(), binding))
+                    .map(|binding| (crate::types::TyParamName::from(captured), binding))
             })
             .collect()
     }
@@ -50158,7 +50203,9 @@ impl<'a> Checker<'a> {
             }
             match declared.kind() {
                 TyKind::TyParam(name, _) => {
-                    bindings.entry(name.to_string()).or_insert(expected);
+                    bindings
+                        .entry(crate::types::TyParamName::new(&name))
+                        .or_insert(expected);
                 }
                 TyKind::Nullable(inner)
                 | TyKind::PlatformNullable(inner)
@@ -50229,7 +50276,9 @@ impl<'a> Checker<'a> {
             return;
         };
         collect_exact_expected_bindings(applied, expected, bindings);
-        bindings.retain(|name, ty| classifier.type_params().contains(name) && *ty != Ty::Error);
+        bindings.retain(|name, ty| {
+            classifier.type_params().iter().any(|formal| formal == name) && *ty != Ty::Error
+        });
     }
 
     /// Match a bare `T`, `T?`, or `T & Any` constructor parameter.
@@ -51385,7 +51434,9 @@ impl<'a> Checker<'a> {
             return;
         };
         if formals.iter().any(|candidate| candidate == formal) {
-            bindings.entry(formal.to_string()).or_insert(actual);
+            bindings
+                .entry(crate::types::TyParamName::new(&formal))
+                .or_insert(actual);
         }
     }
 
@@ -60664,7 +60715,10 @@ impl<'a> Checker<'a> {
                     .copied()
                     .filter(|bound| *bound != Ty::Error)
                     .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
-                class_binds.insert(formal.clone(), Ty::ty_param(formal, bound));
+                class_binds.insert(
+                    crate::types::TyParamName::new(formal),
+                    Ty::ty_param(formal, bound),
+                );
             }
             if selected_owner.is_none_or(|selected| selected == owner) {
                 let overloads =
@@ -60754,7 +60808,7 @@ impl<'a> Checker<'a> {
                     }
                     let mut input_subst = class_binds.clone();
                     for (formal, actual) in gm.signature.formals.iter().zip(explicit_type_args) {
-                        input_subst.insert(formal.clone(), *actual);
+                        input_subst.insert(crate::types::TyParamName::new(formal), *actual);
                     }
                     if let Some(expected) =
                         expected_result.filter(|expected| *expected != Ty::Error)
@@ -60817,7 +60871,7 @@ impl<'a> Checker<'a> {
                             constraints
                                 .lower
                                 .iter()
-                                .map(|(formal, actual)| (formal.clone(), *actual)),
+                                .map(|(formal, actual)| (*formal, *actual)),
                         );
                     }
                     return Some(GenericMemberPlan {
@@ -60856,7 +60910,7 @@ impl<'a> Checker<'a> {
         let mut bindings = crate::symbol_resolver::classifier_bindings(&class, applied);
         if let Some(signature) = member.generic_sig.as_ref() {
             for method_parameter in &signature.formals {
-                bindings.remove(method_parameter);
+                bindings.remove(method_parameter.as_str());
             }
         }
         bindings
@@ -60869,12 +60923,12 @@ impl<'a> Checker<'a> {
     fn generic_member_ret(
         &self,
         gm: &GenericMethod,
-        class_binds: &HashMap<String, Ty>,
+        class_binds: &crate::types::TyParamBindings,
         arg_tys: &[Ty],
     ) -> Ty {
         let mut binds = class_binds.clone();
         for parameter in &gm.signature.formals {
-            binds.remove(parameter);
+            binds.remove(parameter.as_str());
         }
         for (i, shape) in gm.signature.params.iter().enumerate() {
             if let Some(a) = arg_tys.get(i) {
@@ -60890,7 +60944,7 @@ impl<'a> Checker<'a> {
         }
         for (index, parameter) in gm.signature.formals.iter().enumerate() {
             binds
-                .entry(parameter.clone())
+                .entry(crate::types::TyParamName::new(parameter))
                 .or_insert_with(|| gm.signature.primary_formal_bound(index));
         }
         crate::symbol_resolver::ty_subst(gm.signature.ret, &binds)
@@ -61203,7 +61257,7 @@ impl<'a> Checker<'a> {
                     if let Some(explicit) = resolved_partial_explicit.as_ref() {
                         for (formal, actual) in class.type_params.iter().zip(explicit) {
                             if !actual.mentions_error() && !actual.mentions_pending() {
-                                bindings.insert(formal.clone(), *actual);
+                                bindings.insert(crate::types::TyParamName::new(formal), *actual);
                             }
                         }
                     }
@@ -61219,12 +61273,12 @@ impl<'a> Checker<'a> {
                     if class
                         .type_params
                         .iter()
-                        .all(|formal| bindings.contains_key(formal))
+                        .all(|formal| bindings.contains_key(formal.as_str()))
                     {
                         let inferred = class
                             .type_params
                             .iter()
-                            .map(|formal| bindings[formal])
+                            .map(|formal| bindings[formal.as_str()])
                             .collect::<Vec<_>>();
                         return Ty::obj_args_name(internal, &inferred);
                     }
@@ -61280,7 +61334,7 @@ impl<'a> Checker<'a> {
                         .iter()
                         .enumerate()
                         .map(|(index, name)| {
-                            bindings.get(name).copied().unwrap_or_else(|| {
+                            bindings.get(name.as_str()).copied().unwrap_or_else(|| {
                                 class
                                     .type_param_bounds
                                     .get(index)
@@ -61364,7 +61418,7 @@ impl<'a> Checker<'a> {
                         let Some(arguments) = classifier
                             .type_params()
                             .iter()
-                            .map(|parameter| bindings.get(parameter).copied())
+                            .map(|parameter| bindings.get(parameter.as_str()).copied())
                             .collect::<Option<Vec<_>>>()
                         else {
                             continue;
@@ -61416,7 +61470,7 @@ impl<'a> Checker<'a> {
             (TyKind::TyParam(formal, _), TyKind::TyParam(actual_name, _))
                 if actual_name == formal =>
             {
-                bindings.insert(formal.to_string(), actual.non_null());
+                bindings.insert(crate::types::TyParamName::new(&formal), actual.non_null());
                 return;
             }
             (

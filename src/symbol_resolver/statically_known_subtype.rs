@@ -166,14 +166,19 @@ fn replace_projected(projection: Ty, ty: Ty) -> Ty {
 }
 
 impl Unification<'_> {
-    fn unify(&self, original: Ty, with_parameters: Ty, result: &mut HashMap<String, Ty>) -> bool {
+    fn unify(
+        &self,
+        original: Ty,
+        with_parameters: Ty,
+        result: &mut crate::types::TyParamBindings,
+    ) -> bool {
         let original_type = projected_type(original);
         let parameters_type = projected_type(with_parameters);
         if parameters_type == Some(Ty::Error) {
             return true;
         }
         if let Some(TyKind::Intersection(parts)) = original_type.map(Ty::kind) {
-            let mut merged = HashMap::<String, Ty>::default();
+            let mut merged = crate::types::TyParamBindings::default();
             for &part in parts {
                 let mut local = HashMap::default();
                 if !self.unify(part, with_parameters, &mut local) {
@@ -237,7 +242,7 @@ impl Unification<'_> {
                 {
                     return false;
                 }
-                result.insert(name.to_string(), original);
+                result.insert(crate::types::TyParamName::new(&name), original);
                 return true;
             }
         }

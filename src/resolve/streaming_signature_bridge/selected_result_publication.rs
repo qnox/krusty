@@ -263,7 +263,7 @@ impl crate::fir::SelectedResultPublicationSemantics for ProductionSignatureSeman
             .formals
             .iter()
             .zip(abbreviation.arguments.iter())
-            .map(|(formal, ordinary)| bindings.get(formal).copied().unwrap_or(*ordinary))
+            .map(|(formal, ordinary)| bindings.get(formal.as_str()).copied().unwrap_or(*ordinary))
             .collect();
         Some(crate::fir::ResolvedTypeAbbreviation {
             arguments,

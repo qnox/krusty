@@ -76,7 +76,7 @@ fn bottom_approximation_preserves_inputs(
         expected_result.non_null()
     };
     let mut trial = bindings.clone();
-    trial.insert(formal.to_string(), instantiated);
+    trial.insert(crate::types::TyParamName::new(formal), instantiated);
     if !crate::symbol_resolver::generic_bindings_satisfy_bounds(signature, &trial, is_assignable) {
         return false;
     }
@@ -280,7 +280,7 @@ mod tests {
     fn an_error_input_cannot_contextualize_a_bottom_result() {
         let signature = bottom_signature();
         let mut bindings = crate::symbol_resolver::GSigBinds::default();
-        bindings.insert("T".to_string(), Ty::Nothing);
+        bindings.insert("T".into(), Ty::Nothing);
         assert!(
             !super::bottom_approximation_preserves_inputs(
                 &signature,
@@ -298,7 +298,7 @@ mod tests {
     fn a_matching_input_keeps_the_expected_result() {
         let signature = bottom_signature();
         let mut bindings = crate::symbol_resolver::GSigBinds::default();
-        bindings.insert("T".to_string(), Ty::Nothing);
+        bindings.insert("T".into(), Ty::Nothing);
         assert!(super::bottom_approximation_preserves_inputs(
             &signature,
             &bindings,

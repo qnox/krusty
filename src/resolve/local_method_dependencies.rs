@@ -373,7 +373,12 @@ impl Checker<'_> {
         let bindings = declaration_arguments
             .iter()
             .zip(applied_arguments)
-            .map(|(formal, &argument)| Some((formal.ty_param_name()?.to_owned(), argument)))
+            .map(|(formal, &argument)| {
+                Some((
+                    crate::types::TyParamName::from(formal.ty_param_name()?),
+                    argument,
+                ))
+            })
             .collect::<Option<crate::symbol_resolver::GSigBinds>>()?;
         let input_bounds = self
             .checked_local_classifier_input_bounds

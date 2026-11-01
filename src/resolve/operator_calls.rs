@@ -643,7 +643,7 @@ impl<'a> Checker<'a> {
                     arguments: signature
                         .formals
                         .iter()
-                        .map(|formal| bindings.get(formal).copied())
+                        .map(|formal| bindings.get(formal.as_str()).copied())
                         .collect(),
                     signature: signature.clone(),
                     call_sig: selected.call_sig.clone(),

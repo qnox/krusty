@@ -231,7 +231,7 @@ impl ProductionSignatureSemantics<'_> {
         }
         if formals.iter().any(|formal| {
             super::super::ty_mentions_param(expansion, std::slice::from_ref(formal))
-                && !bindings.contains_key(formal)
+                && !bindings.contains_key(formal.as_str())
         }) {
             return None;
         }
@@ -243,7 +243,7 @@ impl ProductionSignatureSemantics<'_> {
         let arguments = if alias.explicit_arguments.is_empty() {
             formals
                 .iter()
-                .map(|formal| bindings.get(formal).copied())
+                .map(|formal| bindings.get(formal.as_str()).copied())
                 .collect::<Option<Box<[Ty]>>>()
         } else {
             Some(alias.explicit_arguments.clone().into_boxed_slice())
@@ -357,7 +357,7 @@ impl ProductionSignatureSemantics<'_> {
             let class_bindings = class
                 .type_params
                 .iter()
-                .cloned()
+                .map(crate::types::TyParamName::from)
                 .zip(expansion.type_args().iter().copied())
                 .collect::<crate::symbol_resolver::GSigBinds>();
             let declared = selected
@@ -430,7 +430,7 @@ impl ProductionSignatureSemantics<'_> {
         );
         if alias_formals
             .iter()
-            .any(|formal| !alias_bindings.contains_key(formal))
+            .any(|formal| !alias_bindings.contains_key(formal.as_str()))
         {
             return None;
         }
@@ -667,7 +667,7 @@ impl AppliedSourceAlias {
         }
         let bindings = formals
             .iter()
-            .cloned()
+            .map(crate::types::TyParamName::from)
             .zip(explicit_type_arguments.iter().copied())
             .collect::<crate::symbol_resolver::GSigBinds>();
         Some(Self {

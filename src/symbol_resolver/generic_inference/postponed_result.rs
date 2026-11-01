@@ -27,7 +27,7 @@ pub(crate) fn unconstrained_result_bindings(signature: &GenericSig) -> GSigBinds
                     })
                 })
                 .unwrap_or(Ty::Nothing);
-            (formal.clone(), completion)
+            (crate::types::TyParamName::from(formal), completion)
         })
         .collect()
 }
@@ -51,20 +51,20 @@ fn complete_self_bounded_formals(
         let Some(bound) = self_type_bound(owner, formal, formals, bounds) else {
             continue;
         };
-        if binds.contains_key(formal) {
+        if binds.contains_key(formal.as_str()) {
             continue;
         }
         // The star carries the bound it reads as, exactly as a written `Box<*>` does.
         let unbounded_star = GSigBinds::from_iter([(
-            formal.clone(),
+            crate::types::TyParamName::from(formal),
             Ty::star_projection(Ty::nullable(Ty::obj("kotlin/Any"))),
         )]);
         let star = GSigBinds::from_iter([(
-            formal.clone(),
+            crate::types::TyParamName::from(formal),
             Ty::star_projection(super::ty_subst_keep_unbound(bound, &unbounded_star)),
         )]);
         let completion = Ty::out_projection(super::ty_subst_keep_unbound(bound, &star));
-        binds.insert(formal.clone(), completion);
+        binds.insert(crate::types::TyParamName::new(formal), completion);
     }
 }
 
@@ -101,7 +101,7 @@ pub(crate) fn completed_constructor_result_arguments(
         .iter()
         .enumerate()
         .map(|(index, formal)| {
-            completed.get(formal).copied().unwrap_or_else(|| {
+            completed.get(formal.as_str()).copied().unwrap_or_else(|| {
                 formal_bounds
                     .get(index)
                     .and_then(|bounds| bounds.first())
@@ -136,7 +136,7 @@ pub(crate) fn solved_constructor_type_arguments(
         .zip(completed)
         .map(|((formal, bounds), completed)| {
             (bindings
-                .get(formal)
+                .get(formal.as_str())
                 .is_some_and(|binding| *binding != Ty::Error)
                 || self_type_bound(owner, formal, formals, bounds).is_some())
             .then_some(completed)
@@ -174,7 +174,7 @@ pub(crate) fn nested_result_from_concrete_parameter(
             continue;
         }
         solved_a_result_variable = true;
-        if !binds.contains_key(formal) {
+        if !binds.contains_key(formal.as_str()) {
             return Ok(None);
         }
     }
@@ -226,7 +226,7 @@ fn bind_concrete_parameter(
                 Some(existing) if *existing != constraint => false,
                 Some(_) => true,
                 None => {
-                    binds.insert(name.to_string(), constraint);
+                    binds.insert(crate::types::TyParamName::new(&name), constraint);
                     true
                 }
             }
@@ -479,7 +479,7 @@ mod tests {
             &[Ty::ty_param("T", any), Ty::ty_param("SELF", any)],
         );
         let formals = ["T".to_string(), "SELF".to_string()];
-        let inferred = GSigBinds::from_iter([("T".to_string(), Ty::obj("kotlin/String"))]);
+        let inferred = GSigBinds::from_iter([("T".into(), Ty::obj("kotlin/String"))]);
 
         assert_eq!(
             completed_constructor_result_arguments(

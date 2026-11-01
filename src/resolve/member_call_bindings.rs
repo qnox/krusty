@@ -69,7 +69,7 @@ impl Checker<'_> {
             bindings.extend(
                 fixed
                     .iter()
-                    .map(|(formal, actual)| (formal.clone(), *actual)),
+                    .map(|(formal, actual)| (*formal, *actual)),
             );
         }
         let context_count = member.context_count.min(signature.params.len());

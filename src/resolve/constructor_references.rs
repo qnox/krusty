@@ -388,7 +388,7 @@ impl Checker<'_> {
             let class_bindings = classifier
                 .type_params
                 .iter()
-                .cloned()
+                .map(crate::types::TyParamName::from)
                 .zip(target.type_args().iter().copied())
                 .collect::<crate::symbol_resolver::GSigBinds>();
             let declared_parameters = selected

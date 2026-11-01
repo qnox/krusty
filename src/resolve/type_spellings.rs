@@ -335,7 +335,7 @@ pub(super) fn expansion_arg_spellings(
     };
     let bindings = formals
         .iter()
-        .cloned()
+        .map(crate::types::TyParamName::from)
         .zip(use_site.iter().map(|(ty, _)| *ty))
         .collect::<crate::symbol_resolver::GSigBinds>();
     let applied = crate::symbol_resolver::ty_subst_keep_unbound(expansion, &bindings);
