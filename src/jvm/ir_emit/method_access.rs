@@ -216,6 +216,13 @@ pub(super) fn primary_constructor_access(
         && super::enclosure::in_inline_function_scope(ir, class)
     {
         ACC_PUBLIC
+    } else if is_continuation
+        && ir.class_id_by_name(class.fq_name_id()).is_some_and(|id| {
+            crate::jvm::suspend_inline_functions::constructed_by_method_copy(ir, id)
+        })
+    {
+        // A method's `$$forInline` copy constructs it, from wherever it is inlined.
+        ACC_PUBLIC
     } else if is_continuation || class.is_anonymous_object {
         // A continuation class's ctor is package-private (constructed only by its own file);
         // kotlinc gives an ANONYMOUS class's ctor the same access (flags 0x0000). This remains

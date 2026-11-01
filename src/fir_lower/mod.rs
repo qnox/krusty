@@ -397,6 +397,10 @@ struct BodyLowering<'a> {
     class_constructor_capture_count: u32,
     class_constructor_context_count: u32,
     capture_slots: HashMap<(u32, crate::fir::FirCaptureSource), CaptureSlot>,
+    /// The reads this body lowered that yield an inline function's `crossinline` parameter, by
+    /// that parameter's slot in the function declaring it. Recorded where each read is produced,
+    /// so an argument keeps its provenance however an inline expansion stages it.
+    crossinline_reads: HashMap<ExprId, u32>,
     implicit_receiver_capture_slots: Vec<(crate::fir::FirImplicitReceiverCapture, u32)>,
     shared_locals: HashMap<crate::fir::LocalValueId, crate::fir::ResolvedTy>,
     /// Checked source-binding reassignment facts, inventoried before expression lowering so every
@@ -630,6 +634,9 @@ struct CaptureSlot {
     shared_cell: bool,
     /// The captured declaration is a `val` or a parameter, which no code can reassign.
     stable: bool,
+    /// When the captured declaration is a `crossinline` parameter: its value slot in the inline
+    /// function that declares it.
+    crossinline_parameter: Option<u32>,
     /// The captured declaration as the callable that supplies this slot named and classified it.
     /// A callable nested deeper captures the same value through this slot, and names it the same.
     declared: CapturedDeclaration,
@@ -715,6 +722,7 @@ impl<'a> BodyLowering<'a> {
             class_constructor_capture_count,
             class_constructor_context_count,
             capture_slots,
+            crossinline_reads: HashMap::default(),
             implicit_receiver_capture_slots,
             shared_locals: directly_shared_locals(body),
             binding_stability: binding_stability::inventory(body),

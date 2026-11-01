@@ -1843,6 +1843,9 @@ pub struct FirBody {
     /// each parameter is bound. The contract above is in physical order and also lists context
     /// receivers that bind no value, so it does not pair positionally with `parameters`.
     spliced_inline_parameters: Vec<LocalValueId>,
+    /// The bound values of the parameters declared `crossinline`. A capture of one of them is a
+    /// crossinline capture wherever it is moved, which the target's inline ABI depends on.
+    crossinline_parameters: Vec<LocalValueId>,
     parameters: Vec<FirValueParameter>,
     default_values: Vec<FirDefaultValue>,
     captures: Vec<FirCapture>,
@@ -1910,6 +1913,7 @@ impl FirBody {
             inline_parameter_modifiers: Vec::new(),
             inline_expansion_modes: Vec::new(),
             spliced_inline_parameters: Vec::new(),
+            crossinline_parameters: Vec::new(),
             parameters: Vec::new(),
             default_values: Vec::new(),
             captures: Vec::new(),
@@ -2177,6 +2181,15 @@ impl FirBody {
     /// The bound values of this body's `Splice`-mode inline parameters.
     pub(crate) fn spliced_inline_parameters(&self) -> &[LocalValueId] {
         &self.spliced_inline_parameters
+    }
+
+    pub(crate) fn add_crossinline_parameter(&mut self, value: LocalValueId) {
+        self.crossinline_parameters.push(value);
+    }
+
+    /// Whether `value` is the bound value of a parameter this body declares `crossinline`.
+    pub(crate) fn is_crossinline_parameter(&self, value: LocalValueId) -> bool {
+        self.crossinline_parameters.contains(&value)
     }
 
     pub fn add_default_value(&mut self, default: FirDefaultValue) {
@@ -2840,6 +2853,7 @@ impl FirBody {
             + self.inline_expansion_modes.len()
                 * std::mem::size_of::<crate::types::InlineExpansionMode>()
             + self.spliced_inline_parameters.len() * std::mem::size_of::<LocalValueId>()
+            + self.crossinline_parameters.len() * std::mem::size_of::<LocalValueId>()
             + self
                 .property_delegate
                 .as_ref()

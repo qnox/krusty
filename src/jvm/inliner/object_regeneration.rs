@@ -421,49 +421,6 @@ fn malformed(malformed: MalformedType) -> InlineError {
 }
 
 /// Each anonymous `new` and the `<init>` call that initializes it, by instruction index.
-/// Whether an object `callee` constructs is passed one of the call's suspend `lambdas` that one of
-/// its methods reads without a `$$forInline` copy
-/// ([`super::anonymous_object::reads_suspend_lambda_without_for_inline_copy`]). The call's route
-/// is decided from this fact before anything is inlined.
-pub(crate) fn suspend_lambda_without_for_inline_copy(
-    callee: &MethodNode,
-    parameters: &Parameters,
-    lambdas: &[Lambda],
-    classes: &dyn ClassRoles,
-) -> Result<bool, InlineError> {
-    let constructions = pair_constructions(callee, parameters, classes)?;
-    for (at, passed) in &constructions.lambdas {
-        let suspend_arguments: Vec<usize> = passed
-            .iter()
-            .filter(|&&(_, lambda)| lambdas[lambda].suspend)
-            .map(|&(argument, _)| argument)
-            .collect();
-        if suspend_arguments.is_empty() {
-            continue;
-        }
-        let Node::Insn(Insn::Method { owner, .. }) = &callee.nodes[*at] else {
-            unreachable!("a construction ends at an `<init>` call")
-        };
-        let unreadable = || {
-            InlineError::Regeneration(RegenerationError::Unsupported(
-                "an anonymous object whose class file does not read",
-            ))
-        };
-        let bytes = classes.class_file(owner).ok_or_else(unreadable)?;
-        let original = crate::jvm::class_node::ClassNode::read(&bytes).map_err(|_| unreadable())?;
-        if super::anonymous_object::reads_suspend_lambda_without_for_inline_copy(
-            &original,
-            &constructions.descriptors[at],
-            &suspend_arguments,
-        )
-        .map_err(InlineError::Regeneration)?
-        {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
 struct Constructions {
     by_new: HashMap<usize, usize>,
     by_constructor: HashMap<usize, usize>,

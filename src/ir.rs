@@ -1290,6 +1290,10 @@ pub struct IrSpecializedAnonymousClass {
     pub caller_source_name: String,
     pub inline_callee: crate::fir::CallableId,
     pub inline_callee_source_name: String,
+    /// For each of the callee's operands, by its value slot: the caller's `crossinline` parameter
+    /// the expansion binds it to, when it is one. A copy remaps its captures' provenance through
+    /// it, and so does an object nested in the copy that is specialized later.
+    pub crossinline_operands: Vec<Option<u32>>,
     /// Source function → the function on this copy. Accessor functions materialized after the
     /// copy are added here before bridges and metadata read the copy.
     pub method_clones: crate::fx_hash::HashMap<FunId, FunId>,
@@ -1367,6 +1371,9 @@ pub struct IrFile {
     /// these identities; they must not recover either one from the generated `$suspendImpl`
     /// spelling.
     pub(crate) jvm_suspend_impl_bodies: crate::fx_hash::HashMap<FunId, (TypeName, FunId)>,
+    /// JVM continuation classes, keyed by class id, with the suspend function each one re-enters.
+    /// The class's access and ABI scope are that function's facts.
+    pub(crate) jvm_continuation_functions: crate::fx_hash::HashMap<ClassId, FunId>,
     /// Exact generated function metadata/debug contracts, keyed by semantic owning classifier.
     /// Producers publish once; backends consume function identities without name/descriptor scans.
     generated_member_publications: crate::fx_hash::HashMap<TypeName, IrGeneratedMemberPublication>,

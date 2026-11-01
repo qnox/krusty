@@ -203,9 +203,14 @@ impl InnerClasses {
                 outer: (!coroutine && !local).then_some(outer),
                 name: (!coroutine).then_some(name),
                 access: if coroutine {
+                    let class_id =
+                        u32::try_from(class_id).expect("too many classes for a class id");
                     let public = u16::from(
                         (suspend_lambda && suspend_lambda_is_public(ir, class))
-                            || published_inline_lambda(ir, class),
+                            || published_inline_lambda(ir, class)
+                            || crate::jvm::suspend_inline_functions::constructed_by_method_copy(
+                                ir, class_id,
+                            ),
                     );
                     0x0008 | 0x0010 | public
                 } else {
