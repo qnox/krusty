@@ -27,6 +27,7 @@ pub mod compilation_inputs;
 mod concatenated_to_string;
 mod constructor_debug;
 mod constructor_metadata;
+mod coroutine_classes;
 mod debug_local_names;
 mod declaration_collisions;
 mod declared_type_nullability;
