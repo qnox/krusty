@@ -460,6 +460,20 @@ impl IrFile {
         Some(identities)
     }
 
+    /// The position of `function`'s `vararg` parameter in its semantic parameter list, which may
+    /// lead with a capture or an extension receiver. [`IrVarargParameter::index`] counts the
+    /// declared context and value parameters, so the position is the declared parameter at that
+    /// ordinal.
+    pub(crate) fn vararg_parameter_position(&self, function: FunId) -> Option<usize> {
+        let vararg = self.fn_varargs.get(&function)?;
+        self.function_parameter_identities(function)?
+            .iter()
+            .enumerate()
+            .filter(|(_, identity)| identity.role.is_declared_parameter())
+            .nth(vararg.index)
+            .map(|(position, _)| position)
+    }
+
     /// Expansion modes parallel to [`Self::function_parameter_identities`]. `None` when the
     /// declaration published no mode or the two records disagree: the caller declines.
     pub(crate) fn inline_expansion_modes(

@@ -880,12 +880,27 @@ pub(super) fn synth_value_members(
                 .iter()
                 .map(|(name, _)| name.as_str())
                 .collect::<Vec<_>>();
-            // Omitted arguments are filled by `constructor-impl$default`, as for the primary.
-            if sc.defaults.iter().any(Option::is_some) {
-                let names = names.iter().map(|name| (*name).to_string()).collect();
-                ir.fn_params.insert(
+            // The static takes the constructor's declared parameters as its own, so it owns their
+            // identities. Omitted arguments are filled by `constructor-impl$default`, as for the
+            // primary.
+            let owned_names = names.iter().map(|name| (*name).to_string()).collect();
+            ir.fn_params.insert(
+                constructor,
+                if sc.defaults.iter().any(Option::is_some) {
+                    crate::ir::FnParamInfo::source_defaults(owned_names, sc.defaults.clone())
+                } else {
+                    crate::ir::FnParamInfo::source_names(owned_names)
+                },
+            );
+            // A `vararg` stays one on the static: Java calls it in element form, and its
+            // `Signature` keeps the element's declaration-site wildcards.
+            if let Some(index) = sc.vararg_index {
+                ir.fn_varargs.insert(
                     constructor,
-                    crate::ir::FnParamInfo::source_defaults(names, sc.defaults.clone()),
+                    crate::ir::IrVarargParameter {
+                        index,
+                        is_last: index + 1 == sc.named_params.len(),
+                    },
                 );
             }
             crate::jvm::method_parameters::record_function(ir, constructor, &names, &[]);
