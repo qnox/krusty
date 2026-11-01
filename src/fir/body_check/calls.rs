@@ -3,6 +3,7 @@
 use super::inline_body_plan::publish as publish_inline_body_plan;
 use super::*;
 
+mod member_extensions;
 mod super_calls;
 mod targets;
 use targets::ExternalCallTarget;
@@ -308,7 +309,6 @@ impl BodyFirChecker<'_> {
             Some(ResolvedCall::MemberExtension {
                 dispatch_receiver,
                 context_args,
-                vararg_index,
                 ..
             }) => {
                 let selected = self
@@ -335,7 +335,7 @@ impl BodyFirChecker<'_> {
                     arguments,
                     &target.parameters,
                     context_args.iter().map(Option::as_ref),
-                    vararg_index,
+                    target.argument_vararg,
                 )?;
                 let parameter_types = self.published_parameter_types(
                     self.file.expr_span(expression),
@@ -384,7 +384,6 @@ impl BodyFirChecker<'_> {
         if let Some(ResolvedCall::MemberExtension {
             dispatch_receiver,
             context_args,
-            vararg_index,
             ..
         }) = self.info.resolved_calls.get(&expression).cloned()
         {
@@ -418,7 +417,7 @@ impl BodyFirChecker<'_> {
                 arguments,
                 &target.parameters,
                 context_args.iter().map(Option::as_ref),
-                vararg_index,
+                target.argument_vararg,
             )?;
             let parameter_types = self
                 .published_parameter_types(self.file.expr_span(expression), &target.parameters)?;
@@ -542,7 +541,11 @@ impl BodyFirChecker<'_> {
                 arguments,
                 &parameter_types,
                 std::iter::empty(),
-                member.call_sig.vararg_index,
+                self.declared_argument_vararg(
+                    self.file.expr_span(expression),
+                    member.call_sig.vararg_index,
+                    0,
+                )?,
             )?,
             substitutions: Box::new([]),
         }))
@@ -618,7 +621,11 @@ impl BodyFirChecker<'_> {
                 arguments,
                 &parameters,
                 std::iter::empty(),
-                member.call_sig.vararg_index,
+                self.declared_argument_vararg(
+                    self.file.expr_span(expression),
+                    member.call_sig.vararg_index,
+                    0,
+                )?,
             )?,
             substitutions,
         }))
@@ -754,7 +761,7 @@ impl BodyFirChecker<'_> {
             arguments,
             &parameters,
             extension.context_args.iter().map(Option::as_ref),
-            extension.vararg_index,
+            ArgumentVararg::of_source_parameters(extension.vararg_index),
         )?;
         Ok(FirExprKind::Call(FirCall {
             target,
@@ -971,7 +978,7 @@ impl BodyFirChecker<'_> {
             Box<[FirTypeSubstitution]>,
             bool,
             Vec<Option<crate::resolve::ResolvedContextArgument>>,
-            Option<usize>,
+            Option<ArgumentVararg>,
             Vec<Ty>,
         ),
         BodyCheckFailure,
@@ -994,7 +1001,11 @@ impl BodyFirChecker<'_> {
                     substitutions,
                     false,
                     selected.context_args.clone(),
-                    selected.member.call_sig.vararg_index,
+                    self.declared_argument_vararg(
+                        self.file.expr_span(expression),
+                        selected.member.call_sig.vararg_index,
+                        selected.context_args.len(),
+                    )?,
                     parameters,
                 ))
             }
@@ -1019,7 +1030,7 @@ impl BodyFirChecker<'_> {
                     substitutions,
                     true,
                     selected.context_args.clone(),
-                    selected.vararg_index,
+                    ArgumentVararg::of_source_parameters(selected.vararg_index),
                     parameters,
                 ))
             }
@@ -1150,7 +1161,11 @@ impl BodyFirChecker<'_> {
                     extension: false,
                     context_parameters,
                     value_parameters: parameters,
-                    vararg_index: selected.member.call_sig.vararg_index,
+                    vararg: self.declared_argument_vararg(
+                        span,
+                        selected.member.call_sig.vararg_index,
+                        selected.context_args.len(),
+                    )?,
                     context_arguments: selected.context_args.clone(),
                 })
             }
@@ -1246,7 +1261,7 @@ impl BodyFirChecker<'_> {
                     extension: true,
                     context_parameters,
                     value_parameters: parameters,
-                    vararg_index: selected.vararg_index,
+                    vararg: ArgumentVararg::of_source_parameters(selected.vararg_index),
                     context_arguments: selected.context_args.clone(),
                 })
             }
@@ -1340,7 +1355,7 @@ impl BodyFirChecker<'_> {
                     extension: true,
                     context_parameters,
                     value_parameters: parameters,
-                    vararg_index: *vararg_index,
+                    vararg: self.declared_argument_vararg(span, *vararg_index, context_count)?,
                     context_arguments: context_args.clone(),
                 })
             }
@@ -1480,195 +1495,6 @@ impl BodyFirChecker<'_> {
         };
         *default_provider = callable.external_default_provider;
         Ok((target, substitutions))
-    }
-
-    /// Publish one already-selected member-extension call without branching on provider origin in
-    /// lowering. Module declarations keep their callable identity. Dependency declarations carry
-    /// the same semantic parameters plus the extension receiver's exact physical slot.
-    pub(super) fn member_extension_call_target(
-        &self,
-        expression: ExprId,
-        selected: &ResolvedCall,
-    ) -> Result<MemberExtensionFirTarget, BodyCheckFailure> {
-        let ResolvedCall::MemberExtension {
-            stable_declaration,
-            external_identity,
-            external_default_provider,
-            owner,
-            name,
-            dispatch_receiver,
-            extension_receiver,
-            params,
-            physical_params,
-            context_args,
-            ret,
-            inline,
-            inline_body_plan,
-            reified_type_parameter_ordinals,
-            suspend,
-            declared_ret,
-            overridden_results,
-            vararg_index,
-            ..
-        } = selected
-        else {
-            return Err(self.failure(
-                self.file.expr_span(expression),
-                BodyCheckFailureKind::UnsupportedCallShape,
-            ));
-        };
-        crate::trace_compiler!(
-            "fir",
-            "publish member-extension expression={expression:?} span={:?} stable={stable_declaration:?} external={external_identity:?} owner={owner:?} name={name} dispatch={dispatch_receiver:?} extension={extension_receiver:?} params={params:?}",
-            self.file.expr_span(expression),
-        );
-        let mut parameters =
-            self.selected_call_parameters(expression, *stable_declaration, params)?;
-        // Resolution exposes a vararg's element type in `params` so applicability and inference see
-        // each source argument. Checked FIR instead publishes the selected declaration slot, which is
-        // the array consumed by packing/default materialization. Preserve every other semantic
-        // parameter and restore only that selected array slot.
-        if let Some(vararg) = *vararg_index {
-            let array = physical_params.get(vararg).copied().ok_or_else(|| {
-                self.failure(
-                    self.file.expr_span(expression),
-                    BodyCheckFailureKind::UnsupportedCallShape,
-                )
-            })?;
-            let parameter = parameters.get_mut(vararg).ok_or_else(|| {
-                self.failure(
-                    self.file.expr_span(expression),
-                    BodyCheckFailureKind::UnsupportedCallShape,
-                )
-            })?;
-            // A generic element is the selected one (`vararg values: T` with `T = String` packs a
-            // `String[]`); the physical slot carries only its erasure.
-            *parameter = match array.type_args().first().map(|argument| argument.kind()) {
-                Some(crate::types::TyKind::OutProjection(_)) if array.is_reference_array() => {
-                    Ty::obj_args_name(crate::types::wk::array(), &[Ty::out_projection(*parameter)])
-                }
-                // A reference array stays one when the element is a primitive: `T = Int` packs
-                // an `Integer[]`, never an `int[]`.
-                Some(_) if array.is_reference_array() => {
-                    Ty::obj_args_name(crate::types::wk::array(), &[*parameter])
-                }
-                _ => array,
-            };
-        }
-        if let Some(declaration) = stable_declaration {
-            let callable = self
-                .index
-                .callable_for_declaration(*declaration)
-                .ok_or_else(|| {
-                    self.failure(
-                        self.file.expr_span(expression),
-                        BodyCheckFailureKind::MissingStableCallTarget,
-                    )
-                })?;
-            return Ok(MemberExtensionFirTarget {
-                target: FirCallTarget::Module(callable.id),
-                substitutions: self.call_substitutions(expression, *declaration)?,
-                parameters,
-                extension_parameter: None,
-                extension_receiver: *extension_receiver,
-            });
-        }
-
-        let declaration = external_identity.ok_or_else(|| {
-            crate::trace_compiler!(
-                "fir",
-                "member-extension call has no stable target expression={expression:?} span={:?} owner={owner:?} name={name} receiver={extension_receiver:?} params={params:?}",
-                self.file.expr_span(expression),
-            );
-            self.failure(
-                self.file.expr_span(expression),
-                BodyCheckFailureKind::MissingStableCallTarget,
-            )
-        })?;
-        let extension_parameter = context_args.len();
-        if extension_parameter > parameters.len() {
-            return Err(self.failure(
-                self.file.expr_span(expression),
-                BodyCheckFailureKind::UnsupportedCallShape,
-            ));
-        }
-        let mut target_parameters = parameters.clone();
-        target_parameters.insert(extension_parameter, *extension_receiver);
-        let (mut target, substitutions) = self.external_call_target_with_identity(
-            expression,
-            ExternalCallTarget {
-                declaration,
-                singleton_dispatch: dispatch_receiver
-                    .singleton
-                    .as_ref()
-                    .map(|singleton| singleton.classifier),
-                receiver: Some(dispatch_receiver.ty),
-                declared_receiver: None,
-                parameters: target_parameters,
-                result: *ret,
-                declared_result: *declared_ret,
-                overridden_results,
-                semantic_role: None,
-                intrinsic_const: false,
-                overridden_declarations: &[],
-                suspend: *suspend,
-                inline: *inline,
-                inline_plan: inline_body_plan.as_deref(),
-                inline_receiver_parameter: None,
-                inline_declared_receiver: None,
-                reified_type_parameter_ordinals,
-            },
-        )?;
-        let extension_parameter = u32::try_from(extension_parameter).map_err(|_| {
-            self.failure(
-                self.file.expr_span(expression),
-                BodyCheckFailureKind::UnsupportedCallShape,
-            )
-        })?;
-        let FirCallTarget::External {
-            default_provider,
-            extension_receiver_parameter,
-            ..
-        } = &mut target
-        else {
-            unreachable!("an external member extension must produce an external FIR target")
-        };
-        *default_provider = *external_default_provider;
-        *extension_receiver_parameter = Some(extension_parameter);
-        Ok(MemberExtensionFirTarget {
-            target,
-            substitutions,
-            parameters,
-            extension_parameter: Some(extension_parameter),
-            extension_receiver: *extension_receiver,
-        })
-    }
-
-    pub(super) fn member_extension_arguments(
-        &self,
-        expression: ExprId,
-        mut arguments: Box<[FirCallArgument]>,
-        extension_parameter: Option<u32>,
-    ) -> Result<Box<[FirCallArgument]>, BodyCheckFailure> {
-        let Some(extension_parameter) = extension_parameter else {
-            return Ok(arguments);
-        };
-        for argument in &mut arguments {
-            let parameter = match argument {
-                FirCallArgument::Expression { parameter, .. }
-                | FirCallArgument::Default { parameter, .. }
-                | FirCallArgument::Vararg { parameter, .. } => parameter,
-            };
-            if *parameter >= extension_parameter {
-                *parameter = parameter.checked_add(1).ok_or_else(|| {
-                    self.failure(
-                        self.file.expr_span(expression),
-                        BodyCheckFailureKind::UnsupportedCallShape,
-                    )
-                })?;
-            }
-        }
-        Ok(arguments)
     }
 
     fn external_call_target_with_identity(
@@ -1973,7 +1799,11 @@ impl BodyFirChecker<'_> {
                 arguments,
                 &parameters,
                 selected.context_args.iter().map(Option::as_ref),
-                selected.vararg_index,
+                self.declared_argument_vararg(
+                    self.file.expr_span(expression),
+                    selected.vararg_index,
+                    selected.context_args.len(),
+                )?,
             )?,
             substitutions,
         }))
@@ -2230,7 +2060,11 @@ impl BodyFirChecker<'_> {
                     arguments,
                     &selected.member.params,
                     selected.context_args.iter().map(Option::as_ref),
-                    selected.member.call_sig.vararg_index,
+                    self.declared_argument_vararg(
+                        self.file.expr_span(expression),
+                        selected.member.call_sig.vararg_index,
+                        selected.context_args.len(),
+                    )?,
                 )?,
                 substitutions: Box::new([]),
             }));
@@ -2301,7 +2135,11 @@ impl BodyFirChecker<'_> {
                 arguments,
                 &parameters,
                 selected.context_args.iter().map(Option::as_ref),
-                selected.member.call_sig.vararg_index,
+                self.declared_argument_vararg(
+                    self.file.expr_span(expression),
+                    selected.member.call_sig.vararg_index,
+                    selected.context_args.len(),
+                )?,
             )?,
             substitutions,
         }))
@@ -2526,7 +2364,6 @@ impl BodyFirChecker<'_> {
             ref selected @ ResolvedCall::MemberExtension {
                 ref dispatch_receiver,
                 ref context_args,
-                vararg_index,
                 ..
             },
         ) = self
@@ -2558,7 +2395,7 @@ impl BodyFirChecker<'_> {
                 operands,
                 &target.parameters,
                 context_args.iter().map(Option::as_ref),
-                vararg_index,
+                target.argument_vararg,
             )?;
             let parameter_types = self
                 .published_parameter_types(self.file.expr_span(expression), &target.parameters)?;
@@ -2651,7 +2488,12 @@ impl BodyFirChecker<'_> {
             let parameter = slots
                 .as_deref()
                 .and_then(|slots| slots.iter().position(|slot| *slot == Some(operand)))
-                .or_else(|| selected.vararg_index.filter(|vararg| source >= *vararg))
+                .or_else(|| {
+                    selected
+                        .vararg
+                        .map(ArgumentVararg::index)
+                        .filter(|vararg| source >= *vararg)
+                })
                 .unwrap_or(source);
             let parameter_ty = selected
                 .value_parameters
@@ -2661,7 +2503,7 @@ impl BodyFirChecker<'_> {
             let parameter_id = u32::try_from(parameter + selected.context_arguments.len())
                 .map_err(|_| self.failure(span, BodyCheckFailureKind::UnsupportedCallShape))?;
             let value = self.expression(operand)?;
-            if selected.vararg_index != Some(parameter) {
+            if selected.vararg.map(ArgumentVararg::index) != Some(parameter) {
                 arguments.push(FirCallArgument::Expression {
                     parameter: parameter_id,
                     value,
@@ -2721,7 +2563,11 @@ impl BodyFirChecker<'_> {
                 .into_boxed_slice(),
             });
         }
-        if let Some(parameter) = selected.vararg_index.filter(|_| !saw_vararg) {
+        if let Some(parameter) = selected
+            .vararg
+            .map(ArgumentVararg::index)
+            .filter(|_| !saw_vararg)
+        {
             arguments.push(FirCallArgument::Vararg {
                 parameter: u32::try_from(parameter + selected.context_arguments.len())
                     .map_err(|_| self.failure(span, BodyCheckFailureKind::UnsupportedCallShape))?,
@@ -2733,7 +2579,7 @@ impl BodyFirChecker<'_> {
         }
         if let Some(slots) = slots {
             for (parameter, slot) in slots.iter().enumerate() {
-                if slot.is_none() && selected.vararg_index != Some(parameter) {
+                if slot.is_none() && selected.vararg.map(ArgumentVararg::index) != Some(parameter) {
                     arguments.push(FirCallArgument::Default {
                         parameter: u32::try_from(parameter + selected.context_arguments.len())
                             .map_err(|_| {
@@ -2818,7 +2664,7 @@ impl BodyFirChecker<'_> {
         let selected = self.statement_operator_target(statement, convention)?;
         let parameter_types = selected.parameter_types();
         let span = self.file.stmt_spans.get(statement.0 as usize).copied();
-        if selected.vararg_index.is_some() {
+        if selected.vararg.is_some() {
             return Err(self.failure(span, BodyCheckFailureKind::UnsupportedCallShape));
         }
         let cause = self.statement_origin(statement)?;

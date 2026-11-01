@@ -17004,15 +17004,16 @@ impl<'a> Checker<'a> {
                                     }
                                 }
                             } else {
+                                let vararg = sig.argument_vararg_index();
                                 for (i, a) in args.iter().enumerate() {
-                                    let p = if sig.vararg() && i >= value_count.saturating_sub(1) {
-                                        sig.params[sig.params.len() - 1]
-                                            .array_read_elem()
-                                            .unwrap_or(Ty::Error)
+                                    let value_index = vararg.filter(|v| i >= *v).unwrap_or(i);
+                                    let parameter_index = ctx_count + value_index;
+                                    let p = if vararg == Some(value_index) {
+                                        sig.params[parameter_index].array_read_elem()
                                     } else {
-                                        sig.params[ctx_count + i]
+                                        Some(sig.params[parameter_index])
                                     };
-                                    let parameter_index = ctx_count + i;
+                                    let p = p.unwrap_or(Ty::Error);
                                     let aty = self.check_argument_expected(
                                         scope,
                                         *a,
@@ -34325,9 +34326,8 @@ impl<'a> Checker<'a> {
         context_args: Vec<Option<ResolvedContextArgument>>,
         param_default_values: Vec<Option<CtorDefaultValue>>,
     ) -> ResolvedCall {
-        let callable = selected.callable.clone();
         ResolvedCall::source_extension(ResolvedSourceExtensionCall {
-            callable,
+            callable: selected.callable.clone(),
             receiver,
             params: value_params,
             context_args,

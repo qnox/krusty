@@ -1885,3 +1885,70 @@ fn an_inferred_property_getter_reads_its_context_parameters() {
     );
     common::expect_box_same_as_kotlinc(INFERRED_CONTEXT_PROPERTIES, "InferredContextPropertiesRun");
 }
+
+/// A context parameter is a declared parameter before the vararg, but no source argument fills
+/// it: the call's arguments start at the first value parameter, so the vararg packs exactly the
+/// positional arguments that reach it, whatever the call form.
+const CONTEXT_VARARG_DECLARATIONS: &str = "context(tag: String)\n\
+    fun tagged(vararg pairs: Pair<String, Int>, tail: Pair<String, Int>): Int =\n\
+    \x20 pairs.size + tail.second + tag.length\n\
+    context(tag: String) fun plain(vararg xs: Int): Int = xs.sum() + tag.length\n\
+    context(tag: String) fun Int.ext(vararg xs: Int, last: Int = 0): Int = this + xs.size + last + tag.length\n\
+    class Box {\n\
+    \x20 context(tag: String) fun member(vararg xs: String): Int = xs.size + tag.length\n\
+    \x20 context(tag: String) fun Int.memberExt(vararg xs: Int): Int = this + xs.size + tag.length\n\
+    \x20 fun run(): Int = with(\"tt\") { member(\"a\", \"b\") + 1.memberExt(4, 5) }\n\
+    }\n";
+
+const CONTEXT_VARARG_CALLS: &str = "fun box(): String {\n\
+    \x20 val results = with(\"t\") {\n\
+    \x20   listOf(\n\
+    \x20     tagged(\"a\" to 1, \"b\" to 2, tail = \"c\" to 3),\n\
+    \x20     tagged(tail = \"z\" to 5),\n\
+    \x20     plain(1, 2, 3),\n\
+    \x20     plain(),\n\
+    \x20     plain(*intArrayOf(4, 5)),\n\
+    \x20     10.ext(1, 2, last = 5),\n\
+    \x20     Box().member(\"x\"),\n\
+    \x20   )\n\
+    \x20 }\n\
+    \x20 val expected = listOf(6, 6, 7, 1, 10, 18, 2)\n\
+    \x20 if (results != expected) return \"fail $results\"\n\
+    \x20 return if (Box().run() == 9) \"OK\" else \"fail member extension ${Box().run()}\"\n\
+    }\n";
+
+#[test]
+fn varargs_after_context_parameters_take_only_the_arguments_that_reach_them() {
+    let src = format!("{CONTEXT_VARARG_DECLARATIONS}{CONTEXT_VARARG_CALLS}");
+    common::expect_box_ok_with_stdlib(&src, "Main");
+}
+
+#[test]
+fn dependency_varargs_after_context_parameters_take_only_the_arguments_that_reach_them() {
+    let lib = format!("package lib\n{CONTEXT_VARARG_DECLARATIONS}");
+    let main = format!("import lib.*\n{CONTEXT_VARARG_CALLS}");
+    if let Some(result) = common::expect_box_run_against("context_vararg_dependency", &lib, &main) {
+        assert_eq!(result, "OK");
+    }
+}
+
+/// Two more callables with a `vararg` after a context parameter: a member-extension `invoke`
+/// operator applied to a value, and a local function.
+#[test]
+fn varargs_after_context_parameters_reach_operator_invokes_and_local_functions() {
+    let src = "class Runner {\n\
+        \x20 context(tag: String)\n\
+        \x20 operator fun Int.invoke(vararg xs: Int): Int = this + tag.length + xs.size\n\
+        \x20 fun run(): Int = with(\"t\") { val n = 1; n(2, 3) }\n\
+        }\n\
+        fun local(): Int {\n\
+        \x20 context(tag: String)\n\
+        \x20 fun inner(vararg xs: Int, last: Int = 5): Int = tag.length + xs.sum() + last\n\
+        \x20 return with(\"ab\") { inner(1, 2) + inner(last = 1) }\n\
+        }\n\
+        fun box(): String {\n\
+        \x20 if (Runner().run() != 4) return \"fail invoke ${Runner().run()}\"\n\
+        \x20 return if (local() == 10 + 3) \"OK\" else \"fail local ${local()}\"\n\
+        }\n";
+    common::expect_box_ok_with_stdlib(src, "Main");
+}
