@@ -471,19 +471,15 @@ impl SerializeBody<'_> {
                 let def = match &constant_default {
                     Some(dc) => {
                         let def = ir.add_expr(IrExpr::Const(dc.clone()));
-                        // The default value carries the property's own declaration line, as
-                        // it does in the deserialization constructor. The comparison that
-                        // consumes it is marked back to the statement's line by the emitter,
-                        // which is where that rule lives. A `null` default is excluded: it is
-                        // tested with `ifnull`, which pushes nothing, and kotlinc marks no
-                        // line for it.
+                        // The constant keeps its own source line, as kotlinc's copy of the
+                        // default keeps its offsets. The comparison that consumes it is marked
+                        // back to the statement's line by the emitter, which is where that rule
+                        // lives. A `null` default is excluded: it is tested with `ifnull`, which
+                        // pushes nothing, and kotlinc marks no line for it.
                         if !matches!(dc, IrConst::Null) {
-                            if let Some(line) = ir
-                                .prop_decl_lines
-                                .get(&(serialized_name, pname.clone()))
-                                .copied()
-                                .filter(|line| *line != 0)
-                            {
+                            let line = super::property_default::checked_default(ir, foo_id, field)
+                                .and_then(|source| ir.expr_source_lines.get(&source).copied());
+                            if let Some(line) = line {
                                 ir.expr_source_lines.insert(def, line);
                             }
                         }
@@ -505,11 +501,6 @@ impl SerializeBody<'_> {
                                 // writes stands in for the receiver the default was checked
                                 // against.
                                 receiver: Some(value_slot),
-                                property_line: ir
-                                    .prop_decl_lines
-                                    .get(&(serialized_name, pname.clone()))
-                                    .copied()
-                                    .filter(|line| *line != 0),
                                 read_line: Some(ir.classes[foo_id as usize].decl_start_line)
                                     .filter(|line| *line != 0),
                                 // A read of the object being written is `write$Self`'s own, as

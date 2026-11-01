@@ -88,9 +88,6 @@ pub(super) struct DefaultFrame<'a> {
     /// The value holding that object, when the method is a member of its class and may reach its
     /// private state. `None` leaves a default that uses the receiver underivable there.
     pub(super) receiver: Option<u32>,
-    /// The line of the property whose default this is. The initializer's own code is attributed to
-    /// it, as it is where the constructor applies the same default.
-    pub(super) property_line: Option<u32>,
     /// The line a re-read property is attributed to: it is the method's own read, not source the
     /// initializer contains. `None` leaves it unattributed.
     pub(super) read_line: Option<u32>,
@@ -240,11 +237,6 @@ fn copy_in_frame(
             | IrExpr::Variable { index: slot, .. } => relocate(slot),
             IrExpr::Try { catches, .. } => catches.iter_mut().for_each(|c| relocate(&mut c.var)),
             _ => {}
-        }
-    }
-    if let Some(line) = frame.property_line {
-        for &expression in &visited {
-            ir.expr_source_lines.entry(expression).or_insert(line);
         }
     }
     for (expression, field) in reads {

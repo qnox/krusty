@@ -27,5 +27,7 @@ mod primary_constructor_newline_e2e;
 mod property_initializer_newline_e2e;
 #[path = "../receiver_type_line_break_e2e.rs"]
 mod receiver_type_line_break_e2e;
+#[path = "../serializable_default_own_lines_e2e.rs"]
+mod serializable_default_own_lines_e2e;
 #[path = "../type_annotation_newline_e2e.rs"]
 mod type_annotation_newline_e2e;
