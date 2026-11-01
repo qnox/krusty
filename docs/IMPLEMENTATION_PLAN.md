@@ -5755,6 +5755,13 @@ regress.
     lambda through the copy's field (kotlinx's `Flow.map`: its `FlowCollector` and that collector's
     continuation), are regenerated under the copy's name generator with the lambda inlined
     (`anonymous_object::nested_objects`); a multifile facade's inline body is read from its part.
+    ✅ A suspend lambda the body creates around a `crossinline` lambda (kotlinx `flatMapLatest`):
+    the copy rebuilds `invokeSuspend` from `invokeSuspend$$forInline` with the lambda as its own
+    continuation (`suspend_methods::transform_lambda`, kotlinc's `newStateMachineForLambda`), and
+    its `invoke`/`create` construct the copy itself with the lambda's captured values; a literal
+    takes the inliner. ☐ A suspend callable reference as an inline lambda shape
+    (`flatMapLatest(::lookup)`, nowinandroid). ☐ `surroundInvokesWithSuspendMarkersIfNeeded`
+    for a captured function value the call does not inline (such a copy is refused).
     ☐ krusty's own `$$forInline` copy of an object's suspend method in an inline function it
     compiles.
 - ☐ 5. `$default` inline functions (mask expansion) and `finally` blocks around inlined returns.
