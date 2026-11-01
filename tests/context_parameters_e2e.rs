@@ -1931,3 +1931,24 @@ fn dependency_varargs_after_context_parameters_take_only_the_arguments_that_reac
         assert_eq!(result, "OK");
     }
 }
+
+/// Two more callables with a `vararg` after a context parameter: a member-extension `invoke`
+/// operator applied to a value, and a local function.
+#[test]
+fn varargs_after_context_parameters_reach_operator_invokes_and_local_functions() {
+    let src = "class Runner {\n\
+        \x20 context(tag: String)\n\
+        \x20 operator fun Int.invoke(vararg xs: Int): Int = this + tag.length + xs.size\n\
+        \x20 fun run(): Int = with(\"t\") { val n = 1; n(2, 3) }\n\
+        }\n\
+        fun local(): Int {\n\
+        \x20 context(tag: String)\n\
+        \x20 fun inner(vararg xs: Int, last: Int = 5): Int = tag.length + xs.sum() + last\n\
+        \x20 return with(\"ab\") { inner(1, 2) + inner(last = 1) }\n\
+        }\n\
+        fun box(): String {\n\
+        \x20 if (Runner().run() != 4) return \"fail invoke ${Runner().run()}\"\n\
+        \x20 return if (local() == 10 + 3) \"OK\" else \"fail local ${local()}\"\n\
+        }\n";
+    common::expect_box_ok_with_stdlib(src, "Main");
+}

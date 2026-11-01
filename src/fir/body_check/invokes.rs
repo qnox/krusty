@@ -635,7 +635,6 @@ impl BodyFirChecker<'_> {
             }
             ref selected @ ResolvedCall::MemberExtension {
                 ref dispatch_receiver,
-                vararg_index,
                 ref context_args,
                 ..
             } => {
@@ -655,7 +654,7 @@ impl BodyFirChecker<'_> {
                         conversion: None,
                     }),
                     context_args.clone(),
-                    vararg_index,
+                    target.argument_vararg_index,
                     target.parameters,
                     target.extension_parameter,
                 )

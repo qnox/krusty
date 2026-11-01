@@ -407,7 +407,7 @@ impl BodyFirChecker<'_> {
                 arguments,
                 &selected.sig.params,
                 selected.context_args.iter().map(Some),
-                selected.sig.vararg_index,
+                selected.sig.argument_vararg_index(),
             )?,
             parameter_types: self
                 .published_parameter_types(self.file.expr_span(expression), &selected.sig.params)?,
