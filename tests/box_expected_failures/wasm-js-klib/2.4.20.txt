@@ -417,7 +417,6 @@ callableReference/adaptedReferences/innerConstructorWithVararg.kt
 callableReference/adaptedReferences/largeVararg.kt
 callableReference/adaptedReferences/localFunctionWithDefault.kt
 callableReference/adaptedReferences/manyDefaultsAndVararg.kt
-callableReference/adaptedReferences/nestedClassConstructorWithDefault.kt
 callableReference/adaptedReferences/referenceToFakeOverrideWithTypeParameter.kt
 callableReference/adaptedReferences/referenceToVarargWithDefaults.kt
 callableReference/adaptedReferences/simpleEmptyVararg.kt
@@ -704,7 +703,6 @@ classes/innerClass.kt
 classes/kt1018.kt
 classes/kt1157.kt
 classes/kt1247.kt
-classes/kt1345.kt
 classes/kt1535.kt
 classes/kt1538.kt
 classes/kt1578.kt
@@ -732,7 +730,6 @@ classes/kt508.kt
 classes/kt5347.kt
 classes/kt6136.kt
 classes/kt633.kt
-classes/kt6816.kt
 classes/kt707.kt
 classes/kt723.kt
 classes/kt725.kt
@@ -962,7 +959,6 @@ contextParameters/contextualInlineCall.kt
 contextParameters/explicitPassing.kt
 contextParameters/genericPropertyWithContextParameters.kt
 contextParameters/inferGenericPropertyType.kt
-contextParameters/invokeMultipleContextParametersOfSameType.kt
 contextParameters/kt51284.kt
 contextParameters/kt51290.kt
 contextParameters/kt51475.kt
@@ -1744,19 +1740,12 @@ defaultArguments/complexInheritance.kt
 defaultArguments/constructor/annotation.kt
 defaultArguments/constructor/annotationWithEmptyArray.kt
 defaultArguments/constructor/anonymousObjectAsDefaultParam.kt
-defaultArguments/constructor/defArgs1.kt
-defaultArguments/constructor/defArgs1InnerClass.kt
-defaultArguments/constructor/defArgs2.kt
-defaultArguments/constructor/doubleDefArgs1InnerClass.kt
 defaultArguments/constructor/enum.kt
 defaultArguments/constructor/enumWithOneDefArg.kt
 defaultArguments/constructor/enumWithTwoDefArgs.kt
 defaultArguments/constructor/enumWithTwoDoubleDefArgs.kt
-defaultArguments/constructor/innerClass32Args.kt
-defaultArguments/constructor/kt2852.kt
 defaultArguments/constructor/kt30517.kt
 defaultArguments/constructor/kt3060.kt
-defaultArguments/constructor/objectExpressionDelegatingToSecondaryConstructor.kt
 defaultArguments/defaultArgumentsInFunctionWithExpressionAsBody.kt
 defaultArguments/function/covariantOverride.kt
 defaultArguments/function/covariantOverrideGeneric.kt
@@ -1769,7 +1758,6 @@ defaultArguments/kt47073.kt
 defaultArguments/kt47073_nested.kt
 defaultArguments/kt48391.kt
 defaultArguments/kt52702.kt
-defaultArguments/kt59326.kt
 defaultArguments/private/clashingNames.kt
 defaultArguments/private/memberExtensionFunction.kt
 defaultArguments/private/memberFunction.kt
@@ -1955,7 +1943,6 @@ destructuringDeclInLambdaParam/stdlibUsages.kt
 destructuringDeclInLambdaParam/underscoreNames.kt
 destructuringDeclInLambdaParam/withIndexed.kt
 devirtualization/anonymousObject.kt
-devirtualization/getter_looking_as_box_function.kt
 devirtualization/inline_getter.kt
 devirtualization/lateinitInterface.kt
 diagnostics/functions/invoke/onObjects/invokeOnClassObject1.kt
@@ -2382,7 +2369,6 @@ functions/kt1038.kt
 functions/kt1199.kt
 functions/kt1413.kt
 functions/kt1649_2.kt
-functions/kt2270.kt
 functions/kt2716.kt
 functions/kt2929.kt
 functions/kt3214.kt
@@ -2521,7 +2507,6 @@ inference/pcla/issues/kt67993.kt
 inference/pcla/issues/kt74819e.kt
 inference/pcla/issues/kt76058.kt
 inference/pcla/issues/kt76171.kt
-inference/pcla/lackOfNullCheckOnNullableInsideBuild.kt
 inference/pcla/memberScope.kt
 inference/pcla/nestedNonExhaustiveIf.kt
 inference/pcla/oneParameter/oneTypeVariable/oneTypeInfoOrigin/sourceSinkFeedContexts/InsideAnonymousObject.kt
@@ -3591,7 +3576,6 @@ innerClass/qualifiedThis.kt
 innerClass/secondaryConstructor.kt
 innerNested/considerPropertyInitValueFromNestedClass.kt
 innerNested/innerLabeledThis.kt
-innerNested/innerWithDefaultArgument.kt
 innerNested/innerWithDefaultArgumentGenericExtensionProperty.kt
 innerNested/innerWithDefaultInner.kt
 innerNested/innerWithThisInDefaultArguments.kt
@@ -3603,7 +3587,6 @@ innerNested/nestedClassObject.kt
 innerNested/nestedEnumConstant.kt
 innerNested/nestedInnerClass.kt
 innerNested/protectedNestedClass.kt
-innerNested/superConstructorCall/deepLocalHierarchy.kt
 innerNested/superConstructorCall/innerExtendsInnerViaSecondaryConstuctor.kt
 innerNested/superConstructorCall/innerExtendsInnerWithProperOuterCapture.kt
 innerNested/superConstructorCall/kt11833_1.kt
@@ -3612,7 +3595,6 @@ innerNested/superConstructorCall/localClassOuterDiffersFromInnerOuter.kt
 innerNested/superConstructorCall/localExtendsInner.kt
 innerNested/superConstructorCall/localExtendsLocalWithClosure.kt
 innerNested/superConstructorCall/localWithClosureExtendsLocalWithClosure.kt
-innerNested/superConstructorCall/objectExtendsClassDefaultArgument.kt
 innerNested/superConstructorCall/objectExtendsInner.kt
 innerNested/superConstructorCall/objectExtendsInnerDefaultArgument.kt
 innerNested/superConstructorCall/objectExtendsInnerOfLocalVarargAndDefault.kt
@@ -3745,7 +3727,6 @@ localClass/signatureConflictHiddenByTypeParameter.kt
 localClass/tryCatch.kt
 localClass/virtualCallFromConstructor.kt
 localClasses/anonymousObjectInExtension.kt
-localClasses/anonymousObjectInParameterInitializer.kt
 localClasses/capturingInDefaultConstructorParameter.kt
 localClasses/closureOfInnerLocalClass.kt
 localClasses/closureOfLambdaInLocalClass.kt
@@ -3765,7 +3746,6 @@ localClasses/kt3584.kt
 localClasses/kt4174.kt
 localClasses/kt45383.kt
 localClasses/localClassCaptureExtensionReceiver.kt
-localClasses/localClassInParameterInitializer.kt
 localClasses/localDataClass.kt
 localClasses/localExtendsInnerAndReferencesOuterMember.kt
 localClasses/localGenericWithTypeParameters.kt
@@ -3964,7 +3944,6 @@ multiplatform/k2/mergedOverrides.kt
 multiplatform/k2/migratedOldTests/mpp2.kt
 multiplatform/k2/migratedOldTests/mpp_default_args.kt
 multiplatform/k2/migratedOldTests/mpp_optional_expectation.kt
-multiplatform/k2/privateConstructorWithDefaults.kt
 multiplatform/k2/regularAndDeprecatedOverloads.kt
 multiplatform/k2/starImportOfExpectEnumWithActualTypeAlias.kt
 nameBasedDestructuring/fakeOverridenFunctionReturnsDataClass.kt
@@ -4205,9 +4184,6 @@ privateConstructors/companion.kt
 privateConstructors/inline.kt
 privateConstructors/inner.kt
 privateConstructors/kt4860.kt
-privateConstructors/withArguments.kt
-privateConstructors/withDefault.kt
-privateConstructors/withLinkedClasses.kt
 privateConstructors/withVarargs.kt
 properties/PrivatePropertyOfComplexGenericFunctionType.kt
 properties/PrivatePropertyOfGenericContravariantFunctionType.kt
@@ -5321,12 +5297,9 @@ secondaryConstructors/accessToCompanion.kt
 secondaryConstructors/basicNoPrimaryOneSink.kt
 secondaryConstructors/basicPrimary.kt
 secondaryConstructors/callFromLocalSubClass.kt
-secondaryConstructors/callFromPrimaryWithNamedArgs.kt
-secondaryConstructors/callFromPrimaryWithOptionalArgs.kt
 secondaryConstructors/clashingDefaultConstructors.kt
 secondaryConstructors/dataClasses.kt
 secondaryConstructors/defaultArgs.kt
-secondaryConstructors/defaultParametersNotDuplicated.kt
 secondaryConstructors/enums.kt
 secondaryConstructors/generics.kt
 secondaryConstructors/innerClasses.kt
@@ -5359,7 +5332,6 @@ smartCasts/lambdaArgumentWithoutType.kt
 smartCasts/negativesmartCastAugmentedAssignment.kt
 smartCasts/nullSmartCast.kt
 smartCasts/propertyInitializationAfterSmartCast.kt
-smartCasts/smartCastInsideIf.kt
 smartCasts/smartCastedGenericWhenSubjectInRangeCheck.kt
 smartCasts/smartcastFromGenericToString.kt
 specialBuiltins/bridgeNotEmptyMap.kt
@@ -5548,7 +5520,6 @@ typeErasure/twoFunWithReifiedTypeParametersInlineFunWithReifiedTypeParameters.kt
 typeErasure/twoFunWithReifiedTypeParametersInlineFunWithTwoTypeParameters.kt
 typeErasure/twoFunWithTypeParametersInlineFunWithReifiedTypeParameters.kt
 typeErasure/twoFunWithTypeParametersWithUpperBoundsInlineFunWithReifiedTypeParameters.kt
-typeInfo/ifOrWhenSpecialCall.kt
 typeMapping/kt2831.kt
 typeMapping/kt3286.kt
 typeMapping/kt3863.kt

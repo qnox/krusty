@@ -122,3 +122,40 @@ fn a_secondary_may_delegate_to_another_secondary() {
          fun box(): String = A(\"O\", 1).text\n";
     every_backend_agrees_with_kotlinc("SecondaryDelegatesToSecondary", source);
 }
+
+/// A LOCAL class capturing a mutable `var`, constructed through its primary's default entry. The
+/// capture is one cell the enclosing function shares: the entry takes it as the cell, not as the
+/// `Int` it holds, and hands that same cell on to the primary, so both sides see each write.
+#[test]
+fn a_default_entry_forwards_a_shared_capture_cell() {
+    let source = "fun box(): String {\n\
+         \x20   var n = 1\n\
+         \x20   class C(val step: Int = 2) { fun add() { n += step } }\n\
+         \x20   val c = C()\n\
+         \x20   c.add()\n\
+         \x20   n += 4\n\
+         \x20   c.add()\n\
+         \x20   return if (n == 9) \"OK\" else \"fail: $n\"\n\
+         }\n";
+    every_backend_agrees_with_kotlinc("DefaultEntrySharedCapture", source);
+}
+
+/// The same cell through a SOURCE secondary constructor of the local class: declared with it,
+/// constructed with it, and forwarded by its `this(…)`.
+#[test]
+fn a_secondary_constructor_forwards_a_shared_capture_cell() {
+    let source = "fun box(): String {\n\
+         \x20   var n = 1\n\
+         \x20   class C(val step: Int) {\n\
+         \x20       constructor(text: String, extra: Int = 0) : this(text.length + extra)\n\
+         \x20       fun add() { n += step }\n\
+         \x20   }\n\
+         \x20   val c = C(\"ab\")\n\
+         \x20   c.add()\n\
+         \x20   n += 4\n\
+         \x20   C(\"\", 1).add()\n\
+         \x20   c.add()\n\
+         \x20   return if (n == 10) \"OK\" else \"fail: $n\"\n\
+         }\n";
+    every_backend_agrees_with_kotlinc("SecondarySharedCapture", source);
+}

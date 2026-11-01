@@ -9,6 +9,11 @@
 //! with placeholders and constant masks ([`call_sites`]). A top-level entry is published to the
 //! other files of the module under the identity of the declaration that provides its defaults.
 //!
+//! A constructor's entry is one more constructor of its class, taking the same frame and masks
+//! after the class's compiler-supplied prefix and delegating `this(…)` to the constructor
+//! ([`constructor_entries`]); constructions, delegations and enum constants that omit arguments
+//! select it by its exact place among the class's constructors ([`constructor_calls`]).
+//!
 //! Common lowering has already selected every callee and mapped every argument; this pass only
 //! changes how an omission is carried. A target runs it after its other common realizations, and
 //! realizes the [`crate::ir::IrExpr::AbsentArgument`] placeholders and the
@@ -16,6 +21,8 @@
 //! methods and does not run it.
 
 mod call_sites;
+mod constructor_calls;
+mod constructor_entries;
 mod entries;
 mod masks;
 #[cfg(test)]
@@ -34,6 +41,7 @@ use crate::ir::IrFile;
 pub(crate) fn realize(ir: &mut IrFile, callables: &mut CheckedBackendCallables) {
     let mut entries = entries::Entries::default();
     entries.publish(ir);
+    constructor_calls::rewrite_delegations(ir, &mut entries);
     entries.take_new_bodies();
     // Every emitted body, the entries' own included: a default may itself call with omissions.
     let mut pending = crate::ir::emitted_body_roots(ir);
@@ -42,6 +50,7 @@ pub(crate) fn realize(ir: &mut IrFile, callables: &mut CheckedBackendCallables) 
         for expression in crate::ir::value_namespace_expressions(ir, root) {
             if seen.insert(expression) {
                 call_sites::rewrite(ir, &mut entries, expression);
+                constructor_calls::rewrite(ir, &mut entries, expression);
             }
         }
         pending.extend(entries.take_new_bodies());

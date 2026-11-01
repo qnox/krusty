@@ -250,7 +250,6 @@ classes/kt3001.kt
 classes/kt8011.kt
 classes/overloadUnaryOperator.kt
 classes/typedDelegation.kt
-closures/captureInSuperConstructorCall/outerCapturedInSecondaryConstructorDefaultParameter.kt
 closures/capturedVarsOptimization/kt44347.kt
 closures/capturedVarsOptimization/withCoroutines.kt
 closures/capturedVarsOptimization/withCoroutinesNoStdLib.kt
@@ -1499,7 +1498,6 @@ innerClass/secondaryConstructor.kt
 innerNested/innerWithDefaultArgumentGenericExtensionProperty.kt
 innerNested/passingOuterRef.kt
 innerNested/protectedNestedClass.kt
-innerNested/superConstructorCall/objectExtendsInnerWithDelegatingConstructor.kt
 interfaceCallsNCasts/conservativeItable.kt
 interfaceCallsNCasts/diamond.kt
 interfaceCallsNCasts/finalMethod.kt
@@ -1669,7 +1667,6 @@ multiplatform/k2/internalOverride2.kt
 multiplatform/k2/internalSetterInCommon.kt
 multiplatform/k2/kt66970.kt
 multiplatform/k2/mergedOverrides.kt
-multiplatform/k2/migratedOldTests/mpp_default_args.kt
 nameBasedDestructuring/fullFormExtraPropType.kt
 nameBasedDestructuring/fullFormFromSmartCast.kt
 nameBasedDestructuring/fullFormLoopsAndLambdas.kt
@@ -2559,8 +2556,6 @@ sam/kt64116.kt
 sealed/kt54028.kt
 sealed/kt54028_cursed.kt
 sealed/multipleFiles_enabled.kt
-secondaryConstructors/callFromLocalSubClass.kt
-secondaryConstructors/clashingDefaultConstructors.kt
 secondaryConstructors/enums.kt
 secondaryConstructors/innerClassesInheritance.kt
 secondaryConstructors/localClasses.kt

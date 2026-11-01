@@ -43,12 +43,15 @@ impl Body<'_> {
 
     pub(super) fn new_object(
         &mut self,
+        site: u32,
         internal: TypeName,
         args: &[u32],
         params: Option<&[Ty]>,
         external: Option<ExternalCallableId>,
         defaults: &[u32],
     ) -> Result<(), Unsupported> {
+        // The shared default-argument lowering rewrites every construction with omitted
+        // arguments it can realize to construct through its constructor's entry.
         if !defaults.is_empty() {
             return Err("a constructor call with omitted arguments".to_string());
         }
@@ -56,7 +59,7 @@ impl Body<'_> {
             .and_then(|target| self.callables.callable(target))
             .and_then(|fact| fact.compiler_operation());
         let Some(CompilerIntrinsic::ThrowableConstructor { message }) = operation else {
-            return self.construction(internal, args, params);
+            return self.construction(site, internal, args, params);
         };
         let message = match (message, args) {
             (false, []) => None,
