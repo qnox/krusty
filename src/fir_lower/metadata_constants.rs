@@ -8,8 +8,8 @@
 //! folded at run time but is not one.
 
 use crate::fir::{
-    FirBody, FirCallArgument, FirCallTarget, FirConstant, FirConversionKind, FirExprId,
-    FirExprKind, FirIntrinsic, FirStatementKind, FirUnaryOperation,
+    FirBody, FirCallArgument, FirCallTarget, FirConstant, FirConstantSource, FirConversionKind,
+    FirExprId, FirExprKind, FirIntrinsic, FirStatementKind, FirUnaryOperation,
 };
 use crate::types::Ty;
 
@@ -43,7 +43,11 @@ fn has_constant_value(
         return false;
     };
     match &node.kind {
-        FirExprKind::Constant(constant) => !matches!(constant, FirConstant::Null),
+        // `"…".trimIndent()` checks to its folded value, but kotlinc's frontend sees a call.
+        FirExprKind::Constant(constant) => {
+            !matches!(constant, FirConstant::Null)
+                && body.constant_source(expression) != Some(FirConstantSource::FoldedCall)
+        }
         // `-x` is `x.unaryMinus()`, a number operation over any constant.
         FirExprKind::Unary {
             operation: FirUnaryOperation::Negate,
@@ -100,12 +104,13 @@ fn property_has_constant_value(
     }
 }
 
-/// A literal as source wrote it, never the value of a constant declaration it reads.
+/// A literal as source wrote it, never the value of a constant declaration it reads or of a call
+/// the checker folded.
 fn is_literal(body: &FirBody, expression: FirExprId) -> bool {
     matches!(
         body.expr(expression).map(|node| &node.kind),
         Some(FirExprKind::Constant(constant)) if !matches!(constant, FirConstant::Null)
-    ) && !body.is_constant_read(expression)
+    ) && body.constant_source(expression).is_none()
 }
 
 /// kotlinc's parser merges `+` between string literals and templates into one concatenation;

@@ -37,7 +37,9 @@ pub use ranges::{
 };
 mod indexed_iteration;
 pub use indexed_iteration::{FirBuiltinIterableKind, FirCharSequenceIndexing};
+mod constant_sources;
 mod with_index;
+pub use constant_sources::FirConstantSource;
 pub use with_index::{FirIndexedValueComponent, FirWithIndexLoop};
 mod callable_dispatch;
 pub use callable_dispatch::{
@@ -1812,10 +1814,9 @@ pub struct FirBody {
     /// Naming provenance of each expression the reference compiler realizes as a class of its own
     /// (a callable reference). A naming fact, not a lowering decision.
     generated_class_provenance: HashMap<FirExprId, FirGeneratedClassProvenance>,
-    /// Constants that are the selected value of a `const val` or a Java constant field, as opposed
-    /// to a literal. Both are `FirExprKind::Constant`; metadata's constant-initializer rule
-    /// tells them apart.
-    constant_reads: HashSet<FirExprId>,
+    /// Constants that are not a literal as source wrote it. Every one is `FirExprKind::Constant`;
+    /// metadata's constant-initializer rule tells them apart.
+    constant_sources: HashMap<FirExprId, FirConstantSource>,
     /// Local-storage blocks originating from postfix `++`/`--`, whose checked shape snapshots the
     /// old value.
     postfix_updates: HashSet<FirExprId>,
@@ -1896,7 +1897,7 @@ impl FirBody {
             destructuring_loop_containers: HashSet::default(),
             debug_lines: Default::default(),
             generated_class_provenance: HashMap::default(),
-            constant_reads: HashSet::default(),
+            constant_sources: HashMap::default(),
             postfix_updates: HashSet::default(),
             inlined_call_conversions: HashSet::default(),
             lifting_site: None,
@@ -2569,15 +2570,6 @@ impl FirBody {
         self.expressions.push(expression);
         self.debug_lines.add_expression();
         id
-    }
-
-    pub(crate) fn record_constant_read(&mut self, expression: FirExprId) {
-        self.constant_reads.insert(expression);
-    }
-
-    /// Whether this constant is a read of a constant declaration rather than a literal.
-    pub fn is_constant_read(&self, expression: FirExprId) -> bool {
-        self.constant_reads.contains(&expression)
     }
 
     pub(crate) fn record_postfix_update(&mut self, block: FirExprId) {
