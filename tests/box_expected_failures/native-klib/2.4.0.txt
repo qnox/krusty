@@ -2611,7 +2611,6 @@ typealias/typeAliasAsBareType.kt
 unsignedTypes/forInUnsignedProgression.kt
 unsignedTypes/forInUnsignedRangeWithCoercion.kt
 unsignedTypes/inUnsignedDownTo.kt
-unsignedTypes/kt43286a.kt
 unsignedTypes/kt47716.kt
 unsignedTypes/unsignedIntCompare.kt
 unsignedTypes/unsignedIntDivide.kt

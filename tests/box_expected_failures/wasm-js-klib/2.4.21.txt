@@ -2128,7 +2128,6 @@ evaluate/serialization/annotationWithArray.kt
 evaluate/serialization/annotationWithDefaults.kt
 evaluate/serialization/nestedTypeAnnotation.kt
 evaluate/serialization/typeAnnotation.kt
-evaluate/stdlibConst.kt
 evaluate/stringConcatenationWithObject.kt
 evaluate/thisPlusString.kt
 evaluate/thisPlusStringWithObject.kt

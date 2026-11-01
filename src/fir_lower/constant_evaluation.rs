@@ -18,6 +18,8 @@ use crate::fx_hash::{HashMap, HashSet};
 use crate::kt_string::{KtString, KtStringBuf};
 use crate::types::Ty;
 
+mod numeric_operations;
+
 use super::string_concatenation::ConcatenationPart;
 use crate::fir::{
     FirBinaryOperation, FirBody, FirCallArgument, FirCallTarget, FirConstant, FirConversion,
@@ -275,10 +277,16 @@ impl ConstantEvaluation {
             FirCallTarget::External {
                 semantic_role: Some(role),
                 intrinsic_const: true,
+                result,
                 ..
             } => {
                 let (receiver, arguments) = self.call_operands(body, call)?;
-                declared_operation(*role, receiver, &arguments)
+                declared_operation(
+                    *role,
+                    receiver,
+                    &arguments,
+                    result.get().canonical_semantic().non_null(),
+                )
             }
             _ => None,
         }
@@ -441,6 +449,9 @@ fn unary(
         };
         return Some(boolean(!value));
     }
+    if operation == FirUnaryOperation::BitwiseNot && matches!(ty, Ty::UInt | Ty::ULong) {
+        return numeric_operations::unsigned_inverse(&operand, ty);
+    }
     // A signed literal is negated before it is narrowed to the checked result type. This ordering
     // is observable at the lower bound: `val b: Byte = -128` has an `Int` literal `128` under the
     // unary operation, and narrowing that magnitude first produces `-128`, whose negation is the
@@ -563,6 +574,9 @@ fn arithmetic(
             FirBinaryOperation::BitwiseXor => lhs ^ rhs,
             _ => return None,
         }));
+    }
+    if matches!(ty, Ty::UInt | Ty::ULong) {
+        return numeric_operations::unsigned_bitwise(operation, &lhs, &rhs, ty);
     }
     let value = match (number(&lhs)?, number(&rhs)?) {
         (Number::Integral(lhs), Number::Integral(rhs)) => match ty {
@@ -737,9 +751,13 @@ fn declared_operation(
     role: crate::types::SemanticCallRole,
     receiver: EvaluatedConstant,
     arguments: &[EvaluatedConstant],
+    result: Ty,
 ) -> Option<EvaluatedConstant> {
     use crate::types::SemanticCallRole;
     match (role, arguments) {
+        (SemanticCallRole::IntrinsicConstNumeric(operation), _) => {
+            numeric_operations::evaluate(operation, &receiver, arguments, result)
+        }
         (SemanticCallRole::KotlinAnyToString, []) => {
             let mut text = KtStringBuf::new();
             push_text(&receiver, &mut text)?;
@@ -932,6 +950,7 @@ mod tests {
                 crate::types::SemanticCallRole::KotlinComparableCompareTo,
                 text(lhs),
                 &[text(rhs)],
+                Ty::Int,
             )
             .map(|order| order.value)
         };

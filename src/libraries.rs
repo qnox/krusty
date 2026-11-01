@@ -26,6 +26,7 @@ pub(crate) mod function_classifiers;
 mod generic_signature;
 mod inline_body;
 mod inline_kind;
+pub(crate) mod intrinsic_const_numeric;
 mod klib_body_accessor;
 mod klib_body_class;
 mod member_flags;
