@@ -376,6 +376,17 @@ th {
   background: var(--accent);
 }
 
+/* A wide table keeps its first column in view while the rest scrolls sideways. */
+
+.table-sticky th:first-child,
+.table-sticky td:first-child {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  background: var(--surface);
+  box-shadow: 1px 0 0 var(--line);
+}
+
 /* Data tables: compact rows, numbers right-aligned in .num cells */
 
 .table-compact th,

@@ -38,14 +38,14 @@ const figures = [
     file: "krusty-conformance.json",
     label: "JVM conformance",
     unit: "cases pass",
-    explain: "Cases whose box() returns OK on krusty's bytecode. CI fails on any applicable JVM case that does not pass.",
+    explain: "Cases whose box() returns OK on krusty's bytecode. CI fails when any applicable JVM case stops passing.",
   },
   {
     id: "bytes",
     file: "krusty-jvm-byte-equality.json",
     label: "JVM byte equality",
     unit: "class-file bytes match",
-    explain: "A progress gauge, not a share of identical classes: each class counts only its bytes before the first difference from kotlinc's. 100% means every class is identical.",
+    explain: "A progress gauge, not a share of identical classes. Each class counts only its bytes before the first difference from kotlinc's, over the longer of the two files; a failing case counts zero. 100% means every class is identical.",
   },
   {
     id: "native",
@@ -131,9 +131,9 @@ const plugins: { name: string; level: Level; html: string }[] = [
           JVM <code>.class</code> files. Every change is diffed against the real kotlinc. It needs no JVM to run.
         </p>
         <p class="fit">
-          <strong>Use it today for</strong> Kotlin/JVM modules, Android ones included, built with Gradle, Bazel or the
-          command line. Under Gradle, a module that needs Compose, Parcelize or another plugin krusty does not implement
-          stays on kotlinc, and the plugin logs which task and why.
+          <strong>Early, and measured in the open.</strong> krusty takes Kotlin/JVM modules, Android ones included,
+          from Gradle, Bazel or the command line. Under Gradle, a compilation it cannot take yet, such as one that
+          needs Compose or Parcelize, stays on kotlinc, and the task log says why.
         </p>
         <div class="actions">
           <a class="button button-primary" href="#try">Try it on your build</a>
@@ -155,10 +155,10 @@ const plugins: { name: string; level: Level; html: string }[] = [
   <section class="band band-alt" id="measured" aria-labelledby="measured-title">
     <div class="wrap">
       <div class="section-head">
-        <p class="eyebrow">Kotlin {newestKotlin} · latest master build</p>
+        <p class="eyebrow">Kotlin {newestKotlin} · last published master build</p>
         <h2 id="measured-title">Measured against kotlinc's own tests</h2>
         <p>
-          Every master build compiles Kotlin's <code>codegen/box</code> test suite with krusty and with
+          Master builds compile Kotlin's <code>codegen/box</code> test suite with krusty and with
           kotlinc {newestKotlin}, the newest supported release. A case passes when its <code>box()</code> function returns
           <code>OK</code>. Cases the suite marks as not running on a target are left out of that target's figures.
         </p>
