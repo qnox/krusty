@@ -74,3 +74,22 @@ fn class_header_binds_the_classifiers_its_class_inherits() {
         "OwnInheritedHeaderClassifiers",
     );
 }
+
+/// A class's own inherited nested classifier outranks a top-level classifier of the file in its
+/// primary-constructor header, so `Child`'s constructor takes `Parent$Category`, as kotlinc emits.
+#[test]
+fn constructor_signature_takes_the_inherited_nested_classifier_like_kotlinc() {
+    let src = "class Category\n\
+               open class Parent { enum class Category { FIRST } }\n\
+               class Child(category: Category) : Parent()\n";
+    let Some(result) = common::byte_diff_against_kotlinc_cp(
+        "OwnInheritedHeaderSignature",
+        src,
+        "Child",
+        &[common::stdlib_jar()],
+    ) else {
+        eprintln!("skipping: reference kotlinc unavailable");
+        return;
+    };
+    result.expect("Child byte-identical to kotlinc");
+}

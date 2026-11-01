@@ -29394,7 +29394,7 @@ fun use() {
     }
 
     #[test]
-    fn subclass_constructor_prefers_package_type_to_nested_type_from_superclass() {
+    fn subclass_constructor_prefers_nested_type_from_superclass_to_package_type() {
         let mut diagnostics = DiagSink::new();
         let source = "class Category\n\
              open class Parent { enum class Category { FIRST } }\n\
@@ -29411,7 +29411,7 @@ fun use() {
                 .get(&type_name("Child"))
                 .expect("subclass signature")
                 .ctor_params,
-            [Ty::obj("Category")]
+            [Ty::obj("Parent$Category")]
         );
     }
 
