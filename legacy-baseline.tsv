@@ -1,0 +1,43 @@
+# Legacy surface the resolution-engine migration deletes (docs/RESOLUTION_ENGINE.md). Each count may
+# only go down: `just legacy-baseline-check` fails above it, `just legacy-baseline` lowers it.
+# Columns: count, kind (uses | fns | lines), subject. See scripts/legacy-ratchet.sh.
+#
+# Partial typers and lambda-shape channels.
+5	uses	infer_lit_ty_scoped
+3	uses	infer_lit_ty_scoped_on_demand
+3	uses	extension_lambda_shape
+5	uses	lambda_shape_for_overload
+5	uses	module_member_lambda_shape
+2	uses	lambda_return_overload_param_types
+3	uses	provider_member_lambda_expectations
+# Per-channel generic binding helpers.
+4	uses	bind_ext_ret
+5	uses	bind_ext_ret_tracking
+3	uses	bind_defaulted_ext_ret
+3	uses	bind_defaulted_ext_ret_slots
+13	uses	merge_generic_bindings
+10	uses	merge_generic_bindings_from
+8	uses	merge_generic_upper_bindings
+8	uses	complete_bottom_constraint_bindings
+# Unifiers that run beside the call constraint system, and name-keyed substitution.
+50	uses	unify_ty
+36	uses	unify_ty_from_symbols
+39	uses	unify_inferred_ty
+7	uses	unify_inferred_ty_with_source
+7	uses	unify_ty_common
+5	uses	unify_member_extension_slot
+274	uses	ty_subst_keep_unbound
+# Common-supertype joins that one join replaces.
+12	uses	semantic_common_supertype
+10	uses	semantic_common_supertype_inner
+6	uses	applied_common_supertype
+12	uses	common_super_type
+8	uses	common_super_types
+10	uses	merge_inferred_ty
+20	uses	merge_inferred_ty_from_symbols
+7	uses	merge_inferred_lower_bounds_from_symbols
+5	uses	try_branch_join
+# Call selection without a shared applicability ranking.
+167	fns	select_
+# The temporary signature bridge, which must disappear.
+30883	lines	src/resolve/streaming_signature_bridge*

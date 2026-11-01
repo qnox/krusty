@@ -8,6 +8,7 @@
 #   just lint       fmt-check + clippy-baseline-check (fails on NEW clippy findings)
 #   just fmt        apply rustfmt
 #   just clippy-baseline   refreeze the accepted clippy findings (clippy-baseline.tsv)
+#   just legacy-baseline   lower legacy-baseline.tsv to the current legacy surface
 #   just test       full test suite (optionally `just test -- <args>`)
 #   just test-all   suite against every supported Kotlin version, in parallel
 #   just kotlinc    download+unpack the reference kotlinc dist; prints bin path
@@ -45,7 +46,7 @@ ci: lint coverage-gate
 # Lint gate (enforced locally + in CI + by the pre-commit hook): formatting must be clean, and
 # clippy must introduce NO new findings beyond the frozen baseline (clippy-baseline.tsv). Existing
 # findings are tolerated; any new one fails. Identical behaviour everywhere — it's plain cargo + sh.
-lint: versioning-tests release-tests fmt-check clippy-baseline-check
+lint: versioning-tests release-tests legacy-ratchet-tests fmt-check legacy-baseline-check clippy-baseline-check
 
 # Cheap release-version contracts, without a compiler build or reference-toolchain download.
 versioning-tests:
@@ -124,6 +125,23 @@ clippy-baseline-check:
         exit 1
     fi
     echo "clippy: no new findings beyond baseline"
+
+# The legacy surface the resolution-engine migration deletes may only shrink. A ratcheted entry
+# point gaining a use, `fn select_*` gaining a definition, or the signature bridge gaining a line
+# fails here.
+# Fail when legacy-baseline.tsv's legacy surface grows.
+legacy-baseline-check:
+    bash scripts/legacy-ratchet.sh check
+
+# Run after deleting legacy surface. It never raises a row: an increase is a hand edit that review
+# has to accept.
+# Lower legacy-baseline.tsv to the current legacy surface.
+legacy-baseline:
+    bash scripts/legacy-ratchet.sh tighten
+
+# Test the legacy-surface ratchet against a disposable repository.
+legacy-ratchet-tests:
+    bash scripts/test-legacy-ratchet.sh
 
 # Full test suite through the canonical self-provisioning harness.
 test *ARGS:
