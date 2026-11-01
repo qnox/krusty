@@ -129,7 +129,7 @@ impl Emitter<'_> {
             return false;
         }
         let arg = *arg;
-        let Some(physical) = self.ir.physical_types.get(&arg).copied() else {
+        let Some(physical) = self.ir.physical_type(arg) else {
             return false;
         };
         let physical_jvm = ir_ty_to_jvm(&physical);

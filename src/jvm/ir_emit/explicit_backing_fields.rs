@@ -26,9 +26,7 @@ impl Emitter<'_> {
         let receiver = receiver?;
         let static_type = self
             .ir
-            .logical_types
-            .get(&receiver)
-            .copied()
+            .logical_type(receiver)
             .unwrap_or_else(|| self.value_ty(receiver));
         let static_name = static_type.non_null().obj_internal()?;
         if class.fq_name_id() == static_name {

@@ -520,9 +520,9 @@ impl<'a> BodyLowering<'a> {
     /// records the type of every expression it lowers, around the bottom-value completion it
     /// attaches to a `Nothing` producer.
     fn typed(&mut self, lowered: ExprId, ty: Ty) -> ExprId {
-        self.ir.logical_types.insert(lowered, ty);
+        self.ir.set_logical_type(lowered, ty);
         let completed = complete_bottom_value(self.ir, lowered, ty);
-        self.ir.logical_types.insert(completed, ty);
+        self.ir.set_logical_type(completed, ty);
         completed
     }
 
@@ -631,7 +631,7 @@ impl<'a> BodyLowering<'a> {
             Some(erased) => {
                 // The read itself is of the declared type; its use is of the erasure.
                 let declared = self.header.slot_type(index);
-                self.ir.logical_types.insert(read, declared);
+                self.ir.set_logical_type(read, declared);
                 let coercion = self.coercion(read, erased);
                 self.erasure_coercions.insert(coercion);
                 coercion
@@ -687,7 +687,7 @@ impl<'a> BodyLowering<'a> {
                     .map(|(condition, result)| (condition, self.declared_value(result, target)))
                     .collect();
                 self.ir.exprs[value as usize] = IrExpr::When { branches };
-                self.ir.logical_types.insert(value, target);
+                self.ir.set_logical_type(value, target);
                 if self.ir.whens.exhaustive.contains_key(&value) {
                     self.ir.whens.exhaustive.insert(value, target);
                 }

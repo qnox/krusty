@@ -560,12 +560,7 @@ impl Emitter<'_> {
             let unit = self.cw.fieldref("kotlin/Unit", "INSTANCE", "Lkotlin/Unit;");
             code.getstatic(unit, 1);
         } else if physical_arg.is_jvm_scalar() && target.is_reference() {
-            let semantic = self
-                .ir
-                .logical_types
-                .get(&arg)
-                .copied()
-                .unwrap_or(physical_arg);
+            let semantic = self.ir.logical_type(arg).unwrap_or(physical_arg);
             crate::trace_compiler!(
                 "value_classes",
                 "box coercion arg={arg} physical={physical_arg:?} semantic={semantic:?}"
@@ -631,9 +626,8 @@ impl Emitter<'_> {
         };
         let source_is_reference = self
             .ir
-            .physical_types
-            .get(source)
-            .map(ir_ty_to_jvm)
+            .physical_type(*source)
+            .map(|ty| ir_ty_to_jvm(&ty))
             .unwrap_or_else(|| self.value_ty(*source))
             .is_reference();
         if source_is_reference && ir_ty_to_jvm(&stored_value_ty(*intermediate)).is_reference() {
@@ -685,9 +679,7 @@ impl Emitter<'_> {
                     && self.erased_reference_result(arg).is_none()
                     && !self
                         .ir
-                        .logical_types
-                        .get(&arg)
-                        .copied()
+                        .logical_type(arg)
                         .unwrap_or_else(|| self.value_ty(arg))
                         .admits_null()
             }
@@ -709,9 +701,7 @@ impl Emitter<'_> {
             };
             let source = self
                 .ir
-                .logical_types
-                .get(&operand)
-                .copied()
+                .logical_type(operand)
                 .unwrap_or_else(|| self.value_ty(operand));
             if self.is_carried_value(type_operand) || self.is_carried_value(source) {
                 break;
@@ -733,17 +723,11 @@ impl Emitter<'_> {
             Some(_) => self.value_ty(operand),
             None => self
                 .ir
-                .physical_types
-                .get(&operand)
-                .map(ir_ty_to_jvm)
+                .physical_type(operand)
+                .map(|ty| ir_ty_to_jvm(&ty))
                 .unwrap_or_else(|| self.value_ty(operand)),
         };
-        let semantic = self
-            .ir
-            .logical_types
-            .get(&operand)
-            .copied()
-            .unwrap_or(physical);
+        let semantic = self.ir.logical_type(operand).unwrap_or(physical);
         self.emit_value(operand, code);
         (physical, semantic)
     }

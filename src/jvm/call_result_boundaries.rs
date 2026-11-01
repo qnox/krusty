@@ -106,7 +106,7 @@ pub(super) fn erased_result_slot(ir: &IrFile, call: ExprId, declared: Ty) -> Opt
 pub(super) fn checked_result_slot(ir: &IrFile, call: ExprId) -> Option<Ty> {
     match realized_call_result(ir, call) {
         Some(_) => erased_result_slot(ir, call, *ir.call_declared_ret.get(&call)?),
-        None => ir.physical_types.get(&call).copied(),
+        None => ir.physical_type(call),
     }
 }
 
@@ -138,7 +138,7 @@ pub(super) fn realize_call_result_boundaries(ir: &mut IrFile) {
         .collect::<Vec<_>>();
 
     for &(_, expression, _, physical) in &boundaries {
-        ir.physical_types.insert(expression, physical);
+        ir.set_physical_type(expression, physical);
     }
     fold_nullable_widenings(ir, &boundaries);
     fold_asserted_number_unbox(ir);
@@ -227,7 +227,7 @@ fn erased_reference_operand(ir: &IrFile, coercion: ExprId) -> Option<(ExprId, Ty
     if declaration_result_call(ir, *produced) != Some(*produced) || !emits_as_call(ir, *produced) {
         return None;
     }
-    let slot = *ir.physical_types.get(produced)?;
+    let slot = ir.physical_type(*produced)?;
     let physical = crate::jvm::physical_type::ir_ty_to_jvm(&slot);
     (substituted.is_reference() && physical.is_reference()).then_some((*produced, slot))
 }
@@ -303,8 +303,7 @@ fn fold_asserted_number_unbox(ir: &mut IrFile) {
             if nullable.nullable_primitive() != Some(primitive) {
                 return None;
             }
-            let physical =
-                crate::jvm::physical_type::ir_ty_to_jvm(ir.physical_types.get(produced)?);
+            let physical = crate::jvm::physical_type::ir_ty_to_jvm(&ir.physical_type(*produced)?);
             let wrapper = crate::jvm::physical_type::ir_ty_to_jvm(&primitive.boxed_ref()?);
             if !physical.is_reference() || physical == wrapper {
                 return None;
@@ -346,8 +345,7 @@ fn check_enhanced_result_before_unbox(ir: &mut IrFile) {
             else {
                 return None;
             };
-            let physical =
-                crate::jvm::physical_type::ir_ty_to_jvm(ir.physical_types.get(produced)?);
+            let physical = crate::jvm::physical_type::ir_ty_to_jvm(&ir.physical_type(*produced)?);
             (primitive.is_jvm_scalar() && physical.is_reference()).then_some((
                 index as ExprId,
                 coercion,
@@ -414,10 +412,10 @@ mod tests {
         }
         realize_call_result_boundaries(&mut ir);
         assert_eq!(
-            ir.physical_types.get(&assertions[0]),
-            Some(&Ty::nullable(Ty::obj("java/lang/Object")))
+            ir.physical_type(assertions[0]),
+            Some(Ty::nullable(Ty::obj("java/lang/Object")))
         );
-        assert!(!ir.physical_types.contains_key(&assertions[1]));
+        assert!(!ir.physical_type(assertions[1]).is_some());
         for assertion in assertions {
             assert!(
                 matches!(ir.expr(assertion), IrExpr::NotNullAssert { operand, .. } if *operand == call)
@@ -444,7 +442,7 @@ mod tests {
         });
         ir.declaration_result_coercions.insert(coercion);
         realize_call_result_boundaries(&mut ir);
-        assert!(!ir.physical_types.contains_key(&assertion));
+        assert!(!ir.physical_type(assertion).is_some());
         assert!(
             matches!(ir.expr(assertion), IrExpr::NotNullAssert { operand, .. } if *operand == region)
         );
@@ -490,7 +488,7 @@ mod tests {
     #[test]
     fn an_unmarked_coercion_keeps_its_semantic_conversion() {
         let (mut ir, call) = producer();
-        ir.physical_types.insert(call, Ty::obj("kotlin/Any"));
+        ir.set_physical_type(call, Ty::obj("kotlin/Any"));
         let coercion = ir.add_expr(IrExpr::TypeOp {
             op: IrTypeOp::ImplicitCoercion,
             arg: call,
@@ -513,7 +511,7 @@ mod tests {
                 value: Some(call),
             });
             ir.inline_regions.insert(region);
-            ir.physical_types.insert(region, Ty::obj("kotlin/Any"));
+            ir.set_physical_type(region, Ty::obj("kotlin/Any"));
             region
         });
         assert_eq!(tested_operand(&ir, test), coercion);
@@ -526,7 +524,7 @@ mod tests {
                 operand: call,
                 check: NullCheck::Source,
             });
-            ir.physical_types.insert(asserted, Ty::obj("kotlin/Any"));
+            ir.set_physical_type(asserted, Ty::obj("kotlin/Any"));
             asserted
         });
         assert_eq!(tested_operand(&ir, test), coercion);

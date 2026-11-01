@@ -536,7 +536,7 @@ fn a_bare_return_retargets_the_block_edge_without_retyping_the_selected_call() {
         dispatch_receiver: None,
         args: vec![argument],
     });
-    ir.logical_types.insert(call, Ty::Unit);
+    ir.set_logical_type(call, Ty::Unit);
     let returned = ir.add_expr(IrExpr::Return(None));
     let nested = ir.add_expr(IrExpr::Block {
         stmts: vec![call, returned],
@@ -553,7 +553,7 @@ fn a_bare_return_retargets_the_block_edge_without_retyping_the_selected_call() {
     let step = stmts[0];
     assert_ne!(step, call);
     assert!(matches!(ir.expr(call), IrExpr::Call { .. }));
-    assert_eq!(ir.logical_types.get(&call), Some(&Ty::Unit));
+    assert_eq!(ir.logical_type(call), Some(Ty::Unit));
     assert!(matches!(
         ir.fir_origins.get(&step),
         Some(IrNodeOrigin::Synthetic {

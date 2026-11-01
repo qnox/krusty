@@ -220,7 +220,7 @@ impl Emitter<'_> {
         if code.is_dead() || !result_ty.is_reference() {
             return;
         }
-        let reified = self.ir.logical_types.get(&branch).is_some_and(|&ty| {
+        let reified = self.ir.logical_type(branch).is_some_and(|ty| {
             crate::jvm::reified_operations::names_reified_type_parameter(self.ir, ty)
         });
         let class = crate::jvm::names::instanceof_internal_name(result_ty);
@@ -239,7 +239,7 @@ impl Emitter<'_> {
                 op: IrTypeOp::ImplicitCoercion,
                 arg,
                 ..
-            } => self.ir.physical_types.get(arg).copied(),
+            } => self.ir.physical_type(*arg),
             _ => None,
         }
         .unwrap_or_else(|| self.value_ty(expression))

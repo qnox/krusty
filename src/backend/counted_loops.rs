@@ -237,7 +237,7 @@ fn finish_membership(
 ) {
     if negated {
         let contains = ir.add_expr(contains);
-        ir.logical_types.insert(contains, Ty::Boolean);
+        ir.set_logical_type(contains, Ty::Boolean);
         ir.replace_with_negation(expression, contains);
     } else {
         ir.exprs[expression as usize] = contains;
@@ -314,7 +314,7 @@ impl Realizer<'_> {
     /// A value node whose checked type this realizer decides, recorded as lowering records one.
     fn add_checked(&mut self, expression: IrExpr, ty: Ty) -> ExprId {
         let id = self.add(expression);
-        self.ir.logical_types.insert(id, ty);
+        self.ir.set_logical_type(id, ty);
         id
     }
 
@@ -330,7 +330,7 @@ impl Realizer<'_> {
         let copy = self.ir.expr(expression).clone();
         let copy = self.add(copy);
         if let Some(ty) = self.ir.checked_type(expression) {
-            self.ir.logical_types.insert(copy, ty);
+            self.ir.set_logical_type(copy, ty);
         }
         self.keep_representation(expression, copy);
         copy
@@ -407,7 +407,7 @@ impl Realizer<'_> {
     fn bound_operand(&mut self, bound: ExprId, ty: Ty) -> Operand {
         let stable = constant_bound(self.ir, bound).is_some()
             || (self.ir.binding_read_stability.get(&bound) == Some(&IrBindingStability::Stable)
-                && self.ir.logical_types.get(&bound) == Some(&ty)
+                && self.ir.logical_type(bound) == Some(ty)
                 && matches!(self.ir.expr(bound), IrExpr::GetValue(_)));
         Operand {
             value: self.range_bound(bound, ty),

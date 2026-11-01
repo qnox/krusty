@@ -234,7 +234,7 @@ impl SerializeBody<'_> {
             // An unsigned value is held as its signed carrier; the read is boxed as the
             // unsigned type it is.
             if ty.is_unsigned() {
-                ir.logical_types.insert(read, *ty);
+                ir.set_logical_type(read, *ty);
             }
             read
         };

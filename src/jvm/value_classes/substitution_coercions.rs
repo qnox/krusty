@@ -46,7 +46,7 @@ pub(super) fn drop_rebox_round_trips(ops: &mut Vec<(ExprId, BoxOp)>, ir: &mut Ir
                 stmts: vec![],
                 value: Some(arg),
             };
-            ir.physical_types.remove(&coercion);
+            ir.take_physical_type(coercion);
         }
     }
     ops.retain(|operation| !identities.contains(operation));

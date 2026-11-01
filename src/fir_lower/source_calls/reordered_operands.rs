@@ -56,7 +56,7 @@ impl BodyLowering<'_> {
             type_operand,
         } = self.ir.expr(value)
         {
-            if let Some(&operand_ty) = self.ir.logical_types.get(&arg) {
+            if let Some(operand_ty) = self.ir.logical_type(arg) {
                 let boxed = !operand_ty.is_reference() && type_operand.is_reference();
                 if boxed || self.is_reference_value(arg) {
                     let read = self.spill_call_operand(arg, operand_ty, statements);
@@ -70,7 +70,7 @@ impl BodyLowering<'_> {
             }
         }
         if self.is_reference_value(value) {
-            if let Some(&reference_ty) = self.ir.logical_types.get(&value) {
+            if let Some(reference_ty) = self.ir.logical_type(value) {
                 let read = self.spill_call_operand(value, reference_ty, statements);
                 return self.reordered_operand_replay(value, read);
             }

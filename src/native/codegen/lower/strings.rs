@@ -161,8 +161,7 @@ mod tests {
         });
         assert!(contiguous_trim_operand(&ir, cast));
         let unknown = ir.add_expr(IrExpr::GetValue(0));
-        ir.logical_types
-            .insert(unknown, Ty::obj("kotlin/CharSequence"));
+        ir.set_logical_type(unknown, Ty::obj("kotlin/CharSequence"));
         let cast_unknown = ir.add_expr(IrExpr::TypeOp {
             op: IrTypeOp::CastNonNull,
             arg: unknown,

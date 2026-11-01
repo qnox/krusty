@@ -5,16 +5,14 @@
 //! value class has no implementation identity; emitting `FunctionN.invoke` would box the carrier.
 
 use super::{ReprCtx, Under};
-use crate::ir::{ExprId, IrExpr};
-use crate::types::Ty;
+use crate::ir::{ExprId, IrExpr, IrFile};
 
 /// Whether `expression` calls a non-null value class as a function value.
 ///
 /// The checked call should have been the selected member. There is no name or arity to search:
 /// a missing implementation is not `FunctionN.invoke`.
 pub(super) fn missing_member_implementation(
-    logical_types: &crate::fx_hash::HashMap<ExprId, Ty>,
-    suspend_calls: &crate::fx_hash::HashMap<ExprId, Ty>,
+    ir: &IrFile,
     under: &Under,
     repr_ctx: &ReprCtx<'_>,
     id: ExprId,
@@ -23,19 +21,19 @@ pub(super) fn missing_member_implementation(
     let IrExpr::InvokeFunction { func, .. } = expression else {
         return false;
     };
-    if suspend_calls.contains_key(&id) {
+    if ir.suspend_calls.contains_key(&id) {
         return false;
     }
-    value_class_callee(logical_types, repr_ctx, under, *func).is_some()
+    value_class_callee(ir, repr_ctx, under, *func).is_some()
 }
 
 fn value_class_callee(
-    logical_types: &crate::fx_hash::HashMap<ExprId, Ty>,
+    ir: &IrFile,
     repr_ctx: &ReprCtx<'_>,
     under: &Under,
     func: ExprId,
 ) -> Option<crate::types::TypeName> {
-    if let Some(ty) = logical_types.get(&func).copied() {
+    if let Some(ty) = ir.logical_type(func) {
         if ty.is_nullable() {
             return None;
         }

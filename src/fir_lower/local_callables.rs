@@ -1406,7 +1406,7 @@ fn inline_callable_body(
             stmts: roots.to_vec(),
             value,
         });
-        ir.logical_types.insert(block, Ty::Unit);
+        ir.set_logical_type(block, Ty::Unit);
         return block;
     }
     let mut statements = roots.to_vec();
@@ -1420,8 +1420,8 @@ fn inline_callable_body(
         stmts: statements,
         value: Some(value),
     });
-    if let Some(&ty) = ir.logical_types.get(&value) {
-        ir.logical_types.insert(block, ty);
+    if let Some(ty) = ir.logical_type(value) {
+        ir.set_logical_type(block, ty);
     }
     block
 }
@@ -1478,7 +1478,7 @@ fn reshape_cloned_unit_inline_block(ir: &mut crate::ir::IrFile, block: ExprId) {
         stmts,
         value: Some(unit),
     };
-    ir.logical_types.insert(block, Ty::Unit);
+    ir.set_logical_type(block, Ty::Unit);
 }
 
 /// Where a declaration parameter sits among the logical parameters.

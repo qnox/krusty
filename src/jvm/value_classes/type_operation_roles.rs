@@ -93,7 +93,7 @@ pub(super) fn record_primitive_array_allocation_carriers(ir: &mut IrFile, under:
         })
         .collect::<Vec<_>>();
     for (id, carrier) in allocations {
-        ir.physical_types.entry(id).or_insert(carrier);
+        ir.set_physical_type_if_absent(id, carrier);
     }
 }
 

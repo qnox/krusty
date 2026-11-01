@@ -173,9 +173,9 @@ impl BodyLowering<'_> {
                 arg: argument,
                 type_operand: runtime.reified_runtime.get(),
             });
-            self.ir.logical_types.insert(operation, Ty::Boolean);
+            self.ir.set_logical_type(operation, Ty::Boolean);
             let expanded = self.wrap_call_statements(statements, operation);
-            self.ir.logical_types.insert(expanded, Ty::Boolean);
+            self.ir.set_logical_type(expanded, Ty::Boolean);
             self.ir.external_inline_expansions.insert(expanded);
             return Some(expanded);
         }
@@ -1606,8 +1606,8 @@ impl BodyLowering<'_> {
                 if let Some(line) = self.ir.source_line(body) {
                     self.ir.set_source_line(wrapped, line);
                 }
-                if let Some(&ty) = self.ir.logical_types.get(&body) {
-                    self.ir.logical_types.insert(wrapped, ty);
+                if let Some(ty) = self.ir.logical_type(body) {
+                    self.ir.set_logical_type(wrapped, ty);
                 }
                 wrapped
             }

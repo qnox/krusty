@@ -52,15 +52,15 @@ fn generic_call_result_boundary_keeps_declared_and_selected_types() {
         declared.map(Ty::kind),
         Some(TyKind::TyParam(_, _))
     ));
-    assert_eq!(ir.logical_types.get(&call), None);
+    assert_eq!(ir.logical_type(call), None);
     assert_eq!(
-        ir.logical_types.get(
-            &ir.declaration_result_coercions
+        ir.logical_type(
+            ir.declaration_result_coercions
                 .iter()
                 .copied()
                 .find(|&id| { matches!(ir.expr(id), IrExpr::TypeOp { arg, .. } if *arg == call) })
                 .expect("produce result boundary")
         ),
-        Some(&Ty::obj("SelectedResult"))
+        Some(Ty::obj("SelectedResult"))
     );
 }
