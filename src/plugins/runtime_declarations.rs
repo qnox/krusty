@@ -49,6 +49,11 @@ pub trait PluginRuntime {
     /// The declaration of `classifier` the compilation sees, as its provider normalized it. A plugin
     /// detects the runtime version it generates code for by whether a runtime classifier exists.
     fn classifier(&self, classifier: TypeName) -> Option<PluginClassifier>;
+
+    /// Record that the plugin's own transform appended `appended` to the dependency declaration
+    /// `target` when its library was compiled, so the calls the plugin rewrote pass them after the
+    /// declared arguments. The target checks them against the compiled declaration.
+    fn appended_parameters(&mut self, target: ExternalCallableId, appended: Vec<Ty>);
 }
 
 /// The facts a plugin reads about a classifier the file does not declare, normalized at the

@@ -30,8 +30,10 @@ pub(super) fn realize(
 }
 
 /// Realize the calls native plugins generated, from expression `first` on, to the runtime
-/// declarations they selected at the handoff. The file's own dependency calls were realized at
-/// lowering; any other expression a plugin appended keeps its own realization path.
+/// declarations they selected at the handoff, and the file's calls to declarations a plugin's
+/// transform appended parameters to, which the plugin has now passed. The file's other dependency
+/// calls were realized at lowering; any other expression a plugin appended keeps its own
+/// realization path.
 pub(super) fn realize_plugin_runtime_calls(
     ir: &mut IrFile,
     classifiers: &dyn crate::backend::BackendClassifierSource,
@@ -55,31 +57,38 @@ pub(super) fn realize_plugin_runtime_calls(
 enum Realized {
     /// Every dependency call and construction of the file.
     File,
-    /// The calls to plugin-selected runtime declarations among the expressions from `first` on.
+    /// The calls to plugin-selected runtime declarations among the expressions from `first` on,
+    /// and every call to a declaration with appended parameters.
     PluginRuntimeCalls { first: usize },
 }
 
 impl Realized {
-    fn first(self) -> usize {
-        match self {
-            Self::File => 0,
-            Self::PluginRuntimeCalls { first } => first,
-        }
-    }
-
+    /// Whether this pass realizes `expression`, the one at `index`. A call to a declaration a
+    /// plugin's transform appended parameters to waits for the plugin pass, which runs after the
+    /// plugin has passed them.
     fn includes(
         self,
+        index: usize,
         expression: &IrExpr,
         callables: &crate::backend::CheckedBackendCallables,
     ) -> bool {
+        let target = match expression {
+            IrExpr::Call { callee, .. } => match **callee {
+                Callee::External { target, .. } => Some(target),
+                _ => None,
+            },
+            _ => None,
+        };
+        let appended =
+            target.is_some_and(|target| !callables.plugin_runtime_appended(target).is_empty());
         match self {
-            Self::File => true,
-            Self::PluginRuntimeCalls { .. } => matches!(
-                expression,
-                IrExpr::Call { callee, .. }
-                    if matches!(**callee, Callee::External { target, .. }
-                        if callables.is_plugin_runtime_callable(target))
-            ),
+            Self::File => !appended,
+            Self::PluginRuntimeCalls { first } => {
+                appended
+                    || (index >= first
+                        && target
+                            .is_some_and(|target| callables.is_plugin_runtime_callable(target)))
+            }
         }
     }
 }
@@ -98,8 +107,8 @@ fn realize_expressions(
     let dispatch_classifiers =
         crate::jvm::member_dispatch::CheckedDispatchClassifiers::new(ir, classifiers);
     let expression_count = ir.exprs.len();
-    for index in realized.first()..expression_count {
-        if !realized.includes(&ir.exprs[index], callables) {
+    for index in 0..expression_count {
+        if !realized.includes(index, &ir.exprs[index], callables) {
             continue;
         }
         let expression = u32::try_from(index).expect("too many common IR expressions");

@@ -274,7 +274,33 @@ fn add_lambda_composer_parameters(ir: &mut IrFile, lambda: &ComposableLambda) {
     };
     *arity = 2;
     // The value is called through the runtime's wrapper, never inlined.
-    *inline_body = None;
+    let template = inline_body.take();
+    if let Some(template) = template {
+        retire_library_calls(ir, template);
+    }
+}
+
+/// Empty the library composable calls of a lambda's dropped inline form. Nothing emits that form,
+/// and a library composable call there would still lack the composer arguments its compiled
+/// method takes.
+fn retire_library_calls(ir: &mut IrFile, template: ExprId) {
+    let mut pending = vec![template];
+    let mut library = Vec::new();
+    while let Some(expression) = pending.pop() {
+        if let IrExpr::Call { callee, .. } = &ir.exprs[expression as usize] {
+            if matches!(**callee, Callee::External { .. }) {
+                library.push(expression);
+                continue;
+            }
+        }
+        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+    }
+    for call in library {
+        ir.exprs[call as usize] = IrExpr::Block {
+            stmts: Vec::new(),
+            value: None,
+        };
+    }
 }
 
 /// The body kotlinc gives a composable lambda. The runtime's `ComposableLambda` wrapper starts
@@ -469,6 +495,18 @@ fn pass_composer(
     let IrExpr::Call { callee, args, .. } = &ir.exprs[call as usize] else {
         unreachable!("a composable call is a call");
     };
+    // A library composable takes the composer parameters already, after every declared one.
+    if let Callee::External { .. } = **callee {
+        let composer = ir.add_expr(IrExpr::GetValue(caller.composer));
+        let changed = changed_argument(ir, caller, arguments);
+        ir.mark_positionless(composer);
+        ir.mark_positionless(changed);
+        let IrExpr::Call { args, .. } = &mut ir.exprs[call as usize] else {
+            unreachable!("a composable call is a call");
+        };
+        args.extend([composer, changed]);
+        return;
+    }
     let function = callee
         .source_function()
         .expect("a composable call in the file calls one of its functions");

@@ -13383,7 +13383,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   default argument that is not a constant, a vararg, more than ten parameters, a parameter type other than a primitive or
   `String` or `@Composable () -> Unit`, a call argument that is not a constant, a parameter, or
   computed from a parameter, any other use of a composable lambda parameter, a grouping annotation
-  or explicit applier target, a call to another file's composable, a name an overload with lambdas
+  or explicit applier target, a call to another file's composable, a call to a library composable
+  with a receiver, default arguments, a function-typed parameter, more than ten parameters or a
+  result, or an `inline` one, a name an overload with lambdas
   shares, a recursive function with composable lambda parameters, and a class whose stability its
   file does not decide (a field of a generic value class whose underlying type names a type
   parameter, of another file's `inner` or annotation class, or of a numbered `KFunctionN` type). A nonempty `metricsDestination`/`reportsDestination` is an

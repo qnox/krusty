@@ -78,6 +78,7 @@ impl Classpath {
             klib_body_accessor: None,
             klib_body_vararg_index: None,
             klib_body_parameter_defaults: None,
+            declares_parameter_defaults: false,
         });
         self.external_callable_ids
             .borrow_mut()
@@ -220,6 +221,18 @@ impl Classpath {
     /// normalized context and extension-receiver slots. The physical callable identity may be
     /// interned before its complete source facet is decoded, so this enriches that same identity;
     /// it never searches by spelling.
+    /// Record that a source parameter of the interned callable `identity` declares a default.
+    pub(crate) fn publish_external_callable_parameter_defaults(
+        &self,
+        identity: crate::fir::ExternalCallableId,
+    ) {
+        self.external_callables
+            .borrow_mut()
+            .get_mut(identity.raw() as usize)
+            .expect("parameter defaults name an interned external callable")
+            .declares_parameter_defaults = true;
+    }
+
     pub(crate) fn publish_external_callable_parameter_identities(
         &self,
         identity: crate::fir::ExternalCallableId,

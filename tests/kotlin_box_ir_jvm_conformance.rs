@@ -1469,6 +1469,11 @@ fn compose_value_class_stability_is_byte_identical_to_kotlinc() {
 }
 
 #[test]
+fn compose_library_calls_are_byte_identical_to_kotlinc() {
+    assert_compose_fixture_matches_kotlinc("libraryCalls");
+}
+
+#[test]
 fn compose_generic_field_stability_is_byte_identical_to_kotlinc() {
     assert_compose_fixture_matches_kotlinc("genericFieldStability");
 }
@@ -1482,17 +1487,33 @@ fn assert_compose_fixture_matches_kotlinc(stem: &str) {
         krusty::conformance::prepare_test_source(&source, krusty::conformance::TestTarget::Jvm);
     let reference = box_reference_classes::checked_prepared_box(&source, stem)
         .expect("the reference compiler compiles the fixture and its box() returns OK");
-    let reference = reference
-        .module(box_reference_classes::MAIN_MODULE)
-        .expect("the reference compiler emits the main module");
     let classpath = common::classpath_jars_for(&source);
     let jdk = common::jdk_modules();
-    let classes: Vec<_> = compile_multifile(&source, stem, &classpath, Some(jdk.as_path()))
-        .expect("krusty compiles the fixture")
-        .into_iter()
-        .filter(|(_, bytes)| bytes.starts_with(&[0xCA, 0xFE, 0xBA, 0xBE]))
-        .collect();
-    assert_eq!(compare_class_sets(&classes, reference), Ok(()));
+    // Every module is krusty's own: a library module is compiled before the modules using it.
+    let compiled = if source.contains("// MODULE:") {
+        compile_module_test(&source, &classpath, Some(jdk.as_path()), &|_| {})
+    } else {
+        compile_multifile(&source, stem, &classpath, Some(jdk.as_path()))
+            .map(CompiledClasses::single_module)
+    }
+    .expect("krusty compiles the fixture");
+    let class_file = |(_, bytes): &&(String, Vec<u8>)| bytes.starts_with(&[0xCA, 0xFE, 0xBA, 0xBE]);
+    for (module, range) in &compiled.module_ranges {
+        let classes: Vec<_> = compiled.flat[range.clone()]
+            .iter()
+            .filter(class_file)
+            .cloned()
+            .collect();
+        let expected = reference
+            .module(module)
+            .unwrap_or_else(|| panic!("the reference compiler emits module {module}"));
+        assert_eq!(
+            compare_class_sets(&classes, expected),
+            Ok(()),
+            "module {module}"
+        );
+    }
+    let classes: Vec<_> = compiled.flat.iter().filter(class_file).cloned().collect();
     let box_class = find_box_class(&classes).expect("the fixture emits box()");
     assert_eq!(
         common::run_box(&classes, &box_class, &classpath),
