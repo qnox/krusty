@@ -3542,11 +3542,7 @@ mod tests {
         let r = Ty::ty_param("R", any);
         let q = Ty::ty_param("Q", any);
         GenericSig {
-            formals: vec![
-                TyParamName::new("C"),
-                TyParamName::new("R"),
-                TyParamName::new("Q"),
-            ],
+            formals: TyParamName::all(&["C", "R", "Q"]),
             formal_bounds: vec![vec![r], vec![q], vec![any]],
             receiver: Some(c),
             params: Vec::new(),
