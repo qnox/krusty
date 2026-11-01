@@ -252,7 +252,13 @@ impl ArchiveViews {
                         let view = view()?;
                         if let Some(view) = view {
                             std::fs::create_dir_all(cache)?;
-                            let staging = cache.join(format!("{key}.{}.tmp", std::process::id()));
+                            // Each publication owns its staging file: two jars with the same
+                            // bytes miss on the same key at once, from one process or several.
+                            static STAGED: std::sync::atomic::AtomicU64 =
+                                std::sync::atomic::AtomicU64::new(0);
+                            let staged = STAGED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            let staging =
+                                cache.join(format!("{key}.{}.{staged}.tmp", std::process::id()));
                             std::fs::write(&staging, view.to_string())?;
                             std::fs::rename(&staging, &entry)?;
                         }
@@ -709,6 +715,62 @@ mod tests {
         assert_eq!(read(&views), view(&first), "the restored version's hit");
         let entries = std::fs::read_dir(&cache).expect("list the cache").count();
         assert_eq!(entries, 2, "one entry per version");
+    }
+
+    /// Jars with the same bytes that miss the cache at the same time each publish their own
+    /// complete entry: every read succeeds, and the entry left holds the view.
+    #[test]
+    fn concurrent_misses_on_one_key_all_publish() {
+        const READERS: usize = 8;
+        let scratch = Scratch::new("jar-concurrent");
+        let time = zip::DateTime::from_date_and_time(2001, 1, 1, 0, 0, 0).expect("a time");
+        let jars = (0..READERS)
+            .map(|index| {
+                let jar = scratch.0.join(format!("copy-{index}.jar"));
+                write_jar(&jar, &[("a.txt", b"same")], time);
+                jar
+            })
+            .collect::<Vec<_>>();
+        let cache = scratch.0.join("views");
+        let views = super::ArchiveViews::new(Some(&cache)).expect("open the view cache");
+        let expected = krusty_build::dependency_view::archive_contents_fingerprint(
+            &std::fs::read(&jars[0]).expect("read"),
+        )
+        .expect("a view");
+        let start = std::sync::Barrier::new(READERS);
+        let read = std::thread::scope(|scope| {
+            let handles = jars
+                .iter()
+                .map(|jar| {
+                    let (views, start) = (&views, &start);
+                    scope.spawn(move || {
+                        start.wait();
+                        views.contents(jar)
+                    })
+                })
+                .collect::<Vec<_>>();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().expect("a reader panicked"))
+                .collect::<Vec<_>>()
+        });
+        for contents in read {
+            match contents.expect("every read succeeds") {
+                super::Contents::Archive(view) => assert_eq!(view, expected),
+                _ => panic!("the jar enters by its view"),
+            }
+        }
+        let entries = std::fs::read_dir(&cache)
+            .expect("list the cache")
+            .map(|entry| entry.expect("an entry").path())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            entries.len(),
+            1,
+            "one published entry, no staging left: {entries:?}"
+        );
+        let published = std::fs::read_to_string(&entries[0]).expect("read the entry");
+        assert_eq!(super::Digest::parse_hex(published.trim()), Some(expected));
     }
 
     /// A classpath file that is no archive the zip reader accepts enters by its bytes.
