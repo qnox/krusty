@@ -120,6 +120,8 @@ mod suspend_statement_when_block_arms_e2e;
 mod suspend_super_call_refusal_e2e;
 #[path = "../suspend_super_calls_e2e.rs"]
 mod suspend_super_calls_e2e;
+#[path = "../suspend_tail_call_line_e2e.rs"]
+mod suspend_tail_call_line_e2e;
 #[path = "../suspend_throw_operand_e2e.rs"]
 mod suspend_throw_operand_e2e;
 #[path = "../suspend_try_catch_shapes_e2e.rs"]

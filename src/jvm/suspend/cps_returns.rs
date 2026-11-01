@@ -3,6 +3,7 @@
 
 use super::{object_ty, stmt_diverges};
 use crate::ir::{for_each_child, ExprId, IrExpr, IrFile, IrTypeOp};
+use crate::types::Ty;
 
 /// Ensure a leaf suspend fn's body ends with a `return` (its CPS method returns `Object`; without this a
 /// fall-through body verifies as "control flow falls through code end"). Idempotent: a body already
@@ -164,5 +165,154 @@ pub(super) fn box_returns(ir: &mut IrFile, e: ExprId) -> bool {
             for_each_child(&ir.exprs, e, &mut |child| children.push(child));
             children.into_iter().all(|child| box_returns(ir, child))
         }
+    }
+}
+
+/// Where a tail suspension point stands in its parent, so the `return` built around it can take
+/// its place.
+#[derive(Clone, Copy)]
+enum TailSlot {
+    Statement(ExprId, usize),
+    Value(ExprId),
+    Branch(ExprId, usize),
+}
+
+/// kotlinc's `TailCallOptimizationLowering`: a suspension point in tail position that no `return`
+/// already takes as its value is returned at the function's end, coerced to `Unit` in a `Unit`
+/// function. The return carries the body's closing line, which kotlinc marks once the value is on
+/// the stack, at the `areturn`; whatever followed the call becomes unreachable.
+///
+/// `tail_calls` are the suspension points whose result the function may return: every one in a
+/// `Unit` function, otherwise those of the function's own result type. Tail positions are the last
+/// statement before the first `return` (or before a bare `return` in a `Unit` function, the
+/// statement ahead of it), through blocks, `when` branches and coercions to `Unit`.
+pub(super) fn return_tail_calls(
+    ir: &mut IrFile,
+    body: ExprId,
+    tail_calls: &[ExprId],
+    unit_ret: bool,
+    close_line: u32,
+) {
+    let mut found = Vec::new();
+    collect_tail_calls(ir, body, None, false, tail_calls, unit_ret, &mut found);
+    for (node, slot) in found {
+        let value = if unit_ret {
+            let unit = ir.add_expr(IrExpr::UnitInstance);
+            ir.add_expr(IrExpr::Block {
+                stmts: vec![node],
+                value: Some(unit),
+            })
+        } else {
+            node
+        };
+        let returned = ir.add_expr(IrExpr::Return(Some(value)));
+        ir.expr_source_lines.insert(returned, close_line);
+        match slot {
+            TailSlot::Statement(block, index) => {
+                if let IrExpr::Block { stmts, .. } = &mut ir.exprs[block as usize] {
+                    stmts[index] = returned;
+                }
+            }
+            TailSlot::Value(block) => {
+                if let IrExpr::Block { value, .. } = &mut ir.exprs[block as usize] {
+                    *value = Some(returned);
+                }
+            }
+            TailSlot::Branch(when, index) => {
+                if let IrExpr::When { branches } = &mut ir.exprs[when as usize] {
+                    branches[index].1 = returned;
+                }
+            }
+        }
+    }
+}
+
+fn collect_tail_calls(
+    ir: &IrFile,
+    expression: ExprId,
+    slot: Option<TailSlot>,
+    immediate_return: bool,
+    tail_calls: &[ExprId],
+    unit_ret: bool,
+    found: &mut Vec<(ExprId, TailSlot)>,
+) {
+    let recurse = |expression, slot, immediate_return, found: &mut Vec<_>| {
+        collect_tail_calls(
+            ir,
+            expression,
+            slot,
+            immediate_return,
+            tail_calls,
+            unit_ret,
+            found,
+        );
+    };
+    match &ir.exprs[expression as usize] {
+        _ if tail_calls.contains(&expression) => {
+            if let Some(slot) = slot.filter(|_| !immediate_return) {
+                found.push((expression, slot));
+            }
+        }
+        IrExpr::Block { stmts, value } => {
+            // kotlinc's block ends in its value as its last statement.
+            let statements: Vec<ExprId> = stmts.iter().copied().chain(*value).collect();
+            if let Some(index) = tail_statement(ir, &statements, unit_ret) {
+                let slot = if index == stmts.len() {
+                    TailSlot::Value(expression)
+                } else {
+                    TailSlot::Statement(expression, index)
+                };
+                recurse(statements[index], Some(slot), false, found);
+            }
+        }
+        IrExpr::When { branches } => {
+            for (index, &(_, result)) in branches.iter().enumerate() {
+                recurse(
+                    result,
+                    Some(TailSlot::Branch(expression, index)),
+                    false,
+                    found,
+                );
+            }
+        }
+        &IrExpr::Return(Some(value)) => recurse(value, slot, true, found),
+        &IrExpr::TypeOp {
+            op: IrTypeOp::ImplicitCoercion,
+            arg,
+            type_operand,
+        } if type_operand == Ty::Unit => {
+            if tail_calls.contains(&arg) {
+                if let Some(slot) = slot.filter(|_| !immediate_return) {
+                    found.push((expression, slot));
+                }
+            } else {
+                // kotlinc visits the coerced operand: a block or `when` keeps its tail positions.
+                recurse(arg, None, false, found);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// kotlinc's `findTailCall` over one block's statements: the first `return`, unless it is a `Unit`
+/// function's bare `return`, whose tail is the statement ahead of it; with no `return`, the last
+/// statement.
+fn tail_statement(ir: &IrFile, stmts: &[ExprId], unit_ret: bool) -> Option<usize> {
+    let Some(index) = stmts
+        .iter()
+        .position(|&statement| matches!(ir.exprs[statement as usize], IrExpr::Return(_)))
+    else {
+        return stmts.len().checked_sub(1);
+    };
+    let bare_unit_return = unit_ret
+        && match ir.exprs[stmts[index] as usize] {
+            IrExpr::Return(None) => true,
+            IrExpr::Return(Some(value)) => matches!(ir.exprs[value as usize], IrExpr::UnitInstance),
+            _ => false,
+        };
+    if bare_unit_return {
+        tail_statement(ir, &stmts[..index], unit_ret)
+    } else {
+        Some(index)
     }
 }
