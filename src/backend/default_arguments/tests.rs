@@ -820,3 +820,5 @@ fn an_entry_keeps_the_checked_facts_frozen_for_its_defaults() {
     assert_eq!(facts.singleton_dispatch(call), dispatch);
     assert_eq!(facts.singleton_dispatch(next), dispatch);
 }
+
+mod constructors;

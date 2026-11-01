@@ -216,50 +216,26 @@ impl<'a> FileLowering<'a> {
                             }
                             // A constant with a body is constructed through its synthesized
                             // subclass's bare primary constructor. Its checked arguments and exact
-                            // enum-constructor target live on that subclass's superclass call, where
-                            // defaults are realized. An ordinary constant calls its selected enum
-                            // constructor here, through the defaults wrapper when necessary.
-                            let (target, carried) = if entry.subclass.is_some() {
-                                (constructor, Vec::new())
+                            // enum-constructor target live on that subclass's superclass call. An
+                            // ordinary constant calls its selected enum constructor here; the
+                            // shared default-argument lowering has already turned one leaving
+                            // arguments out into a call of that constructor's entry.
+                            let carried = if entry.subclass.is_some() {
+                                Vec::new()
+                            } else if !entry.default_parameters.is_empty() {
+                                return Err(declined!(
+                                    "an enum constant omitting a constructor argument (`{}`)",
+                                    entry.name
+                                ));
                             } else {
-                                let mut omitted = entry.default_parameters.clone();
-                                omitted.sort_unstable();
-                                let secondary = (!entry.constructor.primary())
-                                    .then_some(entry.constructor.ordinal as usize - 1);
-                                let frame = body
-                                    .file
-                                    .constructor_frame_of(class, secondary)
+                                constructor_frame(body.file.ir, class, entry.constructor.ordinal)
                                     .ok_or_else(|| {
                                         format!(
                                             "an enum constant selecting an unknown constructor (`{}.{}`)",
                                             declaration.fq_name(),
                                             entry.name
                                         )
-                                    })?;
-                                let carried = frame
-                                    .into_iter()
-                                    .enumerate()
-                                    .filter(|(ordinal, _)| !omitted.contains(&(*ordinal as u32)))
-                                    .map(|(_, ty)| ty)
-                                    .collect();
-                                let target = if omitted.is_empty() {
-                                    constructor
-                                } else {
-                                    let key = super::defaults::CtorOmission {
-                                        class,
-                                        secondary,
-                                        omitted,
-                                    };
-                                    let Some(&wrapper) = body.file.default_constructors.get(&key)
-                                    else {
-                                        return Err(declined!(
-                                            "an enum constant omitting a constructor argument (`{}`)",
-                                            entry.name
-                                        ));
-                                    };
-                                    wrapper
-                                };
-                                (target, carried)
+                                    })?
                             };
                             if entry.args.len() != carried.len() {
                                 return Err(
@@ -273,7 +249,7 @@ impl<'a> FileLowering<'a> {
                                 };
                                 operands.push(value);
                             }
-                            let func_ref = body.func_ref(target);
+                            let func_ref = body.func_ref(constructor);
                             body.emit_call(func_ref, &operands)?;
                         }
                         // `$ENTRIES`: after every constant exists and before the companion runs,
@@ -512,4 +488,19 @@ impl BodyLowering<'_, '_, '_> {
             ),
         }))
     }
+}
+
+/// The physical parameters of constructor `ordinal` of `class` after `this`: the primary's (0),
+/// or the `ordinal`th secondary's, which leads with the prefix every constructor of the class
+/// takes.
+fn constructor_frame(ir: &crate::ir::IrFile, class: ClassId, ordinal: u32) -> Option<Vec<Ty>> {
+    let Some(index) = ordinal.checked_sub(1) else {
+        return Some(super::objects::constructor_parameters(ir, class));
+    };
+    let constructor = ir.classes[class as usize]
+        .secondary_ctors
+        .get(index as usize)?;
+    let mut frame = constructor.prefix_params.clone();
+    frame.extend(constructor.params.iter().copied());
+    Some(frame)
 }

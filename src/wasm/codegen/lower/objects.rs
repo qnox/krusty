@@ -87,9 +87,11 @@ impl Body<'_> {
         Ok(())
     }
 
-    /// `C(args)`: a new instance of `C`, then the constructor `selected` names run on it.
+    /// `C(args)`: a new instance of `C`, then the constructor the construction at `site` selects
+    /// run on it.
     pub(super) fn construction(
         &mut self,
+        site: u32,
         internal: crate::types::TypeName,
         args: &[u32],
         selected: Option<&[Ty]>,
@@ -109,26 +111,20 @@ impl Body<'_> {
         if declaration.is_object || declaration.is_companion {
             return Err(format!("construction of the object declaration `{name}`"));
         }
+        let ordinal = crate::backend::selected_constructor(self.ir, site, class, selected)
+            .ok_or_else(|| format!("a call to an unknown constructor of `{name}`"))?;
         let form = &self.file_classes()?.forms[class as usize];
-        let primary: Vec<Ty> = declaration.ctor_args.iter().map(|arg| arg.ty).collect();
-        let (constructor, params) = match selected {
-            None => (form.constructor, primary),
-            Some(selected) => match declaration.secondary_ctors.iter().position(|candidate| {
-                candidate.params == selected || {
-                    let mut physical = candidate.prefix_params.clone();
-                    physical.extend(candidate.params.iter().copied());
-                    !candidate.prefix_params.is_empty() && physical == selected
-                }
-            }) {
-                Some(ordinal) => {
-                    let secondary = &declaration.secondary_ctors[ordinal];
-                    let mut params = secondary.prefix_params.clone();
-                    params.extend(secondary.params.iter().copied());
-                    (Some(form.secondaries[ordinal]), params)
-                }
-                None if primary == selected => (form.constructor, primary),
-                None => return Err(format!("a call to an unknown constructor of `{name}`")),
-            },
+        let (constructor, params) = match ordinal.checked_sub(1) {
+            None => (
+                form.constructor,
+                declaration.ctor_args.iter().map(|arg| arg.ty).collect(),
+            ),
+            Some(index) => {
+                let secondary = &declaration.secondary_ctors[index as usize];
+                let mut params = secondary.prefix_params.clone();
+                params.extend(secondary.params.iter().copied());
+                (Some(form.secondaries[index as usize]), params)
+            }
         };
         let constructor =
             constructor.ok_or_else(|| format!("a primary constructor `{name}` lacks"))?;
@@ -1484,18 +1480,24 @@ impl Body<'_> {
         Ok((form.secondaries[index], params))
     }
 
-    /// Call `constructor`, taking `params`, on `this` with `args`.
+    /// Call `constructor`, taking `params`, on `this` with the first `forwarded` parameters of
+    /// this constructor and then `args`.
     fn delegate(
         &mut self,
         constructor: u32,
         params: &[Ty],
+        forwarded: usize,
         args: &[u32],
     ) -> Result<(), Unsupported> {
-        if params.len() != args.len() {
-            return Err("a constructor delegation with omitted arguments".to_string());
+        if params.len() != forwarded + args.len() {
+            return Err("a constructor delegation of a different arity".to_string());
         }
         self.code.local_get(0);
-        for (arg, param) in args.iter().zip(params) {
+        for parameter in 1..=forwarded {
+            self.code
+                .local_get(u32::try_from(parameter).expect("too many parameters"));
+        }
+        for (arg, param) in args.iter().zip(&params[forwarded..]) {
             self.value(*arg, *param)?;
         }
         self.code.call(constructor);
@@ -1547,7 +1549,7 @@ impl Body<'_> {
             Some(parent) => {
                 let (constructor, params) =
                     self.constructor_of(parent, declaration.super_ctor.ordinal)?;
-                self.delegate(constructor, &params, &declaration.super_args)?;
+                self.delegate(constructor, &params, 0, &declaration.super_args)?;
             }
             None if !declaration.super_args.is_empty() => {
                 return Err(format!("a superclass constructor call (`{name}`)"));
@@ -1600,15 +1602,17 @@ impl Body<'_> {
             self.statement(statement)?;
         }
         match &secondary.delegate {
+            // A `this(…)` passes on the prefix every constructor of the class takes.
             CtorDelegateTarget::This { target, .. } => {
                 let (constructor, params) = self.constructor_of(class, target.ordinal)?;
-                self.delegate(constructor, &params, &secondary.delegate_args)?;
+                let forwarded = secondary.prefix_params.len();
+                self.delegate(constructor, &params, forwarded, &secondary.delegate_args)?;
             }
             CtorDelegateTarget::Super { target, .. } => {
                 match self.file_classes()?.tables.table(class).superclass {
                     Some(parent) => {
                         let (constructor, params) = self.constructor_of(parent, target.ordinal)?;
-                        self.delegate(constructor, &params, &secondary.delegate_args)?;
+                        self.delegate(constructor, &params, 0, &secondary.delegate_args)?;
                     }
                     None if !secondary.delegate_args.is_empty() => {
                         return Err(format!("a superclass constructor call (`{name}`)"));
