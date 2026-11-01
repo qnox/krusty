@@ -1254,3 +1254,37 @@ fn a_reified_class_left_in_place_refuses_the_inline() {
         Err(InlineError::UnreifiedClass)
     );
 }
+
+/// A class literal between the marker and the object it marks does not consume the marker
+/// (kotlinc's `awaitClassReification` waits for the next `new` or singleton load), so the marked
+/// class, left in place, still refuses the inline.
+#[test]
+fn a_reified_class_left_in_place_behind_an_intervening_reference_refuses_the_inline() {
+    struct Marked;
+    impl ClassRoles for Marked {
+        fn regenerated_class(&self, _internal: &str) -> Option<RegeneratedClass> {
+            None
+        }
+        fn contains_reified_marker(&self, internal: &str) -> bool {
+            internal == "lib/Marked"
+        }
+    }
+    let mut node = MethodNode::new(ACC_STATIC, "f", "()V");
+    node.nodes = vec![
+        reification_marker(),
+        Node::Insn(Insn::Ldc(Constant::Class("lib/Unrelated".into()))),
+        op(0x57),
+        instance_load("lib/Marked"),
+        op(0xb1),
+    ];
+    assert_eq!(
+        object_regeneration::regenerate_objects(
+            &mut node,
+            &Parameters::default(),
+            &[],
+            &Marked,
+            &mut NumberingObjects::default(),
+        ),
+        Err(InlineError::UnreifiedClass)
+    );
+}
