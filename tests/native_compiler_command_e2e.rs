@@ -330,6 +330,51 @@ fn a_program_reads_library_objects_through_the_stdlib_bodies() {
     std::fs::remove_dir_all(&scratch).expect("remove the compiler command's directory");
 }
 
+const COLLECTION_COPIES: &str = "\
+fun box(): String {
+    val fromArray = arrayOf(1, 2, 2).toSet()
+    val fromList = listOf(3, 3).toSet()
+    return if (fromArray == setOf(1, 2) && fromList == setOf(3)) \"OK\" else \"fail: $fromArray $fromList\"
+}
+
+fun main() {
+    println(arrayOf(\"a\", \"b\", \"a\").toSet())
+    println(listOf(3, 3).toSet())
+    println(listOf<Int>().toSet())
+}
+";
+
+#[test]
+fn a_program_copies_collections_into_sets_through_the_stdlib_bodies() {
+    if !native_compiler_available() {
+        return;
+    }
+    assert_eq!(common::kotlinc_box_result(COLLECTION_COPIES), "OK");
+    common::expect_box_ok_with_stdlib(COLLECTION_COPIES, "compilerCommandCollectionCopies");
+
+    let scratch = common::scratch_dir().expect("allocate the compiler command's directory");
+    let main = scratch.join("main.kt");
+    std::fs::write(&main, COLLECTION_COPIES).expect("write main.kt");
+    let compiled = Command::new(common::krusty_binary())
+        .args(["kotlinc-native", "-o"])
+        .arg(scratch.join("app"))
+        .arg(&main)
+        .output()
+        .expect("run krusty kotlinc-native");
+    assert_eq!(
+        completed(compiled),
+        (Some(0), String::new(), String::new()),
+        "the program compiles and links silently"
+    );
+    let run = common::run_freshly_written(&mut Command::new(scratch.join("app.kexe")))
+        .expect("run the Native program");
+    assert_eq!(
+        completed(run),
+        (Some(0), "[a, b]\n[3]\n[]\n".to_owned(), String::new())
+    );
+    std::fs::remove_dir_all(&scratch).expect("remove the compiler command's directory");
+}
+
 #[test]
 fn a_source_error_is_reported_and_no_program_is_written() {
     if !native_compiler_available() {

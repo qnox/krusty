@@ -2,7 +2,7 @@
 
 use super::klib_types::KlibTypeParameters;
 use crate::assignable::{is_subtype, TyCtx, TypeOracle};
-use crate::types::{Ty, TypeName, TypeVariance};
+use crate::types::{Ty, TyKind, TypeName, TypeVariance};
 
 struct NoClassEvidence;
 
@@ -64,6 +64,43 @@ pub(super) fn ordinary_subtype(
     sup: Ty,
 ) -> bool {
     sub == sup || classes.is_some_and(|classes| satisfies(Some(classes), parameters, sub, sup))
+}
+
+/// Whether `left` and `right` are one type once every projection that only restates its
+/// parameter's declaration-site variance is dropped: `Iterator<out T>` is `Iterator<T>` because
+/// `Iterator` declares its parameter `out`. Without the class model only identity is proven.
+pub(super) fn same_type(classes: Option<&dyn TypeOracle>, left: Ty, right: Ty) -> bool {
+    left == right
+        || classes.is_some_and(|classes| {
+            without_restated_variance(classes, left) == without_restated_variance(classes, right)
+        })
+}
+
+fn without_restated_variance(classes: &dyn TypeOracle, ty: Ty) -> Ty {
+    match ty.kind() {
+        TyKind::Nullable(inner) => Ty::nullable(without_restated_variance(classes, inner)),
+        TyKind::InProjection(inner) => Ty::in_projection(without_restated_variance(classes, inner)),
+        TyKind::OutProjection(inner) => {
+            Ty::out_projection(without_restated_variance(classes, inner))
+        }
+        TyKind::Obj(owner, arguments) if !arguments.is_empty() => {
+            let arguments = arguments
+                .iter()
+                .enumerate()
+                .map(|(index, &argument)| {
+                    let argument =
+                        match (argument.kind(), classes.type_param_variance(owner, index)) {
+                            (TyKind::OutProjection(inner), TypeVariance::Out)
+                            | (TyKind::InProjection(inner), TypeVariance::In) => inner,
+                            _ => argument,
+                        };
+                    without_restated_variance(classes, argument)
+                })
+                .collect::<Vec<_>>();
+            Ty::obj_args_name(owner, &arguments)
+        }
+        _ => ty,
+    }
 }
 
 #[cfg(test)]
