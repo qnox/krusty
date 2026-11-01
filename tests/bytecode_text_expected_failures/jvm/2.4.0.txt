@@ -1,5 +1,6 @@
-# Kotlin 2.4.0 compiler/testData/codegen/bytecodeText cases krusty does not reproduce yet, relative to that
-# directory. Regenerate with KRUSTY_BLESS_BYTECODE_TEXT_EXPECTATIONS=1 on a full local run. The list only shrinks.
+# Kotlin 2.4.0 compiler/testData/codegen/bytecodeText cases krusty does not reproduce yet,
+# relative to that directory. Regenerate with KRUSTY_BLESS_BYTECODE_TEXT_EXPECTATIONS=1
+# on a full local run. The list only shrinks.
 accessorNaming.kt
 assert/jvmCrossinline.kt
 assert/jvmCrossinlineAssertInLambda.kt
@@ -127,11 +128,6 @@ optimizedDelegatedProperties/definedInSources.kt
 optimizedDelegatedProperties/delegateToAnother.kt
 optimizedDelegatedProperties/inSeparateModule.kt
 optimizedDelegatedProperties/withNonNullMetadataParameter.kt
-parameterlessMain/dontGenerateOnJvmNameMain.kt
-parameterlessMain/dontGenerateOnMain.kt
-parameterlessMain/dontGenerateOnMainExtension.kt
-parameterlessMain/dontGenerateOnNullableString.kt
-parameterlessMain/dontGenerateOnVarargsString.kt
 properties/lateinit/companionObject.kt
 properties/lateinit/companionObjectFromLambda.kt
 properties/openDataClass.kt

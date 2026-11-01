@@ -47,6 +47,9 @@ pub struct Suite {
 pub enum Outcome {
     Pass,
     Fail(String),
+    /// krusty panicked. A compiler defect is never an expected failure or a not-applicable case:
+    /// it fails the lane whatever the inventories say, and no bless records it.
+    CompilerPanic(String),
     /// Outside the JVM backend: a target or mute directive excludes it.
     Excluded(&'static str),
     /// The runner itself could not evaluate the case.
@@ -290,7 +293,7 @@ fn krusty_outcome(corpus: &Corpus<'_>, path: &Path) -> Outcome {
                 .cloned()
                 .or_else(|| panic.downcast_ref::<&str>().map(|s| s.to_string()))
                 .unwrap_or_default();
-            return Outcome::Fail(format!("krusty panicked: {reason}"));
+            return Outcome::CompilerPanic(reason);
         }
     };
     let classes = CaseClasses {
@@ -369,6 +372,111 @@ fn run_corpus(
     })
 }
 
+/// One krusty run held against the inventories.
+#[derive(Debug, Default)]
+struct Tally {
+    passed: usize,
+    excluded: usize,
+    listed_not_applicable: usize,
+    panics: usize,
+    /// Cases that fail and are not listed as not applicable, with why.
+    failed: BTreeMap<String, String>,
+    /// Compiler panics and cases the runner could not evaluate. No inventory excuses them, and a
+    /// run that has any is incomplete, so it may not be recorded.
+    fatal: Vec<String>,
+    /// Disagreements with the inventories.
+    problems: Vec<String>,
+}
+
+impl Tally {
+    fn of(
+        outcomes: &BTreeMap<String, Outcome>,
+        not_applicable: &BTreeSet<String>,
+        full: bool,
+    ) -> Tally {
+        let mut tally = Tally::default();
+        for (key, outcome) in outcomes {
+            let listed = not_applicable.contains(key);
+            tally.listed_not_applicable += usize::from(listed);
+            match outcome {
+                Outcome::Pass if listed => tally.problems.push(format!(
+                    "{key}: passes but is listed as not applicable; remove it from the list"
+                )),
+                Outcome::Pass => tally.passed += 1,
+                Outcome::Fail(_) if listed => {}
+                Outcome::Fail(reason) => {
+                    tally.failed.insert(key.clone(), reason.clone());
+                }
+                Outcome::CompilerPanic(reason) => {
+                    tally.panics += 1;
+                    tally.fatal.push(format!("{key}: krusty panicked: {reason}"));
+                }
+                Outcome::Excluded(reason) if listed => tally.problems.push(format!(
+                    "{key}: listed as not applicable but already excluded ({reason})"
+                )),
+                Outcome::Excluded(_) => tally.excluded += 1,
+                Outcome::Unavailable(reason) => {
+                    tally.fatal.push(format!("{key}: cannot run here: {reason}"))
+                }
+            }
+        }
+        if full {
+            for key in not_applicable
+                .iter()
+                .filter(|key| !outcomes.contains_key(*key))
+            {
+                tally.problems.push(format!(
+                    "{key}: listed as not applicable but absent from the corpus"
+                ));
+            }
+        }
+        tally
+    }
+
+    fn failing(&self) -> BTreeSet<String> {
+        self.failed.keys().cloned().collect()
+    }
+
+    /// Only a run in which every case completed without a compiler panic is an inventory.
+    fn may_record(&self) -> bool {
+        self.fatal.is_empty()
+    }
+
+    fn compare_expected_failures(
+        &mut self,
+        outcomes: &BTreeMap<String, Outcome>,
+        expected: &BTreeSet<String>,
+        not_applicable: &BTreeSet<String>,
+        full: bool,
+    ) {
+        let failing = self.failing();
+        for key in failing.difference(expected) {
+            let reason = &self.failed[key];
+            self.problems.push(format!("{key}: newly fails: {reason}"));
+        }
+        for key in expected.difference(&failing) {
+            match outcomes.get(key) {
+                Some(Outcome::Pass) => self.problems.push(format!(
+                    "{key}: now passes; remove it from the expected failures"
+                )),
+                Some(Outcome::Excluded(reason)) => self.problems.push(format!(
+                    "{key}: listed as failing but excluded ({reason}); remove it from the \
+                     expected failures"
+                )),
+                Some(Outcome::Fail(_)) if not_applicable.contains(key) => self
+                    .problems
+                    .push(format!("{key}: listed both as failing and as not applicable")),
+                // Already fatal: a listed failure never excuses a panic or an unrun case.
+                Some(Outcome::Fail(_) | Outcome::CompilerPanic(_) | Outcome::Unavailable(_)) => {}
+                None if full => self.problems.push(format!(
+                    "{key}: listed as failing but absent from the corpus"
+                )),
+                None => {}
+            }
+        }
+    }
+}
+
 fn expectation_path(directory: &str, version: KotlinVersion) -> PathBuf {
     box_ratchet::read_path(directory, "jvm", version)
 }
@@ -399,8 +507,8 @@ impl Suite {
     fn render_failures(&self, version: KotlinVersion, failures: &BTreeSet<String>) -> String {
         let mut text = format!(
             "# Kotlin {version} compiler/testData/codegen/{} cases krusty does not reproduce yet,\n\
-             # relative to that directory. Regenerate with {}=1 on a full local run. The list only\n\
-             # shrinks.\n",
+             # relative to that directory. Regenerate with {}=1\n\
+             # on a full local run. The list only shrinks.\n",
             self.directory,
             self.bless()
         );
@@ -412,7 +520,7 @@ impl Suite {
     }
 
     /// krusty against the committed ratchet: every case passes, or fails as listed, or is listed as
-    /// not applicable. Prints `<passed>/<applicable>`.
+    /// not applicable, and none panics. Prints `<passed>/<applicable>`.
     pub fn assert_krusty_ratchet(&self) {
         let corpus = Corpus::new(self);
         let version = krusty::kotlin_version::target();
@@ -420,44 +528,8 @@ impl Suite {
         let not_applicable = load_expectation(&expectation_path(&self.not_applicable(), version));
         let full = corpus.only().is_none();
         let label = self.label;
+        let mut tally = Tally::of(&outcomes, &not_applicable, full);
 
-        let mut failed = BTreeMap::new();
-        let mut passed = 0;
-        let mut excluded = 0;
-        let mut listed_not_applicable = 0;
-        let mut problems = Vec::new();
-        for (key, outcome) in &outcomes {
-            let listed = not_applicable.contains(key);
-            listed_not_applicable += usize::from(listed);
-            match outcome {
-                Outcome::Pass if listed => problems.push(format!(
-                    "{key}: passes but is listed as not applicable; remove it from the list"
-                )),
-                Outcome::Pass => passed += 1,
-                Outcome::Fail(_) if listed => {}
-                Outcome::Fail(reason) => {
-                    failed.insert(key.clone(), reason.clone());
-                }
-                Outcome::Excluded(reason) if listed => problems.push(format!(
-                    "{key}: listed as not applicable but already excluded ({reason})"
-                )),
-                Outcome::Excluded(_) => excluded += 1,
-                Outcome::Unavailable(reason) => {
-                    problems.push(format!("{key}: cannot run here: {reason}"))
-                }
-            }
-        }
-        if full {
-            for key in not_applicable
-                .iter()
-                .filter(|key| !outcomes.contains_key(*key))
-            {
-                problems.push(format!(
-                    "{key}: listed as not applicable but absent from the corpus"
-                ));
-            }
-        }
-        let failing: BTreeSet<String> = failed.keys().cloned().collect();
         let bless_variable = self.bless();
         let bless = box_ratchet::bless_requested(std::env::var(&bless_variable).ok().as_deref())
             .unwrap_or_else(|error| panic!("{}", error.replace("BOX", self.env)));
@@ -467,64 +539,59 @@ impl Suite {
                 "{bless_variable} is refused under CI and on a partial run: expectations are \
                  blessed locally"
             );
+            assert!(
+                tally.may_record(),
+                "{bless_variable} refused: {} case(s) panicked or could not run, so the run is no \
+                 inventory:\n  {}",
+                tally.fatal.len(),
+                tally.fatal.join("\n  ")
+            );
             box_ratchet::record(
                 &self.failures(),
                 "jvm",
                 version,
-                &failing,
-                &self.render_failures(version, &failing),
+                &tally.failing(),
+                &self.render_failures(version, &tally.failing()),
             )
             .unwrap_or_else(|error| panic!("record the {version} {label} expectations: {error}"));
         }
         let failures_path = expectation_path(&self.failures(), version);
         let expected_failures = load_expectation(&failures_path);
-        for key in failing.difference(&expected_failures) {
-            problems.push(format!("{key}: newly fails: {}", failed[key]));
-        }
-        for key in expected_failures.difference(&failing) {
-            match outcomes.get(key) {
-                Some(Outcome::Pass) => problems.push(format!(
-                    "{key}: now passes; remove it from {}",
-                    failures_path.display()
-                )),
-                Some(Outcome::Excluded(reason)) => problems.push(format!(
-                    "{key}: listed as failing but excluded ({reason}); remove it from {}",
-                    failures_path.display()
-                )),
-                Some(Outcome::Fail(_)) if not_applicable.contains(key) => problems.push(format!(
-                    "{key}: listed both as failing and as not applicable"
-                )),
-                Some(Outcome::Fail(_) | Outcome::Unavailable(_)) => {}
-                None if full => problems.push(format!(
-                    "{key}: listed as failing but absent from the corpus"
-                )),
-                None => {}
-            }
-        }
-        let applicable = outcomes.len() - excluded - listed_not_applicable;
+        tally.compare_expected_failures(&outcomes, &expected_failures, &not_applicable, full);
+
+        let applicable = outcomes.len() - tally.excluded - tally.listed_not_applicable;
         eprintln!(
-            "{label} corpus: {passed}/{applicable} applicable cases pass ({:.1}%); \
-             {} expected failures, {listed_not_applicable} not applicable, {excluded} for other \
-             backends, of {}",
-            100.0 * passed as f64 / applicable.max(1) as f64,
-            failing.len(),
+            "{label} corpus: {}/{applicable} applicable cases pass ({:.1}%); \
+             {} expected failures, {} not applicable, {} for other backends, {} compiler \
+             panics, of {}",
+            tally.passed,
+            100.0 * tally.passed as f64 / applicable.max(1) as f64,
+            tally.failed.len(),
+            tally.listed_not_applicable,
+            tally.excluded,
+            tally.panics,
             outcomes.len()
         );
         if !full {
-            for (key, reason) in &failed {
+            for (key, reason) in &tally.failed {
                 eprintln!("  {key}: {reason}");
             }
         }
         assert!(
-            passed > 0,
+            tally.passed > 0,
             "no {label} case passed: check the corpus and the ASM text server"
         );
+        let problems: Vec<&String> = tally.fatal.iter().chain(&tally.problems).collect();
         assert!(
             problems.is_empty(),
             "{} {label} case(s) disagree with {}:\n  {}",
             problems.len(),
             failures_path.display(),
-            problems.join("\n  ")
+            problems
+                .iter()
+                .map(|problem| problem.as_str())
+                .collect::<Vec<_>>()
+                .join("\n  ")
         );
     }
 
@@ -550,6 +617,9 @@ impl Suite {
                 Outcome::Unavailable(reason) => {
                     problems.push(format!("{key}: cannot run here: {reason}"))
                 }
+                Outcome::CompilerPanic(reason) => {
+                    problems.push(format!("{key}: panicked: {reason}"))
+                }
                 _ => {}
             }
         }
@@ -560,5 +630,66 @@ impl Suite {
             self.label,
             problems.join("\n  ")
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn outcomes(cases: Vec<(&str, Outcome)>) -> BTreeMap<String, Outcome> {
+        cases
+            .into_iter()
+            .map(|(key, outcome)| (key.to_string(), outcome))
+            .collect()
+    }
+
+    fn keys(keys: &[&str]) -> BTreeSet<String> {
+        keys.iter().map(|key| key.to_string()).collect()
+    }
+
+    #[test]
+    fn a_listed_failure_does_not_excuse_a_compiler_panic() {
+        let outcomes = outcomes(vec![("a.kt", Outcome::CompilerPanic("boom".to_string()))]);
+        let mut tally = Tally::of(&outcomes, &keys(&[]), true);
+        tally.compare_expected_failures(&outcomes, &keys(&["a.kt"]), &keys(&[]), true);
+        assert_eq!(tally.fatal, ["a.kt: krusty panicked: boom"]);
+        assert_eq!(tally.problems, Vec::<String>::new());
+        assert!(!tally.may_record());
+    }
+
+    #[test]
+    fn a_not_applicable_entry_does_not_excuse_a_compiler_panic() {
+        let outcomes = outcomes(vec![("a.kt", Outcome::CompilerPanic("boom".to_string()))]);
+        let tally = Tally::of(&outcomes, &keys(&["a.kt"]), true);
+        assert_eq!(tally.fatal, ["a.kt: krusty panicked: boom"]);
+        assert_eq!(tally.panics, 1);
+        assert!(!tally.may_record());
+    }
+
+    #[test]
+    fn a_run_with_an_unrun_case_is_not_recorded() {
+        let outcomes = outcomes(vec![
+            ("a.kt", Outcome::Pass),
+            ("b.kt", Outcome::Unavailable("server died".to_string())),
+        ]);
+        let tally = Tally::of(&outcomes, &keys(&[]), true);
+        assert_eq!(tally.fatal, ["b.kt: cannot run here: server died"]);
+        assert!(!tally.may_record());
+    }
+
+    #[test]
+    fn a_complete_run_records_its_ordinary_failures() {
+        let outcomes = outcomes(vec![
+            ("a.kt", Outcome::Pass),
+            ("b.kt", Outcome::Fail("mismatch".to_string())),
+            ("c.kt", Outcome::Fail("environment".to_string())),
+        ]);
+        let mut tally = Tally::of(&outcomes, &keys(&["c.kt"]), true);
+        assert!(tally.may_record());
+        assert_eq!(tally.failing(), keys(&["b.kt"]));
+        tally.compare_expected_failures(&outcomes, &keys(&["b.kt"]), &keys(&["c.kt"]), true);
+        assert_eq!(tally.problems, Vec::<String>::new());
+        assert_eq!((tally.passed, tally.listed_not_applicable), (1, 1));
     }
 }

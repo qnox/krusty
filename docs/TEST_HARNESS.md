@@ -440,7 +440,9 @@ compilation topology are the JVM box lane's, shared with the other bytecode corp
 `tests/bytecode_corpus.rs`. The lane reports `<passed>/<applicable>` on stderr.
 
 `tests/bytecode_text_expected_failures/jvm/<version>.txt` lists the cases krusty does not reproduce
-yet; any case joining or leaving it fails. Rewrite it from a full local run:
+yet; any case joining or leaving it fails. A krusty panic is never an expected failure or a
+not-applicable case: it fails the lane whatever the lists say, and a bless refuses to write while
+any case panicked or could not run. Rewrite it from a full local run:
 
 ```sh
 KRUSTY_BLESS_BYTECODE_TEXT_EXPECTATIONS=1 KRUSTY_LANGUAGE_VERSION=<v> \
