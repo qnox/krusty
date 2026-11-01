@@ -23767,3 +23767,13 @@ call within an operand-evaluation block, preserving any existing origin. The JVM
 call's position at its invoke after inline operands reset the active line. Return endpoints, inline
 origins and positionless expressions keep their existing contracts. Complete class artifacts and
 runtime controls cover expression/explicit returns, reordered operands and source/compiled inlining.
+
+## Stored by-value class captures on Wasm
+
+Local and anonymous classes may carry copied values in their checked constructor fields. Capture
+stores execute before the selected superclass constructor, so an override called there observes
+the copied values. Physical fields, capture identities and forwarded-super ordinals stay separate;
+forwarded operands execute once in their checked order. The shared complete programs
+`retainedLexicalValueIdentity.kt` and `storedClassCapturePrefixes.kt` cover member reads, inherited
+storage, mixed prefixes and nested recapture. Shared-holder and fieldless capture transport retain
+their explicit unsupported results until their complete Wasm ABI is implemented.

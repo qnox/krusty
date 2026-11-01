@@ -6510,3 +6510,10 @@ official-producer program and independent JVM-oracle controls.
   carriers distinct from the semantic model; validate full source payloads and the pinned KSP oracle.
 - [ ] Normalize raw dependency annotation defaults using their exact declaration parameter types;
   keep that provider work separate from checked-source publication and scalar wire decoding.
+
+## Admit stored class captures on Wasm
+
+Validate the producer-owned constructor-prefix roles against full IR storage facts, then reuse
+ordinary WasmGC class construction and pre-super stores. Check exact field/type/pair mappings and
+the shared-holder edges; keep forwarded ordinals independent of preceding captures. Cover the
+whole shared programs and malformed storage metadata before extending fieldless or shared captures.

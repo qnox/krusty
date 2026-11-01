@@ -1582,3 +1582,11 @@ KSP protocol 16 transports four unsigned value tags. Its JVM adapter boxes their
 as Kotlin unsigned wrapper objects, matching KSP2's runtime classes and full values. The class
 reader and build ABI fingerprint remain physical JVM contracts. Raw dependency annotation-default
 normalization remains a declaration-type-owned provider follow-up.
+
+## Wasm constructor capture transport
+
+Capture provenance and optional semantic closure identity belong to the constructor prefix. The
+stored field coordinate and pre-super pair belong to its physical layout. Wasm validates both
+without inferring identities from field names or prefix position. All shared-holder edge maps must
+be absent for this copied-value transport; their logical element types do not describe holder ABI.
+The existing class field and constructor emitters consume the same facts without a metadata change.
