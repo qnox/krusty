@@ -4,8 +4,9 @@ name: oss corpus
 # scripts/oss-corpus/projects.tsv. Each project builds twice from a pinned commit with its own
 # Gradle build: once with kotlinc, once with the krusty Gradle plugin applied by an init script. The
 # run reports, per project, how many Kotlin/JVM compilations krusty built, how many classes match
-# kotlinc's byte for byte, why the rest missed, and what both builds cost (compile time, wall and
-# CPU time, peak memory). It needs full network access for the projects'
+# kotlinc's byte for byte, why the rest missed, how many of the project's own tests that pass on
+# kotlinc's classes also pass on krusty's, and what both builds cost (compile time, wall and CPU
+# time, peak memory). It needs full network access for the projects'
 # dependencies and toolchains. It runs nightly on master and on demand; ordinary pushes and pull
 # requests never schedule it, and it gates nothing.
 #
@@ -108,7 +109,8 @@ jobs:
       matrix:
         project: ${{ fromJson(needs.prepare.outputs.projects) }}
     runs-on: ubuntu-latest
-    timeout-minutes: 240
+    # Two measured builds, each followed by a test build of up to an hour, after a warm-up.
+    timeout-minutes: 360
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -131,7 +133,7 @@ jobs:
           sudo apt-get install -y -q linux-tools-common "linux-tools-$(uname -r)"
           # Lets the runner's user sample every process and resolve kernel symbols.
           sudo sysctl -w kernel.perf_event_paranoid=-1 kernel.kptr_restrict=0
-      - name: build ${{ matrix.project }} with kotlinc and with krusty
+      - name: build and test ${{ matrix.project }} with kotlinc and with krusty
         env:
           CORPUS_PERF: perf
         run: |
@@ -210,7 +212,8 @@ jobs:
             echo
             echo 'Each project is built from a pinned commit with its own Gradle build, once with kotlinc and'
             echo 'once with the krusty Gradle plugin, and the class files of every Kotlin/JVM compilation are'
-            echo 'compared byte for byte. Written by the `oss corpus` workflow (`.github/workflows/oss-corpus.yml`'
+            echo 'compared byte for byte; the project'"'"'s own tests then run on the classes each build compiled.'
+            echo 'Written by the `oss corpus` workflow (`.github/workflows/oss-corpus.yml`'
             echo 'on master); `projects/` holds each project'"'"'s latest result and `history.tsv` every run.'
             echo
             python3 scripts/oss-corpus/summarize.py --stars stars.tsv --plugins "$tree/projects" \

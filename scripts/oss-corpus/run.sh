@@ -2,12 +2,16 @@
 # Builds one corpus project twice from a clean checkout, with kotlinc (its own Gradle build) and
 # with krusty (the same build with the krusty Gradle plugin applied by an init script), then
 # compares the class files of every Kotlin/JVM compile task. A warm-up build first downloads what
-# both need, and both measured builds run offline.
+# both need, and both measured builds run offline. After each measured build, an unmeasured test
+# build runs the project's own JVM tests on the classes it compiled, and their outcomes are compared.
 #
 #   run.sh <name> <work dir> <krusty binary> <krusty Gradle plugin repository> <plugin version>
 #
-# Writes <work dir>/out/<name>/{kotlinc,krusty} (class trees), <work dir>/logs/<name>.* (each build's
-# log, compile-task inventory, task times and metrics) and <work dir>/out/<name>/compare.json. Compiler arguments are never captured or replayed.
+# Writes <work dir>/out/<name>/{kotlinc,krusty} (the measured builds' class trees),
+# <work dir>/out/<name>/{kotlinc,krusty}-tests (JUnit reports), <work dir>/logs/<name>.* (each build's
+# log, compile-task and test-task inventory, task times and metrics, and what each test build changed
+# in the measured outputs) and <work dir>/out/<name>/compare.json. Compiler arguments are never
+# captured or replayed.
 
 # Setup fails fast: a failed fetch, checkout, patch or version-pin rewrite stops the run before
 # anything is measured. Only the two Gradle builds' exit statuses are captured rather than fatal.
@@ -62,18 +66,18 @@ if [ "${android_variant:--}" != - ]; then
   export CORPUS_ANDROID_VARIANT=$android_variant
 fi
 
-# One build of the Gradle root, then its compile outputs moved to out/<mode>: the directories the
-# build's own compile-task inventory lists, so the next build starts without them. The init scripts
-# read every project of the build, so the configuration cache and isolated projects are off. The
-# Gradle exit status is left in `status`; a broken inventory or snapshot fails the run. `measure.py`
-# records the build's wall time, CPU time and peak memory, daemons included, and stops the daemons it
-# leaves behind; the init script records when each task ran.
+# One build of the Gradle root. The init scripts read every project of the build, so the
+# configuration cache and isolated projects are off. The Gradle exit status is left in `status`.
+# `measure.py` records the build's wall time, CPU time and peak memory, daemons included, and stops
+# the daemons it leaves behind; the init script records when each task ran. Every build but the
+# warm-up runs offline.
 build() {
   local mode=$1
   shift
   local root=$checkout/$gradle_root
   local manifest=$logs/$name.$mode.compilations.tsv
-  local start code=0
+  local start code=0 offline=()
+  [ "$mode" = warmup ] || offline=(--offline)
   rm -f "$manifest"
   start=$(date +%s)
   (
@@ -81,17 +85,77 @@ build() {
     CORPUS_COMPILATIONS=$manifest CORPUS_TASK_TIMES=$logs/$name.$mode.tasks.tsv \
       python3 "$here/measure.py" "$logs/$name.$mode.metrics.json" \
       timeout 5400 ./gradlew --no-daemon -I "$here/corpus.init.gradle" \
-      "$@" corpusCompile --continue --rerun-tasks --no-configure-on-demand \
+      "${offline[@]}" "$@" corpusCompile --continue --rerun-tasks --no-configure-on-demand \
       --no-configuration-cache -Dorg.gradle.isolated-projects=false
   ) >"$logs/$name.$mode.log" 2>&1 || code=$?
   echo "$name $mode exit $code seconds $(($(date +%s) - start))" >>"$logs/STATUS"
+  status=$code
+}
+
+# The project's own JVM tests (`corpusTest`), run on the classes the measured build of the same mode
+# compiled, which `snapshot --keep` has already saved and left in place. Every test runs again, since
+# the init script reuses no test result. Not measured, and online: the warm-up downloads only what
+# compiling needs, not a test runtime. `measure.py` still stops the daemons it leaves, so the next
+# measured build starts without them. The exit status is left in `test_status` (124 when it ran out
+# of time); the test-task inventory and the JUnit reports of the tasks it lists go to
+# out/<mode>-tests. Whether the tests really ran on the measured classes is checked by `release`.
+run_tests() {
+  local mode=$1
+  shift
+  local root=$checkout/$gradle_root
+  local manifest=$logs/$name.$mode.tests.tsv
+  local start code=0
+  rm -f "$manifest"
+  start=$(date +%s)
+  (
+    cd "$root"
+    CORPUS_TESTS=$manifest python3 "$here/measure.py" "$logs/$name.$mode.tests.metrics.json" \
+      timeout "${CORPUS_TEST_TIMEOUT:-3600}" ./gradlew --no-daemon -I "$here/corpus.init.gradle" \
+      "$@" corpusTest --continue --no-configure-on-demand --no-configuration-cache \
+      -Dorg.gradle.isolated-projects=false
+  ) >"$logs/$name.$mode.tests.log" 2>&1 || code=$?
+  echo "$name $mode tests exit $code seconds $(($(date +%s) - start))" >>"$logs/STATUS"
+  local reports=$work/out/$name/$mode-tests
   if [ -f "$manifest" ]; then
-    python3 "$here/outputs.py" "$manifest" "$root" "$work/out/$name/$mode"
+    cut -f1,2 "$manifest" >"$logs/$name.$mode.test-reports.tsv"
+    python3 "$here/outputs.py" "$logs/$name.$mode.test-reports.tsv" "$root" "$reports"
   else
+    rm -rf "$reports"
+    mkdir -p "$reports"
+  fi
+  test_status=$code
+}
+
+# A build's compile outputs copied to out/<mode>: the directories the build's own compile-task
+# inventory lists. Without `--keep` they are then removed from the checkout, so the next build starts
+# without them; with it they stay for the test build of the same mode, and `release` removes them
+# afterwards. A broken inventory or snapshot fails the run.
+snapshot() {
+  local mode=$1
+  local manifest=$logs/$name.$mode.compilations.tsv
+  if [ ! -f "$manifest" ]; then
     rm -rf "$work/out/$name/$mode"
     mkdir -p "$work/out/$name/$mode"
+  elif [ "${2:-}" = --keep ]; then
+    python3 "$here/outputs.py" --keep "$manifest" "$checkout/$gradle_root" "$work/out/$name/$mode"
+  else
+    python3 "$here/outputs.py" "$manifest" "$checkout/$gradle_root" "$work/out/$name/$mode"
   fi
-  status=$code
+}
+
+# Removes the outputs `snapshot --keep` left for the test build, and lists in
+# <logs>/<name>.<mode>.changed.tsv every file under them the test build wrote, rewrote or deleted.
+# The snapshot stays the measured build's classes either way; a listed change means the tests did not
+# run on them, and the comparison reports that mode's tests as unavailable.
+release() {
+  local mode=$1
+  local manifest=$logs/$name.$mode.compilations.tsv
+  local changes=$logs/$name.$mode.changed.tsv
+  if [ -f "$manifest" ]; then
+    python3 "$here/outputs.py" --clear "$manifest" "$checkout/$gradle_root" "$work/out/$name/$mode" "$changes"
+  else
+    : >"$changes"
+  fi
 }
 
 # The warm-up build downloads everything the build needs (dependencies, Gradle and compiler plugins,
@@ -99,13 +163,18 @@ build() {
 # measured builds then run offline, so neither pays for the network and both start from the same
 # caches.
 build warmup
+snapshot warmup
 rm -rf "$work/out/$name/warmup" "$logs/$name.warmup.metrics.json" "$logs/$name.warmup.tasks.tsv"
-CORPUS_PLUGIN_SURVEY=$logs/$name.plugins.tsv build kotlinc --offline
+CORPUS_PLUGIN_SURVEY=$logs/$name.plugins.tsv build kotlinc
 reference=$status
 if [ ! -f "$logs/$name.kotlinc.compilations.tsv" ]; then
   echo "$name: the reference build recorded no compile-task inventory" >&2
   exit 1
 fi
+snapshot kotlinc --keep
+run_tests kotlinc
+kotlinc_tests=$test_status
+release kotlinc
 # With `$CORPUS_PERF` set (the `perf` command, allowed to sample every process), the krusty
 # build is sampled system-wide at a low rate, and the krusty processes' call stacks are folded into
 # <logs>/<name>.krusty.folded; with `$CORPUS_FLAMEGRAPH` (inferno's `inferno-flamegraph`) also drawn as
@@ -118,7 +187,7 @@ if [ -n "${CORPUS_PERF:-}" ]; then
   perf_pid=$!
 fi
 KRUSTY_PLUGIN_REPOSITORY=$plugin_repository KRUSTY_PLUGIN_VERSION=$plugin_version \
-  build krusty --offline -I "$here/krusty.init.gradle" -Pkrusty.binary="$krusty"
+  build krusty -I "$here/krusty.init.gradle" -Pkrusty.binary="$krusty"
 if [ -n "${CORPUS_PERF:-}" ]; then
   kill -INT "$perf_pid"
   wait "$perf_pid" || true
@@ -130,4 +199,9 @@ if [ -n "${CORPUS_PERF:-}" ]; then
       >"$logs/$name.krusty.svg"
   fi
 fi
-python3 "$here/compare.py" "$work" "$name" "$reference"
+snapshot krusty --keep
+KRUSTY_PLUGIN_REPOSITORY=$plugin_repository KRUSTY_PLUGIN_VERSION=$plugin_version \
+  run_tests krusty -I "$here/krusty.init.gradle" -Pkrusty.binary="$krusty"
+krusty_tests=$test_status
+release krusty
+python3 "$here/compare.py" "$work" "$name" "$reference" "$kotlinc_tests" "$krusty_tests"

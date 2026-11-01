@@ -33,6 +33,48 @@ gradle.projectsEvaluated { g ->
         }
     }
     root.tasks.register('corpusCompile') { dependsOn { picked } }
+    // `corpusTest`: the JVM test tasks of the same projects, an Android project's unit tests of the
+    // variant only. They are found by type without realizing any other task, and run only in the
+    // test builds that list them in `$CORPUS_TESTS`: there a failing test does not fail its task,
+    // and no task result is reused from an earlier build or the build cache, so each test build
+    // runs every test on the classes that build's compiler wrote.
+    def tests = []
+    def androidTest = variant ? "test${variant.capitalize()}UnitTest" : null
+    root.allprojects { p ->
+        if (p.plugins.hasPlugin('org.gradle.kotlin.kotlin-dsl.base')) return
+        def android = p.plugins.hasPlugin('com.android.base')
+        if (android && androidTest == null) return
+        p.tasks.withType(Test).names.findAll { !android || it == androidTest }.each { n ->
+            tests << p.tasks.named(n, Test).get()
+        }
+    }
+    root.tasks.register('corpusTest') { dependsOn { tests } }
+    def testManifest = System.getenv('CORPUS_TESTS')
+    if (testManifest != null) {
+        tests.each { t ->
+            t.ignoreFailures = true
+            t.outputs.upToDateWhen { false }
+            t.outputs.cacheIf { false }
+        }
+        // One line per test task: its path, its JUnit XML report directory relative to the build
+        // root, and the picked compile tasks it depends on, directly or through other tasks (a jar
+        // of an upstream module), comma-separated: the compilations whose classes it runs.
+        def compiled = new HashSet(picked)
+        g.taskGraph.whenReady { graph ->
+            def lines = tests.findAll { graph.hasTask(it) }.collect { t ->
+                def seen = new LinkedHashSet()
+                def queue = new ArrayDeque(graph.getDependencies(t))
+                while (!queue.isEmpty()) {
+                    def d = queue.poll()
+                    if (seen.add(d)) queue.addAll(graph.getDependencies(d))
+                }
+                def compiles = seen.findAll { it in compiled }.collect { it.path }.sort()
+                def xml = root.projectDir.toPath().relativize(t.reports.junitXml.outputLocation.get().asFile.toPath())
+                "${t.path}\t${xml}\t${compiles.join(',')}\n"
+            }
+            new File(testManifest).text = lines.join('')
+        }
+    }
     // One line per picked task, its path and its output directory relative to the build root: the
     // comparison reads compilations from here rather than guessing them from directory names.
     def manifest = System.getenv('CORPUS_COMPILATIONS')
