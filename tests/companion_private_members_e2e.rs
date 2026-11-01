@@ -190,3 +190,40 @@ fn a_protected_companion_of_a_krusty_built_dependency_is_read_like_a_source_one(
         &[library],
     );
 }
+
+/// A private companion's `const val` and `@JvmField` property become public fields of the outer
+/// class, and kotlinc deprecates each one for Java: `@java.lang.Deprecated` and the `Deprecated`
+/// attribute. A private `const val` stays a private field and an internal or protected
+/// companion's fields are not deprecated.
+#[test]
+fn a_private_companions_public_fields_are_deprecated_on_the_outer_class() {
+    common::assert_classes_identical_to_kotlinc(
+        "PrivateCompanionFields",
+        r#"
+class Holder {
+    fun all() = LIMIT + label.length + hidden + NAME.length
+    private companion object {
+        const val LIMIT = 3600L
+        @JvmField val label = "label"
+        private const val hidden = 3
+        internal const val NAME = "name"
+    }
+}
+
+class Shared {
+    fun all() = LIMIT
+    internal companion object {
+        const val LIMIT = 1
+    }
+}
+
+open class Guarded {
+    fun all() = LIMIT
+    protected companion object {
+        const val LIMIT = 1
+    }
+}
+"#,
+        &["Holder", "Shared", "Guarded"],
+    );
+}

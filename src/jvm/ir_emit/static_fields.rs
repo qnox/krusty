@@ -718,6 +718,27 @@ fn declare_static(
     if let Some(annotations) = static_field_annotations(ir, c, static_index) {
         cw.set_last_late_field_annotations(annotations);
     }
+    // A public field that leaks a private companion's property onto the outer class is deprecated
+    // for Java, as kotlinc's companion-field lowering marks it.
+    if acc & 0x0001 != 0 && moved_from_private_companion(ir, c, static_index) {
+        cw.deprecate_last_late_field();
+    }
+}
+
+/// Whether static `static_index` of `owner` is the storage of a property its
+/// `private companion object` declares: a `const val` or a hoisted property.
+fn moved_from_private_companion(ir: &IrFile, owner: &IrClass, static_index: u32) -> bool {
+    let Some(companion) = owner.companion_class else {
+        return false;
+    };
+    ir.class_visibilities.get(&companion) == Some(&crate::types::Visibility::Private)
+        && (ir
+            .declared_class_statics
+            .get(&companion)
+            .is_some_and(|statics| statics.contains(&static_index))
+            || ir
+                .jvm_companion_static_declaration(static_index)
+                .is_some_and(|(declaring, _)| declaring.fq_name == companion))
 }
 
 fn static_field_annotations<'a>(
