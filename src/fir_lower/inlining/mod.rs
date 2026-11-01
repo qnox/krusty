@@ -20,10 +20,12 @@ use super::BodyLowering;
 mod converted_inline_lambda;
 mod escaping_anonymous;
 mod escaping_lambda;
+mod immediate_lambda;
 mod inline_callee;
 mod lambda_splice_contract;
 mod property_accessors;
 
+pub(super) use immediate_lambda::splice_immediate_lambda;
 pub(super) use inline_callee::InlineCallee;
 pub(super) use lambda_splice_contract::LambdaParameterBinding;
 
@@ -1619,6 +1621,7 @@ pub(super) fn specialize_typed_expression(
         | IrExpr::PropertyWrite {
             ty: type_operand, ..
         }
+        | IrExpr::AbsentArgument { ty: type_operand }
         | IrExpr::RefNew {
             elem: type_operand, ..
         }
@@ -1850,6 +1853,7 @@ fn specialize_callee(
         }
         Callee::CrossFile { params, ret, .. }
         | Callee::Module { params, ret, .. }
+        | Callee::ModuleDefaultEntry { params, ret, .. }
         | Callee::Super { params, ret, .. } => {
             specialize_tys(params, bindings);
             specialize_ty(ret, bindings);
