@@ -11,23 +11,28 @@
 //! `$stable` holds the stability bits of the class's instances (`0` stable, `8` unstable), which a
 //! composable that takes one compares instead of the instance itself; `@StabilityInferred`, visible
 //! in Kotlin metadata too, says whether the result depends on nothing (`1`) or is unknown (`0`). A
-//! class marked `@Stable` or `@Immutable` gets the stable field and no annotation.
+//! generic class's annotation has a bit for each type parameter the stability depends on and the
+//! bit past them when it depends on nothing. A class marked `@Stable` or `@Immutable` gets the
+//! stable field and no annotation.
 //!
 //! The inference is kotlinc's `StabilityInferencer` over the classes of the file: a class is stable
 //! when it is final and every backing field is a `val` of a stable type, a `var` makes it unstable,
 //! and an interface or a class that is not final is of unknown stability. Unknown parts drop out
 //! once there are several, so two interface-typed fields leave a class stable, as kotlinc infers.
-//! What the inference cannot decide here is declined at the class: a type parameter, a value class,
-//! and a class of another file or a Compose-compiled library, whose `$stable` kotlinc reads at run
-//! time.
+//! A class of another file or a Compose-compiled library contributes its `$stable`, read at run
+//! time. What the inference cannot decide here is declined at the class: a value class, and a
+//! field of a generic class, whose type arguments kotlinc substitutes.
 
 use crate::ir::{
-    AnnoRetention, AnnoValue, AppliedAnnotation, DeclarationAnnotations, FieldAnnotations,
-    IrAccessorLines, IrConst, IrExpr, IrFile, IrStatic, IrStaticAccessors, RetainedAnnotation,
+    AnnoRetention, AnnoValue, AppliedAnnotation, DeclarationAnnotations, ExprId, FieldAnnotations,
+    IrAccessorLines, IrBinOp, IrConst, IrExpr, IrFile, IrStatic, IrStaticAccessors,
+    RetainedAnnotation,
 };
 use crate::plugins::runtime_declarations::{PluginClassifier, PluginRuntime};
 use crate::plugins::{PluginRejection, PluginSourceView};
-use crate::types::{type_name, ClassifierDeclarationKind, Ty, TyKind, TypeName, Visibility};
+use crate::types::{
+    type_name, ClassifierDeclarationKind, Ty, TyKind, TyParamName, TypeName, Visibility,
+};
 
 const STABILITY_INFERRED: &str = "androidx/compose/runtime/internal/StabilityInferred";
 const STABLE_MARKER: &str = "androidx/compose/runtime/StableMarker";
@@ -76,11 +81,16 @@ const PROTOBUF_MESSAGES: &[&str] = &[
     "com/google/protobuf/GeneratedMessage",
 ];
 
-/// kotlinc's `Stability`, without the run-time and type-parameter parts the pass declines.
+/// kotlinc's `Stability`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Stability {
     Certain(bool),
     Unknown,
+    /// The class's `$stable`, read when the class initializes: a class of another file, or a
+    /// dependency class compiled with Compose.
+    Runtime(TypeName),
+    /// The stability of the type argument of the class's own type parameter at this index.
+    Parameter(u32),
     Combined(Vec<Stability>),
 }
 
@@ -99,28 +109,71 @@ impl Stability {
         }
     }
 
-    /// kotlinc's `normalize`: an unstable part decides, and unknown parts of a combination drop out.
+    /// kotlinc's `normalize`: an unstable part decides, unknown parts of a combination drop out, and
+    /// the run-time parts remain in the order kotlinc's work stack pops them.
     fn normalize(self) -> Self {
         let Self::Combined(elements) = self else {
             return self;
         };
         let mut pending = elements;
+        let mut parts = Vec::new();
         while let Some(element) = pending.pop() {
             match element {
                 Self::Combined(nested) => pending.extend(nested),
                 Self::Certain(false) => return Self::UNSTABLE,
+                runtime @ Self::Runtime(_) => parts.push(runtime),
+                parameter @ Self::Parameter(_) => {
+                    if !parts.contains(&parameter) {
+                        parts.push(parameter);
+                    }
+                }
                 Self::Certain(true) | Self::Unknown => {}
             }
         }
-        Self::Combined(Vec::new())
+        Self::Combined(parts)
+    }
+
+    /// kotlinc's `irStableExpression`: the `$stable` fields the class's own `$stable` ors together,
+    /// none for a stable class, or nothing when the stability is not known. A type parameter reads
+    /// as stable, and the JVM backend drops an `or` with that constant `0`.
+    fn runtime_reads(&self) -> Option<Vec<TypeName>> {
+        match self {
+            Self::Certain(true) | Self::Parameter(_) => Some(Vec::new()),
+            Self::Certain(false) | Self::Unknown => None,
+            Self::Runtime(class) => Some(vec![*class]),
+            Self::Combined(elements) => elements
+                .iter()
+                .map(Self::runtime_reads)
+                .collect::<Option<Vec<_>>>()
+                .map(|reads| reads.concat()),
+        }
     }
 
     fn known_stable(&self) -> bool {
         match self {
             Self::Certain(stable) => *stable,
-            Self::Unknown => false,
+            Self::Unknown | Self::Runtime(_) | Self::Parameter(_) => false,
             Self::Combined(elements) => elements.iter().all(Self::known_stable),
         }
+    }
+
+    /// kotlinc's `@StabilityInferred(parameters)` of a class with `type_parameters`: a bit for each
+    /// type parameter the stability depends on and, past them, a bit when it is known stable.
+    fn parameter_mask(&self, type_parameters: usize) -> i32 {
+        let mut mask = 0;
+        let parts = match self {
+            Self::Combined(parts) => parts.as_slice(),
+            single => std::slice::from_ref(single),
+        };
+        for part in parts {
+            if let Self::Parameter(index) = part {
+                mask |= 1 << index;
+            }
+        }
+        if self.known_stable() && type_parameters < 32 {
+            mask |= 1 << type_parameters;
+        }
+        mask
     }
 }
 
@@ -136,6 +189,7 @@ pub(super) fn declare(
         ir,
         runtime,
         analyzed: Default::default(),
+        parameters: Vec::new(),
     };
     let mut markers = Vec::new();
     for (index, class) in ir.classes.iter().enumerate() {
@@ -150,29 +204,45 @@ pub(super) fn declare(
             }
         };
         if marker {
-            markers.push((index, STABLE, None));
+            markers.push((index, Some(Vec::new()), None));
             continue;
         }
-        if !class.type_params.is_empty() {
+        inference.parameters = ir
+            .class_signature_name(class.fq_name)
+            .map(|signature| {
+                signature
+                    .type_params
+                    .iter()
+                    .filter_map(|parameter| match parameter.ty().kind() {
+                        TyKind::TyParam(name, _) => Some(name),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        if inference.parameters.len() != class.type_params.len() {
             rejections.push(super::source_facts::class_rejection(
                 source,
                 class,
-                "a generic class, whose stability depends on its type arguments",
+                "a generic class whose type parameters the file does not declare",
             ));
             continue;
         }
         match inference.of_class(class.fq_name, &mut Vec::new()) {
             Ok(stability) => {
                 let stability = stability.normalize();
-                let stable = stability.known_stable();
-                let bits = if stable { STABLE } else { UNSTABLE };
-                markers.push((index, bits, Some(i32::from(stable))));
+                let parameters = if class.type_params.is_empty() {
+                    i32::from(stability.known_stable())
+                } else {
+                    stability.parameter_mask(class.type_params.len())
+                };
+                markers.push((index, stability.runtime_reads(), Some(parameters)));
             }
             Err(what) => rejections.push(super::source_facts::class_rejection(source, class, what)),
         }
     }
-    for (index, bits, parameters) in markers {
-        mark(ir, index, bits, parameters);
+    for (index, reads, parameters) in markers {
+        mark(ir, index, reads, parameters);
     }
 }
 
@@ -200,9 +270,26 @@ fn records_stability(ir: &IrFile, class: &crate::ir::IrClass) -> bool {
 
 /// Add `@JvmField public static final int $stable = bits` and, unless the class carries a stable
 /// marker, `@StabilityInferred(parameters)`.
-fn mark(ir: &mut IrFile, index: usize, bits: i32, parameters: Option<i32>) {
-    let init = ir.add_expr(IrExpr::Const(IrConst::Int(bits)));
-    ir.mark_positionless(init);
+/// Give the class its `$stable`: unstable without `reads`, else the `$stable` fields it reads ored
+/// together in kotlinc's order, or stable when it reads none.
+fn mark(ir: &mut IrFile, index: usize, reads: Option<Vec<TypeName>>, parameters: Option<i32>) {
+    let init = match reads.as_deref() {
+        None => stable_bits(ir, UNSTABLE),
+        Some([]) => stable_bits(ir, STABLE),
+        Some([first, rest @ ..]) => {
+            let mut value = read_stable(ir, *first);
+            for &class in rest {
+                let rhs = read_stable(ir, class);
+                value = ir.add_expr(IrExpr::PrimitiveBinOp {
+                    op: IrBinOp::BitOr,
+                    lhs: value,
+                    rhs,
+                });
+                ir.mark_positionless(value);
+            }
+            value
+        }
+    };
     let class = &mut ir.classes[index];
     let owner = class.fq_name;
     let mut field_annotations = DeclarationAnnotations::default();
@@ -240,13 +327,26 @@ fn mark(ir: &mut IrFile, index: usize, bits: i32, parameters: Option<i32>) {
     });
 }
 
+fn stable_bits(ir: &mut IrFile, bits: i32) -> ExprId {
+    let value = ir.add_expr(IrExpr::Const(IrConst::Int(bits)));
+    ir.mark_positionless(value);
+    value
+}
+
+/// Read `class`'s `$stable`.
+fn read_stable(ir: &mut IrFile, class: TypeName) -> ExprId {
+    let value = ir.external_static_field_name(class, "$stable", "I");
+    ir.mark_positionless(value);
+    value
+}
+
 fn binary(annotation: &str, values: Vec<(String, AnnoValue)>) -> RetainedAnnotation {
     RetainedAnnotation {
         retention: AnnoRetention::Binary,
         annotation: AppliedAnnotation {
+            written_order: None,
             internal: type_name(annotation),
             values,
-            written_order: None,
         },
         facts: Default::default(),
     }
@@ -257,6 +357,8 @@ struct Inference<'a> {
     ir: &'a IrFile,
     runtime: &'a dyn PluginRuntime,
     analyzed: crate::fx_hash::HashMap<TypeName, Stability>,
+    /// The type parameters of the class whose stability is being recorded.
+    parameters: Vec<TyParamName>,
 }
 
 /// A classifier the inference reads: one of the file's classes, or one the compilation declares.
@@ -363,14 +465,19 @@ impl Inference<'_> {
         if class.is_interface {
             return Ok(Stability::Unknown);
         }
-        if !class.type_params.is_empty() {
+        // Only the recorded class is analyzed without type arguments: its own parameters stay
+        // parameters. Another generic class needs its arguments substituted.
+        let generic = !class.type_params.is_empty();
+        if generic && !analyzing.is_empty() {
             return Err("a class whose stability depends on a generic class");
         }
         analyzing.push(name);
         let stability = self.of_members(class, analyzing);
         analyzing.pop();
         let stability = stability?;
-        self.analyzed.insert(name, stability.clone());
+        if !generic {
+            self.analyzed.insert(name, stability.clone());
+        }
         Ok(stability)
     }
 
@@ -445,9 +552,21 @@ impl Inference<'_> {
                 .iter()
                 .any(|annotation| annotation.annotation == stability_inferred)
         {
-            return Err(
-                "a class whose stability depends on a class of another file or a Compose library",
-            );
+            if declared.type_parameters > 0 {
+                return Err(
+                    "a class whose stability depends on a generic class of another file or \
+                     a Compose library",
+                );
+            }
+            if declared.in_module
+                && (declared.is_inner || declared.kind == ClassifierDeclarationKind::Annotation)
+            {
+                return Err(
+                    "a class whose stability depends on another file's class without \
+                     `$stable`",
+                );
+            }
+            return Ok(Stability::Runtime(name));
         }
         Ok(Stability::UNSTABLE)
     }
@@ -529,6 +648,10 @@ impl Inference<'_> {
                     self.of_declared(name, &arguments, analyzing)
                 }
             }
+            TyKind::TyParam(name, _) => match self.parameters.iter().position(|&own| own == name) {
+                Some(index) => Ok(Stability::Parameter(index as u32)),
+                None => Err("a class with a field of another declaration's type parameter"),
+            },
             TyKind::Nothing => Ok(Stability::UNSTABLE),
             _ => Err("a class with a field of a type kotlinc's stability inference reads apart"),
         }

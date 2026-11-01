@@ -65,6 +65,8 @@ pub struct PluginClassifier {
     pub is_value: bool,
     /// Declared by another file of the current compilation module.
     pub in_module: bool,
+    /// An `inner` class, which captures an instance of its outer class.
+    pub is_inner: bool,
     /// How many type parameters the classifier itself declares.
     pub type_parameters: usize,
     /// Its direct supertypes.

@@ -13380,8 +13380,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   computed from a parameter, any other use of a composable lambda parameter, a grouping annotation
   or explicit applier target, a call to another file's composable, a name an overload with lambdas
   shares, a recursive function with composable lambda parameters, and a class whose stability its
-  file does not decide (a generic class, a value-class field, a field of another file's or a
-  Compose library's class, or of a numbered `KFunctionN` type). A nonempty `metricsDestination`/`reportsDestination` is an
+  file does not decide (a value-class field, a field of a generic class, of another file's `inner`
+  or annotation class, or of a numbered `KFunctionN` type). A nonempty `metricsDestination`/`reportsDestination` is an
   `UnimplementedOption` error. The runtime functions the code calls are selected at the handoff by
   their Kotlin signatures, or the module is rejected. Covered:
   `Unit` top-level composables with a block body whose parameters are primitives or `String`. Each
