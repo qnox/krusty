@@ -34,17 +34,33 @@ esac
     exit 1
 }
 
+# Print the matches of one `git grep`. Exit status 1 is git grep's "no match", an empty
+# inventory; any other failure (not a repository, an unreadable index, a bad pathspec) is an error
+# and never a count, so neither `check` nor `tighten` can accept or publish it.
+inventory() {
+    local matches status=0
+    matches=$(git grep "$@") || status=$?
+    case "$status" in
+    0) printf '%s\n' "$matches" ;;
+    1) ;;
+    *)
+        echo "legacy-ratchet: git grep $* failed with status $status" >&2
+        return 1
+        ;;
+    esac
+}
+
 measure() {
     local kind=$1 subject=$2
     case "$kind" in
     uses)
-        { git grep -h -o -w -F -e "$subject" -- src || true; } | wc -l
+        inventory -h -o -w -F -e "$subject" -- src | wc -l | tr -d ' '
         ;;
     fns)
-        { git grep -h -o -E -e "\\bfn ${subject}[A-Za-z0-9_]*" -- src || true; } | wc -l
+        inventory -h -o -E -e "\\bfn ${subject}[A-Za-z0-9_]*" -- src | wc -l | tr -d ' '
         ;;
     lines)
-        { git grep -h -c -e '' -- "$subject" || true; } | awk '{ total += $1 } END { print total + 0 }'
+        inventory -h -c -e '' -- "$subject" | awk '{ total += $1 } END { print total + 0 }'
         ;;
     *)
         echo "legacy-ratchet: unknown kind '$kind' in $baseline" >&2
@@ -66,7 +82,10 @@ while IFS= read -r line || [ -n "$line" ]; do
         echo "legacy-ratchet: malformed row in $baseline: $line" >&2
         exit 1
     fi
-    current=$(measure "$kind" "$subject" | tr -d ' ')
+    if ! current=$(measure "$kind" "$subject"); then
+        echo "legacy-ratchet: could not measure $kind $subject; $baseline is unchanged" >&2
+        exit 1
+    fi
     case "$mode" in
     check)
         if [ "$current" -gt "$allowed" ]; then

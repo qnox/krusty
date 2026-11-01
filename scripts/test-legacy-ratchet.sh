@@ -39,6 +39,14 @@ actual=$("$script" measure baseline.tsv)
 
 "$script" check baseline.tsv >/dev/null || fail "check rejected a tree at its baseline"
 
+# A failed inventory read is an error, not an empty count: both modes fail and the baseline stays.
+before=$(cat baseline.tsv)
+GIT_DIR="$fixture/missing.git" "$script" check baseline.tsv >/dev/null 2>&1 &&
+    fail "check accepted a failed inventory read"
+GIT_DIR="$fixture/missing.git" "$script" tighten baseline.tsv >/dev/null 2>&1 &&
+    fail "tighten accepted a failed inventory read"
+[ "$(cat baseline.tsv)" = "$before" ] || fail "a failed inventory read rewrote '$(cat baseline.tsv)'"
+
 # A new use of a ratcheted identifier fails the check; a longer identifier is not a use.
 echo 'fn caller() { unify_ty(); unify_ty_from_symbols(); }' >>src/lib.rs
 if errors=$("$script" check baseline.tsv 2>&1 >/dev/null); then
