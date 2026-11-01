@@ -1327,7 +1327,7 @@ fn stdlib_range_literal_membership_is_a_bounds_comparison() {
     // checked against the range membership checked FIR lowering records for that source.
     assert_eq!(
         lowered_body(&unit, function),
-        "scope {scope {return@Some(0) Through<kotlin/Char>(v0: kotlin/Char in Char(55296): \
+        "scope {scope {return@Some(0) Through<kotlin/Char>(v0!: kotlin/Char in Char(55296): \
          kotlin/Char, Char(57343): kotlin/Char): Boolean: Nothing}: Nothing}"
     );
 }

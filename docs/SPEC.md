@@ -1,5 +1,18 @@
 # krusty — a memory-lean Kotlin→JVM compiler PoC
 
+## Checked applications of dependency class members
+
+FIR owns class-parameter application, including inherited members. A dependency export retains
+its declared receiver application and carriers, such as `[Crate<T>, T] -> T`. The shared signature
+boundary consumes the complete checked call types for slots depending on authenticated class
+formals. Fixed slots and results still require exact agreement after callable type arguments are
+applied. Callable ordinals retain their own target, completeness and reification checks. Targets
+convert between the declared export carriers and checked application types without reconstructing
+class substitutions from receiver types or argument values. The shared
+`multimoduleGenericClassMembers.kt` fixture covers primitive/reference/nullable applications,
+inherited final methods, zero-argument results, separate class/method formals, and inner classes
+with captured-only or own-and-captured declaration parameters.
+
 ## Inaccessible members against accessible extensions
 
 A member the call site cannot access ranks below every resolved candidate, as kotlinc's visibility
@@ -3306,8 +3319,6 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   nested-local declarations, anonymous objects, enum-entry bodies, and generated classes—join the
   frozen module/dependency facts by exact identity at each JVM realization boundary. Their absence
   is not retried through a provider or inferred from a generated class name.
-  An array receiver names the JVM array type (`[Ljava/lang/String;`, `[C`), not `kotlin/Array`
-  or `kotlin/CharArray`, which have no class file (`tests/inherited_member_owner_e2e.rs`).
 - `enum class`: compiled as a `final` class extending `java/lang/Enum` with a `public static final`
   constant per entry, a synthetic `$VALUES` array, a private `(String name, int ordinal, …userArgs)`
   constructor calling `super(name, ordinal)`, a `<clinit>` that constructs entries in declaration
@@ -5662,8 +5673,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   callee has no scopes, so its lambda takes the call's line. The table spells the names once it is
   complete (`src/jvm/classfile/inline_scope_frames.rs`), and a marker's call-site line moves from
   the method's lines into the class's with the method's line table, as kotlinc's
-  `SourceMapCopyingMethodVisitor` copies it. The command line still refuses the argument until
-  every inlining path numbers its scopes, and the box harness selects it with
+  `SourceMapCopyingMethodVisitor` copies it. The box harness selects it with
   `// USE_INLINE_SCOPES_NUMBERS` (`tests/box_regressions/inlineScopes/`).
 - **A block's local slots are reused after the block ends**, as kotlinc's `FrameMap` reuses them:
   its block end leaves each variable the block declared, and a variable left from the top of the
@@ -12252,6 +12262,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   included, are what a use inherits.
   Tests: `tests/type_use_annotation_metadata_e2e.rs`.
 
+  Checked applications retain written argument indices beside their declaration-ordered values
+  through common IR, including each nested annotation inside a grouped vararg. Metadata consumes
+  those indices directly, then appends materialized unwritten values such as an omitted vararg's
+  empty array. It does not remap arguments from syntax after checking. Declaration annotation
+  metadata follows the same written order; physical annotation attributes keep declaration order.
+
 - **A named function-type parameter records `@ParameterName` on its type.** kotlinc writes
   `(count: Int) -> Unit` as `Function1<@ParameterName(name = "count") Int, Unit>` in `@Metadata`:
   a `Type.annotation` whose one argument is the string `name`, after the annotations the parameter
@@ -13363,8 +13379,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `String` or `@Composable () -> Unit`, a call argument that is not a constant, a parameter, or
   computed from a parameter, any other use of a composable lambda parameter, a grouping annotation
   or explicit applier target, a call to another file's composable, a name an overload with lambdas
-  shares, a recursive function with composable lambda parameters, and a class kotlinc would give
-  `$stable`. A nonempty `metricsDestination`/`reportsDestination` is an
+  shares, a recursive function with composable lambda parameters, and a class whose stability its
+  file does not decide (a field of a generic class or of a generic value class whose underlying
+  type names a type parameter, of another file's `inner` or annotation class, or of a numbered
+  `KFunctionN` type). A nonempty `metricsDestination`/`reportsDestination` is an
   `UnimplementedOption` error. The runtime functions the code calls are selected at the handoff by
   their Kotlin signatures, or the module is rejected. Covered:
   `Unit` top-level composables with a block body whose parameters are primitives or `String`. Each
@@ -19561,7 +19579,22 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
     value index.
 
   The stability test is the read stability common IR publishes for each `GetValue`
-  (`IrFile::binding_read_stability`), not the shape of the FIR expression. In the 2.4.20 box
+  (`IrFile::binding_read_stability`), not the shape of the FIR expression. Reads authenticated as
+  a body's own receiver parameters or its by-value receiver captures publish this same immutable
+  binding fact. The referenced object may remain mutable; computed receivers and captured mutable
+  cells still require a snapshot. A JVM safe-cast snapshot of an object cell keeps the erased
+  `ObjectRef.element` slot until the type test, without an intermediate cast to the variable's
+  semantic type. Named declarations and primitive cells retain their existing storage rules.
+  `implicit_receiver_stability_e2e` compares complete modules and runtime results for own, captured
+  and inline receivers, computed operands and reassigned captured cells, including the complete
+  `bareCastTargetArguments.kt` regression.
+
+  Authenticated serialized receiver parameters publish the same immutable binding fact, including
+  prepared-inline, initializer and lifted closure frames. Declaration-role agreement still gates
+  those direct value reads; locals, mutable cells and structural receiver field reads retain their
+  separate stability decisions. Complete KLIB/source IR comparisons cover the retained fact.
+
+  In the 2.4.20 box
   corpus 8 more files become byte-identical to kotlinc (302 to 310: `array_to_any`, `fullForm`,
   `iterator`, `kt6434_2`, `multiDeclaration`, `nonNullArray`, `shortForm`,
   `typeAliasConstructorForArray`). Open: kotlinc folds a constant `when` subject, names the
@@ -19619,7 +19652,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
     such runs puts its own line in effect and the next run restores the call's. With every
     parameter supplied, the mask push is that first synthetic operand. A defaulted CONSTRUCTOR
     takes the identical rule: it previously restored the line only at the `invokespecial`, three
-    bytes late.
+    bytes late. A dependency's constructor is realized as a construction whose descriptor is the
+    `$default` overload's and whose operands already hold the placeholders, masks and marker; the
+    realization records which of them it added, so the construction's line returns at their first
+    run there too (`a_defaulted_dependency_construction_maps_its_lines_like_kotlinc`). When a
+    suspending body unshares the expressions around a suspension point, a copied construction keeps
+    that record exactly as a copied call does, in both the state-machine handoff and the bytecode
+    machine (`a_defaulted_dependency_construction_in_a_suspending_body_maps_its_lines_like_kotlinc`).
   - **Which operands those are is RECORDED, never recognized by shape.** A realized `Const(0)` and
     a source `0` are the same node, so the pass that invents them records their physical positions
     against the call (`jvm::default_call_operands::DefaultCallOperands`, the backend-owned table the
@@ -20846,8 +20885,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   compilation's subtyping), so its parameters and result are substituted as a source member call
   is. A value used as one of its supertypes, by an implicit cast, a branch or an argument, is the
   value itself, with the coercion checked FIR places for a nullable target. An implicit cast to a
-  subtype, or to another parameterization of the same classifier, is the smart cast kotlinc proved
-  and lowers as a cast; any other implicit cast declines. A prepared copy erases the type
+  subtype, to another parameterization of the same classifier, or to a subtype of the value's
+  star projection (kotlinc erases the checked arguments, so `this is Collection<*>` narrows an
+  `Iterable<T>`), is the smart cast kotlinc proved and lowers as a cast; any other implicit cast
+  declines. A prepared copy erases the type
   parameters of the inline functions it already expanded to their bounds, so a value typed with a
   supertype of the declared type, passed to a function value or produced by one, is that erased
   value. A `FOR_LOOP` block is the source `for` over an iterator: an unnamed iterator local and a
@@ -20855,7 +20896,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   source `try`, each `catch` parameter bound to the next value slot under its source name, each
   branch of a non-`Unit` `try` converted to its type as a conditional's branches are. Tests:
   `klib_lowering::tests::control_forms::try_lowers_as_the_source_try_does`,
-  `klib_lowering::tests::inline_templates::a_member_of_a_generic_class_is_called_at_its_receiver_type_arguments`.
+  `klib_lowering::tests::inline_templates::a_member_of_a_generic_class_is_called_at_its_receiver_type_arguments`,
+  `klib_lowering::tests::control_forms::stdlib_star_projected_smart_cast_lowers_as_a_cast`.
 - **The Native backend realizes what an expanded library body reaches.** A KLIB member's builtin
   operation (`Int.and`, `Long.times`, `Int.inv`, `Array.size`, `String.length`) is attached when
   the provider publishes the member, before its identity is assigned, so a template's call of it
