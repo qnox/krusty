@@ -96,7 +96,7 @@ impl IrFile {
             }
             IrExpr::PrimitiveBinOp { op, .. } if op.yields_boolean() => Ty::Boolean,
             IrExpr::Equality { .. } => Ty::Boolean,
-            IrExpr::PrimitiveNeg { ty, .. } => *ty,
+            IrExpr::PrimitiveNeg { ty, .. } | IrExpr::AbsentArgument { ty } => *ty,
             IrExpr::StringConcat(_) => Ty::String,
             IrExpr::UnitInstance => Ty::Unit,
             // A construction, a singleton and an enum constant name their class; an array
