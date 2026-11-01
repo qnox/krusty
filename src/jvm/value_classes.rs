@@ -68,7 +68,7 @@ pub(crate) use declaration_inventory::record_referenced as record_referenced_val
 use descriptor_parameters::erase_descriptor;
 pub(crate) use inherited_default_calls::InheritedDefaultStatics;
 use lambda_slots::{boxed_lambda_own_params_from, lambda_sam_params, lambda_slot_is_boxed};
-pub(crate) use member_names::suspend_lambda_invoke_name;
+pub(crate) use member_names::{member_signature_is_mangled, suspend_lambda_invoke_name};
 use member_names::{vc_mangle, vc_mangle_once, vc_member_entry_name, vc_member_impl_name};
 pub(crate) use module_members::*;
 use operand_nullness::{operand_nonnull, operand_null_only};

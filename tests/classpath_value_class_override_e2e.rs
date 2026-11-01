@@ -1,6 +1,7 @@
 //! A class implementing a dependency interface whose functions take a value class. The dependency
 //! stores those functions under their mangled JVM names (`get-<hash>`); the implementation must
-//! declare the same name once, not mangle the already-mangled name a second time.
+//! declare the same name once, not mangle the already-mangled name a second time. An unsigned
+//! parameter and a value-class extension receiver mangle the name as a value class does.
 use super::common;
 
 const LIBRARY: &str = r#"package lib
@@ -12,11 +13,14 @@ import kotlin.reflect.KClass
 interface Registry {
     fun <T : Any> get(key: Key, type: KClass<T>): T
     fun all(key: Key): List<String>
+    fun count(limit: UInt): Int
+    fun Key.length(): Int
     val size: Int
 }
 
-fun read(registry: Registry, key: Key): String =
-    registry.get(key, String::class) + registry.all(key).joinToString() + registry.size
+fun read(registry: Registry, key: Key): String = with(registry) {
+    get(key, String::class) + all(key).joinToString() + size + count(3u) + key.length()
+}
 "#;
 
 const CONSUMER: &str = r#"import lib.*
@@ -26,12 +30,14 @@ class MapRegistry : Registry {
     @Suppress("UNCHECKED_CAST")
     override fun <T : Any> get(key: Key, type: KClass<T>): T = key.value as T
     override fun all(key: Key): List<String> = listOf(key.value, key.value)
+    override fun count(limit: UInt): Int = limit.toInt()
+    override fun Key.length(): Int = value.length
     override val size: Int get() = 2
 }
 
 fun box(): String {
     val text = read(MapRegistry(), Key("k"))
-    return if (text == "kk, k2") "OK" else "fail: $text"
+    return if (text == "kk, k231") "OK" else "fail: $text"
 }
 "#;
 
