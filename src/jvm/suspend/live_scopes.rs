@@ -312,11 +312,7 @@ impl ScopeWalk<'_> {
                             // boundary as the local variable table's entry for it, so a spliced
                             // expansion's copy carries its inline depth in both.
                             name: c.binding.as_ref().and_then(|binding| {
-                                crate::jvm::debug_local_names::render(
-                                    self.ir,
-                                    Some(binding.name.as_str()),
-                                    binding.provenance,
-                                )
+                                crate::jvm::debug_local_names::catch_parameter(self.ir, binding)
                             }),
                             named: true,
                         });

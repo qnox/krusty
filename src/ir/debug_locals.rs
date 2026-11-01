@@ -182,6 +182,15 @@ pub enum IrLambdaForm {
     AnonymousFunction,
 }
 
+/// How a `catch` parameter was named.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum IrCatchName {
+    /// The source spelling, as the declaration wrote it.
+    Source(String),
+    /// `catch (_: E)`: the parameter declares no name. A target spells this role itself.
+    Unused,
+}
+
 /// A `catch (e: E)` parameter's debug-local facts.
 ///
 /// A catch binding is DECLARED by its `IrCatch`, not by a `Variable` node, so it has no declaration
@@ -190,8 +199,8 @@ pub enum IrLambdaForm {
 /// a target renders it through the same boundary rather than writing the source spelling out.
 #[derive(Clone, Debug)]
 pub struct IrCatchBinding {
-    /// Source spelling, as the declaration wrote it.
-    pub name: String,
+    /// What the declaration named the parameter.
+    pub name: IrCatchName,
     /// Inline provenance. `None` while the binding is still in the body that declared it; an
     /// expansion that clones this catch nests it exactly as it nests an ordinary local's.
     pub(crate) provenance: Option<IrDebugLocalProvenance>,
@@ -200,16 +209,25 @@ pub struct IrCatchBinding {
 impl IrCatchBinding {
     pub(crate) fn source(name: String) -> Self {
         Self {
-            name,
+            name: IrCatchName::Source(name),
             provenance: None,
         }
     }
 
-    /// The binding of `catch (_: E)`. It is named kotlinc's `<unused var>`
-    /// (`SpecialNames.UNDERSCORE_FOR_UNUSED_VAR`), the name the same parameter carries in a KLIB's
-    /// IR, so a deserialized catch and a source one are one binding shape.
+    /// The binding of `catch (_: E)`, which declares no name.
     pub(crate) fn unused() -> Self {
-        Self::source("<unused var>".to_owned())
+        Self {
+            name: IrCatchName::Unused,
+            provenance: None,
+        }
+    }
+
+    /// The source spelling, absent for an unused parameter.
+    pub fn source_name(&self) -> Option<&str> {
+        match &self.name {
+            IrCatchName::Source(name) => Some(name),
+            IrCatchName::Unused => None,
+        }
     }
 
     /// Carry this binding one inline expansion deeper. A binding with no provenance yet is one

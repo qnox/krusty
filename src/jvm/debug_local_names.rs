@@ -1,6 +1,9 @@
 //! JVM spelling of backend-neutral common-IR debug-local provenance.
 
-use crate::ir::{ExprId, FunId, IrDebugLocalProvenance, IrFile, IrInlineLocalRole, IrLambdaOrigin};
+use crate::ir::{
+    ExprId, FunId, IrCatchBinding, IrCatchName, IrDebugLocalProvenance, IrFile, IrInlineLocalRole,
+    IrLambdaOrigin,
+};
 
 /// Physical JVM names for specialized lambda implementation copies.
 ///
@@ -181,6 +184,16 @@ pub(super) fn escaped(name: &str) -> String {
         }
     }
     escaped
+}
+
+/// Render a `catch` parameter's debug local. An unused parameter (`catch (_: E)`) takes kotlinc's
+/// `<unused var>` (`SpecialNames.UNDERSCORE_FOR_UNUSED_VAR`).
+pub(super) fn catch_parameter(ir: &IrFile, binding: &IrCatchBinding) -> Option<String> {
+    let source = match &binding.name {
+        IrCatchName::Source(name) => name.as_str(),
+        IrCatchName::Unused => "<unused var>",
+    };
+    render(ir, Some(source), binding.provenance)
 }
 
 /// Render one debug local from the two facts common IR carries for every binding: the source

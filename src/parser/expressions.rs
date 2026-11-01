@@ -1534,7 +1534,8 @@ impl Parser<'_> {
                     self.parse_annotation();
                     self.skip_newlines();
                 }
-                let unused = self.at(TokenKind::Ident) && self.text() == "_" && !self.escaped_ident();
+                let unused =
+                    self.at(TokenKind::Ident) && self.text() == "_" && !self.escaped_ident();
                 let name = self.ident_or_error("catch parameter name");
                 self.skip_newlines();
                 self.expect(TokenKind::Colon, "':'");

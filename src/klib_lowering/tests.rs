@@ -504,7 +504,7 @@ fn render_node(ir: &IrFile, expression: ExprId) -> String {
                 .map(|catch| format!(
                     " catch(v{} {:?}: {}) {}",
                     catch.var,
-                    catch.binding.as_ref().map(|binding| binding.name.as_str()),
+                    catch.binding.as_ref().map(|binding| &binding.name),
                     type_name_of(catch.ty),
                     render(ir, catch.body)
                 ))
