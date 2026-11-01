@@ -61,9 +61,9 @@ fn module_member_carrier(ir: &IrFile, ty: Ty) -> Ty {
 
 /// The parameter and result types a forwarder to an inherited member declares: the carriers of a
 /// member this module declares elsewhere, as its declaring file's value-class pass lowers them, or
-/// the recorded physical and semantic types of a dependency's member. kotlinc's forwarders declare,
-/// guard and annotate the lowered member, so a value-class parameter or result of this module is
-/// its carrier throughout.
+/// the recorded physical types of a dependency's member. kotlinc's forwarders declare, guard and
+/// annotate the lowered member, so a value-class parameter or result is its carrier throughout,
+/// whichever module declares the member or the value class.
 pub(crate) struct ForwardedMemberTypes {
     pub(crate) physical_params: Vec<Ty>,
     pub(crate) physical_ret: Ty,
@@ -137,7 +137,7 @@ pub(crate) fn forwarded_member_types(
                     .iter()
                     .map(|ty| module_member_carrier(ir, *ty))
                     .collect(),
-                semantic_ret: ret,
+                semantic_ret: semantic_result(ir, default),
                 value_class_params: vec![None; default.parameters.len()],
                 value_class_ret: None,
             };
@@ -158,10 +158,25 @@ pub(crate) fn forwarded_member_types(
     ForwardedMemberTypes {
         physical_params: physical_params.to_vec(),
         physical_ret: shape.physical_ret,
-        semantic_params: default.parameters.to_vec(),
-        semantic_ret: default.result,
+        semantic_params: default
+            .parameters
+            .iter()
+            .map(|ty| module_member_carrier(ir, *ty))
+            .collect(),
+        semantic_ret: semantic_result(ir, default),
         value_class_params: vec![None; default.parameters.len()],
         value_class_ret: None,
+    }
+}
+
+/// The result a forwarder declares: the carrier of a value class, as the lowered member returns it,
+/// except a `suspend` member's, which travels boxed as its continuation's type argument
+/// (`Continuation<? super Id>`).
+fn semantic_result(ir: &IrFile, default: &crate::fir::ResolvedInheritedDefault) -> Ty {
+    if default.suspend {
+        default.result
+    } else {
+        module_member_carrier(ir, default.result)
     }
 }
 
