@@ -24,6 +24,8 @@ mod box_ratchet;
 mod box_reference_classes;
 #[path = "box_vendored_e2e.rs"]
 mod box_vendored_e2e;
+#[path = "bytecode_corpus.rs"]
+mod bytecode_corpus;
 mod dependency_template_rejections;
 #[path = "kotlin_box_ir_jvm_conformance.rs"]
 mod kotlin_box_ir_jvm_conformance;

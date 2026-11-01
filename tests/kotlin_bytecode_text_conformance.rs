@@ -20,48 +20,20 @@
 //! Only Kotlin's classes are textified: a mixed case's javac output is not in the reference
 //! compiler's class factory. Applicability and the compilation topology are the JVM box lane's.
 //!
-//! Outcomes ratchet like the CLI corpus. `tests/bytecode_text_expected_failures/jvm/<version>.txt`
-//! lists the cases krusty does not reproduce yet; a case leaving or joining it fails until the list
-//! is updated (`KRUSTY_BLESS_BYTECODE_TEXT_EXPECTATIONS=1` rewrites it from a full local run).
-//! `tests/bytecode_text_expected_not_applicable/jvm/<version>.txt` lists the cases the reference
-//! compiler does not reproduce through this runner, each under a comment saying why;
-//! `the_reference_compiler_reproduces_every_applicable_bytecode_text_case` holds it honest.
-//! `KRUSTY_BYTECODE_TEXT_ONLY=<substring>` runs a subset and reports each mismatch.
+//! The ratchet is `bytecode_corpus`'s, under `tests/bytecode_text_expected_*`, blessed with
+//! `KRUSTY_BLESS_BYTECODE_TEXT_EXPECTATIONS=1` and focused with `KRUSTY_BYTECODE_TEXT_ONLY`.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
-
-use rayon::prelude::*;
-
-use krusty::conformance::{BoxJdk, BoxJdkRoots};
-use krusty::kotlin_version::KotlinVersion;
+use std::collections::BTreeMap;
 
 use super::asm_text;
-use super::box_ratchet;
 use super::box_reference_classes;
-use super::common;
-use super::kotlin_box_ir_jvm_conformance::{compile_box_case, CompiledClasses};
-
-const CORPUS: &str = "compiler/testData/codegen/bytecodeText";
-const FAILURES: &str = "bytecode_text_expected_failures";
-const NOT_APPLICABLE: &str = "bytecode_text_expected_not_applicable";
-const BLESS: &str = "KRUSTY_BLESS_BYTECODE_TEXT_EXPECTATIONS";
+use super::bytecode_corpus::{Case, CaseClasses, CheckError, Outcome, Suite, TestModule};
 
 /// Classes under this prefix are the generated coroutine helpers; a single-file module's
 /// expectations never count them.
 const HELPERS_PREFIX: &str = "helpers/";
 const JVM_IR_TEMPLATES: &str = "// JVM_IR_TEMPLATES";
 const JVM_IR_TEMPLATES_WITH_INLINE_SCOPES: &str = "// JVM_IR_TEMPLATES_WITH_INLINE_SCOPES";
-
-#[derive(Debug, PartialEq, Eq)]
-enum Outcome {
-    Pass,
-    Fail(String),
-    /// Outside the JVM backend: a target or mute directive excludes it.
-    Excluded(&'static str),
-    /// The runner itself could not evaluate the case.
-    Unavailable(String),
-}
 
 /// One `// <N> <pattern>` line.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -169,80 +141,6 @@ impl MultiFileOccurrences {
     }
 }
 
-/// A Kotlin source file of a test module.
-struct TestFile {
-    name: String,
-    content: String,
-    /// Supplied by the test infrastructure (the coroutine helpers), not by the case.
-    additional: bool,
-}
-
-/// A module of a case, named as the compilation names its classes' module.
-struct TestModule {
-    name: String,
-    files: Vec<TestFile>,
-}
-
-/// The modules and Kotlin files of `src`, in the topology the JVM box lane compiles it under.
-fn test_modules(src: &str, stem: &str) -> Result<Vec<TestModule>, String> {
-    let kotlin = |files: Vec<(String, String)>| -> Vec<TestFile> {
-        files
-            .into_iter()
-            .map(|(name, content)| TestFile {
-                name: format!("{name}.kt"),
-                content,
-                additional: false,
-            })
-            .collect()
-    };
-    let helpers = || TestFile {
-        name: "CoroutineUtil.kt".to_string(),
-        content: krusty::conformance::COROUTINE_HELPERS.to_string(),
-        additional: true,
-    };
-    if src.contains("// MODULE:") {
-        let mut modules = krusty::conformance::split_modules(src)
-            .ok_or("the case's modules are outside the box compilation model")?;
-        if krusty::conformance::directive(src, "WITH_COROUTINES") {
-            krusty::conformance::inject_support_module(
-                &mut modules,
-                krusty::conformance::COROUTINE_HELPERS,
-            );
-        }
-        return Ok(krusty::conformance::module_units(&modules)
-            .into_iter()
-            .map(|unit| {
-                let support = unit.name == "support";
-                let mut files = kotlin(unit.files);
-                for file in &mut files {
-                    file.additional = support;
-                }
-                TestModule {
-                    name: unit.name,
-                    files,
-                }
-            })
-            .collect());
-    }
-    let mut files = if src.contains("// FILE:") || src.contains("// WITH_COROUTINES") {
-        let (blocks, java) = krusty::conformance::split_files(src);
-        if blocks.is_empty() && java.is_empty() {
-            kotlin(vec![(stem.to_string(), src.to_string())])
-        } else {
-            kotlin(blocks)
-        }
-    } else {
-        kotlin(vec![(stem.to_string(), src.to_string())])
-    };
-    if src.contains("// WITH_COROUTINES") {
-        files.push(helpers());
-    }
-    Ok(vec![TestModule {
-        name: box_reference_classes::MAIN_MODULE.to_string(),
-        files,
-    }])
-}
-
 /// A Kotlin-compiled class of a module: its output path and its text.
 struct OutputClass {
     path: String,
@@ -313,14 +211,6 @@ fn check_occurrences(text: &str, expected: &[Occurrence]) -> Result<Option<Strin
     Ok((!mismatches.is_empty()).then(|| mismatches.join("; ")))
 }
 
-/// Why a module's expectations could not be counted.
-enum CheckError {
-    /// The compiled classes themselves are at fault.
-    Failed(String),
-    /// The runner could not count them.
-    Unavailable(String),
-}
-
 /// Every expectation of `module` against its `classes`. `Ok(None)` when all hold.
 fn check_module(
     case: &str,
@@ -365,23 +255,18 @@ fn check_module(
     }))
 }
 
-/// Check every module of a case against the classes a compiler emitted for it, looked up by
-/// module name.
-fn check_case<'a>(
-    case: &str,
-    modules: &[TestModule],
-    classes_of: impl Fn(&str) -> Option<Vec<(&'a str, &'a [u8])>>,
-) -> Outcome {
+/// Every module's expectations against the classes a compiler emitted for it.
+fn check_case(case: &Case, classes: &CaseClasses<'_>) -> Outcome {
     let mut problems = Vec::new();
-    for module in modules {
-        let Some(classes) = classes_of(&module.name) else {
+    for module in &case.modules {
+        let Some(classes) = classes.module(&module.name) else {
             problems.push(format!("module {} emitted no classes", module.name));
             continue;
         };
-        match check_module(case, module, &classes) {
+        match check_module(&case.src, module, classes) {
             Ok(None) => {}
             Ok(Some(problem)) | Err(CheckError::Failed(problem)) => problems.push(problem),
-            Err(CheckError::Unavailable(error)) => return Outcome::Unavailable(error),
+            Err(error @ CheckError::Unavailable(_)) => return error.into_outcome(),
         }
     }
     if problems.is_empty() {
@@ -391,356 +276,28 @@ fn check_case<'a>(
     }
 }
 
-/// The corpus and the inputs every case compiles against.
-struct Corpus {
-    root: PathBuf,
-    jdk_roots: BoxJdkRoots,
-    reflect: PathBuf,
-}
-
-impl Corpus {
-    fn new() -> Self {
-        let box_dir = krusty::toolchain::box_corpus_dir()
-            .expect("the Kotlin box corpus is provisioned (`just box-corpus <version>`)");
-        // `just box-corpus` checks the bytecode corpora out beside codegen/box.
-        let root = box_dir
-            .parent()
-            .expect("codegen/box has a parent")
-            .join("bytecodeText");
-        assert!(
-            root.is_dir(),
-            "{} is missing; re-provision the checkout with `just box-corpus <version>`",
-            root.display()
-        );
-        let java_home = common::java_home();
-        let jdk_roots = BoxJdkRoots::new(
-            krusty::toolchain::box_mock_jdk_rt_jar(&box_dir)
-                .unwrap_or_else(|error| panic!("{error}")),
-            Some(Path::new(&java_home).join("lib").join("modules")).filter(|path| path.is_file()),
-        );
-        let reflect = krusty::toolchain::dist_jar("kotlin-reflect.jar")
-            .expect("the reference distribution's kotlin-reflect.jar is provisioned");
-        Corpus {
-            root,
-            jdk_roots,
-            reflect,
-        }
-    }
-
-    fn cases(&self) -> Vec<PathBuf> {
-        let mut cases = krusty::conformance::kotlin_files(&self.root);
-        if let Ok(only) = std::env::var("KRUSTY_BYTECODE_TEXT_ONLY") {
-            cases.retain(|case| case.to_string_lossy().contains(&only));
-        }
-        cases
-    }
-
-    fn key(&self, case: &Path) -> String {
-        box_ratchet::corpus_key(&self.root, case)
-    }
-
-    /// The case prepared for the JVM, its stem, its modules and the classpath it compiles
-    /// against, or why it is outside the JVM backend.
-    fn prepare(&self, case: &Path) -> Result<Prepared, Outcome> {
-        let src = std::fs::read_to_string(case)
-            .unwrap_or_else(|error| panic!("read {}: {error}", case.display()));
-        let src =
-            krusty::conformance::prepare_test_source(&src, krusty::conformance::TestTarget::Jvm);
-        if !krusty::conformance::backend_applicable(&src, krusty::conformance::BACKENDS) {
-            return Err(Outcome::Excluded(
-                "targeted at or muted for another backend",
-            ));
-        }
-        let stem = case
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .unwrap_or("File")
-            .to_string();
-        let modules = test_modules(&src, &stem).map_err(Outcome::Unavailable)?;
-        let mut classpath = krusty::toolchain::classpath_jars_for(&src);
-        if !classpath.contains(&self.reflect) {
-            classpath.push(self.reflect.clone());
-        }
-        Ok(Prepared {
-            src,
-            stem,
-            modules,
-            classpath,
-        })
-    }
-
-    fn jdk(&self, src: &str) -> BoxJdk<'_> {
-        self.jdk_roots.select(src)
-    }
-}
-
-struct Prepared {
-    src: String,
-    stem: String,
-    modules: Vec<TestModule>,
-    classpath: Vec<PathBuf>,
-}
-
-fn krusty_outcome(corpus: &Corpus, case: &Path) -> Outcome {
-    let prepared = match corpus.prepare(case) {
-        Ok(prepared) => prepared,
-        Err(outcome) => return outcome,
-    };
-    let compiled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        compile_box_case(
-            &prepared.src,
-            &prepared.stem,
-            &prepared.classpath,
-            corpus.jdk(&prepared.src).classpath_root(),
-            &|_| {},
-        )
-    }));
-    let compiled: CompiledClasses = match compiled {
-        Ok(Some(compiled)) => compiled,
-        Ok(None) => return Outcome::Fail("krusty did not compile the case".to_string()),
-        Err(panic) => {
-            let reason = panic
-                .downcast_ref::<String>()
-                .cloned()
-                .or_else(|| panic.downcast_ref::<&str>().map(|s| s.to_string()))
-                .unwrap_or_default();
-            return Outcome::Fail(format!("krusty panicked: {reason}"));
-        }
-    };
-    check_case(&prepared.src, &prepared.modules, |module| {
-        compiled
-            .module_ranges
-            .iter()
-            .find(|(name, _)| name == module)
-            .map(|(_, range)| {
-                compiled.flat[range.clone()]
-                    .iter()
-                    .map(|(name, bytes)| (name.as_str(), bytes.as_slice()))
-                    .collect()
-            })
-    })
-}
-
-fn reference_outcome(corpus: &Corpus, case: &Path) -> Outcome {
-    let prepared = match corpus.prepare(case) {
-        Ok(prepared) => prepared,
-        Err(outcome) => return outcome,
-    };
-    let reference = match box_reference_classes::reference_compile(
-        &prepared.src,
-        &prepared.stem,
-        &prepared.classpath,
-        corpus.jdk(&prepared.src),
-        krusty::conformance::COROUTINE_HELPERS,
-    ) {
-        Ok(reference) => reference,
-        Err(error) => return Outcome::Fail(format!("kotlinc did not compile the case: {error}")),
-    };
-    check_case(&prepared.src, &prepared.modules, |module| {
-        reference.module(module).map(|classes| {
-            classes
-                .iter()
-                .map(|(name, bytes)| (name.as_str(), bytes.as_slice()))
-                .collect()
-        })
-    })
-}
-
-fn run_corpus(
-    corpus: &Corpus,
-    outcome: fn(&Corpus, &Path) -> Outcome,
-) -> BTreeMap<String, Outcome> {
-    let mut pool = rayon::ThreadPoolBuilder::new()
-        // The box lane's worker stacks: the compiler's recursive descent needs more than 8 MB in
-        // the unoptimized test profile.
-        .stack_size(64 * 1024 * 1024);
-    if let Some(threads) = std::env::var("KRUSTY_TEST_THREADS")
-        .ok()
-        .and_then(|value| value.parse().ok())
-    {
-        pool = pool.num_threads(threads);
-    }
-    let pool = pool.build().expect("build the worker pool");
-    let cases = corpus.cases();
-    pool.install(|| {
-        cases
-            .par_iter()
-            .map(|case| (corpus.key(case), outcome(corpus, case)))
-            .collect()
-    })
-}
-
-fn expectation_path(directory: &str, version: KotlinVersion) -> PathBuf {
-    box_ratchet::read_path(directory, "jvm", version)
-}
-
-/// A missing list is empty: a release with nothing to excuse needs no file.
-fn load_expectation(path: &Path) -> BTreeSet<String> {
-    match std::fs::read_to_string(path) {
-        Ok(text) => box_ratchet::parse(&text)
-            .unwrap_or_else(|error| panic!("invalid expectation {}: {error}", path.display())),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => BTreeSet::new(),
-        Err(error) => panic!("read {}: {error}", path.display()),
-    }
-}
-
-fn render_failures(version: KotlinVersion, failures: &BTreeSet<String>) -> String {
-    let mut text = format!(
-        "# Kotlin {version} {CORPUS} cases krusty does not reproduce yet, relative to that\n\
-         # directory. Regenerate with {BLESS}=1 on a full local run. The list only shrinks.\n"
-    );
-    for failure in failures {
-        text.push_str(failure);
-        text.push('\n');
-    }
-    text
-}
-
-fn full_run() -> bool {
-    std::env::var_os("KRUSTY_BYTECODE_TEXT_ONLY").is_none()
-}
+const SUITE: Suite = Suite {
+    directory: "bytecodeText",
+    label: "bytecode text",
+    inventory: "bytecode_text",
+    env: "BYTECODE_TEXT",
+    with_reflect: true,
+    check: check_case,
+};
 
 #[test]
 fn krusty_reproduces_kotlincs_bytecode_text_corpus() {
-    let corpus = Corpus::new();
-    let version = krusty::kotlin_version::target();
-    let outcomes = run_corpus(&corpus, krusty_outcome);
-    let not_applicable = load_expectation(&expectation_path(NOT_APPLICABLE, version));
-    let full = full_run();
-
-    let mut failed = BTreeMap::new();
-    let mut passed = 0;
-    let mut excluded = 0;
-    let mut problems = Vec::new();
-    for (key, outcome) in &outcomes {
-        match outcome {
-            Outcome::Pass if not_applicable.contains(key) => problems.push(format!(
-                "{key}: passes but is listed as not applicable; remove it from the list"
-            )),
-            Outcome::Pass => passed += 1,
-            Outcome::Fail(_) if not_applicable.contains(key) => {}
-            Outcome::Fail(reason) => {
-                failed.insert(key.clone(), reason.clone());
-            }
-            Outcome::Excluded(_) => excluded += 1,
-            Outcome::Unavailable(reason) => {
-                problems.push(format!("{key}: cannot run here: {reason}"))
-            }
-        }
-    }
-    if full {
-        for key in &not_applicable {
-            match outcomes.get(key) {
-                None => problems.push(format!(
-                    "{key}: listed as not applicable but absent from the corpus"
-                )),
-                Some(Outcome::Excluded(reason)) => problems.push(format!(
-                    "{key}: listed as not applicable but already excluded ({reason})"
-                )),
-                Some(_) => {}
-            }
-        }
-    }
-    let failing: BTreeSet<String> = failed.keys().cloned().collect();
-    let bless = box_ratchet::bless_requested(std::env::var(BLESS).ok().as_deref())
-        .unwrap_or_else(|error| panic!("{}", error.replace("BOX", "BYTECODE_TEXT")));
-    if bless {
-        assert!(
-            std::env::var_os("CI").is_none() && full,
-            "{BLESS} is refused under CI and on a partial run: expectations are blessed locally"
-        );
-        box_ratchet::record(
-            FAILURES,
-            "jvm",
-            version,
-            &failing,
-            &render_failures(version, &failing),
-        )
-        .unwrap_or_else(|error| panic!("record the {version} bytecode text expectations: {error}"));
-    }
-    let failures_path = expectation_path(FAILURES, version);
-    let expected_failures = load_expectation(&failures_path);
-    for key in failing.difference(&expected_failures) {
-        problems.push(format!("{key}: newly fails: {}", failed[key]));
-    }
-    for key in expected_failures.difference(&failing) {
-        match outcomes.get(key) {
-            Some(Outcome::Pass) => problems.push(format!(
-                "{key}: now passes; remove it from {}",
-                failures_path.display()
-            )),
-            Some(Outcome::Unavailable(_)) => {}
-            Some(Outcome::Excluded(reason)) => problems.push(format!(
-                "{key}: listed as failing but excluded ({reason}); remove it from {}",
-                failures_path.display()
-            )),
-            Some(Outcome::Fail(_)) => {}
-            None if full => problems.push(format!(
-                "{key}: listed as failing but absent from the corpus"
-            )),
-            None => {}
-        }
-    }
-    let applicable = outcomes.len() - excluded - not_applicable.len();
-    eprintln!(
-        "bytecode text corpus: {passed}/{applicable} applicable cases pass ({:.1}%); \
-         {} expected failures, {} not applicable, {excluded} for other backends, of {}",
-        100.0 * passed as f64 / applicable.max(1) as f64,
-        failing.len(),
-        not_applicable.len(),
-        outcomes.len()
-    );
-    if !full {
-        for (key, reason) in &failed {
-            eprintln!("  {key}: {reason}");
-        }
-    }
-    assert!(
-        passed > 0,
-        "no bytecode text case passed: check the corpus and the ASM text server"
-    );
-    assert!(
-        problems.is_empty(),
-        "{} bytecode text case(s) disagree with {}:\n  {}",
-        problems.len(),
-        failures_path.display(),
-        problems.join("\n  ")
-    );
+    SUITE.assert_krusty_ratchet();
 }
 
-/// Runs the reference kotlinc's classes through the same runner. Every case the not-applicable
-/// list does not excuse must pass and every listed one must not, which checks that the runner
-/// reproduces JetBrains' bytecode text test and that each listed case is a difference of
-/// environment rather than a krusty gap. Ignored in ordinary runs: a cold reference cache compiles
-/// the whole corpus with kotlinc.
+/// Runs the reference kotlinc's classes through the same runner; see
+/// [`Suite::assert_reference_reproduces_applicable_cases`]. Ignored in ordinary runs: a cold
+/// reference cache compiles the whole corpus with kotlinc. `scripts/conformance-regressions.sh`
+/// runs it for every supported release.
 #[test]
 #[ignore = "compiles the whole bytecode text corpus with the reference kotlinc"]
 fn the_reference_compiler_reproduces_every_applicable_bytecode_text_case() {
-    let corpus = Corpus::new();
-    let version = krusty::kotlin_version::target();
-    let outcomes = run_corpus(&corpus, reference_outcome);
-    let not_applicable = load_expectation(&expectation_path(NOT_APPLICABLE, version));
-    let mut problems = Vec::new();
-    for (key, outcome) in &outcomes {
-        match outcome {
-            Outcome::Pass if not_applicable.contains(key) => problems.push(format!(
-                "{key}: the reference compiler reproduces it; remove it from the not-applicable list"
-            )),
-            Outcome::Fail(reason) if !not_applicable.contains(key) => {
-                problems.push(format!("{key}: {reason}"))
-            }
-            Outcome::Unavailable(reason) => {
-                problems.push(format!("{key}: cannot run here: {reason}"))
-            }
-            _ => {}
-        }
-    }
-    assert!(
-        problems.is_empty(),
-        "{} bytecode text case(s) disagree with the reference compiler:\n  {}",
-        problems.len(),
-        problems.join("\n  ")
-    );
+    SUITE.assert_reference_reproduces_applicable_cases();
 }
 
 #[cfg(test)]

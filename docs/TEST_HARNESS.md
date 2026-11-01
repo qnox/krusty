@@ -436,7 +436,8 @@ expression over the text ASM's `Textifier` prints for the case's Kotlin classes,
 `BytecodeTextHandler` does; `// @<path>.class:` narrows the following lines to one class. The text
 and the pattern semantics come from the ASM copy and the JDK the reference distribution runs on,
 through a pooled server (`tests/common/asm_text`), so no request starts a JVM. Applicability and the
-compilation topology are the JVM box lane's. The lane reports `<passed>/<applicable>` on stderr.
+compilation topology are the JVM box lane's, shared with the other bytecode corpora through
+`tests/bytecode_corpus.rs`. The lane reports `<passed>/<applicable>` on stderr.
 
 `tests/bytecode_text_expected_failures/jvm/<version>.txt` lists the cases krusty does not reproduce
 yet; any case joining or leaving it fails. Rewrite it from a full local run:
