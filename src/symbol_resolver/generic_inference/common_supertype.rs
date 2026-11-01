@@ -624,6 +624,24 @@ mod tests {
     }
 
     #[test]
+    fn a_missing_generic_declaration_stays_an_error_through_the_lower_bound_merge() {
+        let left = Ty::obj_args("demo/Inv", &[Ty::obj("demo/Left")]);
+        let right = Ty::obj_args("demo/Inv", &[Ty::obj("demo/Right")]);
+        assert_eq!(
+            super::super::merge_inferred_ty_from_symbols(Some(&EmptySource), left, right),
+            Ty::Error
+        );
+        assert_eq!(
+            super::super::merge_inferred_ty_from_symbols(
+                Some(&EmptySource),
+                Ty::nullable(left),
+                right
+            ),
+            Ty::Error
+        );
+    }
+
+    #[test]
     fn an_n_ary_join_does_not_discard_the_original_lower_bounds() {
         let left = Ty::obj("demo/Left");
         let middle = Ty::obj("demo/Middle");

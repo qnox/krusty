@@ -1425,10 +1425,11 @@ pub(crate) fn merge_inferred_ty_from_symbols(
     // common supertype of `A` and `B`), and
     // an intersection when several incomparable classifiers remain (`A : Base(), I` and
     // `B : Base(), J`, `J : I`, join at `Base & I`). The common-supertype solver owns that algebra
-    // for every lower-bound join; an unknown classifier shape leaves the erased top.
+    // for every lower-bound join. A proven join to the top keeps the erased top; a missing or
+    // invalid classifier declaration is `Ty::Error`, which propagates rather than becoming `Any`.
     let joined =
         common_supertype::common_super_types(source, &[current.non_null(), actual.non_null()]);
-    if joined == Ty::Error || joined.is_erased_top() {
+    if joined.is_erased_top() {
         return merged;
     }
     if current.is_nullable() || actual.is_nullable() {
