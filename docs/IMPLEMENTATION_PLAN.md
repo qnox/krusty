@@ -1,5 +1,12 @@
 # krusty — implementation plan
 
+## Classify every IrFile field for expression copies
+
+`copy_expression_facts` destructures `IrFile` exhaustively, and each table-holding field
+implements `InheritedFacts` in its owning module, so a new field cannot be added without deciding
+whether a copy of an expression inherits it. Behavior is unchanged. This is step 0 of
+`docs/PHASE_FACTS.md`; the next steps move positions, types, call selections and roles onto IR nodes.
+
 ## Class-generic dependency method exports
 
 Retain the complete declared self type, including captured parameters, at FIR lowering and consume

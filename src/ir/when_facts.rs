@@ -1,6 +1,7 @@
 //! What common lowering records about a `when` (and every `if` it lowers to one), by common-IR
 //! identity, for a backend to emit it without re-deciding.
 
+use super::expression_copy::InheritedFacts;
 use super::ExprId;
 use crate::fx_hash::HashMap;
 use crate::types::Ty;
@@ -21,4 +22,17 @@ pub(crate) struct IrWhenFacts {
     /// rebuilds an elvis's branches at the elvis's own position uses this provenance rather than
     /// recognizing the shape.
     pub(crate) elvises: HashMap<ExprId, u32>,
+}
+
+impl InheritedFacts for IrWhenFacts {
+    fn inherit(&mut self, source: ExprId, target: ExprId) {
+        let Self {
+            exhaustive,
+            source_lines,
+            elvises,
+        } = self;
+        exhaustive.inherit(source, target);
+        source_lines.inherit(source, target);
+        elvises.inherit(source, target);
+    }
 }

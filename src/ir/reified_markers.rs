@@ -3,7 +3,8 @@
 
 use crate::fx_hash::HashMap;
 
-use super::{ExprId, IrFile};
+use super::expression_copy::InheritedFacts;
+use super::ExprId;
 
 #[derive(Default)]
 pub(crate) struct ReifiedMarkers {
@@ -19,15 +20,10 @@ pub(crate) struct ReifiedMarkers {
     pub(crate) arrays: HashMap<ExprId, String>,
 }
 
-impl IrFile {
-    /// Give the copy `target` of expression `source` the markers recorded for `source`.
-    pub(super) fn copy_reified_markers(&mut self, source: ExprId, target: ExprId) {
-        let markers = &mut self.reified_markers;
-        if let Some(catches) = markers.catches.get(&source).cloned() {
-            markers.catches.insert(target, catches);
-        }
-        if let Some(array) = markers.arrays.get(&source).cloned() {
-            markers.arrays.insert(target, array);
-        }
+impl InheritedFacts for ReifiedMarkers {
+    fn inherit(&mut self, source: ExprId, target: ExprId) {
+        let Self { catches, arrays } = self;
+        catches.inherit(source, target);
+        arrays.inherit(source, target);
     }
 }
