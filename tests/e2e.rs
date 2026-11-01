@@ -65,4 +65,3 @@ mod metadata_return_types;
 mod serialization_runtime_support;
 #[path = "common/serialization.rs"]
 mod serialization_test_support;
-
