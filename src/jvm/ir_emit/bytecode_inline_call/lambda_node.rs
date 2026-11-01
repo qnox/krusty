@@ -118,12 +118,19 @@ struct LiteralLambda {
 pub(super) fn callable_reference_template(
     ir: &IrFile,
     argument: u32,
-) -> Option<(u32, Vec<u32>, u32, Ty)> {
+) -> Option<(u32, Vec<u32>, u32, usize, Ty)> {
     let IrExpr::CallableReference(reference) = ir.expr(argument) else {
         return None;
     };
-    let (adapter, captures, inline_body, _) = ir.callable_reference_inline_template(argument)?;
-    Some((adapter, captures, inline_body, reference.function_type))
+    let (adapter, captures, inline_body, arity) =
+        ir.callable_reference_inline_template(argument)?;
+    Some((
+        adapter,
+        captures,
+        inline_body,
+        arity,
+        reference.function_type,
+    ))
 }
 
 impl Emitter<'_> {
@@ -131,10 +138,16 @@ impl Emitter<'_> {
     /// error names the checked fact the literal lacks; the implementation method never stands in
     /// for it.
     fn literal_lambda(&self, argument: u32) -> Result<(LiteralLambda, usize), &'static str> {
-        if let Some((impl_fn, captures, inline_body, function_type)) =
+        if let Some((impl_fn, captures, inline_body, arity, function_type)) =
             callable_reference_template(self.ir, argument)
         {
-            return self.callable_reference_literal(impl_fn, captures, inline_body, function_type);
+            return self.callable_reference_literal(
+                impl_fn,
+                captures,
+                inline_body,
+                arity,
+                function_type,
+            );
         }
         let IrExpr::Lambda {
             impl_fn,
@@ -206,6 +219,7 @@ impl Emitter<'_> {
         impl_fn: u32,
         captures: Vec<u32>,
         inline_body: u32,
+        arity: usize,
         function_type: Ty,
     ) -> Result<(LiteralLambda, usize), &'static str> {
         let TyKind::Fun(signature) = function_type.non_null().kind() else {
@@ -213,10 +227,16 @@ impl Emitter<'_> {
         };
         let physical = jvm_function_params(self.ir, impl_fn);
         let split = captures.len();
-        if physical.len() != split + signature.params.len() {
+        if physical.len() != split + arity {
             return Err("a callable reference adapter does not take its captures and parameters");
         }
         let (capture_types, physical_parameters) = physical.split_at(split);
+        // A suspend reference's adapter, like a suspend literal's implementation, takes the
+        // continuation its `invoke` is passed after the function type's parameters.
+        let mut semantic = signature.params.clone();
+        if signature.suspend {
+            semantic.push(Ty::obj("kotlin/coroutines/Continuation"));
+        }
         let result_semantic = self
             .ir
             .logical_types
@@ -225,7 +245,7 @@ impl Emitter<'_> {
             .unwrap_or(signature.ret);
         let (parameter_types, parameter_coercions) = physical_parameters
             .iter()
-            .zip(signature.params.iter())
+            .zip(semantic.iter())
             .map(|(&physical, &semantic)| self.inline_parameter(semantic, physical))
             .unzip();
         Ok((
@@ -237,9 +257,9 @@ impl Emitter<'_> {
                 parameter_types,
                 parameter_coercions,
                 result_semantic,
-                suspend: false,
+                suspend: signature.suspend,
             },
-            signature.params.len(),
+            arity,
         ))
     }
 
@@ -490,7 +510,7 @@ impl Emitter<'_> {
             return_type: "V".to_string(),
             value_class_return: None,
             captured: 0..0,
-            capture_names: self.capture_names(lambda.impl_fn, lambda.captures.len()),
+            capture_names: self.capture_names(argument, lambda.impl_fn, lambda.captures.len()),
             default_class: None,
             suspend: lambda.suspend,
         };
@@ -766,7 +786,18 @@ impl Emitter<'_> {
             let identities = self.ir.fn_params.get(&impl_fn).map(|info| &info.identities);
             let reference_parameters = callable_reference_template(self.ir, argument).is_some();
             for (index, &ty) in parameter_types.iter().enumerate() {
-                let name = if reference_parameters {
+                // A suspend reference's adapter takes its continuation last, as a suspend
+                // literal's implementation does, and kotlinc names it the same.
+                let continuation = suspend && index + 1 == parameter_types.len();
+                let name = if reference_parameters && continuation {
+                    crate::jvm::parameter_names::local_variable(
+                        &crate::ir::IrParameterIdentity::generated(
+                            crate::ir::IrGeneratedParameterRole::Continuation,
+                            None,
+                        ),
+                        "",
+                    )
+                } else if reference_parameters {
                     let ordinal = u32::try_from(index)
                         .map_err(|_| "a callable reference has too many parameters")?;
                     crate::jvm::debug_local_names::render(
@@ -834,7 +865,7 @@ impl Emitter<'_> {
                 value_class_return: self.invoke_coercion(result_semantic, result).value_class(),
                 captured: 0..0,
                 capture_names: {
-                    let mut names = self.capture_names(impl_fn, own_captures);
+                    let mut names = self.capture_names(argument, impl_fn, own_captures);
                     if continuation_read.is_some() {
                         names.push(Some("$completion".to_string()));
                     }
@@ -862,11 +893,23 @@ impl Emitter<'_> {
     }
 
     /// The names kotlinc's `capturedVars` give the lambda `impl_fn`'s first `count` parameters, its
-    /// captured values: `$x` for a captured local `x`. A captured receiver is not named yet.
-    fn capture_names(&self, impl_fn: u32, count: usize) -> Vec<Option<String>> {
+    /// captured values: `$x` for a captured local `x`. A callable reference `argument`'s bound
+    /// receiver, which its template places after the reference's captures, is `receiver`, the
+    /// value kotlinc's `InlineCallableReferenceToLambda` binds it to. A captured receiver of a
+    /// literal is not named yet.
+    fn capture_names(&self, argument: u32, impl_fn: u32, count: usize) -> Vec<Option<String>> {
         let identities = self.ir.fn_params.get(&impl_fn).map(|info| &info.identities);
+        let bound_receiver = match self.ir.expr(argument) {
+            IrExpr::CallableReference(reference) => {
+                reference.bound_receiver.map(|_| reference.captures.len())
+            }
+            _ => None,
+        };
         (0..count)
             .map(|index| {
+                if bound_receiver == Some(index) {
+                    return Some("receiver".to_string());
+                }
                 let identity = identities?.get(index)?;
                 match identity.role {
                     crate::ir::IrParameterRole::CapturedValue { .. } => {

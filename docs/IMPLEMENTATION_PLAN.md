@@ -5759,8 +5759,12 @@ regress.
     the copy rebuilds `invokeSuspend` from `invokeSuspend$$forInline` with the lambda as its own
     continuation (`suspend_methods::transform_lambda`, kotlinc's `newStateMachineForLambda`), and
     its `invoke`/`create` construct the copy itself with the lambda's captured values; a literal
-    takes the inliner. ☐ A suspend callable reference as an inline lambda shape
-    (`flatMapLatest(::lookup)`, nowinandroid). ☐ `surroundInvokesWithSuspendMarkersIfNeeded`
+    takes the inliner. ✅ A callable reference to a non-suspend declaration as an inline lambda
+    shape for a suspend function type (`flatMapLatest(::lookup)`, nowinandroid's
+    `topicDao::getTopicEntities`): the template's arity counts the adapter's continuation, and a
+    bound receiver is `receiver$inlined`. ☐ A reference to a suspend declaration
+    (`flatMapLatest(::fetch)`): its template's call is a suspension point the coroutine pass places
+    only in a literal's inline body, so the template is declined. ☐ `surroundInvokesWithSuspendMarkersIfNeeded`
     for a captured function value the call does not inline (such a copy is refused).
     ☐ krusty's own `$$forInline` copy of an object's suspend method in an inline function it
     compiles.

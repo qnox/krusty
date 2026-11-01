@@ -7640,9 +7640,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   copy). The copy's `invoke` and `create`, which construct the object anew passing it the lambda,
   construct the copy, which is already regenerated (kotlinc's `isAlreadyRegenerated`), passing the
   lambda's captured values from the copy's fields in its place. A literal lambda takes this route,
-  so it is no longer kept as a value constructing the library's own class; a suspend callable
-  reference (`flatMapLatest(::lookup)`) is not an inline lambda shape yet
-  (`IrFile::callable_reference_inline_template` declines it), so its copy is refused. A captured function value the call does not inline would be invoked unmarked in the
+  so it is no longer kept as a value constructing the library's own class, and so does a callable
+  reference (`flatMapLatest(::lookup)`, nowinandroid's `flatMapLatest(topicDao::getTopicEntities)`).
+  A callable reference's inline template has a literal's shape for a suspend function type as for
+  an ordinary one (`IrFile::callable_reference_inline_template`): its arity counts the
+  `Continuation` its adapter takes after the function type's parameters, as a suspend literal's
+  counts its implementation's, and the inlined node names that parameter `$completion` as kotlinc
+  does. Its bound receiver is the copy's `receiver$inlined`, the value kotlinc's
+  `InlineCallableReferenceToLambda` binds it to. A reference whose selected declaration is itself
+  suspend (`flatMapLatest(::fetch)`) has a suspension point in its template, which the coroutine
+  pass places only in a literal's own inline body, so its template is declined and the copy refused.
+  A captured function value the call does not inline would be invoked unmarked in the
   rebuilt machine (kotlinc marks it with `surroundInvokesWithSuspendMarkersIfNeeded`, not ported
   yet), so such a copy is refused. Tests: `tests/suspend_lambda_regeneration_e2e.rs`. The
   body is not inlined on trial: once a call is routed to the inliner, or a lambda-free call to a
@@ -23360,8 +23368,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
 - **A checked function value passed to a provider-planned inline call is invoked.** A stdlib scope
   function such as `let` takes its provider plan for every expression already checked against its
   function parameter: locals, captures, properties, calls, conditionals, and callable references
-  all evaluate once. A literal body is spliced. A non-suspend callable reference is spliced through
-  its checked adapter template, including its bound receiver and captures, so kotlinc's direct call
+  all evaluate once. A literal body is spliced. A callable reference whose selected declaration is not
+  suspend is spliced through its checked adapter template, including its bound receiver and captures, so kotlinc's direct call
   and `pN` inline locals are retained without rediscovering the reference target. The other
   expressions use the common function-value invocation path. On the JVM, `FunctionN.invoke` remains
   inside the provider's inline frame. A source local declaration restores the caller line before
