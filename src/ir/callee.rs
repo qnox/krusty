@@ -87,6 +87,18 @@ pub enum Callee {
         /// masks independently from the receiver consumes this fact directly.
         extension_receiver_parameter: Option<u32>,
     },
+    /// The default-argument entry of a top-level callable in another source unit of the current
+    /// module, published by the file that declares `target` under the identity of `provider`, the
+    /// declaration whose defaults it evaluates. The argument vector holds the whole parameter
+    /// frame of `params`, with an [`IrExpr::AbsentArgument`](super::IrExpr::AbsentArgument) for
+    /// each omitted parameter, followed by the omission mask words. A backend maps the identity to
+    /// its physical entry; it does not rebuild the masks or the frame.
+    ModuleDefaultEntry {
+        target: crate::fir::CallableId,
+        provider: crate::fir::CallableId,
+        params: Vec<Ty>,
+        ret: Ty,
+    },
     /// A dependency callable selected by the frontend. The opaque declaration identity is realized
     /// by the target provider after common lowering; semantic parameters/results remain available to
     /// backend-neutral passes without exposing an owner or descriptor.

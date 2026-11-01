@@ -175,6 +175,7 @@ impl ReferencedDependencies {
             | IrExpr::Lambda { .. }
             | IrExpr::UnitInstance
             | IrExpr::CurrentContinuation
+            | IrExpr::AbsentArgument { .. }
             | IrExpr::InvokeFunction { .. }
             | IrExpr::NotNullAssert { .. }
             | IrExpr::LateinitCheck { .. }
@@ -219,6 +220,7 @@ impl ReferencedDependencies {
             | Callee::Intrinsic { .. }
             | Callee::CrossFile { .. }
             | Callee::Module { .. }
+            | Callee::ModuleDefaultEntry { .. }
             | Callee::Static { .. }
             | Callee::Virtual { .. }
             | Callee::Super { .. }

@@ -4855,8 +4855,7 @@ fn method_signature_shape(
     }
     if let Some(generic) = ir.signatures.get(&fid) {
         let generic = value_class_signatures::physical_generic_signature(ir, fid, generic);
-        let vararg_index = ir.fn_varargs.get(&fid).map(|vararg| vararg.index);
-        return formatter.method_signature(&generic, f, vararg_index);
+        return formatter.method_signature(&generic, f, vararg_parameter_position(ir, fid));
     }
     if let (Some((params, ret)), Some(_)) = (
         ir.member_semantic_sigs.get(&fid),
@@ -4884,7 +4883,27 @@ fn method_signature_shape(
     if let Some((params, ret)) = value_class_signatures::declared_value_class_signature(ir, fid) {
         return formatter.method_positions(&params, &ret);
     }
-    method_parameterized_sig(formatter, &signature_function_params(ir, fid), &f.ret)
+    method_parameterized_sig(
+        formatter,
+        &signature_function_params(ir, fid),
+        &f.ret,
+        vararg_parameter_position(ir, fid),
+    )
+}
+
+/// The position of `fid`'s `vararg` among its lowered parameters. The recorded index counts the
+/// declared context and value parameters; captures and the extension receiver are lowered among
+/// them, so the position is the parameter whose identity is that declared parameter.
+fn vararg_parameter_position(ir: &IrFile, fid: u32) -> Option<usize> {
+    let vararg = ir.fn_varargs.get(&fid)?;
+    ir.fn_params
+        .get(&fid)?
+        .identities
+        .iter()
+        .enumerate()
+        .filter(|(_, identity)| identity.role.is_declared_parameter())
+        .nth(vararg.index)
+        .map(|(position, _)| position)
 }
 
 /// A method's generic `Signature` when a concrete param/return type is parameterized (`getXs()` →
@@ -4894,6 +4913,7 @@ fn method_parameterized_sig(
     formatter: &JvmSignatureFormatter<'_>,
     params: &[Ty],
     ret: &Ty,
+    vararg_index: Option<usize>,
 ) -> Option<String> {
     // Runs for every emitted method — bail before building any string when no position can carry one.
     let is_parameterized = |t: &Ty| {
@@ -4909,7 +4929,7 @@ fn method_parameterized_sig(
         return None;
     }
     // A `Unit` parameter is the `kotlin.Unit` object, not `void`.
-    let s = formatter.method_positions(params, ret)?;
+    let s = formatter.method_positions_with_vararg(params, ret, vararg_index)?;
     (s != ir_method_desc(params, ret)).then_some(s)
 }
 
