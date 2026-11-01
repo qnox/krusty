@@ -151,6 +151,8 @@ mod anonymous_capture_discovery_e2e;
 mod anonymous_function_e2e;
 #[path = "api_version_availability_e2e.rs"]
 mod api_version_availability_e2e;
+#[path = "apply_receiver_single_store_e2e.rs"]
+mod apply_receiver_single_store_e2e;
 #[path = "apt_host_e2e.rs"]
 mod apt_host_e2e;
 #[path = "arity_error_coverage_e2e.rs"]
