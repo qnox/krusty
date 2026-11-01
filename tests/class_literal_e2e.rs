@@ -3,7 +3,7 @@
 use super::common;
 use krusty::jvm::classreader::parse_class;
 
-#[path = "class_literal_array_of_nothing_e2e.rs"]
+#[path = "class_literal_e2e/array_of_nothing.rs"]
 mod array_of_nothing;
 
 const CLASS_LITERAL_ARGUMENT_VALUES: &str = r#"import kotlin.reflect.KClass

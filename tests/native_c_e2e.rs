@@ -2,7 +2,7 @@
 
 use super::common;
 
-#[path = "native_c_abi_e2e.rs"]
+#[path = "native_c_e2e/abi.rs"]
 mod abi;
-#[path = "native_cinterop_e2e.rs"]
+#[path = "native_c_e2e/interop.rs"]
 mod interop;

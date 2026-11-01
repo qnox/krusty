@@ -17127,7 +17127,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`tests/language_feature_arguments_e2e.rs` compares exit code, complete stderr and the complete
   output tree with kotlinc; `src/features.rs`, `src/features/table.rs` and
   `src/features/language_versions.rs` unit tests.)
-  (`tests/kotlinc_argument_conformance_e2e.rs` compares the table with the reference compiler and
+  (`tests/kotlinc_argument_conformance.rs` compares the table with the reference compiler and
   the parser with kotlinc's `parseCommandLineArguments` over every argument and value form;
   `crates/krusty-cli/src/kotlinc_arguments/tokenize.rs` unit tests;
   `every_kotlinc_argument_takes_its_dispositions_path` in `crates/krusty-cli/src/cli.rs` checks

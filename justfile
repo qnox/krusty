@@ -64,13 +64,17 @@ release-tests:
 test-lsp:
     cargo test --profile gate -p krusty-lsp --all-targets
 
-# rustfmt must be clean (the repo is fully formatted; `just fmt` fixes any drift).
+# rustfmt must be clean (the repo is fully formatted; `just fmt` fixes any drift). The e2e target
+# declares its `tests/*_e2e.rs` modules through a macro, which `cargo fmt` does not follow, so those
+# files are passed to rustfmt directly.
 fmt-check:
     cargo fmt --all --check
+    rustfmt --edition 2021 --check tests/*_e2e.rs
 
 # Apply rustfmt across the workspace.
 fmt:
     cargo fmt --all
+    rustfmt --edition 2021 tests/*_e2e.rs
 
 # Emit current clippy findings as a stable, line-number-independent fingerprint set:
 #   <count><TAB><file><TAB><message>   (one per file+message, so a new occurrence bumps the count)
