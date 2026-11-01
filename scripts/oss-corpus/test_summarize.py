@@ -109,6 +109,137 @@ class Summary(unittest.TestCase):
                              ['left to kotlinc: compose', 1]]),
         ])
 
+    def test_verify_errors_are_listed_per_project_and_grouped_by_cause(self):
+        def verified(task, *errors, status='failed'):
+            r = row(task, False, 1, 0, error='not run: a task it depends on failed')
+            r['verify'] = dict(status=status, errors=list(errors))
+            return r
+        with tempfile.TemporaryDirectory() as work:
+            reports = []
+            for p in (
+                dict(project('zeta', [
+                    verified(':a:compileKotlin', "a/A.kt:3:5: error: unresolved reference 'foo'.",
+                             "a/A.kt:9:1: error: unresolved reference 'bar'.",
+                             'a/A.kt:12:1: error: type mismatch: inferred type is List<T> but `Map|K` was expected'),
+                    verified(':b:compileKotlin', "b/B.kt:1:1: error: unresolved reference 'foo'."),
+                    verified(':c:compileKotlin', status='compiled'),
+                    dict(row(':d:compileKotlin', False, 1, 0, fallback='plugin'), verify=None),
+                ]), verify_exit=1),
+                dict(project('Alpha', [verified(':compileKotlin', "krusty: error: unresolved reference 'x'.",
+                                                "error: doesn't support 'y' at 4")]), verify_exit=0),
+                # A result published before the corpus ran the verify build has no verify_exit and
+                # no entry.
+                project('beta', [row(':compileKotlin', True, 1, 1)]),
+                # A verify build that failed before writing any record still has an entry.
+                dict(project('gamma', [dict(row(':compileKotlin', False, 1, 0, error='boom'), verify=None)]),
+                     verify_exit=1),
+            ):
+                path = os.path.join(work, p['name'] + '.json')
+                with open(path, 'w') as f:
+                    json.dump(p, f)
+                reports.append(path)
+            text = subprocess.run([sys.executable, os.path.join(HERE, 'summarize.py'),
+                                   '--json', f'{work}/out.json', *reports],
+                                  check=True, capture_output=True, text=True).stdout
+            with open(f'{work}/out.json') as f:
+                document = json.load(f)
+        section = text[text.index('## krusty errors'):].splitlines()
+        self.assertEqual(section[8:], [
+            '| Cause | Projects | Compilations | Errors |',
+            '| --- | ---: | ---: | ---: |',
+            "| `unresolved reference '…'.` | 2 | 3 | 4 |",
+            "| `doesn't support 'y' at N` | 1 | 1 | 1 |",
+            '| ``type mismatch: inferred type is List<T> but `…` was expected`` | 1 | 1 | 1 |',
+            '',
+            '<details><summary><b>Alpha</b>: 2 errors in 1 compilation, 2 causes; 1 of 1 compilation verified</summary>',
+            '',
+            "- `doesn't support 'y' at N`",
+            "  - `error: doesn't support 'y' at 4` in `:compileKotlin`",
+            "- `unresolved reference '…'.`",
+            "  - `krusty: error: unresolved reference 'x'.` in `:compileKotlin`",
+            '',
+            '</details>',
+            '',
+            '- **gamma**: no compilation verified (verify build exit 1)',
+            '',
+            '<details><summary><b>zeta</b>: 4 errors in 2 compilations, 2 causes; 3 of 4 compilations verified '
+            '(verify build exit 1)</summary>',
+            '',
+            "- `unresolved reference '…'.`",
+            "  - `a/A.kt:3:5: error: unresolved reference 'foo'.` in `:a:compileKotlin`",
+            "  - `a/A.kt:9:1: error: unresolved reference 'bar'.` in `:a:compileKotlin`",
+            "  - `b/B.kt:1:1: error: unresolved reference 'foo'.` in `:b:compileKotlin`",
+            '- ``type mismatch: inferred type is List<T> but `…` was expected``',
+            '  - ``a/A.kt:12:1: error: type mismatch: inferred type is List<T> but `Map|K` was expected`` in `:a:compileKotlin`',
+            '',
+            '</details>',
+        ])
+        self.assertEqual([(p['name'], p['verification']) for p in document['projects']], [
+            ('Alpha', dict(exit=0, verified=1, unverified=0)),
+            ('beta', None),
+            ('gamma', dict(exit=1, verified=0, unverified=1)),
+            ('zeta', dict(exit=1, verified=3, unverified=1)),
+        ])
+        self.assertEqual([(p['name'], p['errors']) for p in document['projects']], [
+            ('Alpha', [
+                dict(cause="doesn't support 'y' at N", errors=[
+                    dict(error="error: doesn't support 'y' at 4", compilations=[':compileKotlin'])]),
+                dict(cause="unresolved reference '…'.", errors=[
+                    dict(error="krusty: error: unresolved reference 'x'.", compilations=[':compileKotlin'])]),
+            ]),
+            ('beta', []),
+            ('gamma', []),
+            ('zeta', [
+                dict(cause="unresolved reference '…'.", errors=[
+                    dict(error="a/A.kt:3:5: error: unresolved reference 'foo'.", compilations=[':a:compileKotlin']),
+                    dict(error="a/A.kt:9:1: error: unresolved reference 'bar'.", compilations=[':a:compileKotlin']),
+                    dict(error="b/B.kt:1:1: error: unresolved reference 'foo'.", compilations=[':b:compileKotlin'])]),
+                dict(cause='type mismatch: inferred type is List<T> but `…` was expected', errors=[
+                    dict(error='a/A.kt:12:1: error: type mismatch: inferred type is List<T> but `Map|K` was expected',
+                         compilations=[':a:compileKotlin'])]),
+            ]),
+        ])
+
+    def test_a_verify_build_that_recorded_nothing_is_reported_not_omitted(self):
+        with tempfile.TemporaryDirectory() as work:
+            p = dict(project('zeta', [row(':a:compileKotlin', False, 2, 0,
+                                          error='not run: a task it depends on failed')]),
+                     verify_exit=1)
+            p['rows'][0]['verify'] = None
+            with open(f'{work}/zeta.json', 'w') as f:
+                json.dump(p, f)
+            text = subprocess.run([sys.executable, os.path.join(HERE, 'summarize.py'),
+                                   '--json', f'{work}/out.json', f'{work}/zeta.json'],
+                                  check=True, capture_output=True, text=True).stdout
+            with open(f'{work}/out.json') as f:
+                document = json.load(f)
+        self.assertEqual(text, '''\
+| Project | Stars | Kotlin LOC | Java LOC | Reference build | Compilations built by krusty | Identical classes |
+| --- | ---: | ---: | ---: | --- | ---: | ---: |
+| zeta |  | 1,200 | 30 | ok | 0 / 1 | 0 / 2 (0.0%) |
+| **Measured total** | | | | | **0 / 1** | **0 / 2 (0.0%)** |
+
+## Missed compilations
+
+- **zeta**
+  - 1 × not run: a task it depends on failed
+
+## krusty errors
+
+The verify build compiles every compilation with kotlinc, and krusty compiles each one on its own
+beside it, against kotlinc's classes of the compilations it depends on (the krusty plugin's
+verify mode). One failure therefore never hides the next: these are all the errors krusty
+reported, grouped by cause, the message without its location and with quoted text and numbers
+masked. A result measured before the corpus ran the verify build is left out.
+
+No verified compilation reported an error.
+
+- **zeta**: no compilation verified (verify build exit 1)
+''')
+        self.assertEqual([(p['name'], p['misses'], p['errors'], p['verification']) for p in document['projects']], [
+            ('zeta', [['not run: a task it depends on failed', 1]], [], dict(exit=1, verified=0, unverified=1)),
+        ])
+
     def test_build_cost_compares_both_builds_of_each_measured_project(self):
         def cost(built, compile_, wall, cpu, daemon, krusty, total):
             return dict(built_compile_seconds=built, compile_seconds=compile_, wall_seconds=wall,
