@@ -124,3 +124,30 @@ fn a_parameterless_main_facade_is_byte_identical() {
         Some(Err(e)) => panic!("{e}"),
     }
 }
+
+/// A parameterless `main()` beside a function that already has the launcher's JVM signature: the
+/// frontend's entry (`main(args: Array<String>)`, `vararg args: String`) or another facade method
+/// whose physical signature is `main([Ljava/lang/String;)V` (`Array<String?>`, an
+/// `Array<String>.main()` extension, `@JvmName("main")`). kotlinc emits no bridge; one would be a
+/// duplicate method and not a legal class file.
+#[test]
+fn a_parameterless_main_gets_no_bridge_beside_a_launcher_signature() {
+    for (stem, other) in [
+        ("Declared", "fun main(args: Array<String>) {}"),
+        ("Varargs", "fun main(vararg args: String) {}"),
+        ("NullableElements", "fun main(args: Array<String?>) {}"),
+        ("Extension", "fun Array<String>.main() {}"),
+        ("Renamed", "@JvmName(\"main\")\nfun foo(args: Array<String>) {}"),
+    ] {
+        let src = format!("fun main() {{}}\n\n{other}\n");
+        let Some((ours, reference)) = compile_both(stem, &src) else {
+            return;
+        };
+        let class = format!("{stem}Kt");
+        assert_eq!(
+            methods(&ours, &class),
+            methods(&reference, &class),
+            "{stem}: the facade's method set must match kotlinc's"
+        );
+    }
+}
