@@ -1,0 +1,381 @@
+---
+// The public metrics page. Its data comes from scripts/metrics.mjs over the directory the `pages`
+// workflow fills each night (KRUSTY_METRICS_INPUT); without one, every section says it was not
+// measured instead of showing a number.
+import { SEO } from "astro-seo";
+import { collectMetrics } from "../../scripts/metrics.mjs";
+
+const repo = "https://github.com/qnox/krusty";
+const title = "krusty metrics: byte equality, conformance, build time and memory";
+const description =
+  "How krusty compares with kotlinc today, regenerated every night: byte-identical class files on real open-source projects and on Kotlin's codegen/box suite, box conformance per Kotlin version, compile time, peak memory and test coverage.";
+const metrics = collectMetrics(process.env.KRUSTY_METRICS_INPUT);
+const { box, corpus, coverage } = metrics;
+const generated = new Date().toISOString().replace(/\.\d+Z$/, "Z").replace("T", " ");
+
+// Round down to one decimal, so a near miss never shows as 100.0%.
+const pct = (count: number, of: number) => (of === 0 ? "—" : `${(Math.floor((count * 1000) / of) / 10).toFixed(1)}%`);
+const n = (value: number) => value.toLocaleString("en-US");
+const share = (count: number, of: number) => `${n(count)} / ${n(of)}`;
+const short = (sha: string) => sha.slice(0, 7);
+const day = (iso: string) => iso.slice(0, 10);
+const seconds = (value: number | null | undefined) => (value ? `${value.toFixed(1)} s` : "—");
+const mb = (value: number | null | undefined) => (value ? `${n(value)} MB` : "—");
+const commitUrl = (sha: string) => `${repo}/commit/${sha}`;
+const newest = box?.versions[0];
+
+// Kotlin's codegen/box suite is reported per Kotlin version; byte totals are .class bytes.
+const boxCell = (report: { passed?: number; applicable?: number; matched?: number; total?: number } | null, bytes = false) => {
+  if (!report) return { main: "not reported", detail: "" };
+  const count = bytes ? report.matched! : report.passed!;
+  const of = bytes ? report.total! : report.applicable!;
+  return { main: pct(count, of), detail: bytes ? `${n(count)} of ${n(of)} bytes` : `${n(count)} of ${n(of)} cases` };
+};
+
+// The trend: one point per nightly corpus run, the share of classes and of compilations krusty
+// matched or built. Both are shares of 100, so they share one axis.
+// Only runs that measured as many projects as the corpus lists now are comparable; a manual run of
+// a few projects is left to the table of every run.
+const history = corpus?.history ?? [];
+const fullSize = corpus?.projects.length ?? 0;
+const runs = history.filter((r) => r.projects === fullSize).slice(-60);
+const chart = { width: 680, height: 220, left: 40, right: 112, top: 12, bottom: 28 };
+const plotW = chart.width - chart.left - chart.right;
+const plotH = chart.height - chart.top - chart.bottom;
+const series = [
+  { key: "identical", label: "Identical classes", value: (r: any) => (r.classes ? (100 * r.identical) / r.classes : 0) },
+  { key: "built", label: "Compilations built", value: (r: any) => (r.compilations ? (100 * r.built) / r.compilations : 0) },
+];
+const top = Math.max(10, Math.ceil(Math.max(0, ...runs.flatMap((r) => series.map((s) => s.value(r)))) / 10) * 10);
+const x = (i: number) => chart.left + (runs.length <= 1 ? plotW / 2 : (i * plotW) / (runs.length - 1));
+const y = (v: number) => chart.top + plotH - (v / top) * plotH;
+const ticks = [0, top / 2, top];
+const paths = series.map((s) => ({
+  ...s,
+  d: runs.map((r, i) => `${i === 0 ? "M" : "L"}${x(i).toFixed(1)},${y(s.value(r)).toFixed(1)}`).join(""),
+  last: runs.length ? s.value(runs[runs.length - 1]) : 0,
+}));
+const points = runs.map((r, i) => ({
+  x: x(i),
+  tip: `${r.date} · krusty ${short(r.commit)} · ${r.projects} projects\nIdentical classes: ${share(r.identical, r.classes)} (${pct(r.identical, r.classes)})\nCompilations built: ${share(r.built, r.compilations)} (${pct(r.built, r.compilations)})`,
+}));
+---
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <SEO
+      title={title}
+      description={description}
+      canonical={new URL("/metrics/", Astro.site).href}
+      extend={{
+        link: [
+          { rel: "icon", href: "/favicon.ico", sizes: "16x16 32x32 48x48" },
+          { rel: "apple-touch-icon", href: "/apple-touch-icon.png" },
+        ],
+      }}
+    />
+  </head>
+  <body>
+    <main>
+      <p class="crumb"><a href="/">krusty</a> / metrics</p>
+      <h1>Metrics</h1>
+      <p class="tag">Where krusty stands against kotlinc today. Regenerated every night; nothing here is picked by hand.</p>
+      <p class="meta">Generated {generated} UTC from the latest master CI run and the latest nightly corpus run. The raw numbers are at <a href="/metrics.json">/metrics.json</a>.</p>
+
+      <section class="tiles" aria-label="Headline numbers">
+        <div class="tile">
+          <div class="label">Byte-identical classes, real projects</div>
+          {corpus ? (
+            <>
+              <div class="value">{pct(corpus.total.identical, corpus.total.classes)}</div>
+              <div class="detail">{share(corpus.total.identical, corpus.total.classes)} classes, {corpus.projects.length} projects</div>
+            </>
+          ) : <div class="value na">not measured</div>}
+        </div>
+        <div class="tile">
+          <div class="label">JVM byte equality, codegen/box{newest ? ` (Kotlin ${newest.version})` : ""}</div>
+          {newest?.bytes ? (
+            <>
+              <div class="value">{boxCell(newest.bytes, true).main}</div>
+              <div class="detail">{boxCell(newest.bytes, true).detail}</div>
+            </>
+          ) : <div class="value na">not measured</div>}
+        </div>
+        <div class="tile">
+          <div class="label">JVM conformance, codegen/box{newest ? ` (Kotlin ${newest.version})` : ""}</div>
+          {newest?.jvm ? (
+            <>
+              <div class="value">{boxCell(newest.jvm).main}</div>
+              <div class="detail">{boxCell(newest.jvm).detail}</div>
+            </>
+          ) : <div class="value na">not measured</div>}
+        </div>
+        <div class="tile">
+          <div class="label">Compilations krusty builds, real projects</div>
+          {corpus ? (
+            <>
+              <div class="value">{pct(corpus.total.built, corpus.total.compilations)}</div>
+              <div class="detail">{share(corpus.total.built, corpus.total.compilations)} Kotlin/JVM compilations</div>
+            </>
+          ) : <div class="value na">not measured</div>}
+        </div>
+      </section>
+
+      <h2 id="byte-equality">Byte equality with kotlinc</h2>
+      <p>
+        krusty aims to emit <code>.class</code> files byte for byte identical to <code>kotlinc</code>'s. An identical class needs no tests to trust: it is exactly what <code>kotlinc</code> would have shipped. That is why this is the headline number, and why it matters most for projects with few or no tests of their own. A class counts only when the whole file is identical; a class from a compilation krusty could not build counts as different.
+      </p>
+
+      <h3 id="projects">Real projects</h3>
+      {corpus ? (
+        <>
+          <p>
+            Popular open-source Kotlin projects, each built from a pinned commit with its own Gradle build, once with <code>kotlinc</code> and once with the krusty Gradle plugin. Some need a patch to build with the newest Kotlin release krusty targets; it is linked below as applied. The full report, with the reason each compilation was missed, is on the <a href={`${repo}/tree/corpus-results`}><code>corpus-results</code></a> branch.
+          </p>
+          <div class="scroll">
+            <table>
+              <thead>
+                <tr><th>Project</th><th class="num">Identical classes</th><th class="num">Compilations built</th><th>Reference build</th><th>Patch</th><th>Measured</th></tr>
+              </thead>
+              <tbody>
+                {corpus.projects.map((p) => (
+                  <tr>
+                    <td>{p.source ? <a href={`${p.source.url}/tree/${p.source.commit}`}>{p.name}</a> : p.name}{p.kotlinLoc !== null && <div class="sub">{n(p.kotlinLoc)} Kotlin lines</div>}</td>
+                    <td class="num">{pct(p.identical, p.classes)}<div class="sub">{share(p.identical, p.classes)}</div></td>
+                    <td class="num">{share(p.built, p.compilations)}</td>
+                    <td>{p.referenceBuild}</td>
+                    <td>
+                      {!p.source || !p.measured ? <span class="na">not recorded</span>
+                        : p.source.patch ? <a href={`${repo}/blob/${p.measured.commit}/${p.source.patch}`}>{p.source.patch.split("/").pop()}</a>
+                        : "none"}
+                      {p.source?.kotlin_pin && <div class="sub">Kotlin version set in <code>{p.source.kotlin_pin.split(":")[0]}</code></div>}
+                    </td>
+                    <td>{p.measured ? <a href={p.measured.run}>{p.measured.date}</a> : "—"}{p.measured && <div class="sub">krusty <a href={commitUrl(p.measured.commit)}>{short(p.measured.commit)}</a></div>}</td>
+                  </tr>
+                ))}
+                <tr class="total">
+                  <td>Total</td>
+                  <td class="num">{pct(corpus.total.identical, corpus.total.classes)}<div class="sub">{share(corpus.total.identical, corpus.total.classes)}</div></td>
+                  <td class="num">{share(corpus.total.built, corpus.total.compilations)}</td>
+                  <td></td><td></td><td></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </>
+      ) : <p class="na">Not measured: no nightly corpus result was available when this page was built.</p>}
+
+      <h3 id="trend">Trend</h3>
+      {runs.length > 0 ? (
+        <figure class="chart">
+          <svg viewBox={`0 0 ${chart.width} ${chart.height}`} role="img" aria-labelledby="trend-title">
+            <title id="trend-title">Share of identical classes and of compilations built across the last {runs.length} corpus runs</title>
+            {ticks.map((t) => (
+              <g class="grid">
+                <line x1={chart.left} x2={chart.left + plotW} y1={y(t)} y2={y(t)} />
+                <text x={chart.left - 6} y={y(t) + 4} text-anchor="end">{t}%</text>
+              </g>
+            ))}
+            <text class="axis" x={chart.left} y={chart.height - 6}>{runs[0].date}</text>
+            <text class="axis" x={chart.left + plotW} y={chart.height - 6} text-anchor="end">{runs[runs.length - 1].date}</text>
+            {paths.map((s, i) => (
+              <g class={`series s${i + 1}`}>
+                <path d={s.d} />
+                <circle cx={x(runs.length - 1)} cy={y(s.last)} r="4" />
+                <text x={x(runs.length - 1) + 8} y={y(s.last) + 4 + (i === 1 && Math.abs(y(paths[0].last) - y(s.last)) < 14 ? 14 : 0)}>{s.last.toFixed(1)}% {s.key === "identical" ? "classes" : "built"}</text>
+              </g>
+            ))}
+            <line class="cursor" x1="0" x2="0" y1={chart.top} y2={chart.top + plotH} />
+            {points.map((p, i) => (
+              <rect class="hit" x={p.x - plotW / Math.max(1, runs.length - 1) / 2} y={chart.top} width={Math.max(8, plotW / Math.max(1, runs.length - 1))} height={plotH} data-x={p.x} data-tip={p.tip}>
+                <title>{p.tip}</title>
+              </rect>
+            ))}
+          </svg>
+          <figcaption>
+            <span class="key s1"></span>Identical classes <span class="key s2"></span>Compilations built, as a share of everything the projects compile, one point per corpus run that measured all {fullSize} projects. The table below lists every run, partial ones included.
+          </figcaption>
+          <div class="tooltip" hidden></div>
+        </figure>
+      ) : <p class="na">No corpus runs recorded yet.</p>}
+      {history.length > 0 && (
+        <details>
+          <summary>Every corpus run</summary>
+          <div class="scroll">
+            <table>
+              <thead><tr><th>Date</th><th>krusty</th><th class="num">Projects</th><th class="num">Identical classes</th><th class="num">Compilations built</th></tr></thead>
+              <tbody>
+                {[...history].reverse().map((r) => (
+                  <tr>
+                    <td><a href={r.run}>{r.date}</a></td>
+                    <td><a href={commitUrl(r.commit)}>{short(r.commit)}</a></td>
+                    <td class="num">{r.projects}</td>
+                    <td class="num">{pct(r.identical, r.classes)}<div class="sub">{share(r.identical, r.classes)}</div></td>
+                    <td class="num">{share(r.built, r.compilations)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </details>
+      )}
+
+      <h3 id="box">Kotlin's codegen/box suite</h3>
+      {box ? (
+        <>
+          <p>
+            Every applicable case of JetBrains' own <code>codegen/box</code> tests, compiled by krusty and by the matching <code>kotlinc</code>. Conformance counts the cases whose <code>box()</code> returns <code>"OK"</code>; byte equality counts the <code>.class</code> bytes of classes identical to <code>kotlinc</code>'s. From the <a href={box.run.url}>master CI run</a> of {day(box.run.date)}, krusty <a href={commitUrl(box.run.commit)}>{short(box.run.commit)}</a>.
+          </p>
+          <div class="scroll">
+            <table>
+              <thead><tr><th>Kotlin</th><th class="num">JVM byte equality</th><th class="num">JVM conformance</th><th class="num">Native conformance</th></tr></thead>
+              <tbody>
+                {box.versions.map((v) => (
+                  <tr>
+                    <td>{v.version}</td>
+                    {[boxCell(v.bytes, true), boxCell(v.jvm), boxCell(v.native)].map((c) => (
+                      <td class="num">{c.main}<div class="sub">{c.detail}</div></td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      ) : <p class="na">Not measured: no successful master CI run with box reports was available when this page was built.</p>}
+
+      <h2 id="cost">Compile time and memory</h2>
+      {corpus ? (
+        <>
+          <p>
+            The same two builds of each project, each alone on its own runner, after a warm-up build that downloads everything; both run offline from the same caches. The fair speed comparison is the compile time of the compilations krusty built, because <code>kotlinc</code> compiles the rest in both builds. Compiler memory is the Kotlin daemon's peak in the reference build and krusty's in the other; build memory sums every process, Gradle included.
+          </p>
+          <div class="scroll">
+            <table>
+              <thead>
+                <tr><th>Project</th><th class="num">Compile time, compilations krusty built<div class="sub">kotlinc / krusty</div></th><th class="num">Compiler peak RSS<div class="sub">kotlinc / krusty</div></th><th class="num">Build peak RSS<div class="sub">kotlinc / krusty</div></th><th class="num">Build wall time<div class="sub">kotlinc / krusty</div></th></tr>
+              </thead>
+              <tbody>
+                {corpus.projects.map((p) => {
+                  const k = p.cost.kotlinc;
+                  const r = p.cost.krusty;
+                  if (!k || !r) return <tr><td>{p.name}</td><td colspan="4" class="na">not measured</td></tr>;
+                  return (
+                    <tr>
+                      <td>{p.name}</td>
+                      <td class="num">{p.built ? `${seconds(k.builtCompileSeconds)} / ${seconds(r.builtCompileSeconds)}` : "nothing built"}</td>
+                      <td class="num">{mb(k.compilerPeakRssMb)} / {mb(r.compilerPeakRssMb)}</td>
+                      <td class="num">{mb(k.buildPeakRssMb)} / {mb(r.buildPeakRssMb)}</td>
+                      <td class="num">{seconds(k.wallSeconds)} / {seconds(r.wallSeconds)}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </>
+      ) : <p class="na">Not measured: no nightly corpus result was available when this page was built.</p>}
+      <p>
+        <strong>Compiler benchmark:</strong> <span class="na">not measured yet.</span> A fixed benchmark of krusty's own compile time and peak memory, independent of Gradle, is being set up and will appear here.
+      </p>
+
+      <h2 id="tests">Project test suites</h2>
+      <p>
+        <span class="na">Not measured yet.</span> Running each project's own tests against the classes krusty built is being set up and will appear here, per project, as tests passed out of tests run.
+      </p>
+
+      <h2 id="coverage">Test coverage of krusty itself</h2>
+      {coverage ? (
+        <>
+          <p>How much of krusty's own source its test suite exercises, as recorded by the coverage gate every change must pass (<a href={`${repo}/blob/master/coverage-baseline.json`}><code>coverage-baseline.json</code></a>).</p>
+          <div class="scroll">
+            <table>
+              <thead><tr><th>Measure</th><th class="num">Covered</th><th class="num">Of</th><th class="num">Share</th></tr></thead>
+              <tbody>
+                {(["lines", "functions", "regions", "branches"] as const).map((kind) => (
+                  <tr><td>{kind[0].toUpperCase() + kind.slice(1)}</td><td class="num">{n(coverage[kind].covered)}</td><td class="num">{n(coverage[kind].count)}</td><td class="num">{pct(coverage[kind].covered, coverage[kind].count)}</td></tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      ) : <p class="na">Not measured.</p>}
+
+      <h2 id="sources">How this page is made</h2>
+      <p>
+        The <a href={`${repo}/blob/master/.github/workflows/pages.yml`}><code>pages</code> workflow</a> rebuilds it every night and after every release. It reads the box reports of the latest successful master <a href={`${repo}/actions/workflows/ci.yml`}>CI run</a>, the results the nightly <a href={`${repo}/actions/workflows/oss-corpus.yml`}>corpus run</a> publishes to <a href={`${repo}/tree/corpus-results`}><code>corpus-results</code></a>, and the coverage baseline. A missing source is shown as not measured, never estimated.
+      </p>
+    </main>
+    <footer>
+      Apache-2.0 · <a href={repo}>github.com/qnox/krusty</a> · Kotlin is a trademark of JetBrains; krusty is an independent project.
+    </footer>
+    <script>
+      // Hover: a cursor line and a tooltip with the run's numbers. Without script, each column keeps
+      // its native <title> tooltip and the table above lists every run.
+      for (const figure of document.querySelectorAll<HTMLElement>("figure.chart")) {
+        const svg = figure.querySelector("svg")!;
+        const cursor = svg.querySelector<SVGLineElement>(".cursor")!;
+        const tooltip = figure.querySelector<HTMLElement>(".tooltip")!;
+        const hide = () => {
+          tooltip.hidden = true;
+          cursor.style.opacity = "0";
+        };
+        for (const hit of svg.querySelectorAll<SVGRectElement>(".hit")) {
+          hit.querySelector("title")?.remove();
+          hit.addEventListener("pointerenter", () => {
+            const x = hit.dataset.x!;
+            cursor.setAttribute("x1", x);
+            cursor.setAttribute("x2", x);
+            cursor.style.opacity = "1";
+            tooltip.textContent = hit.dataset.tip!;
+            tooltip.hidden = false;
+            const scale = svg.getBoundingClientRect().width / svg.viewBox.baseVal.width;
+            const left = Number(x) * scale;
+            tooltip.style.left = `${Math.min(left, figure.clientWidth - tooltip.offsetWidth)}px`;
+          });
+        }
+        svg.addEventListener("pointerleave", hide);
+      }
+    </script>
+  </body>
+</html>
+
+<style>
+  .crumb { margin: 0 0 8px; font-size: 15px; color: var(--muted); }
+  .meta { font-size: 14px; color: var(--muted); }
+  .na { color: var(--muted); }
+  .sub { font-size: 13px; color: var(--muted); }
+  .scroll { overflow-x: auto; }
+  th { font-weight: 600; }
+  .num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .total td { font-weight: 600; }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin: 24px 0 8px; }
+  .tile { background: var(--code); border-radius: 8px; padding: 12px 14px; }
+  .tile .label { font-size: 13px; color: var(--muted); line-height: 1.35; }
+  .tile .value { font-size: 30px; font-weight: 650; font-variant-numeric: tabular-nums; margin-top: 4px; }
+  .tile .value.na { font-size: 18px; font-weight: 400; }
+  .tile .detail { font-size: 13px; color: var(--muted); }
+  details { margin-top: 12px; }
+  summary { cursor: pointer; color: var(--accent); }
+  .chart { position: relative; margin: 8px 0 0; --series-1: #2a78d6; --series-2: #eb6834; }
+  @media (prefers-color-scheme: dark) { .chart { --series-1: #3987e5; --series-2: #d95926; } }
+  .chart svg { width: 100%; height: auto; display: block; }
+  .chart .grid line { stroke: var(--code); stroke-width: 1; }
+  .chart text { fill: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+  .chart .series path { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+  .chart .series text { fill: var(--fg); }
+  .chart .s1 path { stroke: var(--series-1); }
+  .chart .s1 circle { fill: var(--series-1); }
+  .chart .s2 path { stroke: var(--series-2); }
+  .chart .s2 circle { fill: var(--series-2); }
+  .chart circle { stroke: var(--bg); stroke-width: 2; }
+  .chart .cursor { stroke: var(--muted); stroke-width: 1; opacity: 0; pointer-events: none; }
+  .chart .hit { fill: transparent; }
+  .chart figcaption { font-size: 14px; color: var(--muted); margin-top: 4px; }
+  .key { display: inline-block; width: 12px; height: 3px; border-radius: 2px; vertical-align: middle; margin: 0 4px 0 6px; }
+  .key.s1 { background: var(--series-1); }
+  .key.s2 { background: var(--series-2); }
+  .tooltip { position: absolute; top: 0; white-space: pre; font-size: 13px; line-height: 1.45; background: var(--bg); color: var(--fg); border: 1px solid var(--code); border-radius: 6px; padding: 6px 8px; pointer-events: none; box-shadow: 0 2px 8px rgb(0 0 0 / 0.12); }
+</style>

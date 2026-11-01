@@ -1,6 +1,10 @@
 # Builds the Astro landing page in site/ and publishes it to GitHub Pages (krustythecompiler.dev),
 # with the Bazel registry (krustythecompiler.dev/bazel-registry) generated from the GitHub releases.
 # The release job dispatches this workflow after each release, so the registry lists it.
+# The metrics page (krustythecompiler.dev/metrics/) is built from the latest successful master CI
+# run's box reports, the corpus-results branch and the coverage baseline. The nightly corpus run
+# dispatches this workflow once it has published, and the schedule rebuilds the page every night
+# even when the corpus run does not finish.
 # One-time setup: Settings -> Pages -> Source: "GitHub Actions", Custom domain: krustythecompiler.dev.
 name: pages
 
@@ -8,10 +12,14 @@ on:
   push:
     branches: [master]
     paths: ["site/**", ".github/workflows/pages.yml"]
+  schedule:
+    - cron: '0 7 * * *'
   workflow_dispatch:
 
 permissions:
   contents: read
+  # Downloads the box reports of the latest master CI run for the metrics page.
+  actions: read
   pages: write
   id-token: write
 
@@ -32,6 +40,27 @@ jobs:
           node-version: 22
           cache: npm
           cache-dependency-path: site/package-lock.json
+      # scripts/metrics.mjs documents the layout. A source that is missing is shown as not measured.
+      - name: collect the metrics page inputs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          in=$RUNNER_TEMP/metrics
+          mkdir -p "$in/corpus" "$in/box"
+          cp coverage-baseline.json "$in/"
+          if git fetch -q --depth 1 origin corpus-results; then
+            git show FETCH_HEAD:results.json > "$in/corpus/results.json"
+            git show FETCH_HEAD:history.tsv > "$in/corpus/history.tsv"
+          fi
+          run=$(gh run list -R "$GITHUB_REPOSITORY" --workflow ci.yml --branch master --event push \
+            --status success --limit 1 --json databaseId,headSha,createdAt,url --jq '.[0] // empty')
+          if [ -n "$run" ]; then
+            printf '%s\n' "$run" > "$in/ci-run.json"
+            gh run download -R "$GITHUB_REPOSITORY" "$(jq -r .databaseId <<<"$run")" -D "$in/box" \
+              -p 'pct-*' -p 'jvm-byte-equality-*' -p 'native-pct-*'
+          fi
+          echo "KRUSTY_METRICS_INPUT=$in" >> "$GITHUB_ENV"
       - name: build
         working-directory: site
         run: npm ci && npm run build && npm test
