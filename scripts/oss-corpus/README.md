@@ -23,7 +23,11 @@ fails counts as a miss with the first error it logged. Android modules take part
 that names a variant in `projects.tsv`, and then only that variant's compiles.
 
 After each measured build, an unmeasured test build runs the project's own JVM tests on the classes
-that build compiled, before they are moved out of the checkout. `corpus.init.gradle` adds the
+that build compiled. `outputs.py --keep` first snapshots the measured outputs and leaves them in
+place for it; `outputs.py --clear` then removes them and lists every file under them the test build
+wrote, rewrote or deleted (a compile task that ran again, say). The snapshot, and so the byte
+comparison, is always the measured build's; when a test build changed it, its tests did not run on
+the measured classes, and the project's test comparison is reported unavailable instead. `corpus.init.gradle` adds the
 `corpusTest` task, which depends on every JVM `Test` task of the projects whose compiles are
 compared (an Android project's unit tests of its variant only). In a test build no test task is up
 to date or taken from the build cache, a failing test does not fail its task, and the init script

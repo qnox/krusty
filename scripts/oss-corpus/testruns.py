@@ -7,6 +7,11 @@ exactly the classes that build compiled. `corpus.init.gradle` lists each test ta
 `<work dir>/logs/<name>.<mode>.tests.tsv`: its path, its JUnit XML report directory, and the
 compile tasks whose classes it runs. Its reports are moved to `<work dir>/out/<name>/<mode>-tests`.
 
+The test build runs on the measured outputs left in place, and `run.sh` lists in
+`<work dir>/logs/<name>.<mode>.changed.tsv` every file under them it wrote, rewrote or deleted. Its
+tests then did not run on the measured classes, so neither build's tests are compared: the record says
+which mode changed what, and the measured class snapshots keep the byte comparison.
+
 A test is compared only when it passed on kotlinc's classes: a test the reference build fails or
 skips says nothing about krusty. Each such test then passed, failed or was skipped on krusty's
 classes, or did not run there at all (its task did not run, or ran without reporting it). A test
@@ -69,13 +74,33 @@ def totals(tasks):
     return dict(tasks=len(tasks), **{k: sum(t['krusty'][k] for t in tasks) for k in keys})
 
 
+def changes(path):
+    """The measured output files a test build changed, or None when the check left no record."""
+    try:
+        with open(path) as f:
+            return [line.rstrip('\n') for line in f if line.strip()]
+    except OSError:
+        return None
+
+
 def compare(work, name, rows, exits):
     """The test comparison of one project, or None when the reference test build listed no test
-    task. `rows` are compare.py's compilations, `exits` each test build's exit status."""
+    task. `rows` are compare.py's compilations, `exits` each test build's exit status. When a test
+    build changed the measured outputs, or that was not checked, only why the comparison is
+    unavailable is recorded."""
     logs = os.path.join(work, 'logs')
     reference = inventory(os.path.join(logs, f'{name}.kotlinc.tests.tsv'))
     if not reference:
         return None
+    unavailable = {}
+    for mode in ('kotlinc', 'krusty'):
+        changed = changes(os.path.join(logs, f'{name}.{mode}.changed.tsv'))
+        if changed is None:
+            unavailable[mode] = dict(changed=None, examples=[])
+        elif changed:
+            unavailable[mode] = dict(changed=len(changed), examples=changed[:EXAMPLES])
+    if unavailable:
+        return dict(exit=exits, unavailable=unavailable)
     candidate = {task: reports for task, reports, _ in
                  inventory(os.path.join(logs, f'{name}.krusty.tests.tsv')) or []}
     built = {r['task']: r['built'] for r in rows}
@@ -97,5 +122,5 @@ def compare(work, name, rows, exits):
                         skipped=compared['skipped'], not_run=compared['not_run']),
             not_passing=lost[:EXAMPLES],
         ))
-    return dict(exit=exits, total=totals(tasks),
+    return dict(exit=exits, unavailable=None, total=totals(tasks),
                 krusty_classes=totals([t for t in tasks if t['krusty_classes']]), tasks=tasks)

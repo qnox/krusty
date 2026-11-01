@@ -177,8 +177,9 @@ def test_section(projects):
     the tests that passed on kotlinc's classes, how many pass, fail, are skipped or do not run on
     krusty's, over every test task and over the tasks that run classes krusty built only; and the
     first tests of each project that stopped passing."""
-    tested = [p for p in projects if p.get('tests')]
-    if not tested:
+    tested = [p for p in projects if p.get('tests') and not p['tests'].get('unavailable')]
+    unavailable = [p for p in projects if p.get('tests') and p['tests'].get('unavailable')]
+    if not tested and not unavailable:
         return []
     out = ['', '## Project tests', '',
            'Each project\'s own JVM tests run after each build, on the classes it compiled. Only a test that passed on',
@@ -197,6 +198,13 @@ def test_section(projects):
                    f"{passing(own)} in {own['tasks']} / {t['tasks']} tasks |")
         for scope in totals:
             totals[scope].update(p['tests'][scope])
+    for p in unavailable:
+        reasons = '; '.join(
+            f"the {mode} test build " + ('was not checked against the measured classes' if why['changed'] is None
+                                         else f"changed {why['changed']:,} measured output files")
+            for mode, why in p['tests']['unavailable'].items())
+        out.append(f"| {p['name']} | {p['tests']['exit'].get('kotlinc')} / {p['tests']['exit'].get('krusty')} | "
+                   f"unavailable: {reasons} | | | | |")
     t, own = totals['total'], totals['krusty_classes']
     out.append(f"| **Total** | | **{passing(t)}** | **{t['failed']:,}** | **{t['skipped']:,}** | "
                f"**{t['not_run']:,}** | **{passing(own)} in {own['tasks']} / {t['tasks']} tasks** |")

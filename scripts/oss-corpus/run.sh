@@ -7,9 +7,10 @@
 #
 #   run.sh <name> <work dir> <krusty binary> <krusty Gradle plugin repository> <plugin version>
 #
-# Writes <work dir>/out/<name>/{kotlinc,krusty} (class trees), <work dir>/out/<name>/{kotlinc,krusty}-tests
-# (JUnit reports), <work dir>/logs/<name>.* (each build's log, compile-task and test-task inventory,
-# task times and metrics) and <work dir>/out/<name>/compare.json. Compiler arguments are never
+# Writes <work dir>/out/<name>/{kotlinc,krusty} (the measured builds' class trees),
+# <work dir>/out/<name>/{kotlinc,krusty}-tests (JUnit reports), <work dir>/logs/<name>.* (each build's
+# log, compile-task and test-task inventory, task times and metrics, and what each test build changed
+# in the measured outputs) and <work dir>/out/<name>/compare.json. Compiler arguments are never
 # captured or replayed.
 
 # Setup fails fast: a failed fetch, checkout, patch or version-pin rewrite stops the run before
@@ -92,11 +93,12 @@ build() {
 }
 
 # The project's own JVM tests (`corpusTest`), run on the classes the measured build of the same mode
-# just compiled: its compile tasks are up to date, and every test runs again, since the init script
-# reuses no test result. Not measured, and online: the warm-up downloads only what compiling needs,
-# not a test runtime. `measure.py` still stops the daemons it leaves, so the next measured build
-# starts without them. The exit status is left in `test_status` (124 when it ran out of time); the
-# test-task inventory and the JUnit reports of the tasks it lists go to out/<mode>-tests.
+# compiled, which `snapshot --keep` has already saved and left in place. Every test runs again, since
+# the init script reuses no test result. Not measured, and online: the warm-up downloads only what
+# compiling needs, not a test runtime. `measure.py` still stops the daemons it leaves, so the next
+# measured build starts without them. The exit status is left in `test_status` (124 when it ran out
+# of time); the test-task inventory and the JUnit reports of the tasks it lists go to
+# out/<mode>-tests. Whether the tests really ran on the measured classes is checked by `release`.
 run_tests() {
   local mode=$1
   shift
@@ -124,17 +126,35 @@ run_tests() {
   test_status=$code
 }
 
-# A build's compile outputs moved to out/<mode>: the directories the build's own compile-task
-# inventory lists, so the next build starts without them. A broken inventory or snapshot fails the
-# run.
+# A build's compile outputs copied to out/<mode>: the directories the build's own compile-task
+# inventory lists. Without `--keep` they are then removed from the checkout, so the next build starts
+# without them; with it they stay for the test build of the same mode, and `release` removes them
+# afterwards. A broken inventory or snapshot fails the run.
 snapshot() {
   local mode=$1
   local manifest=$logs/$name.$mode.compilations.tsv
-  if [ -f "$manifest" ]; then
-    python3 "$here/outputs.py" "$manifest" "$checkout/$gradle_root" "$work/out/$name/$mode"
-  else
+  if [ ! -f "$manifest" ]; then
     rm -rf "$work/out/$name/$mode"
     mkdir -p "$work/out/$name/$mode"
+  elif [ "${2:-}" = --keep ]; then
+    python3 "$here/outputs.py" --keep "$manifest" "$checkout/$gradle_root" "$work/out/$name/$mode"
+  else
+    python3 "$here/outputs.py" "$manifest" "$checkout/$gradle_root" "$work/out/$name/$mode"
+  fi
+}
+
+# Removes the outputs `snapshot --keep` left for the test build, and lists in
+# <logs>/<name>.<mode>.changed.tsv every file under them the test build wrote, rewrote or deleted.
+# The snapshot stays the measured build's classes either way; a listed change means the tests did not
+# run on them, and the comparison reports that mode's tests as unavailable.
+release() {
+  local mode=$1
+  local manifest=$logs/$name.$mode.compilations.tsv
+  local changes=$logs/$name.$mode.changed.tsv
+  if [ -f "$manifest" ]; then
+    python3 "$here/outputs.py" --clear "$manifest" "$checkout/$gradle_root" "$work/out/$name/$mode" "$changes"
+  else
+    : >"$changes"
   fi
 }
 
@@ -151,9 +171,10 @@ if [ ! -f "$logs/$name.kotlinc.compilations.tsv" ]; then
   echo "$name: the reference build recorded no compile-task inventory" >&2
   exit 1
 fi
+snapshot kotlinc --keep
 run_tests kotlinc
 kotlinc_tests=$test_status
-snapshot kotlinc
+release kotlinc
 # With `$CORPUS_PERF` set (the `perf` command, allowed to sample every process), the krusty
 # build is sampled system-wide at a low rate, and the krusty processes' call stacks are folded into
 # <logs>/<name>.krusty.folded; with `$CORPUS_FLAMEGRAPH` (inferno's `inferno-flamegraph`) also drawn as
@@ -178,8 +199,9 @@ if [ -n "${CORPUS_PERF:-}" ]; then
       >"$logs/$name.krusty.svg"
   fi
 fi
+snapshot krusty --keep
 KRUSTY_PLUGIN_REPOSITORY=$plugin_repository KRUSTY_PLUGIN_VERSION=$plugin_version \
   run_tests krusty -I "$here/krusty.init.gradle" -Pkrusty.binary="$krusty"
 krusty_tests=$test_status
-snapshot krusty
+release krusty
 python3 "$here/compare.py" "$work" "$name" "$reference" "$kotlinc_tests" "$krusty_tests"

@@ -247,7 +247,12 @@ def main():
             print(f"  {mode} build: {cost['wall_seconds']} s wall, {cost['cpu_seconds']} s CPU, "
                   f"peak {cost['peak_rss_mb']['total']} MB; compile {cost['compile_seconds']} s, "
                   f"{cost['built_compile_seconds']} s in compilations krusty built")
-    if summary['tests']:
+    if summary['tests'] and summary['tests']['unavailable']:
+        for mode, why in summary['tests']['unavailable'].items():
+            print(f"  tests unavailable: the {mode} test build " + (
+                'was not checked against the measured outputs' if why['changed'] is None else
+                f"changed {why['changed']} measured output files: {', '.join(why['examples'])}"))
+    elif summary['tests']:
         for scope, label in (('total', 'all test tasks'), ('krusty_classes', 'tasks on krusty classes only')):
             t = summary['tests'][scope]
             print(f"  tests, {label} ({t['tasks']}): {t['passed']}/{t['passed_kotlinc']} passing on kotlinc's "

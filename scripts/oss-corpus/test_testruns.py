@@ -47,6 +47,9 @@ class Compare(unittest.TestCase):
                      ':empty:test\tempty/build/test-results/test\t\n')
         write(f'{work}/logs/p.kotlinc.tests.tsv', inventory)
         write(f'{work}/logs/p.krusty.tests.tsv', inventory)
+        # Neither test build changed the measured outputs.
+        write(f'{work}/logs/p.kotlinc.changed.tsv', '')
+        write(f'{work}/logs/p.krusty.changed.tsv', '')
         write(f'{out}/kotlinc-tests/lib/build/test-results/test/TEST-l.LT.xml',
               suite('l.LT', {'ok': 'passed', 'bad': 'failed', 'broken': 'passed', 'gone': 'passed',
                              'off': 'passed', 'never': 'skipped', 'reference': 'error'}))
@@ -133,40 +136,94 @@ class Compare(unittest.TestCase):
 
 class RunScript(unittest.TestCase):
     """`run.sh` runs a test build after each measured build and moves its JUnit reports out of the
-    checkout, so the krusty test build cannot read the kotlinc one's."""
+    checkout, so the krusty test build cannot read the kotlinc one's. The test build runs on the
+    measured outputs, snapshotted before it starts; anything it changes in them is detected."""
+
+    def run_corpus(self, work, gradlew):
+        repo = f'{work}/upstream'
+        write(f'{repo}/gradlew', gradlew)
+        os.chmod(f'{repo}/gradlew', 0o755)
+        git = ['git', '-C', repo, '-c', 'user.name=t', '-c', 'user.email=t@t']
+        subprocess.run(['git', 'init', '-q', repo], check=True)
+        subprocess.run(git + ['add', '.'], check=True)
+        subprocess.run(git + ['commit', '-qm', 'init'], check=True)
+        commit = subprocess.run(git + ['rev-parse', 'HEAD'], check=True, capture_output=True,
+                                text=True).stdout.strip()
+        write(f'{work}/projects.tsv', f'p\tfile://{repo}\t{commit}\t.\t21\t-\n')
+        env = dict(os.environ, CORPUS_PROJECTS=f'{work}/projects.tsv')
+        env.pop('CORPUS_PERF', None)
+        result = subprocess.run(['bash', os.path.join(HERE, 'run.sh'), 'p', f'{work}/corpus',
+                                 '/nonexistent/krusty', '/nonexistent/repository', '0'],
+                                env=env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with open(f'{work}/corpus/out/p/compare.json') as f:
+            return json.load(f)
 
     def test_each_test_build_reports_on_its_own_classes(self):
         with tempfile.TemporaryDirectory() as work:
-            repo = f'{work}/upstream'
             # A build with one test task, whose test fails when the krusty plugin is applied.
-            write(f'{repo}/gradlew', '#!/bin/sh\n'
-                                     'if [ -n "$CORPUS_COMPILATIONS" ]; then : > "$CORPUS_COMPILATIONS"; fi\n'
-                                     'if [ -n "$CORPUS_TESTS" ]; then\n'
-                                     '  printf ":test\\tbuild/test-results/test\\t\\n" > "$CORPUS_TESTS"\n'
-                                     '  mkdir -p build/test-results/test\n'
-                                     '  case "$*" in *krusty.binary*) body="<failure/>";; *) body="";; esac\n'
-                                     '  echo "<testsuite><testcase classname=\\"T\\" name=\\"t\\">$body</testcase></testsuite>"'
-                                     ' > build/test-results/test/TEST-T.xml\n'
-                                     'fi\n')
-            os.chmod(f'{repo}/gradlew', 0o755)
-            git = ['git', '-C', repo, '-c', 'user.name=t', '-c', 'user.email=t@t']
-            subprocess.run(['git', 'init', '-q', repo], check=True)
-            subprocess.run(git + ['add', '.'], check=True)
-            subprocess.run(git + ['commit', '-qm', 'init'], check=True)
-            commit = subprocess.run(git + ['rev-parse', 'HEAD'], check=True, capture_output=True,
-                                    text=True).stdout.strip()
-            write(f'{work}/projects.tsv', f'p\tfile://{repo}\t{commit}\t.\t21\t-\n')
-            env = dict(os.environ, CORPUS_PROJECTS=f'{work}/projects.tsv')
-            env.pop('CORPUS_PERF', None)
-            result = subprocess.run(['bash', os.path.join(HERE, 'run.sh'), 'p', f'{work}/corpus',
-                                     '/nonexistent/krusty', '/nonexistent/repository', '0'],
-                                    env=env, capture_output=True, text=True)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            with open(f'{work}/corpus/out/p/compare.json') as f:
-                tests = json.load(f)['tests']
+            tests = self.run_corpus(work, '#!/bin/sh\n'
+                                          'if [ -n "$CORPUS_COMPILATIONS" ]; then : > "$CORPUS_COMPILATIONS"; fi\n'
+                                          'if [ -n "$CORPUS_TESTS" ]; then\n'
+                                          '  printf ":test\\tbuild/test-results/test\\t\\n" > "$CORPUS_TESTS"\n'
+                                          '  mkdir -p build/test-results/test\n'
+                                          '  case "$*" in *krusty.binary*) body="<failure/>";; *) body="";; esac\n'
+                                          '  echo "<testsuite><testcase classname=\\"T\\" name=\\"t\\">$body</testcase></testsuite>"'
+                                          ' > build/test-results/test/TEST-T.xml\n'
+                                          'fi\n')['tests']
             self.assertFalse(os.path.exists(f'{work}/corpus/src/p/build/test-results/test'))
         self.assertEqual(tests['exit'], dict(kotlinc=0, krusty=0))
         self.assertEqual(tests['total'], dict(tasks=1, passed_kotlinc=1, passed=0, failed=1, skipped=0, not_run=0))
+
+    def test_a_test_build_that_rewrites_the_measured_classes_is_not_credited(self):
+        with tempfile.TemporaryDirectory() as work:
+            # The measured builds write different bytes; each test build then rewrites the class
+            # to the same third bytes before its test passes.
+            project = self.run_corpus(work, '#!/bin/sh\n'
+                                            'case "$*" in *krusty.binary*) bytes=R;; *) bytes=K;; esac\n'
+                                            'if [ -n "$CORPUS_COMPILATIONS" ]; then\n'
+                                            '  printf ":compileKotlin\\tbuild/classes\\n" > "$CORPUS_COMPILATIONS"\n'
+                                            '  mkdir -p build/classes && printf $bytes > build/classes/A.class\n'
+                                            'fi\n'
+                                            'if [ -n "$CORPUS_TESTS" ]; then\n'
+                                            '  printf T > build/classes/A.class\n'
+                                            '  printf ":test\\tbuild/test-results/test\\t:compileKotlin\\n" > "$CORPUS_TESTS"\n'
+                                            '  mkdir -p build/test-results/test\n'
+                                            '  echo "<testsuite><testcase classname=\\"T\\" name=\\"t\\"/></testsuite>"'
+                                            ' > build/test-results/test/TEST-T.xml\n'
+                                            'fi\n')
+            measured = {}
+            for mode in ('kotlinc', 'krusty'):
+                with open(f'{work}/corpus/out/p/{mode}/build/classes/A.class') as f:
+                    measured[mode] = f.read()
+            self.assertFalse(os.path.exists(f'{work}/corpus/src/p/build/classes'))
+            path = f'{work}/corpus/out/p/compare.json'
+            text = subprocess.run([sys.executable, os.path.join(HERE, 'summarize.py'), path],
+                                  check=True, capture_output=True, text=True).stdout
+        # The snapshots and the byte comparison are the measured builds', not the test builds'.
+        self.assertEqual(measured, dict(kotlinc='K', krusty='R'))
+        self.assertEqual((project['built'], project['classes'], project['identical']), (1, 1, 0))
+        self.assertEqual(project['tests'], dict(exit=dict(kotlinc=0, krusty=0), unavailable=dict(
+            kotlinc=dict(changed=1, examples=['build/classes/A.class']),
+            krusty=dict(changed=1, examples=['build/classes/A.class']))))
+        # Nothing the test builds ran is counted.
+        self.assertEqual(text[text.index('## Project tests'):text.index('## Build cost')].splitlines()[8:], [
+            '| p | 0 / 0 | unavailable: the kotlinc test build changed 1 measured output files; '
+            'the krusty test build changed 1 measured output files | | | | |',
+            '| **Total** | | **0 / 0** | **0** | **0** | **0** | **0 / 0 in 0 / 0 tasks** |',
+            '',
+        ])
+
+    def test_a_test_build_not_checked_against_the_measured_outputs_is_not_compared(self):
+        with tempfile.TemporaryDirectory() as work:
+            Compare().compare(work)
+            os.remove(f'{work}/logs/p.krusty.changed.tsv')
+            subprocess.run([sys.executable, os.path.join(HERE, 'compare.py'), work, 'p', '0', '0', '1'],
+                           check=True, stdout=subprocess.DEVNULL)
+            with open(f'{work}/out/p/compare.json') as f:
+                tests = json.load(f)['tests']
+        self.assertEqual(tests, dict(exit=dict(kotlinc=0, krusty=1),
+                                     unavailable=dict(krusty=dict(changed=None, examples=[]))))
 
 
 if __name__ == '__main__':
