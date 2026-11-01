@@ -1,10 +1,11 @@
 //! Which classes a class's descriptors and generic signatures name, for `InnerClasses`.
 //!
 //! kotlinc lists a nested class in `InnerClasses` whenever the class it writes names it in a type
-//! position: a class constant, a declared field or method descriptor, a callee's descriptor, or a
-//! generic `Signature`. A dependency's nested class seen only in such a position (a parameter of
-//! type `Map.Entry`, a callee returning `Thread.State`, a `List<Map.Entry<K, V>>` signature) still
-//! gets its row, so the resolver is offered every class those positions name.
+//! position: a class constant, a declared field or method descriptor, a callee's descriptor, a
+//! local variable's descriptor, or a generic `Signature`. A dependency's nested class seen only in
+//! such a position (a parameter of type `Map.Entry`, a callee returning `Thread.State`, a
+//! `List<Map.Entry<K, V>>` signature) still gets its row, so the resolver is offered every class
+//! those positions name.
 
 use super::ClassWriter;
 
@@ -227,6 +228,19 @@ impl ClassWriter {
             .iter()
             .map(|field| field.desc)
             .chain(self.methods.iter().map(|method| method.desc))
+        {
+            if let Some(value) = self.cp.utf8_value(index) {
+                record_mentioned_names(value, &mut names);
+                record_signature_classes(value, &mut |class| {
+                    classes.insert(class.to_string());
+                });
+            }
+        }
+        // A local variable's type is mapped for its `LocalVariableTable` entry.
+        for index in self
+            .methods
+            .iter()
+            .flat_map(|method| method.lvt.iter().map(|&(_, descriptor, ..)| descriptor))
         {
             if let Some(value) = self.cp.utf8_value(index) {
                 record_mentioned_names(value, &mut names);

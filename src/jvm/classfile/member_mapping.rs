@@ -5,7 +5,8 @@
 //! naming it while generating the class. The instructions its inliner copies from a compiled inline
 //! function (`Continuation.resume`'s `Result.Companion` read, a `checkcast` to a nested class) never
 //! pass through that mapper, and neither do the ones its coroutine transformer adds with raw ASM (a
-//! spilled local's `checkcast` on restore), so a nested class only such code names gets no row. A
+//! spilled local's `checkcast` on restore), and neither does the operand of a written `is` or
+//! `as`, so a nested class only such code names gets no row. A
 //! reference interned while copying is recorded as copied; one the class's own code interns is
 //! recorded as mapped.
 
@@ -56,6 +57,14 @@ impl ClassWriter {
     /// Constant-pool index of a `Class` entry, for `new`, `checkcast` and the like.
     pub fn class_ref(&mut self, internal: &str) -> u16 {
         self.with_class_origin(internal, |pool| pool.class(internal))
+    }
+
+    /// The class constant a written type operator checks against: the `instanceof` of `x is T`
+    /// or the `checkcast` of `x as T`. kotlinc boxes that operand's type without its type mapper,
+    /// so a nested class only such an operator names gets no `InnerClasses` row; any other use,
+    /// a compiler-inserted cast included, still maps it.
+    pub fn type_operand_class_ref(&mut self, internal: &str) -> u16 {
+        self.copying(|writer| writer.class_ref(internal))
     }
 
     /// Whether the class's own code, or a declaration, names `internal` as a class constant.

@@ -21,7 +21,7 @@ fn copies_referenced_classpath_inner_class_metadata() {
         .expect("dependency self entry");
     let stdlib = common::stdlib_jar();
     let Some(classes) = common::compile_in_process(
-        "package app\nfun nested(value: Any) = value is dep.Outer.Nested\n",
+        "package app\nfun nested(value: dep.Outer.Nested) = value\n",
         "Use",
         &[lib, stdlib],
         Some(common::jdk_modules().as_path()),
