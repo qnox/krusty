@@ -566,6 +566,7 @@ struct BodyFirChecker<'a> {
     constructor_prefix_capture_access: bool,
     /// Whether an anonymous-super argument is being evaluated in its enclosing scope.
     hoist_anonymous_super_argument: bool,
+    construction_site_receiver_frames: Vec<crate::ast::DeclId>,
 }
 
 impl BodyFirChecker<'_> {
@@ -1007,6 +1008,7 @@ impl BodyFirChecker<'_> {
             outer_receiver_frames: Vec::new(),
             constructor_prefix_capture_access: false,
             hoist_anonymous_super_argument: false,
+            construction_site_receiver_frames: Vec::new(),
         }
     }
 
@@ -2220,10 +2222,18 @@ impl BodyFirChecker<'_> {
             self.body.direct_suspension = true;
         }
         let origin = self.statement_origin(statement)?;
-        if let Some(StmtLowering::PlusAssign(target)) =
-            self.info.stmt_lowers.get(&statement).cloned()
-        {
-            return self.compound_assignment_statement(statement, target, origin);
+        match self.info.stmt_lowers.get(&statement).cloned() {
+            Some(StmtLowering::PlusAssign(target)) => {
+                return self.compound_assignment_statement(statement, target, origin);
+            }
+            Some(StmtLowering::OverloadedAssignment { call }) => {
+                let call = self.expression(call)?;
+                return Ok(self.body.add_statement(FirStatement {
+                    origin,
+                    kind: FirStatementKind::Expression(call),
+                }));
+            }
+            _ => {}
         }
         let custom_range_loop = match self.file.stmt(statement) {
             Stmt::For {

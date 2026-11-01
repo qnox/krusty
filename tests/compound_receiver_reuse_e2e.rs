@@ -1,8 +1,9 @@
 //! The receiver of a compound member assignment `receiver.x op= value`.
 //!
 //! kotlinc evaluates the receiver once. A read of an immutable binding (a `val`, a parameter, or a
-//! value a lambda lifted to a method received as a parameter) and every `this` receiver are read
-//! again for the setter instead of being saved; any other receiver, including a `var`, a property,
+//! value a lambda lifted to a method received as a parameter), every `this` receiver and a resolved
+//! singleton declaration are read again for the setter instead of being saved; computed receivers,
+//! including a `var`, a property,
 //! and a value a local class or a suspend lambda captured into a field, is saved in a temporary.
 //!
 //! DIFFERENTIAL: the same source goes through the provisioned kotlinc and through krusty, and each
@@ -80,4 +81,30 @@ fn a_suspend_lambda_saves_its_captured_receiver() {
         SUSPEND_CAPTURE,
         "SuspendCaptureKt$capture$1",
     );
+}
+
+const SINGLETON_RECEIVER: &str = include_str!("fixtures/compound_receivers/SingletonReceiver.kt");
+const SINGLETON_INDEX: &str = include_str!("fixtures/compound_receivers/SingletonIndex.kt");
+
+#[test]
+fn singleton_member_receivers_match_every_class_artifact() {
+    let classes =
+        common::classes_against_kotlinc_module(&[("SingletonReceiver.kt", SINGLETON_RECEIVER)]);
+    assert_eq!(classes.differences(), Vec::<String>::new());
+}
+
+#[test]
+fn singleton_receivers_initialize_once_before_the_right_operand() {
+    common::expect_box_same_as_kotlinc(SINGLETON_RECEIVER, "SingletonReceiver");
+}
+
+#[test]
+fn singleton_index_operands_match_every_class_artifact() {
+    let classes = common::classes_against_kotlinc_module(&[("SingletonIndex.kt", SINGLETON_INDEX)]);
+    assert_eq!(classes.differences(), Vec::<String>::new());
+}
+
+#[test]
+fn singleton_index_operands_keep_one_get_and_one_set() {
+    common::expect_box_same_as_kotlinc(SINGLETON_INDEX, "SingletonIndex");
 }

@@ -34,6 +34,46 @@ pub(super) fn source(
     })
 }
 
+/// Every declaration `target` overrides, following override edges through module declarations to
+/// the first dependency declaration on each path. Each edge is the one the overriding declaration's
+/// own classifier publishes.
+fn overridden_declarations(
+    index: &ResolvedModuleIndex,
+    target: CallableId,
+) -> Box<[crate::ir::IrOverriddenFunction]> {
+    let mut declarations = Vec::new();
+    let mut pending = vec![target];
+    let mut seen = HashSet::default();
+    while let Some(current) = pending.pop() {
+        if !seen.insert(current) {
+            continue;
+        }
+        let Some(owner) = index
+            .callable(current)
+            .and_then(|callable| index.enclosing_classifier(callable.declaration))
+        else {
+            continue;
+        };
+        for edge in index.function_overrides(owner.declaration) {
+            if edge.implementation != crate::fir::ResolvedFunctionOverrideTarget::Module(current) {
+                continue;
+            }
+            if let crate::fir::ResolvedFunctionOverrideTarget::Module(overridden) = edge.overridden
+            {
+                pending.push(overridden);
+            }
+            declarations.push(crate::ir::IrOverriddenFunction {
+                target: edge.overridden,
+                owner: edge.overridden_owner,
+                name: edge.name.clone(),
+                parameters: edge.declared_parameters.iter().map(|ty| ty.get()).collect(),
+                result: edge.declared_result.get(),
+            });
+        }
+    }
+    declarations.into_boxed_slice()
+}
+
 fn publish_callable(
     index: &ResolvedModuleIndex,
     ir: &mut IrFile,
@@ -78,6 +118,7 @@ fn publish_callable(
                 .collect()
         })
         .unwrap_or_default();
+    let owner_type_parameters = owner_type_parameters(index, owner);
     let owner = owner.map(|classifier| classifier.classifier);
     let placement = super::companion_blocks::static_placement(
         flags,
@@ -140,17 +181,10 @@ fn publish_callable(
                 .enumerate()
                 .filter_map(|(position, &default)| default.then_some(position))
                 .collect(),
-            type_parameters: super::generics::declaration_type_parameters(
-                index,
-                callable.declaration,
-            )
-            .into_iter()
-            .map(|parameter| crate::ir::IrCallableTypeParameter {
-                semantic_name: parameter.semantic_name,
-                bounds: parameter.bounds.into_boxed_slice(),
-            })
-            .collect::<Vec<_>>()
-            .into_boxed_slice(),
+            type_parameters: callable_type_parameters(
+                super::generics::declaration_type_parameters(index, callable.declaration),
+            ),
+            owner_type_parameters,
             result: signature.result.get(),
             annotations: index
                 .declaration_annotations(callable.declaration)
@@ -170,6 +204,7 @@ fn publish_callable(
                 .into_boxed_slice(),
             placement,
             overridden_results,
+            overridden_declarations: overridden_declarations(index, target),
         },
     );
     // A member of a singleton is realized from its owner's shape (a named object or a
@@ -180,6 +215,33 @@ fn publish_callable(
         }
         _ => Ok(()),
     }
+}
+
+/// The records a module declaration carries for its type parameters: identity and bounds.
+fn callable_type_parameters(
+    parameters: Vec<crate::ir::IrTypeParameter>,
+) -> Box<[crate::ir::IrCallableTypeParameter]> {
+    parameters
+        .into_iter()
+        .map(|parameter| crate::ir::IrCallableTypeParameter {
+            semantic_name: parameter.semantic_name,
+            bounds: parameter.bounds.into_boxed_slice(),
+        })
+        .collect()
+}
+
+/// The complete type-parameter layout of a member's declaring classifier, none for a top-level
+/// declaration.
+fn owner_type_parameters(
+    index: &ResolvedModuleIndex,
+    owner: Option<&crate::fir::ResolvedClassifierHeader>,
+) -> Box<[crate::ir::IrCallableTypeParameter]> {
+    owner.map_or_else(Box::default, |owner| {
+        callable_type_parameters(super::generics::classifier_type_parameters(
+            index,
+            owner.declaration,
+        ))
+    })
 }
 
 fn classifier_kind(flags: DeclarationFlags) -> IrClassifierKind {
@@ -331,6 +393,10 @@ fn publish_property(
                 FirFileLoweringFailure::MissingProperty(property.declaration),
             )?,
             overridden_types,
+            type_parameters: callable_type_parameters(
+                super::generics::declaration_type_parameters(index, property.declaration),
+            ),
+            owner_type_parameters: owner_type_parameters(index, owner),
         },
     );
     Ok(())
@@ -427,6 +493,9 @@ fn publish_constructor(
             context_parameter_count: callable.shape.context_parameter_count,
             parameters,
             outer,
+            owner_type_parameters: callable_type_parameters(
+                super::generics::classifier_type_parameters(index, owner.declaration),
+            ),
         },
     );
     Ok(())
@@ -558,6 +627,13 @@ pub(super) fn publish_referenced(
             callables.insert(target);
         }
     }
+    // An override this file declares, whose calls a target realizes from what it overrides.
+    callables.extend(ir.function_overrides.values().flatten().filter_map(|edge| {
+        match edge.implementation {
+            crate::fir::ResolvedFunctionOverrideTarget::Module(target) => Some(target),
+            crate::fir::ResolvedFunctionOverrideTarget::External(_) => None,
+        }
+    }));
     // A declaration this file's classes override, which a target realizes an override against.
     callables.extend(ir.function_overrides.values().flatten().filter_map(|edge| {
         match edge.overridden {

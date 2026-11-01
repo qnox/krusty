@@ -50,3 +50,17 @@ pub enum IrLocalPropertyLayout {
         context_parameters: Vec<Ty>,
     },
 }
+
+impl IrLocalPropertyLayout {
+    /// The accessor functions this layout materialized.
+    pub(crate) fn accessor_functions(&self) -> impl Iterator<Item = FunId> {
+        let (getter, setter) = match self {
+            Self::TopLevelStorage { getter, setter, .. } | Self::Member { getter, setter, .. } => {
+                (*getter, *setter)
+            }
+            Self::TopLevelAccessor { getter, setter, .. }
+            | Self::MemberExtension { getter, setter, .. } => (Some(*getter), *setter),
+        };
+        getter.into_iter().chain(setter)
+    }
+}

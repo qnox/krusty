@@ -1,6 +1,7 @@
 use std::rc::Rc;
 
 mod accessor_modifiers;
+mod declaration_names;
 
 use super::*;
 use crate::fir::ResolvedParameterIdentity;
@@ -224,6 +225,12 @@ fn a_package_type_alias_is_published_from_its_metadata_declaration() {
         Some(crate::libraries::ClassifierDeclaration::TypeAlias(
             crate::libraries::AliasExpansion {
                 identity,
+                declaration_name: Some(std::sync::Arc::new(
+                    crate::types::ClassifierDeclarationName::TopLevel {
+                        package: type_name("fixture"),
+                        name: "Transform".into(),
+                    },
+                )),
                 target,
                 formals: vec!["T".to_string()],
                 expansion,
@@ -240,6 +247,12 @@ fn a_package_type_alias_is_published_from_its_metadata_declaration() {
         ),
         Some(crate::libraries::AliasExpansion {
             identity,
+            declaration_name: Some(std::sync::Arc::new(
+                crate::types::ClassifierDeclarationName::TopLevel {
+                    package: type_name("fixture"),
+                    name: "Transform".into(),
+                },
+            )),
             target,
             formals: vec!["T".to_string()],
             expansion,
@@ -807,8 +820,9 @@ fn write_closed_range_contains_klib_with_shadowed_declarations(
             has_backing_field: true,
             modifiers: Default::default(),
             setter_visibility: Visibility::Public,
-            declares_annotations: false,
+            annotations: Default::default(),
             annotation_method: None,
+            field_annotations: Default::default(),
             companion: false,
             accessor_annotations: Default::default(),
             field_name: None,
@@ -818,8 +832,14 @@ fn write_closed_range_contains_klib_with_shadowed_declarations(
         .into_iter()
         .collect::<Vec<_>>();
     let class_tail = crate::metadata::class_builder::ClassTail::default();
+    let class_id = crate::metadata::class_id::ResolvedClassId::declared(
+        type_name("kotlin/ranges/DependencyOnlyClass"),
+        type_name("kotlin/ranges"),
+        &["DependencyOnlyClass"],
+    );
     let dependency_only_class = crate::metadata::class_builder::ClassDeclaration {
         name: type_name("kotlin/ranges/DependencyOnlyClass"),
+        class_id: &class_id,
         ctor_params: &[],
         props: &[],
         methods: &[],

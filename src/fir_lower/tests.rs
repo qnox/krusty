@@ -564,7 +564,8 @@ fn checked_call_keeps_stable_target_and_final_argument_mapping() {
             IrCheckedArgument::Vararg {
                 parameter: 2,
                 array_type,
-                elements
+                elements,
+                ..
             }
         ] if *array_type == Ty::obj("kotlin/IntArray") && elements == &vec![(1, false)]
     ));

@@ -185,6 +185,12 @@ impl Checker<'_> {
                                     signature.clone(),
                                 )
                             }),
+                            self.rejected_constructor_function_arguments(
+                                args,
+                                &argument_slots,
+                                signature,
+                                &explicit_type_arguments,
+                            ),
                         )
                     });
                     continue;
@@ -342,17 +348,24 @@ impl Checker<'_> {
                         )
                     },
                 );
-                if let Some(violation) = constraints.bound_violation {
-                    let source_argument = violation.argument;
-                    if args.get(source_argument).is_none() {
-                        continue;
-                    }
-                    bound_failures.push(LibraryConstructorFailure::TypeMismatch {
-                        source_argument,
-                        expected: violation.expected,
-                        actual: violation.actual,
-                        result: None,
-                    });
+                let owner = super::type_parameter_owners::classifier_type_parameter_owner(
+                    &source, internal, classifier,
+                );
+                if let Some(contradictions) =
+                    super::generic_argument_bounds::ArgumentContradictions::new(
+                        signature,
+                        &constraints.bound_violations,
+                        owner,
+                        |source_argument| {
+                            let argument = *args.get(source_argument)?;
+                            let parameter = *argument_slots.get(source_argument)?;
+                            Some((argument, *signature.params.get(parameter)?))
+                        },
+                    )
+                {
+                    bound_failures.push(LibraryConstructorFailure::ArgumentContradictions(
+                        Box::new(contradictions),
+                    ));
                     continue;
                 }
                 let tightest_upper = constraints.tightest_upper_bindings(&source);
@@ -557,6 +570,7 @@ impl Checker<'_> {
                                     signature.clone(),
                                 )
                             }),
+                            Vec::new(),
                         )
                     });
                     continue;
@@ -638,6 +652,9 @@ impl Checker<'_> {
                                             source_argument,
                                             ..
                                         } => *source_argument,
+                                        LibraryConstructorFailure::ArgumentContradictions(
+                                            contradictions,
+                                        ) => contradictions.first_argument(),
                                         LibraryConstructorFailure::Mapping(_)
                                         | LibraryConstructorFailure::TypeArgumentMismatch {
                                             ..
@@ -647,8 +664,12 @@ impl Checker<'_> {
                                 return Err(failure);
                             }
                         }
-                        if let Some(((expected, actual), constructor, bound_constructor)) =
-                            type_argument_bound_failure
+                        if let Some((
+                            (expected, actual),
+                            constructor,
+                            bound_constructor,
+                            postponed_arguments,
+                        )) = type_argument_bound_failure
                         {
                             return Err(LibraryConstructorFailure::TypeArgumentMismatch {
                                 expected,
@@ -657,6 +678,7 @@ impl Checker<'_> {
                                 explicit: explicit_type_arguments,
                                 constructor,
                                 bound_constructor,
+                                postponed_arguments,
                             });
                         }
                         if let Some((failure, (params, call_sig))) =

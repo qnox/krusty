@@ -98,7 +98,7 @@ impl BodyLowering<'_> {
             ty,
             CalleeShape {
                 receiver: Some(primitive.receiver),
-                params: &[],
+                params: &primitive.params,
                 ret: primitive.ret,
                 context_count: 0,
                 class_type_parameters: &primitive.class_type_parameters,
@@ -134,6 +134,26 @@ impl BodyLowering<'_> {
                 dispatch_receiver: Some(receiver),
                 args: Vec::new(),
             }),
+            // The source range operator over the receiver and the end bound, as checked FIR
+            // lowers `start..end` once the provider's declaration fixed the range it builds.
+            CommonPrimitive::RangeConstruction(operation) => {
+                let (&[end], &[end_type]) = (operands.args.as_slice(), operands.params.as_slice())
+                else {
+                    return Err(mismatch(
+                        "a range construction is called with another shape than its declaration's",
+                    ));
+                };
+                self.ir.add_expr(IrExpr::Checked(Box::new(
+                    IrCheckedOperation::RangeConstruction {
+                        operation,
+                        start: receiver,
+                        start_type: primitive.receiver,
+                        end,
+                        end_type,
+                        result: primitive.ret,
+                    },
+                )))
+            }
         })
     }
 
@@ -323,6 +343,24 @@ impl BodyLowering<'_> {
                 let inner = self.ty(expression, "call")?;
                 self.equality(access, operator, inner, true)
             }
+            Some("NOT_IN") => {
+                let expression = self.arena.expr(operand);
+                let membership = match super::super::range_membership::range_literal_membership(
+                    self.arena, expression,
+                ) {
+                    Some(membership)
+                        if membership.membership.origin.as_deref() == Some("NOT_IN") =>
+                    {
+                        let inner = self.ty(expression, "call")?;
+                        self.range_literal_membership(membership, inner, true)?
+                    }
+                    _ => None,
+                };
+                membership.map_or_else(
+                    || unsupported("a `!in` of another form than a membership in a range literal"),
+                    Ok,
+                )
+            }
             Some(_) => unsupported("a negation of another form than `!`, `!=` or `!==`"),
         }
     }
@@ -365,7 +403,9 @@ impl BodyLowering<'_> {
         // already expanded inline function's type parameter erased to.
         if signature.ret != ty
             && self.header.erased(signature.ret) != ty
-            && !self.linker.is_subtype(signature.ret, ty)
+            && !self
+                .linker
+                .is_subtype(self.header.type_parameters(), signature.ret, ty)
         {
             return Err(mismatch(
                 "a function invocation is typed apart from its result",
@@ -428,6 +468,10 @@ impl BodyLowering<'_> {
         if let Callee::External { params, ret, .. } = &mut callee {
             (*params, *ret) = (operands.params, operands.ret);
         }
+        let declared_ret = match callee {
+            Callee::Local(function) => Some(self.ir.functions[function as usize].ret),
+            _ => None,
+        };
         let (dispatch_receiver, args) = (operands.receiver, operands.args);
         let singleton_dispatch = linked.singleton_dispatch;
         let call = self.ir.add_expr(IrExpr::Call {
@@ -440,7 +484,16 @@ impl BodyLowering<'_> {
                 .external_singleton_dispatches
                 .insert(call, classifier);
         }
-        Ok(call)
+        // The result of a generic local function is its declared type parameter; the call's
+        // value is that result at the call's type arguments.
+        Ok(match declared_ret {
+            Some(declared) if declared != operands.ret => {
+                let coerced = self.coercion(call, operands.ret);
+                self.ir.logical_types.insert(coerced, operands.ret);
+                coerced
+            }
+            _ => call,
+        })
     }
 }
 
@@ -552,14 +605,25 @@ impl BodyLowering<'_> {
                 }
             }
         };
-        let ret = callee.ret.substitute_erased(&bindings);
+        // Without class bindings the shape is already at the call's type arguments, which may
+        // name the caller's own type parameters; erasing them would lose the call's types.
+        let substitute = |declared: Ty| {
+            if bindings.is_empty() {
+                declared
+            } else {
+                declared.substitute_erased(&bindings)
+            }
+        };
+        // A result read through a projected receiver argument (`Array<out T>.get`) is that
+        // projection's read type, as a source call's result is.
+        let ret = substitute(callee.ret).projection_read_ty();
         if ty != ret {
             return Err(mismatch("a call is typed apart from its callee's result"));
         }
         let params = callee
             .params
             .iter()
-            .map(|param| param.substitute_erased(&bindings))
+            .map(|&param| substitute(param))
             .collect::<Vec<_>>();
         let mut args = Vec::with_capacity(params.len());
         for (argument, &parameter) in arguments.zip(&params) {
@@ -617,6 +681,28 @@ impl BodyLowering<'_> {
             ));
         }
         if linked.type_parameters.is_empty() {
+            return Ok(linked);
+        }
+        if let Callee::Local(_) = linked.callee {
+            // A call of a function the unit declares binds its type parameters as checked FIR
+            // lowers a source call of a module generic function: the arguments are read at the
+            // substituted parameters and the declared result is coerced to the substituted one,
+            // with no substitutions recorded on the call.
+            let mut bindings = crate::fx_hash::HashMap::default();
+            for (parameter, argument) in linked.type_parameters.iter().zip(&access.type_arguments) {
+                let argument = argument.ok_or(KlibBodyDeclineReason::UnsupportedOperation(
+                    "a call that leaves a type argument unset",
+                ))?;
+                let value = semantic_type(self.arena, self.header.type_parameters(), argument)?;
+                bindings.insert(parameter.clone(), value);
+            }
+            for param in &mut linked.params {
+                *param = param.substitute_erased(&bindings);
+            }
+            linked.ret = linked.ret.substitute_erased(&bindings);
+            linked.receiver = linked
+                .receiver
+                .map(|receiver| receiver.substitute_erased(&bindings));
             return Ok(linked);
         }
         let Callee::External {

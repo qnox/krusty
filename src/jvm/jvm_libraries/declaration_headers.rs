@@ -352,7 +352,9 @@ fn kotlin_view(ty: Ty) -> Ty {
                 .collect();
             Ty::obj_args_name(kotlin_classifier(name), &arguments)
         }
-        TyKind::PlatformNullable(inner) | TyKind::Nullable(inner) => kotlin_view(inner),
+        TyKind::PlatformNullable(inner)
+        | TyKind::MutabilityFlexible(inner)
+        | TyKind::Nullable(inner) => kotlin_view(inner),
         TyKind::InProjection(inner) => Ty::in_projection(kotlin_view(inner)),
         TyKind::OutProjection(inner) => Ty::out_projection(kotlin_view(inner)),
         TyKind::StarProjection(inner) => Ty::star_projection(kotlin_view(inner)),
@@ -412,6 +414,9 @@ fn kotlin_annotation(annotation: &ResolvedAnnotation) -> ResolvedAnnotation {
                 }
             }
         }
+        // kotlinc collects the targets into an enum set, so they follow `AnnotationTarget`'s order
+        // rather than the order the Java annotation writes its element types in.
+        targets.sort();
         let target_class = type_name("kotlin/annotation/AnnotationTarget");
         (
             "kotlin/annotation/Target",
