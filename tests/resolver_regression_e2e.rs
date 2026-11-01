@@ -2797,3 +2797,38 @@ fn an_invariant_member_extension_receiver_keeps_its_exact_binding() {
                   }\n";
     assert_rejection_same_as_kotlinc("InvariantMemberExtensionReceiver", source);
 }
+
+/// A safe cast proves its operand only where its result is known non-null: an elvis whose right
+/// side completes normally, an `if` that only guards a statement, and a chain compared with
+/// `false` leave the operand unnarrowed, as kotlinc reports.
+#[test]
+fn a_safe_cast_without_a_non_null_proof_does_not_smart_cast_like_kotlinc() {
+    let sources = [(
+        "Cast.kt",
+        r#"fun fallsThrough(value: Any?): Int {
+    (value as? String) ?: println("miss")
+    return value.length
+}
+
+fun checksOtherwise(value: Any?): Int {
+    if ((value as? String) != null) println("hit")
+    return value.length
+}
+
+fun comparesFalse(value: Any): Int {
+    if ((value as? String)?.isEmpty() == false) println("hit")
+    return value.length
+}
+"#,
+    )];
+    let reference_args = common::language_directives::kotlinc_args(sources[0].1);
+    assert_eq!(
+        common::reference_error_blocks(&sources, &reference_args),
+        [
+            "Cast.kt:3:18: unresolved reference 'length' on receiver of type 'Any?'.",
+            "Cast.kt:8:18: unresolved reference 'length' on receiver of type 'Any?'.",
+            "Cast.kt:13:18: unresolved reference 'length' on receiver of type 'Any'.",
+        ]
+    );
+    common::assert_error_blocks_match_kotlinc(&sources, &reference_args);
+}
