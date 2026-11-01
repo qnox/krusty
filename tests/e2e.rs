@@ -1211,6 +1211,8 @@ mod initializer_inline_local_scopes_e2e;
 mod inline;
 #[path = "inline_member_super_arguments_e2e.rs"]
 mod inline_member_super_arguments_e2e;
+#[path = "inline_operand_holder_slots_e2e.rs"]
+mod inline_operand_holder_slots_e2e;
 #[path = "inline_scopes_numbers_flag_e2e.rs"]
 mod inline_scopes_numbers_flag_e2e;
 #[path = "inlined_code_inner_classes_e2e.rs"]
