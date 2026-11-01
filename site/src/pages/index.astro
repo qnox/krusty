@@ -38,21 +38,22 @@ const figures = [
     file: "krusty-conformance.json",
     label: "JVM conformance",
     unit: "cases pass",
-    explain: "Share of the applicable codegen/box cases whose box() returns OK when run on krusty's bytecode.",
+    explain: "Cases whose box() returns OK on krusty's bytecode. CI fails on any applicable JVM case that does not pass.",
   },
   {
     id: "bytes",
     file: "krusty-jvm-byte-equality.json",
     label: "JVM byte equality",
     unit: "class-file bytes match",
-    explain: "Across the same cases, each class file counts its bytes that match kotlinc's up to the first difference. 100% means every class is identical.",
+    explain: "A progress gauge, not a share of identical classes: each class counts only its bytes before the first difference from kotlinc's. 100% means every class is identical.",
   },
   {
     id: "native",
     file: "krusty-native-conformance.json",
     label: "Native conformance",
     unit: "cases pass",
-    explain: "Share of the Native-applicable cases that compile against the Kotlin/Native stdlib, link, run and return OK. Native is experimental.",
+    experimental: true,
+    explain: "Native-applicable cases that compile against the Kotlin/Native stdlib, link, run and return OK.",
   },
 ];
 const values = await Promise.all(figures.map((figure) => readFigure(figure.file)));
@@ -124,19 +125,25 @@ const plugins: { name: string; level: Level; html: string }[] = [
     <div class="wrap hero-grid">
       <div class="hero-copy">
         <p class="eyebrow">Kotlin/JVM compiler · written in Rust</p>
-        <h1>kotlinc's class files, <span class="rust">from a native binary.</span></h1>
+        <h1>A Kotlin compiler that aims to match kotlinc <span class="rust">byte for byte.</span></h1>
         <p class="lede">
-          krusty is a drop-in replacement for <code>kotlinc</code>. For the Kotlin it supports, it takes the same
-          command-line flags and aims to write <code>.class</code> files byte-for-byte identical to kotlinc's. It needs
-          no JVM to run.
+          krusty is a native binary, written in Rust, that takes <code>kotlinc</code>'s command-line flags and writes
+          JVM <code>.class</code> files. Every change is diffed against the real kotlinc. It needs no JVM to run.
+        </p>
+        <p class="fit">
+          <strong>Use it today for</strong> Kotlin/JVM modules, Android ones included, built with Gradle, Bazel or the
+          command line. Under Gradle, a module that needs Compose, Parcelize or another plugin krusty does not implement
+          stays on kotlinc, and the plugin logs which task and why.
         </p>
         <div class="actions">
-          <a class="button button-primary" href={release}>Download the latest release</a>
-          <a class="button" href="#try">Try it on your build</a>
+          <a class="button button-primary" href="#try">Try it on your build</a>
+          <a class="button" href={release}>Download the latest release</a>
         </div>
-        <p class="hero-meta">
-          Linux, macOS and Windows on x86_64 and arm64 · Kotlin {kotlinVersions.join(", ")} · Apache-2.0
-        </p>
+        <ul class="hero-meta">
+          <li>Kotlin {kotlinVersions.join(", ")}</li>
+          <li>Linux, macOS, Windows · x86_64, arm64</li>
+          <li>Signed releases · Apache-2.0</li>
+        </ul>
       </div>
       <picture class="hero-art">
         <source srcset="/krusty.avif" type="image/avif" />
@@ -145,14 +152,15 @@ const plugins: { name: string; level: Level; html: string }[] = [
     </div>
   </section>
 
-  <section class="band" id="measured" aria-labelledby="measured-title">
+  <section class="band band-alt" id="measured" aria-labelledby="measured-title">
     <div class="wrap">
       <div class="section-head">
         <p class="eyebrow">Kotlin {newestKotlin} · latest master build</p>
         <h2 id="measured-title">Measured against kotlinc's own tests</h2>
         <p>
-          Every master build runs JetBrains' <code>codegen/box</code> suite: the cases kotlinc's own JVM runner expects
-          to pass. A case passes when its <code>box()</code> function returns <code>OK</code>.
+          Every master build compiles Kotlin's <code>codegen/box</code> test suite with krusty and with
+          kotlinc {newestKotlin}, the newest supported release. A case passes when its <code>box()</code> function returns
+          <code>OK</code>. Cases the suite marks as not running on a target are left out of that target's figures.
         </p>
       </div>
       <div class="tiles">
@@ -160,13 +168,13 @@ const plugins: { name: string; level: Level; html: string }[] = [
           const value = values[i];
           return (
             <article class="tile figure" data-file={figure.file} data-unit={figure.unit}>
-              <h3 class="tile-label">{figure.label}</h3>
+              <h3 class="tile-label">{figure.label}{figure.experimental && <span class="tag">Experimental</span>}</h3>
               <p class="tile-value" data-part="value">{value ? `${value.pct}%` : "–"}</p>
               <div class="meter" role="img" aria-label={value ? `${value.pct}%` : "not available"} style={`--value: ${value ? value.pct : 0}%`}>
                 <span />
               </div>
               <p class="tile-meta" data-part="meta">
-                {value ? `${fmt(value.count)} of ${fmt(value.of)} ${figure.unit}` : "Not available right now. The badges in the README show the latest figure."}
+                {value ? `${fmt(value.count)} of ${fmt(value.of)} ${figure.unit}` : "Loading the latest figure"}
               </p>
               <p class="figure-explain">{figure.explain}</p>
             </article>
@@ -205,11 +213,11 @@ krusty -help</code></pre>
     </div>
   </section>
 
-  <section class="band" id="try" aria-labelledby="try-title">
+  <section class="band band-alt" id="try" aria-labelledby="try-title">
     <div class="wrap split">
       <div class="prose">
         <p class="eyebrow">Gradle</p>
-        <h2 id="try-title">Find out if krusty fits your build, without switching</h2>
+        <h2 id="try-title">Find out if krusty fits your build before you switch</h2>
         <p>
           The Gradle plugin's <code>krustyVerify</code> task compiles every Kotlin/JVM compilation with kotlinc, as your
           build does today, and with krusty beside it. Nothing you ship changes.
@@ -219,16 +227,30 @@ krusty -help</code></pre>
           leaves to kotlinc and why, how many classes are byte-identical to kotlinc's and how the rest differ, and
           both compilers' compile time and krusty's peak memory.
         </p>
-        <p>
-          Setup takes two blocks in your Gradle files. See <a href={`${repo}#gradle`}>the Gradle instructions</a>.
-        </p>
-      </div>
-      <div class="prose code-col">
-        <pre><code>./gradlew krustyVerify</code></pre>
         <p class="fine">
           The report has a button that opens a prefilled GitHub issue with totals and difference kinds, with
           compilation, class and member names masked. Sending it tells us what to fix next.
         </p>
+      </div>
+      <div class="prose code-col">
+        <p class="step-label">1. Unpack <code>krusty-gradle-plugin-&lt;version&gt;.zip</code> from the <a href={release}>latest release</a> under <code>gradle/</code></p>
+        <pre><code><span class="c">// settings.gradle.kts</span>
+pluginManagement {'{'}
+    repositories {'{'}
+        maven {'{'} url = uri("gradle/krusty-gradle-plugin-&lt;version&gt;/repository") {'}'}
+        gradlePluginPortal()
+        mavenCentral()
+    {'}'}
+{'}'}</code></pre>
+        <p class="step-label">2. Apply it after your Kotlin or Android plugin</p>
+        <pre><code><span class="c">// build.gradle.kts</span>
+plugins {'{'}
+    kotlin("jvm") version "{newestKotlin}"
+    id("dev.krustythecompiler") version "&lt;version&gt;"
+{'}'}</code></pre>
+        <p class="step-label">3. Compare, without changing your build</p>
+        <pre><code>./gradlew krustyVerify</code></pre>
+        <p class="fine">Signature checks, Android, multiplatform and mirrors are covered in <a href={`${repo}#gradle`}>the Gradle guide</a>.</p>
       </div>
     </div>
   </section>
@@ -241,16 +263,20 @@ krusty -help</code></pre>
       </div>
       <ul class="points">
         <li>
-          <h3>Same command line</h3>
-          <p>kotlinc's flags for the supported subset, output to a class directory or a jar. Anything unsupported fails with an error instead of being skipped.</p>
+          <h3>Fails loudly</h3>
+          <p>On the command line, an unsupported flag or plugin is an error, never silently skipped. Under Gradle it is logged and that task stays on kotlinc.</p>
         </li>
         <li>
-          <h3>Checked byte by byte</h3>
-          <p>Every change is diffed against the real kotlinc, and every build runs JetBrains' <code>codegen/box</code> suite.</p>
+          <h3>Diffed against kotlinc</h3>
+          <p>Every change is compared with the real kotlinc's output, and every master build runs Kotlin's <code>codegen/box</code> suite.</p>
         </li>
         <li>
           <h3>Less memory</h3>
           <p>On our multi-module benchmark, about a third of the peak memory of the GraalVM-native kotlinc.</p>
+        </li>
+        <li>
+          <h3>Verifiable releases</h3>
+          <p>Checksums signed with the maintainer's OpenPGP key and GitHub build provenance on every release file. The Gradle plugin checks the signature before it runs a compiler.</p>
         </li>
         <li>
           <h3>Editor support</h3>
@@ -264,13 +290,19 @@ krusty -help</code></pre>
     <div class="wrap">
       <div class="section-head">
         <p class="eyebrow">Compatibility</p>
-        <h2 id="support-title">Supported build systems and compiler plugins</h2>
+        <h2 id="support-title">Build systems and compiler plugins</h2>
         <p>
           krusty targets every Kotlin release in <a href={blob("kotlin-versions")}><code>kotlin-versions</code></a>.
           On the command line, anything not listed here fails the build with an error. The Gradle plugin reports it and
           leaves that compile task to kotlinc.
         </p>
       </div>
+
+      <ul class="legend" aria-label="Status key">
+        <li><span class="chip chip-yes">Supported</span> krusty replaces kotlinc there.</li>
+        <li><span class="chip chip-partial">Partial</span> Works within the limits listed.</li>
+        <li><span class="chip chip-no">Not supported</span> The command line fails; Gradle keeps kotlinc for that task.</li>
+      </ul>
 
       <h3 class="table-title">Build systems</h3>
       <div class="table-scroll">
@@ -327,7 +359,7 @@ krusty -help</code></pre>
       <div class="prose sponsor">
         <p class="eyebrow">Sponsor</p>
         <h2>Help fund it</h2>
-        <p>If krusty saves your team build time or CI money, please consider sending part of it back.</p>
+        <p>krusty is an independent project. If it is useful to your team, please consider sponsoring its development.</p>
         <p><a class="button" href="https://github.com/sponsors/qnox">Sponsor on GitHub</a></p>
       </div>
     </div>
@@ -390,9 +422,57 @@ krusty -help</code></pre>
     gap: 0.75rem;
   }
 
+  .fit {
+    max-width: 38rem;
+    padding: 0.85rem 1rem;
+    border-radius: var(--radius);
+    background: var(--accent-soft);
+  }
+
   .hero-meta {
+    list-style: none;
+    padding: 0;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.25rem 1.25rem;
     color: var(--muted);
     font-size: var(--step--1);
+  }
+
+  .hero-meta li {
+    white-space: nowrap;
+  }
+
+  .tag {
+    margin-left: 0.5rem;
+    padding: 0.1rem 0.45rem;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    font: 600 0.7rem / 1.4 var(--font-mono);
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--muted);
+    vertical-align: 0.2em;
+  }
+
+  .step-label {
+    font-weight: 600;
+    font-size: var(--step--1);
+  }
+
+  .legend {
+    list-style: none;
+    padding: 0;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem 1.75rem;
+    color: var(--muted);
+    font-size: var(--step--1);
+  }
+
+  .legend .chip {
+    color: var(--fg);
+    margin-right: 0.25rem;
   }
 
   .hero-art img {
@@ -447,7 +527,7 @@ krusty -help</code></pre>
     list-style: none;
     padding: 0;
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(min(100%, 14rem), 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 12rem), 1fr));
     gap: 1.5rem 2rem;
   }
 
@@ -542,8 +622,13 @@ krusty -help</code></pre>
     }
 
     .hero-art img {
-      max-width: 15rem;
+      max-width: 13rem;
       margin-inline: 0;
+    }
+
+    .actions .button {
+      flex: 1 1 100%;
+      justify-content: center;
     }
   }
 
