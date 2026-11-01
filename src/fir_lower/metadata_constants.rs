@@ -8,8 +8,8 @@
 //! folded at run time but is not one.
 
 use crate::fir::{
-    FirBody, FirCallArgument, FirCallTarget, FirConstant, FirConstantSource, FirConversionKind,
-    FirExprId, FirExprKind, FirIntrinsic, FirStatementKind, FirUnaryOperation,
+    FirBody, FirCallArgument, FirCallTarget, FirConstant, FirConversionKind, FirExprId,
+    FirExprKind, FirIntrinsic, FirSourceForm, FirStatementKind, FirUnaryOperation,
 };
 use crate::types::Ty;
 
@@ -46,22 +46,23 @@ fn has_constant_value(
         // `"…".trimIndent()` checks to its folded value, but kotlinc's frontend sees a call.
         FirExprKind::Constant(constant) => {
             !matches!(constant, FirConstant::Null)
-                && body.constant_source(expression) != Some(FirConstantSource::FoldedCall)
+                && body.source_form(expression) != Some(FirSourceForm::FoldedCall)
         }
         // `-x` is `x.unaryMinus()`, a number operation over any constant.
         FirExprKind::Unary {
             operation: FirUnaryOperation::Negate,
             operand,
         } => has_constant_value(body, index, *operand),
-        // `+3` is a literal to kotlinc's parser; `+X` stays a `unaryPlus` call.
+        // `+3` is a literal to kotlinc's parser; `+X` and `3.unaryPlus()` stay `unaryPlus` calls.
         FirExprKind::Unary {
             operation: FirUnaryOperation::Identity,
             operand,
-        } => is_literal(body, *operand),
+        } => body.source_form(expression).is_none() && is_literal(body, *operand),
         FirExprKind::ImplicitConversion { value, conversion } => match conversion.kind {
             // An explicit `toX()` call; unsigned conversions are extensions, not number conversions.
             FirConversionKind::NumericConversion { to } => {
                 !to.get().canonical_semantic().is_unsigned()
+                    && body.source_form(expression) != Some(FirSourceForm::PropertyRead)
                     && has_constant_value(body, index, *value)
             }
             FirConversionKind::NumericWidening { .. }
@@ -110,7 +111,7 @@ fn is_literal(body: &FirBody, expression: FirExprId) -> bool {
     matches!(
         body.expr(expression).map(|node| &node.kind),
         Some(FirExprKind::Constant(constant)) if !matches!(constant, FirConstant::Null)
-    ) && body.constant_source(expression).is_none()
+    ) && body.source_form(expression).is_none()
 }
 
 /// kotlinc's parser merges `+` between string literals and templates into one concatenation;
@@ -129,8 +130,12 @@ fn is_string_concatenation_operand(body: &FirBody, expression: FirExprId) -> boo
     }
 }
 
-/// The receiver and argument of a checked `String.plus`, the operation `+` on a string selects.
+/// The receiver and argument of a checked `String.plus` that source wrote as the operator `+`;
+/// an explicit `plus` call is never merged into a concatenation.
 fn string_plus_operands(body: &FirBody, expression: FirExprId) -> Option<(FirExprId, FirExprId)> {
+    if body.source_form(expression) == Some(FirSourceForm::ExplicitCall) {
+        return None;
+    }
     let FirExprKind::Call(call) = &body.expr(expression)?.kind else {
         return None;
     };

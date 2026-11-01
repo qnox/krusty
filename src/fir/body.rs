@@ -37,9 +37,9 @@ pub use ranges::{
 };
 mod indexed_iteration;
 pub use indexed_iteration::{FirBuiltinIterableKind, FirCharSequenceIndexing};
-mod constant_sources;
+mod source_forms;
 mod with_index;
-pub use constant_sources::FirConstantSource;
+pub use source_forms::FirSourceForm;
 pub use with_index::{FirIndexedValueComponent, FirWithIndexLoop};
 mod callable_dispatch;
 pub use callable_dispatch::{
@@ -1814,9 +1814,8 @@ pub struct FirBody {
     /// Naming provenance of each expression the reference compiler realizes as a class of its own
     /// (a callable reference). A naming fact, not a lowering decision.
     generated_class_provenance: HashMap<FirExprId, FirGeneratedClassProvenance>,
-    /// Constants that are not a literal as source wrote it. Every one is `FirExprKind::Constant`;
-    /// metadata's constant-initializer rule tells them apart.
-    constant_sources: HashMap<FirExprId, FirConstantSource>,
+    /// Source forms checking normalized away, which metadata's constant-initializer rule reads.
+    source_forms: HashMap<FirExprId, FirSourceForm>,
     /// Local-storage blocks originating from postfix `++`/`--`, whose checked shape snapshots the
     /// old value.
     postfix_updates: HashSet<FirExprId>,
@@ -1897,7 +1896,7 @@ impl FirBody {
             destructuring_loop_containers: HashSet::default(),
             debug_lines: Default::default(),
             generated_class_provenance: HashMap::default(),
-            constant_sources: HashMap::default(),
+            source_forms: HashMap::default(),
             postfix_updates: HashSet::default(),
             inlined_call_conversions: HashSet::default(),
             lifting_site: None,
