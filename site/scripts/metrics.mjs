@@ -110,6 +110,8 @@ function corpusProject(p) {
     const c = p.cost?.[side];
     if (!c) return null;
     return {
+      // The whole build's exit status; null for results recorded before the corpus kept it.
+      exit: Number.isInteger(c.exit) ? c.exit : null,
       builtCompileSeconds: c.built_compile_seconds,
       compileSeconds: c.compile_seconds,
       wallSeconds: c.wall_seconds,
@@ -122,7 +124,7 @@ function corpusProject(p) {
   for (const key of ["compilations", "built", "classes", "identical"]) {
     if (!Number.isInteger(p[key])) throw new Error(`corpus/results.json: ${p.name}: missing ${key}`);
   }
-  return {
+  const project = {
     name: p.name,
     stars: p.stars ?? null,
     kotlinLoc: p.loc?.kotlin ?? null,
@@ -139,6 +141,23 @@ function corpusProject(p) {
     notBuilt: notBuilt(p),
     cost: { kotlinc: cost("kotlinc"), krusty: cost("krusty") },
   };
+  project.wholeBuildsComparable = wholeBuildsComparable(project, p.reference_exit);
+  return project;
+}
+
+/**
+ * Whether the two whole builds of a project did the same work, so their wall time and memory can be
+ * compared: both Gradle builds succeeded, and krusty built at least one compilation and failed or
+ * skipped none (a compilation left to kotlinc is compiled in both builds). False when they did not;
+ * null when a result recorded before the corpus kept the build exit statuses cannot tell.
+ */
+export function wholeBuildsComparable(project, referenceExit) {
+  const { kotlinc, krusty } = project.cost;
+  if (!kotlinc || !krusty || referenceExit !== 0 || project.built === 0) return false;
+  if (project.notBuilt === null) return null;
+  if (project.notBuilt.failed > 0 || project.notBuilt.notRun > 0) return false;
+  if (kotlinc.exit === null || krusty.exit === null) return null;
+  return kotlinc.exit === 0 && krusty.exit === 0;
 }
 
 /** One line per corpus run: the sums over the projects the run measured, oldest first. */
