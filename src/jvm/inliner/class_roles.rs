@@ -24,13 +24,6 @@ pub(crate) trait ClassRoles {
         self.regenerated_class(internal).is_some()
     }
 
-    /// Whether a method of `internal` calls `Intrinsics.reifiedOperationMarker`. A class the
-    /// inliner cannot read is treated as if it did: a `needClassReification` body must not keep a
-    /// reference whose markers were not specialized.
-    fn contains_reified_marker(&self, _internal: &str) -> bool {
-        false
-    }
-
     /// The class file of `internal`, which a copy regenerates in turn.
     fn class_file(&self, _internal: &str) -> Option<Vec<u8>> {
         None
@@ -45,32 +38,5 @@ impl ClassRoles for &(dyn MethodBodies + '_) {
 
     fn class_file(&self, internal: &str) -> Option<Vec<u8>> {
         MethodBodies::class_file(*self, internal)
-    }
-
-    fn contains_reified_marker(&self, internal: &str) -> bool {
-        let Some(bytes) = self.class_file(internal) else {
-            return false;
-        };
-        // `ClassNode::read` refuses a class whose `Code` carries an attribute a copy would drop
-        // (`LocalVariableTypeTable` on `Intrinsics`). This predicate is not a copy: it asks whether
-        // a method invokes `reifiedOperationMarker`, and the body index already skips attributes
-        // it does not interpret.
-        let Some(bodies) = crate::jvm::classreader::ClassBodies::parse(std::sync::Arc::new(bytes))
-        else {
-            return true;
-        };
-        for (name, descriptor) in bodies.coded_methods() {
-            let Some(code) = bodies.method_code(name, descriptor) else {
-                return true;
-            };
-            let Ok(node) = crate::jvm::method_node::MethodNode::read(0, name, descriptor, &code)
-            else {
-                return true;
-            };
-            if super::reified::has_reified_markers(&node) {
-                return true;
-            }
-        }
-        false
     }
 }
