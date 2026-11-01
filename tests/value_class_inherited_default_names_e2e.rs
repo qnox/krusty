@@ -4,6 +4,11 @@
 //! `fun rep(n: Count)` is `rep-<hash>(I)` on its interface. A sub-interface's `DefaultImpls`
 //! forwarder and an implementing class's forwarder answer to that same name and call it under
 //! it, as kotlinc's do; the plain `rep` names no method anywhere.
+//!
+//! The forwarder declares, signs and annotates the lowered member, so each value-class position is
+//! the class's carrier (`int`, `String`) whether the value class lives in the same file, a sibling
+//! file or a dependency; a `suspend` member's result stays the value class inside its
+//! `Continuation<? super Id>`.
 
 use super::common;
 
@@ -101,4 +106,68 @@ fn a_call_reaches_the_inherited_unsigned_default() {
         "{UNSIGNED_SOURCE}\nfun box(): String = if (UnsignedConcrete().rep(1u) == \"rep1\") \"OK\" else \"fail\"\n"
     );
     common::expect_box_ok_with_stdlib(&source, "InheritedUnsignedDefault");
+}
+
+const CARRIER_INTERFACE: &str = "\
+interface Ids {
+    fun plain(): Id = Id(1)
+    val property: Id get() = Id(2)
+    fun take(id: Id, ids: List<Id>): Int = id.n
+    fun named(name: Name): Name = name
+    fun maybe(name: Name?): Id? = null
+    suspend fun suspended(id: Id): Id = id
+}
+";
+
+const CARRIER_VALUE_CLASSES: &str = "\
+@JvmInline
+value class Id(val n: Int)
+
+@JvmInline
+value class Name(val s: String)
+";
+
+const CARRIER_IMPLEMENTATIONS: &str = "\
+object Plain : Ids
+
+@JvmInline
+value class Wrapped(val s: String) : Ids
+";
+
+#[test]
+fn a_forwarder_declares_a_sibling_file_value_class_by_its_carrier() {
+    let sources = [
+        ("Ids.kt", format!("package app\n\n{CARRIER_INTERFACE}")),
+        ("Values.kt", format!("package app\n\n{CARRIER_VALUE_CLASSES}")),
+        ("Plain.kt", format!("package app\n\n{CARRIER_IMPLEMENTATIONS}")),
+    ];
+    let sources = sources
+        .iter()
+        .map(|(name, text)| (*name, text.as_str()))
+        .collect::<Vec<_>>();
+    for class in ["app/Plain", "app/Wrapped"] {
+        let pair = common::ModuleClassPair::compile(&sources, class);
+        assert!(pair.krusty == pair.kotlinc, "{class} differs from kotlinc");
+    }
+}
+
+#[test]
+fn a_forwarder_declares_a_dependency_value_class_by_its_carrier() {
+    let library_source = format!("package lib\n\n{CARRIER_INTERFACE}\n{CARRIER_VALUE_CLASSES}");
+    let library = common::compile_libs_build(
+        "DependencyValueClassCarrierLibrary",
+        &[("Lib.kt", library_source.as_str())],
+    )
+    .expect("krusty builds the dependency");
+    let reference = library
+        .reference_out()
+        .expect("reference kotlinc builds the dependency")
+        .to_path_buf();
+    common::assert_classes_identical_to_kotlinc_over_own_libraries(
+        "DependencyValueClassCarrier",
+        &format!("package app\n\nimport lib.Ids\n\n{CARRIER_IMPLEMENTATIONS}"),
+        &["app/Plain", "app/Wrapped"],
+        &[reference],
+        &[library.krusty_out().to_path_buf()],
+    );
 }
