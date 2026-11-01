@@ -14,6 +14,9 @@ pub struct ContinuationMetadata {
     pub enclosing_class: String,
     pub enclosing_method: String,
     pub enclosing_descriptor: String,
+    /// The function whose own method encloses the continuation, when `enclosing_method` is that
+    /// function's name, so a later JVM rename of the function renames the enclosing method too.
+    pub enclosing_function: Option<u32>,
 }
 
 pub type ContinuationMetadataMap = crate::fx_hash::HashMap<String, ContinuationMetadata>;

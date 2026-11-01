@@ -186,6 +186,7 @@ fn emit_property_reference_constructor(
     property: &crate::ir::PropRef,
     target: &PropertyReferenceTarget,
     bound: bool,
+    public: bool,
 ) {
     let own_descriptor = if bound {
         "(Ljava/lang/Object;)V"
@@ -213,13 +214,13 @@ fn emit_property_reference_constructor(
     let constructor = cw.methodref(superclass, "<init>", descriptor);
     code.invokespecial(constructor, if bound { 5 } else { 4 }, 0);
     code.ret_void();
-    finish_code::<0x0000>(
-        cw,
-        "<init>",
-        own_descriptor,
-        &mut code,
-        if bound { 2 } else { 1 },
-    );
+    // Public in an inline function's scope, whose callers construct the class from anywhere.
+    let locals = if bound { 2 } else { 1 };
+    if public {
+        finish_code::<0x0001>(cw, "<init>", own_descriptor, &mut code, locals);
+    } else {
+        finish_code::<0x0000>(cw, "<init>", own_descriptor, &mut code, locals);
+    }
     let receiver: &[(&str, &str)] = if bound {
         &[("receiver", "Ljava/lang/Object;")]
     } else {
@@ -413,7 +414,15 @@ pub(super) fn emit_prop_ref_class(
     let mut cw = property_reference_writer(ir, c, facade, env, opts);
 
     let target = PropertyReferenceTarget::new(pr, realization, facade);
-    emit_property_reference_constructor(&mut cw, &fq, &superclass, pr, &target, false);
+    emit_property_reference_constructor(
+        &mut cw,
+        &fq,
+        &superclass,
+        pr,
+        &target,
+        false,
+        super::enclosure::in_inline_function_scope(ir, c),
+    );
 
     seed_method_header(&mut cw, "get", "(Ljava/lang/Object;)Ljava/lang/Object;");
     let mut get = CodeBuilder::new(2);
@@ -478,7 +487,7 @@ pub(super) fn emit_prop_ref_class(
     emit_singleton_instance_clinit(&mut cw, &fq);
     // kotlinc visits a carrier's fields after its methods.
     add_singleton_instance_field(&mut cw, &fq);
-    finish_local_synthetic_class(cw, env)
+    super::metadata_policy::finish_reference_class(cw, env, ir, c)
 }
 
 /// Emit a bound property-reference (`obj::prop` → `PropertyReference0Impl` subclass): a constructor
@@ -502,7 +511,15 @@ fn emit_bound_prop_ref_class(
         .get(c.fq_name_id())
         .expect("a synthesized property reference must retain its JVM realization");
     let target = PropertyReferenceTarget::new(pr, realization, facade);
-    emit_property_reference_constructor(&mut cw, &fq, &superclass, pr, &target, true);
+    emit_property_reference_constructor(
+        &mut cw,
+        &fq,
+        &superclass,
+        pr,
+        &target,
+        true,
+        super::enclosure::in_inline_function_scope(ir, c),
+    );
 
     // `get()Object`: for a member ref `((Owner) this.receiver).getName()`; for an extension ref
     // `Facade.getName((Owner) this.receiver)`. Boxed if primitive.
@@ -548,7 +565,7 @@ fn emit_bound_prop_ref_class(
         finish_code::<0x0001>(&mut cw, "set", "(Ljava/lang/Object;)V", &mut set, 2);
         attach_accessor_debug(&mut cw, c, "set", "(Ljava/lang/Object;)V", &["value"]);
     }
-    finish_local_synthetic_class(cw, env)
+    super::metadata_policy::finish_reference_class(cw, env, ir, c)
 }
 
 /// Emit a top-level property reference (`::foo` → `(Mutable)PropertyReference0Impl` subclass): an
@@ -621,7 +638,12 @@ fn emit_toplevel_prop_ref_class(
     );
     ctor.invokespecial(sup, 4, 0);
     ctor.ret_void();
-    finish_code::<0x0000>(&mut cw, "<init>", "()V", &mut ctor, 1);
+    // Public in an inline function's scope, whose callers construct the class from anywhere.
+    if super::enclosure::in_inline_function_scope(ir, c) {
+        finish_code::<0x0001>(&mut cw, "<init>", "()V", &mut ctor, 1);
+    } else {
+        finish_code::<0x0000>(&mut cw, "<init>", "()V", &mut ctor, 1);
+    }
     let locals = function_reference_invoke::reference_constructor_locals(&mut cw, &fq, &[]);
     cw.set_method_debug("<init>", "()V", None, &locals);
 
@@ -726,7 +748,7 @@ fn emit_toplevel_prop_ref_class(
     emit_singleton_instance_clinit(&mut cw, &fq);
     // kotlinc visits a carrier's fields after its methods.
     add_singleton_instance_field(&mut cw, &fq);
-    finish_local_synthetic_class(cw, env)
+    super::metadata_policy::finish_reference_class(cw, env, ir, c)
 }
 
 /// kotlinc's header for a property-reference carrier: a synthetic final class, enclosed by the
@@ -740,7 +762,13 @@ fn property_reference_writer(
     opts: &EmitOptions,
 ) -> ClassWriter {
     let mut cw = new_writer(&c.fq_name(), &c.superclass(), opts);
-    cw.set_access(0x1000 | 0x0010 | 0x0020); // SYNTHETIC | FINAL | SUPER
+    // kotlinc makes a class in an inline function's scope public (`inInlineFunctionScope`).
+    let public = if super::enclosure::in_inline_function_scope(ir, c) {
+        0x0001
+    } else {
+        0
+    };
+    cw.set_access(0x1000 | 0x0010 | 0x0020 | public); // SYNTHETIC | FINAL | SUPER
     if let Some((owner, method)) = class_enclosure(ir, env.override_results, c, facade) {
         match method {
             Some((name, descriptor)) => cw.set_enclosing_method(&owner, &name, &descriptor),

@@ -4,9 +4,44 @@
 use super::{BackendCallableFact, DependencyMemberReceiver};
 use crate::fir::{ExternalCallableId, FirTypeParameterRef};
 use crate::fx_hash::HashMap;
-use crate::ir::{FunId, IrCheckedSubstitution, IrFile};
+use crate::ir::{Callee, FunId, IrCheckedSubstitution, IrFile};
 use crate::libraries::GenericSig;
 use crate::types::{Ty, TyKind};
+
+mod class_application;
+
+/// The source checker already applied class parameters, including inherited applications. Borrow
+/// that complete application; target emission must not reconstruct it from an operand or hierarchy.
+struct CheckedDependencyApplication<'a> {
+    target: ExternalCallableId,
+    parameters: &'a [Ty],
+    result: Ty,
+    substitutions: &'a [IrCheckedSubstitution],
+    extension_receiver_parameter: Option<u32>,
+}
+
+impl<'a> CheckedDependencyApplication<'a> {
+    fn of(callee: &'a Callee) -> Result<Self, &'static str> {
+        let Callee::External {
+            target,
+            params,
+            ret,
+            substitutions,
+            extension_receiver_parameter,
+            ..
+        } = callee
+        else {
+            return Err("a dependency signature has no checked external application");
+        };
+        Ok(Self {
+            target: *target,
+            parameters: params,
+            result: *ret,
+            substitutions,
+            extension_receiver_parameter: *extension_receiver_parameter,
+        })
+    }
+}
 
 /// The exact semantic carriers of one emitted function, including retained class dispatch.
 /// Targets retain this beside the export identity, not beside an individual call site.
@@ -32,8 +67,8 @@ impl DependencyFunctionSignature {
             declared.dispatch_receiver,
         ) {
             (Some(ty), Some(owner))
-                if matches!(ty.kind(), TyKind::Obj(classifier, arguments)
-                    if classifier == owner && arguments.is_empty()) =>
+                if matches!(ty.kind(), TyKind::Obj(classifier, _)
+                    if classifier == owner) =>
             {
                 parameters.push(ty)
             }
@@ -65,21 +100,33 @@ pub(crate) struct InstantiatedDependencySignature {
 
 pub(crate) fn instantiate_dependency_signature(
     fact: &BackendCallableFact,
+    callee: &Callee,
+) -> Result<InstantiatedDependencySignature, &'static str> {
+    let application = CheckedDependencyApplication::of(callee)?;
+    let signature =
+        instantiate_callable_signature(fact, application.target, application.substitutions)?;
+    class_application::apply(fact, &application, signature)
+}
+
+fn instantiate_callable_signature(
+    fact: &BackendCallableFact,
     target: ExternalCallableId,
     substitutions: &[IrCheckedSubstitution],
 ) -> Result<InstantiatedDependencySignature, &'static str> {
+    if let Some(signature) = fact.generic_sig.as_deref() {
+        if fact.context_count > signature.params.len()
+            || signature
+                .parameters_with_receiver(fact.context_count)
+                .as_ref()
+                != fact.params
+            || signature.receiver != fact.source_receiver
+            || signature.ret != fact.ret
+        {
+            return Err("a dependency generic signature disagrees with its frozen declaration");
+        }
+    }
     match fact.generic_sig.as_deref() {
         Some(signature) if !signature.formals.is_empty() => {
-            if fact.context_count > signature.params.len()
-                || signature
-                    .parameters_with_receiver(fact.context_count)
-                    .as_ref()
-                    != fact.params
-                || signature.receiver != fact.source_receiver
-                || signature.ret != fact.ret
-            {
-                return Err("a dependency generic signature disagrees with its frozen declaration");
-            }
             if !fact.reified_type_parameter_ordinals.is_empty() {
                 return Err("a reified dependency cannot use an ordinary generic export");
             }

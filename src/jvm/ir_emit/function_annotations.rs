@@ -32,11 +32,12 @@ pub(super) fn add_abstract(
     }
     emit_recorded(ir, cw, function, &declaration.name, &descriptor);
     // An abstract method still carries kotlinc's nullability annotations, in an interface, an
-    // abstract class and an enum alike.
-    let (result, params) =
-        crate::jvm::abstract_method_nullability::annotations(ir, function, declaration);
-    if result.is_some() || params.iter().any(Option::is_some) {
-        cw.set_method_nullability(&declaration.name, &descriptor, result, &params);
+    // abstract class and an enum alike, classified from its declaration as a concrete method's
+    // are: a value-class parameter is `@NotNull` whatever its carrier admits.
+    let super::declared_nullability::DeclaredNullability { result, parameters } =
+        super::override_result_emission::declared_nullability(ir, override_results, function);
+    if result.is_some() || parameters.iter().any(Option::is_some) {
+        cw.set_method_nullability(&declaration.name, &descriptor, result, &parameters);
     }
     descriptor
 }
@@ -102,43 +103,4 @@ pub(super) fn nullability_annotated(
         && !ir.method_visibility(function).is_private()
         && !ir.synthetic_methods.contains(&function)
         && !ir.jvm_nullability_unannotated_methods.contains(&function)
-}
-
-/// The annotation type descriptors a method header interns, in kotlinc's writer order.
-///
-/// kotlinc's writer visits the method's own annotations, then the whole
-/// `RuntimeVisibleParameterAnnotations` attribute, then `RuntimeInvisible…`, interning each type
-/// as it writes it. The declaration's own annotations are reserved separately and first, so the
-/// order here is: the return annotation, every parameter's RUNTIME-retained type, then per
-/// parameter its BINARY-retained types followed by that parameter's synthesized nullability type.
-pub(super) fn header_annotation_types(
-    result: Option<&'static str>,
-    parameter_annotations: &[crate::ir::DeclarationAnnotations],
-    parameter_nullability: &[Option<&'static str>],
-    nullability_annotated: bool,
-) -> Vec<String> {
-    let split: Vec<_> = parameter_annotations
-        .iter()
-        .map(crate::jvm::classfile::split_declaration_annotations)
-        .collect();
-    let descriptor_of = |a: &crate::ir::AppliedAnnotation| format!("L{};", a.internal);
-    let mut types: Vec<String> = result
-        .filter(|_| nullability_annotated)
-        .map(str::to_string)
-        .into_iter()
-        .collect();
-    types.extend(
-        split
-            .iter()
-            .flat_map(|(visible, _)| visible.iter().map(descriptor_of)),
-    );
-    for (index, nullability) in parameter_nullability.iter().enumerate() {
-        if let Some((_, invisible)) = split.get(index) {
-            types.extend(invisible.iter().map(descriptor_of));
-        }
-        if nullability_annotated {
-            types.extend(nullability.map(str::to_string));
-        }
-    }
-    types
 }

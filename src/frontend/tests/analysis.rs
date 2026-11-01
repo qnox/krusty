@@ -173,6 +173,7 @@ impl ExistingLibrary {
                 None
             };
             std::sync::Arc::new(LibraryType {
+                runtime_exception: None,
                 declaration_name: None,
                 is_kotlin: true,
                 is_data: false,
@@ -216,6 +217,7 @@ impl ExistingLibrary {
                 retention: None,
                 annotation_targets: None,
                 mapped_collection: None,
+                mapped_builtin: false,
                 annotation_element_defaults: Vec::new(),
                 deprecation: None,
             })

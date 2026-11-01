@@ -77,6 +77,33 @@ pub(crate) fn bridged_getter(ir: &IrFile, index: u32) -> Option<BridgedStorage> 
         .flatten()
 }
 
+/// Whether a `lateinit` static's field is public. The field follows the setter: a private
+/// property and a `private set` (which has no setter method) keep it private, while otherwise
+/// `isInitialized` and other raw reads `getstatic` it.
+pub(crate) fn lateinit_field_is_public(ir: &IrFile, index: u32) -> bool {
+    let property = &ir.statics[index as usize];
+    property.is_lateinit
+        && !property.visibility.is_private()
+        && property.accessors.setter != IrStaticAccessor::Absent
+}
+
+/// [`bridged_getter`], or for an `isInitialized` probe `expression` of a `lateinit` static whose
+/// getter is public but whose field is private (`private set`), the same `access$get<X>$p`: the
+/// probe reads the field, not the getter.
+pub(crate) fn bridged_getter_read(
+    ir: &IrFile,
+    index: u32,
+    expression: crate::ir::ExprId,
+) -> Option<BridgedStorage> {
+    bridged_getter(ir, index).or_else(|| {
+        (ir.statics[index as usize].is_lateinit
+            && ir.lateinit_initialization_probes.contains(&expression)
+            && !lateinit_field_is_public(ir, index))
+        .then(|| bridgeable(ir, index))
+        .flatten()
+    })
+}
+
 /// Another class writes static storage `index` through `access$set<X>$p` when the `var`'s setter
 /// is a private default one, or the absent setter of a bodiless `private set`.
 pub(crate) fn bridged_setter(ir: &IrFile, index: u32) -> Option<BridgedStorage> {

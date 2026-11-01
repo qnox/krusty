@@ -2,6 +2,14 @@
 
 use crate::types::{ClassifierDeclarationName, Ty, TypeName};
 
+/// The already-selected declaration whose own name is required. An ordinary classifier and an
+/// alias may share a flattened identity while occupying different semantic declaration keys.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ClassifierDeclarationKey {
+    Ordinary(TypeName),
+    TypeAlias(TypeName),
+}
+
 /// A source alias's retained expansion before a use selects its target classifier.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TypeAliasTemplate {

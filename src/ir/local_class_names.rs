@@ -1348,6 +1348,10 @@ impl super::IrFile {
         for alias in &mut self.package_type_aliases {
             type_alias(alias, names);
         }
+        for applied in self.package_property_annotations.values_mut() {
+            annotations(&mut applied.property, names);
+            annotations(&mut applied.field, names);
+        }
         for properties in self.member_ext_props.values_mut() {
             for property in properties {
                 property.receiver = ty(property.receiver, names);
@@ -1602,10 +1606,6 @@ impl super::IrFile {
             .map(|value| remapped_name(value, names))
             .collect();
         self.deprecated_classes = std::mem::take(&mut self.deprecated_classes)
-            .into_iter()
-            .map(|value| remapped_name(value, names))
-            .collect();
-        self.public_synthetics = std::mem::take(&mut self.public_synthetics)
             .into_iter()
             .map(|value| remapped_name(value, names))
             .collect();

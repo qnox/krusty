@@ -32,6 +32,7 @@ impl Checker<'_> {
             }
         }
         let (statement, signature) = self.lookup_local_fun(scope, name)?;
+        self.record_local_reference_diagnostic(expression, statement, signature.ret);
         self.mark_local_function_ref(expression, statement, false);
         let (params, ret) = Self::local_function_reference_shape(&signature, None);
         // No expected function type still keeps the declaration's suspend kind. Dropping it
@@ -109,6 +110,7 @@ impl Checker<'_> {
         );
         if let [selected] = maximal.as_slice() {
             let (statement, params, ret, plan, suspend_conversion, _) = &candidates[*selected];
+            self.record_local_reference_diagnostic(expression, *statement, *ret);
             // The expected shape may still hold the enclosing call's type variables
             // (`s.let(::local)`); the reference's type is the shape the local function realizes.
             let realized =

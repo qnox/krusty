@@ -40,8 +40,11 @@ mod functions;
 mod implementor_dispatch;
 mod imported_functions;
 mod interface_records;
+pub(super) use defaults::exports_default_entry;
 pub(super) use imported_functions::ImportedAbis;
 mod lists;
+pub(super) use classifier_shapes::represents_dependency_classifier;
+pub(super) use lists::realizes_dependency_getter;
 mod local_delegates;
 mod maps;
 mod module_abi;
@@ -482,7 +485,7 @@ struct FileLowering<'a> {
     /// The emitted pieces of each property reference, by the expression that creates it.
     references: HashMap<u32, references::ReferenceSite>,
     /// One marker per (referenced declaration, bound-ness) this file mentions.
-    reference_identities: HashMap<String, DataId>,
+    reference_identities: HashMap<functions::ReferenceIdentity, DataId>,
     /// The runtime-known types this file puts a class of its OWN behind, by resolved identity.
     ///
     /// A receiver typed by one of these may be an object of the program's rather than one the
