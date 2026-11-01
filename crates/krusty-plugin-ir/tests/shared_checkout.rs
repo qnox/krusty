@@ -62,6 +62,87 @@ impl Checkouts {
         .unwrap();
         root
     }
+
+    fn write_root_build(&self, name: &str, diagnostics: bool) -> PathBuf {
+        let root = self.0.join(name);
+        fs::create_dir_all(root.join("src/native/runtime")).unwrap();
+        fs::create_dir(root.join(".cargo")).unwrap();
+        fs::write(
+            root.join(".cargo/config.toml"),
+            include_str!("../../../.cargo/config.toml"),
+        )
+        .unwrap();
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"root-build-checkout\"\nversion = \"0.0.1\"\n\
+             edition = \"2021\"\n[workspace]\n\
+             [profile.dev]\ndebug = 0\nincremental = false\n",
+        )
+        .unwrap();
+        let script = include_str!("../../../build.rs");
+        let diagnostic_build = "generate_diagnostic_names().and_then(|()| prebuild_runtime())";
+        assert_eq!(script.matches(diagnostic_build).count(), 1);
+        fs::write(
+            root.join("build.rs"),
+            if diagnostics {
+                script.to_string()
+            } else {
+                // The older checkout predates diagnostic generation in the build entry point.
+                script.replace(diagnostic_build, "prebuild_runtime()")
+            },
+        )
+        .unwrap();
+        fs::write(
+            root.join("src/native/target_contract.rs"),
+            include_str!("../../../src/native/target_contract.rs"),
+        )
+        .unwrap();
+        let runtime = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../src/native/runtime");
+        for entry in fs::read_dir(runtime).unwrap() {
+            let entry = entry.unwrap();
+            if entry.file_type().unwrap().is_file() {
+                fs::copy(
+                    entry.path(),
+                    root.join("src/native/runtime").join(entry.file_name()),
+                )
+                .unwrap();
+            }
+        }
+        if diagnostics {
+            fs::create_dir_all(root.join("src/diag/releases")).unwrap();
+            fs::write(
+                root.join("src/diag/releases/fixture.diagnostics.tsv"),
+                "CHECKOUT_DIAGNOSTIC\n",
+            )
+            .unwrap();
+        }
+        fs::write(
+            root.join("src/main.rs"),
+            "fn main() { println!(\"{}\", env!(\"CARGO_MANIFEST_DIR\")); }\n",
+        )
+        .unwrap();
+        older_source_times(&root);
+        root
+    }
+}
+
+fn older_source_times(directory: &Path) {
+    for entry in fs::read_dir(directory).unwrap() {
+        let entry = entry.unwrap();
+        if entry.file_type().unwrap().is_dir() {
+            older_source_times(&entry.path());
+        } else {
+            fs::File::options()
+                .write(true)
+                .open(entry.path())
+                .unwrap()
+                .set_times(
+                    fs::FileTimes::new()
+                        .set_modified(UNIX_EPOCH + std::time::Duration::from_secs(1)),
+                )
+                .unwrap();
+        }
+    }
 }
 
 impl Drop for Checkouts {
@@ -126,4 +207,55 @@ fn shared_target_rebuilds_plugin_ir_when_checkout_changes() {
         fs::metadata(&binary).unwrap().modified().unwrap(),
         first_built
     );
+}
+
+fn run_root_build(checkout: &Path, target: &Path) -> SystemTime {
+    let mut command = Command::new(env!("CARGO"));
+    command
+        .current_dir(checkout)
+        .args(["run", "--offline", "--quiet"])
+        .env("CARGO_TARGET_DIR", target)
+        .env("CARGO_INCREMENTAL", "0")
+        .env("CARGO_BUILD_JOBS", "1")
+        .env("KRUSTY_RUNTIME_CC", checkout.join("no-runtime-compiler"));
+    for variable in [
+        "RUSTFLAGS",
+        "CARGO_ENCODED_RUSTFLAGS",
+        "RUSTC_WRAPPER",
+        "RUSTC_WORKSPACE_WRAPPER",
+    ] {
+        command.env_remove(variable);
+    }
+    let output = command.output().unwrap();
+    assert!(
+        output.status.success(),
+        "checkout {}: {}",
+        checkout.display(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap().trim(),
+        checkout.to_str().unwrap()
+    );
+    fs::metadata(target.join("debug").join(format!(
+        "root-build-checkout{}",
+        std::env::consts::EXE_SUFFIX
+    )))
+    .unwrap()
+    .modified()
+    .unwrap()
+}
+
+#[test]
+fn shared_target_recompiles_root_build_script_when_checkout_changes() {
+    let checkouts = Checkouts::new();
+    let newer = checkouts.write_root_build("newer", true);
+    let older = checkouts.write_root_build("older", false);
+    let target = checkouts.0.join("root-target");
+    let newer_built = run_root_build(&newer, &target);
+    assert_eq!(run_root_build(&newer, &target), newer_built);
+    let older_built = run_root_build(&older, &target);
+    assert_eq!(run_root_build(&older, &target), older_built);
+    let newer_rebuilt = run_root_build(&newer, &target);
+    assert_eq!(run_root_build(&newer, &target), newer_rebuilt);
 }
