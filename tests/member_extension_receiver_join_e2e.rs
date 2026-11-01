@@ -2,9 +2,10 @@
 //!
 //! This is the complete program, run against kotlinc: an implicit receiver from `with`, and a
 //! contravariant `(T) -> Unit` argument that leaves the receiver's type in place. The Wasm and
-//! Native KLIB lanes cannot realize stdlib `with` or function-typed parameters yet, so the box
-//! regression `memberExtensionCovariantReceiverJoin.kt` repeats the inference over local
-//! declarations on every target.
+//! Native KLIB lanes do not yet realize the stdlib `with` body or lower the same-module `consume`
+//! extension that takes a function-typed parameter, so the box regression
+//! `memberExtensionCovariantReceiverJoin.kt` repeats the inference over local declarations on every
+//! target.
 use super::common;
 
 const PROGRAM: &str =
