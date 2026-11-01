@@ -157,6 +157,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      # Dispatches the pages workflow, which rebuilds the metrics page from the published results.
+      actions: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -226,3 +228,8 @@ jobs:
             GIT_COMMITTER_NAME='Anton Efimchuk' GIT_COMMITTER_EMAIL='anton.efimchuk@gmail.com' \
             git -C "$tree" commit -q -m "Corpus results for ${GITHUB_SHA::7} ($(date -u +%F))"
           git -C "$tree" push -q origin corpus-results
+      - name: refresh the metrics page
+        if: github.event_name == 'schedule' || inputs.publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run pages.yml --ref master

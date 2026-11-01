@@ -169,9 +169,9 @@ class BuildCost(unittest.TestCase):
         ])
         peak = dict(total=900, gradle=500, kotlin_daemon=400, krusty=0, other=0)
         self.assertEqual(summary['cost'], dict(
-            kotlinc=dict(wall_seconds=60.0, cpu_seconds=90.0, peak_rss_mb=peak,
+            kotlinc=dict(exit=0, wall_seconds=60.0, cpu_seconds=90.0, peak_rss_mb=peak,
                          compile_seconds=5.5, built_compile_seconds=3.0),
-            krusty=dict(wall_seconds=60.0, cpu_seconds=90.0, peak_rss_mb=peak,
+            krusty=dict(exit=0, wall_seconds=60.0, cpu_seconds=90.0, peak_rss_mb=peak,
                         compile_seconds=3.5, built_compile_seconds=0.9),
         ))
 
