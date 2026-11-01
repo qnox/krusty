@@ -65,6 +65,10 @@ pub(super) struct CompactSelectedResultPublication {
     enhancement: TypeEnhancement,
     arguments: Box<[Option<CompactPublicationArgument>]>,
     explicit_type_arguments: bool,
+    /// The typealias the selected declaration spelled its result through. kotlinc's call result
+    /// carries that abbreviation, so an inferred declaration result reached through it records
+    /// the alias.
+    result_alias: Option<TypeName>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -77,6 +81,18 @@ impl CompactSelectedResultPublication {
     pub(super) fn with_selected(mut self, selected: Ty) -> Self {
         self.selected = selected;
         self
+    }
+
+    /// The selection with the typealias its source declaration's published signature spells the
+    /// result through, when the candidate itself carried none.
+    pub(super) fn with_result_alias(mut self, alias: Option<TypeName>) -> Self {
+        self.result_alias = self.result_alias.or(alias);
+        self
+    }
+
+    /// The declared result alias and the result this selection produced.
+    pub(super) fn result_alias(&self) -> Option<(TypeName, Ty)> {
+        self.result_alias.map(|alias| (alias, self.selected))
     }
 
     pub(super) fn callable(
@@ -104,6 +120,7 @@ impl CompactSelectedResultPublication {
                 whole_array_arguments.as_ref(),
             ),
             explicit_type_arguments,
+            result_alias: callable.result_alias,
         }
     }
 
@@ -135,6 +152,7 @@ impl CompactSelectedResultPublication {
                 whole_array_arguments.as_ref(),
             ),
             explicit_type_arguments,
+            result_alias: member.result_alias,
         }
     }
 
@@ -187,6 +205,7 @@ impl CompactSelectedResultPublication {
                 whole_array_arguments.as_ref(),
             ),
             explicit_type_arguments,
+            result_alias: None,
         }
     }
 
@@ -834,6 +853,7 @@ mod tests {
             enhancement: TypeEnhancement::NONE,
             arguments: Box::new([]),
             explicit_type_arguments: false,
+            result_alias: None,
         };
         let ordinary_receiver = Ty::obj_args_name(list, &[function]);
         let published_receiver =
@@ -892,6 +912,7 @@ mod tests {
             enhancement: TypeEnhancement::NONE,
             arguments: Box::new([]),
             explicit_type_arguments: false,
+            result_alias: None,
         };
         assert_eq!(
             member.publish(Some((constructed, published_carrier)), &[], direct_view,),
@@ -923,6 +944,7 @@ mod tests {
             })]
             .into_boxed_slice(),
             explicit_type_arguments: true,
+            result_alias: None,
         };
         let ordinary_receiver = Ty::obj_args_name(carrier, &[Ty::String]);
         let published_receiver = Ty::obj_args_name(carrier, &[Ty::platform_nullable(Ty::String)]);
@@ -955,6 +977,7 @@ mod tests {
             enhancement: TypeEnhancement::NONE,
             arguments: Box::new([]),
             explicit_type_arguments: false,
+            result_alias: None,
         };
 
         assert_eq!(

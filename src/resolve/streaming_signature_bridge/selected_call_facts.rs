@@ -18,6 +18,7 @@ pub(super) struct SelectedCallFacts {
     abbreviations: RefCell<HashMap<OriginId, ResolvedTypeAbbreviation>>,
     inferred_abbreviations: RefCell<HashMap<OriginId, InferredAbbreviation>>,
     publications: RefCell<HashMap<OriginId, CompactSelectedResultPublication>>,
+    read_aliases: RefCell<HashMap<OriginId, (crate::types::TypeName, crate::types::Ty)>>,
 }
 
 /// The alias shape a constructor call inferred its abbreviation arguments through: the alias
@@ -151,5 +152,28 @@ impl SelectedCallFacts {
 
     pub(super) fn publication(&self, origin: OriginId) -> Option<CompactSelectedResultPublication> {
         self.publications.borrow().get(&origin).cloned()
+    }
+
+    /// A value or property read selected a declaration spelled through `alias`, producing
+    /// `result`; a reselection that chose a declaration without one forgets the former alias.
+    pub(super) fn record_read_alias(
+        &self,
+        origin: OriginId,
+        alias: Option<crate::types::TypeName>,
+        result: crate::types::Ty,
+    ) {
+        let mut aliases = self.read_aliases.borrow_mut();
+        match alias {
+            Some(alias) => aliases.insert(origin, (alias, result)),
+            None => aliases.remove(&origin),
+        };
+    }
+
+    /// The declared alias and result of the read selected at `origin`.
+    pub(super) fn read_alias(
+        &self,
+        origin: OriginId,
+    ) -> Option<(crate::types::TypeName, crate::types::Ty)> {
+        self.read_aliases.borrow().get(&origin).copied()
     }
 }
