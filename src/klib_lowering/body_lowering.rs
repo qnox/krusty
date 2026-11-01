@@ -62,6 +62,10 @@ pub(super) struct LinkedCallee {
     /// The semantic identities of the callee's own type parameters, which the receiver,
     /// parameters and result name and a call's type arguments bind, in declaration order.
     pub(super) type_parameters: Vec<String>,
+    /// The complete declared upper bounds of each of [`Self::type_parameters`], as the selected
+    /// declaration authenticates them (an empty slot is the implicit `Any?`). `None` when the
+    /// selection carries no generic signature to read them from.
+    pub(super) type_parameter_bounds: Option<Vec<Vec<Ty>>>,
     /// The semantic identities of the type parameters of a member's generic class, which the
     /// receiver (the class applied to them), parameters and result name and a call binds from its
     /// dispatch receiver's type, in declaration order.
