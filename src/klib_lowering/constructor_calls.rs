@@ -142,6 +142,10 @@ pub(super) fn authenticate(
 }
 
 impl ConstructorDeclaration {
+    pub(super) fn declared_parameters(&self) -> &[Ty] {
+        &self.params
+    }
+
     pub(super) fn default_allowed(&self, ordinal: usize) -> bool {
         self.defaults.get(ordinal).copied().unwrap_or(false)
     }

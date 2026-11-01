@@ -32,8 +32,7 @@ impl<'a> BodyLowering<'a> {
                             .base
                             .symbol,
                     )?;
-                    let receiver =
-                        self.typed(receiver, Ty::obj_name(plan.header.contract.classifier));
+                    let receiver = self.typed(receiver, plan.header.contract.self_type());
                     let value = self.operand(*value, field.ty)?;
                     let store = self.ir.add_expr(IrExpr::SetField {
                         receiver,
@@ -79,10 +78,7 @@ impl<'a> BodyLowering<'a> {
         let field = &frame.plan.storage.fields[index];
         let receiver =
             receiver.ok_or_else(|| mismatch("an instance field access has no receiver"))?;
-        let receiver = self.operand(
-            receiver,
-            Ty::obj_name(frame.plan.header.contract.classifier),
-        )?;
+        let receiver = self.operand(receiver, frame.plan.header.contract.self_type())?;
         let index = u32::try_from(index).expect("a field list fits u32");
         let lowered = match value {
             Some(value) => {

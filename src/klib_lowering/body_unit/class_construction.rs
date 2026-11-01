@@ -26,6 +26,25 @@ impl<'u, 's> Linker<'u, 's> {
         let header = super::super::function_lowering::initializer_header(&plan)?;
         let mut class = IrClass::synthetic(classifier);
         class.supertypes.push(plan.storage.superclass);
+        for (formal, bounds) in plan
+            .storage
+            .declaration
+            .parameters
+            .formals
+            .iter()
+            .zip(&plan.storage.declaration.parameters.bounds)
+        {
+            let crate::types::TyKind::TyParam(identity, _) = formal.kind() else {
+                return Err(KlibBodyDeclineReason::SignatureMismatch(
+                    "a materialized class parameter has no declared formal identity".to_owned(),
+                ));
+            };
+            let identity = identity.as_str().to_owned();
+            class.type_params.push(identity.clone());
+            class
+                .type_param_bounds
+                .extend(bounds.iter().map(|bound| (identity.clone(), *bound)));
+        }
         class.fields = plan
             .storage
             .fields
@@ -71,7 +90,8 @@ impl<'u, 's> Linker<'u, 's> {
         ir.classes[class as usize].methods.push(function);
         ir.note_class_method(class, function);
         let receiver = ir.add_expr(IrExpr::GetValue(0));
-        ir.logical_types.insert(receiver, Ty::obj_name(classifier));
+        ir.logical_types
+            .insert(receiver, plan.storage.declaration.self_type());
         let args = header
             .params()
             .iter()

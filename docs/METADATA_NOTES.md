@@ -1090,6 +1090,18 @@ retains the real receiver slot and the exact constructor value symbols. Field ac
 only within this authenticated initialization frame. The ordinary Native layout, allocation and
 closure ABI consume that common IR; no field layout is guessed from argument positions.
 
+Generic initialization uses this same plan. The class keeps its exact formal identities and bounds;
+stored field types and initializer receiver types retain the declared class application. Checked
+constructor substitutions belong to each call, while allocation and stores use the declaration's
+layout. Constructor nodes retain declared parameter selection separately from checked applied
+operands. The official-producer regression observes generic values through initializer callbacks;
+imported property reads remain a separate getter capability.
+
+The declaration-parameter ledger is independent of the checked constructor-selection role. A
+missing explicit parameter selection denotes the already known in-IR primary constructor; Native
+preserves it even when the ledger is present. An explicit selection still consumes that ledger's
+declared ABI before physical frame adaptation. No metadata encoding or provider identity changes.
+
 Preparation follows only the initializer edges of this same positive plan. Class and helper
 publication share the body's rollback checkpoint. Until qualified class facts and constructor
 exports connect independent units, emission explicitly rejects equal source classifier names,
