@@ -7629,7 +7629,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   copy that reads the lambda's field names the bridge (`SuspendMethodWithoutForInlineCopy`). The
   body is not inlined on trial: once a call is routed to the inliner, or a lambda-free call to a
   compiled body is, a failure to inline or regenerate is an emission error, never a direct call.
-  Tests: `tests/crossinline_suspend_object_e2e.rs`. An object the copied method constructs that reads the lambda through the copy's field (the
+  Tests: `tests/crossinline_suspend_object_e2e.rs`. Each copied method passes through kotlinc's
+  optimizer once, before its constants reach the class's pool, as kotlinc's class writer optimizes
+  every method it writes once. The passes are not idempotent: a second run would fold the store and
+  reload kotlinc keeps for an inline-only callee's receiver (`Continuation { it.getOrThrow() }`'s
+  `astore t; aload t`), whose separating `nop` the first run's cleanup removed
+  (`jvm/classfile/copied_class.rs`, `tests/inlined_lambda_extension_receiver_e2e.rs`). An object the copied method constructs that reads the lambda through the copy's field (the
   `FlowCollector` that `Flow.map`'s object creates) is regenerated too, as kotlinc's
   `MethodInliner` does: it takes the copy's next number after the continuation
   (`…$map$1$2`, its own continuation `…$map$1$2$1`), the lambda is inlined into its methods, and

@@ -12,6 +12,8 @@ mod destination_producer_result_e2e;
 mod enclosing_formal_signatures_e2e;
 #[path = "inferred_alias_constructor_abbreviation_e2e.rs"]
 mod inferred_alias_constructor_abbreviation_e2e;
+#[path = "inlined_lambda_extension_receiver_e2e.rs"]
+mod inlined_lambda_extension_receiver_e2e;
 #[path = "nested_signature_argument_layout_e2e.rs"]
 mod nested_signature_argument_layout_e2e;
 
