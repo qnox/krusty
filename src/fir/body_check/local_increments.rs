@@ -299,7 +299,7 @@ impl BodyFirChecker<'_> {
                 kind: read_kind,
             });
             (
-                self.convert_fir_value(storage_read, receiver_ty, origin, read_conversion),
+                self.convert_fir_value(storage_read, receiver_ty, read_conversion),
                 None,
             )
         } else {

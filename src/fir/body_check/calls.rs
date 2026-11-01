@@ -2093,7 +2093,7 @@ impl BodyFirChecker<'_> {
             let lhs_conversion = self
                 .selected_type_conversion(lhs_actual, lhs_target, cause)
                 .or(receiver.conversion);
-            let lhs = self.convert_fir_value(receiver.value, lhs_target, cause, lhs_conversion);
+            let lhs = self.convert_fir_value(receiver.value, lhs_target, lhs_conversion);
             let rhs = self.value_at_selected_boundary(*argument, rhs_target)?;
             return Ok(FirExprKind::Binary {
                 operation,
@@ -2141,7 +2141,7 @@ impl BodyFirChecker<'_> {
                     }
                     crate::libraries::PrimitiveUnaryIntrinsic::Negate => FirUnaryOperation::Negate,
                 },
-                operand: self.convert_fir_value(receiver.value, target, cause, conversion),
+                operand: self.convert_fir_value(receiver.value, target, conversion),
             });
         }
         if primitive_operation == Some(crate::libraries::CompilerIntrinsic::PrimitiveBitNot) {

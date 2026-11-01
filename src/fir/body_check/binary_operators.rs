@@ -295,7 +295,7 @@ impl BodyFirChecker<'_> {
                 // required unbox on primitive operators inside a non-null branch.
                 let conversion =
                     checker.selected_value_conversion_from(source, value, actual, target, cause)?;
-                Ok(checker.convert_fir_value(value, target, cause, conversion))
+                Ok(checker.convert_fir_value(value, target, conversion))
             };
         let lhs = operand(self, lhs)?;
         let rhs = operand(self, rhs)?;

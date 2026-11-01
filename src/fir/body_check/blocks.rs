@@ -156,7 +156,7 @@ impl BodyFirChecker<'_> {
         };
         let receiver_ty = self.resolved_type(span, resolution.receiver_ty)?;
         let conversion = self.selected_type_conversion(read_ty, receiver_ty, origin);
-        let operand = self.convert_fir_value(operand, receiver_ty, origin, conversion);
+        let operand = self.convert_fir_value(operand, receiver_ty, conversion);
         let convention = if dec { "dec" } else { "inc" };
         let updated_kind = if self
             .info

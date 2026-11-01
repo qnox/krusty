@@ -1684,10 +1684,18 @@ fn local_function_debug_line(body: &FirBody) -> Option<u32> {
     if statement_line != 0 {
         return Some(statement_line);
     }
-    let crate::fir::FirStatementKind::Expression(expression) = &body.statement(root)?.kind else {
+    let crate::fir::FirStatementKind::Expression(mut expression) = body.statement(root)?.kind
+    else {
         return None;
     };
-    let source_line = body.expression_debug_lines(*expression).source;
+    // The conversion of the body's result to the callable's result type stands where the value
+    // it converts is yielded; the callable opens on the line of the body it converts.
+    while let Some(crate::fir::FirExprKind::ImplicitConversion { value, .. }) =
+        body.expr(expression).map(|expression| &expression.kind)
+    {
+        expression = *value;
+    }
+    let source_line = body.expression_debug_lines(expression).source;
     (source_line != 0).then_some(source_line)
 }
 
