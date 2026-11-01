@@ -26,6 +26,8 @@ pub(super) enum ClassMetadataLoadError {
         archive: PathBuf,
         error: zip::result::ZipError,
     },
+    /// The common stdlib KLIB paired with this classpath's stdlib, read on first use.
+    CommonExpectation(Arc<crate::jvm::common_metadata::CommonExpectationError>),
 }
 
 impl ClassMetadataLoadError {
@@ -50,11 +52,23 @@ impl ClassMetadataLoadError {
                 "cannot read classpath entry {}: undecodable entry name: {error}",
                 archive.display()
             ),
+            ClassMetadataLoadError::CommonExpectation(error) => {
+                format!("cannot load Kotlin common-expectation dependency: {error}")
+            }
         }
     }
 }
 
 impl super::Classpath {
+    /// Record a failure to read the paired common stdlib KLIB on first use. It ends the
+    /// compilation like any other lazily loaded declaration that does not parse.
+    pub(in crate::jvm) fn defer_common_expectation_error(
+        &self,
+        error: Arc<crate::jvm::common_metadata::CommonExpectationError>,
+    ) {
+        self.record_metadata_load_error(ClassMetadataLoadError::CommonExpectation(error));
+    }
+
     /// Accept one entry's index build. A failure becomes the classpath's terminal load error and
     /// yields no index, so lookup stops at that entry instead of reading a partial one.
     pub(super) fn accept_entry_index<T>(

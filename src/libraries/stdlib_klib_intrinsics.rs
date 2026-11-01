@@ -19,6 +19,15 @@ pub(crate) enum StdlibKlibIntrinsic {
 }
 
 impl StdlibKlibIntrinsic {
+    /// Every identity the common stdlib KLIB can carry a role for.
+    pub(crate) const ALL: [Self; 5] = [
+        Self::DoubleRangeTo,
+        Self::FloatRangeTo,
+        Self::DoubleRangeUntil,
+        Self::FloatRangeUntil,
+        Self::EnumEntries,
+    ];
+
     pub(crate) fn compiler_intrinsic(self) -> CompilerIntrinsic {
         match self {
             Self::DoubleRangeTo
