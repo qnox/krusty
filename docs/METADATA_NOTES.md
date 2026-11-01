@@ -1459,6 +1459,29 @@ checked lowering/type facts as super-argument disposition. Existing lexical capt
 shared-cell decisions and FIR constructor-prefix coordinates supply the resulting fields and
 closure parameters. No metadata naming, new capture identity or backend recovery is introduced.
 
+## Anonymous superclass closure capture ownership
+
+Constructor-use inventory distinguishes candidate storage discovery from checked publication.
+Ordinary lambda arguments use the existing construction-site forwarding record, preserving the
+caller's lexical owner and source lifting provenance. Their synthetic constructor input is the
+whole selected function value. Final retained-closure admission also checks the declaration-owned
+argument-slot/vararg mapping: the current packing path still needs prefix captures for vararg
+contributions. Existing lexical identities, shared-cell decisions and receiver provenance supply
+closure inputs. No source lookup, invented capture identity or JVM method reparenting is added.
+Anonymous constructor headers also publish receiver-coordinate projections authenticated by the
+existing receiver declaration roles. Checked FIR activates only the constructor frames omitted by
+an actual forward, in inner-to-outer order; constructor-resident closures keep their header frame.
+Receiver-use journals retain exact source sites. Capture retention and ordering exclude the current
+class's checked forwarded roots; diagnostic uses remain recorded. Nested constructions inside those
+roots reconnect to the original caller operands while retaining their class-body receiver coordinates.
+The nested setter's checked write names the original property and matches its lexical receiver
+capture; an anonymous constructor-prefix read is not a substitute for that caller-owned binding.
+This strengthens the ownership regression without changing metadata or the capture inventory.
+
+Direct synchronous source-lambda invocation consumes the prepared inline body through the common
+splice contract. Parameter identities and receiver roles remain declaration-owned, and a consumed
+implementation is recorded as inline-only. Escaping values keep their ordinary function ABI.
+
 ## Serialized getter declaration contracts
 
 KLIB normalization tags a getter or setter from its actual property slot, retaining the property's

@@ -6112,6 +6112,11 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   getter of an open property, and a lambda or local class there captures `this`. Plain parameters,
   supertype arguments, delegation expressions and parameter defaults keep reading the parameter
   (`tests/property_parameter_initializers_e2e.rs`).
+- Checked primary-constructor header initialization runs after the selected superclass delegation
+  and before source-ordered property initializers and `init` blocks. Interface delegate expressions
+  therefore run before those body initializers on every backend
+  (`tests/box_regressions/namedInterfaceDelegateOrder.kt`, with complete JVM constructor ABI and
+  runtime coverage in `tests/interface_delegation_e2e.rs`).
 - Constructing a classpath (non-IR) class (`RuntimeException("x")`, an imported Java type): `new` +
   `dup` + arguments + `invokespecial <init>`, with the constructor descriptor resolved from the
   classpath. JDK `Throwable` types fall back to the `()`/`(String)` constructors (the classpath reader
@@ -13380,8 +13385,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   computed from a parameter, any other use of a composable lambda parameter, a grouping annotation
   or explicit applier target, a call to another file's composable, a name an overload with lambdas
   shares, a recursive function with composable lambda parameters, and a class whose stability its
-  file does not decide (a value-class field, a field of a generic class, of another file's `inner`
-  or annotation class, or of a numbered `KFunctionN` type). A nonempty `metricsDestination`/`reportsDestination` is an
+  file does not decide (a field of a generic value class whose underlying type names a type
+  parameter, of another file's `inner` or annotation class, or of a numbered `KFunctionN` type). A nonempty `metricsDestination`/`reportsDestination` is an
   `UnimplementedOption` error. The runtime functions the code calls are selected at the handoff by
   their Kotlin signatures, or the module is rejected. Covered:
   `Unit` top-level composables with a block body whose parameters are primitives or `String`. Each
@@ -23628,13 +23633,31 @@ formal never survives the call, whatever its bound. Test: `box_regressions/bound
 
 ## Lexical captures in anonymous superclass lambdas
 
-A lambda retained in an anonymous object's superclass-constructor argument carries its enclosing
-lexical values through that object's constructor prefix before forming the closure. Nested lambdas
-preserve the same binding, mutable locals retain their shared cell, and a lambda parameter shadows
-an outer value without creating a capture of it. Type aliases and a same-named inherited property
-do not change this contract. The differential runtime controls live in
-`typealias_constructor_inference_e2e`. The pre-existing captureless lambda placement/constructor
-ABI difference is preserved separately with its complete oracle in #2833.
+An anonymous object's superclass lambda argument is created in the lexical construction body and
+passed as the selected constructor parameter. Its implementation retains that body's owner and
+source lifting site. Captured generic values, nested closures, enclosing instances and extension
+receivers preserve their identities; mutable locals retain their shared cell. A lambda parameter
+shadows an outer value without creating a capture of it. Type aliases and a same-named inherited
+property do not change these rules. Named-class constructor lambdas retain their constructor
+context. The existing vararg packing path still creates vararg-contribution closures in that
+constructor; forwarding a packed array is separate work. Runtime and complete ordinary-slot class
+ABI controls live in `typealias_constructor_inference_e2e` and its anonymous-super-lambda child.
+Forwarding preserves declared extension/context receiver identity across the unavailable anonymous
+header rung, including nested receiver lambdas and mixed forwarded/constructor-resident closures.
+A receiver used only by a forwarded argument adds no anonymous-class storage. A receiver also read
+by a class-body method still has the ordinary capture field; both uses preserve the original value.
+Nested superclass setters preserve the same lexical instance after both anonymous objects have
+been constructed. `box_regressions/nestedAnonymousSuperSetter.kt` distinguishes two same-typed
+callers through the shared backend inventory; its JVM companion compares the complete class ABI.
+
+## Immediately invoked source lambdas
+
+A synchronous source lambda invoked directly uses its checked inline template at that call site.
+Capture operands precede context and value arguments, each is evaluated once, and local returns
+leave that lambda invocation. An escaping function value retains its implementation. The common
+lowering supplies this operation to all backends. Full ABI controls, including the complete #2838
+oracle, live in `immediate_lambda_invocation_e2e`; operand-order and return behavior share
+`box_regressions/immediateFunctionLiteralOperands.kt` across the backend matrix.
 
 ## Runtime-owned dependency getter leaves
 

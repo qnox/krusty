@@ -20,8 +20,11 @@
 //! and an interface or a class that is not final is of unknown stability. Unknown parts drop out
 //! once there are several, so two interface-typed fields leave a class stable, as kotlinc infers.
 //! A class of another file or a Compose-compiled library contributes its `$stable`, read at run
-//! time. What the inference cannot decide here is declined at the class: a value class, and a
-//! field of a generic class, whose type arguments kotlinc substitutes.
+//! time, and a value class the stability of its underlying type. A field of a generic class of the
+//! file is inferred with the field's type arguments in place of the class's type parameters, and
+//! each result is kept for the classes after it, in kotlinc's declaration order. What the inference
+//! cannot decide here is declined at the class, such as a field of a generic value class whose
+//! underlying type names a type parameter.
 
 use crate::ir::{
     AnnoRetention, AnnoValue, AppliedAnnotation, DeclarationAnnotations, ExprId, FieldAnnotations,
@@ -89,8 +92,9 @@ enum Stability {
     /// The class's `$stable`, read when the class initializes: a class of another file, or a
     /// dependency class compiled with Compose.
     Runtime(TypeName),
-    /// The stability of the type argument of the class's own type parameter at this index.
-    Parameter(u32),
+    /// The stability of a type parameter's argument: one of the recorded class's own type parameters,
+    /// or one kotlinc's substitution leaves unresolved.
+    Parameter(TyParamName),
     Combined(Vec<Stability>),
 }
 
@@ -134,16 +138,18 @@ impl Stability {
     }
 
     /// kotlinc's `irStableExpression`: the `$stable` fields the class's own `$stable` ors together,
-    /// none for a stable class, or nothing when the stability is not known. A type parameter reads
-    /// as stable, and the JVM backend drops an `or` with that constant `0`.
-    fn runtime_reads(&self) -> Option<Vec<TypeName>> {
+    /// none for a stable class, or nothing when the stability is not known. One of the class's
+    /// `own` type parameters reads as stable, and the JVM backend drops an `or` with that constant
+    /// `0`; any other parameter leaves the stability unknown.
+    fn runtime_reads(&self, own: &[TyParamName]) -> Option<Vec<TypeName>> {
         match self {
-            Self::Certain(true) | Self::Parameter(_) => Some(Vec::new()),
+            Self::Certain(true) => Some(Vec::new()),
+            Self::Parameter(parameter) => own.contains(parameter).then(Vec::new),
             Self::Certain(false) | Self::Unknown => None,
             Self::Runtime(class) => Some(vec![*class]),
             Self::Combined(elements) => elements
                 .iter()
-                .map(Self::runtime_reads)
+                .map(|element| element.runtime_reads(own))
                 .collect::<Option<Vec<_>>>()
                 .map(|reads| reads.concat()),
         }
@@ -157,21 +163,23 @@ impl Stability {
         }
     }
 
-    /// kotlinc's `@StabilityInferred(parameters)` of a class with `type_parameters`: a bit for each
-    /// type parameter the stability depends on and, past them, a bit when it is known stable.
-    fn parameter_mask(&self, type_parameters: usize) -> i32 {
+    /// kotlinc's `@StabilityInferred(parameters)` of a class with type parameters `own`: a bit for
+    /// each of them the stability depends on and, past them, a bit when it is known stable.
+    fn parameter_mask(&self, own: &[TyParamName]) -> i32 {
         let mut mask = 0;
         let parts = match self {
             Self::Combined(parts) => parts.as_slice(),
             single => std::slice::from_ref(single),
         };
         for part in parts {
-            if let Self::Parameter(index) = part {
-                mask |= 1 << index;
+            if let Self::Parameter(parameter) = part {
+                if let Some(index) = own.iter().position(|own| own == parameter) {
+                    mask |= 1 << index;
+                }
             }
         }
-        if self.known_stable() && type_parameters < 32 {
-            mask |= 1 << type_parameters;
+        if self.known_stable() && own.len() < 32 {
+            mask |= 1 << own.len();
         }
         mask
     }
@@ -189,10 +197,12 @@ pub(super) fn declare(
         ir,
         runtime,
         analyzed: Default::default(),
-        parameters: Vec::new(),
+        substitutions: Vec::new(),
+        resolving: Vec::new(),
     };
     let mut markers = Vec::new();
-    for (index, class) in ir.classes.iter().enumerate() {
+    for index in visit_order(ir) {
+        let class = &ir.classes[index];
         if !records_stability(ir, class) {
             continue;
         }
@@ -207,36 +217,18 @@ pub(super) fn declare(
             markers.push((index, Some(Vec::new()), None));
             continue;
         }
-        inference.parameters = ir
-            .class_signature_name(class.fq_name)
-            .map(|signature| {
-                signature
-                    .type_params
-                    .iter()
-                    .filter_map(|parameter| match parameter.ty().kind() {
-                        TyKind::TyParam(name, _) => Some(name),
-                        _ => None,
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        if inference.parameters.len() != class.type_params.len() {
-            rejections.push(super::source_facts::class_rejection(
-                source,
-                class,
-                "a generic class whose type parameters the file does not declare",
-            ));
-            continue;
-        }
-        match inference.of_class(class.fq_name, &mut Vec::new()) {
-            Ok(stability) => {
-                let stability = stability.normalize();
-                let parameters = if class.type_params.is_empty() {
+        let inferred = type_parameters(ir, class).and_then(|own| {
+            let stability = inference.of_class(class.fq_name, &[], &mut Vec::new())?;
+            Ok((own, stability.normalize()))
+        });
+        match inferred {
+            Ok((own, stability)) => {
+                let parameters = if own.is_empty() {
                     i32::from(stability.known_stable())
                 } else {
-                    stability.parameter_mask(class.type_params.len())
+                    stability.parameter_mask(&own)
                 };
-                markers.push((index, stability.runtime_reads(), Some(parameters)));
+                markers.push((index, stability.runtime_reads(&own), Some(parameters)));
             }
             Err(what) => rejections.push(super::source_facts::class_rejection(source, class, what)),
         }
@@ -249,6 +241,46 @@ pub(super) fn declare(
 /// Whether kotlinc records the stability of `class`: a public or internal class declared in
 /// source that is not an enum, an interface, an annotation, an anonymous, local, inner or companion
 /// object or a value class.
+/// The file's classes in the order kotlinc's transformer visits them: source declaration order,
+/// each nested class before its owner. The inference cache keeps context-dependent results, so the
+/// order decides what a later class reads.
+fn visit_order(ir: &IrFile) -> Vec<usize> {
+    let order = |index: usize| ir.class_source_order(index as crate::ir::ClassId);
+    let mut declared: Vec<usize> = (0..ir.classes.len())
+        .filter(|&index| order(index).is_some())
+        .collect();
+    declared.sort_by_key(|&index| order(index));
+    let owner = |index: usize| match &ir.classes[index].declaration_name {
+        Some(crate::types::ClassifierDeclarationName::Nested { owner, .. }) => declared
+            .iter()
+            .copied()
+            .find(|&candidate| ir.classes[candidate].fq_name == *owner),
+        _ => None,
+    };
+    let mut children: crate::fx_hash::HashMap<usize, Vec<usize>> = Default::default();
+    let mut roots = Vec::new();
+    for &index in &declared {
+        match owner(index) {
+            Some(owner) => children.entry(owner).or_default().push(index),
+            None => roots.push(index),
+        }
+    }
+    let mut visited = Vec::with_capacity(ir.classes.len());
+    let mut stack: Vec<(usize, bool)> = roots.into_iter().rev().map(|root| (root, false)).collect();
+    while let Some((index, expanded)) = stack.pop() {
+        if expanded {
+            visited.push(index);
+            continue;
+        }
+        stack.push((index, true));
+        if let Some(children) = children.get(&index) {
+            stack.extend(children.iter().rev().map(|&child| (child, false)));
+        }
+    }
+    visited.extend((0..ir.classes.len()).filter(|&index| order(index).is_none()));
+    visited
+}
+
 fn records_stability(ir: &IrFile, class: &crate::ir::IrClass) -> bool {
     let visibility = ir
         .class_visibilities
@@ -352,13 +384,44 @@ fn binary(annotation: &str, values: Vec<(String, AnnoValue)>) -> RetainedAnnotat
     }
 }
 
+/// A file class with the type argument each of its type parameters has, kotlinc's
+/// `SymbolForAnalysis`.
+type Analysis = (TypeName, Vec<Option<Ty>>);
+
 /// kotlinc's `StabilityInferencer` over one file, whose classes it infers and caches.
 struct Inference<'a> {
     ir: &'a IrFile,
     runtime: &'a dyn PluginRuntime,
-    analyzed: crate::fx_hash::HashMap<TypeName, Stability>,
-    /// The type parameters of the class whose stability is being recorded.
-    parameters: Vec<TyParamName>,
+    analyzed: crate::fx_hash::HashMap<Analysis, Stability>,
+    /// The type arguments in scope, the innermost last.
+    substitutions: Vec<(TyParamName, Ty)>,
+    /// The type parameters whose argument is being inferred.
+    resolving: Vec<TyParamName>,
+}
+
+/// The type parameters `class` declares, as its declaration names them.
+fn type_parameters(
+    ir: &IrFile,
+    class: &crate::ir::IrClass,
+) -> Result<Vec<TyParamName>, &'static str> {
+    let own: Vec<TyParamName> = ir
+        .class_signature_name(class.fq_name)
+        .map(|signature| {
+            signature
+                .type_params
+                .iter()
+                .filter_map(|parameter| match parameter.ty().kind() {
+                    TyKind::TyParam(name, _) => Some(name),
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if own.len() == class.type_params.len() {
+        Ok(own)
+    } else {
+        Err("a generic class whose type parameters the file does not declare")
+    }
 }
 
 /// A classifier the inference reads: one of the file's classes, or one the compilation declares.
@@ -377,7 +440,11 @@ impl Inference<'_> {
 
     /// Whether the class applies a stable marker itself (kotlinc's `hasStableMarker`).
     fn marker(&self, class: &crate::ir::IrClass) -> Result<bool, &'static str> {
-        for annotation in self.annotations(class.fq_name)? {
+        self.has_stable_marker(class.fq_name)
+    }
+
+    fn has_stable_marker(&self, name: TypeName) -> Result<bool, &'static str> {
+        for annotation in self.annotations(name)? {
             if self.is_stable_marker(annotation)? {
                 return Ok(true);
             }
@@ -435,25 +502,68 @@ impl Inference<'_> {
         Ok(false)
     }
 
-    /// kotlinc's `stabilityOf(IrClass)` for a class without type arguments.
+    /// kotlinc's `stabilityOf(IrClass)` for `name` with `arguments`, none for the class whose
+    /// stability is being recorded or for a superclass, whose parameters kotlinc leaves unsubstituted.
     fn of_class(
         &mut self,
         name: TypeName,
-        analyzing: &mut Vec<TypeName>,
+        arguments: &[Ty],
+        analyzing: &mut Vec<Analysis>,
     ) -> Result<Stability, &'static str> {
-        if analyzing.contains(&name) {
-            return Ok(Stability::UNSTABLE);
-        }
-        if let Some(stability) = self.analyzed.get(&name) {
-            return Ok(stability.clone());
-        }
-        if self.has_stable_marked_descendant(name)? {
-            return Ok(Stability::STABLE);
-        }
         let ir = self.ir;
         let Some(class) = ir.classes.iter().find(|class| class.fq_name == name) else {
-            return self.of_declared(name, &[], analyzing);
+            if self.has_stable_marked_descendant(name)? {
+                return Ok(Stability::STABLE);
+            }
+            return self.of_declared(name, arguments, analyzing);
         };
+        let own = type_parameters(ir, class)?;
+        if !arguments.is_empty() && arguments.len() != own.len() {
+            return Err("a class whose field types the compilation does not declare");
+        }
+        let scope = self.substitutions.len();
+        for (&parameter, &argument) in own.iter().zip(arguments) {
+            // kotlinc's `substitutionMap` drops a parameter passed its own type.
+            if !matches!(argument.kind(), TyKind::TyParam(passed, _) if passed == parameter) {
+                self.substitutions.push((parameter, argument));
+            }
+        }
+        let analysis = (
+            name,
+            own.iter()
+                .map(|&parameter| self.substitution(parameter))
+                .collect(),
+        );
+        let stability = self.of_file_class(class, analysis, analyzing);
+        self.substitutions.truncate(scope);
+        stability
+    }
+
+    /// The innermost type argument in scope for `parameter`.
+    fn substitution(&self, parameter: TyParamName) -> Option<Ty> {
+        self.substitutions
+            .iter()
+            .rev()
+            .find(|&&(substituted, _)| substituted == parameter)
+            .map(|&(_, argument)| argument)
+    }
+
+    /// kotlinc's `stabilityOf(IrClass)` for a class of the file, cached per type arguments.
+    fn of_file_class(
+        &mut self,
+        class: &crate::ir::IrClass,
+        analysis: Analysis,
+        analyzing: &mut Vec<Analysis>,
+    ) -> Result<Stability, &'static str> {
+        if let Some(stability) = self.analyzed.get(&analysis) {
+            return Ok(stability.clone());
+        }
+        if analyzing.contains(&analysis) {
+            return Ok(Stability::UNSTABLE);
+        }
+        if self.has_stable_marked_descendant(class.fq_name)? {
+            return Ok(Stability::STABLE);
+        }
         if class.is_enum || class.is_enum_entry || class.is_object {
             return Ok(Stability::STABLE);
         }
@@ -465,19 +575,11 @@ impl Inference<'_> {
         if class.is_interface {
             return Ok(Stability::Unknown);
         }
-        // Only the recorded class is analyzed without type arguments: its own parameters stay
-        // parameters. Another generic class needs its arguments substituted.
-        let generic = !class.type_params.is_empty();
-        if generic && !analyzing.is_empty() {
-            return Err("a class whose stability depends on a generic class");
-        }
-        analyzing.push(name);
+        analyzing.push(analysis.clone());
         let stability = self.of_members(class, analyzing);
         analyzing.pop();
         let stability = stability?;
-        if !generic {
-            self.analyzed.insert(name, stability.clone());
-        }
+        self.analyzed.insert(analysis, stability.clone());
         Ok(stability)
     }
 
@@ -485,7 +587,7 @@ impl Inference<'_> {
     fn of_members(
         &mut self,
         class: &crate::ir::IrClass,
-        analyzing: &mut Vec<TypeName>,
+        analyzing: &mut Vec<Analysis>,
     ) -> Result<Stability, &'static str> {
         let mut stability = if class.is_open || class.is_abstract || class.is_sealed {
             Stability::Unknown
@@ -506,7 +608,7 @@ impl Inference<'_> {
             stability = stability.plus(self.of_type(field.ty, analyzing)?);
         }
         if !is_any(class.superclass) {
-            let superclass = self.of_class(class.superclass, analyzing)?;
+            let superclass = self.of_class(class.superclass, &[], analyzing)?;
             if superclass != Stability::Unknown {
                 stability = stability.plus(superclass);
             }
@@ -519,7 +621,7 @@ impl Inference<'_> {
         &mut self,
         name: TypeName,
         arguments: &[Ty],
-        analyzing: &mut Vec<TypeName>,
+        analyzing: &mut Vec<Analysis>,
     ) -> Result<Stability, &'static str> {
         let Some(declared) = self.runtime.classifier(name) else {
             return Err("a class whose field types the compilation does not declare");
@@ -537,7 +639,10 @@ impl Inference<'_> {
             .iter()
             .find(|&&(known, _)| name == type_name(known))
         {
-            return self.with_type_arguments(mask, arguments, analyzing);
+            if arguments.is_empty() {
+                return Ok(Stability::STABLE);
+            }
+            return self.with_type_arguments(Stability::STABLE, Some(mask), arguments, analyzing);
         }
         if !declared.is_kotlin {
             return Ok(Stability::UNSTABLE);
@@ -552,12 +657,6 @@ impl Inference<'_> {
                 .iter()
                 .any(|annotation| annotation.annotation == stability_inferred)
         {
-            if declared.type_parameters > 0 {
-                return Err(
-                    "a class whose stability depends on a generic class of another file or \
-                     a Compose library",
-                );
-            }
             if declared.in_module
                 && (declared.is_inner || declared.kind == ClassifierDeclarationKind::Annotation)
             {
@@ -566,34 +665,44 @@ impl Inference<'_> {
                      `$stable`",
                 );
             }
-            return Ok(Stability::Runtime(name));
+            // kotlinc reads a public class of another file at run time, whatever its
+            // `@StabilityInferred(parameters)`, together with every type argument.
+            if declared.type_parameters == 0 {
+                return Ok(Stability::Runtime(name));
+            }
+            if arguments.len() != declared.type_parameters {
+                return Err("a class whose field types the compilation does not declare");
+            }
+            return self.with_type_arguments(Stability::Runtime(name), None, arguments, analyzing);
         }
         Ok(Stability::UNSTABLE)
     }
 
-    /// kotlinc's `applyTypeParameterMask` over a stable classifier's type arguments.
+    /// kotlinc's `applyTypeParameterMask`: `base` plus the stability of each type argument the
+    /// mask selects, or of every one without a mask.
     fn with_type_arguments(
         &mut self,
-        mask: u32,
+        base: Stability,
+        mask: Option<u32>,
         arguments: &[Ty],
-        analyzing: &mut Vec<TypeName>,
+        analyzing: &mut Vec<Analysis>,
     ) -> Result<Stability, &'static str> {
-        if mask == 0 || arguments.is_empty() {
-            return Ok(Stability::STABLE);
+        if mask == Some(0) {
+            return Ok(base);
         }
         let mut elements = Vec::new();
         for (index, &argument) in arguments.iter().enumerate().take(32) {
-            if mask & (1 << index) != 0 {
+            if mask.is_none_or(|mask| mask & (1 << index) != 0) {
                 elements.push(self.of_argument(argument, analyzing)?);
             }
         }
-        Ok(Stability::STABLE.plus(Stability::Combined(elements)))
+        Ok(base.plus(Stability::Combined(elements)))
     }
 
     fn of_argument(
         &mut self,
         argument: Ty,
-        analyzing: &mut Vec<TypeName>,
+        analyzing: &mut Vec<Analysis>,
     ) -> Result<Stability, &'static str> {
         match argument.kind() {
             TyKind::StarProjection(_) => Ok(Stability::UNSTABLE),
@@ -608,7 +717,7 @@ impl Inference<'_> {
     fn of_type(
         &mut self,
         ty: Ty,
-        analyzing: &mut Vec<TypeName>,
+        analyzing: &mut Vec<Analysis>,
     ) -> Result<Stability, &'static str> {
         match ty.kind() {
             TyKind::Unit
@@ -634,23 +743,21 @@ impl Inference<'_> {
             }
             TyKind::Obj(name, arguments) => {
                 if self.is_value_class(name) {
-                    return Err("a class with a value-class field");
+                    return self.of_value_class(name, arguments.len(), analyzing);
                 }
-                if arguments.is_empty() {
-                    self.of_class(name, analyzing)
-                } else if self.ir.classes.iter().any(|class| class.fq_name == name) {
-                    Err("a class whose stability depends on a generic class")
-                } else {
-                    let arguments = arguments.iter().copied().collect::<Vec<_>>();
-                    if self.has_stable_marked_descendant(name)? {
-                        return Ok(Stability::STABLE);
-                    }
-                    self.of_declared(name, &arguments, analyzing)
-                }
+                let arguments = arguments.iter().copied().collect::<Vec<_>>();
+                self.of_class(name, &arguments, analyzing)
             }
-            TyKind::TyParam(name, _) => match self.parameters.iter().position(|&own| own == name) {
-                Some(index) => Ok(Stability::Parameter(index as u32)),
-                None => Err("a class with a field of another declaration's type parameter"),
+            // An argument in scope stands for the parameter, unless it is already being
+            // inferred, where kotlinc leaves the parameter itself.
+            TyKind::TyParam(name, _) => match self.substitution(name) {
+                Some(argument) if !self.resolving.contains(&name) => {
+                    self.resolving.push(name);
+                    let stability = self.of_argument(argument, analyzing);
+                    self.resolving.pop();
+                    stability
+                }
+                _ => Ok(Stability::Parameter(name)),
             },
             TyKind::Nothing => Ok(Stability::UNSTABLE),
             _ => Err("a class with a field of a type kotlinc's stability inference reads apart"),
@@ -665,10 +772,49 @@ impl Inference<'_> {
             .is_some_and(|declared| declared.supertypes.contains(&type_name(K_FUNCTION)))
     }
 
+    /// kotlinc's `stabilityOf` for an inline class type: stable when the value class applies a
+    /// stable marker itself, else the stability of its underlying type, wherever it is declared.
+    fn of_value_class(
+        &mut self,
+        name: TypeName,
+        arguments: usize,
+        analyzing: &mut Vec<Analysis>,
+    ) -> Result<Stability, &'static str> {
+        let (underlying, generic) = match self.classifier(name) {
+            Some(Classifier::File(class)) => (
+                class.fields.first().map(|field| field.ty),
+                !class.type_params.is_empty(),
+            ),
+            Some(Classifier::Declared(declared)) => match declared.value_class {
+                Some(value_class) => (
+                    Some(value_class.underlying),
+                    !value_class.type_parameters.is_empty(),
+                ),
+                None => (None, false),
+            },
+            None => (None, false),
+        };
+        let Some(underlying) = underlying else {
+            return Err(
+                "a class with a field of a value class whose underlying type the \
+                        compilation does not declare",
+            );
+        };
+        if self.has_stable_marker(name)? {
+            return Ok(Stability::STABLE);
+        }
+        // kotlinc substitutes the type's arguments into the underlying type; one that names no
+        // type parameter, like `Result`'s `Any?`, needs none.
+        if (arguments > 0 || generic) && mentions_type_parameter(underlying) {
+            return Err("a class with a field of a generic value class");
+        }
+        self.of_type(underlying, analyzing)
+    }
+
     fn is_value_class(&self, name: TypeName) -> bool {
         match self.classifier(name) {
             Some(Classifier::File(class)) => class.is_value,
-            Some(Classifier::Declared(declared)) => declared.is_value,
+            Some(Classifier::Declared(declared)) => declared.value_class.is_some(),
             None => false,
         }
     }
@@ -690,6 +836,30 @@ impl Inference<'_> {
                     )
                 })
                 .is_some_and(|&superclass| is_protobuf_message(superclass))
+    }
+}
+
+/// Whether `ty` refers to a type parameter anywhere.
+fn mentions_type_parameter(ty: Ty) -> bool {
+    match ty.kind() {
+        TyKind::TyParam(..) => true,
+        TyKind::Obj(_, arguments) | TyKind::Intersection(arguments) => arguments
+            .iter()
+            .any(|&argument| mentions_type_parameter(argument)),
+        TyKind::Nullable(inner)
+        | TyKind::PlatformNullable(inner)
+        | TyKind::MutabilityFlexible(inner)
+        | TyKind::InProjection(inner)
+        | TyKind::OutProjection(inner)
+        | TyKind::StarProjection(inner)
+        | TyKind::RawProjection(inner)
+        | TyKind::DefinitelyNotNull(inner) => mentions_type_parameter(inner),
+        TyKind::Fun(signature) => signature
+            .params
+            .iter()
+            .chain(std::iter::once(&signature.ret))
+            .any(|&part| mentions_type_parameter(part)),
+        _ => false,
     }
 }
 

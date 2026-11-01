@@ -2551,7 +2551,9 @@ fn callee_kind(callee: &Callee) -> &'static str {
         Callee::LocalDefault(_) | Callee::LocalWithDefaults { .. } => "defaulted",
         Callee::Intrinsic { .. } => "intrinsic",
         Callee::CrossFile { .. } => "cross-file",
-        Callee::Module { .. } | Callee::ModuleWithDefaults { .. } => "same-module",
+        Callee::Module { .. }
+        | Callee::ModuleWithDefaults { .. }
+        | Callee::ModuleDefaultEntry { .. } => "same-module",
         Callee::External { .. } => "dependency",
         Callee::Static { .. } => "static",
         Callee::Virtual { .. } => "virtual",
