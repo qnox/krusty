@@ -326,6 +326,8 @@ use signature_parameter_identity::{
 pub(in crate::resolve) use type_spellings::{spelling_of_ref, spelling_of_ref_with};
 mod singleton_receivers;
 pub use singleton_receivers::SingletonValue;
+mod anonymous_capture_remap;
+mod constructor_receiver_frames;
 mod primary_constructor_arguments;
 mod source_constructors;
 mod source_package;
@@ -14610,24 +14612,38 @@ impl<'a> Checker<'a> {
                     }
                 }
                 // kotlinc captures receivers in the order the body first uses them.
+                let forwarded_uses = receiver_uses::ReceiverUseSites::anonymous_forwards(
+                    self.file,
+                    declaration,
+                    self.discovered_anonymous_super_forwards
+                        .get(&declaration)
+                        .map(Vec::as_slice)
+                        .unwrap_or_default(),
+                    self.resolved_primary_ctor_delegations.get(&declaration),
+                );
                 let mut deferred_implicit_receivers = deferred_implicit_receivers;
                 deferred_implicit_receivers.sort_by_key(|(_, identity, _, extension)| {
-                    self.implicit_receiver_identity_uses.first_use_since(
-                        uses_before_body,
-                        *identity,
-                        extension.map(|(declaration, _)| declaration),
-                    )
+                    self.implicit_receiver_identity_uses
+                        .first_use_since_excluding(
+                            uses_before_body,
+                            *identity,
+                            extension.map(|(declaration, _)| declaration),
+                            &forwarded_uses,
+                        )
                 });
                 let mut selected_receiver_candidates = Vec::new();
-                for (candidate, receiver_identity, before, extension_use) in
+                for (candidate, receiver_identity, _before, extension_use) in
                     deferred_implicit_receivers
                 {
                     if self.keep_anonymous_receiver(
                         declaration,
                         &candidate,
                         receiver_identity,
-                        before,
-                        extension_use,
+                        anonymous_object_capture::ReceiverCaptureUses {
+                            mark: uses_before_body,
+                            extension: extension_use.map(|(declaration, _)| declaration),
+                            forwarded: &forwarded_uses,
+                        },
                         &finalized,
                     ) {
                         selected_receiver_candidates.push(candidate);
@@ -14648,6 +14664,11 @@ impl<'a> Checker<'a> {
                 if !provisional {
                     self.finalized_anonymous_captures.insert(declaration);
                 }
+                let original_captures = self
+                    .discovered_anonymous_captures
+                    .get(&declaration)
+                    .cloned()
+                    .unwrap_or_default();
                 let storage_field_remap = record_anonymous_construction_captures(
                     self.file,
                     call,
@@ -14661,6 +14682,7 @@ impl<'a> Checker<'a> {
                         constructor_arguments: capture_storage::ConstructorArgumentUses::Checked {
                             expressions: &self.expr_lowers,
                             types: &self.expr_types,
+                            delegations: &self.resolved_primary_ctor_delegations,
                         },
                     },
                     &mut self.discovered_anonymous_captures,
@@ -14671,10 +14693,14 @@ impl<'a> Checker<'a> {
                 // whole subtree here doubles the work at every nesting level (and is exponential
                 // for deeply nested anonymous objects); the structural owner edge identifies the
                 // only constructions whose storage owner is this declaration.
-                if !remap_direct_anonymous_class_storage_captures(
+                if !anonymous_capture_remap::remap_direct_anonymous_class_storage_captures(
                     declaration,
                     &self.anonymous_lexical_scope,
-                    &storage_field_remap,
+                    anonymous_capture_remap::CaptureFieldRemap {
+                        fields: &storage_field_remap,
+                        original: &original_captures,
+                        forwarded: &forwarded_uses,
+                    },
                     &mut self.discovered_anonymous_captures,
                 ) {
                     self.diags.error(
@@ -17174,17 +17200,8 @@ impl<'a> Checker<'a> {
                         args,
                         arg_tys,
                     );
-                    self.implicit_receiver_selections.insert(
-                        callee,
-                        ImplicitReceiverSelection {
-                            ty: implicit.ty,
-                            current: implicit.current,
-                            receiver_depth: implicit.receiver_depth,
-                            classifier: None,
-                            context_binding: None,
-                            singleton: self.implicit_singleton_value(implicit.ty, implicit.current),
-                        },
-                    );
+                    self.implicit_receiver_selections
+                        .insert(callee, self.implicit_receiver_selection(implicit));
                     self.mark_extension_receiver_used(call, implicit);
                     self.mark_context_extension_receiver_used(scope, call, &context_args);
                     let ret = signature.ret;
@@ -31076,6 +31093,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         eager_eliminated_members: HashMap::default(),
         implicit_receiver_selections: HashMap::default(),
         implicit_receiver_identities: HashMap::default(),
+        constructor_receiver_frames: Vec::new(),
         read_flow_roots: HashMap::default(),
         local_properties: Default::default(),
         local_initialization: Default::default(),
@@ -31358,36 +31376,6 @@ fn enclosing_receiver_labels(
 /// its provisional receiver prefix. The lexical-owner graph is the authoritative relationship:
 /// deeper descendants read storage from their immediate classifier, whose own finalization remaps
 /// them independently.
-fn remap_direct_anonymous_class_storage_captures(
-    owner: DeclId,
-    lexical_scope: &AnonymousLexicalClassScope,
-    storage_fields: &[Option<u32>],
-    captures: &mut HashMap<DeclId, Vec<AnonymousObjectCapture>>,
-) -> bool {
-    let direct_children = lexical_scope
-        .owners
-        .iter()
-        .filter_map(|(&declaration, &candidate_owner)| {
-            (candidate_owner == owner).then_some(declaration)
-        })
-        .collect::<Vec<_>>();
-    for declaration in direct_children {
-        let Some(child_captures) = captures.get_mut(&declaration) else {
-            continue;
-        };
-        for capture in child_captures {
-            let AnonymousObjectCaptureSource::ClassStorage { field } = &mut capture.source else {
-                continue;
-            };
-            let Some(Some(finalized_field)) = storage_fields.get(*field as usize) else {
-                return false;
-            };
-            *field = *finalized_field;
-        }
-    }
-    true
-}
-
 fn install_anonymous_object_captures(
     syms: &mut SymbolTable,
     file_index: u32,
@@ -33132,6 +33120,7 @@ impl ImplicitReceiverSelection {
             classifier: None,
             context_binding: None,
             singleton: None,
+            construction_sites: Vec::new(),
         }
     }
 }
@@ -33158,6 +33147,8 @@ pub struct ImplicitReceiverSelection {
     /// Exact singleton declaration when the selected receiver is a lexical object rather than a
     /// scoped `this` value. `None` means lowering must materialize the selected scoped receiver.
     pub singleton: Option<SingletonValue>,
+    /// Role-authenticated frame changes, consumed only for construction-site forwards.
+    pub(crate) construction_sites: Vec<constructor_receiver_frames::ConstructorReceiverProjection>,
 }
 
 /// The lexical binding a named context receiver is also visible as.
@@ -33657,6 +33648,7 @@ struct Checker<'a> {
     /// Receiver-tower coordinate of each implicit receiver selected above; checker-only, it keys
     /// the smart-cast paths of member reads through that receiver.
     implicit_receiver_identities: HashMap<ExprId, (usize, usize)>,
+    constructor_receiver_frames: Vec<constructor_receiver_frames::ConstructorReceiverFrame>,
     /// The flow root each checked lexical-value or `this` read resolved to.
     read_flow_roots: HashMap<ExprId, scope::PathRoot>,
     local_properties: local_properties::LocalProperties,
@@ -36786,7 +36778,7 @@ impl<'a> Checker<'a> {
             let expected_result_bindings = expected.and_then(|expected| {
                 crate::symbol_resolver::infer_generic_return_bindings_from_symbols(
                     &source,
-                    &result_signature,
+                    &nested_producer_bindings::solved_bound_signature(&result_signature, &bindings),
                     expected,
                     |actual, bound| self.receiver_is_assignable(actual, bound),
                 )
@@ -38679,6 +38671,11 @@ impl<'a> Checker<'a> {
                 .flatten(),
             context_binding: None,
             singleton: self.implicit_singleton_value(receiver.ty, receiver.current),
+            construction_sites: self
+                .constructor_receiver_frames
+                .iter()
+                .filter_map(|frame| frame.selected(receiver))
+                .collect(),
         }
     }
 
@@ -38692,6 +38689,7 @@ impl<'a> Checker<'a> {
         &mut self,
         scope: &CheckerScope<'_>,
         selected: &ImplicitReceiverSelection,
+        declaration: DeclId,
     ) {
         if selected.singleton.is_some() {
             return;
@@ -38703,8 +38701,10 @@ impl<'a> Checker<'a> {
         else {
             return;
         };
-        self.implicit_receiver_identity_uses
-            .record(receiver.identity);
+        self.implicit_receiver_identity_uses.record(
+            receiver.identity,
+            receiver_uses::ReceiverUseSite::Declaration(declaration),
+        );
     }
 
     fn implicit_receiver_identity_use_count(&self, identity: (usize, usize)) -> usize {
@@ -42434,7 +42434,7 @@ impl<'a> Checker<'a> {
             }
         };
         if let Some(receiver) = &selected.outer_receiver {
-            self.mark_selected_implicit_receiver_used(scope, receiver);
+            self.mark_selected_implicit_receiver_used(scope, receiver, class);
         }
         if !selected.omitted.is_empty() && selected.default_masks.is_empty() {
             self.diags.error(
@@ -52281,7 +52281,7 @@ impl<'a> Checker<'a> {
                                 Some(name),
                             )
                         } else {
-                            self.check_lambda_with_types(scope, x, pt)
+                            self.check_lambda_with_types_labeled(scope, x, pt, Some(name))
                         }
                     }
                     _ => {
