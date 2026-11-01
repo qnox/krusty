@@ -26,6 +26,21 @@ pub(crate) enum ReceiverDeclarationRole {
     EnclosingClass(TypeName),
 }
 
+impl ReceiverDeclarationRole {
+    /// A declared or lambda context parameter, as opposed to an extension, lambda or dispatch
+    /// receiver.
+    pub(crate) const fn is_context_parameter(self) -> bool {
+        matches!(
+            self,
+            Self::ContextParameter(_)
+                | Self::Lambda {
+                    slot: LambdaReceiverSlot::Context(_),
+                    ..
+                }
+        )
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum LambdaReceiverSlot {
     Extension,

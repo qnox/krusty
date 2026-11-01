@@ -614,6 +614,8 @@ mod constructor_signature_e2e;
 mod consumer_materialized_result_e2e;
 #[path = "context_and_loop_wording_e2e.rs"]
 mod context_and_loop_wording_e2e;
+#[path = "context_argument_line_marks_e2e.rs"]
+mod context_argument_line_marks_e2e;
 #[path = "context_function_type_e2e.rs"]
 mod context_function_type_e2e;
 #[path = "context_local_fun_e2e.rs"]

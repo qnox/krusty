@@ -33098,39 +33098,6 @@ fn receiver_label_identity(index: usize) -> (usize, usize) {
     (usize::MAX, index)
 }
 
-impl ImplicitReceiver {
-    /// The single-entry receiver tower a DECLARATION has during signature evaluation. There is no
-    /// lexical scope to take an identity from: the declaration's own dispatch receiver is the whole
-    /// tower, so it is the current receiver at depth 0.
-    fn signature_receiver(ty: Ty) -> Self {
-        ImplicitReceiver {
-            receiver_role: None,
-            ty,
-            declared_ty: ty,
-            identity: (0, 0),
-            extension_receiver: None,
-            class_receiver: true,
-            current: true,
-            receiver_depth: 0,
-        }
-    }
-}
-
-impl ImplicitReceiverSelection {
-    /// Matching selection for a signature-evaluation receiver tower.
-    fn signature_receiver(ty: Ty) -> Self {
-        ImplicitReceiverSelection {
-            ty,
-            current: true,
-            receiver_depth: 0,
-            classifier: None,
-            context_binding: None,
-            singleton: None,
-            construction_sites: Vec::new(),
-        }
-    }
-}
-
 /// Runtime identity of the implicit receiver selected by semantic resolution.
 ///
 /// `ty` is the receiver type used to select the member. `current` is deliberately separate: a
@@ -33153,6 +33120,10 @@ pub struct ImplicitReceiverSelection {
     /// Exact singleton declaration when the selected receiver is a lexical object rather than a
     /// scoped `this` value. `None` means lowering must materialize the selected scoped receiver.
     pub singleton: Option<SingletonValue>,
+    /// The selected rung is a context parameter rather than a dispatch, extension or lambda
+    /// receiver. kotlinc reads a context parameter passed as an implicit context argument with no
+    /// source offsets, while it reads a receiver at the call's own.
+    pub context_parameter: bool,
     /// Role-authenticated frame changes, consumed only for construction-site forwards.
     pub(crate) construction_sites: Vec<constructor_receiver_frames::ConstructorReceiverProjection>,
 }
@@ -38686,6 +38657,9 @@ impl<'a> Checker<'a> {
                 .flatten(),
             context_binding: None,
             singleton: self.implicit_singleton_value(receiver.ty, receiver.current),
+            context_parameter: receiver
+                .receiver_role
+                .is_some_and(ReceiverDeclarationRole::is_context_parameter),
             construction_sites: self
                 .constructor_receiver_frames
                 .iter()
