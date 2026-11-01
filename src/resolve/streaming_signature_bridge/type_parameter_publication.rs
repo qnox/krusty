@@ -679,10 +679,8 @@ mod tests {
         let [readable, _, self_parameter] = arguments.as_slice() else {
             panic!("Interpreter bound must retain its three exact arguments: {arguments:?}");
         };
-        let (
-            TyKind::StarProjection(readable),
-            TyKind::TyParam(self_name, _) | TyKind::Var(self_name, _),
-        ) = (readable.kind(), self_parameter.kind())
+        let (TyKind::StarProjection(readable), TyKind::TyParam(self_name, _)) =
+            (readable.kind(), self_parameter.kind())
         else {
             panic!("Interpreter bound must retain its three exact arguments: {arguments:?}");
         };

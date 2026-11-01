@@ -1156,7 +1156,16 @@ impl Ty {
         self.mentions_marker(&|ty| ty == Ty::Error)
     }
 
-    /// The containment walk both markers share: the type itself, a nullability/projection wrapper's
+    /// Whether a call's inference variable occurs anywhere inside this type.
+    ///
+    /// A variable belongs to the solver of the call that introduced it, so it is a third way a type
+    /// can still be undetermined. Publication boundaries reject it rather than reading it as its
+    /// bound: the bound is a constraint on the eventual answer, not the answer.
+    pub fn mentions_type_variable(self) -> bool {
+        self.mentions_marker(&|ty| matches!(ty.kind(), TyKind::Var(..)))
+    }
+
+    /// The containment walk all three questions share: the type itself, a nullability/projection wrapper's
     /// inner type, a reference type's arguments, and a function type's parameters and return.
     fn mentions_marker(self, marker: &dyn Fn(Ty) -> bool) -> bool {
         if marker(self) {

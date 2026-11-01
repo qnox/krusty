@@ -21179,14 +21179,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   call's inference variable for constraint solving and the solution is mapped back
   (`CallSiteVariables`). That variable is its own type kind (`TyKind::Var`), not a renamed type
   parameter: it carries the formal's instantiated bound, the checker treats it as it treats a
-  type parameter until every call solves only its variables, and lowering and the backends never
-  receive one (the JVM descriptor, `@Metadata` encoder and Native mangler reject it as an
-  undetermined type). The call's result template carries the same fresh variable, so a result
+  type parameter until every call solves only its variables, and nothing outside that call's
+  solver receives one: a published declaration type (`ResolvedTy`) and common IR's determined-type
+  validation reject a variable at any depth, whatever its bound, exactly as they reject a pending
+  or error type, rather than approximating it by its bound (the JVM descriptor, `@Metadata`
+  encoder and Native mangler also reject it as an undetermined type). The call's result template carries the same fresh variable, so a result
   mentioning the enclosing `T` is complete rather than an open producer for an outer call to
   solve, and the uninferred-parameter diagnostic accepts `V` resolved to the lexical `V`. A
   formal not in scope keeps its identity, where `T` against `T` still marks a postponed
   expression and contributes nothing. Tests: `tests/self_call_type_variables_e2e.rs`,
-  `symbol_resolver::generic_inference::call_site_variables::tests`.
+  `symbol_resolver::generic_inference::call_site_variables::tests`,
+  `fir::signature::resolved_types::tests`, `ir::semantic_validation::tests`.
 
 - **A postponed solution that depends on another call's open result remains uninferred.** If a
   selected generic call's lambda result relates its `R` to the still-open `T` of a terminal generic

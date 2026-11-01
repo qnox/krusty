@@ -22777,7 +22777,7 @@ fun rejected(owner: Owner) { owner.hidden() }
         let [semantic] = info.resolved_declaration_type_parameters(declaration_start) else {
             panic!("one declaration-owned type-parameter identity expected");
         };
-        let Some(TyKind::TyParam(actual, _) | TyKind::Var(actual, _)) =
+        let Some(TyKind::TyParam(actual, _)) =
             info.expr_lowers.get(&literal).and_then(|lowering| {
                 let ExprLowering::ClassLiteral { unbound } = lowering else {
                     return None;
@@ -22832,8 +22832,7 @@ fun rejected(owner: Owner) { owner.hidden() }
         let [semantic] = info.resolved_declaration_type_parameters(declaration_start) else {
             panic!("one declaration-owned type-parameter identity expected");
         };
-        let (TyKind::TyParam(actual, _) | TyKind::Var(actual, _)) = info.semantic_ty(call).kind()
-        else {
+        let TyKind::TyParam(actual, _) = info.semantic_ty(call).kind() else {
             panic!(
                 "member result must stay a type parameter, got {:?}",
                 info.semantic_ty(call)
