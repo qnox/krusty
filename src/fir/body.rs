@@ -1771,6 +1771,16 @@ pub struct FirStatement {
     pub kind: FirStatementKind,
 }
 
+/// Why a `FirExprKind::Constant` that source did not write as a literal holds a value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FirConstantSource {
+    /// The selected value of a `const val` or a Java constant field.
+    DeclarationRead,
+    /// A call the checker evaluated over a constant receiver (`trimIndent`, `trimMargin`); kotlinc
+    /// folds it only after its frontend, so it is not a constant expression to the frontend.
+    FoldedCall,
+}
+
 /// One checked body unit. Its arenas are body-local and are moved as a single value into lowering;
 /// parser ids and unresolved types cannot be represented here.
 #[derive(Clone, Debug, PartialEq)]
@@ -1812,10 +1822,9 @@ pub struct FirBody {
     /// Naming provenance of each expression the reference compiler realizes as a class of its own
     /// (a callable reference). A naming fact, not a lowering decision.
     generated_class_provenance: HashMap<FirExprId, FirGeneratedClassProvenance>,
-    /// Constants that are the selected value of a `const val` or a Java constant field, as opposed
-    /// to a literal. Both are `FirExprKind::Constant`; metadata's constant-initializer rule
-    /// tells them apart.
-    constant_reads: HashSet<FirExprId>,
+    /// Constants that are not a literal as source wrote it. Every one is `FirExprKind::Constant`;
+    /// metadata's constant-initializer rule tells them apart.
+    constant_sources: HashMap<FirExprId, FirConstantSource>,
     /// Local-storage blocks originating from postfix `++`/`--`, whose checked shape snapshots the
     /// old value.
     postfix_updates: HashSet<FirExprId>,
@@ -1896,7 +1905,7 @@ impl FirBody {
             destructuring_loop_containers: HashSet::default(),
             debug_lines: Default::default(),
             generated_class_provenance: HashMap::default(),
-            constant_reads: HashSet::default(),
+            constant_sources: HashMap::default(),
             postfix_updates: HashSet::default(),
             inlined_call_conversions: HashSet::default(),
             lifting_site: None,
@@ -2571,13 +2580,22 @@ impl FirBody {
         id
     }
 
-    pub(crate) fn record_constant_read(&mut self, expression: FirExprId) {
-        self.constant_reads.insert(expression);
+    pub(crate) fn record_constant_source(
+        &mut self,
+        expression: FirExprId,
+        source: FirConstantSource,
+    ) {
+        self.constant_sources.insert(expression, source);
+    }
+
+    /// Where a constant that source did not write as a literal came from; `None` for a literal.
+    pub fn constant_source(&self, expression: FirExprId) -> Option<FirConstantSource> {
+        self.constant_sources.get(&expression).copied()
     }
 
     /// Whether this constant is a read of a constant declaration rather than a literal.
     pub fn is_constant_read(&self, expression: FirExprId) -> bool {
-        self.constant_reads.contains(&expression)
+        self.constant_source(expression) == Some(FirConstantSource::DeclarationRead)
     }
 
     pub(crate) fn record_postfix_update(&mut self, block: FirExprId) {
