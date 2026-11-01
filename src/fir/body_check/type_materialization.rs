@@ -244,27 +244,45 @@ impl BodyFirChecker<'_> {
         } else {
             self.expression_type(source)?
         };
-        let constant = matches!(kind, FirExprKind::Constant(_));
+        let form = self.source_form(source, &kind);
         let expression = self.body.add_expr(FirExpr { origin, ty, kind });
         self.record_generated_class_provenance(source, expression);
-        if let Some(constant_source) = constant.then(|| self.constant_source(source)).flatten() {
-            self.body
-                .record_constant_source(expression, constant_source);
+        if let Some(form) = form {
+            self.body.record_source_form(expression, form);
         }
         Ok(expression)
     }
 
-    /// Why `source`, which checked to a constant, is not a literal as source wrote it.
-    fn constant_source(&self, source: ExprId) -> Option<crate::fir::FirConstantSource> {
-        if matches!(
+    /// The source form of `source` that checking it to `kind` does not show: a constant that is
+    /// not a literal as source wrote it, or an operation written as an explicit call.
+    fn source_form(&self, source: ExprId, kind: &FirExprKind) -> Option<crate::fir::FirSourceForm> {
+        let call = matches!(
             self.file.expr(source),
             crate::ast::Expr::Call { .. } | crate::ast::Expr::SafeCall { .. }
-        ) {
-            Some(crate::fir::FirConstantSource::FoldedCall)
-        } else if self.info.resolved_constants.contains_key(&source) {
-            Some(crate::fir::FirConstantSource::DeclarationRead)
-        } else {
-            None
+        );
+        match kind {
+            FirExprKind::Constant(_) if call => Some(crate::fir::FirSourceForm::FoldedCall),
+            FirExprKind::Constant(_) => self
+                .info
+                .resolved_constants
+                .contains_key(&source)
+                .then_some(crate::fir::FirSourceForm::DeclarationRead),
+            // Only an operation with an operator form needs telling apart: a unary operator or a
+            // compiler-owned operation such as `String.plus`.
+            FirExprKind::Unary { .. } if call => Some(crate::fir::FirSourceForm::ExplicitCall),
+            FirExprKind::Call(checked)
+                if call && matches!(checked.target, FirCallTarget::Intrinsic { .. }) =>
+            {
+                Some(crate::fir::FirSourceForm::ExplicitCall)
+            }
+            FirExprKind::ImplicitConversion { conversion, .. }
+                if !call
+                    && matches!(conversion.kind, FirConversionKind::NumericConversion { .. })
+                    && matches!(self.file.expr(source), crate::ast::Expr::Member { .. }) =>
+            {
+                Some(crate::fir::FirSourceForm::PropertyRead)
+            }
+            _ => None,
         }
     }
 
@@ -277,12 +295,11 @@ impl BodyFirChecker<'_> {
         self.record_expression_suspension(source);
         self.finalize_inline_plan(source, &mut kind)?;
         let origin = self.expression_origin(source)?;
-        let constant = matches!(kind, FirExprKind::Constant(_));
+        let form = self.source_form(source, &kind);
         let expression = self.body.add_expr(FirExpr { origin, ty, kind });
         self.record_generated_class_provenance(source, expression);
-        if let Some(constant_source) = constant.then(|| self.constant_source(source)).flatten() {
-            self.body
-                .record_constant_source(expression, constant_source);
+        if let Some(form) = form {
+            self.body.record_source_form(expression, form);
         }
         Ok(expression)
     }
