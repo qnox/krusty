@@ -41,7 +41,9 @@ fn finish_bridge(
     } = header;
     let name = bridge.name.as_str();
     if let Some(entry) = entry {
-        finish_code_sig::<0x0001>(cw, name, desc, code, locals, entry.signature.as_deref());
+        code.ensure_locals(locals);
+        code.link();
+        cw.add_method_sig(entry.access, name, desc, code, entry.signature.as_deref());
         cw.set_method_parameters(name, desc, &entry.reflected);
     } else if packs_arguments {
         finish_code::<{ 0x0001 | 0x0010 | 0x0040 | 0x1000 }>(cw, name, desc, code, locals);
@@ -731,6 +733,8 @@ fn attach_bridge_debug_tables(
 /// nullability annotations and, under `-java-parameters`, `MethodParameters`, less the carrier the
 /// member receives first.
 struct EntryHeader {
+    /// `ACC_PUBLIC`, with the member's `ACC_VARARGS`: the entry keeps its trailing vararg.
+    access: u16,
     signature: Option<String>,
     result: Option<&'static str>,
     parameters: Vec<Option<&'static str>>,
@@ -747,26 +751,22 @@ impl EntryHeader {
         java_parameters: bool,
     ) -> Self {
         let function = &ir.functions[member as usize];
-        let signature = ir.signatures.get(&member).and_then(|generic| {
-            let mut generic =
-                super::value_class_signatures::physical_generic_signature(ir, member, generic)
-                    .into_owned();
+        // The entry stands for the lowered member less its leading carrier: its signature is the
+        // member's whole-frame shape (a vararg at its position in that frame) without the
+        // carrier's element.
+        let signature = super::method_signatures::method_signature_parts(
+            formatter, ir, member, function,
+        )
+        .map(|mut parts| {
             assert_eq!(
-                generic.params.len(),
-                function.params.len(),
-                "a lowered value-class member signs its carrier"
+                parts.parameters.len(),
+                entry.erased_params.len() + 1,
+                "a lowered value-class member signs its carrier ahead of the entry's parameters"
             );
-            generic.params.remove(0);
-            // The carrier occupied signed slot 0, so a later vararg keeps declaration-site
-            // variance at its shifted index.
-            let vararg_index = ir
-                .fn_varargs
-                .get(&member)
-                .and_then(|vararg| vararg.index.checked_sub(1));
-            formatter
-                .method_signature(&generic, function, vararg_index)
-                .filter(|signature| signature != descriptor)
-        });
+            parts.parameters.remove(0);
+            parts.render()
+        })
+        .filter(|signature| signature != descriptor);
         let nullability = super::declared_nullability::declared_nullability(ir, member);
         let reflected = if java_parameters {
             crate::jvm::method_parameters::value_class_interface_entry(
@@ -780,6 +780,8 @@ impl EntryHeader {
             Vec::new()
         };
         Self {
+            access: crate::jvm::classfile::ACC_PUBLIC
+                | super::method_access::varargs_access(ir, member),
             signature,
             result: nullability.result,
             parameters: nullability.parameters.get(1..).unwrap_or_default().to_vec(),

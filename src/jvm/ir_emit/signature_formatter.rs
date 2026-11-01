@@ -74,6 +74,29 @@ impl Wildcards {
     }
 }
 
+/// A method's generic `Signature` in its grammar's parts: the type-parameter declaration section,
+/// each parameter's element and the result's, as the formatter wrote them. A realization whose frame
+/// leads with a parameter the declaration does not have (a value class's carrier) adds or drops that
+/// element here, never by searching the rendered text.
+pub(super) struct MethodSignatureParts {
+    pub(super) type_parameters: String,
+    pub(super) parameters: Vec<String>,
+    pub(super) result: String,
+}
+
+impl MethodSignatureParts {
+    pub(super) fn render(&self) -> String {
+        let mut signature = self.type_parameters.clone();
+        signature.push('(');
+        self.parameters
+            .iter()
+            .for_each(|parameter| signature.push_str(parameter));
+        signature.push(')');
+        signature.push_str(&self.result);
+        signature
+    }
+}
+
 /// Format backend-agnostic semantic types into JVM generic-signature elements. The ordinary JVM
 /// descriptor and the optional generic `Signature` attribute are separate classfile declarations: the
 /// former supplies runtime calling types, while this formatter preserves type parameters, type
@@ -93,30 +116,22 @@ struct ClassifierSignatureSegment {
 }
 
 impl<'a> JvmSignatureFormatter<'a> {
-    pub(super) fn method_signature(
+    /// A generic member's signature: its type parameters, then its parameters and result.
+    pub(super) fn method_signature_parts(
         &self,
         generic: &crate::ir::IrGenericSig,
         function: &crate::ir::IrFunction,
         vararg_index: Option<usize>,
-    ) -> Option<String> {
-        let mut signature = super::jvm_type_params(self, generic)?;
-        signature.push('(');
-        for (index, parameter) in generic.params.iter().enumerate() {
-            // A vararg element is a value parameter. `Array<In<E>>` suppresses the element's
-            // declaration-site wildcard; `vararg x: In<E>` keeps `In<? super E>`.
-            let rendered = if vararg_index == Some(index) {
-                self.vararg_element_ty(parameter, Wildcards::Declared)?
-            } else {
-                self.parameter_ty(parameter)?
-            };
-            signature.push_str(&rendered);
-        }
-        signature.push(')');
-        signature.push_str(&self.method_ty(
-            generic.ret.as_ref().unwrap_or(&function.ret),
-            Wildcards::Suppressed,
-        )?);
-        Some(signature)
+    ) -> Option<MethodSignatureParts> {
+        let type_parameters = super::jvm_type_params(self, generic)?;
+        Some(MethodSignatureParts {
+            type_parameters,
+            ..self.method_positions_parts(
+                &generic.params,
+                generic.ret.as_ref().unwrap_or(&function.ret),
+                vararg_index,
+            )?
+        })
     }
 
     /// `(params)result` in a method's parameter and return modes, declaring no type parameter.
@@ -133,18 +148,43 @@ impl<'a> JvmSignatureFormatter<'a> {
         ret: &Ty,
         vararg_index: Option<usize>,
     ) -> Option<String> {
-        let mut signature = String::from("(");
-        for (index, parameter) in params.iter().enumerate() {
-            let rendered = if vararg_index == Some(index) {
-                self.vararg_element_ty(parameter, Wildcards::Declared)?
-            } else {
-                self.parameter_ty(parameter)?
-            };
-            signature.push_str(&rendered);
-        }
-        signature.push(')');
-        signature.push_str(&self.method_ty(ret, Wildcards::Suppressed)?);
-        Some(signature)
+        self.method_positions_parts(params, ret, vararg_index)
+            .map(|parts| parts.render())
+    }
+
+    /// [`Self::method_positions_with_vararg`] in its grammar's parts. A vararg element is a value
+    /// parameter: `Array<In<E>>` suppresses the element's declaration-site wildcard, while
+    /// `vararg x: In<E>` keeps `In<? super E>`.
+    pub(super) fn method_positions_parts(
+        &self,
+        params: &[Ty],
+        ret: &Ty,
+        vararg_index: Option<usize>,
+    ) -> Option<MethodSignatureParts> {
+        Some(MethodSignatureParts {
+            type_parameters: String::new(),
+            parameters: self.parameter_parts(params, vararg_index)?,
+            result: self.method_ty(ret, Wildcards::Suppressed)?,
+        })
+    }
+
+    /// Each parameter's signature element, the vararg one (if any) as a vararg element.
+    pub(super) fn parameter_parts(
+        &self,
+        params: &[Ty],
+        vararg_index: Option<usize>,
+    ) -> Option<Vec<String>> {
+        params
+            .iter()
+            .enumerate()
+            .map(|(index, parameter)| {
+                if vararg_index == Some(index) {
+                    self.vararg_element_ty(parameter, Wildcards::Declared)
+                } else {
+                    self.parameter_ty(parameter)
+                }
+            })
+            .collect()
     }
 
     /// [`Self::method_positions`] with every declaration-site variance of the parameters written,

@@ -6,6 +6,11 @@
 //! ordinal counts the declared context parameters ahead of it, and a value class's secondary
 //! constructor keeps its vararg on the static `constructor-impl` that realizes it, both in the
 //! `Signature` and as `ACC_VARARGS`.
+//!
+//! A value class's interface entry stands for its lowered member without the leading carrier: it
+//! signs the member's shape less the carrier's element, a vararg first or after another parameter
+//! included, and keeps `ACC_VARARGS`. A member with only a parameterized concrete position signs its
+//! entry too.
 
 use super::common;
 
@@ -77,4 +82,41 @@ fn a_vararg_parameter_keeps_its_element_wildcards() {
         .expect("reference kotlinc is provisioned")
         .unwrap_or_else(|diff| panic!("{class} differs from kotlinc: {diff}"));
     }
+}
+
+const INTERFACE_ENTRIES: &str = "\
+interface Joiner<T> {\n\
+    fun join(vararg parts: List<T>): String\n\
+    fun tail(first: Int, vararg rest: List<T>): String\n\
+    fun one(x: List<T>): String\n\
+    fun named(x: List<String>): String\n\
+}\n\
+\n\
+@JvmInline\n\
+value class Glue<T>(val sep: String) : Joiner<T> {\n\
+    override fun join(vararg parts: List<T>): String = parts.joinToString(sep)\n\
+    override fun tail(first: Int, vararg rest: List<T>): String = \"$first\" + rest.joinToString(sep)\n\
+    override fun one(x: List<T>): String = x.toString()\n\
+    override fun named(x: List<String>): String = x.joinToString(sep)\n\
+}\n\
+\n\
+fun box(): String {\n\
+    val joiner: Joiner<String> = Glue(\",\")\n\
+    val joined = joiner.join(listOf(\"a\"), listOf(\"b\")) + joiner.tail(1, listOf(\"c\"))\n\
+    val single = joiner.one(listOf(\"d\")) + joiner.named(listOf(\"e\", \"f\"))\n\
+    return if (joined == \"[a],[b]1[c]\" && single == \"[d]e,f\") \"OK\" else joined + single\n\
+}\n\
+";
+
+#[test]
+fn a_value_class_interface_entry_signs_its_member_without_the_carrier() {
+    common::byte_diff_against_kotlinc_cp(
+        "ValueClassInterfaceEntrySignature",
+        INTERFACE_ENTRIES,
+        "Glue",
+        &[common::stdlib_jar()],
+    )
+    .expect("reference kotlinc is provisioned")
+    .unwrap_or_else(|diff| panic!("Glue differs from kotlinc: {diff}"));
+    common::expect_box_ok_with_stdlib(INTERFACE_ENTRIES, "ValueClassInterfaceEntrySignature");
 }
