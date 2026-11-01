@@ -4084,7 +4084,7 @@ pub(crate) fn finalized_streamed_signature_index(
                 backing_field_declarations.push(stub.id);
             }
         } else {
-            let Ok(signature) = crate::fir::ResolvedSignature::new(parameters, result) else {
+            let Ok(mut signature) = crate::fir::ResolvedSignature::new(parameters, result) else {
                 crate::trace_compiler!(
                     "fir",
                     "signature finalization declined {:?}: explicit signature is unpublishable",
@@ -4093,6 +4093,9 @@ pub(crate) fn finalized_streamed_signature_index(
                 failed.push(stub.id);
                 continue;
             };
+            signature.declared_result_alias = result_type
+                .and_then(|syntax| explicit_type_semantics.selected_types.spelling(syntax))
+                .and_then(|spelling| spelling.alias);
             inferred_parameters.insert(stub.id, signature.parameters.clone());
             explicit.push((stub.id, signature));
         }

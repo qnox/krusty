@@ -18,6 +18,9 @@ pub struct MetaProp {
     /// Whether the Kotlin property return is nullable (`T?`). JVM getter descriptors/signatures erase
     /// this flag, so generic extension-property specialization must restore it from metadata.
     pub ret_nullable: bool,
+    /// The typealias the declared type was spelled through (`val names: Names`); see
+    /// [`super::result_alias::result_alias`].
+    pub ret_alias: Option<TypeName>,
     /// Metadata-primary generic relation between an extension receiver and its return.
     pub generic_sig: Option<GenericSig>,
     /// Context parameters declared by this property. Legacy unnamed context receivers use an empty
@@ -300,6 +303,12 @@ pub(super) fn decode_properties(
             },
         );
         let is_var = setter_signature.is_some() || flags & is_var_bit != 0;
+        let ret_alias = super::result_alias::result_alias(
+            ret_body.map(|body| (body, false)),
+            type_table,
+            records,
+            d2,
+        );
         let generic_sig = build_property_generic_sig(
             ParsedPropertySignature {
                 inherited: class_tparams,
@@ -447,6 +456,7 @@ pub(super) fn decode_properties(
             name,
             ret_class: ret,
             ret_nullable,
+            ret_alias,
             generic_sig,
             context_params: decoded_context_params,
             context_parameter_kinds,

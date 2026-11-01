@@ -1159,8 +1159,10 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         )
             -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
     ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
-        self.select_value_candidate(scope, spelling, origin, expected, demand)
-            .map(|selected| selected.result)
+        let selected = self.select_value_candidate(scope, spelling, origin, expected, demand)?;
+        self.selected_calls
+            .record_read_alias(origin, selected.result_alias, selected.result.get());
+        Ok(selected.result)
     }
 
     fn select_call(
@@ -2090,7 +2092,12 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                             &resolved_type_arguments,
                             expected.map(crate::fir::ResolvedTy::get),
                         )?;
-                        self.record_final_selected_publication(origin, publication, result);
+                        self.record_source_selected_publication(
+                            origin,
+                            publication,
+                            &signature,
+                            result,
+                        );
                         return Ok(result);
                     }
                 }

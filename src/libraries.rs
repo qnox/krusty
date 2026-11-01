@@ -323,6 +323,8 @@ pub struct LibraryMember {
     /// value-class pass reads this to decide the result's representation. `None` when the provider
     /// records no metadata return classifier.
     pub declared_ret: Option<Ty>,
+    /// See [`LibraryCallable::result_alias`].
+    pub result_alias: Option<crate::types::TypeName>,
     /// See [`LibraryCallable::overridden_results`].
     pub overridden_results: Box<[Ty]>,
     /// See [`LibraryCallable::enhanced_result`].
@@ -768,6 +770,7 @@ impl LibraryMember {
             default_realization: None,
             nonvirtual_realization: None,
             declared_ret: None,
+            result_alias: None,
             overridden_results: Box::new([]),
             enhanced_result: EnhancedResult::NONE,
             implicit_classifier_callable: None,
@@ -1067,6 +1070,10 @@ pub struct LibraryCallable {
     /// a BOX out of the generic slot `E` and `create` the erased carrier. Only non-null declared
     /// returns are recorded; a nullable value class really is boxed.
     pub declared_ret: Option<Ty>,
+    /// The typealias the declared return type was spelled through (`fun f(): Names`). kotlinc
+    /// keeps that abbreviation on the type a call produces, so a declaration whose result is
+    /// inferred from the call records the alias in its own metadata.
+    pub result_alias: Option<crate::types::TypeName>,
     /// The declared results of the declarations this suspend callable overrides, as the core member
     /// hierarchy found them, nearest first; empty for a non-suspend one. A backend decides from them
     /// how the callable's own result crosses its continuation boundary.
@@ -1720,6 +1727,7 @@ impl FunctionInfo {
         // declarations say the former hands back an unboxed carrier. Without them every consumer,
         // the operator-invoke path included, would unbox a real carrier as though it were a box.
         member.declared_ret = self.callable.declared_ret;
+        member.result_alias = self.callable.result_alias;
         member.overridden_results = self.callable.overridden_results.clone();
         member.enhanced_result = self.callable.enhanced_result.clone();
         member.signature = self.callable.signature.clone();

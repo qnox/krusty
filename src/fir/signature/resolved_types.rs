@@ -51,6 +51,9 @@ pub struct ResolvedSignature {
     /// abbreviated as `kotlin.text.StringBuilder`). It never takes part in type identity: only
     /// `@Metadata` reads it, as the declaration's `abbreviatedType`.
     pub result_abbreviation: Option<ResolvedTypeAbbreviation>,
+    /// The typealias an explicit result is written as (`fun names(): Names`). A call's result
+    /// carries it, so a declaration inferred from that call records the abbreviation as well.
+    pub declared_result_alias: Option<crate::types::TypeName>,
 }
 
 /// A typealias application that abbreviates a resolved type: the alias's qualified identity and
@@ -70,6 +73,16 @@ impl ResolvedSignature {
         self.inferred_body_result
     }
 
+    /// The typealias the result is spelled through at its root: the explicit result's alias, or
+    /// the abbreviation an inferred result was reached through.
+    pub(crate) fn result_alias(&self) -> Option<crate::types::TypeName> {
+        self.result_abbreviation
+            .as_ref()
+            .filter(|abbreviation| abbreviation.argument_path.is_empty())
+            .map(|abbreviation| abbreviation.alias)
+            .or(self.declared_result_alias)
+    }
+
     pub fn new(
         parameters: impl IntoIterator<Item = Ty>,
         result: Ty,
@@ -84,6 +97,7 @@ impl ResolvedSignature {
             result: ResolvedTy::new(result)?,
             inferred_body_result: None,
             result_abbreviation: None,
+            declared_result_alias: None,
         })
     }
 }

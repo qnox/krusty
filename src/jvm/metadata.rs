@@ -14,6 +14,7 @@ mod inline_class;
 mod property_declarations;
 mod property_identity;
 mod realization_facts;
+mod result_alias;
 mod serialization_program_order;
 pub use serialization_program_order::SerialElementName;
 mod since_kotlin;
@@ -1845,6 +1846,16 @@ fn decode_functions(
                     };
                     let receiver_ty = decode_type(pf.receiver_body.as_deref(), pf.receiver_type_id);
                     let ret_ty = decode_type(pf.return_body.as_deref(), pf.return_type_id);
+                    let ret_alias = result_alias::result_alias(
+                        metadata_type_ref(
+                            pf.return_body.as_deref(),
+                            pf.return_type_id,
+                            function_type_table,
+                        ),
+                        function_type_table,
+                        records,
+                        d2,
+                    );
                     let receiver_class = receiver_ty.and_then(declared_classifier);
                     let ret_class = ret_ty.and_then(declared_classifier);
                     let decode_parameter = |p: &ParsedValueParam| {
@@ -2080,6 +2091,7 @@ fn decode_functions(
                             ),
                         receiver_class,
                         ret_class,
+                        ret_alias,
                         value_params,
                         generic_sig,
                         contract,
