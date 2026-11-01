@@ -33,6 +33,12 @@ function project(name, extra = {}) {
       krusty: { wall_seconds: 7, cpu_seconds: 9, compile_seconds: 3, built_compile_seconds: 1, peak_rss_mb: { total: 600, kotlin_daemon: 0, krusty: 80 } },
     },
     measured: { date: "2026-11-01", commit: "b".repeat(40), run: "https://example.test/run/8" },
+    rows: [
+      { built: true, fallback: null, error: null },
+      { built: false, fallback: "krusty does not implement everything it requests (plugin)", error: null },
+      { built: false, fallback: null, error: "not run: a task it depends on failed" },
+      { built: false, fallback: null, error: "A.kt:1:1: error: unresolved reference 'x'." },
+    ],
     ...extra,
   };
 }
@@ -88,7 +94,7 @@ test("an unknown box artifact stops the build", () => {
 test("corpus projects carry their totals, cost and what was built", () => {
   const source = { url: "https://example.test/p", commit: "c".repeat(40), patch: "scripts/oss-corpus/patches/p.patch", kotlin_pin: "gradle.properties:kotlin" };
   const dir = inputs({
-    "corpus/results.json": { projects: [project("p", { source }), project("q", { reference_exit: 1, cost: {} })] },
+    "corpus/results.json": { projects: [project("p", { source }), project("q", { reference_exit: 1, cost: {}, rows: undefined })] },
   });
   try {
     const { corpus } = collectMetrics(dir);
@@ -106,6 +112,7 @@ test("corpus projects carry their totals, cost and what was built", () => {
       identical: 3,
       measured: project("p").measured,
       source,
+      notBuilt: { leftToKotlinc: 1, failed: 1, notRun: 1 },
       cost: {
         kotlinc: { builtCompileSeconds: 4, compileSeconds: 8, wallSeconds: 10, cpuSeconds: 20, compilerPeakRssMb: 500, buildPeakRssMb: 900 },
         krusty: { builtCompileSeconds: 1, compileSeconds: 3, wallSeconds: 7, cpuSeconds: 9, compilerPeakRssMb: 80, buildPeakRssMb: 600 },
@@ -113,6 +120,7 @@ test("corpus projects carry their totals, cost and what was built", () => {
     });
     assert.equal(q.referenceBuild, "failed (exit 1)");
     assert.equal(q.source, null);
+    assert.equal(q.notBuilt, null);
     assert.deepEqual(q.cost, { kotlinc: null, krusty: null });
   } finally {
     rmSync(dir, { recursive: true });
