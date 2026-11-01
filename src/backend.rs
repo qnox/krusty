@@ -22,7 +22,7 @@ pub(crate) use dependency_call_shape::{
 pub(crate) use dependency_facts::referenced_dependencies;
 pub use dependency_facts::{
     BackendCallableFact, BackendCompilerIntrinsic, BackendPropertyFact, BackendSemanticCallRole,
-    CheckedBackendCallables, DependencyFactError, DependencyGetterSignature,
+    CheckedBackendCallables, DependencyClassifier, DependencyFactError, DependencyGetterSignature,
 };
 pub(crate) use dependency_metadata::KlibDependencyCallable;
 pub(crate) use dependency_metadata::{
@@ -139,6 +139,14 @@ pub trait Backend {
     /// A positive target implementation of a complete authenticated getter declaration. This
     /// never authorizes an ordinary class body or displaces a retained dependency export.
     fn realizes_dependency_getter(&self, _signature: DependencyGetterSignature<'_>) -> bool {
+        false
+    }
+
+    /// Whether the target, not the library's serialized class body, owns the representation of a
+    /// dependency classifier. A member of such a classifier is realized by the target at its
+    /// dispatch receiver, as a source call of it is; its KLIB body reads a class layout the target
+    /// object does not have and is never lowered.
+    fn represents_dependency_classifier(&self, _classifier: DependencyClassifier) -> bool {
         false
     }
 

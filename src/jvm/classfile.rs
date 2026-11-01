@@ -24,6 +24,7 @@ mod enclosing_method;
 mod exception_tables;
 mod field_annotations;
 mod inline_call_stacks;
+pub(crate) mod inline_scope_frames;
 mod inner_classes;
 mod kotlin_metadata;
 mod late_fields;
@@ -1915,6 +1916,9 @@ pub struct CodeBuilder {
     /// Semantic inline-frame placement parallel to `local_entries`. This never reaches the class
     /// file; it makes table order independent of which lexical scope happens to close first.
     local_entry_placements: Vec<local_variables::LocalEntryPlacement>,
+    /// The inline frames whose locals the table names by inline scope number; empty unless the
+    /// method numbers its scopes.
+    inline_scope_frames: Vec<inline_scope_frames::InlineScopeFrame>,
     /// Offset of the implicit void return appended by declared-function emission. Ordinary
     /// `ret_void` calls intentionally do not populate it.
     implicit_void_return_pc: Option<u16>,
@@ -1985,6 +1989,7 @@ impl CodeBuilder {
             retained_line_distinct: false,
             local_entries: Vec::new(),
             local_entry_placements: Vec::new(),
+            inline_scope_frames: Vec::new(),
             implicit_void_return_pc: None,
             suppress_entry_line: false,
             dead: false,
@@ -2662,6 +2667,7 @@ mod tests {
             access: ACC_PUBLIC | ACC_STATIC | ACC_FINAL,
         });
         writer.set_runtime_annotations(&[crate::ir::AppliedAnnotation {
+            written_order: None,
             internal: crate::types::type_name(nested),
             values: Vec::new(),
         }]);

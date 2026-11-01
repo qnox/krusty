@@ -26,15 +26,17 @@ impl Checker<'_> {
             while let Expr::SafeCall { receiver, .. } = self.file.expr(root) {
                 root = *receiver;
             }
+            // A non-null safe cast (`x as? T`, or a safe-call chain rooted at one) proves `x is T`.
+            if let Some(test) = self.safe_cast_type_test(root) {
+                self.type_test_narrowings(scope, test, out, declined);
+                return;
+            }
             if let Some(root_path) = self
                 .expr_access_path(root)
                 .filter(|path| path.segments.is_empty())
             {
                 self.null_proof_or_decline(scope, &root_path, out, declined, self.span(operand));
             }
-            // `x as? T` is non-null exactly when the cast succeeded, so a proof on the chain's
-            // root narrows `x` to `T`.
-            self.safe_cast_non_null_narrowing(scope, root, out, declined);
             return;
         };
         // A plain chain's proof covers only the full path; a safe-call chain's covers every prefix.
