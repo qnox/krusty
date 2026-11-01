@@ -26,6 +26,8 @@ pub struct MetadataCallFacts {
     /// arguments, so consumers do not repeat overload alignment merely to recover semantic
     /// classifiers erased by a JVM signature (`MutableList<MutableSet<T>>` → `List<Set<T>>`).
     pub declared_ret: Option<Ty>,
+    /// The typealias the declared return type was spelled through, from the same declaration.
+    pub ret_alias: Option<TypeName>,
     /// Full Kotlin source parameter types from the same descriptor-aligned metadata declaration.
     /// An extension receiver, when present, is the leading entry. These are resolution facts; the
     /// descriptor-derived JVM parameters remain a separate realization shape in the provider.
@@ -94,6 +96,7 @@ impl MetadataCallFacts {
             call_sig,
             ret: ReturnInfo::default(),
             declared_ret: None,
+            ret_alias: None,
             declared_params: None,
             generic_sig: None,
             suspend: false,
@@ -153,6 +156,7 @@ pub(super) fn for_callable(
         call_sig,
         ret: metadata_return_info(callable.ret_class, callable.ret_nullable()),
         declared_ret: metadata_declared_return(callable),
+        ret_alias: callable.ret_alias(),
         declared_params: metadata_declared_params(callable),
         generic_sig: callable.generic_sig.clone(),
         suspend: callable.is_suspend(),

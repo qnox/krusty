@@ -2189,6 +2189,7 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
             result: approximated.published,
             inferred_body_result: approximated.inferred_body_result,
             result_abbreviation,
+            declared_result_alias: None,
         })
     }
 
@@ -2219,6 +2220,10 @@ fn result_abbreviation<S: SignatureSemantics>(
         SigExpr::Call { target, .. } => {
             semantics.call_result_abbreviation(graph.callable_selection(target)?.origin)
         }
+        SigExpr::Value(selection) => {
+            semantics.call_result_abbreviation(graph.value_selection(selection)?.origin)
+        }
+        SigExpr::Member { origin, .. } => semantics.call_result_abbreviation(origin),
         SigExpr::ClassLiteral {
             classifier: Some(classifier),
             ..

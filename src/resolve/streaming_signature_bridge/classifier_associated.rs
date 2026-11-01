@@ -454,12 +454,15 @@ impl ProductionSignatureSemantics<'_> {
                 classifier: property.owner,
                 name: property.name.clone(),
             });
-        let result =
+        let selected =
             match self.demanded_source_signature(None, property.stable_declaration, demand)? {
-                Some(signature) => signature.result,
-                None => crate::fir::ResolvedTy::new(property.ty).map_err(|_| Self::failure())?,
+                Some(signature) => SelectedValue::declared(signature),
+                None => SelectedValue::property(&property)?,
             };
-        Ok(Some(SelectedValue { result, enum_entry }))
+        Ok(Some(SelectedValue {
+            enum_entry,
+            ..selected
+        }))
     }
 }
 
