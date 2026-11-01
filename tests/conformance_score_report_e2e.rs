@@ -586,15 +586,21 @@ fn preview_lanes_and_release_carry_all_target_reports_distinctly() {
 }
 
 #[test]
-fn readme_and_site_show_all_badges_with_distinct_endpoints() {
+fn readme_badges_and_site_figures_read_distinct_endpoints() {
     let root = repo_root();
     let gist = "gist.githubusercontent.com%2Fqnox%2Fdec8149bc4f43b203d6cc9adc14f2026%2Fraw%2F";
     let readme = fs::read_to_string(root.join("README.md")).expect("read README");
+    // The landing page shows the same three figures as stat tiles, read from the badge Gist's
+    // endpoint JSON (src/lib/figures.ts) rather than as shields.io images.
+    let figures =
+        fs::read_to_string(root.join("site/src/lib/figures.ts")).expect("read site figures");
     let site =
         fs::read_to_string(root.join("site/src/pages/index.astro")).expect("read landing page");
     assert!(
-        site.contains(gist),
-        "the site's badge helper uses the badge Gist"
+        figures.contains(
+            "\"https://gist.githubusercontent.com/qnox/dec8149bc4f43b203d6cc9adc14f2026/raw/\""
+        ),
+        "the site's figures read the badge Gist"
     );
     for (endpoint, alt) in [
         (
@@ -614,9 +620,10 @@ fn readme_and_site_show_all_badges_with_distinct_endpoints() {
             readme.contains(&format!("{gist}{endpoint}\" alt=\"{alt}\">")),
             "README shows the {endpoint} badge as {alt:?}"
         );
-        assert!(
-            site.contains(&format!("<img src={{badge(\"{endpoint}\")}} alt=\"{alt}\"")),
-            "the site shows the {endpoint} badge as {alt:?}"
+        assert_eq!(
+            site.matches(&format!("file: \"{endpoint}\",")).count(),
+            1,
+            "the site shows one tile read from {endpoint}"
         );
     }
 }
