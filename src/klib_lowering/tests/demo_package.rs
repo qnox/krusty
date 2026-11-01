@@ -45,6 +45,7 @@ pub(super) enum T {
     Throwable,
     Any,
     NullableAny,
+    NullableBoolean,
     NullableInt,
     NullableString,
     /// `Nothing?`, the type of `null`.
@@ -65,6 +66,7 @@ impl T {
             T::Throwable => "Throwable",
             T::Any => "Any",
             T::NullableAny => "Any",
+            T::NullableBoolean => "Boolean",
             T::NullableInt => "Int",
             T::NullableString => "String",
             T::NullableNothing => "Nothing",
@@ -74,7 +76,11 @@ impl T {
     pub(super) fn nullable(self) -> bool {
         matches!(
             self,
-            T::NullableAny | T::NullableInt | T::NullableString | T::NullableNothing
+            T::NullableAny
+                | T::NullableBoolean
+                | T::NullableInt
+                | T::NullableString
+                | T::NullableNothing
         )
     }
 
@@ -799,6 +805,18 @@ pub(super) fn source_body(source: &str, name: &str, arity: usize) -> String {
         "KlibBodyEquivalent",
         Box::new(crate::libraries::EmptySymbolSource),
     );
+    rendered_function(&ir, name, arity)
+}
+
+/// [`source_body`] for a source that calls a builtin member, such as `Boolean.not`, the library
+/// declares.
+pub(super) fn source_body_with_stdlib(source: &str, name: &str, arity: usize) -> String {
+    let ir =
+        crate::fir_lower::tests::lower_single_source_with_jvm_stdlib(source, "KlibBodyEquivalent");
+    rendered_function(&ir, name, arity)
+}
+
+fn rendered_function(ir: &crate::ir::IrFile, name: &str, arity: usize) -> String {
     let functions = ir
         .fn_source_names
         .iter()
@@ -810,7 +828,7 @@ pub(super) fn source_body(source: &str, name: &str, arity: usize) -> String {
     let [function] = functions.as_slice() else {
         panic!("expected one source `{name}`, found {}", functions.len());
     };
-    render(&ir, ir.functions[*function as usize].body.expect("a body"))
+    render(ir, ir.functions[*function as usize].body.expect("a body"))
 }
 
 pub(super) fn lowered_f(demo: &Demo) -> String {

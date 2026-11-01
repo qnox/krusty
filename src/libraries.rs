@@ -26,6 +26,7 @@ pub(crate) mod function_classifiers;
 mod generic_signature;
 mod inline_body;
 mod inline_kind;
+mod klib_body_accessor;
 mod klib_body_class;
 mod member_flags;
 mod member_records;
@@ -40,6 +41,7 @@ mod result_nullability;
 mod runtime_exception;
 mod scalar_instruction;
 mod singleton_dispatch;
+mod source_inputs;
 mod stdlib_klib_intrinsics;
 pub use annotation_application::{
     AnnotationApplication, AnnotationElementDefault, AnnotationParameterPolicy,
@@ -55,8 +57,10 @@ pub use call_realization::{
 pub(crate) use call_realization::{KlibBodyCallableShape, KlibBodyCompanionReceiver};
 pub use call_sig::required_arity;
 pub use callable_scope_rung::CallableScopeRung;
-pub use classifier_callables::BoundInnerConstructor;
-pub(crate) use classifier_callables::{constructor_generic_signature, ConstructorAlias};
+pub(crate) use classifier_callables::{
+    constructor_declaration_signature, constructor_generic_signature, ConstructorAlias,
+};
+pub use classifier_callables::{BoundInnerConstructor, ConstructorCandidate};
 pub(crate) use classifier_declaration::type_alias_target_classifier;
 pub use classifier_declaration::{
     AliasExpansion, ClassifierDeclaration, ClassifierDeclarationKey, TypeAliasTemplate,
@@ -78,6 +82,8 @@ pub(crate) use dependency_body_contract::{
 pub(crate) use dependency_body_modifiers::KlibBodyDeclarationModifiers;
 pub use enhanced_nullability::{enhance_from_overridden, EnhancedResult, TypeEnhancement};
 pub use inline_kind::InlineKind;
+pub use klib_body_accessor::DependencyGetterSignature;
+pub(crate) use klib_body_accessor::{KlibAccessorRole, KlibBodyAccessor};
 pub use param_flags::ParamFlags;
 pub use physical_parameter_plan::PhysicalParameterSlot;
 pub use platform_abi::PlatformAbi;
@@ -89,6 +95,7 @@ pub use provider_override::ProviderOverrideSlot;
 pub use result_nullability::{ResultEnhancement, ReturnInfo};
 pub use runtime_exception::{RuntimeExceptionKind, RuntimeExceptionLayout};
 pub use singleton_dispatch::SingletonDispatch;
+pub(crate) use source_inputs::{ReceiverInputBounds, SourceInputDeclaration};
 pub(crate) use stdlib_klib_intrinsics::{stdlib_klib_intrinsic, StdlibKlibIntrinsic};
 
 use crate::fx_hash::{HashMap, HashSet};
@@ -107,6 +114,8 @@ pub use inline_body::{
     InlineCollectionCapacity, InlineCollectionLocalNames, InlineIterationIndex,
     InlineIterationTraversal,
 };
+#[cfg(test)]
+pub(crate) use klib_body_class::test_fixture as klib_body_class_fixture;
 pub(crate) use klib_body_class::{KlibBodyClassContract, KlibBodyClassParameters};
 pub use member_flags::LmFlags;
 pub(crate) use metadata_normalization::{
@@ -994,6 +1003,12 @@ pub struct LibraryCallable {
     /// placeholders for the omitted trailing ones, an `int` bit-mask (a bit set per omitted parameter),
     /// and a `null` marker — the JVM realization of default arguments. `false` for an ordinary call.
     pub default_call: bool,
+    /// The declaration fills its own omitted arguments: a dependency declaration whose defaults
+    /// are part of its declaring module, where that module's compilation realizes them as one
+    /// entry taking every operand and a mask of the omitted ones. A call omitting a computed
+    /// default to such a declaration keeps the declaration's identity, with
+    /// [`Self::default_call`] set; no platform `$default` symbol is named.
+    pub defaults_from_declaration: bool,
     /// For a generic `vararg` callable resolved with a bound element type (`listOf<Long>(…)` →
     /// `Long`): the *logical* element type the trailing arguments adapt to. `None` for a non-vararg
     /// call or when the element type is not recovered. The backend uses it to coerce each packed
@@ -1366,6 +1381,9 @@ pub fn map_call_args<T: Copy>(
 #[derive(Clone)]
 pub struct FunctionInfo {
     pub kind: FnKind,
+    /// Declaration input slots and receiver bindings retained before classifier application.
+    /// An unapplied candidate still carries its declaration directly in `semantic_signature`.
+    pub(crate) source_inputs: Option<Box<SourceInputDeclaration>>,
     /// Provider-owned override-slot identity for declarations whose platform compatibility differs
     /// from their source-language signature. This is distinct from the physical emit handle.
     pub(crate) provider_override_slot: Option<ProviderOverrideSlot>,
@@ -1428,13 +1446,18 @@ pub struct FunctionInfo {
     /// value. It travels on the same candidate structure so the checker can combine both facets and
     /// run overload selection once.
     pub implicit_classifier_callable: Option<ImplicitClassifierCallable>,
-    /// The `inner` classifier this candidate constructs when it is a constructor reached through a
-    /// value of the outer class (`outer.Inner(args)`). Kotlin places such a constructor in the
+    /// The classifier this candidate constructs when it is a constructor. A constructor travels on
+    /// the same candidate structure as the functions it competes with: Kotlin places an `inner`
+    /// constructor reached through a value of the outer class (`outer.Inner(args)`) in the
     /// receiver's member level beside same-named member functions; selection runs once over both
     /// and the constructor path then materializes the selected declaration.
-    pub bound_inner_constructor: Option<BoundInnerConstructor>,
+    pub constructor: Option<ConstructorCandidate>,
     /// The alias selected on the caller's scope tower for this constructor candidate.
     pub(crate) constructor_alias: Option<Box<ConstructorAlias>>,
+    /// This declaration's identity as its classifier declares it, before a hierarchy rung applies
+    /// the receiver's type arguments (`Map.get(K): V?`, not `Map.get(String): Int?`). Recorded once,
+    /// when the declaration is first specialized; an override records it as what it overrides.
+    pub(crate) declaration_identity: Option<Box<crate::types::OverriddenDeclaration>>,
 }
 
 /// Where an extension receiver sits among a callable's PHYSICAL parameters. Kotlin puts the leading
@@ -1638,6 +1661,7 @@ impl FunctionInfo {
             .saturating_sub(usize::from(kind == FnKind::Extension));
         FunctionInfo {
             kind,
+            source_inputs: None,
             provider_override_slot: None,
             classifier_static: false,
             associated_classifier: None,
@@ -1661,8 +1685,9 @@ impl FunctionInfo {
             stable_declaration: None,
             source_member: None,
             implicit_classifier_callable: None,
-            bound_inner_constructor: None,
+            constructor: None,
             constructor_alias: None,
+            declaration_identity: None,
         }
     }
 
@@ -2251,6 +2276,12 @@ pub struct LibraryType {
     /// map pairs them. Published by the provider that owns that map; `None` for every other
     /// classifier.
     pub mapped_collection: Option<crate::types::MappedCollection>,
+    /// This classifier is a Kotlin builtin declaration that the platform realizes by a distinct
+    /// class (`kotlin/collections/List` by `java/util/List`), as the platform's builtin class map
+    /// pairs them. It is a Kotlin declaration although its class carries no Kotlin metadata.
+    /// Published by the provider that owns that map; `false` for every other classifier,
+    /// including a platform class that merely shares a builtin's package.
+    pub mapped_builtin: bool,
     /// For an annotation classifier: each element that declares a default, as the provider's
     /// declaration format records it. A module annotation publishes none; its defaults are
     /// checked default expressions.
@@ -2358,6 +2389,7 @@ impl LibraryType {
             retention: None,
             annotation_targets: None,
             mapped_collection: None,
+            mapped_builtin: false,
             annotation_element_defaults: Vec::new(),
             deprecation: None,
         }
@@ -2654,6 +2686,7 @@ mod tests {
             retention: None,
             annotation_targets: None,
             mapped_collection: None,
+            mapped_builtin: false,
             annotation_element_defaults: Vec::new(),
             deprecation: None,
         };

@@ -141,10 +141,12 @@ fn no_inner_classifiers(_: TypeName) -> Result<Option<InnerClassifier>, TypeName
 }
 
 /// Checked type facts supplied by a metadata-emitting target.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(crate) struct MetadataTypeLookups<'a> {
     pub(crate) intersection_approximation: Option<&'a dyn Fn(Ty) -> Option<Ty>>,
     pub(crate) inner_classifiers: InnerClassifiers<'a>,
+    pub(crate) local_classifiers: crate::fx_hash::HashSet<TypeName>,
+    pub(crate) enum_entry_bodies: crate::fx_hash::HashSet<TypeName>,
 }
 
 impl Default for MetadataTypeLookups<'_> {
@@ -154,6 +156,8 @@ impl Default for MetadataTypeLookups<'_> {
             // Standalone metadata-builder tests declare no inner classifiers. Production emitters
             // replace this with their frozen checked classifier view.
             inner_classifiers: &no_inner_classifiers,
+            local_classifiers: Default::default(),
+            enum_entry_bodies: Default::default(),
         }
     }
 }
@@ -188,17 +192,6 @@ impl<'a> StringTable<'a> {
             intersection_approximation,
             inner_classifiers,
             ..StringTable::default()
-        }
-    }
-
-    pub(crate) fn with_intersection_approximation(
-        approximation: Option<&'a dyn Fn(Ty) -> Option<Ty>>,
-        inner_classifiers: InnerClassifiers<'a>,
-    ) -> Self {
-        Self {
-            intersection_approximation: approximation,
-            inner_classifiers,
-            ..Self::default()
         }
     }
 
@@ -444,6 +437,56 @@ impl<'a> StringTable<'a> {
             );
         }
         self.class_literal(encoded.literal, false)
+    }
+
+    /// A declaration's class ID, using its retained segments in either metadata carrier.
+    pub(crate) fn declaration_class_id(
+        &mut self,
+        class: &crate::metadata::class_id::ResolvedClassId,
+    ) -> Result<u32, crate::metadata::class_id::ClassIdError> {
+        let Some((package, names)) = class.declaration() else {
+            if self.klib.is_some() {
+                return Err(crate::metadata::class_id::ClassIdError::LocalInKlib(
+                    class.classifier(),
+                ));
+            }
+            assert!(
+                self.local_classifiers.contains(&class.classifier()),
+                "a raw class ID requires local provenance"
+            );
+            return Ok(self.class_id(class.classifier()));
+        };
+        let package = package.render();
+        if self.klib.is_some() {
+            let parts = package
+                .split('/')
+                .filter(|part| !part.is_empty())
+                .collect::<Vec<_>>();
+            let mut parent = self.klib_package(&parts);
+            for name in names {
+                parent = Some(self.klib_qualified_name(parent, name, QualifiedNameKind::Class));
+            }
+            return Ok(parent.expect("a resolved class ID has a declaration segment"));
+        }
+        let prefix = if package.is_empty() {
+            String::new()
+        } else {
+            format!("{package}/")
+        };
+        let relative = names.iter().map(AsRef::as_ref).collect::<Vec<&str>>();
+        let literal = format!("{prefix}{}", relative.join("."));
+        if let Some(predefined) = PREDEFINED_STRINGS.iter().position(|name| *name == literal) {
+            return Ok(self.builtin(predefined));
+        }
+        if let Some(index) = self.non_local_name(&literal) {
+            return Ok(index);
+        }
+        if !package.contains('$') && names.iter().all(|name| !name.contains('$')) {
+            let mut record = Pb::new();
+            record.field_varint(3, 2);
+            return Ok(self.push(literal, format!("L{prefix}{};", relative.join("$")), record));
+        }
+        Ok(self.class_literal(literal, false))
     }
 
     /// A local classifier's id: the raw internal name of the classifier declared in executable
@@ -1529,7 +1572,12 @@ mod tests {
     #[test]
     fn a_missing_checked_classifier_fact_is_an_error() {
         let missing = |classifier| Err(classifier);
-        let mut strings = StringTable::with_intersection_approximation(None, &missing);
+        let mut strings = StringTable::with_local_classifiers(
+            &Default::default(),
+            &Default::default(),
+            None,
+            &missing,
+        );
         let classifier = crate::types::type_name("sample/Missing");
 
         let Err(error) = encode_type(
@@ -1554,7 +1602,12 @@ mod tests {
                 }))
                 .ok_or(classifier)
         };
-        let mut strings = StringTable::with_intersection_approximation(None, &lookup);
+        let mut strings = StringTable::with_local_classifiers(
+            &Default::default(),
+            &Default::default(),
+            None,
+            &lookup,
+        );
 
         let Err(error) = encode_type(
             &mut strings,

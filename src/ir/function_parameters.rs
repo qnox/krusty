@@ -122,6 +122,9 @@ pub enum IrGeneratedParameterRole {
     /// The owner or extension receiver a generated property-delegate accessor receives for its
     /// property. The JVM spells it `<this>`.
     DelegateMethodReceiver,
+    /// The mask of omitted arguments a function takes in place of a `$default` synthetic, as the
+    /// Compose plugin's functions do. It has no local-variable row.
+    DefaultMask,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

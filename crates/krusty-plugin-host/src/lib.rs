@@ -18,6 +18,11 @@
 //! compiler, which loads plugin jars the way kotlinc's `-Xplugin` does, and opens a compilation's
 //! session over the build's classpath, where IR plugins find the build's declarations.
 //!
+//! The host also reads a script template's definition ([`Host::script_definition`]): it loads the
+//! template over the build's classpath and builds its compilation configuration as kotlinc's
+//! `-script-templates` does, with the scripting libraries kotlinc's own `lib/` holds beside the
+//! compiler.
+//!
 //! The crate runs KSP processors the same way ([`KspHost`]): [`provision_ksp`] finds the JDK and
 //! KSP's API jar, and the host serves the processors krusty's own analysis of the module, with no
 //! compiler in its JVM.
@@ -34,6 +39,7 @@ mod pins;
 mod process;
 mod protocol;
 mod provision;
+mod script_template;
 mod session;
 
 pub use download::{Curl, Fetcher};
@@ -52,4 +58,5 @@ pub use provision::{
     provision, provision_artifact, provision_ksp, HostRuntime, KspRequest, KspRuntime,
     ProvisionError, Request, COMPILER_MIN_JAVA,
 };
+pub use script_template::{ScriptTemplateDefinition, ScriptType};
 pub use session::SessionRequest;

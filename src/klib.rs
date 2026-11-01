@@ -346,10 +346,11 @@ impl KlibArchive {
                 path: path.to_path_buf(),
                 source,
             })?;
-        let mut archive = zip::ZipArchive::new(file).map_err(|error| KlibError::InvalidZip {
-            path: path.to_path_buf(),
-            detail: error.to_string(),
-        })?;
+        let mut archive =
+            crate::archive::open_file(file).map_err(|error| KlibError::InvalidZip {
+                path: path.to_path_buf(),
+                detail: error.to_string(),
+            })?;
         if archive.central_directory_start() != directory.start
             || archive.len() != usize::from(directory.entry_count)
         {

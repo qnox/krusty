@@ -5,8 +5,10 @@
 //! `@IntrinsicConstEvaluation`, and the language operators `==`, `<`, `<=`, `>`, `>=`, `&&` and `||`,
 //! once every argument is a constant, and it merges the constant arguments of a string template.
 //! The checker publishes exactly those builtin declarations as typed operations (`Binary`,
-//! `Unary`, a numeric conversion, a `String` intrinsic), so evaluation reads only those operations
-//! and the checked types; it never selects a declaration or inspects a source spelling.
+//! `Unary`, a numeric conversion, a `String` intrinsic), or, for a builtin's `toString`, `equals`
+//! and `compareTo`, as an external call it marks intrinsic-const with the override role naming the
+//! operation. Evaluation reads only those facts and the checked types; it never selects a
+//! declaration or inspects a source spelling.
 //!
 //! An operation kotlinc's interpreter would reject is left alone: an integer division by zero or a
 //! referential comparison.
@@ -73,7 +75,8 @@ impl ConstantEvaluation {
             | FirExprKind::Binary { .. }
             | FirExprKind::Equality { .. }
             | FirExprKind::StringTemplate(_)
-            | FirExprKind::Call(_) => true,
+            | FirExprKind::Call(_)
+            | FirExprKind::ComparisonCall { .. } => true,
             // An explicit conversion call (`300.toByte()`) is intrinsic-const; an implicit widening
             // (`d + 1.0F`) is not a call kotlinc evaluates and keeps its runtime widening.
             FirExprKind::ImplicitConversion { conversion, .. } => {
@@ -234,31 +237,72 @@ impl ConstantEvaluation {
                 }
                 Some(string(text.finish()))
             }
-            FirExprKind::Call(call) => {
-                if let Some(name) = self.enum_entry_name(body, call) {
-                    return Some(name);
-                }
-                let FirCallTarget::Intrinsic { operation, .. } = &call.target else {
+            FirExprKind::Call(call) => self.call_value(body, call),
+            // `a < b` over a selected `compareTo` is the language operator over that call's result.
+            FirExprKind::ComparisonCall { operation, call } => {
+                let FirConstant::Int(order) = self.call_value(body, call)?.value else {
                     return None;
                 };
-                let receiver = call
-                    .dispatch_receiver
-                    .or(call.extension_receiver)
-                    .map(|receiver| self.converted(body, receiver.value, receiver.conversion));
-                let arguments = call
-                    .arguments
-                    .iter()
-                    .map(|argument| match argument {
-                        FirCallArgument::Expression {
-                            value, conversion, ..
-                        } => self.converted(body, *value, *conversion),
-                        FirCallArgument::Default { .. } | FirCallArgument::Vararg { .. } => None,
-                    })
-                    .collect::<Option<Vec<_>>>()?;
-                intrinsic(operation, receiver?, &arguments)
+                Some(boolean(match operation {
+                    FirBinaryOperation::Less => order < 0,
+                    FirBinaryOperation::LessOrEqual => order <= 0,
+                    FirBinaryOperation::Greater => order > 0,
+                    FirBinaryOperation::GreaterOrEqual => order >= 0,
+                    _ => return None,
+                }))
             }
             _ => None,
         }
+    }
+
+    /// The value of a call to an intrinsic-const declaration whose operands are all constants.
+    fn call_value(
+        &mut self,
+        body: &FirBody,
+        call: &crate::fir::FirCall,
+    ) -> Option<EvaluatedConstant> {
+        if let Some(name) = self.enum_entry_name(body, call) {
+            return Some(name);
+        }
+        match &call.target {
+            FirCallTarget::Intrinsic { operation, .. } => {
+                let (receiver, arguments) = self.call_operands(body, call)?;
+                intrinsic(operation, receiver, &arguments)
+            }
+            // A declaration marked `@IntrinsicConstEvaluation` that is not a compiler
+            // intrinsic is an override of one of `Any`'s or `Comparable`'s operations on a
+            // builtin (`String.compareTo`, `Boolean.equals`); its role names the operation.
+            FirCallTarget::External {
+                semantic_role: Some(role),
+                intrinsic_const: true,
+                ..
+            } => {
+                let (receiver, arguments) = self.call_operands(body, call)?;
+                declared_operation(*role, receiver, &arguments)
+            }
+            _ => None,
+        }
+    }
+
+    /// The receiver and argument values of a call whose every operand is a constant.
+    fn call_operands(
+        &mut self,
+        body: &FirBody,
+        call: &crate::fir::FirCall,
+    ) -> Option<(EvaluatedConstant, Vec<EvaluatedConstant>)> {
+        let receiver = call.dispatch_receiver.or(call.extension_receiver)?;
+        let receiver = self.converted(body, receiver.value, receiver.conversion);
+        let arguments = call
+            .arguments
+            .iter()
+            .map(|argument| match argument {
+                FirCallArgument::Expression {
+                    value, conversion, ..
+                } => self.converted(body, *value, *conversion),
+                FirCallArgument::Default { .. } | FirCallArgument::Vararg { .. } => None,
+            })
+            .collect::<Option<Vec<_>>>()?;
+        Some((receiver?, arguments))
     }
 
     /// `Enum.name` on a direct entry is that entry's declaration name. The entry expression is not
@@ -622,10 +666,21 @@ fn equals(lhs: &EvaluatedConstant, rhs: &EvaluatedConstant) -> Option<bool> {
 
 fn intrinsic(
     operation: &FirIntrinsic,
-    receiver: Option<EvaluatedConstant>,
+    receiver: EvaluatedConstant,
     arguments: &[EvaluatedConstant],
 ) -> Option<EvaluatedConstant> {
-    match (operation, receiver?, arguments) {
+    match (operation, receiver, arguments) {
+        // `toString()` on a builtin value, `Any?.toString()` on `null`, and an unsigned value's
+        // `toString()` are each intrinsic-const: the value's string conversion.
+        (
+            FirIntrinsic::NullableAnyToString | FirIntrinsic::UnsignedToString { .. },
+            receiver,
+            [],
+        ) => {
+            let mut text = KtStringBuf::new();
+            push_text(&receiver, &mut text)?;
+            Some(string(text.finish()))
+        }
         (FirIntrinsic::StringLength, receiver, []) => {
             let FirConstant::String(text) = receiver.value else {
                 return None;
@@ -676,6 +731,105 @@ fn intrinsic(
     }
 }
 
+/// An intrinsic-const override of `Any.toString`, `Any.equals` or `Comparable.compareTo` on a
+/// constant receiver. The receiver is a builtin value, so the operation is that builtin's own.
+fn declared_operation(
+    role: crate::types::SemanticCallRole,
+    receiver: EvaluatedConstant,
+    arguments: &[EvaluatedConstant],
+) -> Option<EvaluatedConstant> {
+    use crate::types::SemanticCallRole;
+    match (role, arguments) {
+        (SemanticCallRole::KotlinAnyToString, []) => {
+            let mut text = KtStringBuf::new();
+            push_text(&receiver, &mut text)?;
+            Some(string(text.finish()))
+        }
+        (SemanticCallRole::KotlinAnyEquals, [other]) => {
+            Some(boolean(value_equals(&receiver, other)))
+        }
+        // An unsigned `compareTo` orders the two unsigned values, whatever their widths.
+        (SemanticCallRole::KotlinComparableCompareTo, [other]) if unsigned(&receiver).is_some() => {
+            let order = unsigned(&receiver)?.cmp(&unsigned(other)?);
+            Some(EvaluatedConstant {
+                value: FirConstant::Int(order as i64),
+                ty: Ty::Int,
+            })
+        }
+        // `String.compareTo` is Java's: the first differing UTF-16 unit's difference, else the
+        // length difference. A primitive's `compareTo` is the `PrimitiveCompare` intrinsic.
+        (SemanticCallRole::KotlinComparableCompareTo, [other]) => {
+            let (FirConstant::String(lhs), FirConstant::String(rhs)) =
+                (&receiver.value, &other.value)
+            else {
+                return None;
+            };
+            let difference = match lhs.units().zip(rhs.units()).find(|(lhs, rhs)| lhs != rhs) {
+                Some((lhs, rhs)) => i64::from(lhs) - i64::from(rhs),
+                None => {
+                    i64::try_from(lhs.len_utf16()).ok()? - i64::try_from(rhs.len_utf16()).ok()?
+                }
+            };
+            Some(EvaluatedConstant {
+                value: FirConstant::Int(difference),
+                ty: Ty::Int,
+            })
+        }
+        _ => None,
+    }
+}
+
+/// An unsigned constant's value, read at its checked type's width.
+fn unsigned(constant: &EvaluatedConstant) -> Option<u64> {
+    Some(
+        match (&constant.value, constant.ty.non_null().canonical_semantic()) {
+            (FirConstant::UInt(value), Ty::UByte) => u64::from(*value as u8),
+            (FirConstant::UInt(value), Ty::UShort) => u64::from(*value as u16),
+            (FirConstant::UInt(value), Ty::UInt) => u64::from(*value as u32),
+            (FirConstant::ULong(value), Ty::ULong) => *value as u64,
+            _ => return None,
+        },
+    )
+}
+
+/// `equals` on a builtin value: the boxed value's `equals`. Values of different types are unequal
+/// (`1.equals(1L)`), a floating value compares its canonical bits (`NaN` equals itself, `0.0` is
+/// not `-0.0`), and no value equals `null`.
+fn value_equals(receiver: &EvaluatedConstant, other: &EvaluatedConstant) -> bool {
+    if matches!(other.value, FirConstant::Null)
+        || receiver.ty.non_null().canonical_semantic() != other.ty.non_null().canonical_semantic()
+    {
+        return false;
+    }
+    match (&receiver.value, &other.value) {
+        (FirConstant::Float(lhs), FirConstant::Float(rhs)) => {
+            canonical_f32_bits(*lhs) == canonical_f32_bits(*rhs)
+        }
+        (FirConstant::Double(lhs), FirConstant::Double(rhs)) => {
+            canonical_f64_bits(*lhs) == canonical_f64_bits(*rhs)
+        }
+        (lhs, rhs) => lhs == rhs,
+    }
+}
+
+/// Java's `Float.floatToIntBits`: every NaN is one value.
+fn canonical_f32_bits(value: f32) -> u32 {
+    if value.is_nan() {
+        f32::NAN.to_bits()
+    } else {
+        value.to_bits()
+    }
+}
+
+/// Java's `Double.doubleToLongBits`: every NaN is one value.
+fn canonical_f64_bits(value: f64) -> u64 {
+    if value.is_nan() {
+        f64::NAN.to_bits()
+    } else {
+        value.to_bits()
+    }
+}
+
 /// `Float.compareTo`/`Double.compareTo`: Java's `Float.compare`, which orders `-0.0` below `0.0`
 /// and every NaN (as one value) above positive infinity.
 trait KotlinTotalOrder {
@@ -707,19 +861,9 @@ fn push_text(constant: &EvaluatedConstant, text: &mut KtStringBuf) -> Option<()>
         FirConstant::Boolean(value) => text.push_str(if *value { "true" } else { "false" }),
         FirConstant::Char(value) => text.push_unit(*value),
         FirConstant::Int(value) | FirConstant::Long(value) => text.push_str(&value.to_string()),
-        FirConstant::UInt(value) => text.push_str(
-            &match constant.ty.non_null().canonical_semantic() {
-                Ty::UByte => u64::from(*value as u8),
-                Ty::UShort => u64::from(*value as u16),
-                Ty::UInt => u64::from(*value as u32),
-                _ => return None,
-            }
-            .to_string(),
-        ),
-        FirConstant::ULong(value) if constant.ty.non_null().canonical_semantic() == Ty::ULong => {
-            text.push_str(&(*value as u64).to_string())
+        FirConstant::UInt(_) | FirConstant::ULong(_) => {
+            text.push_str(&unsigned(constant)?.to_string())
         }
-        FirConstant::ULong(_) => return None,
         FirConstant::Float(value) => crate::kt_string::push_f32(*value, text)?,
         FirConstant::Double(value) => crate::kt_string::push_f64(*value, text)?,
     }
@@ -750,6 +894,50 @@ mod tests {
             rendered(FirConstant::UInt(i64::from(u32::MAX)), Ty::UInt),
             Some("4294967295".to_string())
         );
+    }
+
+    fn constant(value: FirConstant, ty: Ty) -> EvaluatedConstant {
+        EvaluatedConstant { value, ty }
+    }
+
+    #[test]
+    fn builtin_equals_is_the_boxed_values_equals() {
+        let int = constant(FirConstant::Int(1), Ty::Int);
+        assert!(value_equals(&int, &constant(FirConstant::Int(1), Ty::Int)));
+        assert!(!value_equals(
+            &int,
+            &constant(FirConstant::Long(1), Ty::Long)
+        ));
+        assert!(!value_equals(
+            &int,
+            &constant(FirConstant::Null, Ty::nullable(Ty::Nothing))
+        ));
+        let nan = constant(FirConstant::Double(f64::NAN), Ty::Double);
+        assert!(value_equals(
+            &nan,
+            &constant(FirConstant::Double(-f64::NAN), Ty::Double)
+        ));
+        let zero = constant(FirConstant::Double(0.0), Ty::Double);
+        assert!(!value_equals(
+            &zero,
+            &constant(FirConstant::Double(-0.0), Ty::Double)
+        ));
+    }
+
+    #[test]
+    fn string_compare_to_is_javas_unit_difference() {
+        let text = |value: &str| constant(FirConstant::String(KtString::from(value)), Ty::String);
+        let order = |lhs, rhs| {
+            declared_operation(
+                crate::types::SemanticCallRole::KotlinComparableCompareTo,
+                text(lhs),
+                &[text(rhs)],
+            )
+            .map(|order| order.value)
+        };
+        assert_eq!(order("b", "abc"), Some(FirConstant::Int(1)));
+        assert_eq!(order("ab", "abcd"), Some(FirConstant::Int(-2)));
+        assert_eq!(order("abc", "abc"), Some(FirConstant::Int(0)));
     }
 
     #[test]
