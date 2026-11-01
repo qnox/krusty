@@ -157,7 +157,11 @@ impl BodyLowering<'_> {
                 let slot = self
                     .implicit_receiver_slot(*current, *depth)
                     .ok_or(FirLoweringFailure::MissingImplicitReceiver { origin })?;
-                self.ir.add_expr(IrExpr::GetValue(slot))
+                let read = self.ir.add_expr(IrExpr::GetValue(slot));
+                self.ir
+                    .binding_read_stability
+                    .insert(read, crate::ir::IrBindingStability::Stable);
+                read
             }
             FirExprKind::EnclosingReceiver { path } => self.enclosing_receiver(path, origin)?,
             FirExprKind::CapturedImplicitReceiver {
@@ -169,7 +173,11 @@ impl BodyLowering<'_> {
                 let slot = self
                     .implicit_receiver_capture_slot(*enclosing_depth, *current, *depth, path)
                     .ok_or(FirLoweringFailure::MissingImplicitReceiver { origin })?;
-                self.ir.add_expr(IrExpr::GetValue(slot))
+                let read = self.ir.add_expr(IrExpr::GetValue(slot));
+                self.ir
+                    .binding_read_stability
+                    .insert(read, crate::ir::IrBindingStability::Stable);
+                read
             }
             FirExprKind::SingletonValue { classifier } => self.checked_singleton(*classifier),
             FirExprKind::EnumEntry {

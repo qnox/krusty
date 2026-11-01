@@ -200,8 +200,12 @@ through lambda parameters, an explicit applier target, a call argument the pass 
 `@ReadOnlyComposable`, `@ExplicitGroupsComposable`), a call to a composable of another file or
 module, a composable lambda that captures a local value or a composable lambda parameter, holds
 another lambda or is empty, a composable
-whose lambda numbering another lambda or overload shares, and any class kotlinc would give
-`$stable` and `@StabilityInferred`.
+whose lambda numbering another lambda or overload shares, and a class whose stability its file
+does not decide. Every other public or internal class gets kotlinc's `$stable` field and
+`@StabilityInferred`, whose initializer reads the `$stable` of fields' classes from other files
+and Compose libraries; the inference reads the classifiers of fields and supertypes that the file
+does not declare through `PluginRuntime::classifier`, which the handoff answers from the module's
+and the dependencies' classifier facts.
 
 The runtime functions the generated code calls (`Composer.startRestartGroup`,
 `ScopeUpdateScope.updateScope`, `sourceInformation`, `traceEventStart`, …) cross the handoff as

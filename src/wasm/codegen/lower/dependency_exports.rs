@@ -51,7 +51,6 @@ impl Body<'_> {
             target,
             params,
             ret,
-            substitutions,
             defaults,
             extension_receiver_parameter,
             ..
@@ -87,8 +86,8 @@ impl Body<'_> {
             .callables
             .callable(*target)
             .ok_or_else(|| "a dependency call without frozen callable facts".to_owned())?;
-        let instantiated = instantiate_dependency_signature(callable, *target, substitutions)
-            .map_err(str::to_owned)?;
+        let instantiated =
+            instantiate_dependency_signature(callable, callee).map_err(str::to_owned)?;
         if callable
             .generic_sig
             .as_ref()

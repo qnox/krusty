@@ -325,7 +325,6 @@ compileKotlinAgainstKotlin/jvm8/defaults/enable/superCallFromInterface2.kt
 compileKotlinAgainstKotlin/jvm8/defaults/enable/superPropAccess.kt
 compileKotlinAgainstKotlin/jvm8/defaults/enable/superPropAccessFromInterface.kt
 compileKotlinAgainstKotlin/jvm8/defaults/enable/superPropAccessFromInterface2.kt
-compileKotlinAgainstKotlin/jvm8/defaults/interop/likeSpecialization.kt
 compileKotlinAgainstKotlin/jvm8/defaults/superCall.kt
 compileKotlinAgainstKotlin/jvm8/defaults/superCallFromInterface.kt
 compileKotlinAgainstKotlin/jvm8/defaults/superPropAccess.kt
@@ -338,7 +337,6 @@ compileKotlinAgainstKotlin/jvm8/jvm8against6/simpleCallWithHierarchy.kt
 compileKotlinAgainstKotlin/jvm8/jvm8against6/simpleProp.kt
 compileKotlinAgainstKotlin/jvm8/jvm8against6/simplePropWithHierarchy.kt
 compileKotlinAgainstKotlin/kt14012.kt
-compileKotlinAgainstKotlin/kt21775.kt
 compileKotlinAgainstKotlin/nestedClass.kt
 compileKotlinAgainstKotlin/nestedClassAsBound.kt
 compileKotlinAgainstKotlin/nestedEnum.kt
@@ -1619,7 +1617,6 @@ multiplatform/k2/expectStatic.kt
 multiplatform/k2/expectValueClassWithNoPrimaryConstructor.kt
 multiplatform/k2/extensionPropertiesOverloads.kt
 multiplatform/k2/hmpp/abstractExpectedActual2-2.kt
-multiplatform/k2/hmpp/aliasToExpectGeneric.kt
 multiplatform/k2/hmpp/arrayDequeExtension.kt
 multiplatform/k2/hmpp/defaultImplsMultiInheritance.kt
 multiplatform/k2/hmpp/defaultImplsMultiInheritanceConflict.kt
