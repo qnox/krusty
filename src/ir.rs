@@ -1952,10 +1952,11 @@ pub struct IrFile {
     /// for evaluation order. This is provenance, not a storage decision; a backend decides how
     /// that role participates in its own frame or register allocation.
     pub call_operand_bindings: crate::fx_hash::HashSet<ExprId>,
-    /// Call-operand declarations introduced to preserve checked argument evaluation order, rather
-    /// than to bind an expanded callable's parameters or captures. A reused declaration leaves this
-    /// subset when an inline expansion adopts it as its own formal binding. This records purpose;
-    /// each backend still owns storage and lifetime decisions.
+    /// Call-operand declarations a call reordered by its named arguments introduces to evaluate
+    /// them in source order (kotlinc's temporaries), rather than holders that stage an operand or
+    /// bind an expanded callable's parameters or captures. A reused declaration leaves this subset
+    /// when an inline expansion adopts it as its own formal binding. This records purpose; each
+    /// backend still owns storage and lifetime decisions.
     pub(crate) argument_evaluation_bindings: crate::fx_hash::HashSet<ExprId>,
     /// The call-operand holders of one inline lambda invocation, consecutive in its block: the
     /// invocation evaluates every operand before it binds any. A backend chooses the binding order.
@@ -2287,6 +2288,9 @@ pub struct IrFile {
     /// carried as provenance; the JVM backend is where it becomes a class name. A suspend function
     /// with no entry has no source declaration behind it.
     pub fn_continuation_ordinal: crate::fx_hash::HashMap<u32, u32>,
+    /// A continuation class the JVM coroutine lowering synthesizes → the `suspend` function whose
+    /// state machine it carries. The class has no source enclosure; this is the code it belongs to.
+    pub(crate) continuation_owners: crate::fx_hash::HashMap<ClassId, FunId>,
     /// The declared `contract { … }` of a member function, a Kotlin declaration fact the class's
     /// metadata records. A package function carries its own on [`IrPackageFunction`].
     pub fn_contracts: crate::fx_hash::HashMap<u32, crate::contracts::ResolvedContract>,

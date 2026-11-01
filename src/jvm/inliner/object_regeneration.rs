@@ -76,6 +76,13 @@ pub(crate) trait AnonymousObjects {
     fn same_module(&self) -> bool {
         false
     }
+
+    /// Whether the body is a method of an object the call site regenerates (kotlinc's
+    /// `classRegeneration`): every object it constructs is then regenerated with it
+    /// (`capturedOuterRegenerated`), whichever module compiled it.
+    fn class_regeneration(&self) -> bool {
+        false
+    }
 }
 
 /// A constructor call whose object takes lambdas: the call is completed once the lambdas' loads are
@@ -155,8 +162,10 @@ pub(super) fn regenerate_objects(
             let passed = &constructions.lambdas[&constructor];
             let specialize = std::mem::take(&mut await_reification);
             // kotlinc's `shouldRegenerate(sameModule)`: an object that takes none of the call's
-            // lambdas, needs no reification, and captures no object regenerated here is reused.
+            // lambdas, needs no reification, is not constructed by a regenerated object, and
+            // captures no object regenerated here is reused.
             if objects.same_module()
+                && !objects.class_regeneration()
                 && passed.is_empty()
                 && !specialize
                 && !captures_regenerated_object(

@@ -86,7 +86,7 @@ pub(super) fn emit_lambda_class(
                 cw.set_source_file(Some(origin.source_file));
                 cw.start_inline_origin_source_map_at(origin.lines, &origin.path);
             }
-            None => match foreign_declaration_source(ir, c) {
+            None => match super::enclosure::foreign_declaration_source(ir, c) {
                 // Another file's class, compiled here for a call site that inlines its declaring
                 // function: that file is its source, as it is where that file writes it.
                 Some((source_file, lines)) => {
@@ -374,18 +374,6 @@ fn regenerated_inline_origin(
         lines,
         declaration_enclosure,
     })
-}
-
-/// The source file name and line count of the file whose inline function declares `class`, when
-/// that is another file.
-fn foreign_declaration_source(ir: &IrFile, class: &IrClass) -> Option<(String, u16)> {
-    let template = crate::jvm::inner_classes::foreign_declaration(ir, class)?;
-    let debug = ir
-        .source_debug
-        .file(ir.foreign_template_source(template)?.source)?;
-    let source_file = debug.name.rsplit(['/', '\\']).next().unwrap_or(&debug.name);
-    let lines = u16::try_from(debug.line_count).unwrap_or(u16::MAX).max(1);
-    Some((source_file.to_string(), lines))
 }
 
 fn emit_initialization(

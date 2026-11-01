@@ -202,7 +202,7 @@ pub(super) fn secondary_constructor_varargs(constructor: &crate::ir::IrSecondary
 /// constructor takes a value-class-typed parameter is private (kotlinc routes construction through a
 /// synthetic `(…args, DefaultConstructorMarker)` accessor); a SEALED class's is private too, since
 /// subclasses construct through that public synthetic accessor. An anonymous object's constructor is
-/// package-private, except one declared in an `inline` function: inlining copies its `new` into
+/// package-private, except one declared in an `inline` function's scope: inlining copies its `new` into
 /// every call site, including a caller in another package, so that constructor is public. A
 /// continuation class's constructor is package-private. A `vararg` last parameter adds
 /// `ACC_VARARGS`.
