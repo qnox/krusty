@@ -1,14 +1,3 @@
-compiler	:leakcanary:leakcanary-app	annotations-13.0.jar
-compiler	:leakcanary:leakcanary-app	kotlin-build-tools-api-2.4.10.jar
-compiler	:leakcanary:leakcanary-app	kotlin-compiler-embeddable-2.4.10.jar
-compiler	:leakcanary:leakcanary-app	kotlin-compose-compiler-plugin-embeddable-2.4.10.jar
-compiler	:leakcanary:leakcanary-app	kotlin-daemon-embeddable-2.4.10.jar
-compiler	:leakcanary:leakcanary-app	kotlin-parcelize-compiler-2.4.10.jar
-compiler	:leakcanary:leakcanary-app	kotlin-reflect-1.6.10.jar
-compiler	:leakcanary:leakcanary-app	kotlin-script-runtime-2.4.10.jar
-compiler	:leakcanary:leakcanary-app	kotlin-stdlib-2.4.10.jar
-compiler	:leakcanary:leakcanary-app	kotlinx-coroutines-core-jvm-1.8.0.jar
-compiler	:leakcanary:leakcanary-app	symbol-processing-api-2.3.10.jar
 compiler	:leakcanary:leakcanary-core	annotations-13.0.jar
 compiler	:leakcanary:leakcanary-core	kotlin-script-runtime-2.4.10.jar
 compiler	:leakcanary:leakcanary-core	kotlin-scripting-common-2.4.10.jar

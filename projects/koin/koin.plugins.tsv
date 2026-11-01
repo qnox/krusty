@@ -1,37 +1,3 @@
-compiler	:compose:koin-androidx-compose	kotlin-compose-compiler-plugin-embeddable-2.4.21.jar
-compiler	:compose:koin-androidx-compose-navigation	kotlin-compose-compiler-plugin-embeddable-2.4.21.jar
-compiler	:compose:koin-compose	annotations-13.0.jar
-compiler	:compose:koin-compose	kotlin-compose-compiler-plugin-embeddable-2.4.21.jar
-compiler	:compose:koin-compose	kotlin-script-runtime-2.4.21.jar
-compiler	:compose:koin-compose	kotlin-scripting-common-2.4.21.jar
-compiler	:compose:koin-compose	kotlin-scripting-compiler-embeddable-2.4.21.jar
-compiler	:compose:koin-compose	kotlin-scripting-compiler-impl-embeddable-2.4.21.jar
-compiler	:compose:koin-compose	kotlin-scripting-jvm-2.4.21.jar
-compiler	:compose:koin-compose	kotlin-stdlib-2.4.21.jar
-compiler	:compose:koin-compose-navigation3	annotations-13.0.jar
-compiler	:compose:koin-compose-navigation3	kotlin-compose-compiler-plugin-embeddable-2.4.21.jar
-compiler	:compose:koin-compose-navigation3	kotlin-script-runtime-2.4.21.jar
-compiler	:compose:koin-compose-navigation3	kotlin-scripting-common-2.4.21.jar
-compiler	:compose:koin-compose-navigation3	kotlin-scripting-compiler-embeddable-2.4.21.jar
-compiler	:compose:koin-compose-navigation3	kotlin-scripting-compiler-impl-embeddable-2.4.21.jar
-compiler	:compose:koin-compose-navigation3	kotlin-scripting-jvm-2.4.21.jar
-compiler	:compose:koin-compose-navigation3	kotlin-stdlib-2.4.21.jar
-compiler	:compose:koin-compose-viewmodel	annotations-13.0.jar
-compiler	:compose:koin-compose-viewmodel	kotlin-compose-compiler-plugin-embeddable-2.4.21.jar
-compiler	:compose:koin-compose-viewmodel	kotlin-script-runtime-2.4.21.jar
-compiler	:compose:koin-compose-viewmodel	kotlin-scripting-common-2.4.21.jar
-compiler	:compose:koin-compose-viewmodel	kotlin-scripting-compiler-embeddable-2.4.21.jar
-compiler	:compose:koin-compose-viewmodel	kotlin-scripting-compiler-impl-embeddable-2.4.21.jar
-compiler	:compose:koin-compose-viewmodel	kotlin-scripting-jvm-2.4.21.jar
-compiler	:compose:koin-compose-viewmodel	kotlin-stdlib-2.4.21.jar
-compiler	:compose:koin-compose-viewmodel-navigation	annotations-13.0.jar
-compiler	:compose:koin-compose-viewmodel-navigation	kotlin-compose-compiler-plugin-embeddable-2.4.21.jar
-compiler	:compose:koin-compose-viewmodel-navigation	kotlin-script-runtime-2.4.21.jar
-compiler	:compose:koin-compose-viewmodel-navigation	kotlin-scripting-common-2.4.21.jar
-compiler	:compose:koin-compose-viewmodel-navigation	kotlin-scripting-compiler-embeddable-2.4.21.jar
-compiler	:compose:koin-compose-viewmodel-navigation	kotlin-scripting-compiler-impl-embeddable-2.4.21.jar
-compiler	:compose:koin-compose-viewmodel-navigation	kotlin-scripting-jvm-2.4.21.jar
-compiler	:compose:koin-compose-viewmodel-navigation	kotlin-stdlib-2.4.21.jar
 compiler	:core:benchmark	annotations-13.0.jar
 compiler	:core:benchmark	kotlin-allopen-compiler-plugin-embeddable-2.4.21.jar
 compiler	:core:benchmark	kotlin-script-runtime-2.4.21.jar
@@ -124,10 +90,6 @@ compiler	:plugins:koin-gradle-plugin	kotlin-scripting-compiler-embeddable-2.4.21
 compiler	:plugins:koin-gradle-plugin	kotlin-scripting-compiler-impl-embeddable-2.4.21.jar
 compiler	:plugins:koin-gradle-plugin	kotlin-scripting-jvm-2.4.21.jar
 compiler	:plugins:koin-gradle-plugin	kotlin-stdlib-2.4.21.jar
-compiler-arg	:compose:koin-compose	-P plugin:androidx.compose.compiler.plugins.kotlin
-compiler-arg	:compose:koin-compose-navigation3	-P plugin:androidx.compose.compiler.plugins.kotlin
-compiler-arg	:compose:koin-compose-viewmodel	-P plugin:androidx.compose.compiler.plugins.kotlin
-compiler-arg	:compose:koin-compose-viewmodel-navigation	-P plugin:androidx.compose.compiler.plugins.kotlin
 gradle	:	com.gradleup.nmcp.aggregation
 gradle	:	org.gradle.base
 gradle	:	org.gradle.build-init

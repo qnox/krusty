@@ -7,9 +7,6 @@ compiler	:	kotlin-scripting-jvm-2.4.20.jar
 compiler	:	kotlin-serialization-compiler-plugin-embeddable-2.4.20.jar
 compiler	:	kotlin-stdlib-2.4.20.jar
 compiler	:	purity-compiler-plugin-1.10.4.jar
-compiler	:android	annotations-13.0.jar
-compiler	:android	kotlin-stdlib-2.4.0.jar
-compiler	:android	purity-compiler-plugin-1.10.4.jar
 compiler	:core	annotations-13.0.jar
 compiler	:core	kotlin-script-runtime-2.4.20.jar
 compiler	:core	kotlin-scripting-common-2.4.20.jar
