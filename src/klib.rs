@@ -1532,6 +1532,90 @@ mod tests {
     }
 
     #[test]
+    fn zip_entries_read_on_first_use_belong_to_the_opened_generation() {
+        let root = temp_dir("klib-zip-generations");
+        let generation = |module: &[u8]| -> Vec<(&'static str, Vec<u8>)> {
+            vec![
+                ("default/manifest", b"unique_name=fixture\n".to_vec()),
+                ("default/linkdata/module", module.to_vec()),
+            ]
+        };
+        let write_generation = |name: &str, module: &[u8]| {
+            let entries = generation(module);
+            let borrowed = entries
+                .iter()
+                .map(|(entry, bytes)| (*entry, bytes.as_slice()))
+                .collect::<Vec<_>>();
+            write_stored_zip(&root, name, &borrowed)
+        };
+
+        // Replaced by a rename after open: the cached entry and the entry first read after the
+        // replacement both come from the opened generation, and publication sees the change.
+        let path = write_generation("replaced.klib", b"first");
+        let first_fingerprint = KlibArchive::open(&path)
+            .and_then(|first| first.content_fingerprint())
+            .expect("fingerprint the first generation");
+        let opened = KlibArchive::open(&path).expect("open the first generation");
+        assert_eq!(
+            opened.manifest().expect("read the manifest").unique_name(),
+            Some("fixture")
+        );
+        let replacement = write_generation("replacement.klib", b"second");
+        std::fs::rename(&replacement, &path).expect("replace the KLIB path");
+        assert_eq!(
+            opened
+                .read("default/linkdata/module")
+                .expect("first read after replacement"),
+            b"first"
+        );
+        let opened_fingerprint = opened
+            .content_fingerprint()
+            .expect("fingerprint the opened");
+        assert_eq!(opened_fingerprint, first_fingerprint);
+        let current = opened.reopen_selected(&path).expect("open the replacement");
+        assert_ne!(
+            current
+                .content_fingerprint()
+                .expect("fingerprint the replacement"),
+            opened_fingerprint
+        );
+
+        // Rewritten in place with the same layout: an entry first read afterwards fails its
+        // CRC-32 against the central directory read at open instead of yielding new bytes.
+        let path = write_generation("rewritten.klib", b"first");
+        let opened = KlibArchive::open(&path).expect("open before the rewrite");
+        let rewritten = write_generation("rewritten-bytes.klib", b"fresh");
+        std::fs::write(&path, std::fs::read(&rewritten).expect("read the rewrite"))
+            .expect("rewrite the KLIB in place");
+        match opened.read("default/linkdata/module") {
+            Err(KlibError::Io {
+                operation,
+                path: entry,
+                source,
+            }) => {
+                assert_eq!(operation, "read");
+                assert_eq!(entry, path.join("default/linkdata/module"));
+                assert_eq!(source.to_string(), "Invalid checksum");
+            }
+            Err(error) => panic!("unexpected in-place rewrite error: {error}"),
+            Ok(bytes) => panic!("read {bytes:?} from a rewritten generation"),
+        }
+
+        // The fingerprint reads every selected entry, so it reports a corrupt one nothing read.
+        let corrupt = write_raw_zip(&root, "corrupt-unread.klib", CORRUPT_CRC_ZIP);
+        let opened = KlibArchive::open(&corrupt).expect("the central directory is intact");
+        match opened.content_fingerprint() {
+            Err(KlibError::Io { source, .. }) => {
+                assert_eq!(source.to_string(), "Invalid checksum");
+            }
+            Err(error) => panic!("unexpected corrupt-fingerprint error: {error}"),
+            Ok(_) => panic!("fingerprinted a corrupt selected entry"),
+        }
+
+        std::fs::remove_dir_all(root).expect("remove zip generation fixtures");
+    }
+
+    #[test]
     fn raw_zip_failures_preserve_the_exact_container_error() {
         let root = temp_dir("klib-raw-zip-errors");
 
