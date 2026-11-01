@@ -21,6 +21,10 @@ impl ProductionSignatureSemantics<'_> {
             &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
         ]);
         let implicit_receivers = self.implicit_receivers(scope);
+        let inputs = super::selected_result_publication::SelectionInputs {
+            receiver: Some(receiver),
+            arguments: &[],
+        };
         let selected = self.with_resolver(scope, |resolver| {
             resolver.select_member_property_applicable_where(receiver, spelling, |property| {
                 let context_types = property.getter.params.get(..property.context_count)?;
@@ -61,6 +65,7 @@ impl ProductionSignatureSemantics<'_> {
                             origin,
                             publication.with_result_alias(alias),
                             result,
+                            inputs,
                         );
                     }
                     result
@@ -100,6 +105,7 @@ impl ProductionSignatureSemantics<'_> {
                     origin,
                     publication.with_result_alias(alias),
                     result,
+                    inputs,
                 );
             }
             result

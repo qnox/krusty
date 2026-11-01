@@ -165,7 +165,7 @@ struct FunctionExtras {
     /// Compiler-known strict-equality parameter refinement decoded from fields 9/10.
     equality_bound: Option<Ty>,
     /// The typealias the declared return type was spelled through (`fun f(): Names`).
-    ret_alias: Option<TypeName>,
+    ret_alias: Option<crate::libraries::DeclaredResultAlias>,
     /// `@SinceKotlin` version. A callable newer than the compilation's API level is not a candidate.
     since_kotlin: Option<LanguageVersion>,
     /// `@DeprecatedSinceKotlin(hiddenSince)` version. The declaration is no longer a candidate at
@@ -185,7 +185,7 @@ pub(super) struct DecodedFunction {
     pub flags: MfnFlags,
     pub receiver_class: Option<TypeName>,
     pub ret_class: Option<TypeName>,
-    pub ret_alias: Option<TypeName>,
+    pub ret_alias: Option<crate::libraries::DeclaredResultAlias>,
     pub value_params: Vec<MetaValueParam>,
     pub generic_sig: Option<GenericSig>,
     pub contract: Option<Arc<crate::contracts::Contract>>,
@@ -310,7 +310,7 @@ impl MetaFn {
     }
 
     /// The typealias this function's declared return type was spelled through, if any.
-    pub fn ret_alias(&self) -> Option<TypeName> {
+    pub fn ret_alias(&self) -> Option<crate::libraries::DeclaredResultAlias> {
         self.extras.as_ref().and_then(|extras| extras.ret_alias)
     }
 

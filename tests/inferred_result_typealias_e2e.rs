@@ -6,6 +6,10 @@ use super::common;
 
 const CALLS: &str = include_str!("box_regressions/multimodule/inferredResultThroughAliasCall.kt");
 const READS: &str = include_str!("box_regressions/multimodule/inferredResultThroughAliasRead.kt");
+const ARGUMENTS: &str =
+    include_str!("box_regressions/multimodule/inferredResultThroughAliasArguments.kt");
+const NULLABLE: &str =
+    include_str!("box_regressions/multimodule/inferredResultThroughNullableAlias.kt");
 
 /// The `lib` and `main(lib)` modules of a two-module fixture.
 fn modules(program: &str) -> (&str, &str) {
@@ -47,4 +51,14 @@ fn the_complete_alias_call_program_matches_kotlin() {
 #[test]
 fn the_complete_alias_read_program_matches_kotlin() {
     assert_complete_program("inferred_result_alias_reads", READS);
+}
+
+#[test]
+fn the_complete_redundant_alias_argument_program_matches_kotlin() {
+    assert_complete_program("inferred_result_alias_arguments", ARGUMENTS);
+}
+
+#[test]
+fn the_complete_nullable_alias_expansion_program_matches_kotlin() {
+    assert_complete_program("inferred_result_nullable_alias", NULLABLE);
 }

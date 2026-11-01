@@ -164,6 +164,9 @@ fn project_local_alias_spelling(
                     use_site_definitely_non_null: source.definitely_non_null(),
                     alias,
                     alias_args,
+                    alias_absorbs_nullability: alias.is_some()
+                        && !source.nullable()
+                        && template.is_some_and(|(_, _, expansion)| expansion.is_nullable()),
                     args: if alias.is_some() {
                         super::super::type_spellings::expansion_arg_spellings(template, &children)
                     } else {
