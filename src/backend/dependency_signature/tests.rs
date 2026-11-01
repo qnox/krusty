@@ -44,7 +44,7 @@ fn the_emitted_signature_authenticates_retained_member_dispatch() {
 fn generic() -> GenericSig {
     let formal = Ty::ty_param("dependency-owned-T", Ty::nullable(Ty::obj("kotlin/Any")));
     GenericSig {
-        formals: vec!["dependency-owned-T".to_owned()],
+        formals: vec![crate::types::TyParamName::new("dependency-owned-T")],
         formal_bounds: vec![Vec::new()],
         receiver: Some(formal),
         params: vec![Ty::Long, formal],

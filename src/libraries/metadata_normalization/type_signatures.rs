@@ -91,7 +91,7 @@ fn declared_generic_sig(
 ) -> GenericSig {
     let bounds = semantic_bounds_with_identities(formals, enclosing, identities.by_id());
     GenericSig {
-        formals: identities.formals().to_vec(),
+        formals: crate::types::TyParamName::all(identities.formals()),
         formal_bounds: formals
             .iter()
             .map(|parameter| {
@@ -144,7 +144,7 @@ fn declared_generic_sig_with_source_names(
     GenericSig {
         formals: formals
             .iter()
-            .map(|parameter| parameter.name.clone())
+            .map(|parameter| crate::types::TyParamName::new(&parameter.name))
             .collect(),
         formal_bounds: formals
             .iter()

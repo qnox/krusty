@@ -367,7 +367,7 @@ pub(super) fn integer_literal_overload_with_ties<T>(
 pub(super) struct ExtCtx<'a> {
     pub(super) fn_scope: Option<FunctionScopeRef<'a>>,
     pub(super) source: &'a dyn SymbolSource,
-    pub(super) type_variables: &'a [String],
+    pub(super) type_variables: &'a [crate::types::TyParamName],
 }
 
 /// The single call-overload selector for a receiver call `recv.name(args)`. It is parameterized by

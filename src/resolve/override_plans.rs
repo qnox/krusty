@@ -455,13 +455,13 @@ fn function_parameter_identities(
 fn declaration_formals(
     index: &ResolvedModuleIndex,
     declaration: crate::fir::DeclarationId,
-) -> Vec<String> {
+) -> Vec<crate::types::TyParamName> {
     (0..)
         .map_while(|ordinal| index.type_parameter(declaration, ordinal))
         .filter_map(|parameter| {
             index
                 .type_parameter_semantic_name(parameter)
-                .map(str::to_owned)
+                .map(crate::types::TyParamName::new)
         })
         .collect()
 }
@@ -805,7 +805,7 @@ struct PropertyImplementation<'a> {
     name: &'a str,
     id: crate::fir::PropertyId,
     ty: ResolvedTy,
-    formals: Vec<String>,
+    formals: Vec<crate::types::TyParamName>,
     formal_bounds: Vec<Vec<Ty>>,
     context_parameters: Vec<Ty>,
     /// The declared receiver of a member-extension property, part of the slot it overrides.
@@ -1077,7 +1077,7 @@ fn property_override_plans(
 /// (context parameters, then the extension receiver, then value parameters) and result.
 struct OverridingFunction {
     callable: crate::fir::CallableId,
-    formals: Vec<String>,
+    formals: Vec<crate::types::TyParamName>,
     formal_bounds: Vec<Vec<Ty>>,
     parameters: Vec<Ty>,
     receiver: Option<Ty>,

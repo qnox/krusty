@@ -648,17 +648,15 @@ fn specialize_fixed_member_receiver(
         .into_iter()
         .find_map(|(candidate, applied, _)| (candidate == owner).then_some(applied))?;
     let bindings = super::classifier_bindings(&classifier, applied_owner);
-    let declaration_formals = classifier
-        .type_params()
-        .iter()
+    let declaration_formals = crate::types::TyParamName::all(classifier.type_params())
+        .into_iter()
         .chain(
             member
                 .generic_sig
                 .as_ref()
                 .into_iter()
-                .flat_map(|signature| &signature.formals),
+                .flat_map(|signature| signature.formals.iter().copied()),
         )
-        .cloned()
         .collect::<Vec<_>>();
     let mut specialized = member.clone();
     // `params`/`ret` are the erased callable realization for classpath members. Kotlin metadata's
@@ -681,7 +679,11 @@ fn specialize_fixed_member_receiver(
         .then_some(specialized)
 }
 
-fn member_slots_are_applied(params: &[Ty], ret: Ty, declaration_formals: &[String]) -> bool {
+fn member_slots_are_applied(
+    params: &[Ty],
+    ret: Ty,
+    declaration_formals: &[crate::types::TyParamName],
+) -> bool {
     !params
         .iter()
         .any(|parameter| crate::types::ty_mentions_param(*parameter, declaration_formals))
@@ -1000,7 +1002,7 @@ mod projected_member_view_tests {
 
     #[test]
     fn applied_member_slots_preserve_an_enclosing_declaration_identity() {
-        let provider_formals = ["T".to_owned()];
+        let provider_formals = [crate::types::TyParamName::new("T")];
         let provider_t = Ty::ty_param("T", Ty::nullable(Ty::obj("kotlin/Any")));
         let source_e = Ty::ty_param("\0tp:source:emit:E", Ty::nullable(Ty::obj("kotlin/Any")));
 
@@ -1045,7 +1047,7 @@ mod projected_member_view_tests {
     fn a_spread_array_is_not_reclassified_as_one_vararg_element() {
         let variable = Ty::ty_param("T", Ty::platform_nullable(Ty::obj("kotlin/Any")));
         let signature = GenericSig {
-            formals: vec!["T".to_string()],
+            formals: vec![crate::types::TyParamName::new("T")],
             formal_bounds: vec![vec![Ty::platform_nullable(Ty::obj("kotlin/Any"))]],
             receiver: None,
             params: vec![Ty::platform_nullable(Ty::array(variable))],

@@ -581,7 +581,7 @@ impl BodyEncoder<'_, '_> {
             }
             _ => return Err(self.refuse(span, "a call to a dependency of unknown owner")),
         };
-        let formals: &[String] = callable
+        let formals: &[crate::types::TyParamName] = callable
             .generic_sig
             .as_ref()
             .map_or(&[], |signature| &signature.formals);

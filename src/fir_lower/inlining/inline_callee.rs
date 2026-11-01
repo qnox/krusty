@@ -188,7 +188,10 @@ mod tests {
             template: DependencyInlineTemplate {
                 function: 0,
                 name: "scope".to_owned(),
-                type_parameters: vec!["opaque-T".to_owned(), "opaque-R".to_owned()],
+                type_parameters: vec![
+                    crate::types::TyParamName::new("opaque-T"),
+                    crate::types::TyParamName::new("opaque-R"),
+                ],
             },
         }
     }

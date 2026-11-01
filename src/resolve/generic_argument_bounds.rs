@@ -23,7 +23,7 @@ pub(super) struct GenericArgumentBounds<'a> {
 /// leave without evidence, then one mismatch per rejected argument, in argument order.
 pub(super) struct ArgumentContradictions {
     /// The signature's formals, each marked whether it is left uninferred.
-    formals: Vec<(String, bool)>,
+    formals: Vec<(crate::types::TyParamName, bool)>,
     /// kotlinc's owner wording of the formals: `fun <T : Square> keep`, `class Keep<T : Square>`.
     owner: String,
     /// Each rejected argument with the type it is reported against. A structural parameter keeps
@@ -205,7 +205,7 @@ impl ArgumentContradictions {
                 let uninferred = violations
                     .iter()
                     .any(|violation| violation.formal == index && violation.uninferred);
-                (formal.clone(), uninferred)
+                (*formal, uninferred)
             })
             .collect();
         // kotlinc reports a rejected argument once, against its parameter with every formal the
@@ -223,10 +223,7 @@ impl ArgumentContradictions {
                 }
                 let mut binding = GSigBinds::default();
                 for violation in rejected.iter().filter(|violation| !violation.uninferred) {
-                    binding.insert(
-                        crate::types::TyParamName::new(&signature.formals[violation.formal]),
-                        violation.expected,
-                    );
+                    binding.insert(signature.formals[violation.formal], violation.expected);
                 }
                 if binding.is_empty() {
                     return Some((argument, parameter));

@@ -39,9 +39,10 @@ mod type_parameter_identity;
 pub use equality_mode::EqualityMode;
 
 pub(crate) use substitute::{
-    ty_canonicalize_params, ty_rename_params, ty_subst, ty_subst_alias_expansion, ty_subst_all,
-    ty_subst_applied_arguments, ty_subst_applied_lookup, ty_subst_formals, ty_subst_keep_unbound,
-    ty_with_param_bounds, ty_with_transitive_param_bounds, TyParamBindings,
+    declares_formal, ty_canonicalize_params, ty_rename_params, ty_subst, ty_subst_alias_expansion,
+    ty_subst_all, ty_subst_applied_arguments, ty_subst_applied_lookup, ty_subst_formals,
+    ty_subst_keep_unbound, ty_with_param_bounds, ty_with_transitive_param_bounds, TyParamBindings,
+    TyParamKey,
 };
 
 pub use crate::context_parameters::{CapturedContextKind, ContextParameterKind};
@@ -661,7 +662,10 @@ impl Ty {
     /// Substitute known type parameters and erase an unbound parameter to its non-null upper bound.
     /// This is a type-shape operation used while publishing and specializing metadata; it is not an
     /// overload-selection decision.
-    pub fn substitute_erased(self, bindings: &crate::fx_hash::HashMap<String, Ty>) -> Ty {
+    pub(crate) fn substitute_erased<K: TyParamKey>(
+        self,
+        bindings: &crate::fx_hash::HashMap<K, Ty>,
+    ) -> Ty {
         match self.kind() {
             TyKind::TyParam(name, bound) => bindings
                 .get(name.as_str())
@@ -1949,9 +1953,9 @@ pub(crate) fn semantic_value_parameter_ty(declared: Ty, is_vararg: bool) -> Ty {
 /// Whether `ty` mentions any of the named type parameters (`T` itself, `List<T>`, `(T) -> T`,
 /// `T?`). A pure `Ty` predicate shared by the checker (generic-shape classification) and lowering
 /// (generic-shape gates).
-pub(crate) fn ty_mentions_param(ty: Ty, names: &[String]) -> bool {
+pub(crate) fn ty_mentions_param<F: TyParamKey>(ty: Ty, names: &[F]) -> bool {
     match ty.kind() {
-        TyKind::TyParam(name, _) => names.iter().any(|parameter| parameter == name),
+        TyKind::TyParam(name, _) => declares_formal(names, &name),
         TyKind::DefinitelyNotNull(inner) => ty_mentions_param(inner, names),
         TyKind::Intersection(parts) => parts.iter().any(|part| ty_mentions_param(*part, names)),
         TyKind::Obj(_, arguments) => arguments
@@ -2005,9 +2009,9 @@ pub(crate) fn ty_mentions_any_param(ty: Ty) -> bool {
 
 /// Whether an occurrence names a parameter outside the supplied declaration scope.
 /// Declaration-owned bounds are checked separately from the occurrences they contain.
-pub(crate) fn ty_mentions_undeclared_param(ty: Ty, names: &[String]) -> bool {
+pub(crate) fn ty_mentions_undeclared_param<F: TyParamKey>(ty: Ty, names: &[F]) -> bool {
     ty.mentions_marker(
-        &|occurrence| matches!(occurrence.kind(), TyKind::TyParam(name, _) if !names.iter().any(|parameter| parameter == name)),
+        &|occurrence| matches!(occurrence.kind(), TyKind::TyParam(name, _) if !declares_formal(names, &name)),
     )
 }
 

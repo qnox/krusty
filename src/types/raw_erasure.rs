@@ -5,21 +5,21 @@
 //! ([`raw_member_type`]). Both operate on declared formals and bounds; the JVM provider supplies
 //! them from class headers, the resolver from the classifier record.
 
-use super::{Ty, TyKind, TypeName};
+use super::{Ty, TyKind, TyParamKey, TypeName};
 
 /// The erasure of each of `formals`, given each formal's declared bounds: its first bound, with
 /// arguments that name one of `formals` starred (`T extends Comparable<T>` erases to
 /// `Comparable<*>!`) and a bound that is itself one of `formals` erased in turn
 /// (`B extends A`). A formal with no bound, or one in a bound cycle, erases to `Any?`. A Java
 /// bound arrives flexible (`Object` is `Any!`), so its erasure stays flexible.
-pub(crate) fn formal_erasures(formals: &[String], bounds: &[Vec<Ty>]) -> Vec<Ty> {
+pub(crate) fn formal_erasures<F: TyParamKey>(formals: &[F], bounds: &[Vec<Ty>]) -> Vec<Ty> {
     (0..formals.len())
         .map(|index| formal_erasure(formals, bounds, index, &mut Vec::new()))
         .collect()
 }
 
-fn formal_erasure(
-    formals: &[String],
+fn formal_erasure<F: TyParamKey>(
+    formals: &[F],
     bounds: &[Vec<Ty>],
     index: usize,
     visiting: &mut Vec<usize>,
@@ -33,7 +33,10 @@ fn formal_erasure(
     }
     visiting.push(index);
     let erased = match bound.non_null().kind() {
-        TyKind::TyParam(name, _) => match formals.iter().position(|formal| *formal == *name) {
+        TyKind::TyParam(name, _) => match formals
+            .iter()
+            .position(|formal| formal.borrow() == name.as_str())
+        {
             Some(named) => bound
                 .rewrap_nullability(formal_erasure(formals, bounds, named, visiting).non_null()),
             None => any,
@@ -47,7 +50,7 @@ fn formal_erasure(
     erased
 }
 
-fn star_formal_arguments(bound: Ty, formals: &[String]) -> Ty {
+fn star_formal_arguments<F: TyParamKey>(bound: Ty, formals: &[F]) -> Ty {
     let TyKind::Obj(name, arguments) = bound.kind() else {
         return bound;
     };
@@ -70,7 +73,7 @@ fn star_formal_arguments(bound: Ty, formals: &[String]) -> Ty {
 }
 
 /// The raw application of `classifier`: one [`TyKind::RawProjection`] per formal.
-fn raw_application(classifier: TypeName, formals: &[String], bounds: &[Vec<Ty>]) -> Ty {
+fn raw_application<F: TyParamKey>(classifier: TypeName, formals: &[F], bounds: &[Vec<Ty>]) -> Ty {
     Ty::obj_args_name(
         classifier,
         &formal_erasures(formals, bounds)

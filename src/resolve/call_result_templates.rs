@@ -241,7 +241,7 @@ impl Checker<'_> {
             })
             .collect::<Vec<_>>();
         Some(std::borrow::Cow::Owned(GenericSig {
-            formals: classifier.type_params().clone(),
+            formals: crate::types::TyParamName::all(classifier.type_params()),
             formal_bounds: classifier.type_param_bounds().clone(),
             receiver: None,
             params: constructor_parameter_shapes(constructor).to_vec(),
@@ -376,7 +376,7 @@ impl Checker<'_> {
             .resolved_constructors
             .get(&expression)
             .and_then(|constructor| self.resolved_type_name(constructor.owner()))
-            .map(|classifier| classifier.type_params().clone())
+            .map(|classifier| crate::types::TyParamName::all(classifier.type_params()))
             .unwrap_or_default();
         let shape_mentions_result_formal = |shape: Ty| {
             signature
@@ -431,11 +431,13 @@ impl Checker<'_> {
                         .any(shape_mentions_result_formal)
                 }),
         };
-        fn is_declaration_fallback(symbolic: Ty, actual: Ty, formals: &[String]) -> bool {
+        fn is_declaration_fallback(
+            symbolic: Ty,
+            actual: Ty,
+            formals: &[crate::types::TyParamName],
+        ) -> bool {
             match (symbolic.kind(), actual.kind()) {
-                (TyKind::TyParam(formal, bound), _)
-                    if formals.iter().any(|declared| declared == formal) =>
-                {
+                (TyKind::TyParam(formal, bound), _) if formals.contains(&formal) => {
                     // An alias formal (`E` of `typealias HashSet<E> = java.util.HashSet<E>`) is
                     // bounded by `Any?`; the Java target completes the same position from its own
                     // flexible bound `Any!`. Both are the declaration fallback.
@@ -509,7 +511,7 @@ mod tests {
         SelectedGenericCallShape::source_for_test(
             declaration,
             GenericSig {
-                formals: vec!["T".to_string()],
+                formals: vec![crate::types::TyParamName::new("T")],
                 formal_bounds: vec![Vec::new()],
                 receiver: None,
                 params: Vec::new(),

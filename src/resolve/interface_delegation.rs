@@ -791,7 +791,7 @@ fn delegated_type_parameters(
         .map(|(semantic_name, bounds)| {
             Some(ResolvedDelegatedTypeParameter {
                 name: crate::types::type_parameter_source_name(semantic_name).into(),
-                semantic_name: semantic_name.clone().into_boxed_str(),
+                semantic_name: semantic_name.as_str().into(),
                 bounds: resolved_types(bounds.iter().copied())?,
             })
         })

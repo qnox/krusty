@@ -130,7 +130,7 @@ struct ProductionSignatureSemantics<'a> {
 
 #[derive(Clone)]
 struct DeclarationTypeParameters {
-    formals: Vec<String>,
+    formals: Vec<crate::types::TyParamName>,
     bounds: Vec<Vec<Ty>>,
 }
 
@@ -468,7 +468,7 @@ impl ProductionSignatureSemantics<'_> {
         &self,
         scope: &super::CheckerScope<'_>,
         declaration: crate::fir::DeclarationId,
-        semantic_names: &[String],
+        semantic_names: &[crate::types::TyParamName],
         semantic_bounds: &[Vec<Ty>],
     ) {
         let packed = self.header_type_parameters(declaration);
@@ -480,7 +480,7 @@ impl ProductionSignatureSemantics<'_> {
             };
             let semantic_name = semantic_names
                 .get(ordinal)
-                .map(String::as_str)
+                .map(|name| name.as_str())
                 .unwrap_or(source_name);
             let bounds = semantic_bounds
                 .get(ordinal)

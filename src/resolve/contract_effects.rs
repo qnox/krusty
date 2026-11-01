@@ -229,12 +229,12 @@ impl Checker<'_> {
             _ => return ty,
         };
         let gsig = c.generic_sig.as_ref();
-        let formals: Vec<String> = gsig
+        let formals: Vec<crate::types::TyParamName> = gsig
             .map(|g| g.formals.clone())
             .or_else(|| {
-                c.signature
-                    .as_deref()
-                    .map(|s| self.libraries.signature_formal_names(s))
+                c.signature.as_deref().map(|s| {
+                    crate::types::TyParamName::all(&self.libraries.signature_formal_names(s))
+                })
             })
             .unwrap_or_default();
         if formals.is_empty() {
@@ -244,7 +244,7 @@ impl Checker<'_> {
         if let Some(targs) = self.selected_call_type_arguments(call) {
             for (name, t) in formals.iter().zip(targs.iter()) {
                 if let Some(t) = t {
-                    binds.insert(crate::types::TyParamName::new(name), *t);
+                    binds.insert(*name, *t);
                 }
             }
         }
@@ -268,7 +268,7 @@ impl Checker<'_> {
                 } else if formals.len() == actual_args.len() {
                     // No declared receiver shape: pair the formals positionally (exact count).
                     for (name, t) in formals.iter().zip(actual_args.iter()) {
-                        binds.insert(crate::types::TyParamName::new(name), *t);
+                        binds.insert(*name, *t);
                     }
                 }
             }

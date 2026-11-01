@@ -177,6 +177,11 @@ pub(crate) trait TyParamKey: std::borrow::Borrow<str> + Eq + std::hash::Hash {}
 impl TyParamKey for TyParamName {}
 impl TyParamKey for String {}
 
+/// Whether `formals` declares the type parameter `name`.
+pub(crate) fn declares_formal<K: TyParamKey>(formals: &[K], name: &str) -> bool {
+    formals.iter().any(|formal| formal.borrow() == name)
+}
+
 fn recorded_binding<K: TyParamKey>(bindings: &HashMap<K, Ty>, name: &str) -> Option<Ty> {
     bindings.get(name).copied()
 }
@@ -255,15 +260,15 @@ pub(crate) fn ty_subst_alias_expansion<K: TyParamKey>(ty: Ty, bindings: &HashMap
 /// does. Every other type parameter belongs to a declaration enclosing the call (`T` of the class
 /// whose member is called through `this`); it is in scope at the call site, not a variable of the
 /// call, so it stays as written.
-pub(crate) fn ty_subst_formals<K: TyParamKey>(
+pub(crate) fn ty_subst_formals<F: TyParamKey, K: TyParamKey>(
     ty: Ty,
-    formals: &[String],
+    formals: &[F],
     bindings: &HashMap<K, Ty>,
 ) -> Ty {
     substitute_type_parameters(
         ty,
         |name| recorded_binding(bindings, name),
-        |name| !formals.iter().any(|formal| formal == name),
+        |name| !declares_formal(formals, name),
         true,
     )
 }
@@ -449,13 +454,13 @@ pub(crate) fn ty_rename_params(ty: Ty, identities: &HashMap<&str, &'static str>)
 /// Canonicalize declaration-owned type-parameter identities by their ordinal. This is used for
 /// declaration-shape equality: two independently declared `<T>` parameters have different semantic
 /// identities during inference, but occupy the same slot when comparing callable signatures.
-pub(crate) fn ty_canonicalize_params(ty: Ty, formals: &[String]) -> Ty {
+pub(crate) fn ty_canonicalize_params<F: TyParamKey>(ty: Ty, formals: &[F]) -> Ty {
     let identities = formals
         .iter()
         .enumerate()
         .map(|(ordinal, formal)| {
             (
-                formal.as_str(),
+                formal.borrow(),
                 intern(&format!("\0signature-parameter:{ordinal}")),
             )
         })

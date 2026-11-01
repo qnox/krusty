@@ -307,7 +307,7 @@ pub(super) fn semantic_name<'a>(
 ) -> &'a str {
     stable
         .and_then(|generic| generic.formals.get(ordinal))
-        .map(String::as_str)
+        .map(|formal| formal.as_str())
         .unwrap_or(local)
 }
 
@@ -583,11 +583,11 @@ pub(super) fn publish_source_declarations(
     }
 }
 
-fn mentions_external_formal(ty: Ty, own_formals: &[String]) -> bool {
+fn mentions_external_formal(ty: Ty, own_formals: &[crate::types::TyParamName]) -> bool {
     match ty.kind() {
         // The occurrence identity is the declaration relation. Its inline bound is descriptive
         // metadata and may recursively mention other formals without adding a source edge here.
-        TyKind::TyParam(name, _) => !own_formals.iter().any(|formal| formal == name),
+        TyKind::TyParam(name, _) => !own_formals.contains(&name),
         TyKind::Fun(shape) => {
             shape
                 .params

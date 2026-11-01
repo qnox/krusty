@@ -85,7 +85,9 @@ impl DeclaredBoundsIndex {
         for generic in signatures.filter_map(|signature| signature.generic_sig.as_ref()) {
             for (formal, bounds) in generic.formals.iter().zip(&generic.formal_bounds) {
                 if bounds.len() > 1 {
-                    index.by_parameter.insert(formal.clone(), bounds.clone());
+                    index
+                        .by_parameter
+                        .insert(formal.to_string(), bounds.clone());
                 }
             }
         }

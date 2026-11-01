@@ -1191,11 +1191,11 @@ impl JvmLibraries {
         &self,
         receiver: Ty,
         target_internal: TypeName,
-        method_formals: &[String],
+        method_formals: &[crate::types::TyParamName],
     ) -> crate::fx_hash::HashMap<String, Ty> {
         let mut bindings = self.receiver_type_bindings_name(receiver, target_internal);
         for formal in method_formals {
-            bindings.remove(formal);
+            bindings.remove(formal.as_str());
         }
         bindings
     }
@@ -5372,7 +5372,7 @@ mod tests {
                 .generic_sig
                 .as_ref()
                 .map(|signature| signature.formals.as_slice()),
-            Some(["T".to_string()].as_slice())
+            Some([crate::types::TyParamName::new("T")].as_slice())
         );
         let scope = [type_name("kotlin/reflect")];
         let selected = crate::symbol_resolver::SymbolResolver::new_scoped(&libraries, &scope)

@@ -65,6 +65,12 @@ impl TParams {
             .unwrap_or_else(|| Ty::obj("kotlin/Any"))
     }
 
+    /// The semantic identity of the parameter written `name`: the identity its binding carries,
+    /// or the spelling itself for a parameter bound to a substitution rather than to itself.
+    pub(crate) fn identity(&self, name: &str) -> crate::types::TyParamName {
+        crate::types::TyParamName::new(self.bound(name).ty_param_name().unwrap_or(name))
+    }
+
     /// Build directly from explicit name→type bindings — a SUBSTITUTION (concrete types), not an
     /// erasure. Used to map a generic method's type parameters to their receiver-supplied / inferred
     /// concrete types so `ty_of_ref` realizes `T`/`R` to `String`/`Int` rather than the erased `Object`.

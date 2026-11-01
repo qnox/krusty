@@ -78,7 +78,7 @@ impl Checker<'_> {
                     type_parameters
                         .bound(source)
                         .ty_param_name()
-                        .map(str::to_owned)
+                        .map(crate::types::TyParamName::new)
                 })
                 .collect::<Option<Vec<_>>>();
             let formal_bounds = property

@@ -104,7 +104,7 @@ pub(super) fn source_generic_signature_from_tparams(
             .type_parameters
             .iter()
             .filter_map(|source| type_params.bound(source).ty_param_name())
-            .map(str::to_string)
+            .map(crate::types::TyParamName::new)
             .collect(),
         formal_bounds,
         receiver,
@@ -173,7 +173,7 @@ pub(super) fn source_generic_signature_from_header(
             .type_parameters
             .iter()
             .filter_map(|source| type_params.bound(source).ty_param_name())
-            .map(str::to_string)
+            .map(crate::types::TyParamName::new)
             .collect(),
         formal_bounds,
         receiver,

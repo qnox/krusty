@@ -244,7 +244,10 @@ fn generic_constraint_collection_projects_callable_references_through_sam() {
     let t = Ty::ty_param("T", any);
     let u = Ty::ty_param("U", any);
     let signature = GenericSig {
-        formals: vec!["T".to_string(), "U".to_string()],
+        formals: vec![
+            crate::types::TyParamName::new("T"),
+            crate::types::TyParamName::new("U"),
+        ],
         formal_bounds: vec![vec![any], vec![any]],
         receiver: None,
         params: vec![Ty::obj_args(

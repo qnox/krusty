@@ -21,7 +21,7 @@ pub struct MemberExtPropSig {
     pub(super) context_params: Vec<Ty>,
     pub(super) context_param_names: Vec<String>,
     pub(super) context_parameter_identities: Vec<crate::fir::ResolvedParameterIdentity>,
-    pub(super) type_params: Vec<String>,
+    pub(super) type_params: Vec<crate::types::TyParamName>,
     pub(super) type_param_bounds: Vec<Ty>,
     pub(super) formal_bounds: Vec<Vec<Ty>>,
     pub(super) is_var: bool,
@@ -67,7 +67,7 @@ impl MemberExtPropSig {
     }
 
     /// The property's own type parameters (`val <T> T.x`); empty for the supported shape.
-    pub(crate) fn type_params(&self) -> &[String] {
+    pub(crate) fn type_params(&self) -> &[crate::types::TyParamName] {
         &self.type_params
     }
 

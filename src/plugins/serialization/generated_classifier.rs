@@ -45,7 +45,7 @@ pub(super) fn publish_serializer_accessor_declaration(
         .collect::<Vec<_>>();
     let ret = crate::types::Ty::obj_args_name(serializer, &[class]);
     let generic_sig = (!parameters.is_empty()).then(|| crate::libraries::GenericSig {
-        formals: ctx.type_parameters.type_params().clone(),
+        formals: crate::types::TyParamName::all(ctx.type_parameters.type_params()),
         formal_bounds: vec![Vec::new(); parameters.len()],
         receiver: None,
         params: params.clone(),
@@ -198,7 +198,7 @@ mod tests {
                     )],
                 ),
                 generic_sig: Some(crate::libraries::GenericSig {
-                    formals: vec!["T".to_string()],
+                    formals: vec![crate::types::TyParamName::new("T")],
                     formal_bounds: vec![Vec::new()],
                     receiver: None,
                     params: vec![Ty::obj_args(

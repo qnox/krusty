@@ -27,7 +27,7 @@ fn receiver_type_args_match(
     src: &dyn SymbolSource,
     decl_recv: Ty,
     recv: Ty,
-    type_variables: &[String],
+    type_variables: &[crate::types::TyParamName],
 ) -> bool {
     let recv = bind_receiver_type_variables(src, decl_recv, recv, type_variables);
     // Each actual argument must be assignable to the declared one under Kotlin's covariant receiver
@@ -138,14 +138,14 @@ pub(crate) struct ReceiverMro {
     ranks: Vec<(Ty, u32)>,
     /// Type variables of enclosing postponed calls that the receiver may mention; see
     /// [`receiver_type_args_match`].
-    type_variables: Vec<String>,
+    type_variables: Vec<crate::types::TyParamName>,
 }
 
 fn bind_receiver_type_variables(
     src: &dyn SymbolSource,
     decl_recv: Ty,
     recv: Ty,
-    type_variables: &[String],
+    type_variables: &[crate::types::TyParamName],
 ) -> Ty {
     if !crate::types::ty_mentions_param(recv, type_variables) {
         return recv;
@@ -221,7 +221,10 @@ impl ReceiverMro {
         }
     }
 
-    pub(crate) fn with_type_variables(mut self, type_variables: &[String]) -> Self {
+    pub(crate) fn with_type_variables(
+        mut self,
+        type_variables: &[crate::types::TyParamName],
+    ) -> Self {
         self.type_variables = type_variables.to_vec();
         self
     }
