@@ -11,10 +11,19 @@ val marker: String? = "marker"
 @JvmField
 var counter: Int = 1
 
+// The field of an `internal` property is public on the JVM; the property stays internal.
+@JvmField
+internal val shadow: String = "library"
+
 // MODULE: main(library)
+// FILE: other.kt
+package other
+
+val shadow: String = "other"
+
 // FILE: main.kt
-import fieldlib.counter
-import fieldlib.marker
+import fieldlib.*
+import other.*
 
 private val described = marker!! + "!"
 
@@ -27,5 +36,6 @@ fun box(): String {
     if (length() != 6) return "length"
     counter = 4
     if (bump() != 5 || fieldlib.counter != 4) return "counter"
+    if (shadow != "other") return "shadow"
     return "OK"
 }

@@ -351,7 +351,13 @@ impl JvmLibraries {
             && !metadata.is_extension
             && metadata.context_params.is_empty()
         {
-            properties.extend(self.associated_property_for_static_field(field.clone()));
+            // The field's access flags are the JVM realization; an `internal` property's field is
+            // public. Kotlin visibility comes from the declaration's metadata.
+            let field = JvmStaticField {
+                visibility: metadata.visibility,
+                ..field.clone()
+            };
+            properties.extend(self.associated_property_for_static_field(field));
         }
     }
 
