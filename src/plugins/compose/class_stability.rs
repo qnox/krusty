@@ -20,8 +20,9 @@
 //! and an interface or a class that is not final is of unknown stability. Unknown parts drop out
 //! once there are several, so two interface-typed fields leave a class stable, as kotlinc infers.
 //! A class of another file or a Compose-compiled library contributes its `$stable`, read at run
-//! time. What the inference cannot decide here is declined at the class: a value class, and a
-//! field of a generic class, whose type arguments kotlinc substitutes.
+//! time, and a value class the stability of its underlying type. What the inference cannot decide
+//! here is declined at the class: a field of a generic class or generic value class, whose type
+//! arguments kotlinc substitutes.
 
 use crate::ir::{
     AnnoRetention, AnnoValue, AppliedAnnotation, DeclarationAnnotations, ExprId, FieldAnnotations,
@@ -377,7 +378,11 @@ impl Inference<'_> {
 
     /// Whether the class applies a stable marker itself (kotlinc's `hasStableMarker`).
     fn marker(&self, class: &crate::ir::IrClass) -> Result<bool, &'static str> {
-        for annotation in self.annotations(class.fq_name)? {
+        self.has_stable_marker(class.fq_name)
+    }
+
+    fn has_stable_marker(&self, name: TypeName) -> Result<bool, &'static str> {
+        for annotation in self.annotations(name)? {
             if self.is_stable_marker(annotation)? {
                 return Ok(true);
             }
@@ -634,7 +639,7 @@ impl Inference<'_> {
             }
             TyKind::Obj(name, arguments) => {
                 if self.is_value_class(name) {
-                    return Err("a class with a value-class field");
+                    return self.of_value_class(name, arguments.len(), analyzing);
                 }
                 if arguments.is_empty() {
                     self.of_class(name, analyzing)
@@ -665,10 +670,49 @@ impl Inference<'_> {
             .is_some_and(|declared| declared.supertypes.contains(&type_name(K_FUNCTION)))
     }
 
+    /// kotlinc's `stabilityOf` for an inline class type: stable when the value class applies a
+    /// stable marker itself, else the stability of its underlying type, wherever it is declared.
+    fn of_value_class(
+        &mut self,
+        name: TypeName,
+        arguments: usize,
+        analyzing: &mut Vec<TypeName>,
+    ) -> Result<Stability, &'static str> {
+        let (underlying, generic) = match self.classifier(name) {
+            Some(Classifier::File(class)) => (
+                class.fields.first().map(|field| field.ty),
+                !class.type_params.is_empty(),
+            ),
+            Some(Classifier::Declared(declared)) => match declared.value_class {
+                Some(value_class) => (
+                    Some(value_class.underlying),
+                    !value_class.type_parameters.is_empty(),
+                ),
+                None => (None, false),
+            },
+            None => (None, false),
+        };
+        let Some(underlying) = underlying else {
+            return Err(
+                "a class with a field of a value class whose underlying type the \
+                        compilation does not declare",
+            );
+        };
+        if self.has_stable_marker(name)? {
+            return Ok(Stability::STABLE);
+        }
+        // kotlinc substitutes the type's arguments into the underlying type; one that names no
+        // type parameter, like `Result`'s `Any?`, needs none.
+        if (arguments > 0 || generic) && mentions_type_parameter(underlying) {
+            return Err("a class with a field of a generic value class");
+        }
+        self.of_type(underlying, analyzing)
+    }
+
     fn is_value_class(&self, name: TypeName) -> bool {
         match self.classifier(name) {
             Some(Classifier::File(class)) => class.is_value,
-            Some(Classifier::Declared(declared)) => declared.is_value,
+            Some(Classifier::Declared(declared)) => declared.value_class.is_some(),
             None => false,
         }
     }
@@ -690,6 +734,30 @@ impl Inference<'_> {
                     )
                 })
                 .is_some_and(|&superclass| is_protobuf_message(superclass))
+    }
+}
+
+/// Whether `ty` refers to a type parameter anywhere.
+fn mentions_type_parameter(ty: Ty) -> bool {
+    match ty.kind() {
+        TyKind::TyParam(..) => true,
+        TyKind::Obj(_, arguments) | TyKind::Intersection(arguments) => arguments
+            .iter()
+            .any(|&argument| mentions_type_parameter(argument)),
+        TyKind::Nullable(inner)
+        | TyKind::PlatformNullable(inner)
+        | TyKind::MutabilityFlexible(inner)
+        | TyKind::InProjection(inner)
+        | TyKind::OutProjection(inner)
+        | TyKind::StarProjection(inner)
+        | TyKind::RawProjection(inner)
+        | TyKind::DefinitelyNotNull(inner) => mentions_type_parameter(inner),
+        TyKind::Fun(signature) => signature
+            .params
+            .iter()
+            .chain(std::iter::once(&signature.ret))
+            .any(|&part| mentions_type_parameter(part)),
+        _ => false,
     }
 }
 

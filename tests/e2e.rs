@@ -7,6 +7,8 @@ mod constructor_boxing_casts_e2e;
 mod constructor_type_argument_publication_e2e;
 #[path = "dependent_constructor_bounds_e2e.rs"]
 mod dependent_constructor_bounds_e2e;
+#[path = "destination_producer_result_e2e.rs"]
+mod destination_producer_result_e2e;
 mod enclosing_formal_signatures_e2e;
 #[path = "inferred_alias_constructor_abbreviation_e2e.rs"]
 mod inferred_alias_constructor_abbreviation_e2e;
@@ -2476,6 +2478,8 @@ mod safe_call_e2e;
 mod safe_call_generic_field_e2e;
 #[path = "safe_call_inline_callable_reference_e2e.rs"]
 mod safe_call_inline_callable_reference_e2e;
+#[path = "safe_call_lambda_label_e2e.rs"]
+mod safe_call_lambda_label_e2e;
 #[path = "safe_call_layout_e2e.rs"]
 mod safe_call_layout_e2e;
 #[path = "safe_call_let_destructure_e2e.rs"]
@@ -2492,6 +2496,8 @@ mod safe_call_primitive_e2e;
 mod safe_call_unresolved_member_e2e;
 #[path = "safe_cast_elvis_e2e.rs"]
 mod safe_cast_elvis_e2e;
+#[path = "safe_cast_type_test_e2e.rs"]
+mod safe_cast_type_test_e2e;
 #[path = "sam_classpath_e2e.rs"]
 mod sam_classpath_e2e;
 #[path = "sam_constructor_lambda_label_e2e.rs"]

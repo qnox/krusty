@@ -634,11 +634,11 @@ fn the_compose_pass_rejects_what_it_does_not_cover() {
          depends on a generic class yet",
     );
     assert_compose_rejects(
-        "compose-value-class-field",
-        "@JvmInline value class Id(val raw: Int)\nclass User(val id: Id)\n",
+        "compose-generic-value-class-field",
+        "@JvmInline value class Id<T>(val raw: T)\nclass User(val id: Id<Int>)\n",
         &[],
-        "4:1: error: krusty's Compose compiler plugin does not support a class with a value-class \
-         field yet",
+        "4:1: error: krusty's Compose compiler plugin does not support a class with a field of a \
+         generic value class yet",
     );
     assert_compose_rejects(
         "compose-reflection-function-field",
