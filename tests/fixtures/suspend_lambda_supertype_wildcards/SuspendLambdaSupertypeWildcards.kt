@@ -1,4 +1,3 @@
-// TARGET_BACKEND: JVM_IR
 // WITH_STDLIB
 
 import kotlin.coroutines.Continuation

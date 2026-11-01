@@ -78,6 +78,8 @@ mod suspend_lambda_private_property_e2e;
 mod suspend_lambda_shared_capture_e2e;
 #[path = "../suspend_lambda_sites_e2e.rs"]
 mod suspend_lambda_sites_e2e;
+#[path = "../suspend_lambda_supertype_wildcards_e2e.rs"]
+mod suspend_lambda_supertype_wildcards_e2e;
 #[path = "../suspend_lambda_unit_tail_e2e.rs"]
 mod suspend_lambda_unit_tail_e2e;
 #[path = "../suspend_lambda_value_class_invoke_e2e.rs"]
