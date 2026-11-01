@@ -585,6 +585,10 @@ impl BodyFirChecker<'_> {
                     member.member.stable_declaration,
                     &member.member.params,
                 )?;
+                let vararg_index = member
+                    .member
+                    .call_sig
+                    .argument_vararg_index(member.context_args.len());
                 (
                     target.0,
                     target.1,
@@ -594,7 +598,7 @@ impl BodyFirChecker<'_> {
                     }),
                     None,
                     member.context_args,
-                    member.member.call_sig.vararg_index,
+                    vararg_index,
                     parameters,
                     None,
                 )

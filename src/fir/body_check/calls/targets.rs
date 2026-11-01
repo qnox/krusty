@@ -13,6 +13,9 @@ pub(in crate::fir::body_check) struct MemberExtensionFirTarget {
     /// The extension receiver parameter's type as the checker applied it, which an explicit
     /// receiver argument is converted to.
     pub(in crate::fir::body_check) extension_receiver: Ty,
+    /// The vararg's index among the parameters the call's source arguments address, after the
+    /// leading context parameters. The selected call records it among all declared parameters.
+    pub(in crate::fir::body_check) argument_vararg_index: Option<usize>,
 }
 
 /// The declaration's annotations mark it `@IntrinsicConstEvaluation`: kotlinc evaluates a call to

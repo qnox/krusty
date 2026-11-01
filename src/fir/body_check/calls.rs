@@ -308,7 +308,6 @@ impl BodyFirChecker<'_> {
             Some(ResolvedCall::MemberExtension {
                 dispatch_receiver,
                 context_args,
-                vararg_index,
                 ..
             }) => {
                 let selected = self
@@ -335,7 +334,7 @@ impl BodyFirChecker<'_> {
                     arguments,
                     &target.parameters,
                     context_args.iter().map(Option::as_ref),
-                    vararg_index,
+                    target.argument_vararg_index,
                 )?;
                 let parameter_types = self.published_parameter_types(
                     self.file.expr_span(expression),
@@ -384,7 +383,6 @@ impl BodyFirChecker<'_> {
         if let Some(ResolvedCall::MemberExtension {
             dispatch_receiver,
             context_args,
-            vararg_index,
             ..
         }) = self.info.resolved_calls.get(&expression).cloned()
         {
@@ -418,7 +416,7 @@ impl BodyFirChecker<'_> {
                 arguments,
                 &target.parameters,
                 context_args.iter().map(Option::as_ref),
-                vararg_index,
+                target.argument_vararg_index,
             )?;
             let parameter_types = self
                 .published_parameter_types(self.file.expr_span(expression), &target.parameters)?;
@@ -994,7 +992,10 @@ impl BodyFirChecker<'_> {
                     substitutions,
                     false,
                     selected.context_args.clone(),
-                    selected.member.call_sig.vararg_index,
+                    selected
+                        .member
+                        .call_sig
+                        .argument_vararg_index(selected.context_args.len()),
                     parameters,
                 ))
             }
@@ -1150,7 +1151,10 @@ impl BodyFirChecker<'_> {
                     extension: false,
                     context_parameters,
                     value_parameters: parameters,
-                    vararg_index: selected.member.call_sig.vararg_index,
+                    vararg_index: selected
+                        .member
+                        .call_sig
+                        .argument_vararg_index(selected.context_args.len()),
                     context_arguments: selected.context_args.clone(),
                 })
             }
@@ -1522,6 +1526,16 @@ impl BodyFirChecker<'_> {
             "publish member-extension expression={expression:?} span={:?} stable={stable_declaration:?} external={external_identity:?} owner={owner:?} name={name} dispatch={dispatch_receiver:?} extension={extension_receiver:?} params={params:?}",
             self.file.expr_span(expression),
         );
+        let argument_vararg_index = vararg_index
+            .map(|vararg| {
+                vararg.checked_sub(context_args.len()).ok_or_else(|| {
+                    self.failure(
+                        self.file.expr_span(expression),
+                        BodyCheckFailureKind::UnsupportedCallShape,
+                    )
+                })
+            })
+            .transpose()?;
         let mut parameters =
             self.selected_call_parameters(expression, *stable_declaration, params)?;
         // Resolution exposes a vararg's element type in `params` so applicability and inference see
@@ -1571,6 +1585,7 @@ impl BodyFirChecker<'_> {
                 parameters,
                 extension_parameter: None,
                 extension_receiver: *extension_receiver,
+                argument_vararg_index,
             });
         }
 
@@ -1641,6 +1656,7 @@ impl BodyFirChecker<'_> {
             parameters,
             extension_parameter: Some(extension_parameter),
             extension_receiver: *extension_receiver,
+            argument_vararg_index,
         })
     }
 
@@ -2230,7 +2246,10 @@ impl BodyFirChecker<'_> {
                     arguments,
                     &selected.member.params,
                     selected.context_args.iter().map(Option::as_ref),
-                    selected.member.call_sig.vararg_index,
+                    selected
+                        .member
+                        .call_sig
+                        .argument_vararg_index(selected.context_args.len()),
                 )?,
                 substitutions: Box::new([]),
             }));
@@ -2301,7 +2320,10 @@ impl BodyFirChecker<'_> {
                 arguments,
                 &parameters,
                 selected.context_args.iter().map(Option::as_ref),
-                selected.member.call_sig.vararg_index,
+                selected
+                    .member
+                    .call_sig
+                    .argument_vararg_index(selected.context_args.len()),
             )?,
             substitutions,
         }))
@@ -2526,7 +2548,6 @@ impl BodyFirChecker<'_> {
             ref selected @ ResolvedCall::MemberExtension {
                 ref dispatch_receiver,
                 ref context_args,
-                vararg_index,
                 ..
             },
         ) = self
@@ -2558,7 +2579,7 @@ impl BodyFirChecker<'_> {
                 operands,
                 &target.parameters,
                 context_args.iter().map(Option::as_ref),
-                vararg_index,
+                target.argument_vararg_index,
             )?;
             let parameter_types = self
                 .published_parameter_types(self.file.expr_span(expression), &target.parameters)?;
