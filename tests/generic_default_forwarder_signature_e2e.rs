@@ -5,6 +5,8 @@
 //! annotated `@NotNull` only when its bound excludes null, and `@Nullable` when marked `T?`.
 //! A type parameter bounded by the interface's own (`fun <T : E>` through `Picker<String>`) erases
 //! to the substituted bound, beside an erased bridge, and a local class bound keeps its emitted name.
+//! A value class signs each forwarder's `-impl` static the same way, with the carrier first by its
+//! erased JVM type.
 
 use super::common;
 
@@ -41,6 +43,12 @@ object Strings : Picker<String>\n\
 \n\
 class Numbers<Q : Number> : Picker<Q>\n\
 \n\
+@JvmInline\n\
+value class Wrapped(val s: String) : Picker<String>\n\
+\n\
+@JvmInline\n\
+value class Measured<A : Number>(val a: A) : Picker<A>\n\
+\n\
 fun locals(): Any {\n\
     class Bound\n\
     class Local : Picker<Bound>\n\
@@ -56,6 +64,12 @@ import lib.Picker\n\
 object Strings : Picker<String>\n\
 \n\
 class Numbers<Q : Number> : Picker<Q>\n\
+\n\
+@JvmInline\n\
+value class Wrapped(val s: String) : Picker<String>\n\
+\n\
+@JvmInline\n\
+value class Measured<A : Number>(val a: A) : Picker<A>\n\
 ";
 
 #[test]
@@ -63,6 +77,8 @@ fn a_generic_default_forwarder_declares_its_type_parameters() {
     for class in [
         "app/Strings",
         "app/Numbers",
+        "app/Wrapped",
+        "app/Measured",
         "app/GenericDefaultForwarderSignatureKt$locals$Local",
     ] {
         common::byte_diff_against_kotlinc_cp(
@@ -90,7 +106,7 @@ fn a_dependency_generic_default_forwarder_declares_its_type_parameters() {
     common::assert_classes_identical_to_kotlinc_over_own_libraries(
         "DependencyGenericDefaultForwarder",
         CONSUMER,
-        &["app/Strings", "app/Numbers"],
+        &["app/Strings", "app/Numbers", "app/Wrapped", "app/Measured"],
         &[reference],
         &[library.krusty_out().to_path_buf()],
     );

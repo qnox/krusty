@@ -566,7 +566,9 @@ fn write_forwarder(
 /// first, then the forwarder's parameters. It checks each `@NotNull` parameter, boxes the carrier
 /// and calls the forwarder on the box. Like every generated static it maps no line; its locals and
 /// `MethodParameters` name the carrier `arg0` (synthetic) and move an extension receiver into a
-/// mandated parameter.
+/// mandated parameter. It is signed exactly when the forwarder is: kotlinc copies the forwarder's
+/// signature and writes the carrier ahead of its parameters by its erased JVM type, without
+/// declaring the class's type parameters.
 fn write_value_class_static(
     c: &crate::ir::IrClass,
     cw: &mut ClassWriter,
@@ -592,6 +594,12 @@ fn write_value_class_static(
     let mut params = vec![carrier];
     params.extend_from_slice(&forwarder.param_tys);
     let desc = method_descriptor(&params, forwarder.ret);
+    let signature = forwarder.signature.as_deref().map(|signature| {
+        let (declarations, parameters) = signature
+            .split_once('(')
+            .expect("a method signature has a parameter list");
+        format!("{declarations}({}{parameters}", type_descriptor(carrier))
+    });
     let local_variable_names = forwarder.local_variable_names(ForwarderSite::ValueClassStatic);
     assert_eq!(
         local_variable_names.len(),
@@ -617,7 +625,7 @@ fn write_value_class_static(
     cw.reserve_method_pool_with_annotations(
         &name,
         &desc,
-        None,
+        signature.as_deref(),
         &header_annotations,
         &crate::ir::DeclarationAnnotations::default(),
         &reflected,
@@ -676,7 +684,14 @@ fn write_value_class_static(
     );
     forwarder.cast_target_result(cw, &mut code);
     emit_return(forwarder.ret, &mut code);
-    finish_code::<0x0009>(cw, &name, &desc, &mut code, argument_words);
+    finish_code_sig::<0x0009>(
+        cw,
+        &name,
+        &desc,
+        &mut code,
+        argument_words,
+        signature.as_deref(),
+    );
     cw.set_method_parameters(&name, &desc, &reflected);
     let mut locals = vec![(carrier_name, local_variable_desc(carrier), 0)];
     let mut slot = slot_words(carrier);
