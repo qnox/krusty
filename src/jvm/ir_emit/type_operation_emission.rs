@@ -727,8 +727,23 @@ impl Emitter<'_> {
         operand: ExprId,
         code: &mut CodeBuilder,
     ) -> (Ty, Ty) {
-        // A suspension point the transformer takes leaves its callee's declared result, not the
-        // erased result the common IR records.
+        // A suspension point's reference result is checked and cast from the erased `Object` slot
+        // the point leaves.
+        if matches!(
+            self.erased_reference_result(operand),
+            Some(super::operand_representation::ErasedResult::Suspension)
+        ) {
+            let physical = self.emit_consumed_operand(operand, code);
+            let semantic = self
+                .ir
+                .logical_types
+                .get(&operand)
+                .copied()
+                .unwrap_or_else(|| self.value_ty(operand));
+            return (physical, semantic);
+        }
+        // Any other suspension point the transformer takes leaves its callee's declared result, not
+        // the erased result the common IR records.
         let physical = match self.transformed_result(operand) {
             Some(_) => self.value_ty(operand),
             None => self
