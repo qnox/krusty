@@ -2094,12 +2094,9 @@ impl BodyLowering<'_> {
         let safe_call_line = self.body.expression_debug_lines(safe_call).source;
         let receiver_line = self.body.expression_debug_lines(receiver.value).start;
         if receiver_line != 0 {
-            self.ir.safe_call_reads.insert(
-                selector_read,
-                crate::ir::IrSafeCallRead::Receiver {
-                    start_line: receiver_line,
-                },
-            );
+            self.ir
+                .set_start_line_if_absent(selector_read, receiver_line);
+            self.ir.set_source_line(selector_read, receiver_line);
         }
         let selector_read = self.ir.add_expr(IrExpr::TypeOp {
             op: IrTypeOp::ImplicitCoercion,
@@ -2112,19 +2109,15 @@ impl BodyLowering<'_> {
         self.constants.bind_temporary(receiver.value);
         let null = self.ir.add_expr(IrExpr::Const(IrConst::Null));
         let condition_read = self.ir.add_expr(IrExpr::GetValue(temporary));
-        let null_check = crate::ir::IrSafeCallRead::NullCheck {
-            line: safe_call_line,
-        };
-        if safe_call_line != 0 {
-            self.ir.safe_call_reads.insert(condition_read, null_check);
-        }
         let condition = self.ir.add_expr(IrExpr::PrimitiveBinOp {
             op: IrBinOp::Eq,
             lhs: condition_read,
             rhs: null,
         });
         if safe_call_line != 0 {
-            self.ir.safe_call_reads.insert(condition, null_check);
+            for read in [condition_read, condition] {
+                self.ir.set_source_line(read, safe_call_line);
+            }
         }
         let selector = self.expression(selector)?;
         let selector = self.coerce_result(selector, result_type);

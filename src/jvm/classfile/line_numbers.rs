@@ -67,34 +67,16 @@ impl ClassWriter {
         {
             return;
         }
-        let (needs_lnt, needs_lvt, suppress_entry_line) = match self
+        // A body that marked lines keeps exactly those: kotlinc numbers a method only where its
+        // codegen marks a node, never with the declaration's line in front of the first mark.
+        let (needs_lnt, needs_lvt) = match self
             .methods
             .iter()
             .find(|method| method.name == n && method.desc == d)
         {
-            Some(method) => (
-                method.lnt.is_empty(),
-                method.lvt.is_empty(),
-                method.suppress_entry_line,
-            ),
+            Some(method) => (method.lnt.is_empty(), method.lvt.is_empty()),
             None => return,
         };
-        if !needs_lnt && !suppress_entry_line {
-            if let Some((0, line)) = lnt {
-                if let Some(method) = self
-                    .methods
-                    .iter_mut()
-                    .find(|method| method.name == n && method.desc == d)
-                {
-                    let line = line.min(u16::MAX as u32) as u16;
-                    match method.lnt.first() {
-                        Some(&(0, _)) => {}
-                        Some(&(_, first)) if first == line => {}
-                        _ => method.lnt.insert(0, (0, line)),
-                    }
-                }
-            }
-        }
         if !needs_lnt && !needs_lvt {
             return;
         }
@@ -442,8 +424,6 @@ impl CodeBuilder {
         while self.line_marks.len() > since && self.line_marks.last().is_some_and(|m| m.0 == pc) {
             self.line_marks.pop();
         }
-        // The method's declaration line is not to stand in for the withdrawn entry at its start.
-        self.suppress_entry_line |= pc == 0;
         self.pending_lines.forgotten = forgotten;
         Some(DeferredLine {
             index: self.line_marks.len(),
@@ -525,7 +505,6 @@ impl CodeBuilder {
                 .is_some_and(|&(marked_pc, marked)| marked == line && marked_pc as usize == pc)
         {
             let removed = self.line_marks.len() - 1;
-            self.suppress_entry_line |= self.line_marks[removed].0 == 0;
             self.line_marks.pop();
             if self.retained_line_mark == Some(removed) {
                 self.retained_line_mark = None;

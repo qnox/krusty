@@ -67,10 +67,12 @@ impl Emitter<'_> {
         code: &mut CodeBuilder,
     ) {
         let (class, _) = ref_class(&elem);
+        // kotlinc's shared-variable lowering declares the holder at the declaration's offsets: its
+        // constructor call marks the declaration's line before the `new`, and the variable marks it
+        // again before the store.
+        self.mark_expression_start(declaration, code);
         self.emit_new_holder(class, code);
-        if let Some(line) = self.ir.statement_line(declaration) {
-            self.mark_expression_line(declaration, line, code);
-        }
+        self.mark_expression_start(declaration, code);
         let holder = Ty::obj(class);
         store(holder, slot, code);
         self.mark_suspend_lambda_parameter_read(declaration, code);
@@ -91,9 +93,7 @@ impl Emitter<'_> {
             }
             self.emit_element_value(elem, value, code);
             self.unsigned_assignment_line = saved_assignment;
-            if let Some(line) = self.ir.statement_line(declaration) {
-                self.mark_expression_line(declaration, line, code);
-            }
+            self.mark_expression_start(declaration, code);
             self.put_element(&elem, code);
         }
     }

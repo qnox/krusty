@@ -341,6 +341,7 @@ fn realize_accessor(
     if accessor.line != 0 {
         ir.set_statement_line(accessor.body, accessor.line);
         ir.set_source_line(accessor.body, accessor.line);
+        ir.position_generated_tree(accessor.body, accessor.line);
     }
     let returned = if accessor.result == crate::types::Ty::Unit {
         let returned = ir.add_expr(IrExpr::Return(None));

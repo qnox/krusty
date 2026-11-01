@@ -92,6 +92,14 @@ pub(super) fn boxed_scalar_slot(ir: &IrFile, declaration: ExprId, semantic: Ty) 
     .then_some(primitive)
 }
 
+/// Whether `initializer` is the parser's synthetic default of a declaration written without one.
+/// Only that default is replaced. A captured deferred local's holder (`RefNew`) is real storage:
+/// substituting `null` makes the later `element` write throw.
+fn is_deferred_zero(ir: &IrFile, declaration: ExprId, initializer: ExprId) -> bool {
+    ir.deferred_local_types.contains_key(&declaration)
+        && matches!(ir.expr(initializer), IrExpr::Const(_))
+}
+
 fn emit_deferred_zero(
     ir: &IrFile,
     declaration: ExprId,
@@ -100,11 +108,7 @@ fn emit_deferred_zero(
     code: &mut CodeBuilder,
     classes: &mut ClassWriter,
 ) -> bool {
-    // Only the parser's synthetic default is replaced. A captured deferred local's holder
-    // (`RefNew`) is real storage: substituting `null` makes the later `element` write throw.
-    if !ir.deferred_local_types.contains_key(&declaration)
-        || !matches!(ir.expr(initializer), IrExpr::Const(_))
-    {
+    if !is_deferred_zero(ir, declaration, initializer) {
         return false;
     }
     push_zero(slot, code, classes);
@@ -330,6 +334,12 @@ impl Emitter<'_> {
         slot_ty: Ty,
         code: &mut CodeBuilder,
     ) {
+        // A declaration without a source initializer holds the parser's zero placeholder. kotlinc's
+        // `visitVariable` marks such a declaration before it pushes the default value.
+        let default_value = is_deferred_zero(self.ir, declaration, initializer);
+        if default_value {
+            self.mark_declared_initializer_line(declaration, initializer, code);
+        }
         let source =
             if emit_deferred_zero(self.ir, declaration, initializer, slot_ty, code, self.cw) {
                 slot_ty
@@ -387,7 +397,7 @@ impl Emitter<'_> {
         if self.completes_unsigned_bitwise_value(initializer) {
             code.forget_line();
         }
-        if marks_line && !restore_inlined_line {
+        if marks_line && !restore_inlined_line && !default_value {
             self.mark_declared_initializer_line(declaration, initializer, code);
         }
     }

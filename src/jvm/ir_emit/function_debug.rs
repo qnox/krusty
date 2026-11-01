@@ -93,8 +93,7 @@ pub(super) fn attach_declared_function_debug(
         slot += slot_words(*ty);
     }
     // An emitted `inline fun` stores `$i$f$` at this slot before any statement. That marker has
-    // no line, so the declaration-line fallback must not land on it: `set_method_debug` would
-    // otherwise insert the signature line at pc 0 whenever the body's own first entry is later.
+    // no line, so a body that marks none of its own takes the declaration line after it.
     if opens_with_inline_depth_marker(ir, fid, !function.is_static) {
         body_pc += inline_depth_marker_width(slot);
     }

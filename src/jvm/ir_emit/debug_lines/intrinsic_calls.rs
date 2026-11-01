@@ -13,7 +13,6 @@
 use crate::fir::{FirBinaryOperation, FirUnaryOperation, SyntheticOriginKind};
 use crate::ir::{
     Callee, ExprId, IrBuiltinCall, IrBuiltinCallKind, IrExpr, IrFile, IrIntrinsic, IrNodeOrigin,
-    IrSafeCallRead,
 };
 use crate::types::Ty;
 
@@ -28,7 +27,8 @@ pub(in crate::jvm::ir_emit) fn states_line_before_operands(
     }
     // A safe call states its line where it declares the receiver temporary, before the receiver,
     // unless an elvis folds it (`JvmSafeCallChainFoldingLowering`).
-    ir.safe_calls.contains(&expression) && !is_elvis_operand(ir, expression)
+    ir.jvm_intrinsic_calls.contains(&expression)
+        || ir.safe_calls.contains(&expression) && !is_elvis_operand(ir, expression)
 }
 
 /// Whether kotlinc realizes `call` as an intrinsic call of its own.
@@ -93,13 +93,4 @@ pub(in crate::jvm::ir_emit) fn inversion_mask_line(ir: &IrFile, expression: Expr
     .then(|| ir.source_line(expression))
     .flatten()
     .filter(|&line| line != 0)
-}
-
-/// The line a read of a safe call's receiver temporary carries: the null test at the safe call's
-/// line, the selector's receiver at the line the receiver starts on.
-pub(in crate::jvm::ir_emit) fn safe_call_read_line(ir: &IrFile, read: ExprId) -> Option<u32> {
-    match ir.safe_call_reads.get(&read)? {
-        IrSafeCallRead::NullCheck { line } => Some(*line),
-        IrSafeCallRead::Receiver { start_line } => Some(*start_line),
-    }
 }

@@ -4,16 +4,13 @@
 //! those locations into `LineNumberTable` marks without teaching expression emission how the maps
 //! are represented.
 
-use crate::fir::SyntheticOriginKind;
-use crate::ir::{ExprId, IrExpr, IrFile, IrNodeOrigin};
+use crate::ir::{ExprId, IrExpr, IrFile};
 use crate::jvm::classfile::CodeBuilder;
 
 use super::Emitter;
 
 mod intrinsic_calls;
-pub(super) use intrinsic_calls::{
-    inversion_mask_line, safe_call_read_line, states_line_before_operands,
-};
+pub(super) use intrinsic_calls::{inversion_mask_line, states_line_before_operands};
 
 fn first_block_expression(ir: &IrFile, block: ExprId) -> ExprId {
     let mut expression = block;
@@ -176,9 +173,13 @@ impl Emitter<'_> {
         }
     }
 
-    /// Mark one expression line, mapping a same-module inline copy through the class's SMAP. Common
-    /// IR supplies the semantic declaration owner, the callee's source file, and the call line;
-    /// this boundary chooses JVM source paths and output line numbers.
+    /// Mark `expression`'s own line, mapping a same-module inline copy through the class's SMAP.
+    /// Common IR supplies the semantic declaration owner, the callee's source file, and the call
+    /// line; this boundary chooses JVM source paths and output line numbers.
+    ///
+    /// Callers mark where kotlinc's visitor marks the node's kind: its start for a node
+    /// [`crate::jvm::line_numbers::marks_line_at_start`] names
+    /// ([`Self::mark_value_expression_start`]), the instruction that completes it otherwise.
     pub(super) fn mark_expression_start(&mut self, expression: ExprId, code: &mut CodeBuilder) {
         if self.ir.callable_scopes.contains(&expression)
             || self.ir.dispatch_line(expression).is_some()
@@ -189,11 +190,7 @@ impl Emitter<'_> {
             self.mark_kept_start_line(expression, code);
             return;
         }
-        let Some(line) = self
-            .ir
-            .source_line(expression)
-            .or_else(|| safe_call_read_line(self.ir, expression))
-        else {
+        let Some(line) = self.ir.source_line(expression) else {
             return;
         };
         self.mark_expression_line(expression, line, code);
@@ -540,14 +537,7 @@ impl Emitter<'_> {
     /// Whether `expression` realizes an inlined call in place (`SyntheticOriginKind::InlinedCall`)
     /// or is an external-inline expansion lowered from its declaration plan.
     pub(super) fn realizes_inlined_call(&self, expression: ExprId) -> bool {
-        self.ir.external_inline_expansions.contains(&expression)
-            || matches!(
-                self.ir.fir_origins.get(&expression),
-                Some(IrNodeOrigin::Synthetic {
-                    kind: SyntheticOriginKind::InlinedCall,
-                    ..
-                })
-            )
+        crate::jvm::line_numbers::realizes_inlined_call(self.ir, expression)
     }
 
     /// kotlinc's `markLineNumberAfterInlineIfNeeded`, after a node that realizes an inlined call in

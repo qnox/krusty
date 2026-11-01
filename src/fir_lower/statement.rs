@@ -165,14 +165,6 @@ impl BodyLowering<'_> {
             }),
         };
         self.record_expression_origins(first_generated, lowered, origin);
-        let line = self.body.statement_debug_line(statement_id);
-        if line != 0 {
-            self.ir.set_statement_line(lowered, line);
-            for expression in first_generated..self.ir.exprs.len() {
-                self.ir
-                    .record_inline_copy_call_line(expression as u32, line);
-            }
-        }
         // An assignment's write dispatches where its lvalue is NAMED, not where the statement
         // begins: `b\n    .value =\n    x` puts the setter call on the `.value` line, exactly as a
         // multi-line call's dispatch returns to its selector's. Nothing else in the statement has a
@@ -182,6 +174,14 @@ impl BodyLowering<'_> {
             self.ir.set_source_line_if_absent(lowered, target_line);
         }
         self.stamp_statement(statement_id, first_generated);
+        let line = self.body.statement_debug_line(statement_id);
+        if line != 0 {
+            self.ir.set_statement_line(lowered, line);
+            for expression in first_generated..self.ir.exprs.len() {
+                self.ir
+                    .record_inline_copy_call_line(expression as u32, line);
+            }
+        }
         self.set_statement_state(statement_id, LoweringState::Lowered(lowered));
         Ok(lowered)
     }
@@ -246,7 +246,15 @@ impl BodyLowering<'_> {
         captures: &[FirLocalClassCapture],
         capture_order: &[u32],
     ) -> Result<ExprId, FirLoweringFailure> {
+        let first_capture = self.ir.exprs.len();
         let (classifier, values) = self.prepare_captured_class(declaration, captures)?;
+        // The captured values are the arguments of every construction of the class, which kotlinc's
+        // `LocalDeclarationsLowering` reads at each construction, not at the declaration. They
+        // carry no line of the declaration's.
+        self.ir.settle_positions(
+            first_capture..self.ir.exprs.len(),
+            crate::ir::IrNodePosition::default(),
+        );
         self.record_capture_order(declaration, captures.len(), capture_order)?;
         self.local_class_captures.insert(classifier, values);
         Ok(self.ir.add_expr(IrExpr::Block {

@@ -23787,3 +23787,33 @@ the statement's start offset itself. The field is removed once lowering gives ev
 expression's position (`docs/PHASE_FACTS.md`, "The JVM line rule"). Covered by
 `ir::expression_copy::tests::a_copy_inherits_the_facts_its_owning_modules_record` and the line
 table differentials in `lnt_parity_e2e` and `expression_line_marks_e2e`.
+
+## Line entries by node kind
+
+JVM emission decides where an expression marks its line from the node's kind, as kotlinc's
+`ExpressionCodegen` does (`src/jvm/line_numbers.rs`). These nodes mark where their code starts,
+before their operands: a value read, a constant, a field access (a static store included), a
+`when`, a `throw`, a `try`, a `break`/`continue`, a constructor call, an intrinsic call, a suspend
+call, and a block that opens an inline frame (an inlined call or lambda invocation realized in
+place). An operand-less call such as `E.values()` or `E.entries` marks there too. These nodes do
+not mark at their start: an ordinary call (it marks at its invoke), a `return`, a variable
+declaration and an assignment (they mark before their store), a block, a type operator and a loop.
+Their first line is the first line an inner node marks.
+
+The remaining details follow kotlinc:
+
+- A declaration without an initializer marks before the default value it pushes.
+- An assignment marks its value's start even when an `iinc` replaces evaluating the value.
+- A discarded implicit `Unit` is no code and marks nothing.
+- A JDK-realized unsigned member (`UInt.toString`, `compareTo`, `div`, `rem`) is one of kotlinc's
+  `IntrinsicMethods`, recorded by the library realization's `intrinsic` flag.
+- The safe-call reads carry their receiver's and call's lines as node positions, not as a side
+  table.
+- Nothing puts a function's declaration line ahead of the body's first mark.
+
+Positions come from lowering. Nodes that lowering builds without a FIR element are given explicit
+positions where they are built: delegated-property getters, in-place delegate methods, local
+delegate accessors, and local-class capture arguments (which are settled to no position).
+
+Covered by `expression_line_marks_e2e::line_entries_follow_kotlincs_rule_by_node_kind` and the line
+and byte differentials against kotlinc.

@@ -56,7 +56,10 @@ impl Emitter<'_> {
         if self.suppress_unsigned_local_line {
             return;
         }
-        if !self.defers_unsigned_bitwise_start_line(expression) {
+        if !self.defers_unsigned_bitwise_start_line(expression)
+            && (crate::jvm::line_numbers::marks_line_at_start(self.ir, expression)
+                || self.keeps_start_line(expression))
+        {
             self.mark_expression_start(expression, code);
         }
     }

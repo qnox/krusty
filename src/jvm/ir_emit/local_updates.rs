@@ -105,6 +105,9 @@ impl Emitter<'_> {
         if ty != Ty::Int || self.inline_return_frame_result_type(target).is_some() {
             return false;
         }
+        // kotlinc's optimization lowering leaves a statement `n++` as the store `n = n.inc()` at
+        // the update's offsets, whose value marks the update's line: the `iinc` keeps it.
+        self.mark_expression_start(block, code);
         if !discarded {
             code.iload(slot);
         }

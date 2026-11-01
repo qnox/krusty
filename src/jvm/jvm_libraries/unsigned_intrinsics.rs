@@ -64,6 +64,7 @@ fn realize_jdk_unsigned_member(
     member.descriptor = descriptor;
     member.realization = MemberRealization::Direct {
         pass_receiver: true,
+        intrinsic: true,
     };
     member.inline = InlineKind::None;
     member.inline_body_plan = None;
@@ -108,6 +109,7 @@ mod tests {
             );
             member.realization = MemberRealization::Direct {
                 pass_receiver: true,
+                intrinsic: false,
             };
             member
         };
@@ -132,6 +134,7 @@ mod tests {
             "(II)I".to_owned(),
             MemberRealization::Direct {
                 pass_receiver: true,
+                intrinsic: true,
             },
             true,
         );
@@ -163,6 +166,7 @@ mod tests {
                 "(J)Ljava/lang/String;".to_owned(),
                 MemberRealization::Direct {
                     pass_receiver: true,
+                    intrinsic: true,
                 },
                 true,
             )

@@ -383,10 +383,7 @@ fn reads_share_receiver_line(
     selector: u32,
     temporary: u32,
 ) -> bool {
-    let line = |expression: u32| {
-        ir.source_line(expression)
-            .or_else(|| super::debug_lines::safe_call_read_line(ir, expression))
-    };
+    let line = |expression: u32| ir.source_line(expression);
     let condition_read = match ir.expr(condition) {
         IrExpr::PrimitiveBinOp { lhs, rhs, .. } => [*lhs, *rhs]
             .into_iter()

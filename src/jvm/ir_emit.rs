@@ -5596,7 +5596,7 @@ impl<'a> Emitter<'a> {
 
     fn emit_node(&mut self, e: u32, code: &mut CodeBuilder) {
         match self.ir.expr(e).clone() {
-            IrExpr::Block { stmts, value } => self.emit_statement_block(e, stmts, value, code),
+            IrExpr::Block { stmts, value } => self.emit_block_node(e, stmts, value, code),
             IrExpr::Return(value) => self.emit_return_node(e, value, code),
             IrExpr::Variable {
                 index,
@@ -5614,12 +5614,12 @@ impl<'a> Emitter<'a> {
                     );
                 };
                 let deferred = self.inline_return_frame_result_type(var).is_some();
+                // kotlinc's `visitSetValue` marks the value's start before evaluating it, whatever
+                // the value's kind: an `iinc` that never evaluates it keeps that line.
+                self.mark_expression_start(value, code);
                 match local_updates::iinc_delta(self.ir, e, var, value, jt) {
                     Some(delta) if !deferred => code.iinc(self.slots[&var].0, delta),
                     _ => {
-                        // `visitSetValue` marks the assignment before the value, so a literal
-                        // argument does not take the line the way a declaration initializer's does.
-                        // The store writes the line again once `constructor-impl` has forgotten it.
                         let unsigned = self.completes_unsigned_bitwise_value(value);
                         let saved_assignment = self.unsigned_assignment_line;
                         if unsigned {

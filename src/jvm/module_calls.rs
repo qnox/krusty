@@ -631,6 +631,7 @@ pub(super) fn realize_super_calls(
                 holder.descriptor,
                 crate::libraries::MemberRealization::Direct {
                     pass_receiver: true,
+                    intrinsic: false,
                 },
             ),
             None => (owner, descriptor, realization),
@@ -714,7 +715,7 @@ pub(super) fn realize_super_calls(
                 }),
                 // As for a direct `super` call below, the receiver stays the dispatch receiver,
                 // so a receiver-first holder static loads it at its own class.
-                crate::libraries::MemberRealization::Direct { pass_receiver } => {
+                crate::libraries::MemberRealization::Direct { pass_receiver, .. } => {
                     ir.add_expr(IrExpr::Call {
                         callee: Box::new(Callee::Static {
                             owner,
@@ -790,7 +791,7 @@ pub(super) fn realize_super_calls(
                 },
                 // The receiver stays the call's dispatch receiver: a receiver-first holder
                 // static loads it at its own class, as the original dispatch did.
-                crate::libraries::MemberRealization::Direct { pass_receiver } => IrExpr::Call {
+                crate::libraries::MemberRealization::Direct { pass_receiver, .. } => IrExpr::Call {
                     callee: Box::new(Callee::Static {
                         owner,
                         name,

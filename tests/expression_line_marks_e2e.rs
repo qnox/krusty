@@ -824,3 +824,61 @@ fn an_expression_bodied_setter_returns_at_its_last_line() {
         &["line 6: 0", "line 7: 1", "line 5: 2", "line 8: 5"],
     );
 }
+
+/// kotlinc decides each line entry from the kind of node it visits: a node that has no operands to
+/// evaluate first (`E.values()`), an intrinsic (`UInt.toString()` realized on the JDK), and an
+/// inlined lambda's invocation mark where their code starts; a `var` without an initializer marks
+/// its declaration before the default it stores; a discarded implicit `Unit` branch value is no
+/// code and marks nothing; and nothing puts the declaration's line ahead of the body's first mark.
+#[test]
+fn line_entries_follow_kotlincs_rule_by_node_kind() {
+    let source = "\
+enum class Shade { LIGHT, DARK }
+
+fun sink(v: Any?) {}
+
+fun names(): Int {
+    var n = 0
+    for (s in Shade.values()) {
+        n += s.ordinal
+    }
+    return n
+}
+
+fun text(x: UInt): String {
+    val s = (x + 1u).toString()
+    return s
+}
+
+fun late(flag: Boolean): Int {
+    var k: Int
+    if (flag) {
+        k = 1
+    } else {
+        k = 2
+    }
+    return k
+}
+
+fun branch(flag: Boolean) {
+    if (flag) sink(1)
+    sink(2)
+}
+
+fun runs(): Int {
+    val v = run {
+        sink(3)
+        4
+    }
+    return v
+}
+";
+    common::byte_diff_against_kotlinc_cp(
+        "KindLineRule",
+        source,
+        "KindLineRuleKt",
+        &[common::stdlib_jar()],
+    )
+    .expect("the reference kotlinc is provisioned")
+    .unwrap_or_else(|why| panic!("{why}"));
+}

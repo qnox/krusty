@@ -1571,6 +1571,7 @@ impl JvmLibraries {
                 if m.is_static() {
                     member.realization = crate::libraries::MemberRealization::Direct {
                         pass_receiver: dispatch_parameter,
+                        intrinsic: false,
                     };
                 }
                 parameter_plans::member(
@@ -2886,6 +2887,7 @@ impl JvmLibraries {
                     if value_dispatch {
                         getter.member_realization = crate::libraries::MemberRealization::Direct {
                             pass_receiver: true,
+                            intrinsic: false,
                         };
                     }
                     parameter_plans::callable(&mut getter, value_dispatch, false);
@@ -2919,6 +2921,7 @@ impl JvmLibraries {
                             callable.member_realization =
                                 crate::libraries::MemberRealization::Direct {
                                     pass_receiver: true,
+                                    intrinsic: false,
                                 };
                         }
                         parameter_plans::callable(&mut callable, value_dispatch, false);
@@ -4125,6 +4128,7 @@ impl JvmLibraries {
                     let prefix = match member.realization {
                         crate::libraries::MemberRealization::Direct {
                             pass_receiver: true,
+                            ..
                         } => params.as_slice(),
                         _ => params.get(1..).unwrap_or_default(),
                     };

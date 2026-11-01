@@ -31,6 +31,12 @@ impl Emitter<'_> {
         node: &IrExpr,
         code: &mut CodeBuilder,
     ) {
+        // A discarded `Unit` is no code at all, so it marks no line either.
+        if !matches!(node, IrExpr::UnitInstance)
+            && crate::jvm::line_numbers::marks_line_at_start(self.ir, expression)
+        {
+            self.mark_expression_start(expression, code);
+        }
         if self.emit_discarded_safe_call(expression, node, code) {
             return;
         }

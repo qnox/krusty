@@ -126,6 +126,30 @@ impl IrFile {
         }
     }
 
+    /// Give every node of the generated tree rooted at `root` that has no source line `line`, as
+    /// kotlinc builds a compiler-generated body (a delegated local's accessor) at its declaration's
+    /// offsets. A node that has a source line, and the tree under it, keeps its own.
+    pub(crate) fn position_generated_tree(&mut self, root: ExprId, line: u32) {
+        if line == 0 {
+            return;
+        }
+        let mut pending = vec![root];
+        while let Some(node) = pending.pop() {
+            if self.positions.get(node).source_line.is_some() && node != root {
+                continue;
+            }
+            let position = self.positions.settle(node);
+            for unpositioned in [
+                &mut position.start_line,
+                &mut position.source_line,
+                &mut position.end_line,
+            ] {
+                unpositioned.get_or_insert(line);
+            }
+            super::traversal::for_each_child(&self.exprs, node, &mut |child| pending.push(child));
+        }
+    }
+
     /// The source position of `expression`.
     pub fn position(&self, expression: ExprId) -> IrNodePosition {
         self.positions.get(expression)
@@ -188,8 +212,30 @@ impl IrFile {
         self.positions.get(expression).statement_line
     }
 
+    /// Root a statement beginning on `line` at `expression`. The nodes built for the statement
+    /// that nothing positioned yet take that line, as fir2ir builds a statement's elements at the
+    /// statement's offsets. It does not settle them: lowering that positions them afterwards still
+    /// does, and a node already settled keeps its position, and so does what it roots.
     pub fn set_statement_line(&mut self, expression: ExprId, line: u32) {
         self.positions.statement_mut(expression).statement_line = Some(line);
+        if line == 0 {
+            return;
+        }
+        let mut pending = vec![expression];
+        while let Some(node) = pending.pop() {
+            if self.positions.is_settled(node) {
+                continue;
+            }
+            let position = self.positions.statement_mut(node);
+            for unpositioned in [
+                &mut position.start_line,
+                &mut position.source_line,
+                &mut position.end_line,
+            ] {
+                unpositioned.get_or_insert(line);
+            }
+            super::traversal::for_each_child(&self.exprs, node, &mut |child| pending.push(child));
+        }
     }
 
     /// Remove `expression`'s statement line, returning it.

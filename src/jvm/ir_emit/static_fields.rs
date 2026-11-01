@@ -1287,6 +1287,8 @@ impl Emitter<'_> {
         value: crate::ir::ExprId,
         code: &mut CodeBuilder,
     ) {
+        // kotlinc's `visitFieldAccess` marks a static store where it starts.
+        self.mark_expression_start(statement, code);
         let s = &self.ir.statics[index as usize];
         let initializer_line = self
             .ir
