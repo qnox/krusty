@@ -585,10 +585,11 @@ impl BodyFirChecker<'_> {
                     member.member.stable_declaration,
                     &member.member.params,
                 )?;
-                let vararg = ArgumentVararg::of_declaration(
+                let vararg = self.declared_argument_vararg(
+                    self.file.expr_span(expression),
                     member.member.call_sig.vararg_index,
                     member.context_args.len(),
-                );
+                )?;
                 (
                     target.0,
                     target.1,

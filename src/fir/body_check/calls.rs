@@ -540,7 +540,11 @@ impl BodyFirChecker<'_> {
                 arguments,
                 &parameter_types,
                 std::iter::empty(),
-                ArgumentVararg::of_declaration(member.call_sig.vararg_index, 0),
+                self.declared_argument_vararg(
+                    self.file.expr_span(expression),
+                    member.call_sig.vararg_index,
+                    0,
+                )?,
             )?,
             substitutions: Box::new([]),
         }))
@@ -616,7 +620,11 @@ impl BodyFirChecker<'_> {
                 arguments,
                 &parameters,
                 std::iter::empty(),
-                ArgumentVararg::of_declaration(member.call_sig.vararg_index, 0),
+                self.declared_argument_vararg(
+                    self.file.expr_span(expression),
+                    member.call_sig.vararg_index,
+                    0,
+                )?,
             )?,
             substitutions,
         }))
@@ -992,10 +1000,11 @@ impl BodyFirChecker<'_> {
                     substitutions,
                     false,
                     selected.context_args.clone(),
-                    ArgumentVararg::of_declaration(
+                    self.declared_argument_vararg(
+                        self.file.expr_span(expression),
                         selected.member.call_sig.vararg_index,
                         selected.context_args.len(),
-                    ),
+                    )?,
                     parameters,
                 ))
             }
@@ -1151,10 +1160,11 @@ impl BodyFirChecker<'_> {
                     extension: false,
                     context_parameters,
                     value_parameters: parameters,
-                    vararg: ArgumentVararg::of_declaration(
+                    vararg: self.declared_argument_vararg(
+                        span,
                         selected.member.call_sig.vararg_index,
                         selected.context_args.len(),
-                    ),
+                    )?,
                     context_arguments: selected.context_args.clone(),
                 })
             }
@@ -1344,7 +1354,7 @@ impl BodyFirChecker<'_> {
                     extension: true,
                     context_parameters,
                     value_parameters: parameters,
-                    vararg: ArgumentVararg::of_declaration(*vararg_index, context_count),
+                    vararg: self.declared_argument_vararg(span, *vararg_index, context_count)?,
                     context_arguments: context_args.clone(),
                 })
             }
@@ -1526,7 +1536,11 @@ impl BodyFirChecker<'_> {
             "publish member-extension expression={expression:?} span={:?} stable={stable_declaration:?} external={external_identity:?} owner={owner:?} name={name} dispatch={dispatch_receiver:?} extension={extension_receiver:?} params={params:?}",
             self.file.expr_span(expression),
         );
-        let argument_vararg = ArgumentVararg::of_declaration(*vararg_index, context_args.len());
+        let argument_vararg = self.declared_argument_vararg(
+            self.file.expr_span(expression),
+            *vararg_index,
+            context_args.len(),
+        )?;
         let mut parameters =
             self.selected_call_parameters(expression, *stable_declaration, params)?;
         // Resolution exposes a vararg's element type in `params` so applicability and inference see
@@ -1980,7 +1994,11 @@ impl BodyFirChecker<'_> {
                 arguments,
                 &parameters,
                 selected.context_args.iter().map(Option::as_ref),
-                ArgumentVararg::of_declaration(selected.vararg_index, selected.context_args.len()),
+                self.declared_argument_vararg(
+                    self.file.expr_span(expression),
+                    selected.vararg_index,
+                    selected.context_args.len(),
+                )?,
             )?,
             substitutions,
         }))
@@ -2237,10 +2255,11 @@ impl BodyFirChecker<'_> {
                     arguments,
                     &selected.member.params,
                     selected.context_args.iter().map(Option::as_ref),
-                    ArgumentVararg::of_declaration(
+                    self.declared_argument_vararg(
+                        self.file.expr_span(expression),
                         selected.member.call_sig.vararg_index,
                         selected.context_args.len(),
-                    ),
+                    )?,
                 )?,
                 substitutions: Box::new([]),
             }));
@@ -2311,10 +2330,11 @@ impl BodyFirChecker<'_> {
                 arguments,
                 &parameters,
                 selected.context_args.iter().map(Option::as_ref),
-                ArgumentVararg::of_declaration(
+                self.declared_argument_vararg(
+                    self.file.expr_span(expression),
                     selected.member.call_sig.vararg_index,
                     selected.context_args.len(),
-                ),
+                )?,
             )?,
             substitutions,
         }))
