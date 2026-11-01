@@ -1,21 +1,20 @@
 //! Which locals a suspension snapshots, and which of them are still live when it runs.
 //!
-//! kotlinc's positional-spill model (docs/POSITIONAL_SPILLS.md) is a LEXICAL rule for named
-//! variables and a LIVENESS rule for compiler temporaries, and the two are decided by one walk of
-//! the final body. Keeping that walk in a module of its own is what lets the rule be read in one
-//! place rather than inferred from the transform that consumes it.
+//! kotlinc's positional-spill model is a LEXICAL rule for named variables and a LIVENESS rule for
+//! compiler temporaries, and the two are decided by one walk of the final body. Keeping that walk
+//! in a module of its own is what lets the rule be read in one place rather than inferred from the
+//! transform that consumes it.
 
 use super::*;
 
-/// Per-suspension lexical scope snapshots (kotlinc's positional-spill model, see
-/// docs/POSITIONAL_SPILLS.md): one walk of the FINAL (post-hoist) body, tracking the eligible
-/// locals in scope; every suspend-call expression id maps to `params ++ in-scope entries` in
-/// declaration order. A NAMED local is included whenever lexically in scope (kotlinc's scope
-/// rule); an unnamed TEMP only while LIVE — some read of it can still run after the suspension
-/// (the `pending` context: every not-yet-walked statement of the enclosing lists, plus the whole
-/// enclosing loops, which re-run their subtrees on the back-edge). A catch variable remapped to a
-/// spill local (`catch_spills`: cvar → ev) is in scope inside its catch body (named — it must
-/// survive its body's own suspensions).
+/// Per-suspension lexical scope snapshots (kotlinc's positional-spill model): one walk of the FINAL
+/// (post-hoist) body, tracking the eligible locals in scope; every suspend-call expression id maps
+/// to `params ++ in-scope entries` in declaration order. A NAMED local is included whenever
+/// lexically in scope (kotlinc's scope rule); an unnamed TEMP only while LIVE — some read of it can
+/// still run after the suspension (the `pending` context: every not-yet-walked statement of the
+/// enclosing lists, plus the whole enclosing loops, which re-run their subtrees on the back-edge).
+/// A catch variable remapped to a spill local (`catch_spills`: cvar → ev) is in scope inside its
+/// catch body (named — it must survive its body's own suspensions).
 pub(super) struct ScopeWalk<'a> {
     pub(super) ir: &'a IrFile,
     pub(super) suspend_set: &'a HashSet<u32>,

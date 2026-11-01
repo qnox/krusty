@@ -56,7 +56,7 @@ pub(crate) struct BackendPassPlugins<'a> {
 pub(crate) struct BackendPassFacts {
     continuation_metadata: crate::jvm::suspend::ContinuationMetadataMap,
     /// Suspend functions whose state machine is built during emission because their only suspension
-    /// lives inside a body the emitter splices. See `docs/JVM_INLINE_BEFORE_CPS.md`.
+    /// lives inside a body the emitter splices.
     emit_time_machines: crate::jvm::suspend::EmitTimeMachines,
     /// Physical returns that preserve `COROUTINE_SUSPENDED` and otherwise answer `Unit`.
     suspended_result_returns: crate::jvm::suspend::SuspendedResultReturns,

@@ -2,7 +2,7 @@
 //! on demand, once per declaration.
 //!
 //! krusty used to answer that question in several unrelated places, each a partial typer with its
-//! own scope model and its own idea of when to give up (see `docs/RESOLUTION_ENGINE.md`). The
+//! own scope model and its own idea of when to give up. The
 //! structural fault was not any one of them but the absence of a single engine: a pass that types
 //! declarations in file-argument order answers a question whose answer depends on the order it was
 //! asked in.

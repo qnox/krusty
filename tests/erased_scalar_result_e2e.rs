@@ -10,9 +10,9 @@
 //! When a later argument (a `try`) makes the earlier ones spill to temporaries, each is still
 //! evaluated against its parameter slot: the erased result is stored and reloaded as the `Object`
 //! the callee returned. kotlinc lays such a spill out differently (it spills the stack at the `try`
-//! itself, reloading it inside the protected region), a separate divergence recorded in
-//! `docs/SPEC.md`, so these shapes pin krusty's complete instruction sequence instead of a kotlinc
-//! byte diff, and run the program for its result.
+//! itself, reloading it inside the protected region), a separate divergence, so these shapes pin
+//! krusty's complete instruction sequence instead of a kotlinc byte diff, and run the program for
+//! its result.
 use super::common;
 
 const SOURCE: &str = "package store\n\

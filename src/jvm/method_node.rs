@@ -16,7 +16,7 @@
 //!
 //! Its consumers are the bytecode rewrites a class's methods get when it is written, which carry
 //! the rewritten body in this form (see `classfile::method_rewrite`), and the unified inliner, a
-//! port of kotlinc's `MethodInliner` (see "JVM unified inliner" in `docs/IMPLEMENTATION_PLAN.md`).
+//! port of kotlinc's `MethodInliner`.
 
 mod assemble;
 mod flow;

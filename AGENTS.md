@@ -92,8 +92,12 @@ upstream release notes, which can name an assistant that contributed upstream. T
   A shared target must not authenticate a sibling checkout's typed model by source mtimes alone.
   Test checkout switching and unchanged-checkout reuse; do not clean the shared target to mask it.
   Audit: `rg -n 'KRUSTY_BUILD_CHECKOUT|shared_target_rebuilds_plugin_ir' .cargo crates/krusty-plugin-ir`.
-- Record every Kotlin-semantics decision in `docs/SPEC.md` with a test.
-- Keep `docs/SPEC.md`, `docs/IMPLEMENTATION_PLAN.md`, and `docs/METADATA_NOTES.md` current.
+- **kotlinc is the spec; tests are the record.** A Kotlin-semantics decision lands as a test that
+  pins kotlinc's behavior, not as prose. Plans, progress, and per-change notes belong in the pull
+  request and its issue, not in the repository.
+- `docs/` holds only design decisions kotlinc cannot answer (for example `docs/NATIVE.md`), format
+  references (`docs/METADATA_NOTES.md`), and user- or contributor-facing guides. Update one when a
+  change alters what it states; never append a per-change log entry or a status section.
 
 # Compiler implementation and review rules
 
@@ -358,4 +362,4 @@ change, not a quiet reset inside yours.
   ceiling. Deadlines must remain configurable for slow systems; timeout output must identify the
   active test/case well enough to diagnose loops.
 
-See also `docs/ARCHITECTURE.md`, `docs/COMPILER_REVIEW.md`, and `docs/TEST_HARNESS.md`.
+See also `docs/ARCHITECTURE.md` and `docs/TEST_HARNESS.md`.

@@ -11,8 +11,7 @@
 //! An object whose constructor is passed one of the call's inline lambdas (a `crossinline` one)
 //! inlines it: the copy keeps the lambda's captured values instead of the lambda, and each of its
 //! methods that called the lambda runs the lambda's body in its place (see `lambda_inlining`).
-//! Objects whose bodies create anonymous objects of their own are a later stage (see "JVM unified
-//! inliner" in `docs/IMPLEMENTATION_PLAN.md`).
+//! Objects whose bodies create anonymous objects of their own are a later stage.
 
 mod constructor;
 use constructor::DeclaredCapture;

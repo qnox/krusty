@@ -1,4 +1,4 @@
-//! APT (javax.annotation.processing) hosting — `docs/JAVA_INTEROP.md` slice 4. javac owns the
+//! APT (javax.annotation.processing) hosting. javac owns the
 //! multi-round loop: krusty's seam only passes `-processorpath` through the persistent JavaRunner
 //! (`common::javac_compile_proc`), and generated sources are compiled in the same invocation.
 //!

@@ -195,7 +195,7 @@ pub(super) fn emit_inherited_default_surface(
                 semantic_ret,
                 // The promoted generic signature of an inherited member is not reconstructed here
                 // (the declaring classifier's formals are not this interface's); a generic
-                // inherited surface keeps descriptor-only shape. Recorded in docs/SPEC.md.
+                // inherited surface keeps descriptor-only shape.
                 signature: None,
                 // kotlinc gives an inherited member's holder forwarder no line: it has no source in
                 // this interface.
