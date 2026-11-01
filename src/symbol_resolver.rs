@@ -345,18 +345,6 @@ fn specialized_constructor_params(
         .collect()
 }
 
-/// Seed a declaration's formals from explicit call-site type arguments. All inference channels use
-/// this operation before receiver/argument unification so written arguments remain authoritative and
-/// member, extension, static, and lambda-shape probes cannot drift into different binding rules.
-pub(crate) fn seeded_gsig_binds(gsig: &GenericSig, type_args: &[Ty]) -> GSigBinds {
-    gsig.formals
-        .iter()
-        .map(crate::types::TyParamName::from)
-        .zip(type_args.iter().copied())
-        .filter(|(_, argument)| *argument != Ty::Error)
-        .collect()
-}
-
 /// Kotlin's internal `@Exact` is a declaration-site applicability constraint. After the callable's
 /// type parameters are fixed (explicitly, or inferred from this call), an annotated parameter admits
 /// only the same semantic type—not an ordinary subtype.

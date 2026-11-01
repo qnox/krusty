@@ -17,8 +17,7 @@ fn local_receiver_input_bounds(
         let identity = argument.non_null().ty_param_name()?;
         let primary = argument.non_null().ty_param_bound()?;
         let extra = parameters
-            .erasure
-            .iter()
+            .bindings()
             .find(|(_, binding)| binding.non_null().ty_param_name() == Some(identity))
             .map(|(source, _)| parameters.extra_bounds_of(source))
             .unwrap_or_else(|| captured_extra_bounds(argument));
