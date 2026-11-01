@@ -748,14 +748,17 @@ impl EntryHeader {
         member: u32,
         entry: &crate::ir::Bridge,
         descriptor: &str,
+        override_results: &crate::jvm::override_results::OverrideResults,
         java_parameters: bool,
     ) -> Self {
-        let function = &ir.functions[member as usize];
         // The entry stands for the lowered member less its leading carrier: its signature is the
-        // member's whole-frame shape (a vararg at its position in that frame) without the
-        // carrier's element.
-        let signature = super::method_signatures::method_signature_parts(
-            formatter, ir, member, function,
+        // member's declared whole-frame shape (a vararg at its position in that frame, a boxed
+        // override result as its wrapper) without the carrier's element.
+        let signature = super::override_result_emission::declared_method_signature_parts(
+            formatter,
+            ir,
+            override_results,
+            member,
         )
         .map(|mut parts| {
             assert_eq!(
@@ -815,7 +818,15 @@ pub(super) fn emit_value_class_interface_entries(
             continue;
         }
         let descriptor = method_descriptor(&jvm_tys(&b.erased_params), ir_ty_to_jvm(&b.erased_ret));
-        let header = EntryHeader::of(ir, formatter, member, b, &descriptor, env.java_parameters);
+        let header = EntryHeader::of(
+            ir,
+            formatter,
+            member,
+            b,
+            &descriptor,
+            env.override_results,
+            env.java_parameters,
+        );
         let class = ClassBridges::new(ir, c, env);
         emit_bridge(&class, cw, bridge_index, b, Some(&header));
         cw.set_method_nullability(&b.name, &descriptor, header.result, &header.parameters);

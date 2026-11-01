@@ -120,3 +120,34 @@ fn a_value_class_interface_entry_signs_its_member_without_the_carrier() {
     .unwrap_or_else(|diff| panic!("Glue differs from kotlinc: {diff}"));
     common::expect_box_ok_with_stdlib(INTERFACE_ENTRIES, "ValueClassInterfaceEntrySignature");
 }
+
+/// An override whose primitive result a generic supertype declares as its wrapper: the entry signs
+/// the member's boxed result, so a signature it needs (a `List<Int>` parameter) ends in
+/// `Ljava/lang/Integer;` and one it does not need is left out.
+const BOXED_ENTRY_RESULTS: &str = "\
+interface Echo<T> {\n\
+    fun echo(x: T): T\n\
+    fun first(xs: List<T>): T\n\
+}\n\
+\n\
+@JvmInline\n\
+value class Shift(val by: Int) : Echo<Int> {\n\
+    override fun echo(x: Int): Int = x + by\n\
+    override fun first(xs: List<Int>): Int = xs[0] + by\n\
+}\n\
+\n\
+fun box(): String {\n\
+    val echo: Echo<Int> = Shift(1)\n\
+    return if (echo.echo(1) == 2 && echo.first(listOf(4)) == 5) \"OK\" else \"fail\"\n\
+}\n\
+";
+
+#[test]
+fn a_value_class_interface_entry_signs_a_boxed_result_as_its_wrapper() {
+    let pair = common::ModuleClassPair::compile(&[("Echo.kt", BOXED_ENTRY_RESULTS)], "Shift");
+    assert_eq!(
+        common::member_table(&pair.krusty),
+        common::member_table(&pair.kotlinc)
+    );
+    common::expect_box_ok_with_stdlib(BOXED_ENTRY_RESULTS, "ValueClassBoxedEntryResult");
+}
