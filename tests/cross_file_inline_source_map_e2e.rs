@@ -274,7 +274,11 @@ fn a_unit_inline_from_another_file_marks_its_closing_brace() {
             "*E",
         ],
     );
-    assert_same_class("announce", &[("Lib.kt", UNIT_LIB), ("Use.kt", UNIT_USE)], "sample/UseKt");
+    assert_same_class(
+        "announce",
+        &[("Lib.kt", UNIT_LIB), ("Use.kt", UNIT_USE)],
+        "sample/UseKt",
+    );
 }
 
 /// An erased `contract { … }` leaves the body empty; the expansion's only line is still the
@@ -290,5 +294,8 @@ fn assert_same_class(tag: &str, sources: &[(&str, &str)], class: &str) {
         eprintln!("skip (reference toolchain unavailable)");
         return;
     };
-    assert!(reference == krusty, "{tag}: {class} differs from kotlinc's bytes");
+    assert!(
+        reference == krusty,
+        "{tag}: {class} differs from kotlinc's bytes"
+    );
 }
