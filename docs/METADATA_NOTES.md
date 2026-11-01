@@ -28,9 +28,10 @@ Annotation values: `mv=[1,9,0]`, `k=2` (file facade), `xi=48`, `d2=["f","","a"]`
   `flags`=9 (default 6 = public final); JVM ext `method_signature`=100 — **omitted** when the JVM
   descriptor is derivable from the Kotlin signature (the simple case).
 - `Type.class_name` = field 6 (fq-name id).
-- A raw platform type sets `JvmProtoBuf.is_raw` (field 101) on both flexible faces. The lower
-  application uses erased declared upper bounds; the nullable upper uses all-star arguments and
-  the read-only collection face where applicable. `flexible_type_capabilities_id` names
+- A raw platform type sets `JvmProtoBuf.is_raw` (field 101) on both flexible faces. For an unannotated
+  occurrence, the lower application uses erased declared upper bounds; the nullable upper uses
+  all-star arguments and the read-only collection face where applicable. Occurrence nullability
+  annotations adjust both faces. `flexible_type_capabilities_id` names
   `kotlin.jvm.PlatformType`. Strings intern lower, upper, then capability.
   Test: `tests/java_raw_type_e2e.rs`.
 - `ValueParameter`: `name`=2, `type`=3.
