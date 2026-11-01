@@ -200,6 +200,34 @@ fn is_inherited_special_bridge(method: &crate::jvm::classreader::MethodSig) -> b
         && (method.is_public() || method.is_protected())
 }
 
+/// The name a bridge for a dependency's member function starts from.
+fn external_function_name(
+    ir: &IrFile,
+    callables: &crate::backend::CheckedBackendCallables,
+    target: crate::fir::ExternalCallableId,
+) -> Result<String, SkipReason> {
+    let callable = callables.callable(target).ok_or(SkipReason::Bridges)?;
+    // A value class in a dependency member's signature gives its JVM method kotlinc's mangled
+    // name (`get-d1cXd_c`). The value-class pass derives that name for a bridge from the
+    // supertype's parameters, as it does for a declaration of this module, so the bridge starts
+    // from the Kotlin name; starting from the mangled one mangles it twice. An overridable member
+    // cannot carry `@JvmName`, and an internal one keeps its module-suffixed name.
+    if callable.visibility != crate::types::Visibility::Internal
+        && callable
+            .params
+            .iter()
+            .chain(std::iter::once(&callable.ret))
+            .any(|ty| {
+                ty.non_null()
+                    .obj_internal()
+                    .is_some_and(|name| crate::jvm::value_classes::is_boxed_value_class(ir, name))
+            })
+    {
+        return Ok(callable.name.clone());
+    }
+    external_method_name(callables, target)
+}
+
 fn external_method_name(
     callables: &crate::backend::CheckedBackendCallables,
     target: crate::fir::ExternalCallableId,
@@ -447,7 +475,7 @@ fn superclass_method_bridges(
                 module_function_name(ir, callable).unwrap_or_else(|| edge.name.clone())
             }
             crate::fir::ResolvedFunctionOverrideTarget::External(target) => {
-                external_method_name(callables, target)?
+                external_function_name(ir, callables, target)?
             }
         };
         let target_name = if let Some(function) = own_fid {
@@ -458,7 +486,7 @@ fn superclass_method_bridges(
                     module_function_name(ir, callable).unwrap_or_else(|| edge.name.clone())
                 }
                 crate::fir::ResolvedFunctionOverrideTarget::External(target) => {
-                    external_method_name(callables, target)?
+                    external_function_name(ir, callables, target)?
                 }
             }
         };
