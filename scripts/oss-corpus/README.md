@@ -85,3 +85,32 @@ Run one project locally with:
 ```text
 scripts/oss-corpus/run.sh <name> <work dir> <krusty binary> <plugin repository> <plugin version>
 ```
+
+## Warm benchmark
+
+The corpus builds above are cold: each starts without a Gradle or Kotlin daemon and pays for its
+own JVM warm-up. A developer's build does not, so `bench.sh` measures what an edit loop costs with
+a warm Gradle daemon, with kotlinc running in the Kotlin daemon with incremental compilation, the
+way the Kotlin Gradle plugin runs it by default:
+
+```text
+scripts/oss-corpus/bench.sh <name> <work dir> <krusty binary> <plugin repository> <plugin version>
+```
+
+A krusty probe build first finds the compilations krusty builds today (`bench.py plan`): only those
+are benchmarked, both compilers build exactly that task set, and both builds must succeed. Each
+compiler then gets its own session against its own Gradle and Kotlin daemons (`bench.py session`),
+which it starts under a Gradle user home and Kotlin daemon directory of its own, checks that every
+build ran in, and stops, leaving any other daemon on the machine alone: unrecorded
+warm-up builds, clean builds (`--rerun-tasks`), and an edit loop that changes one Kotlin file
+between builds, first without changing its ABI (the body of a private function) and then with an
+ABI change (a public function renamed). The file is the median-sized source of the benchmarked
+main compilation with the most sources, or `$BENCH_EDIT`. Recorded builds run offline and without
+the build cache. `$BENCH_WARMUPS`, `$BENCH_CLEAN_RUNS` and `$BENCH_EDIT_RUNS` set the run counts.
+
+Each build records its wall time, the time of the benchmarked compile tasks, the peak of the summed
+resident memory of every process the session started (the warm daemons included, sampled every
+100 ms, by kind) and what stays resident afterwards. `bench.py report` writes
+`<work dir>/bench/<name>.json` with the median times and highest peak memory of each scenario and
+prints a Markdown table. krusty compiles a whole compilation each time its task is out of date,
+while kotlinc recompiles only what changed: the edit loop measures that difference as it is.
