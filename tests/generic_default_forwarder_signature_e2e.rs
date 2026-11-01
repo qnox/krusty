@@ -1,0 +1,144 @@
+//! A class inheriting an interface default member that declares its own type parameters gets a
+//! forwarder whose generic `Signature` declares them, as kotlinc writes it: each bound as the
+//! class's supertype substitutes it, the class bound ahead of the interface bounds, and a
+//! `suspend` member's CPS shape after the declaration section. A type-parameter position is
+//! annotated `@NotNull` only when its bound excludes null, and `@Nullable` when marked `T?`.
+//! A type parameter bounded by the interface's own (`fun <T : E>` through `Picker<String>`) erases
+//! to the substituted bound, beside an erased bridge, and a local class bound keeps its emitted name.
+//! A value class signs each forwarder's `-impl` static the same way, with the carrier first by its
+//! erased JVM type.
+
+use super::common;
+
+const LIBRARY: &str = "\
+package lib\n\
+\n\
+interface Picker<E> {\n\
+    fun <T : Comparable<T>> least(x: T, y: T): T = if (x < y) x else y\n\
+    fun <T> first(xs: List<T>, fallback: E): T = xs[0]\n\
+    fun <T> describe(x: T): String = \"$x\"\n\
+    fun <T> count(): Int = 1\n\
+    fun <T> orNull(x: T?): T? = x\n\
+    fun <T : E> narrow(x: T): T = x\n\
+    suspend fun <T> echo(x: T): T = x\n\
+}\n\
+";
+
+const SAME_MODULE: &str = "\
+package app\n\
+\n\
+interface Picker<E> {\n\
+    fun <T : Comparable<T>> least(x: T, y: T): T = if (x < y) x else y\n\
+    fun <T> first(xs: List<T>, fallback: E): T = xs[0]\n\
+    fun <T> describe(x: T): String = \"$x\"\n\
+    fun <T> count(): Int = 1\n\
+    fun <T> orNull(x: T?): T? = x\n\
+    fun <T : E> narrow(x: T): T = x\n\
+    suspend fun <T> echo(x: T): T = x\n\
+    fun <T, R> T.convert(r: R): R where T : CharSequence, T : Runnable = r\n\
+    fun <T : Number> E.pair(x: T): Pair<E, T> = this to x\n\
+}\n\
+\n\
+object Strings : Picker<String>\n\
+\n\
+class Numbers<Q : Number> : Picker<Q>\n\
+\n\
+@JvmInline\n\
+value class Wrapped(val s: String) : Picker<String>\n\
+\n\
+@JvmInline\n\
+value class Measured<A : Number>(val a: A) : Picker<A>\n\
+\n\
+fun locals(): Any {\n\
+    class Bound\n\
+    class Local : Picker<Bound>\n\
+    return Local()\n\
+}\n\
+";
+
+const CONSUMER: &str = "\
+package app\n\
+\n\
+import lib.Picker\n\
+\n\
+object Strings : Picker<String>\n\
+\n\
+class Numbers<Q : Number> : Picker<Q>\n\
+\n\
+@JvmInline\n\
+value class Wrapped(val s: String) : Picker<String>\n\
+\n\
+@JvmInline\n\
+value class Measured<A : Number>(val a: A) : Picker<A>\n\
+";
+
+#[test]
+fn a_generic_default_forwarder_declares_its_type_parameters() {
+    for class in [
+        "app/Strings",
+        "app/Numbers",
+        "app/Wrapped",
+        "app/Measured",
+        "app/GenericDefaultForwarderSignatureKt$locals$Local",
+    ] {
+        common::byte_diff_against_kotlinc_cp(
+            "GenericDefaultForwarderSignature",
+            SAME_MODULE,
+            class,
+            &[common::stdlib_jar()],
+        )
+        .expect("reference kotlinc is provisioned")
+        .unwrap_or_else(|diff| panic!("{class} differs from kotlinc: {diff}"));
+    }
+}
+
+#[test]
+fn a_dependency_generic_default_forwarder_declares_its_type_parameters() {
+    let library = common::compile_libs_build(
+        "DependencyGenericDefaultForwarderLibrary",
+        &[("Lib.kt", LIBRARY)],
+    )
+    .expect("krusty builds the dependency");
+    let reference = library
+        .reference_out()
+        .expect("reference kotlinc builds the dependency")
+        .to_path_buf();
+    common::assert_classes_identical_to_kotlinc_over_own_libraries(
+        "DependencyGenericDefaultForwarder",
+        CONSUMER,
+        &["app/Strings", "app/Numbers", "app/Wrapped", "app/Measured"],
+        &[reference],
+        &[library.krusty_out().to_path_buf()],
+    );
+}
+
+/// A bound whose JVM name holds a parenthesis: the value-class static's carrier goes ahead of the
+/// forwarder's parameter list, never inside the declaration section.
+const PARENTHESIZED_BOUND: &str = "\
+open class `Bound(Ok`\n\
+\n\
+interface Picker {\n\
+    fun <T : `Bound(Ok`> echo(x: T): T = x\n\
+}\n\
+\n\
+@JvmInline\n\
+value class Wrapped(val payload: String) : Picker\n\
+\n\
+fun box(): String {\n\
+    val input = `Bound(Ok`()\n\
+    return if (Wrapped(\"x\").echo(input) === input) \"OK\" else \"fail\"\n\
+}\n\
+";
+
+#[test]
+fn a_value_class_static_signature_keeps_a_parenthesized_bound_whole() {
+    common::byte_diff_against_kotlinc_cp(
+        "ParenthesizedBoundForwarder",
+        PARENTHESIZED_BOUND,
+        "Wrapped",
+        &[common::stdlib_jar()],
+    )
+    .expect("reference kotlinc is provisioned")
+    .unwrap_or_else(|diff| panic!("Wrapped differs from kotlinc: {diff}"));
+    common::expect_box_ok_with_stdlib(PARENTHESIZED_BOUND, "ParenthesizedBoundForwarder");
+}

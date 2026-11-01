@@ -172,6 +172,11 @@ pub(super) fn inherited_defaults(
                 let Some(body) = accessor.body(is_kotlin) else {
                     continue;
                 };
+                let (applied_parameters, applied_result) = rebound_member_formals(
+                    &accessor.type_parameters,
+                    applied_parameters,
+                    applied_result,
+                );
                 defaults.push(ResolvedInheritedDefault {
                     name: accessor.name,
                     function: accessor.function,
@@ -183,6 +188,7 @@ pub(super) fn inherited_defaults(
                     result: accessor.result,
                     applied_parameters,
                     applied_result,
+                    type_parameters: accessor.type_parameters,
                     suspend: accessor.suspend,
                     vararg: accessor.vararg,
                     body,
@@ -191,6 +197,69 @@ pub(super) fn inherited_defaults(
         }
     }
     defaults
+}
+
+/// The applied shape with each occurrence of the member's own type parameter carrying its bound
+/// as the applied supertype substitutes it. `fun <T : E> f(x: T)` seen through `I<String>` takes a
+/// `T` bounded by `String`, so a realization erases it to `String`, as kotlinc's fake override
+/// does; an occurrence whose bound the substitution leaves alone stays as it is.
+fn rebound_member_formals<P: AsRef<[Ty]> + FromIterator<Ty>>(
+    type_parameters: &[crate::fir::InheritedTypeParameter],
+    parameters: P,
+    result: Ty,
+) -> (P, Ty) {
+    let occurrence = |name: &str| {
+        parameters
+            .as_ref()
+            .iter()
+            .chain(std::iter::once(&result))
+            .find_map(|ty| occurrence_bound(*ty, name))
+    };
+    let bounds = type_parameters
+        .iter()
+        .filter_map(|parameter| {
+            let bound = parameter
+                .bounds
+                .first()
+                .map_or(Ty::nullable(Ty::obj("kotlin/Any")), |(bound, _)| *bound);
+            let name = &*parameter.semantic_name;
+            occurrence(name)
+                .is_some_and(|current| current != bound)
+                .then(|| (name.to_string(), bound))
+        })
+        .collect::<crate::fx_hash::HashMap<_, _>>();
+    if bounds.is_empty() {
+        return (parameters, result);
+    }
+    let rebound = |ty: Ty| crate::types::ty_with_param_bounds(ty, &bounds);
+    let parameters = parameters.as_ref().iter().map(|ty| rebound(*ty)).collect();
+    (parameters, rebound(result))
+}
+
+/// The bound an occurrence of type parameter `name` carries inside `ty`, if it occurs.
+fn occurrence_bound(ty: Ty, name: &str) -> Option<Ty> {
+    use crate::types::TyKind;
+    match ty.kind() {
+        TyKind::TyParam(parameter, bound) if parameter.as_str() == name => Some(bound),
+        TyKind::DefinitelyNotNull(inner)
+        | TyKind::Nullable(inner)
+        | TyKind::PlatformNullable(inner)
+        | TyKind::MutabilityFlexible(inner)
+        | TyKind::InProjection(inner)
+        | TyKind::OutProjection(inner)
+        | TyKind::StarProjection(inner)
+        | TyKind::RawProjection(inner) => occurrence_bound(inner, name),
+        TyKind::Intersection(parts) => parts.iter().find_map(|part| occurrence_bound(*part, name)),
+        TyKind::Obj(_, arguments) => arguments
+            .iter()
+            .find_map(|argument| occurrence_bound(*argument, name)),
+        TyKind::Fun(signature) => signature
+            .params
+            .iter()
+            .chain(std::iter::once(&signature.ret))
+            .find_map(|part| occurrence_bound(*part, name)),
+        _ => None,
+    }
 }
 
 fn is_interface(source: &dyn SymbolSource, classifier: TypeName) -> bool {
@@ -354,6 +423,8 @@ struct SurfaceAccessor {
     parameters: Box<[Ty]>,
     parameter_identities: Box<[ResolvedParameterIdentity]>,
     result: Ty,
+    /// A function's own type parameters as the applied view bounds them; an accessor has none.
+    type_parameters: Box<[crate::fir::InheritedTypeParameter]>,
     suspend: bool,
     /// The declaration's last physical parameter is its declared `vararg`.
     vararg: bool,
@@ -459,6 +530,7 @@ fn module_surface(
                     .into_iter()
                     .find(|function| function.stable_declaration == Some(child))
                     .expect("a module interface function is visible through its provider");
+                let type_parameters = type_parameters(source, &applied);
                 let mut parameters = signature
                     .parameters
                     .iter()
@@ -493,6 +565,7 @@ fn module_surface(
                         parameters: parameters.into_boxed_slice(),
                         parameter_identities,
                         result: signature.result.get(),
+                        type_parameters,
                         suspend: header.flags.has(DeclarationFlags::SUSPEND),
                         vararg,
                         is_abstract,
@@ -539,6 +612,7 @@ fn module_surface(
                     parameters: parameters.clone().into_boxed_slice(),
                     parameter_identities: getter_identities.clone().into_boxed_slice(),
                     result: signature.result.get(),
+                    type_parameters: Box::default(),
                     suspend: false,
                     vararg: false,
                     is_abstract,
@@ -567,6 +641,7 @@ fn module_surface(
                         parameters: parameters.into_boxed_slice(),
                         parameter_identities: setter_identities.into_boxed_slice(),
                         result: Ty::Unit,
+                        type_parameters: Box::default(),
                         suspend: false,
                         vararg: false,
                         is_abstract,
@@ -625,9 +700,10 @@ fn dependency_surface(
             .zip(applied_functions.overloads)
             .filter(|(function, _)| member_function(function))
         {
+            let type_parameters = type_parameters(source, &applied);
             surface.push(SurfaceMember {
                 slot: Slot::Function(Box::new(applied)),
-                accessors: vec![dependency_function(function)],
+                accessors: vec![dependency_function(function, type_parameters)],
                 is_kotlin: shape.is_kotlin,
             });
         }
@@ -679,7 +755,41 @@ fn dependency_realization(callable: &LibraryCallable) -> DependencyRealization {
     }
 }
 
-fn dependency_function(function: &FunctionInfo) -> SurfaceAccessor {
+/// The type parameters `function` declares, bounded as its applied view substitutes them.
+fn type_parameters(
+    source: &dyn SymbolSource,
+    function: &FunctionInfo,
+) -> Box<[crate::fir::InheritedTypeParameter]> {
+    let Some(signature) = &function.generic_sig else {
+        return Box::default();
+    };
+    signature
+        .formals
+        .iter()
+        .enumerate()
+        .map(|(ordinal, name)| crate::fir::InheritedTypeParameter {
+            semantic_name: name.as_str().into(),
+            bounds: signature
+                .formal_bounds
+                .get(ordinal)
+                .into_iter()
+                .flatten()
+                .map(|&bound| {
+                    let is_interface =
+                        crate::fir::ResolvedTypeParameterBound::is_interface_type(bound, |owner| {
+                            is_interface(source, owner)
+                        });
+                    (bound, is_interface)
+                })
+                .collect(),
+        })
+        .collect()
+}
+
+fn dependency_function(
+    function: &FunctionInfo,
+    type_parameters: Box<[crate::fir::InheritedTypeParameter]>,
+) -> SurfaceAccessor {
     let callable = &function.callable;
     // An extension receiver leads the physical parameters; the call shape's `vararg_index` counts
     // only the logical (context and value) parameters.
@@ -701,6 +811,7 @@ fn dependency_function(function: &FunctionInfo) -> SurfaceAccessor {
             )
             .expect("a normalized function publishes every typed parameter identity"),
         result: callable.ret,
+        type_parameters,
         suspend: function.flags.suspend,
         vararg: function.call_sig.vararg_index.is_some_and(|index| {
             index + usize::from(receiver_param) + 1 == callable.physical_params.len()
@@ -749,6 +860,7 @@ fn dependency_accessor(
         parameters: callable.params.clone().into_boxed_slice(),
         parameter_identities: identities.into_boxed_slice(),
         result: callable.ret,
+        type_parameters: Box::default(),
         suspend: callable.suspend,
         // A property accessor never declares a `vararg`.
         vararg: false,

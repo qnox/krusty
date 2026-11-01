@@ -50,7 +50,7 @@ struct InheritedForwarder {
     value_class_params: Vec<Option<crate::jvm::bridge_adaptations::ValueClassAdapter>>,
     value_class_ret: Option<crate::jvm::bridge_adaptations::ValueClassAdapter>,
     /// The forwarder's generic `Signature`, when its substituted types have generic structure.
-    signature: Option<String>,
+    signature: Option<ForwarderSignature>,
     target_owner: String,
     target_descriptor: String,
     dispatch: ForwarderDispatch,
@@ -161,16 +161,10 @@ enum ForwarderSite {
     ValueClassStatic,
 }
 
-/// `@NotNull`/`@Nullable` for one semantic type of a forwarder: reference types only, and never a
-/// bare type variable.
+/// `@NotNull`/`@Nullable` for one semantic type of a forwarder, as kotlinc annotates any declared
+/// position: reference types only, and a bare type variable only when its bound excludes null.
 fn forwarder_nullability(ty: Ty) -> Option<&'static str> {
-    if ty.non_null().is_ty_param() || !ir_ty_to_jvm(&ty).is_reference() {
-        None
-    } else if ty.is_nullable() {
-        Some("Lorg/jetbrains/annotations/Nullable;")
-    } else {
-        Some("Lorg/jetbrains/annotations/NotNull;")
-    }
+    crate::jvm::declared_type_nullability::declared_annotation(ty, ir_ty_to_jvm(&ty))
 }
 
 /// Emit an ordinary class's forwarders. A value class writes its own, each beside its `-impl`
@@ -277,8 +271,8 @@ fn forwarder(
     let signature = forwarder_signature(
         formatter,
         class_type_params,
-        &semantic_params,
-        semantic_ret,
+        &default.type_parameters,
+        (&semantic_params, semantic_ret),
         (&param_tys, ret),
         default.suspend,
     );
@@ -348,42 +342,90 @@ fn forwarder(
 }
 
 /// The generic `Signature` of a forwarder whose types have generic structure (`List<String>`, a
-/// class type parameter), or `None` when it would only repeat the descriptor. A `suspend` member
-/// signs its CPS shape, as the member itself does: the declared result travels as the trailing
-/// `Continuation<? super R>` and the method returns `Object`.
+/// class type parameter, a type parameter of its own), or `None` when it would only repeat the
+/// descriptor. A `suspend` member signs its CPS shape, as the member itself does: the declared
+/// result travels as the trailing `Continuation<? super R>` and the method returns `Object`.
 ///
-/// A member's own type parameters would need their declarations ahead of the parameter list,
-/// which the inherited record does not carry; such a forwarder keeps descriptor-only shape
-/// (recorded in docs/SPEC.md).
+/// The member's own type parameters are declared ahead of the parameter list with their bounds as
+/// the class's applied supertype substitutes them (`<T::Ljava/lang/Comparable<-TT;>;>`).
 fn forwarder_signature(
     formatter: &JvmSignatureFormatter<'_>,
     class_type_params: &[String],
-    semantic_params: &[Ty],
-    semantic_ret: Ty,
+    type_parameters: &[crate::fir::InheritedTypeParameter],
+    (semantic_params, semantic_ret): (&[Ty], Ty),
     (param_tys, ret): (&[Ty], Ty),
     suspend: bool,
-) -> Option<String> {
-    // A member's own type parameter (`fun <T> echo`) needs its declaration in the forwarder's
-    // signature, which this record does not carry: keep the descriptor-only shape for it.
+) -> Option<ForwarderSignature> {
+    let known = class_type_params
+        .iter()
+        .cloned()
+        .chain(
+            type_parameters
+                .iter()
+                .map(|parameter| parameter.semantic_name.to_string()),
+        )
+        .collect::<Vec<_>>();
     if semantic_params
         .iter()
         .chain(std::iter::once(&semantic_ret))
-        .any(|ty| mentions_other_type_parameter(*ty, class_type_params))
+        .chain(
+            type_parameters
+                .iter()
+                .flat_map(|parameter| parameter.bounds.iter().map(|(bound, _)| bound)),
+        )
+        .any(|ty| mentions_other_type_parameter(*ty, &known))
     {
         return None;
     }
-    let mut signature = String::from("(");
+    let declarations = super::type_parameter_signatures::jvm_type_parameter_declarations(
+        formatter,
+        type_parameters.iter().map(|parameter| {
+            (
+                crate::types::type_parameter_source_name(&parameter.semantic_name),
+                &*parameter.bounds,
+            )
+        }),
+    )?;
+    let mut parameters = String::new();
     for parameter in semantic_params {
-        signature.push_str(&formatter.method_ty(parameter, Wildcards::Declared)?);
+        parameters.push_str(&formatter.method_ty(parameter, Wildcards::Declared)?);
     }
     if suspend {
-        signature.push_str(&formatter.continuation(semantic_ret, Wildcards::Declared)?);
-        signature.push_str(")Ljava/lang/Object;");
-        return Some(signature);
+        parameters.push_str(&formatter.continuation(semantic_ret, Wildcards::Declared)?);
+        return Some(ForwarderSignature {
+            declarations,
+            parameters,
+            result: "Ljava/lang/Object;".to_string(),
+        });
     }
-    signature.push(')');
-    signature.push_str(&formatter.method_ty(&semantic_ret, Wildcards::Suppressed)?);
-    (signature != method_descriptor(param_tys, ret)).then_some(signature)
+    let signature = ForwarderSignature {
+        declarations,
+        parameters,
+        result: formatter.method_ty(&semantic_ret, Wildcards::Suppressed)?,
+    };
+    (signature.render(None) != method_descriptor(param_tys, ret)).then_some(signature)
+}
+
+/// A forwarder's generic `Signature` in its grammar's parts: the type-parameter declaration
+/// section, the parameter types and the result type, each already written.
+struct ForwarderSignature {
+    declarations: String,
+    parameters: String,
+    result: String,
+}
+
+impl ForwarderSignature {
+    /// The signature, with `leading` written ahead of the forwarder's parameters (a value class's
+    /// static takes its carrier first).
+    fn render(&self, leading: Option<&str>) -> String {
+        format!(
+            "{}({}{}){}",
+            self.declarations,
+            leading.unwrap_or_default(),
+            self.parameters,
+            self.result
+        )
+    }
 }
 
 /// Whether `ty` mentions a type parameter not named in `known`.
@@ -449,6 +491,10 @@ fn write_forwarder(
         "an inherited forwarder needs every declaration parameter identity"
     );
     let desc = forwarder.descriptor();
+    let signature = forwarder
+        .signature
+        .as_ref()
+        .map(|signature| signature.render(None));
     let parameter_annotations = forwarder.parameter_annotations();
     // The forwarder is an instance method again, so an extension receiver is an ordinary,
     // unflagged parameter.
@@ -471,7 +517,7 @@ fn write_forwarder(
     cw.reserve_method_pool_with_annotations(
         name,
         &desc,
-        forwarder.signature.as_deref(),
+        signature.as_deref(),
         &header_annotations,
         &crate::ir::DeclarationAnnotations::default(),
         &reflected,
@@ -514,7 +560,7 @@ fn write_forwarder(
         &desc,
         &mut code,
         argument_words,
-        forwarder.signature.as_deref(),
+        signature.as_deref(),
     );
     cw.set_method_parameters(name, &desc, &reflected);
     let mut locals = vec![("this".to_string(), format!("L{};", c.fq_name()), 0)];
@@ -552,7 +598,9 @@ fn write_forwarder(
 /// first, then the forwarder's parameters. It checks each `@NotNull` parameter, boxes the carrier
 /// and calls the forwarder on the box. Like every generated static it maps no line; its locals and
 /// `MethodParameters` name the carrier `arg0` (synthetic) and move an extension receiver into a
-/// mandated parameter.
+/// mandated parameter. It is signed exactly when the forwarder is: kotlinc copies the forwarder's
+/// signature and writes the carrier ahead of its parameters by its erased JVM type, without
+/// declaring the class's type parameters.
 fn write_value_class_static(
     c: &crate::ir::IrClass,
     cw: &mut ClassWriter,
@@ -578,6 +626,11 @@ fn write_value_class_static(
     let mut params = vec![carrier];
     params.extend_from_slice(&forwarder.param_tys);
     let desc = method_descriptor(&params, forwarder.ret);
+    let carrier_descriptor = type_descriptor(carrier);
+    let signature = forwarder
+        .signature
+        .as_ref()
+        .map(|signature| signature.render(Some(&carrier_descriptor)));
     let local_variable_names = forwarder.local_variable_names(ForwarderSite::ValueClassStatic);
     assert_eq!(
         local_variable_names.len(),
@@ -603,7 +656,7 @@ fn write_value_class_static(
     cw.reserve_method_pool_with_annotations(
         &name,
         &desc,
-        None,
+        signature.as_deref(),
         &header_annotations,
         &crate::ir::DeclarationAnnotations::default(),
         &reflected,
@@ -662,7 +715,14 @@ fn write_value_class_static(
     );
     forwarder.cast_target_result(cw, &mut code);
     emit_return(forwarder.ret, &mut code);
-    finish_code::<0x0009>(cw, &name, &desc, &mut code, argument_words);
+    finish_code_sig::<0x0009>(
+        cw,
+        &name,
+        &desc,
+        &mut code,
+        argument_words,
+        signature.as_deref(),
+    );
     cw.set_method_parameters(&name, &desc, &reflected);
     let mut locals = vec![(carrier_name, local_variable_desc(carrier), 0)];
     let mut slot = slot_words(carrier);
