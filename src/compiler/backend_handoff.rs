@@ -63,7 +63,8 @@ pub(super) fn checked_ir_file<'a>(
         .get(source.raw() as usize)
         .map(|stem| format!("{}.kt", stem.rsplit(['/', '\\']).next().unwrap_or(stem)))
         .unwrap_or_default();
-    let mut runtime = plugin_handoff::HandoffRuntime::new(symbols.semantic_platform());
+    let mut runtime =
+        plugin_handoff::HandoffRuntime::new(symbols.semantic_platform(), &classifiers);
     let rejections = crate::plugins::record_enabled_source_facts(
         &mut ir,
         symbols.native_plugins(),
