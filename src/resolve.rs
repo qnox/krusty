@@ -242,6 +242,7 @@ mod plugin_expression_planning;
 mod plugin_noarg;
 mod plugin_status;
 mod postponed_applicability;
+mod postponed_array_factories;
 mod postponed_constraints;
 mod postponed_diagnostics;
 mod property_declaration_check;
@@ -42468,7 +42469,8 @@ impl<'a> Checker<'a> {
             if matches!(
                 self.file.expr(argument),
                 Expr::Lambda { .. } | Expr::CallableRef { .. }
-            ) {
+            ) || self.postponed_empty_reference_array_factory(scope, argument)
+            {
                 let has_receiver = selected
                     .argument_lambda_receivers
                     .get(index)
@@ -42516,6 +42518,7 @@ impl<'a> Checker<'a> {
                 None,
             );
         }
+        self.record_whole_array_delegation_arguments(arguments, &selected);
         self.resolved_ctor_delegations
             .insert((class, secondary), selected);
     }
@@ -47093,7 +47096,12 @@ impl<'a> Checker<'a> {
                             // A delegation lambda is contextual: leave its initial `Error`
                             // placeholder until the shared constructor selector maps it to a
                             // parameter slot, just like a primary class-header base argument.
-                            if !matches!(c.file.expr(argument), Expr::Lambda { .. }) {
+                            if !matches!(c.file.expr(argument), Expr::Lambda { .. })
+                                && !c.postponed_empty_reference_array_factory(
+                                    delegation_scope,
+                                    argument,
+                                )
+                            {
                                 c.expr(delegation_scope, argument);
                             }
                         }
@@ -47135,7 +47143,12 @@ impl<'a> Checker<'a> {
                     }
                     CtorDelegation::Super(delegation) => {
                         for &argument in &delegation.args {
-                            if !matches!(c.file.expr(argument), Expr::Lambda { .. }) {
+                            if !matches!(c.file.expr(argument), Expr::Lambda { .. })
+                                && !c.postponed_empty_reference_array_factory(
+                                    delegation_scope,
+                                    argument,
+                                )
+                            {
                                 c.expr(delegation_scope, argument);
                             }
                         }
@@ -48179,7 +48192,8 @@ impl<'a> Checker<'a> {
                     if !matches!(
                         self.file.expr(argument),
                         Expr::Lambda { .. } | Expr::CallableRef { .. }
-                    ) {
+                    ) && !self.postponed_empty_reference_array_factory(scope, argument)
+                    {
                         self.expr(scope, argument);
                     }
                 }
@@ -48193,7 +48207,10 @@ impl<'a> Checker<'a> {
                     &arguments,
                     &constructor_candidates,
                 ) {
-                    SourceConstructorSelection::Selected { resolved, .. } => *resolved,
+                    SourceConstructorSelection::Selected { resolved, .. } => {
+                        self.record_whole_array_delegation_arguments(&arguments, &resolved);
+                        *resolved
+                    }
                     SourceConstructorSelection::NoMatch { .. } => {
                         self.diags.error(
                             entry.span,
@@ -49183,6 +49200,14 @@ impl<'a> Checker<'a> {
             self.contextual_annotation_array_argument(scope, argument, actual, expected)
         {
             committed
+        } else if self.expr_types[argument.0 as usize] == Ty::Error
+            && self.postponed_empty_reference_array_factory(scope, argument)
+            && expected.non_null().is_reference_array()
+            && expected.non_null().array_elem().is_some()
+        {
+            // A postponed empty array factory is still uncommitted: its `Error` placeholder is
+            // not a checked result, so the selected parameter supplies its element type now.
+            self.expr_expected(scope, argument, expected)
         } else if matches!(self.file.expr(argument), Expr::Call { .. })
             && self.expr_types[argument.0 as usize] == actual
             && (actual == expected
@@ -49206,11 +49231,7 @@ impl<'a> Checker<'a> {
             // produced inside the reference was retained by that completed check. Re-entering the
             // reference here would duplicate either outcome.
             actual
-        } else if self.file.collection_literal_calls.contains(&argument.0)
-            || (self.postponed_empty_reference_array_factory(scope, argument)
-                && expected.non_null().is_reference_array()
-                && expected.non_null().array_elem().is_some())
-        {
+        } else if self.file.collection_literal_calls.contains(&argument.0) {
             self.expr_expected(scope, argument, expected)
         } else if matches!(self.file.expr(argument), Expr::CallableRef { .. })
             && expected.non_null().is_fun()
@@ -55000,47 +55021,6 @@ impl<'a> Checker<'a> {
             return None;
         }
         Some(name)
-    }
-
-    /// A zero-element reference-array factory has no element evidence until an enclosing selected
-    /// parameter supplies `Array<T>`. Keep that call uncommitted during overload probing, exactly as
-    /// an unshaped lambda is kept uncommitted; the selected-argument seam re-enters the ordinary
-    /// synthetic call checker with the concrete array expectation. This predicate identifies the
-    /// compiler declaration after normal lexical/module/classifier shadowing, rather than reserving
-    /// the source spelling.
-    fn postponed_empty_reference_array_factory(
-        &self,
-        scope: &CheckerScope<'_>,
-        expression: ExprId,
-    ) -> bool {
-        let Expr::Call { callee, args } = self.file.expr(expression) else {
-            return false;
-        };
-        if !args.is_empty()
-            || self
-                .file
-                .call_type_args
-                .get(&expression.0)
-                .is_some_and(|arguments| !arguments.is_empty())
-        {
-            return false;
-        }
-        let Expr::Name(name) = self.file.expr(*callee) else {
-            return false;
-        };
-        let Some(synthetic) = crate::synthetics::lookup(name) else {
-            return false;
-        };
-        if synthetic.kind != crate::synthetics::SyntheticKind::ReferenceVararg
-            || self.lexical_value_claims_call_with_arguments(scope, name, args)
-            || self.module_declares(name)
-        {
-            return false;
-        }
-        !matches!(
-            self.select_classifier(scope, name),
-            InheritedNestedClassifier::Found(internal) if !internal.matches(synthetic.fqn)
-        )
     }
 
     fn context_sensitive_name_matches(&self, name: &str, expected: Ty) -> bool {
