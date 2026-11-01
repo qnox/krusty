@@ -1,9 +1,10 @@
 //! Provider normalization for JVM-backed top-level Kotlin properties.
 //!
-//! A Kotlin `const val` is declared in package metadata (or in class metadata, for a
-//! `companion { … }` block constant) but may have no emitted getter. Its field is
-//! the physical realization and carries the compile-time payload. This module joins those two
-//! provider facts into the same [`PropertyInfo`] shape used by source and accessor-backed properties.
+//! A Kotlin `const val` or `@JvmField` property is declared in package metadata (or in class
+//! metadata, for a `companion { … }` block member) but has no emitted accessor. Its static field is
+//! the physical realization, and for a constant it carries the compile-time payload. This module
+//! joins those two provider facts into the same [`PropertyInfo`] shape used by source and
+//! accessor-backed properties.
 
 use super::classpath::kotlin_type_name_to_ty;
 use super::jvm_libraries::JvmStaticField;
@@ -62,7 +63,80 @@ pub(super) fn merge_metadata_const(
     );
     getter.physical_name = getter_physical_name;
     getter.external_identity = field.external_identity;
-    properties.push(PropertyInfo {
+    properties.push(field_property(
+        source_name,
+        metadata,
+        field,
+        ty,
+        FieldAccessors {
+            getter,
+            setter: None,
+        },
+        Some(constant),
+        deprecated_hidden,
+    ));
+}
+
+/// The read, and for a `var` the write, of the static field that realizes a property.
+pub(super) struct FieldAccessors {
+    pub(super) getter: LibraryCallable,
+    pub(super) setter: Option<LibraryCallable>,
+}
+
+/// Joins a receiver-less metadata property that has no accessor at all, a `@JvmField` one, with the
+/// static field realizing it: its value is read and written through `accessors`. An accessor-backed
+/// declaration of the same property, already among `properties`, is that property's realization.
+pub(super) fn merge_metadata_field(
+    source_name: &str,
+    metadata: &MetaProp,
+    field: &JvmStaticField,
+    accessors: FieldAccessors,
+    deprecated_hidden: bool,
+    properties: &mut Vec<PropertyInfo>,
+) {
+    if metadata.name != source_name
+        || metadata.is_const
+        || metadata.is_extension
+        || metadata.getter.is_some()
+    {
+        return;
+    }
+    if properties.iter().any(|property| {
+        property.kind == crate::libraries::PropKind::TopLevel
+            && property.owner == field.owner
+            && property.name == source_name
+    }) {
+        return;
+    }
+    let accessors = FieldAccessors {
+        setter: accessors.setter.filter(|_| metadata.is_var),
+        ..accessors
+    };
+    let mut property = field_property(
+        source_name,
+        metadata,
+        field,
+        field.ty,
+        accessors,
+        None,
+        deprecated_hidden,
+    );
+    property.read_stability = metadata.read_stability;
+    properties.push(property);
+}
+
+/// The [`PropertyInfo`] of a receiver-less property `metadata` declares and `field` realizes.
+fn field_property(
+    source_name: &str,
+    metadata: &MetaProp,
+    field: &JvmStaticField,
+    ty: Ty,
+    accessors: FieldAccessors,
+    constant: Option<crate::libraries::LibraryConst>,
+    deprecated_hidden: bool,
+) -> PropertyInfo {
+    let is_const = constant.is_some();
+    PropertyInfo {
         return_value_status: None,
         name: source_name.to_string(),
         kind: crate::libraries::PropKind::TopLevel,
@@ -83,13 +157,13 @@ pub(super) fn merge_metadata_const(
             .map(|parameter| parameter.name.clone())
             .collect(),
         context_parameter_identities: metadata.context_parameter_identities(),
-        getter,
-        setter: None,
+        getter: accessors.getter,
+        setter: accessors.setter.map(Box::new),
         setter_visibility: metadata.visibility,
         setter_parameter_name: None,
-        is_const: true,
+        is_const,
         implicit_integer_coercion: false,
-        compile_time_constant: Some(constant),
+        compile_time_constant: constant,
         metadata_constant_read: false,
         deprecated_hidden,
         accessor_availability: Default::default(),
@@ -105,5 +179,5 @@ pub(super) fn merge_metadata_const(
         source_member: None,
         producer: crate::libraries::PropertyProducer::Field,
         read_stability: crate::libraries::PropertyReadStability::Unstable,
-    });
+    }
 }

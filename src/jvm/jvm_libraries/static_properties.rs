@@ -126,13 +126,7 @@ impl JvmLibraries {
             .into_iter()
             .collect::<Vec<_>>();
         if let Some(field) = self.declared_static_field(&class, internal, declaration) {
-            super::super::top_level_properties::merge_metadata_const(
-                name,
-                declaration,
-                &field,
-                field.deprecated_hidden,
-                &mut properties,
-            );
+            self.merge_metadata_field_realization(name, declaration, &field, &mut properties);
         }
         let mut property = properties.pop()?;
         property.associated_classifier = Some(internal);
@@ -368,6 +362,33 @@ impl JvmLibraries {
             Some(SemanticCallableOwner::Classifier(field.owner)),
         );
         Some(property)
+    }
+
+    /// Joins `metadata`, a receiver-less property with no accessor of its own (a `const val` or a
+    /// `@JvmField` property), with the static `field` realizing it.
+    pub(super) fn merge_metadata_field_realization(
+        &self,
+        name: &str,
+        metadata: &super::metadata::MetaProp,
+        field: &JvmStaticField,
+        properties: &mut Vec<PropertyInfo>,
+    ) {
+        use super::super::top_level_properties::{
+            merge_metadata_const, merge_metadata_field, FieldAccessors,
+        };
+        if metadata.is_const {
+            merge_metadata_const(name, metadata, field, field.deprecated_hidden, properties);
+        } else {
+            let (getter, setter) = self.static_field_accessors(field);
+            merge_metadata_field(
+                name,
+                metadata,
+                field,
+                FieldAccessors { getter, setter },
+                field.deprecated_hidden,
+                properties,
+            );
+        }
     }
 
     /// The field read, and for a non-final field the field write, that realize a static field as a
