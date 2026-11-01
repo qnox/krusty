@@ -18,6 +18,7 @@ pub(super) struct SelectedCallFacts {
     abbreviations: RefCell<HashMap<OriginId, ResolvedTypeAbbreviation>>,
     inferred_abbreviations: RefCell<HashMap<OriginId, InferredAbbreviation>>,
     publications: RefCell<HashMap<OriginId, CompactSelectedResultPublication>>,
+    result_aliases: RefCell<HashMap<OriginId, crate::libraries::DeclaredResultAlias>>,
 }
 
 /// The alias shape a constructor call inferred its abbreviation arguments through: the alias
@@ -139,6 +140,7 @@ impl SelectedCallFacts {
     /// must not escape that selection transaction.
     pub(super) fn forget_publication(&self, origin: OriginId) {
         self.publications.borrow_mut().remove(&origin);
+        self.result_aliases.borrow_mut().remove(&origin);
     }
 
     pub(super) fn record_publication(
@@ -151,5 +153,27 @@ impl SelectedCallFacts {
 
     pub(super) fn publication(&self, origin: OriginId) -> Option<CompactSelectedResultPublication> {
         self.publications.borrow().get(&origin).cloned()
+    }
+
+    /// The selection at `origin` chose a declaration whose result is spelled through `alias`,
+    /// applied as the selection bound it; a selection of a declaration without one forgets the
+    /// former alias.
+    pub(super) fn record_result_alias(
+        &self,
+        origin: OriginId,
+        alias: Option<crate::libraries::DeclaredResultAlias>,
+    ) {
+        let mut aliases = self.result_aliases.borrow_mut();
+        match alias {
+            Some(alias) => aliases.insert(origin, alias),
+            None => aliases.remove(&origin),
+        };
+    }
+
+    pub(super) fn result_alias(
+        &self,
+        origin: OriginId,
+    ) -> Option<crate::libraries::DeclaredResultAlias> {
+        self.result_aliases.borrow().get(&origin).copied()
     }
 }

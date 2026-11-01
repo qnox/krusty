@@ -14,6 +14,7 @@ mod inline_class;
 mod property_declarations;
 mod property_identity;
 mod realization_facts;
+mod result_alias;
 mod serialization_program_order;
 pub use serialization_program_order::SerialElementName;
 mod since_kotlin;
@@ -953,113 +954,6 @@ fn build_generic_sig(
     })
 }
 
-struct ParsedPropertySignature<'a> {
-    inherited: &'a [(u64, String)],
-    inherited_bounds: &'a [Vec<Ty>],
-    type_params: &'a [ParsedTypeParam],
-    context_params: &'a [ParsedValueParam],
-    context_receiver_bodies: &'a [Vec<u8>],
-    context_receiver_type_ids: &'a [u64],
-    return_body: Option<&'a [u8]>,
-    return_nullable: bool,
-    receiver_body: Option<&'a [u8]>,
-    receiver_nullable: bool,
-}
-
-fn build_property_generic_sig(
-    property: ParsedPropertySignature<'_>,
-    records: &[Rec],
-    d2: &[String],
-    type_table: Option<&[u8]>,
-) -> Option<GenericSig> {
-    let context = type_parameter_context(
-        property.inherited,
-        property.inherited_bounds,
-        property.type_params,
-        records,
-        d2,
-        type_table,
-    )?;
-    let receiver = match property.receiver_body {
-        Some(body) => {
-            let receiver = decode_metadata_type(
-                body,
-                type_table,
-                records,
-                d2,
-                &context.names,
-                &context.erasure_bounds,
-                property.receiver_nullable,
-                0,
-            )?;
-            Some(receiver)
-        }
-        None => None,
-    };
-    let ret = decode_metadata_type(
-        property.return_body?,
-        type_table,
-        records,
-        d2,
-        &context.names,
-        &context.erasure_bounds,
-        property.return_nullable,
-        0,
-    )?;
-    let params = if !property.context_params.is_empty() {
-        property
-            .context_params
-            .iter()
-            .map(|parameter| {
-                let (body, table_nullable) = value_parameter_type(parameter, type_table)?;
-                decode_metadata_type(
-                    body,
-                    type_table,
-                    records,
-                    d2,
-                    &context.names,
-                    &context.erasure_bounds,
-                    table_nullable,
-                    0,
-                )
-            })
-            .collect::<Option<Vec<_>>>()?
-    } else {
-        property
-            .context_receiver_bodies
-            .iter()
-            .map(|body| (Some(body.as_slice()), None))
-            .chain(
-                property
-                    .context_receiver_type_ids
-                    .iter()
-                    .map(|&id| (None, Some(id))),
-            )
-            .map(|(body, id)| {
-                let (body, table_nullable) = metadata_type_ref(body, id, type_table)?;
-                decode_metadata_type(
-                    body,
-                    type_table,
-                    records,
-                    d2,
-                    &context.names,
-                    &context.erasure_bounds,
-                    table_nullable,
-                    0,
-                )
-            })
-            .collect::<Option<Vec<_>>>()?
-    };
-    Some(GenericSig {
-        formals: context.formals[property.inherited.len()..].to_vec(),
-        formal_bounds: context.formal_bounds[property.inherited.len()..].to_vec(),
-        receiver,
-        params,
-        ret,
-        return_policy: Default::default(),
-    })
-}
-
 /// A JVM method signature carried by Kotlin metadata: method name + descriptor as one fact.
 #[derive(Clone, Debug)]
 pub struct MetaJvmMethodSig {
@@ -1845,6 +1739,17 @@ fn decode_functions(
                     };
                     let receiver_ty = decode_type(pf.receiver_body.as_deref(), pf.receiver_type_id);
                     let ret_ty = decode_type(pf.return_body.as_deref(), pf.return_type_id);
+                    let ret_alias = result_alias::declared(
+                        metadata_type_ref(
+                            pf.return_body.as_deref(),
+                            pf.return_type_id,
+                            function_type_table,
+                        ),
+                        function_type_table,
+                        records,
+                        d2,
+                        type_context.as_ref(),
+                    );
                     let receiver_class = receiver_ty.and_then(declared_classifier);
                     let ret_class = ret_ty.and_then(declared_classifier);
                     let decode_parameter = |p: &ParsedValueParam| {
@@ -2080,6 +1985,7 @@ fn decode_functions(
                             ),
                         receiver_class,
                         ret_class,
+                        ret_alias,
                         value_params,
                         generic_sig,
                         contract,

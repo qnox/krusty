@@ -572,11 +572,11 @@ impl ProductionSignatureSemantics<'_> {
         if let Some(origin) = selected_site.and_then(|site| site.abbreviation_origin) {
             self.selected_types.record(
                 origin,
-                crate::fir::ResolvedTypeAbbreviation {
-                    alias: identity,
-                    arguments: arguments.clone().into_boxed_slice(),
-                    argument_path: Box::new([]),
-                },
+                crate::fir::ResolvedTypeAbbreviation::root(
+                    identity,
+                    arguments.clone().into_boxed_slice(),
+                    false,
+                ),
             );
         }
         let bindings = formals

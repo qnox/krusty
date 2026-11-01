@@ -21,6 +21,10 @@ impl ProductionSignatureSemantics<'_> {
             &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
         ]);
         let implicit_receivers = self.implicit_receivers(scope);
+        let inputs = super::selected_result_publication::SelectionInputs {
+            receiver: Some(receiver),
+            arguments: &[],
+        };
         let selected = self.with_resolver(scope, |resolver| {
             resolver.select_member_property_applicable_where(receiver, spelling, |property| {
                 let context_types = property.getter.params.get(..property.context_count)?;
@@ -53,11 +57,16 @@ impl ProductionSignatureSemantics<'_> {
                 let publication = publication_origin.map(|_| {
                     self.selected_callable_publication(&extension.getter, Box::new([]), &[], false)
                 });
-                let finish = |result: crate::fir::ResolvedTy| {
+                let finish = |result: crate::fir::ResolvedTy, alias| {
                     if let (Some(origin), Some(publication)) =
                         (publication_origin, publication.clone())
                     {
-                        self.record_final_selected_publication(origin, publication, result);
+                        self.record_final_selected_publication(
+                            origin,
+                            publication.with_result_alias(alias),
+                            result,
+                            inputs,
+                        );
                     }
                     result
                 };
@@ -67,14 +76,15 @@ impl ProductionSignatureSemantics<'_> {
                         extension.stable_declaration,
                         demand,
                     )? {
+                        let alias = signature.result_alias();
                         return self
                             .apply_demanded_source_property(source, receiver, &signature)
-                            .map(finish)
+                            .map(|result| finish(result, alias))
                             .map(Some);
                     }
                 }
                 return crate::fir::ResolvedTy::new(extension.ty)
-                    .map(finish)
+                    .map(|result| finish(result, None))
                     .map(Some)
                     .map_err(|_| Self::failure());
             }
@@ -89,9 +99,14 @@ impl ProductionSignatureSemantics<'_> {
                 false,
             ))
         });
-        let finish = |result: crate::fir::ResolvedTy| {
+        let finish = |result: crate::fir::ResolvedTy, alias| {
             if let (Some(origin), Some(publication)) = (publication_origin, publication.clone()) {
-                self.record_final_selected_publication(origin, publication, result);
+                self.record_final_selected_publication(
+                    origin,
+                    publication.with_result_alias(alias),
+                    result,
+                    inputs,
+                );
             }
             result
         };
@@ -102,16 +117,18 @@ impl ProductionSignatureSemantics<'_> {
                     .stub(declaration)
                     .is_some_and(|stub| stub.signature_inference.is_some())
                 {
+                    let signature = demand(declaration)?;
+                    let alias = signature.result_alias();
                     let result = self
                         .apply_dispatch_owner(
                             receiver,
                             property.owner,
                             None,
-                            demand(declaration)?.result.get(),
+                            signature.result.get(),
                         )
                         .projection_read_ty();
                     return crate::fir::ResolvedTy::new(result)
-                        .map(finish)
+                        .map(|result| finish(result, alias))
                         .map(Some)
                         .map_err(|_| Self::failure());
                 }
@@ -119,17 +136,18 @@ impl ProductionSignatureSemantics<'_> {
             if let Some(signature) =
                 self.demanded_member_signature(property.stable_declaration, demand)?
             {
+                let alias = signature.result_alias();
                 let result = self
                     .apply_dispatch_owner(receiver, property.owner, None, signature.result.get())
                     .projection_read_ty();
                 return crate::fir::ResolvedTy::new(result)
-                    .map(finish)
+                    .map(|result| finish(result, alias))
                     .map(Some)
                     .map_err(|_| Self::failure());
             }
         }
         crate::fir::ResolvedTy::new(selected.ty)
-            .map(finish)
+            .map(|result| finish(result, None))
             .map(Some)
             .map_err(|_| Self::failure())
     }

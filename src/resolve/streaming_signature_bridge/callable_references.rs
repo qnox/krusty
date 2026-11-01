@@ -248,10 +248,8 @@ impl ProductionSignatureSemantics<'_> {
         } else {
             Some(alias.explicit_arguments.clone().into_boxed_slice())
         };
-        let abbreviation = arguments.map(|arguments| crate::fir::ResolvedTypeAbbreviation {
-            alias: alias.identity,
-            arguments,
-            argument_path: Box::new([]),
+        let abbreviation = arguments.map(|arguments| {
+            crate::fir::ResolvedTypeAbbreviation::root(alias.identity, arguments, false)
         });
         Some((result, abbreviation))
     }
