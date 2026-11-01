@@ -427,6 +427,28 @@ being skipped, so the gate never tests fewer cases than it claims. JDKs are foun
 `JAVA_HOME_<release>_X64` variables `actions/setup-java` exports, and from
 `KRUSTY_JDK_<release>_HOME`, which overrides the rest.
 
+## Diagnostics False-Accept Ratchet
+
+`tests/kotlin_diagnostics_jvm_conformance.rs` compiles Kotlin's diagnostics test data
+(`compiler/testData/diagnostics/tests` and `testsWithStdLib` of the provisioned checkout) with
+kotlinc and with krusty, using the same sources and `-XXLanguage:` arguments, and compares only
+whether each compiler rejects the case. A false accept, a case kotlinc rejects and krusty compiles
+without an error, is the divergence it ratchets: `tests/diagnostics_false_accepts/jvm/<version>.txt`
+lists them, and a case joining or leaving the list fails the run until the list is rewritten:
+
+```sh
+KRUSTY_BLESS_DIAGNOSTICS_EXPECTATIONS=1 just diagnostics-conformance "$(just conformance-bin)" <v>
+```
+
+False rejects and krusty failures (including a compile that runs past
+`KRUSTY_DIAGNOSTICS_CASE_TIMEOUT_SECONDS`, 60 by default) are printed with the totals, not
+ratcheted. `// MODULE:` cases are counted and not scored yet. kotlinc's verdicts are cached under
+`target/cache/diagnostics-reference`, keyed by each case's content and the exact compiler, so a
+warm run costs only krusty's compiles (tens of minutes) and a cold one takes hours. Ordinary runs
+therefore ignore the test; `just diagnostics-conformance` runs it under
+`KRUSTY_DIAGNOSTICS_TIMEOUT_SECONDS`, and CI runs it in the newest supported version's JVM
+conformance row, restoring the verdicts from the base and saving them from master.
+
 ## JVM processes
 
 kotlinc, `javac`, and `java` that the suite runs on every test are pooled. A cache hit does not

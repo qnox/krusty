@@ -314,7 +314,7 @@ klib-semantics VERSION=`just max-version`:
 
 # Provision the Kotlin codegen/box conformance corpus into one cached dir (target/cache/box-corpus/<ver>/) and
 # print the path to compiler/testData/codegen/box. The same checkout carries the command-line corpus,
-# compiler/testData/cli, beside it. Blobless + sparse clone of just that directory at
+# compiler/testData/cli, and the diagnostics test data, compiler/testData/diagnostics, beside it. Blobless + sparse clone of just that directory at
 # the matching tag — small and idempotent (no-op once present, cheap to cache). Mirrors `kotlinc`:
 # the conformance test FAILS (not skips) without it, so the harness provisions it rather than
 # silently skipping. The same checkout carries JetBrains' mock JDK,
@@ -358,8 +358,9 @@ box-corpus VERSION=`just max-version`:
         git -C "$root" sparse-checkout set compiler/testData/codegen/box "$mock_dir" $cli_dirs >&2
     }
     # Kotlin's command-line test corpus (`.args`/`.out` pairs) and the third-party annotation
-    # sources some of its cases put on the classpath; kotlin_cli_jvm_conformance runs it.
-    cli_dirs="compiler/testData/cli third-party/annotations third-party/java8-annotations third-party/jsr305"
+    # sources some of its cases put on the classpath; kotlin_cli_jvm_conformance runs it. Its
+    # diagnostics test data, which kotlin_diagnostics_jvm_conformance scores by false accepts.
+    cli_dirs="compiler/testData/cli third-party/annotations third-party/java8-annotations third-party/jsr305 compiler/testData/diagnostics/tests compiler/testData/diagnostics/testsWithStdLib"
     mock_dir=""
     if [ -d "$root/.git" ] && [ -d "$box" ]; then
         mock_dir="$(mock_dir_at_tag)"
@@ -380,9 +381,9 @@ box-corpus VERSION=`just max-version`:
         exit 1
     fi
     if [ -n "$mock_dir" ]; then
-        # A cache provisioned before the mock JDK or the CLI corpus was needed: extend it rather
-        # than accept it.
-        echo "adding the mock JDK and the CLI corpus to the Kotlin codegen/box corpus (v${ver})…" >&2
+        # A cache provisioned before the mock JDK, the CLI corpus or the diagnostics test data was
+        # needed: extend it rather than accept it.
+        echo "adding the mock JDK, the CLI corpus and the diagnostics test data to the Kotlin codegen/box corpus (v${ver})…" >&2
         git -C "$root" sparse-checkout add "$mock_dir" $cli_dirs >&2 \
             || { echo "failed to extend the v${ver} corpus checkout" >&2; exit 1; }
     else
@@ -562,6 +563,14 @@ conformance-regressions BIN VERSION:
     #!/usr/bin/env bash
     set -euo pipefail
     bash scripts/conformance-regressions.sh "{{BIN}}" "{{VERSION}}"
+
+# Run the diagnostics test data lane (kotlinc's diagnostics cases, scored by false accepts) with the
+# binary from `conformance-bin`. Ordinary runs ignore it; CI runs this for the newest supported
+# Kotlin. Bless with KRUSTY_BLESS_DIAGNOSTICS_EXPECTATIONS=1. A sibling `krusty` next to BIN is the CLI.
+diagnostics-conformance BIN VERSION:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    bash scripts/diagnostics-conformance.sh "{{BIN}}" "{{VERSION}}"
 
 # Run focused Native conformance tests only after provisioning the exact Native distribution whose
 # stdlib KLIB owns their semantics. The corpus itself remains in `native-conformance-run`.

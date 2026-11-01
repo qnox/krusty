@@ -41,25 +41,6 @@ fn exit_code_name(code: Option<i32>) -> String {
     }
 }
 
-/// The JetBrains checkout the box corpus was provisioned from; `just box-corpus` places the CLI
-/// corpus and the third-party annotation sources in the same checkout.
-fn checkout_root() -> PathBuf {
-    let box_dir = krusty::toolchain::box_corpus_dir()
-        .expect("the Kotlin box corpus is provisioned (`just box-corpus <version>`)");
-    let root = box_dir
-        .ancestors()
-        .nth(4)
-        .filter(|_| box_dir.ends_with("compiler/testData/codegen/box"))
-        .unwrap_or_else(|| panic!("{} is not a JetBrains checkout", box_dir.display()))
-        .to_path_buf();
-    assert!(
-        root.join("compiler/testData/cli/jvm").is_dir(),
-        "{} has no compiler/testData/cli/jvm; re-provision it with `just box-corpus <version>`",
-        root.display()
-    );
-    root
-}
-
 fn cli_cases(root: &Path) -> Vec<PathBuf> {
     fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
         let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)
@@ -125,7 +106,7 @@ impl Toolchain {
                 krusty::toolchain::dist_jar(name).map(|jar| (*placeholder, jar))
             })
             .collect();
-        let root = checkout_root();
+        let root = super::box_inventory::kotlin_checkout("compiler/testData/cli/jvm");
         link_dist(&root);
         Toolchain {
             compiler,
