@@ -14392,7 +14392,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   arguments in the child context: `Base<T>.set(T)` suppresses the parent's stub but not an applied
   child's `set(String)` stub and erased bridge. A concrete generic intermediate's existing stub is
   still inherited rather than repeated. The stubs never enter Kotlin metadata. The collection faces
-  (`Iterable`, `List`, `Set`, `Map`, `Map.Entry`; `Collection` is below), with `removeAt`, the lifted
+  (`Iterable`, `Set`, `Map`, `Map.Entry`; `Collection` and `List` are below), with `removeAt`, the lifted
   `iterator` result types, the JDK members and `toArray`, follow in later slices. Tests:
   `tests/read_only_iterator_stubs_e2e.rs`. Corpus: `objects/useAnonymousObjectAsIterator.kt`,
   `builtinStubMethods/customReadOnlyIterator.kt`.
@@ -14465,11 +14465,38 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `fun remove(element: String)` implements `remove(Object)`, which becomes kotlinc's
   `ACC_PUBLIC|ACC_FINAL|ACC_BRIDGE` special bridge returning `false` unless the argument is
   `instanceof String` (or `null`, for a `String?`), and an inherited `Base<T>.remove(e: T)` under
-  `Base<String>` already has the erased descriptor, so nothing is written for it. The List, Set
-  and Map faces, the JDK members (`removeIf`),
+  `Base<String>` already has the erased descriptor, so nothing is written for it. The Set and
+  Map faces, the JDK members (`removeIf`),
   `toArray`, the `Collection<?>` signature of a declared `containsAll` override and an abstract
   class's fake-override bridges follow in later slices. Tests:
   `tests/read_only_collection_face_stubs_e2e.rs` (member bytes and box runs against kotlinc).
+- **A read-only `List` gets `MutableList`'s members as stubs.** A class that implements
+  `kotlin.collections.List` without `MutableList` gets throwing stubs for the members
+  `MutableList` declares: `add`, `add(Int, E)`, `remove`, both `addAll`, `removeAll`,
+  `retainAll`, `clear`, `set` and `removeAt`, and `listIterator`, `listIterator(Int)` and
+  `subList` when the class leaves them abstract. As kotlinc reads a builtin's member scope, one
+  name's overloads stay together in their first declaration's place (`add(E)`, `add(Int, E)`). A
+  member takes the type-safe and signature policies of the declaration it overrides, so
+  `MutableList.remove` is `remove(Object)` and `removeAll`/`retainAll` are `Collection<?>` like
+  `MutableCollection`'s. A scalar result over the declaration's generic one is boxed
+  (kotlinc's `forceBoxedReturnTypeOnOverride`): `Integer set(int, int)` for a `List<Int>`, and
+  `Integer next()` with its `Object next()` bridge for an abstract `ListIterator<Int>`.
+  `removeAt` follows kotlinc's `createRemoveAtStub`: it is realized under its JVM name without
+  overriding anything, so it stays unboxed (`int remove(int)`), and its throwing
+  `ACC_BRIDGE|ACC_SYNTHETIC` `Object remove(int)` directly follows it unless the two erase alike
+  (`T remove(int)`). A class's own `removeAt` implements it and gets kotlinc's
+  `ACC_PUBLIC|ACC_FINAL|ACC_BRIDGE` `remove(int)` calling it, followed by the erased bridge
+  calling that, in the member's place among the bridges. The erased bridge is decided against the
+  implementation's own physical descriptor, so a `List<Any>`'s `fun removeAt(index: Int): String`
+  still gets `Object remove(int)` beside its `String remove(int)`, though a throwing stub's `Object`
+  result would have erased alike. The override check compares results
+  through applied supertypes: a builtin's generic supertypes from `.kotlin_builtins` and a source
+  classifier's checked applied hierarchy, so `listIterator(): MutableListIterator<String>` and
+  `listIterator(): Walk` with `Walk : ListIterator<String>` implement `listIterator`. The JDK
+  defaults (`replaceAll`, `sort`, the `SequencedCollection` members), `toArray`, a declared
+  `containsAll`'s signature and an abstract class's fake-override bridges follow later. Tests:
+  `tests/read_only_list_face_stubs_e2e.rs` (member bytes and box runs against kotlinc),
+  `tests/metadata_return_types.rs::list_impls_realize_remove_at_as_remove_int`.
 - **A nested value class over a reference carrier is read as its carrier.** In `ZN(val z: Z1?)`
   with `Z1(val x: En)`, `Z1?` is carried as `En?`, so `zn.z` and `zn.z!!` already are `Z1`'s
   carrier and `.x` of them is that carrier itself, with no cast. krusty took the unboxed property
@@ -17100,7 +17127,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`tests/language_feature_arguments_e2e.rs` compares exit code, complete stderr and the complete
   output tree with kotlinc; `src/features.rs`, `src/features/table.rs` and
   `src/features/language_versions.rs` unit tests.)
-  (`tests/kotlinc_argument_conformance_e2e.rs` compares the table with the reference compiler and
+  (`tests/kotlinc_argument_conformance.rs` compares the table with the reference compiler and
   the parser with kotlinc's `parseCommandLineArguments` over every argument and value form;
   `crates/krusty-cli/src/kotlinc_arguments/tokenize.rs` unit tests;
   `every_kotlinc_argument_takes_its_dispositions_path` in `crates/krusty-cli/src/cli.rs` checks
