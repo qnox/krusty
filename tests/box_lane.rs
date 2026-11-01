@@ -1015,18 +1015,22 @@ fn outcome(lane: &dyn Lane, scratch: &Path, file: &Path) -> Outcome {
         if let Err(error) = super::box_reference_classes::checked_box(&source, stem) {
             return Outcome::Harness(format!("required JVM oracle: {error}"));
         }
-        if lane.platform() == box_ratchet::Platform::Native && source.contains("// MODULE:") {
-            let answer =
-                super::kotlin_native_multimodule_support::kotlin_native_multimodule_box(&source);
-            if answer.as_deref() != Some("OK") {
-                return Outcome::Harness(format!(
-                    "required Native oracle must return OK, got {answer:?}"
-                ));
-            }
-        }
     }
+    // A case outside the lane has no lane oracle: kotlinc-native cannot compile a JVM-only module.
     if let Some(reason) = lane.not_applicable(&source) {
         return Outcome::NotApplicable(reason);
+    }
+    if super::box_inventory::owned(file)
+        && lane.platform() == box_ratchet::Platform::Native
+        && source.contains("// MODULE:")
+    {
+        let answer =
+            super::kotlin_native_multimodule_support::kotlin_native_multimodule_box(&source);
+        if answer.as_deref() != Some("OK") {
+            return Outcome::Harness(format!(
+                "required Native oracle must return OK, got {answer:?}"
+            ));
+        }
     }
     if let Some(reason) = lane.harness_limitation(&source) {
         return Outcome::Harness(reason.to_string());
