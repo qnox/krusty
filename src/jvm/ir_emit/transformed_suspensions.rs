@@ -146,6 +146,17 @@ impl Emitter<'_> {
         // is the callee's box leaves, is the point itself.
         let mut e = e;
         loop {
+            // `return step()!!` checks the erased result and returns it without a cast.
+            if let IrExpr::NotNullAssert { operand, check } = self.ir.expr(e) {
+                let (operand, check) = (*operand, check.clone());
+                if !super::ir_ty_to_jvm(&self.value_ty(operand)).is_reference()
+                    || !self.emit_erased_suspension_result(operand, target, code)
+                {
+                    return false;
+                }
+                self.emit_null_assertion_check(&check, code);
+                return true;
+            }
             e = match self.ir.expr(e) {
                 IrExpr::TypeOp {
                     op: IrTypeOp::ImplicitCoercion,

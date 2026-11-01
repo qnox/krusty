@@ -1,6 +1,6 @@
 //! Physical JVM emission of one common-IR value node.
 
-use crate::ir::{Callee, IrExpr, NullCheck};
+use crate::ir::{Callee, IrExpr};
 use crate::jvm::classfile::CodeBuilder;
 use crate::jvm::names::{method_descriptor, type_descriptor};
 use crate::jvm::value_classes::instance_representation;
@@ -1916,11 +1916,23 @@ impl super::Emitter<'_> {
                 // kotlinc checks a value in the slot that produced it and narrows the checked
                 // value afterwards: a captured `var`'s `ObjectRef.element` is checked as `Object`
                 // and only then cast to the variable's type (`getfield; dup; checkNotNull;
-                // checkcast`).
+                // checkcast`). A suspension point's erased `Object` result is checked the same way
+                // before the cast to the callee's declared result.
+                let mut erased_suspension = None;
                 let shared_cell = match *self.ir.expr(*operand) {
                     IrExpr::RefGet { holder, elem } if ir_ty_to_jvm(&elem).is_reference() => {
                         self.emit_shared_cell_read(holder, elem, false, code);
                         Some(elem)
+                    }
+                    _ if ir_ty_to_jvm(&self.value_ty(*operand)).is_reference()
+                        && self.emit_erased_suspension_result(
+                            *operand,
+                            Ty::obj("java/lang/Object"),
+                            code,
+                        ) =>
+                    {
+                        erased_suspension = Some(self.value_ty(*operand));
+                        None
                     }
                     _ => {
                         self.emit_value(*operand, code);
@@ -1936,41 +1948,16 @@ impl super::Emitter<'_> {
                 if self.value_ty(*operand).is_jvm_scalar() {
                     return;
                 }
-                // An inlined operand leaves the caller's line forgotten. kotlinc marks the checked
-                // expression's line again at the implicit check, so the check owns an entry even
-                // though the restored caller line is already in effect.
-                if matches!(check, NullCheck::Named(_)) && code.line_forgotten() {
-                    if let Some(line) = code.current_line() {
-                        code.mark_line(line.into());
-                    }
-                }
-                code.dup();
-                // A platform value narrowed to a declared non-null type names the checked expression
-                // in its failure (`getenv(...) must not be null`); `x!!` has no such name and uses the
-                // one-argument form. Both consume the duplicate and leave the value in place.
-                let m = match check {
-                    NullCheck::Named(message) => {
-                        code.push_string(message, self.cw);
-                        self.cw.methodref(
-                            "kotlin/jvm/internal/Intrinsics",
-                            "checkNotNullExpressionValue",
-                            "(Ljava/lang/Object;Ljava/lang/String;)V",
-                        )
-                    }
-                    NullCheck::Source | NullCheck::Unnamed => self.cw.methodref(
-                        "kotlin/jvm/internal/Intrinsics",
-                        "checkNotNull",
-                        "(Ljava/lang/Object;)V",
-                    ),
-                };
-                let arguments = if matches!(check, NullCheck::Named(_)) {
-                    2
-                } else {
-                    1
-                };
-                code.invokestatic(m, arguments, 0);
+                self.emit_null_assertion_check(check, code);
                 if let Some(elem) = shared_cell {
                     self.narrow_shared_cell_element(elem, code);
+                }
+                if let Some(declared) = erased_suspension {
+                    self.coerce_reference_on_stack(
+                        Ty::nullable(Ty::obj("kotlin/Any")),
+                        declared,
+                        code,
+                    );
                 }
             }
             IrExpr::LateinitCheck { operand, name } => {

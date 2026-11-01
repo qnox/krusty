@@ -136,6 +136,7 @@ mod method_signatures;
 mod must_inline_lambdas;
 mod non_local_jumps;
 mod non_null_operands;
+mod null_assertions;
 mod nullable_sam;
 mod numeric_comparison;
 mod object_static_initialization;
