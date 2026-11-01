@@ -203,6 +203,35 @@ impl Emitter<'_> {
         self.mark_expression_line(expression, line, code);
     }
 
+    /// kotlinc's `visitVariable` marks the initializer's line once its value is on the stack, then
+    /// the declaration's line. Both entries stay when they share an offset: a multi-line
+    /// `val x =\n    if (…) … else …` records the `if`'s line and then the `val`'s at the store.
+    pub(super) fn mark_initializer_end(&mut self, initializer: ExprId, code: &mut CodeBuilder) {
+        if self.ir.callable_scopes.contains(&initializer)
+            || self.ir.dispatch_line(initializer).is_some()
+        {
+            return;
+        }
+        if self.keeps_start_line(initializer) {
+            self.mark_kept_start_line(initializer, code);
+            return;
+        }
+        let Some(line) = self
+            .ir
+            .expr_source_lines
+            .get(&initializer)
+            .copied()
+            .or_else(|| safe_call_read_line(self.ir, initializer))
+        else {
+            return;
+        };
+        if line != 0 && !code.is_dead() {
+            self.note_inlined_expression(initializer, code);
+            let line = self.mapped_expression_line(initializer, line);
+            code.mark_line_kept(line);
+        }
+    }
+
     /// Whether `expression`'s line keeps its entry where an operand marks another line at the same
     /// offset: an intrinsic or safe call that states its line before its operands, or a node
     /// common IR marks so.
