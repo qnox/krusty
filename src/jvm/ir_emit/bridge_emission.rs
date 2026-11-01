@@ -41,7 +41,9 @@ fn finish_bridge(
     } = header;
     let name = bridge.name.as_str();
     if let Some(entry) = entry {
-        finish_code_sig::<0x0001>(cw, name, desc, code, locals, entry.signature.as_deref());
+        code.ensure_locals(locals);
+        code.link();
+        cw.add_method_sig(entry.access, name, desc, code, entry.signature.as_deref());
         cw.set_method_parameters(name, desc, &entry.reflected);
     } else if packs_arguments {
         finish_code::<{ 0x0001 | 0x0010 | 0x0040 | 0x1000 }>(cw, name, desc, code, locals);
@@ -731,6 +733,8 @@ fn attach_bridge_debug_tables(
 /// nullability annotations and, under `-java-parameters`, `MethodParameters`, less the carrier the
 /// member receives first.
 struct EntryHeader {
+    /// `ACC_PUBLIC`, with the member's `ACC_VARARGS`: the entry keeps its trailing vararg.
+    access: u16,
     signature: Option<String>,
     result: Option<&'static str>,
     parameters: Vec<Option<&'static str>>,
@@ -744,30 +748,30 @@ impl EntryHeader {
         member: u32,
         entry: &crate::ir::Bridge,
         descriptor: &str,
+        override_results: &crate::jvm::override_results::OverrideResults,
         java_parameters: bool,
     ) -> Self {
-        let function = &ir.functions[member as usize];
-        let signature = ir.signatures.get(&member).and_then(|generic| {
-            let mut generic =
-                super::value_class_signatures::physical_generic_signature(ir, member, generic)
-                    .into_owned();
+        // The entry stands for the lowered member less its leading carrier: its signature is the
+        // member's declared whole-frame shape (a vararg at its position in that frame, a boxed
+        // override result as its wrapper) without the carrier's element.
+        let signature = super::override_result_emission::declared_method_signature_parts(
+            formatter,
+            ir,
+            override_results,
+            member,
+        )
+        .map(|mut parts| {
             assert_eq!(
-                generic.params.len(),
-                function.params.len(),
-                "a lowered value-class member signs its carrier"
+                parts.parameters.len(),
+                entry.erased_params.len() + 1,
+                "a lowered value-class member signs its carrier ahead of the entry's parameters"
             );
-            generic.params.remove(0);
-            // The carrier occupied signed slot 0, so a later vararg keeps declaration-site
-            // variance at its shifted index.
-            let vararg_index = ir
-                .fn_varargs
-                .get(&member)
-                .and_then(|vararg| vararg.index.checked_sub(1));
-            formatter
-                .method_signature(&generic, function, vararg_index)
-                .filter(|signature| signature != descriptor)
-        });
-        let nullability = super::declared_nullability::declared_nullability(ir, member);
+            parts.parameters.remove(0);
+            parts.render()
+        })
+        .filter(|signature| signature != descriptor);
+        let nullability =
+            super::override_result_emission::declared_nullability(ir, override_results, member);
         let reflected = if java_parameters {
             crate::jvm::method_parameters::value_class_interface_entry(
                 ir,
@@ -780,6 +784,8 @@ impl EntryHeader {
             Vec::new()
         };
         Self {
+            access: crate::jvm::classfile::ACC_PUBLIC
+                | super::method_access::varargs_access(ir, member),
             signature,
             result: nullability.result,
             parameters: nullability.parameters.get(1..).unwrap_or_default().to_vec(),
@@ -813,7 +819,15 @@ pub(super) fn emit_value_class_interface_entries(
             continue;
         }
         let descriptor = method_descriptor(&jvm_tys(&b.erased_params), ir_ty_to_jvm(&b.erased_ret));
-        let header = EntryHeader::of(ir, formatter, member, b, &descriptor, env.java_parameters);
+        let header = EntryHeader::of(
+            ir,
+            formatter,
+            member,
+            b,
+            &descriptor,
+            env.override_results,
+            env.java_parameters,
+        );
         let class = ClassBridges::new(ir, c, env);
         emit_bridge(&class, cw, bridge_index, b, Some(&header));
         cw.set_method_nullability(&b.name, &descriptor, header.result, &header.parameters);
