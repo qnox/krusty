@@ -37,11 +37,10 @@ pub(super) fn emit(
     // kotlinc reaches `<clinit>` before the fields, so the body interns first and the leading
     // INSTANCE and `$$delegatedProperties` intern with the field visit.
     cw.reserve_method_name("<clinit>");
-    let nullability = (!interface_companion).then_some("Lorg/jetbrains/annotations/NotNull;");
     cw.add_field_late_leading(
         (instance_access, instance_name, &self_desc),
         None,
-        nullability,
+        Some("Lorg/jetbrains/annotations/NotNull;"),
     );
     delegated_property_array::declare(env, c.fq_name, cw);
 

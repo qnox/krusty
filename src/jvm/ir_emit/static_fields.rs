@@ -1500,3 +1500,74 @@ impl Emitter<'_> {
         code.putstatic(reference, slot_words(physical) as i32);
     }
 }
+
+/// Declare an interface's static fields: its companion's constants, then each hoisted `@JvmField`
+/// property. `<clinit>` already interned `Companion`; these follow it in the field table.
+pub(super) fn declare_interface_statics(ir: &IrFile, c: &IrClass, cw: &mut ClassWriter) {
+    let fq_name = c.fq_name();
+    // `<clinit>` already interned `Companion`. These constants follow it in the field table, and
+    // their names, descriptors, and `ConstantValue` payloads intern together at the field visit —
+    // after that alias store, before `@Metadata`. A hoisted `@JvmField` property is visited later
+    // because kotlinc places it after both.
+    for (static_index, property) in ir.statics.iter().enumerate().filter(|(index, property)| {
+        property.owner_matches(&fq_name) && !ir.is_jvm_field_static(*index as u32)
+    }) {
+        let descriptor = ir_type_desc(&property.ty);
+        let value = property.init.and_then(|init| constant_value(ir, init));
+        let nullability = (descriptor.starts_with('L') || descriptor.starts_with('[')).then(|| {
+            if property.ty.is_nullable() {
+                "Lorg/jetbrains/annotations/Nullable;"
+            } else {
+                "Lorg/jetbrains/annotations/NotNull;"
+            }
+        });
+        cw.add_field_late(0x0019, &property.name, &descriptor, value, nullability);
+        deprecate_moved_interface_field(ir, c, static_index, cw);
+    }
+
+    // A hoisted `@JvmField` property is the public static field itself. Its declaration annotations
+    // remain owned by the companion in common IR and are copied onto this target field here.
+    for (static_index, s) in ir
+        .statics
+        .iter()
+        .enumerate()
+        .filter(|(index, s)| s.owner_matches(&fq_name) && ir.is_jvm_field_static(*index as u32))
+    {
+        let descriptor = ir_type_desc(&s.ty);
+        let nullability = (descriptor.starts_with('L') || descriptor.starts_with('[')).then(|| {
+            if s.ty.is_nullable() {
+                "Lorg/jetbrains/annotations/Nullable;"
+            } else {
+                "Lorg/jetbrains/annotations/NotNull;"
+            }
+        });
+        cw.add_field_late(0x0019, &s.name, &descriptor, None, nullability);
+        deprecate_moved_interface_field(ir, c, static_index, cw);
+        if let Some(annotations) = c
+            .companion_class
+            .and_then(|companion| ir.class_id_by_name(companion))
+            .and_then(|companion| {
+                ir.classes[companion as usize]
+                    .field_annotations
+                    .iter()
+                    .find(|annotations| annotations.field == s.name)
+            })
+        {
+            cw.set_last_late_field_annotations(&annotations.annotations);
+        }
+    }
+}
+
+/// An interface's fields are public, so each one its private companion moves out is deprecated
+/// for Java, as on a class.
+fn deprecate_moved_interface_field(
+    ir: &IrFile,
+    interface: &IrClass,
+    static_index: usize,
+    cw: &mut ClassWriter,
+) {
+    let static_index = u32::try_from(static_index).expect("too many statics for a packed index");
+    if moved_from_private_companion(ir, interface, static_index) {
+        cw.deprecate_last_late_field();
+    }
+}
