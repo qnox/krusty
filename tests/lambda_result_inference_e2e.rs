@@ -66,3 +66,7 @@ fn top_level_lazy_getter_narrows_its_inferred_reference_result() {
         "OK"
     );
 }
+
+/// Overloads that differ only in the lambda's result, selected by the lambda body.
+#[path = "lambda_return_overload_shape_e2e.rs"]
+mod overload_by_lambda_result;

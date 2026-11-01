@@ -322,7 +322,7 @@ impl Checker<'_> {
                     },
                 ),
                 CallableCandidateSelection::MissingContext(_)
-                | CallableCandidateSelection::Ambiguous(_) => None,
+                | CallableCandidateSelection::Ambiguous(..) => None,
             };
         }
 
@@ -643,7 +643,7 @@ impl Checker<'_> {
             Some(CallableCandidateSelection::MissingContext(_)) | None => {
                 return InvokeResolution::Inapplicable(vec![diagnostic_declaration]);
             }
-            Some(CallableCandidateSelection::Ambiguous(_)) => {
+            Some(CallableCandidateSelection::Ambiguous(..)) => {
                 unreachable!("one planned invoke declaration cannot become ambiguous")
             }
         };
@@ -1114,7 +1114,9 @@ impl Checker<'_> {
                     result_constraint,
                     overloads.clone(),
                 );
-                if let Some(CallableCandidateSelection::Ambiguous(candidates)) = &member_selection {
+                if let Some(CallableCandidateSelection::Ambiguous(candidates, _)) =
+                    &member_selection
+                {
                     return InvokeResolution::Ambiguous(candidates.clone());
                 }
                 if let Some(mut selected) =
@@ -1283,7 +1285,7 @@ impl Checker<'_> {
                         result_constraint,
                         extensions.clone(),
                     );
-                    if let Some(CallableCandidateSelection::Ambiguous(candidates)) =
+                    if let Some(CallableCandidateSelection::Ambiguous(candidates, _)) =
                         &extension_selection
                     {
                         return InvokeResolution::Ambiguous(candidates.clone());

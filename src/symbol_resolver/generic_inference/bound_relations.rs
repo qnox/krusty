@@ -598,6 +598,24 @@ pub(crate) fn generic_bindings_admit_expected_return_intersection(
                 if admits(actual, bound) {
                     return true;
                 }
+                // A binding expressed through a formal still open before the postponed lambda
+                // (`C := HashSet<R>` for `C : MutableCollection<in R>`) relates that same variable
+                // on both sides; erasing it to its bound in only the declared bound would compare
+                // two different types.
+                let open_formals = generic_sig
+                    .formals
+                    .iter()
+                    .filter(|formal| !bindings.contains_key(*formal))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if crate::types::ty_mentions_param(actual, &open_formals)
+                    && admits(
+                        actual,
+                        crate::types::ty_subst_keep_unbound(declared_bound, bindings),
+                    )
+                {
+                    return true;
+                }
                 let formal_slice = std::slice::from_ref(formal);
                 expected_bindings
                     .and_then(|expected| expected.get(formal))

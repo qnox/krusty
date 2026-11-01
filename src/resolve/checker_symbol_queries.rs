@@ -16,6 +16,7 @@ impl Checker<'_> {
             self.file_index,
             self.access_context_class_names(),
         )
+        .with_eager_lambda_results(self.file.eager_lambda_analysis)
     }
 
     pub(super) fn resolver_in_scope<'s>(

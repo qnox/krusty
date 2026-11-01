@@ -1486,6 +1486,7 @@ impl Checker<'_> {
                             Some(CallCandidateScore {
                                 rank: (score, std::cmp::Reverse(0), !call_sig.vararg),
                                 sam_signatures: vec![None; slots.args.len()],
+                                lambda_result_fits: true,
                             })
                         },
                     },
