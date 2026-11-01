@@ -213,15 +213,11 @@ fn external_function_name(
     // from the Kotlin name; starting from the mangled one mangles it twice. An overridable member
     // cannot carry `@JvmName`, and an internal one keeps its module-suffixed name.
     if callable.visibility != crate::types::Visibility::Internal
-        && callable
-            .params
-            .iter()
-            .chain(std::iter::once(&callable.ret))
-            .any(|ty| {
-                ty.non_null()
-                    .obj_internal()
-                    .is_some_and(|name| crate::jvm::value_classes::is_boxed_value_class(ir, name))
-            })
+        && crate::jvm::value_classes::member_signature_is_mangled(
+            ir,
+            callable.source_receiver.iter().chain(&callable.params),
+            &callable.ret,
+        )
     {
         return Ok(callable.name.clone());
     }
