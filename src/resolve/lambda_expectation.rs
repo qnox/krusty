@@ -339,6 +339,43 @@ pub(super) fn functional_argument_expectation(
     }
 }
 
+impl super::Checker<'_> {
+    /// Whether an UNTYPED lambda that omits its parameter list must synthesize Kotlin's implicit `it`.
+    ///
+    /// Merely finding the token in the body is insufficient: when a lexical value named `it` already
+    /// exists, the inner lambda CAPTURES that value and remains `Function0`. Keep this decision in one
+    /// helper because overload probing and rejected-call diagnostics must infer the same arity.
+    pub(super) fn untyped_lambda_binds_implicit_it(
+        &self,
+        scope: &super::CheckerScope<'_>,
+        body: ExprId,
+    ) -> bool {
+        self.file.expr_uses_name(body, "it") && self.lookup(scope, "it").is_none()
+    }
+
+    /// The parameters a lambda declares when no expected function type shapes it. A lambda that
+    /// omits its parameter list declares none: only a contextual one-parameter function type
+    /// introduces the implicit `it`. A postponed call argument is checked here only
+    /// provisionally, before a candidate supplies its shape, so it keeps the arity overload probing
+    /// infers; the selected or rejected call checks it again against the declared shape.
+    pub(super) fn unshaped_lambda_parameter_names(
+        &self,
+        scope: &super::CheckerScope<'_>,
+        params: &[String],
+        body: ExprId,
+    ) -> Vec<String> {
+        if !params.is_empty() {
+            params.to_vec()
+        } else if self.postponed_argument_depth != 0
+            && self.untyped_lambda_binds_implicit_it(scope, body)
+        {
+            vec!["it".to_string()]
+        } else {
+            Vec::new()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -393,42 +430,5 @@ mod tests {
 
         assert_eq!(expectation(pending, &[]).fixed_result(), None);
         assert_eq!(expectation(error, &[]).fixed_result(), None);
-    }
-}
-
-impl super::Checker<'_> {
-    /// Whether an UNTYPED lambda that omits its parameter list must synthesize Kotlin's implicit `it`.
-    ///
-    /// Merely finding the token in the body is insufficient: when a lexical value named `it` already
-    /// exists, the inner lambda CAPTURES that value and remains `Function0`. Keep this decision in one
-    /// helper because overload probing and rejected-call diagnostics must infer the same arity.
-    pub(super) fn untyped_lambda_binds_implicit_it(
-        &self,
-        scope: &super::CheckerScope<'_>,
-        body: ExprId,
-    ) -> bool {
-        self.file.expr_uses_name(body, "it") && self.lookup(scope, "it").is_none()
-    }
-
-    /// The parameters a lambda declares when no expected function type shapes it. A lambda that
-    /// omits its parameter list declares none: only a contextual one-parameter function type
-    /// introduces the implicit `it`. A postponed call argument is checked here only
-    /// provisionally, before a candidate supplies its shape, so it keeps the arity overload probing
-    /// infers; the selected or rejected call checks it again against the declared shape.
-    pub(super) fn unshaped_lambda_parameter_names(
-        &self,
-        scope: &super::CheckerScope<'_>,
-        params: &[String],
-        body: ExprId,
-    ) -> Vec<String> {
-        if !params.is_empty() {
-            params.to_vec()
-        } else if self.postponed_argument_depth != 0
-            && self.untyped_lambda_binds_implicit_it(scope, body)
-        {
-            vec!["it".to_string()]
-        } else {
-            Vec::new()
-        }
     }
 }
