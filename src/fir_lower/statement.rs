@@ -181,6 +181,7 @@ impl BodyLowering<'_> {
         if target_line != 0 {
             self.ir.set_source_line_if_absent(lowered, target_line);
         }
+        self.stamp_statement(statement_id, first_generated);
         self.set_statement_state(statement_id, LoweringState::Lowered(lowered));
         Ok(lowered)
     }

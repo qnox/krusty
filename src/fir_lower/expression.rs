@@ -1507,50 +1507,14 @@ impl BodyLowering<'_> {
         if !matches!(expression.kind, FirExprKind::Lambda { .. }) {
             self.record_callable_reference_provenance(expression_id, first_generated);
         }
-        let mut debug = self.body.expression_debug_lines(expression_id);
-        // kotlinc replaces an array-factory call (`intArrayOf(a, b)`) by its vararg, whose offsets
-        // start at the first element, so the call's own line never opens. An empty factory call
-        // keeps its own position.
-        if let FirExprKind::ArrayLiteral { elements, .. } = &expression.kind {
-            let first = elements
-                .first()
-                .map(|first| self.body.expression_debug_lines(first.value).source);
-            if let Some(line) = first.filter(|&line| line != 0) {
-                debug.source = line;
-            }
-        }
-        if debug.positionless {
-            self.ir.mark_positionless(lowered);
-        }
+        let debug = self.expression_position(expression_id, &expression.kind);
+        // The builtin call this node realizes, when lowering made a node of its own for it.
         if debug.source != 0 {
-            self.ir.set_source_line(lowered, debug.source);
-            // The builtin call this node realizes, when lowering made a node of its own for it.
             if let Some(call) = builtin_call.filter(|_| lowered as usize >= first_generated) {
                 self.ir.builtin_calls.insert(lowered, call);
             }
-            // A call whose operands were stored first keeps the call's line on the call itself, which
-            // kotlinc marks once those operands are evaluated.
-            if let Some(&call) = self.operand_bound_calls.get(&lowered) {
-                self.ir.set_source_line_if_absent(call, debug.source);
-            }
-            for raw in first_generated..self.ir.exprs.len() {
-                let raw = raw as u32;
-                if !self.ir.suspend_calls.contains_key(&raw) {
-                    continue;
-                }
-                self.ir.set_source_line_if_absent(raw, debug.source);
-            }
         }
-        if debug.end != 0 {
-            self.ir.set_end_line(lowered, debug.end);
-            for raw in first_generated..self.ir.exprs.len() {
-                let raw = raw as u32;
-                if !self.ir.suspend_calls.contains_key(&raw) {
-                    continue;
-                }
-                self.ir.set_end_line_if_absent(raw, debug.end);
-            }
-        }
+        self.stamp_expression(debug, lowered, first_generated);
         self.record_expression_origins(first_generated, lowered, origin);
         if ends_inlined_call {
             self.ir.fir_origins.insert(

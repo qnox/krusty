@@ -396,6 +396,7 @@ impl BodyLowering<'_> {
             // A checked plan is an obligation, not an optimization hint. If its already-validated
             // operands cannot be materialized, propagate failure to `checked_call` as an unsupported
             // external call; never retry the same source as an ordinary dependency invocation.
+            let first_expanded = self.ir.exprs.len();
             let expanded = self.external_inline_call(ExternalInlineCallRequest {
                 target,
                 plan,
@@ -409,6 +410,7 @@ impl BodyLowering<'_> {
                 extension_receiver_parameter,
                 source_line,
             })?;
+            self.settle_external_expansion_positions(first_expanded);
             self.ir.inline_regions.insert(expanded);
             return Some(expanded);
         }

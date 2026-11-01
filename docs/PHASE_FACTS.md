@@ -75,6 +75,13 @@ that expression's position, as fir2ir does, and the JVM backend decides by node 
 begins instead of by which nodes happen to carry a line. That second half changes line tables, so
 it lands together with the JVM line-marking work.
 
+Lowering's half lives in `src/fir_lower/node_positions.rs`. Once a FIR expression or statement is
+lowered, every node built for it that nothing settled yet takes its start, source and end lines.
+A node an inner expression built keeps that expression's position, a copy keeps its source's even
+when that is none, code an external inline body expands to keeps only the lines the expansion
+gave it, and a node a body builds outside any expression has none. Settling is a lowering-time
+mark on the position column, not a fact a later phase reads.
+
 Positions come first although types were patched more often, because positions are what the JVM
 line-number work is waiting on: once every node has offsets, kotlinc's line-marking rule is ported
 once instead of per construct. Each step also deletes its tables from the other hand-written copy

@@ -65,6 +65,7 @@ mod loops;
 mod member_dispatch;
 mod metadata_constants;
 mod module_declarations;
+mod node_positions;
 mod package_declarations;
 mod properties;
 mod property_references;
@@ -352,6 +353,7 @@ pub(crate) fn lower_body_with_context(
             roots.push(lowered);
         }
     }
+    lowering.settle_body_positions();
     let lowered = LoweredFirBody {
         owner,
         roots: roots.into_boxed_slice(),
@@ -439,6 +441,8 @@ struct BodyLowering<'a> {
     /// The call each `{ val t = operand…; call(t…) }` block this body built evaluates once its
     /// stored operands are bound, recorded when the block is created.
     operand_bound_calls: HashMap<ExprId, ExprId>,
+    /// The first node this body built. Every node from here on is this body's.
+    first_expression: usize,
     /// The lambda literal about to be lowered for a functional interface whose method returns
     /// `Unit`: its implementation returns nothing, as the interface method does, rather than the
     /// `Unit` value a function type's `invoke` returns.
@@ -663,6 +667,7 @@ impl<'a> BodyLowering<'a> {
             local_callable_scopes,
             published_local_callables,
         } = scopes;
+        let first_expression = ir.exprs.len();
         let context_parameter_count = u32::try_from(body.context_receiver_types().len())
             .expect("too many FIR context parameters");
         let context_value_count = body.context_value_count();
@@ -735,6 +740,7 @@ impl<'a> BodyLowering<'a> {
             root_block: root_scope_block(body),
             lowered_root_block: None,
             operand_bound_calls: HashMap::default(),
+            first_expression,
             unit_method_lambda: None,
         }
     }

@@ -1,5 +1,13 @@
 # krusty — implementation plan
 
+## Stamp lowered nodes with their FIR position
+
+Every node lowering builds for a FIR expression or statement takes that element's start, source
+and end lines unless an inner expression, an explicit write or a copy settled it first, as fir2ir
+passes offsets to every element it builds. External inline expansions and body-level nodes stay
+without a position. This is lowering's half of step 1b of `docs/PHASE_FACTS.md`; it lands with the
+JVM backend's kind-based line marking.
+
 ## Statement lines on IR nodes
 
 `expr_lines`, the sparse table of statement-root lines, becomes the `statement_line` of each node's

@@ -1358,6 +1358,7 @@ impl BodyLowering<'_> {
                 body_origin(body),
             )?
         };
+        nested.settle_body_positions();
         let published_local_callables = std::mem::take(&mut nested.published_local_callables);
         drop(nested);
         self.published_local_callables = published_local_callables;
