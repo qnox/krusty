@@ -155,36 +155,6 @@ impl IrFile {
         }
     }
 
-    /// The call `expression` evaluates (below any type operation) when one of its operands is a
-    /// call inlined from a compiled body. kotlinc forgets the line in effect after an inlined body,
-    /// so that call marks its own line again at its invoke.
-    pub(crate) fn call_after_compiled_inline_operand(&self, expression: ExprId) -> Option<ExprId> {
-        let call = self.below_type_operations(expression);
-        let IrExpr::Call {
-            dispatch_receiver,
-            args,
-            ..
-        } = self.expr(call)
-        else {
-            return None;
-        };
-        dispatch_receiver
-            .iter()
-            .chain(args)
-            .any(|&operand| {
-                self.compiled_inline_call(self.below_type_operations(operand))
-                    .is_some()
-            })
-            .then_some(call)
-    }
-
-    fn below_type_operations(&self, mut expression: ExprId) -> ExprId {
-        while let IrExpr::TypeOp { arg, .. } = self.expr(expression) {
-            expression = *arg;
-        }
-        expression
-    }
-
     /// A copy of a recorded call is inlined from the same body.
     pub(super) fn copy_compiled_inline_call(&mut self, source: ExprId, target: ExprId) {
         if let Some(function) = self.compiled_inline_call(source) {
