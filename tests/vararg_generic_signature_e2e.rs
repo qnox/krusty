@@ -3,7 +3,8 @@
 //! `vararg pairs: Pair<String, Any?>` as `[Lkotlin/Pair<Ljava/lang/String;+Ljava/lang/Object;>;`,
 //! while a plain `Array<Pair<String, Any?>>` parameter keeps the element invariant. An extension
 //! receiver comes before the vararg among the JVM parameters, and a local function's captured
-//! values come before both.
+//! values come before both. A context parameter counts among the declared parameters before the
+//! vararg, and a value parameter may follow it.
 
 use super::common;
 
@@ -30,7 +31,12 @@ fun outer(captured: Array<Pair<String, Any?>>): Int {\n\
 fun <T> genericOuter(captured: Array<Pair<String, List<T>>>): Int {\n\
 \x20   fun local(vararg values: Pair<String, List<T>>): Int = captured.size + values.size\n\
 \x20   return local(\"a\" to emptyList())\n\
-}\n";
+}\n\
+\n\
+context(tag: String)\n\
+fun tagged(vararg pairs: Pair<String, Any?>, tail: Pair<String, Any?>): Int =\n\
+\x20   tag.length + pairs.size + tail.first.length\n\
+\n";
 
 const BOX: &str = "fun box(): String {\n\
 \x20   val total = flex(\"a\" to 1, \"b\" to null) + lists(listOf(\"x\")) +\n\

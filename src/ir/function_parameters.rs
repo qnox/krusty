@@ -33,11 +33,17 @@ pub enum IrParameterRole {
 }
 
 impl IrParameterRole {
-    /// A source value parameter, the parameters a declaration's value-parameter ordinals count.
-    pub const fn is_declared_value(self) -> bool {
+    /// A declared context or value parameter: what [`IrVarargParameter::index`] counts. Receivers,
+    /// captures and compiler-generated parameters are not declared parameters.
+    pub const fn is_declared_parameter(self) -> bool {
         matches!(
             self,
-            Self::Value | Self::UnusedValue | Self::DestructuredValue
+            Self::Value
+                | Self::UnusedValue
+                | Self::DestructuredValue
+                | Self::ContextValue
+                | Self::AnonymousContextParameter { .. }
+                | Self::ContextReceiver { .. }
         )
     }
 }
@@ -602,7 +608,9 @@ mod tests {
 /// The `vararg` parameter of a declared function.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct IrVarargParameter {
-    /// SOURCE index among the value parameters (receiver excluded).
+    /// Index among the declared parameters: context parameters first, then value parameters.
+    /// Receivers and captures are not counted; a target finds the physical slot through the
+    /// function's parameter identities.
     pub index: usize,
     /// No value parameter follows it.
     pub is_last: bool,

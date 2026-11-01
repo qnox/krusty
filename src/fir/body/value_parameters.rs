@@ -66,7 +66,8 @@ pub struct FirDefaultValue {
 /// The declared `vararg` parameter of a local function body.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FirVarargParameter {
-    /// Index among the source value parameters, context parameters excluded.
+    /// Index among the declared parameters, context parameters first; receivers and captures are
+    /// not counted.
     pub index: u32,
     /// No value parameter follows it.
     pub is_last: bool,

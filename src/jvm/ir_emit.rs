@@ -4924,8 +4924,8 @@ fn suspend_method_sig(
 }
 
 /// The position of `fid`'s `vararg` among its lowered parameters. The recorded index counts the
-/// source value parameters; captures, context parameters and the extension receiver come before
-/// them, so the position is the parameter whose identity is that declared value parameter.
+/// declared context and value parameters; captures and the extension receiver are lowered among
+/// them, so the position is the parameter whose identity is that declared parameter.
 fn vararg_parameter_position(ir: &IrFile, fid: u32) -> Option<usize> {
     let vararg = ir.fn_varargs.get(&fid)?;
     ir.fn_params
@@ -4933,7 +4933,7 @@ fn vararg_parameter_position(ir: &IrFile, fid: u32) -> Option<usize> {
         .identities
         .iter()
         .enumerate()
-        .filter(|(_, identity)| identity.role.is_declared_value())
+        .filter(|(_, identity)| identity.role.is_declared_parameter())
         .nth(vararg.index)
         .map(|(position, _)| position)
 }
