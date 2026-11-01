@@ -46,6 +46,8 @@ mod kotlin_bytecode_listing_conformance;
 mod kotlin_bytecode_text_conformance;
 #[path = "kotlin_cli_jvm_conformance.rs"]
 mod kotlin_cli_jvm_conformance;
+#[path = "kotlin_diagnostics_jvm_conformance.rs"]
+mod kotlin_diagnostics_jvm_conformance;
 #[path = "common/kotlin_native_multimodule.rs"]
 mod kotlin_native_multimodule_support;
 #[path = "kotlinc_argument_conformance.rs"]
