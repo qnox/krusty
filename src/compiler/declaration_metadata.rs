@@ -11,6 +11,7 @@ fn applied_annotation(
 ) -> crate::ir::AppliedAnnotation {
     crate::ir::AppliedAnnotation {
         internal: annotation.internal,
+        written_order: Some(annotation.written.order.clone()),
         values: annotation
             .values
             .iter()

@@ -247,6 +247,7 @@ mod tests {
                     retention: crate::types::AnnotationRetention::Binary,
                     annotation: crate::ir::AppliedAnnotation {
                         internal: crate::types::type_name("store/Stamp"),
+                        written_order: None,
                         values: vec![(
                             "value".into(),
                             crate::ir::AnnoValue::Const(crate::ir::IrConst::String(text.into())),
