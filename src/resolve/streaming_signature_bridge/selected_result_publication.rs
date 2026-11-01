@@ -8,6 +8,14 @@ use super::ProductionSignatureSemantics;
 use crate::resolve::selected_result_publication::CompactSelectedResultPublication;
 use crate::types::{Ty, TyKind};
 
+/// What a selection applied its declaration to: the receiver it was selected on and its argument
+/// types in source order.
+#[derive(Clone, Copy, Default)]
+pub(super) struct SelectionInputs<'a> {
+    pub(super) receiver: Option<Ty>,
+    pub(super) arguments: &'a [Ty],
+}
+
 fn whole_array_arguments(arguments: &[crate::fir::ResolvedSigCallArgument<'_>]) -> Box<[bool]> {
     arguments
         .iter()
@@ -16,42 +24,62 @@ fn whole_array_arguments(arguments: &[crate::fir::ResolvedSigCallArgument<'_>]) 
 }
 
 impl ProductionSignatureSemantics<'_> {
-    /// The abbreviation a call's result carries because its selected declaration spelled the
-    /// result through a typealias (`fun names(): Names`, `fun <T> boxed(x: T): Boxed<T>`). The
-    /// alias arguments are read back from the result the call produced (`result`, or the
-    /// selection's own result): a result that is not an application of the alias's expansion is
-    /// a new type and carries none.
+    /// The abbreviation a call or read's result carries because its selected declaration spelled
+    /// the result through a typealias (`fun names(): Names`, `val foo: Foo<T>?`): the alias
+    /// application selection recorded, its arguments bound as the selection bound them.
     fn declared_result_abbreviation(
         &self,
         origin: crate::fir::OriginId,
-        result: Option<Ty>,
     ) -> Option<crate::fir::ResolvedTypeAbbreviation> {
-        let (alias, selected) = self
-            .selected_calls
-            .publication(origin)
-            .and_then(|publication| publication.result_alias())
-            .or_else(|| self.selected_calls.read_alias(origin))?;
-        let result = result.unwrap_or(selected).non_null();
-        let (formals, expansion) = match self.table.alias_expansion_spellings.get(&alias) {
-            Some((_, formals, expansion)) => (formals.clone(), *expansion),
-            None => {
-                let library = self.table.libraries.type_alias_expansion(alias)?;
-                (library.formals, library.expansion)
-            }
-        };
-        let mut bindings = crate::symbol_resolver::GSigBinds::default();
-        crate::symbol_resolver::unify_ty(expansion, result, &mut bindings);
-        let arguments = formals
+        let alias = self.selected_calls.result_alias(origin)?;
+        Some(crate::fir::ResolvedTypeAbbreviation::root(
+            alias.alias(),
+            alias.arguments(),
+            alias.marked_nullable(),
+        ))
+    }
+
+    /// The classifier `owner` applied to its own type parameters, as its members' declared
+    /// signatures mention them.
+    fn declaring_self(&self, owner: crate::types::TypeName) -> Option<Ty> {
+        if let Some(class) = self.table.class_by_type_name(owner) {
+            return Some(super::semantic_classifier_self(class));
+        }
+        let classifier =
+            crate::symbol_source::SymbolSource::classifier(&*self.table.libraries, owner)?;
+        let arguments = classifier
+            .type_params()
             .iter()
-            .map(|formal| bindings.get(formal).copied())
-            .collect::<Option<Box<[Ty]>>>()?;
-        (crate::types::ty_subst(expansion, &bindings) == result).then(|| {
-            crate::fir::ResolvedTypeAbbreviation {
-                alias,
-                arguments,
-                argument_path: Box::new([]),
-            }
-        })
+            .enumerate()
+            .map(|(ordinal, parameter)| {
+                let bound = classifier
+                    .type_param_bounds()
+                    .get(ordinal)
+                    .and_then(|bounds| bounds.first().copied())
+                    .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
+                Ty::ty_param(parameter, bound)
+            })
+            .collect::<Vec<_>>();
+        Some(Ty::obj_args_name(owner, &arguments))
+    }
+
+    /// The applied supertype of `actual` declared by `owner`, with its arguments: the hierarchy
+    /// view publication binds declared parameters through.
+    fn applied_supertype(
+        &self,
+        actual: Ty,
+        owner: crate::types::TypeName,
+    ) -> Option<(Ty, Vec<Ty>)> {
+        let applied = self
+            .table
+            .applied_hierarchy(actual)
+            .into_iter()
+            .find(|(candidate, _, _)| *candidate == owner)
+            .map(|(_, applied, _)| applied)?;
+        let TyKind::Obj(applied_owner, arguments) = applied.non_null().kind() else {
+            return None;
+        };
+        (applied_owner == owner).then(|| (applied, arguments.to_vec()))
     }
 
     pub(super) fn forget_selected_result_publication(&self, origin: crate::fir::OriginId) {
@@ -62,7 +90,15 @@ impl ProductionSignatureSemantics<'_> {
         &self,
         origin: crate::fir::OriginId,
         publication: CompactSelectedResultPublication,
+        inputs: SelectionInputs<'_>,
     ) {
+        let alias = publication.applied_result_alias(
+            inputs.receiver,
+            inputs.arguments,
+            |owner| self.declaring_self(owner),
+            |actual, owner| self.applied_supertype(actual, owner),
+        );
+        self.selected_calls.record_result_alias(origin, alias);
         self.selected_calls.record_publication(origin, publication);
     }
 
@@ -149,12 +185,10 @@ impl ProductionSignatureSemantics<'_> {
         publication: CompactSelectedResultPublication,
         signature: &crate::fir::ResolvedSignature,
         result: crate::fir::ResolvedTy,
+        inputs: SelectionInputs<'_>,
     ) {
-        self.record_final_selected_publication(
-            origin,
-            publication.with_result_alias(signature.result_alias()),
-            result,
-        );
+        let publication = publication.with_result_alias(signature.result_alias());
+        self.record_final_selected_publication(origin, publication, result, inputs);
     }
 
     pub(super) fn record_final_selected_publication(
@@ -162,9 +196,10 @@ impl ProductionSignatureSemantics<'_> {
         origin: crate::fir::OriginId,
         publication: CompactSelectedResultPublication,
         result: crate::fir::ResolvedTy,
+        inputs: SelectionInputs<'_>,
     ) {
-        self.selected_calls
-            .record_publication(origin, publication.with_selected(result.get()));
+        let publication = publication.with_selected(result.get());
+        self.record_selected_result_publication(origin, publication, inputs);
     }
 
     pub(super) fn finish_selected_member_publication(
@@ -185,6 +220,10 @@ impl ProductionSignatureSemantics<'_> {
         )
             -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
     ) -> Result<crate::fir::ResolvedMemberCall, crate::fir::DiagnosticId> {
+        let inputs = SelectionInputs {
+            receiver: Some(receiver.get()),
+            arguments: &argument_types,
+        };
         if let Some(member) = member.as_ref() {
             if let Some(declaration) = member.stable_declaration {
                 if self
@@ -213,7 +252,13 @@ impl ProductionSignatureSemantics<'_> {
                         type_arguments,
                         expected.map(crate::fir::ResolvedTy::get),
                     )?;
-                    self.record_source_selected_publication(origin, publication, &signature, ty);
+                    self.record_source_selected_publication(
+                        origin,
+                        publication,
+                        &signature,
+                        ty,
+                        inputs,
+                    );
                     return Ok(crate::fir::ResolvedMemberCall {
                         ty: Some(ty),
                         declaration: Some(declaration),
@@ -243,7 +288,13 @@ impl ProductionSignatureSemantics<'_> {
                     type_arguments,
                     expected.map(crate::fir::ResolvedTy::get),
                 )?;
-                self.record_source_selected_publication(origin, publication, &signature, ty);
+                self.record_source_selected_publication(
+                    origin,
+                    publication,
+                    &signature,
+                    ty,
+                    inputs,
+                );
                 return Ok(crate::fir::ResolvedMemberCall {
                     ty: Some(ty),
                     declaration: member.stable_declaration,
@@ -275,7 +326,13 @@ impl ProductionSignatureSemantics<'_> {
                     type_arguments,
                     expected.map(crate::fir::ResolvedTy::get),
                 )?;
-                self.record_source_selected_publication(origin, publication, &signature, ty);
+                self.record_source_selected_publication(
+                    origin,
+                    publication,
+                    &signature,
+                    ty,
+                    inputs,
+                );
                 return Ok(crate::fir::ResolvedMemberCall {
                     ty: Some(ty),
                     declaration: source_declaration,
@@ -287,7 +344,7 @@ impl ProductionSignatureSemantics<'_> {
         if ty.is_none() && declaration.is_none() {
             return Err(Self::failure());
         }
-        self.record_selected_result_publication(origin, publication);
+        self.record_selected_result_publication(origin, publication, inputs);
         Ok(crate::fir::ResolvedMemberCall { ty, declaration })
     }
 }
@@ -299,7 +356,7 @@ impl crate::fir::SelectedResultPublicationSemantics for ProductionSignatureSeman
     ) -> Option<crate::fir::ResolvedTypeAbbreviation> {
         self.selected_calls
             .abbreviation(origin)
-            .or_else(|| self.declared_result_abbreviation(origin, None))
+            .or_else(|| self.declared_result_abbreviation(origin))
     }
 
     fn published_call_result_abbreviation(
@@ -308,7 +365,7 @@ impl crate::fir::SelectedResultPublicationSemantics for ProductionSignatureSeman
         published: crate::fir::ResolvedTy,
     ) -> Option<crate::fir::ResolvedTypeAbbreviation> {
         let Some(abbreviation) = self.selected_calls.abbreviation(origin) else {
-            return self.declared_result_abbreviation(origin, Some(published.get()));
+            return self.declared_result_abbreviation(origin);
         };
         let Some(inferred) = self.selected_calls.inferred_abbreviation(origin) else {
             return Some(abbreviation);

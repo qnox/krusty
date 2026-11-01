@@ -8,9 +8,9 @@ use crate::resolve::implicit_rungs::ImplicitRung;
 pub(super) struct SelectedValue {
     pub(super) result: crate::fir::ResolvedTy,
     pub(super) enum_entry: Option<SelectedEnumEntry>,
-    /// The typealias the selected declaration spelled its type through (`val names: Names`).
-    /// kotlinc's read of the declaration carries that abbreviation.
-    pub(super) result_alias: Option<TypeName>,
+    /// The typealias application the selected declaration spelled its type through (`val
+    /// names: Names`). kotlinc's read of the declaration carries that abbreviation.
+    pub(super) result_alias: Option<crate::libraries::DeclaredResultAlias>,
 }
 
 /// The exact enum entry a value selection chose: its enum and its declared name.
@@ -29,10 +29,12 @@ impl SelectedValue {
         }
     }
 
-    /// The value of a declaration whose published signature was demanded.
+    /// The value of a declaration whose published signature was demanded. These reads apply no
+    /// receiver substitution, so only an alias application closed over the declaration's type
+    /// parameters is carried.
     pub(super) fn declared(signature: crate::fir::ResolvedSignature) -> Self {
         Self {
-            result_alias: signature.result_alias(),
+            result_alias: signature.result_alias().filter(|alias| alias.is_closed()),
             ..Self::plain(signature.result)
         }
     }
@@ -44,7 +46,10 @@ impl SelectedValue {
         let result = crate::fir::ResolvedTy::new(property.ty)
             .map_err(|_| ProductionSignatureSemantics::failure())?;
         Ok(Self {
-            result_alias: property.getter.result_alias,
+            result_alias: property
+                .getter
+                .result_alias
+                .filter(|alias| alias.is_closed()),
             ..Self::plain(result)
         })
     }
@@ -92,7 +97,11 @@ impl ProductionSignatureSemantics<'_> {
             if let Some(receiver) =
                 self.qualified_value_receiver(scope, spelling, origin, demand)?
             {
-                return Ok(SelectedValue::plain(receiver));
+                // The last segment's member selection recorded the alias it was declared through.
+                return Ok(SelectedValue {
+                    result_alias: self.selected_calls.result_alias(origin),
+                    ..SelectedValue::plain(receiver)
+                });
             }
             if let Some((qualifier, name)) = spelling.rsplit_once('.') {
                 if qualifier
@@ -136,7 +145,10 @@ impl ProductionSignatureSemantics<'_> {
                 }
             }
             if let Ok(value) = self.qualified_receiver_ty(scope, spelling, origin, demand) {
-                return Ok(SelectedValue::plain(value));
+                return Ok(SelectedValue {
+                    result_alias: self.selected_calls.result_alias(origin),
+                    ..SelectedValue::plain(value)
+                });
             }
             if let Some((qualifier, name)) = spelling.rsplit_once('.') {
                 let package = crate::types::type_name(&qualifier.replace('.', "/"));
@@ -317,7 +329,10 @@ impl ProductionSignatureSemantics<'_> {
             if let Some(result) =
                 self.selected_member_property_type(scope, receiver, spelling, Some(origin), demand)?
             {
-                return Ok(SelectedValue::plain(result));
+                return Ok(SelectedValue {
+                    result_alias: self.selected_calls.result_alias(origin),
+                    ..SelectedValue::plain(result)
+                });
             }
             // Compile-time constants are declaration facts on the receiver classifier, not
             // property accessor candidates. This is the same provider-normalized constant channel
@@ -357,7 +372,8 @@ impl ProductionSignatureSemantics<'_> {
                     if let Some(signature) =
                         self.demanded_member_signature(member.stable_declaration, demand)?
                     {
-                        let result_alias = signature.result_alias();
+                        let result_alias =
+                            signature.result_alias().filter(|alias| alias.is_closed());
                         return self
                             .apply_demanded_member(receiver, member, &signature, &[], &[])
                             .map(|result| SelectedValue {

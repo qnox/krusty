@@ -17,6 +17,7 @@ mod compiler_intrinsic;
 mod core_builtins;
 mod declaration_header;
 mod declared_members;
+mod declared_result_alias;
 mod default_value;
 mod dependency_access_policy;
 mod dependency_body_contract;
@@ -73,6 +74,7 @@ pub use declared_members::{
     DeclaredConstructor, DeclaredFunction, DeclaredMembers, DeclaredParameter, DeclaredProperty,
     KotlinModality,
 };
+pub use declared_result_alias::DeclaredResultAlias;
 pub use default_value::DefaultValue;
 pub use dependency_access_policy::DependencyAccessPolicy;
 pub use dependency_body_contract::DependencyBodyFacts;
@@ -324,7 +326,7 @@ pub struct LibraryMember {
     /// records no metadata return classifier.
     pub declared_ret: Option<Ty>,
     /// See [`LibraryCallable::result_alias`].
-    pub result_alias: Option<crate::types::TypeName>,
+    pub result_alias: Option<DeclaredResultAlias>,
     /// See [`LibraryCallable::overridden_results`].
     pub overridden_results: Box<[Ty]>,
     /// See [`LibraryCallable::enhanced_result`].
@@ -1070,10 +1072,8 @@ pub struct LibraryCallable {
     /// a BOX out of the generic slot `E` and `create` the erased carrier. Only non-null declared
     /// returns are recorded; a nullable value class really is boxed.
     pub declared_ret: Option<Ty>,
-    /// The typealias the declared return type was spelled through (`fun f(): Names`). kotlinc
-    /// keeps that abbreviation on the type a call produces, so a declaration whose result is
-    /// inferred from the call records the alias in its own metadata.
-    pub result_alias: Option<crate::types::TypeName>,
+    /// The typealias the declared return type was spelled through (`fun f(): Names`).
+    pub result_alias: Option<DeclaredResultAlias>,
     /// The declared results of the declarations this suspend callable overrides, as the core member
     /// hierarchy found them, nearest first; empty for a non-suspend one. A backend decides from them
     /// how the callable's own result crosses its continuation boundary.

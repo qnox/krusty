@@ -51,9 +51,9 @@ pub struct ResolvedSignature {
     /// abbreviated as `kotlin.text.StringBuilder`). It never takes part in type identity: only
     /// `@Metadata` reads it, as the declaration's `abbreviatedType`.
     pub result_abbreviation: Option<ResolvedTypeAbbreviation>,
-    /// The typealias an explicit result is written as (`fun names(): Names`). A call's result
-    /// carries it, so a declaration inferred from that call records the abbreviation as well.
-    pub declared_result_alias: Option<crate::types::TypeName>,
+    /// The typealias application an explicit result is written as (`fun names(): Names`). A
+    /// call's result carries it, so a declaration inferred from that call records it as well.
+    pub declared_result_alias: Option<crate::libraries::DeclaredResultAlias>,
 }
 
 /// A typealias application that abbreviates a resolved type: the alias's qualified identity and
@@ -66,6 +66,25 @@ pub struct ResolvedTypeAbbreviation {
     /// `alias`. Constructor aliases abbreviate the root and therefore carry an empty path; a
     /// class literal through `Alias<T>` abbreviates the represented `KClass` argument at `[0]`.
     pub argument_path: Box<[u32]>,
+    /// The alias use is marked `?` (`Names?`, `Foo<T>?`). An alias whose own expansion is
+    /// nullable (`typealias MaybeNames = Names?`) abbreviates a nullable type unmarked.
+    pub marked_nullable: bool,
+}
+
+impl ResolvedTypeAbbreviation {
+    /// An alias application that abbreviates the result root itself.
+    pub fn root(
+        alias: crate::types::TypeName,
+        arguments: Box<[Ty]>,
+        marked_nullable: bool,
+    ) -> Self {
+        Self {
+            alias,
+            arguments,
+            argument_path: Box::new([]),
+            marked_nullable,
+        }
+    }
 }
 
 impl ResolvedSignature {
@@ -73,13 +92,19 @@ impl ResolvedSignature {
         self.inferred_body_result
     }
 
-    /// The typealias the result is spelled through at its root: the explicit result's alias, or
-    /// the abbreviation an inferred result was reached through.
-    pub(crate) fn result_alias(&self) -> Option<crate::types::TypeName> {
+    /// The typealias application the result is spelled through at its root: the explicit
+    /// result's alias, or the abbreviation an inferred result was reached through.
+    pub(crate) fn result_alias(&self) -> Option<crate::libraries::DeclaredResultAlias> {
         self.result_abbreviation
             .as_ref()
             .filter(|abbreviation| abbreviation.argument_path.is_empty())
-            .map(|abbreviation| abbreviation.alias)
+            .map(|abbreviation| {
+                crate::libraries::DeclaredResultAlias::new(
+                    abbreviation.alias,
+                    &abbreviation.arguments,
+                    abbreviation.marked_nullable,
+                )
+            })
             .or(self.declared_result_alias)
     }
 

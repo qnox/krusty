@@ -18,7 +18,7 @@ pub(super) struct SelectedCallFacts {
     abbreviations: RefCell<HashMap<OriginId, ResolvedTypeAbbreviation>>,
     inferred_abbreviations: RefCell<HashMap<OriginId, InferredAbbreviation>>,
     publications: RefCell<HashMap<OriginId, CompactSelectedResultPublication>>,
-    read_aliases: RefCell<HashMap<OriginId, (crate::types::TypeName, crate::types::Ty)>>,
+    result_aliases: RefCell<HashMap<OriginId, crate::libraries::DeclaredResultAlias>>,
 }
 
 /// The alias shape a constructor call inferred its abbreviation arguments through: the alias
@@ -140,6 +140,7 @@ impl SelectedCallFacts {
     /// must not escape that selection transaction.
     pub(super) fn forget_publication(&self, origin: OriginId) {
         self.publications.borrow_mut().remove(&origin);
+        self.result_aliases.borrow_mut().remove(&origin);
     }
 
     pub(super) fn record_publication(
@@ -154,26 +155,25 @@ impl SelectedCallFacts {
         self.publications.borrow().get(&origin).cloned()
     }
 
-    /// A value or property read selected a declaration spelled through `alias`, producing
-    /// `result`; a reselection that chose a declaration without one forgets the former alias.
-    pub(super) fn record_read_alias(
+    /// The selection at `origin` chose a declaration whose result is spelled through `alias`,
+    /// applied as the selection bound it; a selection of a declaration without one forgets the
+    /// former alias.
+    pub(super) fn record_result_alias(
         &self,
         origin: OriginId,
-        alias: Option<crate::types::TypeName>,
-        result: crate::types::Ty,
+        alias: Option<crate::libraries::DeclaredResultAlias>,
     ) {
-        let mut aliases = self.read_aliases.borrow_mut();
+        let mut aliases = self.result_aliases.borrow_mut();
         match alias {
-            Some(alias) => aliases.insert(origin, (alias, result)),
+            Some(alias) => aliases.insert(origin, alias),
             None => aliases.remove(&origin),
         };
     }
 
-    /// The declared alias and result of the read selected at `origin`.
-    pub(super) fn read_alias(
+    pub(super) fn result_alias(
         &self,
         origin: OriginId,
-    ) -> Option<(crate::types::TypeName, crate::types::Ty)> {
-        self.read_aliases.borrow().get(&origin).copied()
+    ) -> Option<crate::libraries::DeclaredResultAlias> {
+        self.result_aliases.borrow().get(&origin).copied()
     }
 }

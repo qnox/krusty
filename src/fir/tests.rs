@@ -3018,11 +3018,11 @@ fn mutable_local_publication_keeps_the_declared_value_abbreviation() {
     let current_origin = OriginId::from_raw(11);
     let declared_ty = Ty::obj("sample/Declared");
     let current_ty = Ty::obj("sample/Current");
-    let abbreviation = ResolvedTypeAbbreviation {
-        alias: crate::types::type_name("sample/PublishedAlias"),
-        arguments: Box::new([]),
-        argument_path: Box::new([]),
-    };
+    let abbreviation = ResolvedTypeAbbreviation::root(
+        crate::types::type_name("sample/PublishedAlias"),
+        Box::new([]),
+        false,
+    );
     let mut graph = SignatureGraph::default();
     let scope = graph.add_scope(SignatureScope {
         owner: declaration,

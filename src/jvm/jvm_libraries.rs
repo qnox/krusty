@@ -13,6 +13,7 @@ mod classpath_annotation_classes;
 mod collection_canonicalization;
 mod declaration_headers;
 mod declared_members;
+mod default_impls_realization;
 mod symbol_source;
 use classpath_annotation_classes::{
     annotation_element_defaults, classpath_annotation_targets, java_annotation_parameter_list,
@@ -86,6 +87,7 @@ use crate::symbol_resolver::{ty_subst, ty_subst_all, ty_subst_keep_unbound};
 use crate::symbol_source::{SymbolNamespace, SymbolSource};
 use crate::types::{type_name, SemanticCallableOwner, Ty, TyKind, TypeName, TypeNameList};
 
+use default_impls_realization::interface_holder_method;
 use java_operator_convention::java_method_has_operator_convention;
 
 fn effective_class_access(class: &super::classreader::ClassInfo) -> u16 {
@@ -2630,42 +2632,6 @@ fn function_interface_signature(
             (&*signature.params, signature.ret)
         });
     Some(Ty::fun(params.to_vec(), ret))
-}
-
-/// Exact nonvirtual realization of a legacy concrete interface declaration, if the classpath
-/// publishes one. Semantic selection stays on the metadata declaration; this only couples it to the
-/// matching receiver-first static method at the provider boundary.
-fn interface_holder_method(
-    cp: &crate::jvm::classpath::Classpath,
-    interface: TypeName,
-    name: &str,
-    descriptor: &str,
-) -> Option<Box<crate::libraries::NonvirtualCallRealization>> {
-    // `$DefaultImpls` also exists in compatibility mode, where the interface method itself is
-    // concrete and remains the dispatch target. Only the legacy shape has an ABSTRACT interface
-    // method whose implementation must be replaced by the receiver-first holder static. Keeping
-    // this representation test here makes functions and property accessors share one ABI rule.
-    let interface_class = cp.find_name(interface)?;
-    if !interface_class.methods.iter().any(|method| {
-        method.is_abstract() && method.name == name && method.descriptor == descriptor
-    }) {
-        return None;
-    }
-    let holder = crate::types::type_name_nested_child(interface, "DefaultImpls");
-    let class = cp.find_name(holder)?;
-    let method = class.methods.iter().find(|method| {
-        method.is_static()
-            && method.name == name
-            && crate::jvm::names::descriptor_prepends_classifier(
-                descriptor,
-                interface,
-                &method.descriptor,
-            )
-    })?;
-    Some(Box::new(crate::libraries::NonvirtualCallRealization {
-        owner: holder,
-        descriptor: method.descriptor.clone(),
-    }))
 }
 
 pub(crate) fn parse_method_desc(desc: &str) -> Option<(Vec<Ty>, Ty)> {

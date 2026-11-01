@@ -12228,9 +12228,17 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   keeps it, `if (c) Payload() else Cargo()` and `if (c) Cargo() else null` do not). The signature
   solver records it on the selected call (`SelectedCallFacts`) and on the declaration's
   `ResolvedSignature::result_abbreviation`; finalization turns it into the declaration's result
-  spelling. Not yet propagated: a call returning a declared alias type, a read of a declaration
-  spelled with an alias, and inference through a generic call (`run { Cargo() }`). Tests:
-  `tests/inferred_alias_abbreviation_e2e.rs`.
+  spelling. A call or read of a declaration whose type is spelled through an alias carries that
+  alias application too, from source and dependency declarations alike (`fun names(): Names`,
+  `val stored: Labels`, a member, an extension, an object member, a chained `Holder().names()`).
+  The declaration owns the application, including arguments its expansion never uses
+  (`typealias Tagged<T> = List<String>`): the selection substitutes them, so `Store<Int>().tagged`
+  declared `Tagged<T>?` is abbreviated `Tagged<Int>?`. The application keeps whether the use was
+  marked `?`: an alias whose expansion is nullable (`typealias MaybeNames = List<String>?`) is
+  recorded unmarked, and `maybe()!!` is `List<String>` still abbreviated `MaybeNames`. An
+  application whose arguments the selection leaves unbound is not recorded. Not yet propagated:
+  inference through a generic call (`run { Cargo() }`, `listOf(names())`). Tests:
+  `tests/inferred_alias_abbreviation_e2e.rs`, `tests/inferred_result_typealias_e2e.rs`.
 - **An inferred alias argument carries its published flexibility in the abbreviation too.** An
   argument inferred through a Java usage is flexible in the published constructor type, and kotlinc
   abbreviates that same type: `ArrayList(listOf("a"))` is `ArrayList<String!>` abbreviated as

@@ -2143,7 +2143,9 @@ fn result_abbreviation<S: SignatureSemantics>(
         SigExpr::Value(selection) => {
             semantics.call_result_abbreviation(graph.value_selection(selection)?.origin)
         }
-        SigExpr::Member { origin, .. } => semantics.call_result_abbreviation(origin),
+        SigExpr::Member { origin, .. } | SigExpr::MemberCall { origin, .. } => {
+            semantics.call_result_abbreviation(origin)
+        }
         SigExpr::ClassLiteral {
             classifier: Some(classifier),
             ..
