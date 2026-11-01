@@ -680,16 +680,16 @@ fn attach_bridge_debug_tables(
         cw.set_method_debug(&bridge.name, erased_desc, None, &locals);
         return;
     }
-    if c.decl_line == 0 {
+    // A class with no declaration behind it has no line, but its bridges still have locals.
+    if c.decl_line == 0 && ir.declarationless_class(c.fq_name_id()).is_none() {
         return;
     }
     // Where the DECLARATION starts, annotations included — the same line the primary constructor's
     // `super()` maps to. The two coincide unless an annotation sits on its own line above the
     // header, which is exactly the shape a `@Serializable` class has.
-    let line = if c.decl_start_line == 0 {
-        c.decl_line
-    } else {
-        c.decl_start_line
+    let line = match (c.decl_start_line, c.decl_line) {
+        (_, 0) => None,
+        (0, line) | (line, _) => Some(line),
     };
     let this_desc = format!("L{};", c.fq_name());
     {
@@ -718,7 +718,12 @@ fn attach_bridge_debug_tables(
             }
             slot += slot_words(*parameter);
         }
-        cw.set_method_debug(&bridge.name, erased_desc, Some((0, line)), &locals);
+        cw.set_method_debug(
+            &bridge.name,
+            erased_desc,
+            line.map(|line| (0, line)),
+            &locals,
+        );
     }
 }
 

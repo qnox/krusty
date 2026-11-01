@@ -364,6 +364,21 @@ pinned runtime and requires this fixture to lower. A complete JVM classfile comp
 reference JSON round trip, including missing-field rejection, independently constrain that contract.
 Tests: `tests/plugins_e2e.rs`.
 
+## Parcelize generated members
+
+A `@Parcelize` class that implements `Parcelable` and declares neither member gets
+`describeContents(): Int` and `writeToParcel(dest: Parcel, flags: Int)` as overrides of
+`Parcelable`'s, so source code may call them and they return `void` rather than `kotlin.Unit`.
+`writeToParcel` writes the primary-constructor properties in parameter order; a nullable primitive
+writes `0`, or `1` and its value, while a `String` relies on `writeString` accepting `null`.
+`CREATOR` holds an instance of the local class `C$Creator`, declared in its initializer, whose
+`createFromParcel` calls the primary constructor with each property read back and whose `newArray`
+returns `arrayOfNulls<C>(size)`. Its bridges name their parameters `source` and `size`, after the
+plugin's own declaration of `Parcelable.Creator`. Line numbers follow kotlinc's offsets: the
+generated members map to the class's first and last lines, and `Creator`'s methods have none.
+A class or property the port does not cover is rejected, never compiled without these members.
+Tests: `tests/parcelize_plugin_e2e.rs`.
+
 ## Class application header ownership
 
 A classpath classifier's generic layout is read from declaration headers before its members are

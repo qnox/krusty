@@ -88,12 +88,17 @@ pub(super) fn build_class_metadata_with_facts(
         });
     }
     // A class a plugin generates with no declaration behind it has a synthetic-class record, whose
-    // `xi` carries no visibility, since no lowering of kotlinc's own made it.
-    if ir.is_declarationless_class(c.fq_name_id()) {
+    // `xi` carries the visibility its producer gave it, as kotlinc's
+    // `addSyntheticClassVisibilityFlags` normalizes it.
+    if let Some(visibility) = ir.declarationless_class(c.fq_name_id()) {
+        let visibility = match visibility {
+            crate::ir::IrDeclarationlessVisibility::Internal => SYNTHETIC_INTERNAL,
+            crate::ir::IrDeclarationlessVisibility::Local => SYNTHETIC_LOCAL,
+        };
         return Some(KotlinMetadata {
             k: 3,
             stamp: opts.metadata_stamp(),
-            xi: super::metadata_policy::class_xi(ir, c),
+            xi: super::metadata_policy::class_xi(ir, c) | synthetic_class_xi(visibility),
             d1: vec![],
             d2: vec![],
         });

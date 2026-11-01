@@ -19,8 +19,6 @@ mod nested_signature_argument_layout_e2e;
 mod abstract_serializable_e2e;
 #[path = "annotation_documented_mirror_e2e.rs"]
 mod annotation_documented_mirror_e2e;
-#[path = "assignment_plugin_e2e.rs"]
-mod assignment_plugin_e2e;
 #[path = "backticked_dotted_package_qualifier_e2e.rs"]
 mod backticked_dotted_package_qualifier_e2e;
 #[path = "bridge_result_cast_e2e.rs"]
@@ -101,8 +99,6 @@ mod abstract_modifier_consistency_e2e;
 mod access_increment_shape_e2e;
 #[path = "adapted_callable_reference_equality_e2e.rs"]
 mod adapted_callable_reference_equality_e2e;
-#[path = "allopen_plugin_e2e.rs"]
-mod allopen_plugin_e2e;
 #[path = "also_apply_result_line_e2e.rs"]
 mod also_apply_result_line_e2e;
 #[path = "annotated_class_decl_line_e2e.rs"]
@@ -2111,8 +2107,6 @@ mod no_assertions_flags_e2e;
 mod no_expect_for_actual_e2e;
 #[path = "no_jdk_builtin_emit_e2e.rs"]
 mod no_jdk_builtin_emit_e2e;
-#[path = "noarg_plugin_e2e.rs"]
-mod noarg_plugin_e2e;
 #[path = "non_field_ctor_metadata_e2e.rs"]
 mod non_field_ctor_metadata_e2e;
 #[path = "non_generic_overload_wins_e2e.rs"]
@@ -2213,8 +2207,6 @@ mod reference_consumer_casts_e2e;
 mod renamed_builtin_bridge_owner_e2e;
 #[path = "renamed_builtin_property_null_check_e2e.rs"]
 mod renamed_builtin_property_null_check_e2e;
-#[path = "sam_with_receiver_plugin_e2e.rs"]
-mod sam_with_receiver_plugin_e2e;
 #[path = "shared_cell_initial_values_e2e.rs"]
 mod shared_cell_initial_values_e2e;
 #[path = "smart_cast_consumer_cast_e2e.rs"]
@@ -2737,6 +2729,8 @@ mod erased_parameter_boxing_e2e;
 mod function_type_parameter_name_e2e;
 #[path = "hidden_deprecation_overload_e2e.rs"]
 mod hidden_deprecation_overload_e2e;
+#[path = "e2e/kotlinc_plugin_reimplementations.rs"]
+mod kotlinc_plugin_reimplementations;
 #[path = "nullable_when_subject_membership_e2e.rs"]
 mod nullable_when_subject_membership_e2e;
 #[path = "super_argument_outer_receiver_e2e.rs"]
