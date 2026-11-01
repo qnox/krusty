@@ -229,7 +229,6 @@ open class Guarded {
     fun all() = LIMIT
     protected companion object {
         const val LIMIT = 1
-        const val NAME = "tagged"
     }
 }
 "#,
@@ -266,6 +265,7 @@ interface Open {
 annotation class Tagged {
     companion object {
         const val LIMIT = 1
+        const val NAME = "tagged"
     }
 }
 "#,
@@ -277,5 +277,29 @@ annotation class Tagged {
             "Tagged",
             "Tagged$Companion",
         ],
+    );
+}
+
+/// The annotation interface and its companion load and verify on the JVM: reading the companion
+/// goes through the annotation's `Companion` field, and the class literal is an annotation type.
+#[test]
+fn an_annotation_class_companion_loads_through_its_field() {
+    common::expect_box_ok_with_stdlib(
+        r#"
+annotation class Tagged {
+    companion object {
+        const val LIMIT = 1
+        fun named() = "tagged"
+    }
+}
+
+fun box(): String {
+    val companion = Tagged
+    if (!Tagged::class.java.isAnnotation) return "fail: not an annotation"
+    if (companion.named() != "tagged") return "fail: companion"
+    return if (Tagged.LIMIT == 1) "OK" else "fail: limit"
+}
+"#,
+        "AnnotationCompanionLoads",
     );
 }
