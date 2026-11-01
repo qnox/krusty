@@ -2480,6 +2480,8 @@ mod safe_call_inline_callable_reference_e2e;
 mod safe_call_layout_e2e;
 #[path = "safe_call_let_destructure_e2e.rs"]
 mod safe_call_let_destructure_e2e;
+#[path = "safe_call_lambda_label_e2e.rs"]
+mod safe_call_lambda_label_e2e;
 #[path = "safe_call_member_on_generic_result_e2e.rs"]
 mod safe_call_member_on_generic_result_e2e;
 #[path = "safe_call_origin_narrowing_e2e.rs"]
