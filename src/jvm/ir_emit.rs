@@ -231,11 +231,10 @@ use inline_call::{bind_inline_handlers, parse_descriptor_params, InlineStaticTar
 use member_schedule::{
     source_ordered_members, split_around_primary_constructor, SourceOrderedMember,
 };
-pub(crate) use metadata_policy::is_coroutine_state_machine;
 pub use metadata_policy::KotlinMetadata;
 use metadata_policy::{
-    finish_local_synthetic_class, is_continuation_class, synthetic_class_xi, SYNTHETIC_LOCAL,
-    SYNTHETIC_PROTECTED, SYNTHETIC_PUBLIC,
+    finish_local_synthetic_class, synthetic_class_xi, SYNTHETIC_LOCAL, SYNTHETIC_PROTECTED,
+    SYNTHETIC_PUBLIC,
 };
 use method_defaults::{
     emit_default_stub, emit_facade_default_stub, static_default_stub_marker, DefaultStubSource,
@@ -2257,7 +2256,7 @@ fn emit_class(
     // (`class Box<T>(var a: T)` → `(TT;)V`); a PARAMETERIZED concrete-type param reads its full generic
     // signature (`List<String>` → `Ljava/util/List<Ljava/lang/String;>;`). `None` when no param needs it.
     // Computed once here: the pool seeder interns it and the `<init>` emission attaches it.
-    let is_continuation = is_continuation_class(c);
+    let is_continuation = crate::jvm::suspend::is_continuation_class(c);
     let has_continuation_receiver = c.ctor_args.iter().any(|argument| {
         argument.provenance == crate::ir::IrCtorParameterProvenance::ContinuationDispatchReceiver
     });
@@ -2286,7 +2285,7 @@ fn emit_class(
     );
     // An anonymous object carries kotlinc's minimal record (see the metadata assembly below) and
     // the same debug tables, so it is seeded like any class with a computed record.
-    let byte_parity = !is_coroutine_state_machine(c)
+    let byte_parity = !crate::jvm::suspend::is_coroutine_state_machine(c)
         && opts.emit_class_metadata
         && (c.is_anonymous_object || build_class_metadata(ir, c, opts, env).is_some());
     let pool_seed = || PlainClassPoolSeed {
@@ -2923,7 +2922,7 @@ fn emit_class(
         .flatten();
     // A value class visits generated nullability before its class-level `@JvmInline`.
     let early_value_nullability =
-        c.is_value && computed.is_some() && !is_coroutine_state_machine(c);
+        c.is_value && computed.is_some() && !crate::jvm::suspend::is_coroutine_state_machine(c);
     if early_value_nullability {
         attach_synth_nullability(ir, c, env.run, &mut cw);
         // `set_class_annotations` visits the deferred underlying field first, so a generic
@@ -2931,7 +2930,7 @@ fn emit_class(
         cw.set_class_annotations(&super::value_classes::class_file_annotations(c));
     }
     // Debug tables + nullability annotations follow a successfully computed `@Metadata` shape.
-    if computed.is_some() && !is_coroutine_state_machine(c) {
+    if computed.is_some() && !crate::jvm::suspend::is_coroutine_state_machine(c) {
         attach_synth_debug_tables(
             ir,
             env.override_results,
@@ -3002,7 +3001,7 @@ fn emit_class(
     // Intern the `EnclosingMethod` refs, then every retained `InnerClasses` row's outer-class ref
     // and simple name, at kotlinc's post-metadata pool position, in the table's sorted order. An
     // ANONYMOUS class has neither for its own row; its enclosing refs use the window in `finish`.
-    if !is_coroutine_state_machine(c) && !c.is_anonymous_object {
+    if !crate::jvm::suspend::is_coroutine_state_machine(c) && !c.is_anonymous_object {
         cw.intern_post_metadata_attribute_refs();
     }
     env.run.finish_class(cw)

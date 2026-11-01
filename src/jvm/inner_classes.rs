@@ -155,7 +155,8 @@ impl InnerClasses {
             // the scope it was lowered in. A coroutine state machine is anonymous in
             // `InnerClasses` even though its own IR class is not a source anonymous-object
             // declaration, and so is a lambda realized as a class.
-            let coroutine = is_coroutine_state_machine(class) || class.lambda.is_some();
+            let coroutine =
+                crate::jvm::suspend::is_coroutine_state_machine(class) || class.lambda.is_some();
             let local = class.is_local_class && class.enclosure.is_some();
             let (outer, name) = match &class.declaration_name {
                 Some(ClassifierDeclarationName::TopLevel { .. }) => continue,
@@ -512,19 +513,6 @@ fn source_name(ir: &IrFile, class: crate::ir::ClassId) -> String {
         .last()
         .expect("a named local class must carry a source-name segment")
         .clone()
-}
-
-/// A function's continuation class or a suspend lambda's class: both are state machines kotlinc
-/// generates, not source declarations.
-fn is_coroutine_state_machine(class: &IrClass) -> bool {
-    [
-        "kotlin/coroutines/jvm/internal/ContinuationImpl",
-        "kotlin/coroutines/jvm/internal/RestrictedContinuationImpl",
-        "kotlin/coroutines/jvm/internal/SuspendLambda",
-        "kotlin/coroutines/jvm/internal/RestrictedSuspendLambda",
-    ]
-    .iter()
-    .any(|superclass| class.superclass.matches(superclass))
 }
 
 fn is_suspend_lambda_class(class: &IrClass) -> bool {
