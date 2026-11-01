@@ -36,6 +36,9 @@ impl ClassWriter {
         else {
             return;
         };
+        if !super::late_fields::carries_nullability(self.fields[index].access) {
+            return;
+        }
         let annotation_type = self.cp.utf8(ann_type);
         let annotation = vec![(annotation_type >> 8) as u8, annotation_type as u8, 0, 0];
         let field = &mut self.fields[index];

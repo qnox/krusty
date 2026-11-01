@@ -235,3 +235,33 @@ open class Guarded {
         &["Holder", "Leaked", "Shared", "Guarded"],
     );
 }
+
+/// An interface's members are public, so kotlinc makes its private companion public in bytecode
+/// (`specialCaseVisibility`): its `InnerClasses` rows are public, and the interface's `Companion`
+/// field is public and synthetic, so it carries no nullability annotation. Each constant the
+/// companion moves onto the interface is deprecated as on a class. A public companion's field is
+/// an ordinary one.
+#[test]
+fn an_interfaces_private_companion_is_public_and_synthetic_in_bytecode() {
+    common::assert_classes_identical_to_kotlinc(
+        "InterfacePrivateCompanion",
+        r#"
+interface Keyed {
+    fun all() = LIMIT + label.length + named()
+    private companion object {
+        const val LIMIT = 3
+        val label = "label"
+        fun named() = 1
+    }
+}
+
+interface Open {
+    fun all() = LIMIT
+    companion object {
+        const val LIMIT = 1
+    }
+}
+"#,
+        &["Keyed", "Keyed$Companion", "Open", "Open$Companion"],
+    );
+}

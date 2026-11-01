@@ -989,6 +989,20 @@ fn attach_synth_nullability(
     }
 }
 
+/// An interface's fields are public, so each one its private companion moves out is deprecated
+/// for Java, as on a class.
+fn deprecate_moved_interface_field(
+    ir: &IrFile,
+    interface: &IrClass,
+    static_index: usize,
+    cw: &mut ClassWriter,
+) {
+    let static_index = u32::try_from(static_index).expect("too many statics for a packed index");
+    if static_fields::moved_from_private_companion(ir, interface, static_index) {
+        cw.deprecate_last_late_field();
+    }
+}
+
 /// Emit the companion/static surface shared by declarations that are JVM interfaces: Kotlin
 /// interfaces and annotation classes. Common IR keeps those source kinds distinct, but both use
 /// interface field constraints and the companion's self-hosted `$$INSTANCE` realization.
@@ -1056,20 +1070,14 @@ fn emit_jvm_interface_companion_surface(
         }
     }
 
-    add_companion_field(cw, c);
+    add_companion_field(ir, cw, c);
     // `<clinit>` already interned `Companion`. These constants follow it in the field table, and
     // their names, descriptors, and `ConstantValue` payloads intern together at the field visit —
     // after that alias store, before `@Metadata`. A hoisted `@JvmField` property is visited later
     // because kotlinc places it after both.
-    for property in ir
-        .statics
-        .iter()
-        .enumerate()
-        .filter(|(index, property)| {
-            property.owner_matches(&fq_name) && !ir.is_jvm_field_static(*index as u32)
-        })
-        .map(|(_, property)| property)
-    {
+    for (static_index, property) in ir.statics.iter().enumerate().filter(|(index, property)| {
+        property.owner_matches(&fq_name) && !ir.is_jvm_field_static(*index as u32)
+    }) {
         let descriptor = ir_type_desc(&property.ty);
         let value = property
             .init
@@ -1082,16 +1090,16 @@ fn emit_jvm_interface_companion_surface(
             }
         });
         cw.add_field_late(0x0019, &property.name, &descriptor, value, nullability);
+        deprecate_moved_interface_field(ir, c, static_index, cw);
     }
 
     // A hoisted `@JvmField` property is the public static field itself. Its declaration annotations
     // remain owned by the companion in common IR and are copied onto this target field here.
-    for s in ir
+    for (static_index, s) in ir
         .statics
         .iter()
         .enumerate()
         .filter(|(index, s)| s.owner_matches(&fq_name) && ir.is_jvm_field_static(*index as u32))
-        .map(|(_, s)| s)
     {
         let descriptor = ir_type_desc(&s.ty);
         let nullability = (descriptor.starts_with('L') || descriptor.starts_with('[')).then(|| {
@@ -1102,6 +1110,7 @@ fn emit_jvm_interface_companion_surface(
             }
         });
         cw.add_field_late(0x0019, &s.name, &descriptor, None, nullability);
+        deprecate_moved_interface_field(ir, c, static_index, cw);
         if let Some(annotations) = c
             .companion_class
             .and_then(|companion| ir.class_id_by_name(companion))

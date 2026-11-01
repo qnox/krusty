@@ -729,7 +729,11 @@ fn declare_static(
 
 /// Whether static `static_index` of `owner` is the storage of a property its
 /// `private companion object` declares: a `const val` or a hoisted property.
-fn moved_from_private_companion(ir: &IrFile, owner: &IrClass, static_index: u32) -> bool {
+pub(super) fn moved_from_private_companion(
+    ir: &IrFile,
+    owner: &IrClass,
+    static_index: u32,
+) -> bool {
     let Some(companion) = owner.companion_class else {
         return false;
     };

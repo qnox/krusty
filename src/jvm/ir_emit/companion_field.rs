@@ -6,14 +6,21 @@ use crate::jvm::private_static_access::StaticOwner;
 
 /// `static final` plus the companion object's own visibility, as kotlinc writes the outer class's
 /// `Companion` field: a `private companion object` keeps its field private, a protected one
-/// protected. An interface field is always public.
+/// protected. An interface field is always public, and kotlinc marks the public field of an
+/// interface's private companion synthetic (`isPrivateCompanionFieldInInterface`).
 pub(super) fn companion_field_access(ir: &IrFile, class: &IrClass, companion: TypeName) -> u16 {
     const STATIC_FINAL: u16 = 0x0018;
+    let visibility = ir.class_visibilities.get(&companion);
     if class.is_interface {
-        return STATIC_FINAL | 0x0001;
+        let synthetic = if visibility == Some(&crate::types::Visibility::Private) {
+            crate::jvm::classfile::ACC_SYNTHETIC
+        } else {
+            0
+        };
+        return STATIC_FINAL | 0x0001 | synthetic;
     }
     STATIC_FINAL
-        | match ir.class_visibilities.get(&companion) {
+        | match visibility {
             Some(crate::types::Visibility::Private) => 0x0002,
             Some(crate::types::Visibility::Protected) => 0x0004,
             _ => 0x0001,
@@ -205,12 +212,12 @@ fn java_string_hash(text: &str) -> i32 {
     })
 }
 
-pub(super) fn add_companion_field(cw: &mut ClassWriter, class: &IrClass) {
+pub(super) fn add_companion_field(ir: &IrFile, cw: &mut ClassWriter, class: &IrClass) {
     let Some(companion) = class.companion_class else {
         return;
     };
     cw.add_field(
-        0x0019,
+        companion_field_access(ir, class, companion),
         crate::jvm::companion_storage::field_name(class.fq_name, companion),
         &format!("L{};", companion.render()),
     );
