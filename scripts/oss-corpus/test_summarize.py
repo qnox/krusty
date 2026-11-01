@@ -109,6 +109,83 @@ class Summary(unittest.TestCase):
                              ['left to kotlinc: compose', 1]]),
         ])
 
+    def test_verify_errors_are_listed_per_project_and_grouped_by_cause(self):
+        def verified(task, *errors, status='failed'):
+            r = row(task, False, 1, 0, error='not run: a task it depends on failed')
+            r['verify'] = dict(status=status, errors=list(errors))
+            return r
+        with tempfile.TemporaryDirectory() as work:
+            reports = []
+            for p in (
+                project('zeta', [
+                    verified(':a:compileKotlin', "a/A.kt:3:5: error: unresolved reference 'foo'.",
+                             "a/A.kt:9:1: error: unresolved reference 'bar'.",
+                             'a/A.kt:12:1: error: type mismatch: inferred type is List<T> but `Map|K` was expected'),
+                    verified(':b:compileKotlin', "b/B.kt:1:1: error: unresolved reference 'foo'."),
+                    verified(':c:compileKotlin', status='compiled'),
+                    dict(row(':d:compileKotlin', False, 1, 0, fallback='plugin'), verify=None),
+                ]),
+                project('Alpha', [verified(':compileKotlin', "krusty: error: unresolved reference 'x'.",
+                                           "error: doesn't support 'y' at 4")]),
+                # A result published before the verify build has no verify record and no entry.
+                project('beta', [row(':compileKotlin', True, 1, 1)]),
+            ):
+                path = os.path.join(work, p['name'] + '.json')
+                with open(path, 'w') as f:
+                    json.dump(p, f)
+                reports.append(path)
+            text = subprocess.run([sys.executable, os.path.join(HERE, 'summarize.py'),
+                                   '--json', f'{work}/out.json', *reports],
+                                  check=True, capture_output=True, text=True).stdout
+            with open(f'{work}/out.json') as f:
+                document = json.load(f)
+        section = text[text.index('## krusty errors'):].splitlines()
+        self.assertEqual(section[8:], [
+            '| Cause | Projects | Compilations | Errors |',
+            '| --- | ---: | ---: | ---: |',
+            "| `unresolved reference '…'.` | 2 | 3 | 4 |",
+            "| `doesn't support 'y' at N` | 1 | 1 | 1 |",
+            '| ``type mismatch: inferred type is List<T> but `…` was expected`` | 1 | 1 | 1 |',
+            '',
+            '<details><summary><b>Alpha</b>: 2 errors in 1 compilation, 2 causes</summary>',
+            '',
+            "- `doesn't support 'y' at N`",
+            "  - `error: doesn't support 'y' at 4` in `:compileKotlin`",
+            "- `unresolved reference '…'.`",
+            "  - `krusty: error: unresolved reference 'x'.` in `:compileKotlin`",
+            '',
+            '</details>',
+            '',
+            '<details><summary><b>zeta</b>: 4 errors in 2 compilations, 2 causes; 1 compilation not verified</summary>',
+            '',
+            "- `unresolved reference '…'.`",
+            "  - `a/A.kt:3:5: error: unresolved reference 'foo'.` in `:a:compileKotlin`",
+            "  - `a/A.kt:9:1: error: unresolved reference 'bar'.` in `:a:compileKotlin`",
+            "  - `b/B.kt:1:1: error: unresolved reference 'foo'.` in `:b:compileKotlin`",
+            '- ``type mismatch: inferred type is List<T> but `…` was expected``',
+            '  - ``a/A.kt:12:1: error: type mismatch: inferred type is List<T> but `Map|K` was expected`` in `:a:compileKotlin`',
+            '',
+            '</details>',
+        ])
+        self.assertEqual([(p['name'], p['errors']) for p in document['projects']], [
+            ('Alpha', [
+                dict(cause="doesn't support 'y' at N", errors=[
+                    dict(error="error: doesn't support 'y' at 4", compilations=[':compileKotlin'])]),
+                dict(cause="unresolved reference '…'.", errors=[
+                    dict(error="krusty: error: unresolved reference 'x'.", compilations=[':compileKotlin'])]),
+            ]),
+            ('beta', []),
+            ('zeta', [
+                dict(cause="unresolved reference '…'.", errors=[
+                    dict(error="a/A.kt:3:5: error: unresolved reference 'foo'.", compilations=[':a:compileKotlin']),
+                    dict(error="a/A.kt:9:1: error: unresolved reference 'bar'.", compilations=[':a:compileKotlin']),
+                    dict(error="b/B.kt:1:1: error: unresolved reference 'foo'.", compilations=[':b:compileKotlin'])]),
+                dict(cause='type mismatch: inferred type is List<T> but `…` was expected', errors=[
+                    dict(error='a/A.kt:12:1: error: type mismatch: inferred type is List<T> but `Map|K` was expected',
+                         compilations=[':a:compileKotlin'])]),
+            ]),
+        ])
+
     def test_build_cost_compares_both_builds_of_each_measured_project(self):
         def cost(built, compile_, wall, cpu, daemon, krusty, total):
             return dict(built_compile_seconds=built, compile_seconds=compile_, wall_seconds=wall,
