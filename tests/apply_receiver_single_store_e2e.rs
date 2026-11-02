@@ -4,7 +4,8 @@
 
 use super::common;
 
-const PROGRAM: &str = include_str!("box_regressions/applyReceiverSingleStore.kt");
+const PROGRAM: &str =
+    include_str!("fixtures/apply_receiver_single_store/applyReceiverSingleStore.kt");
 
 #[test]
 fn the_complete_apply_receiver_program_matches_kotlin() {
@@ -24,4 +25,9 @@ fn the_complete_apply_receiver_program_matches_kotlin() {
         })
         .collect::<Vec<_>>();
     assert!(differences.is_empty(), "{}", differences.join("\n\n"));
+}
+
+#[test]
+fn the_apply_receiver_program_runs_like_kotlin() {
+    common::expect_box_same_as_kotlinc(PROGRAM, "ApplyReceiverSingleStore");
 }
