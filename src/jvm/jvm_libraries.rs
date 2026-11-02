@@ -287,7 +287,7 @@ impl JvmLibraries {
             push(mapping.source_name.clone());
         }
         if let Some(class) = self.cp.find_name(internal) {
-            for property in metadata::class_properties(&class) {
+            for property in self.cp.class_members(&class).class_properties.iter() {
                 if !property.is_companion_block_member {
                     push(property.name.clone());
                 }
@@ -715,7 +715,7 @@ impl JvmLibraries {
                 .find(|method| method.name == jvm_name && method.descriptor == desc)
                 .map(|method| method.is_public())
         };
-        for function in super::metadata::class_functions(&class) {
+        for function in self.cp.class_members(&class).class_functions.iter() {
             if function.kotlin_name != name
                 || !function.is_public()
                 || self.hides_function(function)
@@ -814,7 +814,7 @@ impl JvmLibraries {
             });
             self.publish_function_deprecation(overloads.last_mut(), function.deprecation());
         }
-        for property in super::metadata::class_properties(&class) {
+        for property in self.cp.class_members(&class).class_properties.iter() {
             if property.name != name || !property.is_extension {
                 continue;
             }
@@ -971,11 +971,13 @@ impl JvmLibraries {
         else {
             return crate::fx_hash::HashMap::default();
         };
-        let prop_rets: crate::fx_hash::HashMap<_, _> =
-            super::metadata::class_properties(&companion)
-                .iter()
-                .filter_map(|p| p.ret_class.map(|ret| (p.name.clone(), ret)))
-                .collect();
+        let prop_rets: crate::fx_hash::HashMap<_, _> = self
+            .cp
+            .class_members(&companion)
+            .class_properties
+            .iter()
+            .filter_map(|p| p.ret_class.map(|ret| (p.name.clone(), ret)))
+            .collect();
         Self::const_fields(&ci.fields, |f| {
             prop_rets
                 .get(&f.name)
@@ -1007,7 +1009,10 @@ impl JvmLibraries {
                 }
             }
         }
-        let declared: crate::fx_hash::HashMap<_, _> = super::metadata::class_properties(ci)
+        let declared: crate::fx_hash::HashMap<_, _> = self
+            .cp
+            .class_members(ci)
+            .class_properties
             .iter()
             .filter(|property| property.is_const)
             .filter_map(|property| {
@@ -1273,11 +1278,11 @@ impl JvmLibraries {
             // default flags, which the erased JVM descriptor loses. Populate every member's `call_sig` from
             // its record so a named-argument / omitted-`$default` member call resolves through the ONE
             // `resolve_type` member seam (the `instance_members` query), not a separate `functions()` walk.
-            let meta_fns = metadata::class_functions(&ci);
+            let meta_fns = &self.cp.class_members(&ci).class_functions;
             // The class's `@Metadata` CONSTRUCTOR records — the only place a constructor parameter's
             // source-level shape survives (a receiver function type erases to `FunctionN` in both the
             // descriptor and the `Signature`).
-            let meta_constructors = metadata::class_constructors(&ci);
+            let meta_constructors = &self.cp.class_members(&ci).constructors;
             let ctor_param_lists = self.visible_constructor_params(meta_constructors);
             crate::trace_compiler!(
                 "resolve",
@@ -2037,7 +2042,7 @@ impl JvmLibraries {
             // marker overloads remain public. Publish every missing declaration here. Its empty opaque
             // emit token says only "the provider has no direct physical method for this declaration";
             // the selected application is paired with the matching physical marker below resolution.
-            for declaration in meta_constructors {
+            for declaration in meta_constructors.iter() {
                 // A HIDDEN-deprecated declaration was dropped above; never resurrect it here.
                 // Iterating the declarations directly (rather than the filtered param-list
                 // projection) keeps this loop and the hidden filter from ever disagreeing.
@@ -2782,7 +2787,7 @@ impl JvmLibraries {
             .iter()
             .find(|mapping| mapping.is_property() && mapping.source_name == name);
         if let Some(ci) = self.cp.find_name(cn) {
-            for mp in metadata::class_properties(&ci) {
+            for mp in self.cp.class_members(&ci).class_properties.iter() {
                 // A `companion { … }` block property is a classifier member, not an instance one.
                 if mp.name != name || mp.is_companion_block_member {
                     continue;
@@ -3662,6 +3667,9 @@ impl JvmLibraries {
             .into_iter()
             .flat_map(|package| self.cp.package_facades_name(package))
         {
+            if !self.cp.facade_declares_function(facade, name) {
+                continue;
+            }
             let lambda_return_overload = self.cp.lambda_return_overloads(facade).contains(name);
             for mf in self.cp.meta_functions_name(facade).iter() {
                 if mf.kotlin_name != name || !mf.is_extension() {

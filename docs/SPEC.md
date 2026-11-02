@@ -163,6 +163,17 @@ names; KLIB declines a local header it cannot represent. Serialization-generated
 the exact owner and segment published by their frontend plugin. Tests: the full classfile oracle
 in `backtick_identifier_e2e`, shared class-ID wire tests, and the generated-header boundary test.
 
+## Dependency member metadata is decoded on first use
+
+A dependency class's `@Metadata` header (kind, flags, type parameters, supertypes, type aliases) is
+decoded when its class file is read. Its functions, properties and constructors stay packed until a
+lookup reads them. A package's member index and its callable lookup read only each function's Kotlin
+name, JVM name and visibility, so a package's facades are not decoded to resolve one name. Member
+metadata that does not decode is reported when the compilation first consults it, as the classpath's
+terminal load error (`cannot load classpath declaration <class>: invalid Kotlin metadata: …`). As in
+kotlinc, a malformed member nothing looks up is never reported. Test:
+`malformed_member_metadata_is_reported_only_when_a_lookup_reads_the_members`.
+
 ## Dependency conversion type evidence
 
 Ordinary KLIB bodies and prepared inline templates prove subtype conversions through the calling

@@ -2245,14 +2245,17 @@ mod tests {
             Some(metadata.k),
             "a/AKt",
             None,
-            &[],
         )
         .expect("decode generated facade metadata");
 
-        let [property] = decoded.package_properties.as_ref() else {
+        let members = decoded
+            .members
+            .decode(&[], &decoded.type_parameter_scope)
+            .expect("decode generated facade members");
+        let [property] = members.package_properties.as_ref() else {
             panic!(
                 "expected one package property, got {:?}",
-                decoded.package_properties
+                members.package_properties
             );
         };
         assert_eq!(property.name, "topLevel");
