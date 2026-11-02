@@ -365,26 +365,35 @@ fn forwarder_signature(
                 .map(|parameter| parameter.semantic_name.to_string()),
         )
         .collect::<Vec<_>>();
+    let bounds = type_parameters
+        .iter()
+        .map(|parameter| {
+            parameter
+                .bounds
+                .iter()
+                .map(|bound| (bound.ty.get(), bound.is_interface))
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
     if semantic_params
         .iter()
         .chain(std::iter::once(&semantic_ret))
-        .chain(
-            type_parameters
-                .iter()
-                .flat_map(|parameter| parameter.bounds.iter().map(|(bound, _)| bound)),
-        )
+        .chain(bounds.iter().flatten().map(|(bound, _)| bound))
         .any(|ty| mentions_other_type_parameter(*ty, &known))
     {
         return None;
     }
     let declarations = super::type_parameter_signatures::jvm_type_parameter_declarations(
         formatter,
-        type_parameters.iter().map(|parameter| {
-            (
-                crate::types::type_parameter_source_name(&parameter.semantic_name),
-                &*parameter.bounds,
-            )
-        }),
+        type_parameters
+            .iter()
+            .zip(&bounds)
+            .map(|(parameter, bounds)| {
+                (
+                    crate::types::type_parameter_source_name(&parameter.semantic_name),
+                    bounds.as_slice(),
+                )
+            }),
     )?;
     let mut parameters = String::new();
     for parameter in semantic_params {

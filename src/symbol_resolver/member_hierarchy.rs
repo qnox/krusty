@@ -274,11 +274,35 @@ fn specialize_declared_callables(
         // mention the declaring classifier's formals (`Parent<X>.val <T : X> T.x`), so specialize
         // only the applied copy while the declaration table retains the raw signature for
         // diagnostics. Property-owned formals were removed from `bindings` above and stay open.
+        let mut refreshed = crate::fx_hash::HashMap::default();
         if let Some(signature) = &mut property.getter.generic_sig {
+            let declared_bounds = (0..signature.formals.len())
+                .map(|ordinal| signature.primary_formal_bound(ordinal))
+                .collect::<Vec<_>>();
             for bounds in &mut signature.formal_bounds {
                 for bound in bounds {
                     *bound = ty_subst_keep_unbound(*bound, &bindings);
                 }
+            }
+            refreshed = refreshed_formal_bounds(signature, &declared_bounds);
+            if !refreshed.is_empty() {
+                let refresh = |ty: Ty| crate::types::ty_with_param_bounds(ty, &refreshed);
+                signature.receiver = signature.receiver.map(refresh);
+                signature.params = signature.params.iter().map(|ty| refresh(*ty)).collect();
+                signature.ret = refresh(signature.ret);
+            }
+        }
+        if !refreshed.is_empty() {
+            let refresh = |ty: Ty| crate::types::ty_with_param_bounds(ty, &refreshed);
+            property.ty = refresh(property.ty);
+            property.getter.params = property
+                .getter
+                .params
+                .iter()
+                .map(|ty| refresh(*ty))
+                .collect();
+            if property.kind != PropKind::Member {
+                property.receiver = property.receiver.map(refresh);
             }
         }
         property.getter.ret = property.ty;
@@ -290,6 +314,13 @@ fn specialize_declared_callables(
                         *bound = ty_subst_keep_unbound(*bound, &bindings);
                     }
                 }
+            }
+            if !refreshed.is_empty() {
+                setter.params = setter
+                    .params
+                    .iter()
+                    .map(|ty| crate::types::ty_with_param_bounds(*ty, &refreshed))
+                    .collect();
             }
         }
         if super::raw_member_view::is_raw_receiver(receiver) {
@@ -409,15 +440,52 @@ pub(crate) fn specialize_member_function(
         if signature.ret != declared_ret {
             function.callable.ret = signature.ret;
         }
+        let declared_bounds = (0..signature.formals.len())
+            .map(|ordinal| signature.primary_formal_bound(ordinal))
+            .collect::<Vec<_>>();
         for bounds in &mut signature.formal_bounds {
             for bound in bounds {
                 *bound = ty_subst_keep_unbound(*bound, &bindings);
+            }
+        }
+        let refreshed = refreshed_formal_bounds(signature, &declared_bounds);
+        if !refreshed.is_empty() {
+            let refresh = |ty: Ty| crate::types::ty_with_param_bounds(ty, &refreshed);
+            signature.receiver = signature.receiver.map(refresh);
+            signature.params = signature.params.iter().map(|ty| refresh(*ty)).collect();
+            signature.ret = refresh(signature.ret);
+            let callable = &mut function.callable;
+            callable.params = callable.params.iter().map(|ty| refresh(*ty)).collect();
+            callable.ret = refresh(callable.ret);
+            callable.source_receiver = callable.source_receiver.map(refresh);
+            if function.kind == FnKind::Extension {
+                function.receiver = function.receiver.map(refresh);
             }
         }
     }
     if raw_receiver {
         super::raw_member_view::erase_function(source, function);
     }
+}
+
+/// The member's own formals whose primary bound the receiver substitution changed, each with its
+/// substituted bound. kotlinc's fake override declares fresh type parameters with the substituted
+/// bounds, so every occurrence of such a formal in the applied member carries the new bound
+/// (`fun <T : E> f(x: T)` seen through `I<String>` takes a `T : String`).
+fn refreshed_formal_bounds(
+    signature: &crate::libraries::GenericSig,
+    declared_bounds: &[Ty],
+) -> crate::fx_hash::HashMap<String, Ty> {
+    signature
+        .formals
+        .iter()
+        .zip(declared_bounds)
+        .enumerate()
+        .filter_map(|(ordinal, (formal, &declared))| {
+            let applied = signature.primary_formal_bound(ordinal);
+            (applied != declared).then(|| (formal.clone(), applied))
+        })
+        .collect()
 }
 
 /// The existing logical suspend-member view, shared with the retained declaration snapshot.

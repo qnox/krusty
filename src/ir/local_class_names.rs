@@ -1283,8 +1283,8 @@ impl super::IrFile {
                 tys(&mut default.applied_parameters, names);
                 default.applied_result = ty(default.applied_result, names);
                 for parameter in default.type_parameters.iter_mut() {
-                    for (bound, _) in parameter.bounds.iter_mut() {
-                        *bound = ty(*bound, names);
+                    for bound in parameter.bounds.iter_mut() {
+                        resolved_ty(&mut bound.ty, names);
                     }
                 }
             }

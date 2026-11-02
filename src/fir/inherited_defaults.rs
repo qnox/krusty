@@ -33,12 +33,13 @@ pub enum InheritedDefaultBody {
     JavaDefaultMethod,
 }
 
-/// One type parameter an inherited member declares: its semantic identity and its bounds, each
-/// marked when it is an interface (kotlinc writes the class bound first).
+/// One type parameter an inherited member declares: its semantic name (the identity its
+/// occurrences in the member's types carry) and its declared bounds as the classifier's applied
+/// supertype substitutes them.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InheritedTypeParameter {
     pub semantic_name: Box<str>,
-    pub bounds: Box<[(Ty, bool)]>,
+    pub bounds: Box<[crate::fir::ResolvedTypeParameterBound]>,
 }
 
 /// One interface member a classifier inherits with a body and does not override.
