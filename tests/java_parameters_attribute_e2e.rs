@@ -68,18 +68,23 @@ fn parameters_by_method(rows: Vec<String>) -> BTreeMap<String, String> {
     keyed
 }
 
-fn kotlinc_classes(source_name: &str, source: &str) -> std::path::PathBuf {
+fn kotlinc_classes(source_name: &str, source: &str, extra: &[String]) -> std::path::PathBuf {
     let root = common::scratch_dir().expect("reference scratch dir");
     let out = root.join("classes");
     std::fs::create_dir_all(&out).expect("reference output dir");
     let source_path = root.join(format!("{source_name}.kt"));
     std::fs::write(&source_path, source).expect("reference source");
-    let (code, stderr) = common::kotlinc_compile(&[
-        "-d".to_string(),
-        out.to_string_lossy().into_owned(),
-        "-java-parameters".to_string(),
-        source_path.to_string_lossy().into_owned(),
-    ])
+    let (code, stderr) = common::kotlinc_compile(
+        &[
+            "-d".to_string(),
+            out.to_string_lossy().into_owned(),
+            "-java-parameters".to_string(),
+        ]
+        .into_iter()
+        .chain(extra.iter().cloned())
+        .chain([source_path.to_string_lossy().into_owned()])
+        .collect::<Vec<_>>(),
+    )
     .expect("reference kotlinc unavailable under the test harness");
     assert_eq!(code, 0, "kotlinc failed: {stderr}");
     out
@@ -104,7 +109,7 @@ fn compile_java_parameters(
     );
     let analysis = krusty::frontend::analyze_source_set_with_features_and_prepare(
         &inputs,
-        krusty::frontend::PlatformProvider::jvm(platform),
+        common::with_native_plugins(krusty::compilation_target::CompilationTarget::Jvm, platform),
         &krusty::features::LangFeatures::default(),
         |files, symbols| krusty::jvm::prepare_module_symbols(files, &stems, symbols),
         &mut diagnostics,
@@ -173,7 +178,7 @@ const ENUM_CONSTRUCTOR_SOURCE: &str = "package demo\n\
 fn assert_parameter_parity(source_name: &str, source: &str, expected_classes: &[&str]) {
     let jdk = common::jdk_modules();
     let stdlib = common::stdlib_jar();
-    let reference_dir = kotlinc_classes(source_name, source);
+    let reference_dir = kotlinc_classes(source_name, source, &[]);
     let classes = compile_java_parameters(
         source_name,
         source,
@@ -639,16 +644,39 @@ fn method_parameters_remain_opt_in() {
 
 /// Byte-compare `expected_classes` compiled by both compilers under `-java-parameters`.
 fn assert_byte_parity(source_name: &str, source: &str, expected_classes: &[&str]) {
+    assert_byte_parity_with(source_name, source, expected_classes, &[], &[]);
+}
+
+/// [`assert_byte_parity`] with `libraries` beside the stdlib on both compilers' classpaths and
+/// `kotlinc_extra` passed to kotlinc only (a compiler plugin krusty implements itself).
+fn assert_byte_parity_with(
+    source_name: &str,
+    source: &str,
+    expected_classes: &[&str],
+    libraries: &[std::path::PathBuf],
+    kotlinc_extra: &[String],
+) {
     let jdk = common::jdk_modules();
     let stdlib = common::stdlib_jar();
-    let reference_dir = kotlinc_classes(source_name, source);
-    let classes = compile_java_parameters(
-        source_name,
-        source,
-        &[stdlib, jdk.clone()],
-        Some(jdk.as_path()),
-    )
-    .expect("compile with -java-parameters");
+    let mut reference_extra = kotlinc_extra.to_vec();
+    if !libraries.is_empty() {
+        reference_extra.push("-classpath".to_string());
+        reference_extra.push(
+            libraries
+                .iter()
+                .map(|jar| jar.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+                .join(":"),
+        );
+    }
+    let reference_dir = kotlinc_classes(source_name, source, &reference_extra);
+    let classpath = libraries
+        .iter()
+        .cloned()
+        .chain([stdlib, jdk.clone()])
+        .collect::<Vec<_>>();
+    let classes = compile_java_parameters(source_name, source, &classpath, Some(jdk.as_path()))
+        .expect("compile with -java-parameters");
     let mismatches: Vec<&str> = expected_classes
         .iter()
         .copied()
@@ -671,6 +699,27 @@ fn assert_byte_parity(source_name: &str, source: &str, expected_classes: &[&str]
         .parent()
         .expect("reference output has a scratch root");
     let _ = std::fs::remove_dir_all(root);
+}
+
+/// kotlinc writes no `MethodParameters` on a synthetic method, and the serialization plugin's
+/// `write$Self` is one, so the class interns its `@JvmStatic` right after the method's header.
+#[test]
+fn java_parameters_skips_a_serializable_classs_synthetic_write_self() {
+    let plugin = super::compiler_plugin_fixture::kotlinc_plugin_jar(
+        "kotlinx-serialization-compiler-plugin.jar",
+    );
+    let core = krusty::toolchain::serialization_core_jar()
+        .expect("the serialization runtime is provisioned");
+    assert_byte_parity_with(
+        "JavaParametersSerializable",
+        "package demo\n\
+         import kotlinx.serialization.Serializable\n\
+         @Serializable\n\
+         data class Domain(val name: String, val verified: Boolean = false)\n",
+        &["demo/Domain"],
+        &[core],
+        &[format!("-Xplugin={}", plugin.display())],
+    );
 }
 
 /// ASM interns each `MethodParameters` name in `visitParameter`, right after a method's header and

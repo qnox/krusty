@@ -285,6 +285,51 @@ fn a_program_calls_generic_stdlib_functions_through_their_bodies() {
     std::fs::remove_dir_all(&scratch).expect("remove the compiler command's directory");
 }
 
+const LIBRARY_OBJECTS: &str = "\
+fun box(): String {
+    val none = setOf<String>()
+    val same = none === emptySet<Int>()
+    return if (none.isEmpty() && same && Int.Companion === Int) \"OK\" else \"fail: $none $same\"
+}
+
+fun main() {
+    println(setOf<String>())
+    println(setOf<String>() === emptySet<Int>())
+    println(Int.Companion === Int)
+}
+";
+
+#[test]
+fn a_program_reads_library_objects_through_the_stdlib_bodies() {
+    if !native_compiler_available() {
+        return;
+    }
+    assert_eq!(common::kotlinc_box_result(LIBRARY_OBJECTS), "OK");
+    common::expect_box_ok_with_stdlib(LIBRARY_OBJECTS, "compilerCommandLibraryObjects");
+
+    let scratch = common::scratch_dir().expect("allocate the compiler command's directory");
+    let main = scratch.join("main.kt");
+    std::fs::write(&main, LIBRARY_OBJECTS).expect("write main.kt");
+    let compiled = Command::new(common::krusty_binary())
+        .args(["kotlinc-native", "-o"])
+        .arg(scratch.join("app"))
+        .arg(&main)
+        .output()
+        .expect("run krusty kotlinc-native");
+    assert_eq!(
+        completed(compiled),
+        (Some(0), String::new(), String::new()),
+        "the program compiles and links silently"
+    );
+    let run = common::run_freshly_written(&mut Command::new(scratch.join("app.kexe")))
+        .expect("run the Native program");
+    assert_eq!(
+        completed(run),
+        (Some(0), "[]\ntrue\ntrue\n".to_owned(), String::new())
+    );
+    std::fs::remove_dir_all(&scratch).expect("remove the compiler command's directory");
+}
+
 #[test]
 fn a_source_error_is_reported_and_no_program_is_written() {
     if !native_compiler_available() {

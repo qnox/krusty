@@ -275,21 +275,6 @@ impl Constructor {
 }
 
 /// The slots a value of type `desc` takes.
-/// The slot each argument of the constructor descriptor `desc` starts at.
-pub(super) fn argument_slots(desc: &str) -> Option<Vec<u16>> {
-    let mut slot = 1u16;
-    Some(
-        argument_descriptors(desc)?
-            .iter()
-            .map(|argument| {
-                let start = slot;
-                slot += descriptor_words(argument);
-                start
-            })
-            .collect(),
-    )
-}
-
 fn descriptor_words(desc: &str) -> u16 {
     if matches!(desc.as_bytes()[0], b'J' | b'D') {
         2

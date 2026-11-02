@@ -261,6 +261,7 @@ fn capture_storage_and_unproven_prefix_roles_still_decline() {
     captured.ctor_args[0].capture = Some(IrConstructorCapture {
         source_name: "captured".into(),
         receiver: None,
+        crossinline_parameter: None,
     });
     assert_eq!(check_class(&captured), expected);
     let mut stored = original.clone();
