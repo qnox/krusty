@@ -44263,7 +44263,9 @@ impl<'a> Checker<'a> {
             // path below.
             let declared = StablePathRead::new(self).declared_ty(scope, path);
             if ty.non_null() != Ty::Nothing {
-                if let Some(declared) = declared.map(Ty::non_null) {
+                // A nullable test (`is B?`) still admits null, so the declaration keeps its `?`.
+                let keep_null = ty.is_nullable();
+                if let Some(declared) = declared.map(|d| if keep_null { d } else { d.non_null() }) {
                     let context = crate::assignable::TyCtx::new();
                     let comparable = crate::assignable::is_subtype(&context, self, declared, *ty)
                         || crate::assignable::is_subtype(&context, self, *ty, declared);

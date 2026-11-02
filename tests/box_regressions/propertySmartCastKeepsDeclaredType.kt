@@ -24,6 +24,17 @@ class Generic<T>(val delegate: Column<T>) {
 
 class Outer(val inner: Plain)
 
+// A nullable test (`is Dated?`) still admits null, so the declared type keeps its `?`: the read
+// is `Column<String>? & Dated?` and only the nullable overload applies.
+fun pick(column: Column<String>): String = "non-null"
+fun pick(value: Any?): String = "nullable"
+
+class Maybe(val delegate: Column<String>?) {
+    fun marker(): String = if (delegate is Dated?) pick(delegate) else "none"
+}
+
+fun local(delegate: Column<String>?): String = if (delegate is Dated?) pick(delegate) else "none"
+
 fun nested(outer: Outer): String =
     if (outer.inner.delegate is Dated) outer.inner.delegate.sqlType() + outer.inner.delegate.hasTime else "none"
 
@@ -31,5 +42,8 @@ fun box(): String {
     if (Plain(DateColumn()).marker() != "DATEfalse") return "Fail plain"
     if (Generic(DateColumn()).marker() != "DATEfalse") return "Fail generic"
     if (nested(Outer(Plain(DateColumn()))) != "DATEfalse") return "Fail nested"
+    if (Maybe(DateColumn()).marker() != "nullable") return "Fail nullable path"
+    if (Maybe(null).marker() != "nullable") return "Fail null path"
+    if (local(DateColumn()) != "nullable") return "Fail nullable local"
     return "OK"
 }
