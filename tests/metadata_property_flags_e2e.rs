@@ -417,3 +417,33 @@ fn a_constant_read_is_not_folded_like_a_literal() {
     assert_identical("ConstantReads", SRC, "app/R");
     assert_identical("ConstantReads", SRC, "app/ConstantReadsKt");
 }
+
+/// `trimIndent()` and `trimMargin()` over a string literal are folded after kotlinc's frontend, so
+/// a `val` they initialize records no constant even though its field holds the folded string. A
+/// call operand keeps a `+` a `plus` call rather than a literal concatenation.
+#[test]
+fn a_trimmed_string_literal_is_not_a_constant() {
+    const SRC: &str = "package app\n\
+        \n\
+        class T {\n\
+        \x20   fun all() = indented + margin + short + joined + plain\n\
+        \x20   companion object {\n\
+        \x20       private val indented =\n\
+        \x20           \"\"\"\n\
+        \x20           x\n\
+        \x20             y\n\
+        \x20           \"\"\".trimIndent()\n\
+        \x20       private val margin = \"\"\"a\n\
+        \x20           |b\"\"\".trimMargin()\n\
+        \x20       internal val short = \"q\".trimIndent()\n\
+        \x20       val joined = \"a\" + \" b\".trimIndent()\n\
+        \x20       val plain = \"p\"\n\
+        \x20   }\n\
+        }\n\
+        private val topIndented = \"\"\"\n\
+        \x20   x\n\
+        \"\"\".trimIndent()\n\
+        fun top() = topIndented\n";
+    assert_identical("TrimmedConstants", SRC, "app/T$Companion");
+    assert_identical("TrimmedConstants", SRC, "app/TrimmedConstantsKt");
+}

@@ -7,9 +7,9 @@ pinned by tests, so do not add per-change entries here.
 ## Reference (`fun f(a: Int): Int = a` in `M.kt` → class `MKt`)
 
 > The `d1` byte capture below was taken from kotlinc **1.9.24** when this format was first
-> reverse-engineered; the encoding is version-stable so it still holds. The reference toolchain krusty
-> is **validated** against today is pinned by the `kotlin-versions` manifest (its newest release) and
-> self-provisioned by `just kotlinc` — see `harness/run-diff.sh` / `just conformance`.
+> reverse-engineered; the encoding is version-stable so it still holds. The reference toolchain is
+> selected by the `kotlin-versions` manifest and self-provisioned by `just kotlinc` — see
+> `harness/run-diff.sh` / `just conformance`.
 
 Annotation values: `mv=[1,9,0]`, `k=2` (file facade), `xi=48`, `d2=["f","","a"]`.
 
@@ -18,7 +18,7 @@ Annotation values: `mv=[1,9,0]`, `k=2` (file facade), `xi=48`, `d2=["f","","a"]`
 00 08 0a 00 0a 02 10 08 0a 00 1a 0e 10 00 1a 02 30 01 32 06 10 02 1a 02 30 01
 ```
 
-## Encoding chain (implemented + validated, `metadata/encoding.rs`)
+## Encoding chain (`metadata/encoding.rs`)
 `Package` proto bytes → `bytesToStrings` (byte→char identity; **matches the reference d1 exactly**)
 → modified-UTF-8 in the constant pool. `BitEncoding` default path (`FORCE_8TO7=false`); no marker.
 
@@ -51,7 +51,7 @@ to the builtin via `predefinedIndex=8` = `kotlin/Int`.
 ```
 ⇒ krusty types: Int→8, Long→9, Double→6, Boolean→11, String→14, Unit→2.
 
-## Leading `00` — RESOLVED
+## Leading `00`
 The "extra leading `00`" is the **`UTF8_MODE_MARKER`** (`BitEncoding`): the d1 payload begins with a
 `0x00` byte before the delimited `StringTableTypes`. The reader strips it before
 `parseDelimitedFrom`. krusty emits it verbatim; confirmed by the round-trips below.
@@ -422,34 +422,8 @@ consumer: kotlin-test's JUnit5 variant declares `package kotlin.test` and emits 
 into `KotlinMeta::package`; every consumer keys declarations by that field rather than by splitting
 the class's internal name.
 
-**Writer side — OPEN.** krusty cannot yet compile a source carrying `@file:JvmPackageName`, so it
-emits no `pn`. Closing it is four pieces: `-Xfriend-paths` (the annotation is `internal` to the
-stdlib, so no source can name it otherwise), emitting the facade class at the relocated JVM package,
-writing `pn`, and writing the `.kotlin_module` `jvm_package_name` table with
-`class_with_jvm_package_name_{short_name,package_id}`. Reachable only by a library that names an
-stdlib-internal annotation — kotlin-test itself, essentially.
-
-## Known byte-identity gap — `Type.abbreviatedType`
-
-kotlinc records the ALIAS SPELLING at a use site: a declaration written `fun make(): Cargo` where
-`typealias Cargo = Payload` encodes `Type{class_name=Payload, abbreviated_type=Type{…Cargo…}}`.
-krusty writes only the expanded target, so any consumer that spells a typealias in a DECLARED type
-differs from kotlinc in `d1`/`d2` alone (bytecode, descriptors and the constant pool all match).
-This applies to every classpath typealias, relocated facade or not — measured both ways.
-
-This is the byte-identity blocker that real code hits, and it is a `Ty` REPRESENTATION change, not a
-writer patch: every metadata entry point (`class_builder::build_class`, `builder`, `type_encoder`) is
-driven by `Ty`, which is fully expanded by the time it reaches them and carries no alias identity.
-Emitting `abbreviatedType` means threading the source spelling from `TypeRef` through `Ty` to every
-declared-type encode site — the same shape as the in-flight `Ty` nullability migration, and owed its
-own workstream.
-
-## Status — round-trips PASSING
-Encoding chain ✅, schema + builtin table ✅, `UTF8_MODE_MARKER` ✅. **Both round-trips pass**: a
-*Kotlin consumer* compiled by the real kotlinc resolves krusty's top-level functions (facade
-`@Metadata` + `META-INF/*.kotlin_module`, Phase 5b) **and** uses krusty's classes via property syntax
-(class `@Metadata` kind=1, Phase 8b). Remaining: richer language surface (data classes, methods in
-bodies, generics, nullability) — each extends these same builders.
+The `.kotlin_module` relocation table uses `jvm_package_name` and the
+`class_with_jvm_package_name_{short_name,package_id}` fields.
 
 ## `Type.abbreviatedType` — the source spelling of a declared type
 
@@ -580,24 +554,6 @@ UNPROJECTED as `ValueParameter.vararg_element_type` (f4). `metadata::vararg_reco
 the projection at the encode seam only, so nothing upstream of metadata sees a type source never
 wrote. Package functions, member functions, constructors (annotation classes included) and a
 `vararg val` constructor property all record the projected array. A primitive specialized array has no type argument and is recorded unchanged.
-
-## `Property.flags` HAS_CONSTANT
-
-Read from kotlinc 2.4.20's `FirElementSerializer.propertyProto`:
-`isConst || (!isVar && canBeUsedForConstVal(fullyExpandedType(returnType)) && hasConstantValue(initializer))`.
-`hasConstantValue` (`FirToConstantValueChecker`) accepts a supported literal, a string
-concatenation whose arguments are constants, a `const val` (or Java `final` field) read, an enum
-entry, an annotation constructor, `arrayOf` over constants, and a call in package `kotlin` named
-in `NUMBER_CONVERSIONS` or `unaryMinus` whose dispatch receiver is constant. kotlinc's parser folds
-`-3`, `+3` and `"a" + "b"` into literals before that. Measured the same in classes and at top level:
-
-| initializer | HAS_CONSTANT |
-| --- | --- |
-| `val s: String = "s"`, `val u: UInt = 1u`, `val n: Int = -X` | yes |
-| `X.toLong()`, `(-3).toLong()`, `0.toDouble()`, `1.0.toInt()`, `65.toChar()` | yes |
-| `"$X"`, `"a${S}b"`, `"a" + "b" + "c"`, `+3`, a bare `S` | yes |
-| `val a: Any = "t"`, `val c: CharSequence = "abcd"`, `val m: String? = "m"` | no |
-| `(1 + 2).toLong()`, `1 + 2`, `!true`, `"a" + 1`, `"a" + S`, `S + "a"`, `+X`, `3u.toUInt()` | no |
 
 ## Accessors, setter parameters and member list order
 

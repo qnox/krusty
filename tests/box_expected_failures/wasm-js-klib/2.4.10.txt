@@ -1,7 +1,7 @@
 # Kotlin 2.4.10 codegen/box files expected to fail on wasm-js-klib, relative to
-# compiler/testData/codegen/box. Later releases with no file of their own read this one.
 # Owned fixtures use regressions/<path relative to tests/box_regressions>.
 # Regenerate both exact inventories with KRUSTY_BLESS_BOX_EXPECTATIONS=1 on a full local
+# compiler/testData/codegen/box. Later releases with no file of their own read this one.
 # wasm-js-klib run. The lists only shrink.
 annotations/annotationWithDefaultArgInDifferentModule.kt
 annotations/annotations0.kt
@@ -472,7 +472,6 @@ callableReference/bound/equals/nullableReceiverInEquals.kt
 callableReference/bound/equals/receiverInEquals.kt
 callableReference/bound/genericBoundPropertyAsCrossinline.kt
 callableReference/bound/genericValOnLHS.kt
-callableReference/bound/inlineFunctionRefToAnonymousObject.kt
 callableReference/bound/kCallableNameIntrinsic.kt
 callableReference/bound/kt12738.kt
 callableReference/bound/kt15446.kt
@@ -528,7 +527,6 @@ callableReference/function/local/extension.kt
 callableReference/function/local/extensionToLocalClass.kt
 callableReference/function/local/extensionToPrimitive.kt
 callableReference/function/local/extensionWithClosure.kt
-callableReference/function/local/localClassMember.kt
 callableReference/function/local/localFunctionName.kt
 callableReference/function/local/localLocal.kt
 callableReference/function/local/recursiveClosure.kt
@@ -743,15 +741,9 @@ classes/privateOuterProperty.kt
 classes/privateToThis.kt
 closures/anonymousObjectAsLastExpressionInLambda.kt
 closures/captureExtensionReceiver.kt
-closures/captureInSuperConstructorCall/constructorParameterAndLocalCapturedInLambdaInLocalClass.kt
 closures/captureInSuperConstructorCall/kt14148.kt
 closures/captureInSuperConstructorCall/kt4174.kt
 closures/captureInSuperConstructorCall/kt4174a.kt
-closures/captureInSuperConstructorCall/localCapturedInAnonymousObjectInLocalClass.kt
-closures/captureInSuperConstructorCall/localCapturedInAnonymousObjectInLocalClass2.kt
-closures/captureInSuperConstructorCall/localCapturedInLambdaInInnerClassInLocalClass.kt
-closures/captureInSuperConstructorCall/localCapturedInLambdaInLocalClass.kt
-closures/captureInSuperConstructorCall/localFunctionCapturedInLambda.kt
 closures/captureInSuperConstructorCall/outerAndLocalCapturedInLocalClass.kt
 closures/captureInSuperConstructorCall/outerCapturedInLambda2.kt
 closures/captureInSuperConstructorCall/outerCapturedInLocalClass.kt
@@ -763,7 +755,6 @@ closures/captureInSuperConstructorCall/outerCapturedInSecondaryConstructorDefaul
 closures/captureInSuperConstructorCall/outerEnumEntryCapturedInLambdaInInnerClass.kt
 closures/captureInSuperConstructorCall/properValueCapturedByClosure1.kt
 closures/captureInSuperConstructorCall/properValueCapturedByClosure2.kt
-closures/captureInSuperConstructorCall/referenceToCapturedVariablesInMultipleLambdas.kt
 closures/captureOuterProperty/captureFunctionInProperty.kt
 closures/captureOuterProperty/inFunction.kt
 closures/captureOuterProperty/inProperty.kt
@@ -798,7 +789,6 @@ closures/kt3523.kt
 closures/kt4106.kt
 closures/kt47840.kt
 closures/kt47894_inlineFunWithObjectWithNothing.kt
-closures/localClassFunClosure.kt
 closures/localClassLambdaClosure.kt
 closures/localFunInInit.kt
 closures/localFunctionInInitBlock.kt
@@ -3511,15 +3501,12 @@ innerNested/superConstructorCall/kt11833_1.kt
 innerNested/superConstructorCall/kt11833_2.kt
 innerNested/superConstructorCall/localClassOuterDiffersFromInnerOuter.kt
 innerNested/superConstructorCall/localExtendsInner.kt
-innerNested/superConstructorCall/localExtendsLocalWithClosure.kt
-innerNested/superConstructorCall/localWithClosureExtendsLocalWithClosure.kt
 innerNested/superConstructorCall/objectExtendsClassDefaultArgument.kt
 innerNested/superConstructorCall/objectExtendsInner.kt
 innerNested/superConstructorCall/objectExtendsInnerDefaultArgument.kt
 innerNested/superConstructorCall/objectExtendsInnerOfLocalVarargAndDefault.kt
 innerNested/superConstructorCall/objectExtendsInnerOfLocalWithCapture.kt
 innerNested/superConstructorCall/objectExtendsInnerWithDelegatingConstructor.kt
-innerNested/superConstructorCall/objectExtendsLocalWithClosure.kt
 innerNested/superConstructorCall/objectOuterDiffersFromInnerOuter.kt
 instructions/swap/swapRefToSharedVarInt.kt
 instructions/swap/swapRefToSharedVarLong.kt
@@ -3638,7 +3625,6 @@ literals/strdedup1.kt
 localClass/innerTakesCapturedFromOuter.kt
 localClass/localFunctionCallFromLocalClass.kt
 localClass/localFunctionInLocalClass.kt
-localClass/localHierarchy.kt
 localClass/objectExpressionInInitializer.kt
 localClass/objectExpressionInProperty.kt
 localClass/signatureConflictHiddenByTypeParameter.kt
@@ -3696,7 +3682,6 @@ mangling/parentheses.kt
 mangling/publicOverrideSuperCall.kt
 mixedNamedPosition/varargs.kt
 mixedNamedPosition/varargsEvaluationOrder.kt
-multiDecl/ValCapturedInObjectLiteral.kt
 multiDecl/VarCapturedInFunctionLiteral.kt
 multiDecl/VarCapturedInLocalFunction.kt
 multiDecl/VarCapturedInObjectLiteral.kt
@@ -3891,7 +3876,6 @@ object/initialization.kt
 object/initialization1.kt
 object/method_call.kt
 objectExpression/expr1.kt
-objectExpression/expr2.kt
 objectExpression/expr3.kt
 objectIntrinsics/objects.kt
 objects/classCallsProtectedInheritedByCompanion.kt
