@@ -2124,7 +2124,6 @@ evaluate/serialization/annotationWithDefaultValueOnFakeOverride.kt
 evaluate/serialization/annotationWithDefaults.kt
 evaluate/serialization/nestedTypeAnnotation.kt
 evaluate/serialization/typeAnnotation.kt
-evaluate/stdlibConst.kt
 evaluate/stringConcatenationWithObject.kt
 evaluate/thisPlusString.kt
 evaluate/thisPlusStringWithObject.kt
@@ -4205,7 +4204,6 @@ properties/accessorForProtectedPropertyWithPrivateSetterWithIntermediateClass.kt
 properties/augmentedAssignmentsAndIncrements.kt
 properties/backingField/anyPropertyWithValueClassExplicitBackingField.kt
 properties/backingField/anySupertypeValueClassAnyMethodsWithExplicitBackingField.kt
-properties/backingField/backingFieldAndPropertyWithTheSameName.kt
 properties/backingField/backingFieldInitializedInInit.kt
 properties/backingField/backingFieldWithSmartTypeParameters.kt
 properties/backingField/equalsHashCodeWithValueClassExplicitBackingFieldAndSupertype.kt
