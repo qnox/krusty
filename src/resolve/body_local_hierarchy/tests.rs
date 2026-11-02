@@ -36,11 +36,13 @@ fn exact_provider_formals_preserve_own_and_captured_nullable_arguments() {
             vec![Ty::nullable(Ty::obj("kotlin/Any"))],
         ],
     );
-    let mut symbols = SymbolTable::default();
-    symbols.libraries = Box::new(SelectedOwner {
-        owner,
-        class: Arc::new(class),
-    });
+    let symbols = SymbolTable {
+        libraries: Box::new(SelectedOwner {
+            owner,
+            class: Arc::new(class),
+        }),
+        ..Default::default()
+    };
     let mut checker = make_checker(&file, 0, None, &symbols, &mut diagnostics);
     let own = Ty::ty_param("owner:Own", Ty::nullable(Ty::obj("kotlin/Any")));
     let captured = Ty::ty_param("outer:Captured", Ty::nullable(Ty::obj("kotlin/Any")));
