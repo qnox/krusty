@@ -50,6 +50,29 @@ impl BodyLowering<'_> {
         parameter_ty: Ty,
         statements: &mut Vec<ExprId>,
     ) -> ExprId {
+        let first = statements.len();
+        let read = self.spill_reordered_value(value, parameter_ty, statements);
+        // These holders, and only these, are kotlinc's argument-order variables, which take their
+        // slots before their values are evaluated. Any other call-operand holder is a staging of
+        // the operand, stored once it is evaluated. kotlinc's `visitVariable` marks each one at the
+        // argument's line once the value is stored: after an inlined argument has forgotten the
+        // line, that mark states it again.
+        let line = self.operand_source_line(value);
+        for &declaration in &statements[first..] {
+            self.ir.argument_evaluation_bindings.insert(declaration);
+            if let Some(line) = line {
+                self.ir.expr_lines.insert(declaration, line);
+            }
+        }
+        read
+    }
+
+    fn spill_reordered_value(
+        &mut self,
+        value: ExprId,
+        parameter_ty: Ty,
+        statements: &mut Vec<ExprId>,
+    ) -> ExprId {
         if let &IrExpr::TypeOp {
             op: IrTypeOp::ImplicitCoercion,
             arg,
@@ -92,7 +115,7 @@ impl BodyLowering<'_> {
     /// The source line of a call operand that lowering stores in a temporary: kotlinc builds the
     /// temporary and its reads at the argument's offsets. An implicit coercion of the argument to
     /// its parameter has no position of its own, so the line is the value it coerces.
-    pub(in super::super) fn operand_source_line(&self, operand: ExprId) -> Option<u32> {
+    fn operand_source_line(&self, operand: ExprId) -> Option<u32> {
         let mut operand = operand;
         loop {
             if let Some(&line) = self.ir.expr_source_lines.get(&operand) {
