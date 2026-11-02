@@ -5,7 +5,7 @@
 //! are represented.
 
 use crate::fir::SyntheticOriginKind;
-use crate::ir::{ExprId, IrExpr, IrFile, IrNodeOrigin};
+use crate::ir::{ExprId, IrExpr, IrFile, IrNodeOrigin, IrTypeOp};
 use crate::jvm::classfile::CodeBuilder;
 
 use super::Emitter;
@@ -175,6 +175,67 @@ impl Emitter<'_> {
         if let Some(&line) = self.ir.expr_source_lines.get(&expression) {
             self.mark_expression_line(expression, line, code);
         }
+    }
+
+    /// Mark a suspend callee's call line before anything its call generates, receiver and
+    /// arguments included. kotlinc's `visitCall` does so for every suspend callee, so the line is
+    /// in effect before the coroutine transformer spills around the call (KT-66413); the
+    /// receiver's own line, when it starts another line, follows at the same offset.
+    ///
+    /// `expression` may be a cast of the call's generic result: the cast starts where the call
+    /// does and carries the call's line when the call node itself does not.
+    pub(super) fn mark_suspend_call_line(&mut self, expression: ExprId, code: &mut CodeBuilder) {
+        let Some(call) = self.suspend_call_under_result_casts(expression) else {
+            return;
+        };
+        // A generated call marks its line only at its dispatch: it has no source start of its own.
+        if self.ir.dispatch_line(call).is_some() {
+            return;
+        }
+        let line = [call, expression]
+            .into_iter()
+            .find_map(|node| self.ir.expr_source_lines.get(&node).copied());
+        let Some(line) = line.filter(|&line| line != 0) else {
+            return;
+        };
+        if !code.is_dead() {
+            self.note_inlined_expression(call, code);
+            let line = self.mapped_expression_line(call, line);
+            code.mark_line_kept(line);
+        }
+    }
+
+    /// The suspend call `expression` is, or evaluates under casts of its result.
+    fn suspend_call_under_result_casts(&self, expression: ExprId) -> Option<ExprId> {
+        let mut current = expression;
+        loop {
+            match self.ir.expr(current) {
+                IrExpr::TypeOp {
+                    op: IrTypeOp::Cast | IrTypeOp::CastNonNull | IrTypeOp::ImplicitCoercion,
+                    arg,
+                    ..
+                } => current = *arg,
+                _ => break,
+            }
+        }
+        self.calls_suspend_callee(current).then_some(current)
+    }
+
+    fn calls_suspend_callee(&self, call: ExprId) -> bool {
+        if self.ir.suspend_calls.contains_key(&call) {
+            return true;
+        }
+        let function = match self.ir.expr(call) {
+            IrExpr::Call { callee, .. } => callee.source_function(),
+            IrExpr::MethodCall { class, index, .. } => self
+                .ir
+                .classes
+                .get(*class as usize)
+                .and_then(|class| class.methods.get(*index as usize))
+                .copied(),
+            _ => None,
+        };
+        function.is_some_and(|function| self.ir.suspend_funs.contains(&function))
     }
 
     /// Mark one expression line, mapping a same-module inline copy through the class's SMAP. Common

@@ -27,5 +27,7 @@ mod primary_constructor_newline_e2e;
 mod property_initializer_newline_e2e;
 #[path = "../receiver_type_line_break_e2e.rs"]
 mod receiver_type_line_break_e2e;
+#[path = "../suspend_call_start_line_e2e.rs"]
+mod suspend_call_start_line_e2e;
 #[path = "../type_annotation_newline_e2e.rs"]
 mod type_annotation_newline_e2e;
