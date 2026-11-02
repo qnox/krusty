@@ -10,47 +10,6 @@ enum ReceiverAdmissionPhase {
     AfterArguments,
 }
 
-fn first_name_use(file: &File, expression: ExprId, name: &str) -> Option<ExprId> {
-    match file.expr(expression) {
-        Expr::Name(candidate) => (candidate == name).then_some(expression),
-        // A nested lambda owns its own implicit parameter and lexical diagnostics.
-        Expr::Lambda { .. } => None,
-        _ => {
-            let found = std::cell::Cell::new(None);
-            file.any_child_expr(
-                expression,
-                &mut |child| {
-                    if found.get().is_none() {
-                        found.set(first_name_use(file, child, name));
-                    }
-                    found.get().is_some()
-                },
-                &mut |statement| {
-                    if found.get().is_none() {
-                        found.set(first_name_use_in_statement(file, statement, name));
-                    }
-                    found.get().is_some()
-                },
-            );
-            found.get()
-        }
-    }
-}
-
-fn first_name_use_in_statement(file: &File, statement: StmtId, name: &str) -> Option<ExprId> {
-    if matches!(file.stmt(statement), Stmt::LocalFun(_)) {
-        return None;
-    }
-    let found = std::cell::Cell::new(None);
-    file.any_child_stmt(statement, &mut |child| {
-        if found.get().is_none() {
-            found.set(first_name_use(file, child, name));
-        }
-        found.get().is_some()
-    });
-    found.get()
-}
-
 /// The rejected candidate that owns a receiver call's failure.
 pub(super) enum RejectedCallOwner {
     Member,
@@ -737,28 +696,27 @@ impl Checker<'_> {
 
     /// Report the diagnostics owned by a lambda for which no callable supplied an expected
     /// function shape. This runs only after the scope tower is exhausted: probes remain silent,
-    /// while the final rejected source form diagnoses every untyped written parameter and leaves
-    /// an implicit `it` unresolved, as the language does without a contextual function type.
+    /// while the final rejected source form diagnoses every untyped written parameter and checks a
+    /// lambda without a parameter list as declaring none, as the language does without a
+    /// contextual function type.
     pub(super) fn report_unshaped_lambda_diagnostics(
         &mut self,
         scope: &CheckerScope<'_>,
         arguments: &[ExprId],
+        implicit_label: Option<&str>,
     ) {
         for &argument in arguments {
             let Expr::Lambda { params, body } = self.file.expr(argument) else {
                 continue;
             };
             if params.is_empty() {
-                if !self.file.lambda_explicit_arrows.contains(&argument.0)
-                    && self.untyped_lambda_binds_implicit_it(scope, *body)
-                {
-                    if let Some(reference) = first_name_use(self.file, *body, "it") {
-                        self.diags.error(
-                            self.span(reference),
-                            "unresolved reference 'it'.".to_string(),
-                        );
-                    }
-                }
+                // No candidate gives the lambda a shape, so it declares no parameter: its body is
+                // checked without one, and an `it` it reads resolves lexically or is unresolved.
+                // kotlinc reports `{ length }` as `unresolved reference 'length'`.
+                let (params, body) = (params.clone(), *body);
+                self.omit_unshaped_any_receiver_type += 1;
+                self.expr_inner_lambda(scope, argument, None, params, body, implicit_label);
+                self.omit_unshaped_any_receiver_type -= 1;
                 continue;
             }
 
@@ -946,7 +904,7 @@ impl Checker<'_> {
             self.unresolved_member_diagnostic(scope, Some(receiver), name, constraints.receiver);
         self.diags
             .error(self.call_callee_name_span(call_args.call), message);
-        self.report_unshaped_lambda_diagnostics(scope, call_args.args);
+        self.report_unshaped_lambda_diagnostics(scope, call_args.args, Some(name));
     }
 
     /// The one candidate more specific than every other rejected one, a non-generic declaration

@@ -922,19 +922,7 @@ impl Checker<'_> {
         self.report_callable_ambiguity(call, name, candidates);
         if let Expr::Call { args, .. } = self.file.expr(call) {
             let args = args.clone();
-            // A lambda with neither parameters nor an implicit `it` is still checked, without a
-            // receiver: kotlinc reports `{ length }` as `unresolved reference 'length'`.
-            for &argument in &args {
-                let Expr::Lambda { params, body } = self.file.expr(argument).clone() else {
-                    continue;
-                };
-                if params.is_empty() && !self.untyped_lambda_binds_implicit_it(scope, body) {
-                    self.omit_unshaped_any_receiver_type += 1;
-                    self.expr_inner_lambda(scope, argument, None, params, body, Some(name));
-                    self.omit_unshaped_any_receiver_type -= 1;
-                }
-            }
-            self.report_unshaped_lambda_diagnostics(scope, &args);
+            self.report_unshaped_lambda_diagnostics(scope, &args, Some(name));
         }
         self.set(call, Ty::Error)
     }

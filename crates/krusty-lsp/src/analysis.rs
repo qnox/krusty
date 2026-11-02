@@ -8131,7 +8131,10 @@ mod tests {
             "builtin compound assignment is an operator: {tokens:?}"
         );
 
-        let return_source = "fun pick(n: Int): Int = n.let { if (it > 0) return@let it; return 0 }";
+        // Standalone analysis has no stdlib, so the source declares the `let` that shapes `it`.
+        let return_source =
+            "fun pick(n: Int): Int = n.let { if (it > 0) return@let it; return 0 }\n\
+                             inline fun <T, R> T.let(block: (T) -> R): R = block(this)";
         let return_analysis = analyze_standalone_source_set(&[return_source]);
         let return_index = SemanticTokenIndex::from_file_analysis(
             return_source,

@@ -210,7 +210,7 @@ pub(super) fn score_with_declaration(
         } else {
             let argument_kind = call_arg_kind(checker.file, argument, actual);
             let probe = if argument_kind.is_lambda_literal() {
-                checker.lambda_probe_ty(scope, argument).unwrap_or(actual)
+                checker.lambda_probe_ty(argument).unwrap_or(actual)
             } else {
                 actual
             };
@@ -337,9 +337,7 @@ pub(super) fn score_with_declaration(
         if expected.is_erased_top() {
             return Some(2);
         }
-        let probe = checker
-            .lambda_probe_ty(scope, argument)
-            .unwrap_or(Ty::Error);
+        let probe = checker.lambda_probe_ty(argument).unwrap_or(Ty::Error);
         if checker.sam_argument_fits(scope, expected, probe, argument) {
             record_sam(source, expected)?;
             Some(1)
