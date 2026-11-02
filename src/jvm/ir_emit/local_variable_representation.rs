@@ -352,8 +352,6 @@ impl Emitter<'_> {
                     let declared_try = matches!(self.ir.expr(initializer), IrExpr::Try { .. })
                         .then_some(initializer);
                     let outer_try = std::mem::replace(&mut self.declared_try, declared_try);
-                    // `visitVariable` marks the declaration once its value is on the stack.
-                    code.mark_value_boundary(initializer);
                     let source = self.emit_consumed_operand(initializer, code);
                     self.declared_try = outer_try;
                     self.leave_declared_initializer(previous);
@@ -379,31 +377,22 @@ impl Emitter<'_> {
             .get(&initializer)
             .copied()
             .unwrap_or(source);
-        // An inlined body forgets the caller's line. kotlinc's `visitVariable` marks the
-        // declaration before it narrows the erased result, so the `checkcast` — not the store
-        // after it — starts that line (`val value = fetch(slot)`). An unsigned
-        // bitwise result still forgets after its carrier conversion, and the store is the mark
-        // that follows.
-        // A same-module inline call's operand is stored into its parameter slot as kotlinc's
-        // `genValueAndPut` does, with no line of the declaration's.
-        let marks_line = self.copied_operand_binding != Some(declaration);
-        let restore_inlined_line = marks_line
-            && code.line_forgotten()
-            && !self.completes_unsigned_bitwise_value(initializer);
-        if restore_inlined_line {
-            self.mark_declared_initializer_line(declaration, initializer, code);
+        // kotlinc's `visitVariable`: once the value is on the stack it marks the initializer's
+        // start, narrows the value to the slot (`checkcast` of an erased result), and marks the
+        // declaration before the store. A same-module inline call's operand is stored into its
+        // parameter slot as kotlinc's `genValueAndPut` does, with no line of the declaration's.
+        let marks_line = self.copied_operand_binding != Some(declaration) && !default_value;
+        if marks_line {
+            self.mark_expression_start(initializer, code);
         }
         self.adapt_physical_operand(source, semantic, Some(semantic_ty), slot_ty, code);
-        if self.completes_unsigned_bitwise_value(initializer) {
-            code.forget_line();
-        }
-        if marks_line && !restore_inlined_line && !default_value {
-            self.mark_declared_initializer_line(declaration, initializer, code);
+        if marks_line {
+            self.mark_declaration_line(declaration, code);
         }
     }
 
-    /// The declaration's line, after the initializer's own start when that start is a different
-    /// expression. A declaration inside an external inline body maps through the class source map.
+    /// The initializer's start and the declaration's own line, as kotlinc's `visitVariable` marks
+    /// a declaration without an initializer before its default value.
     fn mark_declared_initializer_line(
         &mut self,
         declaration: ExprId,
@@ -411,6 +400,12 @@ impl Emitter<'_> {
         code: &mut CodeBuilder,
     ) {
         self.mark_expression_start(initializer, code);
+        self.mark_declaration_line(declaration, code);
+    }
+
+    /// The declaration's line. A declaration inside an external inline body maps through the class
+    /// source map.
+    fn mark_declaration_line(&mut self, declaration: ExprId, code: &mut CodeBuilder) {
         match self.ir.external_frame_lines.get(&declaration).cloned() {
             Some(frame) => {
                 let line = self.map_external_frame_line(&frame);

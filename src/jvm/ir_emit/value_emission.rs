@@ -1937,13 +1937,11 @@ impl super::Emitter<'_> {
                 if self.value_ty(*operand).is_jvm_scalar() {
                     return;
                 }
-                // An inlined operand leaves the caller's line forgotten. kotlinc marks the checked
-                // expression's line again at the implicit check, so the check owns an entry even
-                // though the restored caller line is already in effect.
-                if matches!(check, NullCheck::Named(_)) && code.line_forgotten() {
-                    if let Some(line) = code.current_line() {
-                        code.mark_line(line.into());
-                    }
+                // kotlinc lowers the implicit check to a temporary of the checked value
+                // (`TypeOperatorLowering`), whose declaration marks the check's line once the
+                // value is on the stack: after an inlined operand the mapper wrote nothing yet.
+                if matches!(check, NullCheck::Named(_)) {
+                    self.mark_expression_start(e, code);
                 }
                 code.dup();
                 // A platform value narrowed to a declared non-null type names the checked expression

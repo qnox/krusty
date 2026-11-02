@@ -41,11 +41,12 @@ impl Emitter<'_> {
             return;
         }
         // An in-place delegate evaluated where its field was initialized keeps its property's
-        // line even when the evaluation leaves no instruction (`Unit`): the next line's mark gives
-        // it a `nop` of its own.
+        // line even when the evaluation leaves no instruction (`Unit`): the line owns a `nop`,
+        // which the redundant-nop pass removes once another instruction follows on that line.
         if self.ir.is_jvm_delegate_evaluation(expression) {
             if let Some(line) = self.ir.source_line(expression) {
-                code.mark_line_occupied(line);
+                code.mark_line(line);
+                code.nop();
             }
         }
         if let IrExpr::BottomValue {

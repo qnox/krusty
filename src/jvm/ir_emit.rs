@@ -4422,7 +4422,6 @@ fn emit_placed_method(
         &reserved_desc,
         reserved_sig,
     );
-    let lambda_impl = ir.lambda_own_params_from.contains_key(&fid);
     let declared_nullability::DeclaredNullability {
         result: ret_ann,
         parameters: param_anns,
@@ -4478,13 +4477,6 @@ fn emit_placed_method(
         &mut e,
         &mut code,
     );
-    // A LAMBDA IMPL's LineNumberTable starts at the post-guard pc, mapped to the body's line.
-    if let Some(line) = lambda_impl
-        .then(|| function_debug::lambda_entry_line(ir, fid))
-        .flatten()
-    {
-        code.mark_line(line);
-    }
     // kotlinc opens every EMITTED `inline fun` body with an inline-depth marker: `iconst_0;
     // istore_<n>` into a synthetic `$i$f$<name>` int local covering the body — its inliner tracks
     // splice depth through these. Emitted after the parameter guards; the body's LineNumberTable
@@ -5177,13 +5169,8 @@ struct Emitter<'a> {
     copied_operand_binding: Option<ExprId>,
     /// The `&&`/`||` operand whose line is marked again before the jump that consumes it.
     short_circuit_operand_line: Option<ExprId>,
-    /// The enclosing unsigned operation's decision to move its eager source boundary.
-    unsigned_receiver_line_moves: Option<bool>,
     /// A plain local operand of an unsigned bitwise member is being loaded, so it records no line.
     suppress_unsigned_local_line: bool,
-    /// An assignment of an unsigned bitwise value keeps its line on the receiver load. The store
-    /// writes that line again after `constructor-impl`.
-    unsigned_assignment_line: bool,
     /// Slot 0 remains the verifier's special uninitialized receiver until the constructor delegates.
     this_uninitialized: bool,
     /// Independent realization strategies for plain lambdas and SAM conversions.
@@ -5298,9 +5285,7 @@ impl<'a> Emitter<'a> {
             inside_condition: false,
             copied_operand_binding: None,
             short_circuit_operand_line: None,
-            unsigned_receiver_line_moves: None,
             suppress_unsigned_local_line: false,
-            unsigned_assignment_line: false,
             this_uninitialized: false,
             lambda_modes: env.lambda_modes,
             inline_string_concat: env.inline_string_concat,
@@ -5615,21 +5600,15 @@ impl<'a> Emitter<'a> {
                 };
                 let deferred = self.inline_return_frame_result_type(var).is_some();
                 // kotlinc's `visitSetValue` marks the value's start before evaluating it, whatever
-                // the value's kind: an `iinc` that never evaluates it keeps that line.
-                self.mark_expression_start(value, code);
+                // the value's kind: an `iinc` that never evaluates it keeps that line. A store into
+                // an inline-return frame's result is kotlinc's `return` from the inlined body,
+                // which marks only after its value (`visitReturn`).
+                if !deferred {
+                    self.mark_expression_start(value, code);
+                }
                 match local_updates::iinc_delta(self.ir, e, var, value, jt) {
                     Some(delta) if !deferred => code.iinc(self.slots[&var].0, delta),
                     _ => {
-                        let unsigned = self.completes_unsigned_bitwise_value(value);
-                        let saved_assignment = self.unsigned_assignment_line;
-                        if unsigned {
-                            self.unsigned_assignment_line = true;
-                            // The value's own mark follows at this same pc. When its right operand
-                            // is itself unsigned, kotlinc keeps both.
-                            if self.unsigned_bitwise_rhs_is_unsigned(value) {
-                                debug_lines::mark_statement_retained(self.ir, e, code);
-                            }
-                        }
                         // An erased `FunctionN.invoke` stored into an `Object` slot stays `Object`.
                         // The consumer after the store narrows it; casting at the store would put
                         // the checkcast inside the protected range.
@@ -5647,7 +5626,6 @@ impl<'a> Emitter<'a> {
                         if keep_erased_invoke {
                             self.erased_invocations.remove(&value);
                         }
-                        self.unsigned_assignment_line = saved_assignment;
                         // Coerced to the slot's type as the initializer is: a value of another
                         // class is cast to the declared one, which is what a join of the two
                         // stores reads back. The erased invoke already left `Object`.
@@ -5657,10 +5635,6 @@ impl<'a> Emitter<'a> {
                         // An inlined `return` stores on the return's line, after the value.
                         self.mark_expression_start(e, code);
                         let slot = self.activate_inline_return_frame_result(var, jt);
-                        if unsigned {
-                            code.forget_line();
-                            debug_lines::mark_statement(self.ir, e, code);
-                        }
                         store(jt, slot, code);
                     }
                 }
@@ -5693,7 +5667,6 @@ impl<'a> Emitter<'a> {
     }
 
     fn emit_value_expression(&mut self, e: u32, code: &mut CodeBuilder) {
-        debug_lines::begin_expression(self.ir, e, code);
         self.mark_value_expression_start(e, code);
         // Mark a machine-owned suspension at its post-splice location.
         let suspension = self.machine_before(e, code);

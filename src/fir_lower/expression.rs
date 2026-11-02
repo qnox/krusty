@@ -646,7 +646,8 @@ impl BodyLowering<'_> {
                     }
                     FirUnaryOperation::BitwiseNot => {
                         // `inv` xors with every bit set in the carrier. `ULong` is that `long`
-                        // carrier, the same width `Long.inv` already uses.
+                        // carrier, the same width `Long.inv` already uses. The mask is code of
+                        // the member's body, not of the source: it has no position.
                         let carrier = expression.ty.get().canonical_semantic().non_null();
                         let all_bits = self.ir.add_expr(IrExpr::Const(
                             if matches!(carrier, crate::types::Ty::Long | crate::types::Ty::ULong) {
@@ -655,6 +656,9 @@ impl BodyLowering<'_> {
                                 IrConst::Int(-1)
                             },
                         ));
+                        let mask = all_bits as usize;
+                        self.ir
+                            .settle_positions(mask..mask + 1, crate::ir::IrNodePosition::default());
                         self.ir.add_arithmetic(
                             IrBinOp::BitXor,
                             operand,

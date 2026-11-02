@@ -1899,13 +1899,6 @@ pub struct CodeBuilder {
     /// class initializers curate their final table, so they retain this provenance separately from
     /// ordinary nested-expression marks.
     inlined_line_marks: Vec<(u16, u16)>,
-    /// A bytecode offset whose last recorded line mark must be KEPT when another mark lands on the
-    /// same offset: the next one appends after it instead of replacing it. See
-    /// [`CodeBuilder::mark_line_retained`].
-    retained_line_mark: Option<usize>,
-    /// The retained mark keeps only a mark of ANOTHER line after it; the same line dedupes as
-    /// usual. See [`CodeBuilder::mark_line_kept`].
-    retained_line_distinct: bool,
     /// `(start_pc, length, slot, name, descriptor)` entries in scope-close order.
     local_entries: Vec<(u16, Option<u16>, u16, String, String)>,
     /// Semantic inline-frame placement parallel to `local_entries`. This never reaches the class
@@ -1955,8 +1948,8 @@ pub struct CodeBuilder {
     /// stand in, which a bytecode rewrite that inserts an instruction between them needs.
     bind_sequence: Vec<u32>,
     next_bind: u32,
-    /// Pending line-mark obligations (see [`line_numbers::PendingLines`]).
-    pending_lines: line_numbers::PendingLines,
+    /// kotlinc's `LineNumberMapper` state for this body (see [`crate::jvm::line_numbers`]).
+    lines: crate::jvm::line_numbers::LineNumberMapper,
     /// This method expanded an inline body. kotlinc sorts that method's whole exception table by
     /// handler pc, then start pc, only after inlining. A method that was not inlined keeps
     /// emission order (the inner handler of a nested `try` stays ahead of the outer one).
@@ -1977,8 +1970,6 @@ impl CodeBuilder {
             exceptions: Vec::new(),
             line_marks: Vec::new(),
             inlined_line_marks: Vec::new(),
-            retained_line_mark: None,
-            retained_line_distinct: false,
             local_entries: Vec::new(),
             local_entry_placements: Vec::new(),
             inline_scope_frames: Vec::new(),
@@ -1989,7 +1980,7 @@ impl CodeBuilder {
             dead_bound: Vec::new(),
             bind_sequence: Vec::new(),
             next_bind: 0,
-            pending_lines: Default::default(),
+            lines: Default::default(),
             inlined_bytecode: false,
         }
     }

@@ -217,17 +217,14 @@ pub(super) fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, env:
         let Some(init) = stored_clinit_initializer(ir, s) else {
             continue;
         };
-        code.mark_line_retained(initializer_line(ir, s, init));
+        code.mark_line(initializer_line(ir, s, init));
         e.emit_static_initializer_store(facade, index, init, &mut code);
     }
     code.ret_void();
-    let mut clinit_lines: Vec<(u16, u32)> = code.line_marks()[first_mark..]
+    let clinit_lines: Vec<(u16, u32)> = code.line_marks()[first_mark..]
         .iter()
         .map(|&(pc, line)| (pc, u32::from(line)))
         .collect();
-    // The store's own mark is retained so an argument line at the same offset follows it; the
-    // initializer marking that same line again there adds nothing.
-    clinit_lines.dedup();
     finish_code::<0x0008>(e.cw, "<clinit>", "()V", &mut code, e.frame.max());
     if !clinit_lines.is_empty() {
         e.cw.set_method_lines("<clinit>", "()V", &clinit_lines);

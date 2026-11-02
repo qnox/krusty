@@ -185,12 +185,10 @@ impl Emitter<'_> {
             self.emit_value(receiver, code);
             code.pop();
         }
-        // An object initializer's store opens on its line and the value starts at that same
-        // offset; a line the value marks there (an argument on a line of its own) follows the
-        // store's entry instead of replacing it, as kotlinc keeps both.
+        // An object initializer's store opens on its line (`visitFieldAccess`), before its value.
         if self.render_initializer_boundaries {
             if let Some(line) = self.ir.statement_line(statement) {
-                code.mark_line_retained(line);
+                code.mark_line(line);
             }
         }
         self.emit_value(value, code);

@@ -270,12 +270,18 @@ impl Emitter<'_> {
             .filter(|_| !is_stmt)
             .map(TempSlot::slot);
         if stores_body {
-            // The call's line owns the synthetic result store. A trailing same-line `nop` already
-            // carries that mark and will be removed onto the store; otherwise force a fresh mark
-            // after the inlined body's own closing line.
-            if inline_cleanup_result && !code.line_marked_on_trailing_nop() {
-                code.forget_line();
-                self.mark_expression_start(expression, code);
+            // The result store follows the inlined lambda's body in the copied cleanup body.
+            // kotlinc's inliner writes the line of the lambda's invocation there, as copied
+            // lines are, without the mapper: the call's line, which the `@InlineOnly` body maps
+            // every line to. A lambda whose value closes on that line already left it on the
+            // `nop` that anchors its frame's end, which the cleanup removes onto this store.
+            if inline_cleanup_result {
+                if let Some(line) = self.expression_start_line(expression, code) {
+                    let line = line.min(u32::from(u16::MAX)) as u16;
+                    if !code.line_anchored_by_trailing_nop(line) {
+                        code.inlined_line(line);
+                    }
+                }
             }
             store(rt, result_slot.unwrap(), code);
         }
@@ -504,7 +510,7 @@ impl Emitter<'_> {
             let tslot = parked.slot();
             // The handler's entry belongs to the finalizer copy it introduces, not to the `finally`
             // keyword — mark it before the store so both copies open on the same line.
-            self.mark_finalizer_handler_entry(expression, f, code);
+            self.mark_finalizer_handler_entry(f, code);
             store(thr_ty, tslot, code);
             // kotlinc protects the handler's own entry — everything ahead of the copy of the
             // finalizer it introduces — with a range of its own.

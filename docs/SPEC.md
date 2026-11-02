@@ -23809,7 +23809,54 @@ The remaining details follow kotlinc:
   `IntrinsicMethods`, recorded by the library realization's `intrinsic` flag.
 - The safe-call reads carry their receiver's and call's lines as node positions, not as a side
   table.
-- Nothing puts a function's declaration line ahead of the body's first mark.
+- Nothing puts a function's declaration line ahead of the body's first mark, a lambda's body
+  included.
+- A property read or write is a call of its accessor and marks at the invoke. One realized as a
+  field access marks at its start, before the receiver (`visitFieldAccess`).
+- An unsigned operation is a call of the standard library's `@InlineOnly` member over the signed
+  carrier: it marks once its arguments are generated, not at its start.
+- A store into an inline-return frame's result is kotlinc's `return` from the inlined body and
+  marks only after its value.
+- A declaration marks its initializer's start once the value is on the stack, narrows the value to
+  the slot (`checkcast` of an erased result), and marks its own line before the store.
+- An implicit not-null check of a platform value marks its line once the checked value is on the
+  stack, as the temporary kotlinc lowers it to does.
+- A `return` behind a `finally` that never completes still marks its line after the finalizer,
+  in dead code: kotlinc generates the dead return, and its mark moves the mapper.
+- A node a lowering generates takes the position kotlinc builds it at: `inv()`'s all-bits mask is
+  code of the `@InlineOnly` member's body and has none; a value class's boxed `equals` delegating
+  to a source override's `equals-impl` builds its call at the override's offsets, so the call marks
+  the signature line; a value-class equality realized as a call keeps the comparison's position.
+
+### Whether a mark writes an entry
+
+Whether a mark writes an entry is kotlinc's `LineNumberMapper` (`LineNumberMapper` in
+`src/jvm/line_numbers.rs`), one per method body:
+
+- A mark writes an entry unless its line is the line the mapper marked last. Every entry is
+  appended: two entries at one offset both stay, and a later mark never replaces an earlier one.
+- Code dropped as dead still moves the mapper, as kotlinc's dead-code pass removes the entry only
+  after the mark.
+- After an inlined call the mapper forgets its line, so the next mark of any line writes an entry.
+  Inside a condition it registers the line again at once instead
+  (`markLineNumberAfterInlineIfNeeded`).
+- A line the inliner copies with an inline body is written without the mapper and leaves its line
+  unchanged.
+- Code with no position in kotlinc, such as a captured value an inline lambda reads, is emitted in
+  a no-line scope, where marks write nothing.
+- An `@InlineOnly` call whose arguments are evaluated in place (an unsigned operator, for one)
+  marks its line once its arguments have marked theirs, and its entry goes ahead of their entries,
+  where `InplaceArgumentsMethodTransformer` leaves the call's line label.
+- An `init` block marks its opening and closing lines over a `nop` that the redundant-nop pass
+  keeps only where the line owns no other instruction, and its locals end before the closing mark.
+- The result store of an inlined `use`-style cleanup body is numbered with the call's line as a
+  copied line, unless the lambda's closing anchor `nop` already numbers it.
+
+Covered by `line_numbers::tests` and the line and byte differentials against kotlinc
+(`unsigned_bitwise_lines_e2e`, `captured_unsigned_lines_e2e`, `init_block_lines_e2e`,
+`inline_finally_marker_e2e`, `platform_null_check_line_e2e`, `inline_use_lambda_e2e`,
+`lambda_implicit_return_lines_e2e`, `not_null_assert_e2e`, `unsigned_bitwise_e2e`,
+`value_class_any_override_e2e`, `value_class_equality_e2e`).
 
 Positions come from lowering. Nodes that lowering builds without a FIR element are given explicit
 positions where they are built: delegated-property getters, in-place delegate methods, local

@@ -99,7 +99,6 @@ impl Emitter<'_> {
             };
             self.emit_open_block(block, stmts, value, terminal_target, entry, true, code)
         };
-        self.mark_initializer_line(block, true, code);
         let mut anchored = false;
         if !self.ir.callable_scopes.contains(&block) {
             self.close_external_inline_frame(block, code);
@@ -120,6 +119,9 @@ impl Emitter<'_> {
                 anchored = self.close_copied_function_inline_frame(block, code);
             }
         }
+        // kotlinc writes an `init` block's locals once its body ends, before the block marks its
+        // closing line.
+        self.mark_initializer_line(block, true, code);
         // kotlinc returns to the call's line once the inlined body ends, before the statement
         // discards its result: the `pop` occupies that line, so the cleanup drops the frame's
         // closing `nop`.
