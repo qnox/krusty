@@ -1398,6 +1398,21 @@ pub(crate) fn merge_inferred_ty_from_symbols(
     if same_parameter_dnn(actual, current) {
         return actual;
     }
+    // `T & Any` is a subtype of `T` (and of `T?`), so the join of a parameter with its own
+    // definitely-non-null face is that parameter, in either representation of the face.
+    let own_dnn_face = |face: Ty, plain: Ty| {
+        let parameter = plain.non_null();
+        matches!(parameter.kind(), TyKind::TyParam(..))
+            && face != parameter
+            && (face == parameter.definitely_non_null()
+                || face == parameter.contributed_through_nullable_formal())
+    };
+    if own_dnn_face(actual, current) {
+        return current;
+    }
+    if own_dnn_face(current, actual) {
+        return actual;
+    }
     if current.non_null() == actual.non_null() {
         let base = current.non_null();
         return if current.is_nullable() || actual.is_nullable() {
