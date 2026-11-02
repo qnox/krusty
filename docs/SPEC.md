@@ -232,7 +232,8 @@ covers both hosts, release defaults, explicit options, parent types and rethrow 
 ## Wasm runtime-exception type tests
 
 Selected platform-stdlib declarations publish authenticated storage roles for Throwable,
-Exception, RuntimeException and IndexOutOfBoundsException. Their metadata owns the parent chain;
+Exception, RuntimeException, IndexOutOfBoundsException, NullPointerException and
+IllegalStateException. Their metadata owns the parent chain;
 ordinary dependency or source declarations acquire no role from a matching name. Frozen backend
 facts retain this evidence independently of selected constructors.
 
@@ -241,6 +242,15 @@ Missing, cyclic or changed hierarchy evidence declines before publishing a parti
 Throws and the existing single Throwable catch transport the same Kotlin reference. The shared
 `throwableHierarchy.kt` regression compares the JVM reference and all backends, including negative
 subclass tests, message reads and rethrow identity.
+
+The exact no-argument and nullable-String constructors of an admitted platform runtime-exception
+declaration carry their selected declaring kind separately from storage authority. Wasm checks the
+constructor owner, parameter types and supplied operand count before evaluating its operands, then
+allocates that selected subtype through the same hierarchy registry. A message is evaluated once;
+the no-argument and null-message forms retain a null message. The complete shared
+`runtimeExceptionConstructors.kt` case checks identity, effect count, inherited message and subtype
+tests through the existing base-Throwable catch. Cause-bearing/defaulted constructors, typed catches
+and `finally` are outside this constructor slice.
 Synthesized reference null guards, including Elvis message reads, use the reference-identity path
 only when an operand is an explicit IR null constant. They never call user `equals(null)`;
 ordinary source structural equality retains its own operation. The shared fixture includes an

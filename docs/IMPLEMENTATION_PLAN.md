@@ -123,6 +123,14 @@ mutating module state. The shared Throwable hierarchy case starts from exact JVM
 Native results and exercises both Wasm hosts. Reference-array storage and checked array reads
 consume this registry in a separate slice of #2531.
 
+Runtime-exception constructor realization uses the selected declaration's authenticated storage
+kind plus its complete no-argument or nullable-message overload. Keep the semantic declaring owner
+in the frozen constructor facts and verify the IR construction frame before evaluating a message.
+Allocate the selected GC subtype, preserving exception identity across the existing Throwable
+transport. `runtimeExceptionConstructors.kt` is the complete shared constructor/identity/effect
+control; provider and representation units retain untrusted-owner, malformed-frame and hierarchy
+negatives. This does not admit arbitrary subclasses, typed catches or new exception metadata.
+
 ## JVM companion field ABI
 
 Centralize the physical companion field segment from the selected holder/companion identities.

@@ -1269,11 +1269,18 @@ names and complete signatures do not grant platform authority.
 ## Authenticated Throwable realization
 
 KLIB classifier and property records retain the selected platform-stdlib input's existing archive
-authority before constructor/accessor identities are published. The exact base `Throwable()` and
-`Throwable(String?)` signatures and immutable `message: String?` member may receive typed compiler
+authority before constructor/accessor identities are published. The exact `()` and `(String?)`
+constructors of admitted runtime-exception declarations and immutable `Throwable.message: String?`
+member may receive typed compiler
 realizations; an ordinary dependency with identical metadata may not. This does not rewrite Kotlin
 metadata or change source overload selection. Wasm owns the GC fields and exception tag; common IR
 keeps the selected constructor/getter identities and typed `Try` / `Throw` nodes.
+
+The constructor operation retains its authenticated declaring kind, independently of the class's
+storage role and metadata-owned parent. Frozen semantic owner, source parameters and Unit invocation
+result must agree with the selected IR constructor frame. Wasm realizes that class through the
+existing exception hierarchy registry rather than allocating the base Throwable for every kind.
+No constructor role, parent or overload is recovered from a backend descriptor or source spelling.
 
 ## Inline-body migration outcomes
 
