@@ -18,6 +18,8 @@ mod asm_text;
 #[path = "box_byte_score.rs"]
 mod box_byte_score;
 mod box_inventory;
+#[path = "box_jvm_compile.rs"]
+mod box_jvm_compile;
 mod box_klib_bytes;
 #[path = "box_lane.rs"]
 mod box_lane;
@@ -52,6 +54,8 @@ mod kotlin_diagnostics_jvm_conformance;
 mod kotlin_native_multimodule_support;
 #[path = "kotlinc_argument_conformance.rs"]
 mod kotlinc_argument_conformance;
+#[path = "krusty_case_workers.rs"]
+mod krusty_case_workers;
 #[path = "common/reference_targets/invocation.rs"]
 mod reference_invocation_support;
 #[path = "common/reference_recording.rs"]

@@ -1,19 +1,16 @@
-//! Preserve the compiler's actual diagnostics before a JVM corpus rejection becomes `None`.
+//! Preserve the compiler's actual diagnostics when a JVM corpus compilation is rejected.
 
 use krusty::diag::{DiagSink, DiagnosticNames};
 use krusty::source::SourceKind;
 
-/// The source order and stems are the same ones passed into this compilation's frontend.
-/// Render one complete report while stderr is locked by the single print operation, so
-/// concurrent corpus workers do not interleave individual diagnostic lines.
-pub(super) fn report_rejection<'a>(
+/// One complete report of `diagnostics`, rendered against the sources and stems passed into this
+/// compilation's frontend, in that order. A caller prints it in one operation, so concurrent
+/// corpus workers do not interleave individual diagnostic lines.
+pub(super) fn render<'a>(
     module: &str,
     sources: impl IntoIterator<Item = (SourceKind, &'a str, &'a str)>,
     diagnostics: &DiagSink,
-) {
-    if !diagnostics.has_errors() {
-        return;
-    }
+) -> String {
     let sources = sources.into_iter().collect::<Vec<_>>();
     let names = sources
         .iter()
@@ -35,8 +32,8 @@ pub(super) fn report_rejection<'a>(
         .zip(&sources)
         .map(|(name, (_, _, source))| (name.as_str(), *source))
         .collect::<Vec<_>>();
-    eprintln!(
+    format!(
         "box compiler diagnostics [{module}]:\n{}",
         diagnostics.render_all(&named, DiagnosticNames::Hidden)
-    );
+    )
 }

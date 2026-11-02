@@ -30,20 +30,23 @@ fi
 export KRUSTY_LANGUAGE_VERSION="$v"
 export RUST_MIN_STACK="${RUST_MIN_STACK:-134217728}"
 
-# The downloaded test binary is not under target/<profile>/deps, so the suite's CLI lookup would
-# rebuild krusty. A sibling built with the binary is that CLI.
-if [ -z "${KRUSTY_BIN:-}" ]; then
-  sibling="$(cd "$(dirname "$bin")" && pwd)/krusty"
-  if [ -x "$sibling" ]; then
-    export KRUSTY_BIN="$sibling"
-  fi
+test=kotlin_diagnostics_jvm_conformance::krusty_rejects_what_kotlinc_rejects_in_its_diagnostics_test_data
+# An exact filter that matches nothing runs zero tests and passes, so a binary built before the lane
+# existed (or one whose test was renamed or no longer ignored) must not stand in for a run.
+if ! listed=$("$bin" --list --format terse --ignored --exact "$test"); then
+  echo "diagnostics-conformance: $bin cannot list its tests" >&2
+  exit 1
+fi
+if [ "$listed" != "$test: test" ]; then
+  echo "diagnostics-conformance: $bin has no ignored test $test" >&2
+  exit 1
 fi
 
 set +e
 run_with_deadline "$KRUSTY_DIAGNOSTICS_TIMEOUT_SECONDS" \
   "$bin" \
   --ignored \
-  --exact kotlin_diagnostics_jvm_conformance::krusty_rejects_what_kotlinc_rejects_in_its_diagnostics_test_data \
+  --exact "$test" \
   --nocapture
 status=$?
 set -e
