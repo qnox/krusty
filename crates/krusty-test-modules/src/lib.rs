@@ -47,10 +47,11 @@ pub fn declare_test_modules(input: TokenStream) -> TokenStream {
     }
 
     let mut out = String::new();
+    // Relative to tests/, the directory of the invoking target root, so diagnostics keep the
+    // `tests/<file>` paths that clippy-baseline.tsv is keyed by.
     for file in &files {
-        let path = tests_dir.join(file);
         out.push_str(&format!(
-            "#[path = {path:?}] mod {};\n",
+            "#[path = {file:?}] mod {};\n",
             &file[..file.len() - ".rs".len()]
         ));
     }
