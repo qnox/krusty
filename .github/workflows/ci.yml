@@ -27,10 +27,8 @@ jobs:
   # build does not sit on the coverage critical path. Conformance and Gradle run prebuilt artifact
   # families from their independent producer jobs below; neither matrix compiles krusty again.
   # Jobs run on self-hosted runners with one size label each (rust-8c-16gb, rust-4c-12gb,
-  # rust-4c-8gb, helper-1c-1gb). The Maven and Bazel jobs stay on GitHub-hosted until the
-  # self-hosted image has mvn and bazel; build-release needs its matrix's operating systems, and
-  # release publishes from GitHub-hosted. Fork PRs run on ubuntu-latest: self-hosted runners never
-  # take fork PR jobs.
+  # rust-4c-8gb, helper-1c-1gb). build-release stays on GitHub-hosted for its matrix's operating
+  # systems. Fork PRs run on ubuntu-latest: self-hosted runners never take fork PR jobs.
   lint:
     runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
     steps:
@@ -905,7 +903,7 @@ jobs:
   # Build the Maven plugin's release bytes once: a portable local Maven repository the release
   # publishes and the job below consumes.
   build-maven-plugin:
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -937,7 +935,7 @@ jobs:
   # kotlin-maven-plugin builds, with the shared krusty binary.
   maven:
     needs: [build-tool-bins, build-maven-plugin]
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -981,7 +979,7 @@ jobs:
       fail-fast: false
       matrix:
         bazel: [8.4.2, 9.3.1]
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -992,6 +990,16 @@ jobs:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: tool-bins
+      # ubuntu-latest has Bazelisk installed as `bazel`; the self-hosted image installs it as
+      # `bazelisk`.
+      - name: put bazelisk on PATH as bazel
+        run: |
+          set -euo pipefail
+          if ! command -v bazel >/dev/null; then
+            mkdir -p "$RUNNER_TEMP/bin"
+            ln -s "$(command -v bazelisk)" "$RUNNER_TEMP/bin/bazel"
+            echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+          fi
       - name: build the packaged Bazel module with Bazel ${{ matrix.bazel }}
         env:
           USE_BAZEL_VERSION: ${{ matrix.bazel }}
@@ -1079,7 +1087,7 @@ jobs:
   release:
     needs: [ci, lint, conformance, conformance-klib, build-gradle-plugin, gradle, build-maven-plugin, maven, build-tools, bazel, build-tool-bins, build-release]
     if: github.ref == 'refs/heads/master'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, helper-1c-1gb]
     # Shorter than the release lock's TTL, so a lock that outlives it belongs to a dead job.
     timeout-minutes: 25
     permissions:
