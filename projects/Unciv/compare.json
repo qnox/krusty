@@ -11,62 +11,52 @@
  "identical": 0,
  "cost": {
   "kotlinc": {
-   "wall_seconds": 131.4,
-   "cpu_seconds": 420.8,
+   "wall_seconds": 133.2,
+   "cpu_seconds": 427.4,
    "peak_rss_mb": {
-    "total": 4152,
-    "gradle": 858,
-    "kotlin_daemon": 3299,
+    "total": 4187,
+    "gradle": 867,
+    "kotlin_daemon": 3332,
     "krusty": 0,
     "other": 0
    },
-   "compile_seconds": 128.7,
+   "compile_seconds": 131.2,
    "built_compile_seconds": 0
   },
   "krusty": {
-   "wall_seconds": 150.5,
-   "cpu_seconds": 485.7,
+   "wall_seconds": 154.0,
+   "cpu_seconds": 499.2,
    "peak_rss_mb": {
-    "total": 5101,
-    "gradle": 1906,
-    "kotlin_daemon": 3201,
-    "krusty": 46,
+    "total": 5548,
+    "gradle": 2120,
+    "kotlin_daemon": 3434,
+    "krusty": 11,
     "other": 0
    },
-   "compile_seconds": 137.2,
+   "compile_seconds": 141.3,
    "built_compile_seconds": 0
   }
  },
  "hotspots": {
-  "samples": 18,
+  "samples": 20,
   "functions": [
    {
-    "function": "llseek",
-    "self": 3,
-    "total": 5
+    "function": "[libc.so.6]",
+    "self": 2,
+    "total": 18
    },
    {
-    "function": "<core::str::pattern::CharSearcher as core::str::pattern::Searcher>::next_match",
+    "function": "<core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write",
     "self": 2,
     "total": 3
    },
    {
-    "function": "core::core_arch::x86::sse2::_mm_movemask_epi8",
+    "function": "llseek",
     "self": 2,
     "total": 2
    },
    {
-    "function": "[libc.so.6]",
-    "self": 1,
-    "total": 17
-   },
-   {
-    "function": "do_syscall_64",
-    "self": 1,
-    "total": 4
-   },
-   {
-    "function": "<std::hash::random::DefaultHasher as core::hash::Hasher>::finish",
+    "function": "zip::read::read_variable_length_byte_field::<std::fs::File>",
     "self": 1,
     "total": 2
    },
@@ -76,89 +66,114 @@
     "total": 1
    },
    {
-    "function": "<core::ops::control_flow::ControlFlow<&str> as core::ops::try_trait::Try>::branch",
+    "function": "<core::str::LinesMap as core::ops::function::Fn<(&str,)>>::call",
     "self": 1,
     "total": 1
    },
    {
-    "function": "[ld-linux-x86-64.so.2]",
+    "function": "<hashbrown::control::bitmask::BitMaskIter as core::iter::traits::iterator::Iterator>::next",
     "self": 1,
     "total": 1
    },
    {
-    "function": "__x64_sys_lseek",
+    "function": "<hashbrown::raw::Bucket<usize>>::from_base_index",
     "self": 1,
     "total": 1
    },
    {
-    "function": "core::slice::memchr::memchr",
+    "function": "<std::fs::File as core::io::seek::Seek>::seek",
     "self": 1,
     "total": 1
    },
    {
-    "function": "kmem_cache_alloc_noprof",
+    "function": "<u16 as core::convert::From<zip::format::flags::ZipFlags>>::from",
     "self": 1,
     "total": 1
    },
    {
-    "function": "native_set_pte",
+    "function": "<u8 as core::convert::TryFrom<u16>>::try_from",
     "self": 1,
     "total": 1
    },
    {
-    "function": "vfs_read",
+    "function": "atime_needs_update",
+    "self": 1,
+    "total": 1
+   },
+   {
+    "function": "core::intrinsics::rotate_left::<u64>",
+    "self": 1,
+    "total": 1
+   },
+   {
+    "function": "filemap_get_entry",
+    "self": 1,
+    "total": 1
+   },
+   {
+    "function": "filemap_get_pages",
+    "self": 1,
+    "total": 1
+   },
+   {
+    "function": "filemap_map_pages",
+    "self": 1,
+    "total": 1
+   },
+   {
+    "function": "kernel_init_pages",
     "self": 1,
     "total": 1
    },
    {
     "function": "<fn() as core::ops::function::FnOnce<()>>::call_once",
     "self": 0,
-    "total": 17
+    "total": 18
    },
    {
     "function": "__libc_start_main",
     "self": 0,
-    "total": 17
+    "total": 18
    },
    {
     "function": "_start",
     "self": 0,
-    "total": 17
+    "total": 18
    },
    {
     "function": "krusty::main",
     "self": 0,
-    "total": 17
+    "total": 18
    },
    {
     "function": "krusty::run_refusals",
     "self": 0,
-    "total": 17
+    "total": 18
    },
    {
     "function": "main",
     "self": 0,
-    "total": 17
+    "total": 18
    },
    {
     "function": "std::rt::lang_start::<()>",
     "self": 0,
-    "total": 17
+    "total": 18
    },
    {
     "function": "std::rt::lang_start::<()>::{closure#0}",
     "self": 0,
-    "total": 17
+    "total": 18
    },
    {
     "function": "std::rt::lang_start_internal",
     "self": 0,
-    "total": 17
+    "total": 18
    },
    {
     "function": "std::sys::backtrace::__rust_begin_short_backtrace::<fn(),",
     "self": 0,
-    "total": 17
+    "total": 18
    },
    {
     "function": "<alloc::vec::Vec<(&str, core::option::Option<alloc::vec::Vec<alloc::string::String>>)> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<(&str, core::option::Option<alloc::vec::Vec<alloc::string::String>>), core::iter::adapters::map::Map<core::iter::adapters::map::Map<core::iter::adapters::chain::Chain<core::slice::iter::Iter<alloc::string::String>, core::iter::adapters::flatten::FlatMap<core::slice::iter::Iter<krusty::plugins::cli::CompilerPluginSpec>, core::slice::iter::Iter<alloc::string::String>, <krusty::plugins::cli::PluginConfig>::all_plugin_jars::{closure#0}>>, <alloc::string::String>::as_str>, <krusty::plugins::registry::PluginRegistry>::resolve::{closure#0}>>>::from_iter",
@@ -172,6 +187,11 @@
    },
    {
     "function": "<krusty_cli::cli::Options>::resolve_plugins",
+    "self": 0,
+    "total": 11
+   },
+   {
+    "function": "krusty::archive::open_file",
     "self": 0,
     "total": 11
    },
@@ -191,22 +211,22 @@
     "total": 10
    },
    {
-    "function": "krusty::archive::open_file",
+    "function": "<zip::read::zip_archive::ZipArchive<std::fs::File>>::get_metadata",
     "self": 0,
-    "total": 10
-   },
-   {
-    "function": "<std::sys::sync::once::futex::Once>::call",
-    "self": 0,
-    "total": 6
+    "total": 9
    },
    {
     "function": "krusty_cli::cli::parse::<alloc::vec::Vec<alloc::string::String>>",
     "self": 0,
-    "total": 6
+    "total": 7
    },
    {
     "function": "krusty_cli::cli::read::<alloc::vec::Vec<alloc::string::String>>",
+    "self": 0,
+    "total": 7
+   },
+   {
+    "function": "<std::sys::sync::once::futex::Once>::call",
     "self": 0,
     "total": 6
    },
@@ -217,6 +237,11 @@
    },
    {
     "function": "<alloc::collections::btree::map::BTreeMap<krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog> as core::iter::traits::collect::FromIterator<(krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog)>>::from_iter::<core::iter::adapters::filter_map::FilterMap<alloc::vec::into_iter::IntoIter<krusty::kotlin_version::KotlinVersion>, <krusty_cli::kotlinc_arguments::catalog::Catalog>::for_version::{closure#0}::{closure#0}>>",
+    "self": 0,
+    "total": 5
+   },
+   {
+    "function": "<alloc::vec::Vec<(krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog)> as alloc::vec::spec_extend::SpecExtend<(krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog), core::iter::adapters::filter_map::FilterMap<alloc::vec::into_iter::IntoIter<krusty::kotlin_version::KotlinVersion>, <krusty_cli::kotlinc_arguments::catalog::Catalog>::for_version::{closure#0}::{closure#0}>>>::spec_extend",
     "self": 0,
     "total": 5
    },
@@ -236,27 +261,7 @@
     "total": 5
    },
    {
-    "function": "<alloc::vec::Vec<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec> as alloc::vec::spec_extend::SpecExtend<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec, core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::str::iter::Lines, <krusty_cli::kotlinc_arguments::catalog::Catalog>::parse::{closure#0}>, <krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>::parse_row>, core::result::Result<core::convert::Infallible, alloc::string::String>>>>::spec_extend",
-    "self": 0,
-    "total": 5
-   },
-   {
-    "function": "<alloc::vec::Vec<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec> as alloc::vec::spec_from_iter::SpecFromIter<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec, core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::str::iter::Lines, <krusty_cli::kotlinc_arguments::catalog::Catalog>::parse::{closure#0}>, <krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>::parse_row>, core::result::Result<core::convert::Infallible, alloc::string::String>>>>::from_iter",
-    "self": 0,
-    "total": 5
-   },
-   {
-    "function": "<alloc::vec::Vec<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec, core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::str::iter::Lines, <krusty_cli::kotlinc_arguments::catalog::Catalog>::parse::{closure#0}>, <krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>::parse_row>, core::result::Result<core::convert::Infallible, alloc::string::String>>>>::from_iter",
-    "self": 0,
-    "total": 5
-   },
-   {
-    "function": "<alloc::vec::Vec<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec> as core::iter::traits::collect::FromIterator<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>>::from_iter::<core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::str::iter::Lines, <krusty_cli::kotlinc_arguments::catalog::Catalog>::parse::{closure#0}>, <krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>::parse_row>, core::result::Result<core::convert::Infallible, alloc::string::String>>>",
-    "self": 0,
-    "total": 5
-   },
-   {
-    "function": "<alloc::vec::Vec<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>>::extend_desugared::<core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::str::iter::Lines, <krusty_cli::kotlinc_arguments::catalog::Catalog>::parse::{closure#0}>, <krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>::parse_row>, core::result::Result<core::convert::Infallible, alloc::string::String>>>",
+    "function": "<alloc::vec::Vec<(krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog)>>::extend_desugared::<core::iter::adapters::filter_map::FilterMap<alloc::vec::into_iter::IntoIter<krusty::kotlin_version::KotlinVersion>, <krusty_cli::kotlinc_arguments::catalog::Catalog>::for_version::{closure#0}::{closure#0}>>",
     "self": 0,
     "total": 5
    },
@@ -282,21 +287,6 @@
    },
    {
     "function": "<core::iter::adapters::filter_map::FilterMap<alloc::vec::into_iter::IntoIter<krusty::kotlin_version::KotlinVersion>, <krusty_cli::kotlinc_arguments::catalog::Catalog>::for_version::{closure#0}::{closure#0}> as core::iter::traits::iterator::Iterator>::next",
-    "self": 0,
-    "total": 5
-   },
-   {
-    "function": "<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::str::iter::Lines, <krusty_cli::kotlinc_arguments::catalog::Catalog>::parse::{closure#0}>, <krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>::parse_row> as core::iter::traits::iterator::Iterator>::collect::<core::result::Result<alloc::vec::Vec<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>, alloc::string::String>>",
-    "self": 0,
-    "total": 5
-   },
-   {
-    "function": "<core::result::Result<alloc::vec::Vec<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>, alloc::string::String> as core::iter::traits::collect::FromIterator<core::result::Result<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec, alloc::string::String>>>::from_iter::<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::str::iter::Lines, <krusty_cli::kotlinc_arguments::catalog::Catalog>::parse::{closure#0}>, <krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>::parse_row>>",
-    "self": 0,
-    "total": 5
-   },
-   {
-    "function": "<core::result::Result<alloc::vec::Vec<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>, alloc::string::String> as core::iter::traits::collect::FromIterator<core::result::Result<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec, alloc::string::String>>>::from_iter::<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::str::iter::Lines, <krusty_cli::kotlinc_arguments::catalog::Catalog>::parse::{closure#0}>, <krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>::parse_row>>::{closure#0}",
     "self": 0,
     "total": 5
    },
@@ -356,162 +346,162 @@
     "total": 5
    },
    {
-    "function": "core::iter::adapters::try_process::<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::str::iter::Lines, <krusty_cli::kotlinc_arguments::catalog::Catalog>::parse::{closure#0}>, <krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>::parse_row>, krusty_cli::kotlinc_arguments::catalog::ArgumentSpec, core::result::Result<core::convert::Infallible, alloc::string::String>, <core::result::Result<alloc::vec::Vec<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>, alloc::string::String> as core::iter::traits::collect::FromIterator<core::result::Result<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec, alloc::string::String>>>::from_iter<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::str::iter::Lines, <krusty_cli::kotlinc_arguments::catalog::Catalog>::parse::{closure#0}>, <krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>::parse_row>>::{closure#0}, alloc::vec::Vec<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>>",
-    "self": 0,
-    "total": 5
-   },
-   {
     "function": "core::iter::traits::iterator::Iterator::find_map::check::<krusty::kotlin_version::KotlinVersion,",
     "self": 0,
     "total": 5
    },
    {
-    "function": "<<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>::parse_row as core::ops::function::FnMut<(&str,)>>::call_mut",
-    "self": 0,
-    "total": 4
-   },
-   {
     "function": "<alloc::vec::into_iter::IntoIter<(alloc::boxed::Box<[u8]>, zip::types::ZipFileData)> as core::iter::traits::iterator::Iterator>::fold::<(), core::iter::traits::iterator::Iterator::for_each::call<(alloc::boxed::Box<[u8]>, zip::types::ZipFileData), <zip::read::zip_archive::SharedBuilder>::build::{closure#0}>::{closure#0}>",
     "self": 0,
-    "total": 4
+    "total": 3
    },
    {
     "function": "<alloc::vec::into_iter::IntoIter<(alloc::boxed::Box<[u8]>, zip::types::ZipFileData)> as core::iter::traits::iterator::Iterator>::for_each::<<zip::read::zip_archive::SharedBuilder>::build::{closure#0}>",
     "self": 0,
-    "total": 4
+    "total": 3
    },
    {
-    "function": "<core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::str::iter::Lines, <krusty_cli::kotlinc_arguments::catalog::Catalog>::parse::{closure#0}>, <krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>::parse_row>, core::result::Result<core::convert::Infallible, alloc::string::String>> as core::iter::traits::iterator::Iterator>::next",
+    "function": "<hashbrown::map::HashMap<alloc::string::String, usize, std::hash::random::RandomState>>::insert",
     "self": 0,
-    "total": 4
-   },
-   {
-    "function": "<core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::str::iter::Lines, <krusty_cli::kotlinc_arguments::catalog::Catalog>::parse::{closure#0}>, <krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>::parse_row>, core::result::Result<core::convert::Infallible, alloc::string::String>> as core::iter::traits::iterator::Iterator>::try_fold::<(), core::iter::traits::iterator::Iterator::try_for_each::call<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec, core::ops::control_flow::ControlFlow<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>, core::ops::control_flow::ControlFlow<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>::Break>::{closure#0}, core::ops::control_flow::ControlFlow<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>>",
-    "self": 0,
-    "total": 4
-   },
-   {
-    "function": "<core::iter::adapters::filter::Filter<core::str::iter::Lines, <krusty_cli::kotlinc_arguments::catalog::Catalog>::parse::{closure#0}> as core::iter::traits::iterator::Iterator>::try_fold::<(), core::iter::adapters::map::map_try_fold<&str, core::result::Result<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec, alloc::string::String>,",
-    "self": 0,
-    "total": 4
-   },
-   {
-    "function": "<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::str::iter::Lines, <krusty_cli::kotlinc_arguments::catalog::Catalog>::parse::{closure#0}>, <krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>::parse_row> as core::iter::traits::iterator::Iterator>::try_fold::<(), <core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::str::iter::Lines, <krusty_cli::kotlinc_arguments::catalog::Catalog>::parse::{closure#0}>, <krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>::parse_row>, core::result::Result<core::convert::Infallible, alloc::string::String>> as core::iter::traits::iterator::Iterator>::try_fold<(), core::iter::traits::iterator::Iterator::try_for_each::call<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec, core::ops::control_flow::ControlFlow<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>, core::ops::control_flow::ControlFlow<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>::Break>::{closure#0}, core::ops::control_flow::ControlFlow<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>>::{closure#0}, core::ops::control_flow::ControlFlow<core::ops::control_flow::ControlFlow<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>>>",
-    "self": 0,
-    "total": 4
-   },
-   {
-    "function": "<core::str::iter::Lines as core::iter::traits::iterator::Iterator>::try_fold::<(), core::iter::adapters::filter::filter_try_fold<&str,",
-    "self": 0,
-    "total": 4
+    "total": 3
    },
    {
     "function": "<indexmap::map::IndexMap<alloc::boxed::Box<[u8]>, zip::types::ZipFileData>>::insert",
     "self": 0,
-    "total": 4
+    "total": 3
    },
    {
     "function": "<indexmap::map::IndexMap<alloc::boxed::Box<[u8]>, zip::types::ZipFileData>>::insert_full",
     "self": 0,
-    "total": 4
+    "total": 3
    },
    {
-    "function": "<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>::parse_row",
+    "function": "<std::collections::hash::map::HashMap<alloc::string::String, usize>>::insert",
     "self": 0,
-    "total": 4
+    "total": 3
+   },
+   {
+    "function": "<std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&alloc::string::String>",
+    "self": 0,
+    "total": 3
    },
    {
     "function": "<zip::read::zip_archive::SharedBuilder>::build",
     "self": 0,
-    "total": 4
+    "total": 3
    },
    {
     "function": "<zip::read::zip_archive::SharedBuilder>::build::{closure#0}",
     "self": 0,
-    "total": 4
+    "total": 3
    },
    {
-    "function": "core::iter::adapters::filter::filter_try_fold::<&str,",
+    "function": "__handle_mm_fault",
     "self": 0,
-    "total": 4
+    "total": 3
    },
    {
-    "function": "core::iter::adapters::map::map_try_fold::<&str, core::result::Result<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec, alloc::string::String>,",
+    "function": "asm_exc_page_fault",
     "self": 0,
-    "total": 4
+    "total": 3
    },
    {
     "function": "core::iter::traits::iterator::Iterator::for_each::call::<(alloc::boxed::Box<[u8]>, zip::types::ZipFileData), <zip::read::zip_archive::SharedBuilder>::build::{closure#0}>::{closure#0}",
     "self": 0,
-    "total": 4
+    "total": 3
    },
    {
-    "function": "entry_SYSCALL_64_after_hwframe",
-    "self": 0,
-    "total": 4
-   },
-   {
-    "function": "<alloc::vec::Vec<(krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog)> as alloc::vec::spec_extend::SpecExtend<(krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog), core::iter::adapters::filter_map::FilterMap<alloc::vec::into_iter::IntoIter<krusty::kotlin_version::KotlinVersion>, <krusty_cli::kotlinc_arguments::catalog::Catalog>::for_version::{closure#0}::{closure#0}>>>::spec_extend",
+    "function": "do_user_addr_fault",
     "self": 0,
     "total": 3
    },
    {
-    "function": "<alloc::vec::Vec<(krusty::kotlin_version::KotlinVersion, krusty_cli::kotlinc_arguments::catalog::Catalog)>>::extend_desugared::<core::iter::adapters::filter_map::FilterMap<alloc::vec::into_iter::IntoIter<krusty::kotlin_version::KotlinVersion>, <krusty_cli::kotlinc_arguments::catalog::Catalog>::for_version::{closure#0}::{closure#0}>>",
+    "function": "exc_page_fault",
     "self": 0,
     "total": 3
    },
    {
-    "function": "<alloc::vec::Vec<&str> as alloc::vec::spec_extend::SpecExtend<&str, core::str::iter::Split<char>>>::spec_extend",
+    "function": "handle_mm_fault",
+    "self": 0,
+    "total": 3
+   },
+   {
+    "function": "<&alloc::string::String as core::hash::Hash>::hash::<std::hash::random::DefaultHasher>",
     "self": 0,
     "total": 2
    },
    {
-    "function": "<alloc::vec::Vec<&str> as alloc::vec::spec_from_iter::SpecFromIter<&str, core::str::iter::Split<char>>>::from_iter",
+    "function": "<alloc::string::String as core::hash::Hash>::hash::<std::hash::random::DefaultHasher>",
     "self": 0,
     "total": 2
    },
    {
-    "function": "<alloc::vec::Vec<&str> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<&str, core::str::iter::Split<char>>>::from_iter",
+    "function": "<alloc::vec::Vec<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec> as alloc::vec::spec_extend::SpecExtend<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec, core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::str::iter::Lines, <krusty_cli::kotlinc_arguments::catalog::Catalog>::parse::{closure#0}>, <krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>::parse_row>, core::result::Result<core::convert::Infallible, alloc::string::String>>>>::spec_extend",
     "self": 0,
     "total": 2
    },
    {
-    "function": "<alloc::vec::Vec<&str> as core::iter::traits::collect::FromIterator<&str>>::from_iter::<core::str::iter::Split<char>>",
+    "function": "<alloc::vec::Vec<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec> as alloc::vec::spec_from_iter::SpecFromIter<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec, core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::str::iter::Lines, <krusty_cli::kotlinc_arguments::catalog::Catalog>::parse::{closure#0}>, <krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>::parse_row>, core::result::Result<core::convert::Infallible, alloc::string::String>>>>::from_iter",
     "self": 0,
     "total": 2
    },
    {
-    "function": "<alloc::vec::Vec<&str>>::extend_desugared::<core::str::iter::Split<char>>",
+    "function": "<alloc::vec::Vec<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec, core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::str::iter::Lines, <krusty_cli::kotlinc_arguments::catalog::Catalog>::parse::{closure#0}>, <krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>::parse_row>, core::result::Result<core::convert::Infallible, alloc::string::String>>>>::from_iter",
     "self": 0,
     "total": 2
    },
    {
-    "function": "<core::str::iter::Split<char> as core::iter::traits::iterator::Iterator>::collect::<alloc::vec::Vec<&str>>",
+    "function": "<alloc::vec::Vec<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec> as core::iter::traits::collect::FromIterator<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>>::from_iter::<core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::str::iter::Lines, <krusty_cli::kotlinc_arguments::catalog::Catalog>::parse::{closure#0}>, <krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>::parse_row>, core::result::Result<core::convert::Infallible, alloc::string::String>>>",
     "self": 0,
     "total": 2
    },
    {
-    "function": "<core::str::iter::Split<char> as core::iter::traits::iterator::Iterator>::next",
+    "function": "<alloc::vec::Vec<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>>::extend_desugared::<core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::str::iter::Lines, <krusty_cli::kotlinc_arguments::catalog::Catalog>::parse::{closure#0}>, <krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>::parse_row>, core::result::Result<core::convert::Infallible, alloc::string::String>>>",
     "self": 0,
     "total": 2
    },
    {
-    "function": "<core::str::iter::SplitInternal<char>>::next",
+    "function": "<core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write_str",
     "self": 0,
     "total": 2
    },
    {
-    "function": "<hashbrown::raw::RawTable<usize>>::find_or_find_insert_index::<indexmap::inner::equivalent<alloc::boxed::Box<[u8]>, zip::types::ZipFileData, alloc::boxed::Box<[u8]>>::{closure#0}, indexmap::inner::get_hash<alloc::boxed::Box<[u8]>, zip::types::ZipFileData>::{closure#0}>",
+    "function": "<core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::str::iter::Lines, <krusty_cli::kotlinc_arguments::catalog::Catalog>::parse::{closure#0}>, <krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>::parse_row>, core::result::Result<core::convert::Infallible, alloc::string::String>> as core::iter::traits::iterator::Iterator>::next",
     "self": 0,
     "total": 2
    },
    {
-    "function": "<hashbrown::raw::RawTableInner>::find_or_find_insert_index_inner",
+    "function": "<core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::str::iter::Lines, <krusty_cli::kotlinc_arguments::catalog::Catalog>::parse::{closure#0}>, <krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>::parse_row>, core::result::Result<core::convert::Infallible, alloc::string::String>> as core::iter::traits::iterator::Iterator>::try_fold::<(), core::iter::traits::iterator::Iterator::try_for_each::call<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec, core::ops::control_flow::ControlFlow<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>, core::ops::control_flow::ControlFlow<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>::Break>::{closure#0}, core::ops::control_flow::ControlFlow<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>>",
     "self": 0,
     "total": 2
    },
    {
-    "function": "<hashbrown::table::HashTable<usize>>::entry::<indexmap::inner::equivalent<alloc::boxed::Box<[u8]>, zip::types::ZipFileData, alloc::boxed::Box<[u8]>>::{closure#0}, indexmap::inner::get_hash<alloc::boxed::Box<[u8]>, zip::types::ZipFileData>::{closure#0}>",
+    "function": "<core::iter::adapters::filter::Filter<core::str::iter::Lines, <krusty_cli::kotlinc_arguments::catalog::Catalog>::parse::{closure#0}> as core::iter::traits::iterator::Iterator>::try_fold::<(), core::iter::adapters::map::map_try_fold<&str, core::result::Result<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec, alloc::string::String>,",
+    "self": 0,
+    "total": 2
+   },
+   {
+    "function": "<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::str::iter::Lines, <krusty_cli::kotlinc_arguments::catalog::Catalog>::parse::{closure#0}>, <krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>::parse_row> as core::iter::traits::iterator::Iterator>::collect::<core::result::Result<alloc::vec::Vec<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>, alloc::string::String>>",
+    "self": 0,
+    "total": 2
+   },
+   {
+    "function": "<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::str::iter::Lines, <krusty_cli::kotlinc_arguments::catalog::Catalog>::parse::{closure#0}>, <krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>::parse_row> as core::iter::traits::iterator::Iterator>::try_fold::<(), <core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::str::iter::Lines, <krusty_cli::kotlinc_arguments::catalog::Catalog>::parse::{closure#0}>, <krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>::parse_row>, core::result::Result<core::convert::Infallible, alloc::string::String>> as core::iter::traits::iterator::Iterator>::try_fold<(), core::iter::traits::iterator::Iterator::try_for_each::call<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec, core::ops::control_flow::ControlFlow<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>, core::ops::control_flow::ControlFlow<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>::Break>::{closure#0}, core::ops::control_flow::ControlFlow<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>>::{closure#0}, core::ops::control_flow::ControlFlow<core::ops::control_flow::ControlFlow<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>>>",
+    "self": 0,
+    "total": 2
+   },
+   {
+    "function": "<core::result::Result<alloc::vec::Vec<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>, alloc::string::String> as core::iter::traits::collect::FromIterator<core::result::Result<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec, alloc::string::String>>>::from_iter::<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::str::iter::Lines, <krusty_cli::kotlinc_arguments::catalog::Catalog>::parse::{closure#0}>, <krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>::parse_row>>",
+    "self": 0,
+    "total": 2
+   },
+   {
+    "function": "<core::result::Result<alloc::vec::Vec<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>, alloc::string::String> as core::iter::traits::collect::FromIterator<core::result::Result<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec, alloc::string::String>>>::from_iter::<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::str::iter::Lines, <krusty_cli::kotlinc_arguments::catalog::Catalog>::parse::{closure#0}>, <krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>::parse_row>>::{closure#0}",
+    "self": 0,
+    "total": 2
+   },
+   {
+    "function": "<core::str::iter::Lines as core::iter::traits::iterator::Iterator>::try_fold::<(), core::iter::adapters::filter::filter_try_fold<&str,",
     "self": 0,
     "total": 2
    },
@@ -521,7 +511,87 @@
     "total": 2
    },
    {
-    "function": "<indexmap::map::IndexMap<alloc::boxed::Box<[u8]>, zip::types::ZipFileData>>::hash::<alloc::boxed::Box<[u8]>>",
+    "function": "<krusty::features::LangFeatures>::for_release",
+    "self": 0,
+    "total": 2
+   },
+   {
+    "function": "<std::fs::File as alloc::io::read::Read>::read",
+    "self": 0,
+    "total": 2
+   },
+   {
+    "function": "<std::hash::random::DefaultHasher as core::hash::Hasher>::write_str",
+    "self": 0,
+    "total": 2
+   },
+   {
+    "function": "[ld-linux-x86-64.so.2]",
+    "self": 0,
+    "total": 2
+   },
+   {
+    "function": "__x64_sys_read",
+    "self": 0,
+    "total": 2
+   },
+   {
+    "function": "alloc::io::read::default_read_exact::<std::fs::File>",
+    "self": 0,
+    "total": 2
+   },
+   {
+    "function": "core::iter::adapters::try_process::<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::str::iter::Lines, <krusty_cli::kotlinc_arguments::catalog::Catalog>::parse::{closure#0}>, <krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>::parse_row>, krusty_cli::kotlinc_arguments::catalog::ArgumentSpec, core::result::Result<core::convert::Infallible, alloc::string::String>, <core::result::Result<alloc::vec::Vec<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>, alloc::string::String> as core::iter::traits::collect::FromIterator<core::result::Result<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec, alloc::string::String>>>::from_iter<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::str::iter::Lines, <krusty_cli::kotlinc_arguments::catalog::Catalog>::parse::{closure#0}>, <krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>::parse_row>>::{closure#0}, alloc::vec::Vec<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>>",
+    "self": 0,
+    "total": 2
+   },
+   {
+    "function": "do_fault",
+    "self": 0,
+    "total": 2
+   },
+   {
+    "function": "do_syscall_64",
+    "self": 0,
+    "total": 2
+   },
+   {
+    "function": "entry_SYSCALL_64_after_hwframe",
+    "self": 0,
+    "total": 2
+   },
+   {
+    "function": "ext4_file_read_iter",
+    "self": 0,
+    "total": 2
+   },
+   {
+    "function": "filemap_read",
+    "self": 0,
+    "total": 2
+   },
+   {
+    "function": "generic_file_read_iter",
+    "self": 0,
+    "total": 2
+   },
+   {
+    "function": "handle_pte_fault",
+    "self": 0,
+    "total": 2
+   },
+   {
+    "function": "ksys_read",
+    "self": 0,
+    "total": 2
+   },
+   {
+    "function": "read",
+    "self": 0,
+    "total": 2
+   },
+   {
+    "function": "vfs_read",
     "self": 0,
     "total": 2
    },
@@ -531,7 +601,37 @@
     "total": 2
    },
    {
+    "function": "<&alloc::boxed::Box<[u8]> as core::hash::Hash>::hash::<std::hash::random::DefaultHasher>",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "<<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>::parse_row as core::ops::function::FnMut<(&str,)>>::call_mut",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "<[u8] as core::hash::Hash>::hash::<std::hash::random::DefaultHasher>",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "<alloc::boxed::Box<[u8]> as core::hash::Hash>::hash::<std::hash::random::DefaultHasher>",
+    "self": 0,
+    "total": 1
+   },
+   {
     "function": "<alloc::collections::btree::map::BTreeMap<krusty::kotlin_version::KotlinVersion, krusty::features::table::FeatureTable> as core::iter::traits::collect::FromIterator<(krusty::kotlin_version::KotlinVersion, krusty::features::table::FeatureTable)>>::from_iter::<core::iter::adapters::map::Map<core::slice::iter::Iter<(krusty::kotlin_version::KotlinVersion, &str)>, <krusty::features::table::FeatureTable>::for_version::{closure#0}::{closure#0}>>",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "<alloc::raw_vec::RawVecInner<_>>::reserve::do_reserve_and_handle::<alloc::alloc::Global>",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "<alloc::raw_vec::RawVecInner>::finish_grow",
     "self": 0,
     "total": 1
    },
@@ -546,72 +646,77 @@
     "total": 1
    },
    {
-    "function": "<alloc::vec::Vec<krusty_cli::kotlinc_arguments::catalog::FeatureToggle> as alloc::vec::spec_from_iter::SpecFromIter<krusty_cli::kotlinc_arguments::catalog::FeatureToggle, core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::str::iter::Split<char>, krusty_cli::kotlinc_arguments::catalog::toggles::{closure#0}>, krusty_cli::kotlinc_arguments::catalog::toggles::{closure#1}>>>::from_iter",
-    "self": 0,
-    "total": 1
-   },
-   {
-    "function": "<alloc::vec::Vec<krusty_cli::kotlinc_arguments::catalog::FeatureToggle> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<krusty_cli::kotlinc_arguments::catalog::FeatureToggle, core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::str::iter::Split<char>, krusty_cli::kotlinc_arguments::catalog::toggles::{closure#0}>, krusty_cli::kotlinc_arguments::catalog::toggles::{closure#1}>>>::from_iter",
-    "self": 0,
-    "total": 1
-   },
-   {
-    "function": "<alloc::vec::Vec<krusty_cli::kotlinc_arguments::catalog::FeatureToggle> as core::iter::traits::collect::FromIterator<krusty_cli::kotlinc_arguments::catalog::FeatureToggle>>::from_iter::<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::str::iter::Split<char>, krusty_cli::kotlinc_arguments::catalog::toggles::{closure#0}>, krusty_cli::kotlinc_arguments::catalog::toggles::{closure#1}>>",
-    "self": 0,
-    "total": 1
-   },
-   {
     "function": "<core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::finish",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<core::iter::adapters::filter::Filter<core::str::iter::Split<char>, krusty_cli::kotlinc_arguments::catalog::toggles::{closure#0}> as core::iter::traits::iterator::Iterator>::next",
+    "function": "<core::iter::adapters::map::Map<core::str::iter::SplitInclusive<char>, core::str::LinesMap> as core::iter::traits::iterator::Iterator>::next",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::str::iter::Lines, <krusty::features::table::FeatureTable>::parse::{closure#0}>, <krusty::features::table::LanguageFeature>::parse_row> as core::iter::traits::iterator::Iterator>::try_fold::<(), <core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::str::iter::Lines, <krusty::features::table::FeatureTable>::parse::{closure#0}>, <krusty::features::table::LanguageFeature>::parse_row>, core::result::Result<core::convert::Infallible, alloc::string::String>> as core::iter::traits::iterator::Iterator>::try_fold<(), core::iter::traits::iterator::Iterator::try_for_each::call<krusty::features::table::LanguageFeature, core::ops::control_flow::ControlFlow<krusty::features::table::LanguageFeature>, core::ops::control_flow::ControlFlow<krusty::features::table::LanguageFeature>::Break>::{closure#0}, core::ops::control_flow::ControlFlow<krusty::features::table::LanguageFeature>>::{closure#0}, core::ops::control_flow::ControlFlow<core::ops::control_flow::ControlFlow<krusty::features::table::LanguageFeature>>>",
+    "function": "<core::str::LinesMap as core::ops::function::FnMut<(&str,)>>::call_mut",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::str::iter::Split<char>, krusty_cli::kotlinc_arguments::catalog::toggles::{closure#0}>, krusty_cli::kotlinc_arguments::catalog::toggles::{closure#1}> as core::iter::traits::iterator::Iterator>::collect::<alloc::vec::Vec<krusty_cli::kotlinc_arguments::catalog::FeatureToggle>>",
+    "function": "<core::str::iter::Lines as core::iter::traits::iterator::Iterator>::next",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::str::iter::Split<char>, krusty_cli::kotlinc_arguments::catalog::toggles::{closure#0}>, krusty_cli::kotlinc_arguments::catalog::toggles::{closure#1}> as core::iter::traits::iterator::Iterator>::next",
+    "function": "<hashbrown::raw::RawTable<(alloc::string::String, usize)>>::find_or_find_insert_index::<hashbrown::map::equivalent_key<alloc::string::String, alloc::string::String, usize>::{closure#0}, hashbrown::map::make_hasher<alloc::string::String, usize, std::hash::random::RandomState>::{closure#0}>",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<core::str::iter::Split<char> as core::iter::traits::iterator::Iterator>::find::<&mut krusty_cli::kotlinc_arguments::catalog::toggles::{closure#0}>",
+    "function": "<hashbrown::raw::RawTable<(alloc::string::String, usize)>>::reserve::<hashbrown::map::make_hasher<alloc::string::String, usize, std::hash::random::RandomState>::{closure#0}>",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<core::str::iter::Split<char> as core::iter::traits::iterator::Iterator>::try_fold::<(), core::iter::traits::iterator::Iterator::find::check<&str, &mut krusty_cli::kotlinc_arguments::catalog::toggles::{closure#0}>::{closure#0}, core::ops::control_flow::ControlFlow<&str>>",
+    "function": "<hashbrown::raw::RawTable<(alloc::string::String, usize)>>::reserve_rehash::<hashbrown::map::make_hasher<alloc::string::String, usize, std::hash::random::RandomState>::{closure#0}>",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<hashbrown::control::group::sse2::Group>::match_empty_or_deleted",
+    "function": "<hashbrown::raw::RawTable<(alloc::string::String, usize)>>::reserve_rehash::<hashbrown::map::make_hasher<alloc::string::String, usize, std::hash::random::RandomState>::{closure#0}>::{closure#0}",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<hashbrown::control::group::sse2::Group>::match_tag",
+    "function": "<hashbrown::raw::RawTable<usize>>::bucket",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<hashbrown::raw::RawTableInner>::find_insert_index_in_group",
+    "function": "<hashbrown::raw::RawTable<usize>>::find_or_find_insert_index::<indexmap::inner::equivalent<alloc::boxed::Box<[u8]>, zip::types::ZipFileData, alloc::boxed::Box<[u8]>>::{closure#0}, indexmap::inner::get_hash<alloc::boxed::Box<[u8]>, zip::types::ZipFileData>::{closure#0}>",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<krusty::features::LangFeatures>::for_release",
+    "function": "<hashbrown::raw::RawTable<usize>>::insert_tagged_at_index",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "<hashbrown::raw::RawTableInner>::find_or_find_insert_index_inner",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "<hashbrown::table::HashTable<usize>>::entry::<indexmap::inner::equivalent<alloc::boxed::Box<[u8]>, zip::types::ZipFileData, alloc::boxed::Box<[u8]>>::{closure#0}, indexmap::inner::get_hash<alloc::boxed::Box<[u8]>, zip::types::ZipFileData>::{closure#0}>",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "<hashbrown::table::VacantEntry<usize>>::insert",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "<indexmap::map::IndexMap<alloc::boxed::Box<[u8]>, zip::types::ZipFileData>>::hash::<alloc::boxed::Box<[u8]>>",
     "self": 0,
     "total": 1
    },
@@ -636,12 +741,22 @@
     "total": 1
    },
    {
-    "function": "<std::fs::File as alloc::io::read::Read>::read",
+    "function": "<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec>::parse_row",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<std::fs::OpenOptions>::_open",
+    "function": "<mimalloc::MiMalloc as core::alloc::global::GlobalAlloc>::realloc",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "<std::hash::random::DefaultHasher as core::hash::Hasher>::finish",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "<std::hash::random::DefaultHasher as core::hash::Hasher>::write",
     "self": 0,
     "total": 1
    },
@@ -661,47 +776,72 @@
     "total": 1
    },
    {
-    "function": "<std::sys::fs::unix::File>::open_c",
+    "function": "<u16 as core::convert::TryInto<u8>>::try_into",
     "self": 0,
     "total": 1
    },
    {
-    "function": "<str>::split_once::<char>",
+    "function": "<u8 as core::hash::Hash>::hash_slice::<std::hash::random::DefaultHasher>",
     "self": 0,
     "total": 1
    },
    {
-    "function": "__handle_mm_fault",
+    "function": "<zip::datetime::DateTime>::try_from_msdos",
     "self": 0,
     "total": 1
    },
    {
-    "function": "__x64_sys_openat",
+    "function": "__alloc_frozen_pages_noprof",
     "self": 0,
     "total": 1
    },
    {
-    "function": "__x64_sys_read",
+    "function": "__do_fault",
     "self": 0,
     "total": 1
    },
    {
-    "function": "_dl_catch_exception",
+    "function": "__do_huge_pmd_anonymous_page",
     "self": 0,
     "total": 1
    },
    {
-    "function": "alloc::io::read::default_read_exact::<std::fs::File>",
+    "function": "__rustc::__rust_realloc",
     "self": 0,
     "total": 1
    },
    {
-    "function": "alloc_empty_file",
+    "function": "_mi_arenas_page_alloc",
     "self": 0,
     "total": 1
    },
    {
-    "function": "asm_exc_page_fault",
+    "function": "_mi_malloc_generic",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "_mi_page_init",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "_mi_theap_realloc_zero",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "alloc_pages_mpol",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "core::iter::adapters::filter::filter_try_fold::<&str,",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "core::iter::adapters::map::map_try_fold::<&str, core::result::Result<krusty_cli::kotlinc_arguments::catalog::ArgumentSpec, alloc::string::String>,",
     "self": 0,
     "total": 1
    },
@@ -711,17 +851,7 @@
     "total": 1
    },
    {
-    "function": "core::ptr::drop_glue::<alloc::vec::Vec<core::option::Option<usize>>>",
-    "self": 0,
-    "total": 1
-   },
-   {
-    "function": "do_fault",
-    "self": 0,
-    "total": 1
-   },
-   {
-    "function": "do_file_open",
+    "function": "do_huge_pmd_anonymous_page",
     "self": 0,
     "total": 1
    },
@@ -731,42 +861,22 @@
     "total": 1
    },
    {
-    "function": "do_sys_openat2",
+    "function": "filemap_fault",
     "self": 0,
     "total": 1
    },
    {
-    "function": "do_user_addr_fault",
+    "function": "get_page_from_freelist",
     "self": 0,
     "total": 1
    },
    {
-    "function": "exc_page_fault",
+    "function": "hashbrown::map::make_hasher::<alloc::string::String, usize, std::hash::random::RandomState>::{closure#0}",
     "self": 0,
     "total": 1
    },
    {
-    "function": "filemap_map_folio_range",
-    "self": 0,
-    "total": 1
-   },
-   {
-    "function": "filemap_map_pages",
-    "self": 0,
-    "total": 1
-   },
-   {
-    "function": "handle_mm_fault",
-    "self": 0,
-    "total": 1
-   },
-   {
-    "function": "handle_pte_fault",
-    "self": 0,
-    "total": 1
-   },
-   {
-    "function": "init_file",
+    "function": "krusty_cli::cli::arguments::finish_language_settings",
     "self": 0,
     "total": 1
    },
@@ -776,27 +886,87 @@
     "total": 1
    },
    {
-    "function": "ksys_read",
+    "function": "mi_arenas_page_regular_alloc",
     "self": 0,
     "total": 1
    },
    {
-    "function": "open64",
+    "function": "mi_block_set_next",
     "self": 0,
     "total": 1
    },
    {
-    "function": "path_openat",
+    "function": "mi_block_set_nextx",
     "self": 0,
     "total": 1
    },
    {
-    "function": "read",
+    "function": "mi_find_free_page",
     "self": 0,
     "total": 1
    },
    {
-    "function": "security_file_alloc",
+    "function": "mi_find_page",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "mi_page_extend_free",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "mi_page_free_list_extend",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "mi_page_fresh",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "mi_page_fresh_alloc",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "mi_page_queue_find_free_ex",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "mi_realloc_aligned",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "mi_theap_realloc_aligned",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "mi_theap_realloc_zero_aligned",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "mi_theap_umalloc",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "post_alloc_hook",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "vma_alloc_anon_folio_pmd",
+    "self": 0,
+    "total": 1
+   },
+   {
+    "function": "vma_alloc_folio_noprof",
     "self": 0,
     "total": 1
    }
@@ -814,8 +984,8 @@
    "only_kotlinc": null,
    "only_krusty": null,
    "seconds": {
-    "kotlinc": 95.72,
-    "krusty": 99.68
+    "kotlinc": 96.41,
+    "krusty": 98.82
    }
   },
   {
@@ -829,8 +999,8 @@
    "only_kotlinc": null,
    "only_krusty": null,
    "seconds": {
-    "kotlinc": 4.61,
-    "krusty": 5.7
+    "kotlinc": 4.43,
+    "krusty": 6.64
    }
   },
   {
@@ -844,8 +1014,8 @@
    "only_kotlinc": null,
    "only_krusty": null,
    "seconds": {
-    "kotlinc": 15.64,
-    "krusty": 18.19
+    "kotlinc": 15.98,
+    "krusty": 18.85
    }
   },
   {
@@ -859,8 +1029,8 @@
    "only_kotlinc": null,
    "only_krusty": null,
    "seconds": {
-    "kotlinc": 12.73,
-    "krusty": 13.6
+    "kotlinc": 14.36,
+    "krusty": 17.04
    }
   }
  ],
@@ -897,9 +1067,9 @@
   }
  ],
  "measured": {
-  "date": "2026-11-01",
-  "commit": "1fd314196c9327db9a99680db49effb3822b7927",
-  "run": "https://github.com/qnox/krusty/actions/runs/41286577483"
+  "date": "2026-11-02",
+  "commit": "dd148ca59831a9adc34cc047b12b013072e35ff9",
+  "run": "https://github.com/qnox/krusty/actions/runs/41409751998"
  },
  "flame_graph": "krusty-flamegraph.svg"
 }
