@@ -79,7 +79,7 @@ jobs:
         run: cargo test -p krusty-plugin-host -- --include-ignored
 
   ci:
-    runs-on: [self-hosted, rust]
+    runs-on: [self-hosted, rust, large]
     outputs:
       # Release packaging waits for coverage, then starts only while this master commit is still the
       # publishable tip. The release job repeats the check while holding the publisher lock.
