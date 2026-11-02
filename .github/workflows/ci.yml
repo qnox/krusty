@@ -26,13 +26,13 @@ jobs:
   # Lint and coverage are independent merge gates. Give each its own runner so the clean Clippy
   # build does not sit on the coverage critical path. Conformance and Gradle run prebuilt artifact
   # families from their independent producer jobs below; neither matrix compiles krusty again.
-  # Jobs run on self-hosted runners, one profile label each (rust-large, rust-medium, rust,
-  # helper). The Maven and Bazel jobs stay on GitHub-hosted until the self-hosted image has mvn
-  # and bazel; build-release needs its matrix's operating systems, and release publishes from
-  # GitHub-hosted. Fork PRs run on ubuntu-latest:
-  # self-hosted runners never take fork PR jobs.
+  # Jobs run on self-hosted runners with one size label each (rust-8c-16gb, rust-4c-12gb,
+  # rust-4c-8gb, helper-1c-1gb). The Maven and Bazel jobs stay on GitHub-hosted until the
+  # self-hosted image has mvn and bazel; build-release needs its matrix's operating systems, and
+  # release publishes from GitHub-hosted. Fork PRs run on ubuntu-latest: self-hosted runners never
+  # take fork PR jobs.
   lint:
-    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust"]') }}
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -82,7 +82,7 @@ jobs:
         run: cargo test -p krusty-plugin-host -- --include-ignored
 
   ci:
-    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust-large"]') }}
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust-8c-16gb"]') }}
     outputs:
       # Release packaging waits for coverage, then starts only while this master commit is still the
       # publishable tip. The release job repeats the check while holding the publisher lock.
@@ -243,7 +243,7 @@ jobs:
   # matrix waits for the slowest required build instead of serializing every unrelated target graph
   # on one runner. Consumers never compile krusty again.
   build-conformance-bin:
-    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust"]') }}
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
@@ -277,7 +277,7 @@ jobs:
           if-no-files-found: error
 
   build-klib-test-bins:
-    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust-medium"]') }}
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust-4c-12gb"]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
@@ -309,7 +309,7 @@ jobs:
           if-no-files-found: error
 
   build-tool-bins:
-    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust"]') }}
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
     outputs:
       # Every consumer already waits for this artifact family. Publish the manifest-derived matrix
       # here instead of scheduling a separate ten-second runner solely for these two values.
@@ -368,7 +368,7 @@ jobs:
       matrix:
         version: ${{ fromJson(needs.build-tool-bins.outputs.matrix) }}
         target: [jvm]
-    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust"]') }}
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
     steps: &conformance-steps
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
@@ -697,7 +697,7 @@ jobs:
       matrix:
         version: ${{ fromJson(needs.build-tool-bins.outputs.matrix) }}
         target: [native, wasm]
-    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust"]') }}
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
     steps: *conformance-steps
 
   # The one check a ruleset requires: its context does not change with either matrix. A required
@@ -709,7 +709,7 @@ jobs:
     name: ci-and-conformance
     needs: [ci, lint, conformance, conformance-klib, build-gradle-plugin, gradle, maven, build-tools, bazel]
     if: always()
-    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "helper"]') }}
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "helper-1c-1gb"]') }}
     steps:
       - name: require every merge gate to succeed
         env:
@@ -748,7 +748,7 @@ jobs:
   # Build the release bytes once. The compatibility matrix below consumes this Maven repository;
   # it never rebuilds the plugin from the checkout.
   build-gradle-plugin:
-    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust"]') }}
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -786,7 +786,7 @@ jobs:
       fail-fast: false
       matrix:
         kotlin: ${{ fromJson(needs.build-tool-bins.outputs.matrix) }}
-    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust"]') }}
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -833,7 +833,7 @@ jobs:
           - { kotlin: 2.4.0,  gradle: 9.5.0,  ksp: true }
           - { kotlin: 2.4.10, gradle: 8.14.3, ksp: true }
           - { kotlin: 2.4.20, gradle: 7.6.3,  ksp: false }
-    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust"]') }}
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
