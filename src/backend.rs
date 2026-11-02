@@ -5,7 +5,7 @@
 pub mod class_tables;
 pub(crate) mod coroutines;
 pub mod counted_loops;
-pub(crate) mod default_arguments;
+pub mod default_arguments;
 mod dependency_accessor;
 mod dependency_call_shape;
 mod dependency_facts;
@@ -13,12 +13,10 @@ mod dependency_metadata;
 mod dependency_signature;
 mod entry;
 pub mod interface_identity;
-pub(crate) mod local_properties;
+pub mod local_properties;
 mod module_facts;
 
-pub use dependency_call_shape::{
-    DeclaredOperandRoles, DependencyCallShape, DependencyExportCall,
-};
+pub use dependency_call_shape::{DeclaredOperandRoles, DependencyCallShape, DependencyExportCall};
 #[cfg(any(test, feature = "test-support"))]
 pub use dependency_facts::referenced_dependencies;
 pub use dependency_facts::{
@@ -34,12 +32,10 @@ pub use dependency_metadata::{
     DependencyExportSignatures, DependencyMemberReceiver, DependencyMetadata,
     SingletonExtensionUnreadReceiver, SingletonMemberReceiver,
 };
-pub use dependency_signature::{
-    instantiate_dependency_signature, DependencyFunctionSignature,
-};
+pub use dependency_signature::{instantiate_dependency_signature, DependencyFunctionSignature};
 
 /// The parameter form [`Entry::selected`] reports beside the selected function.
-pub(crate) use crate::ir::MainEntryParameters;
+pub use crate::ir::MainEntryParameters;
 pub use entry::{Entry, BOX_RESULT_FRAME};
 
 pub use module_facts::{

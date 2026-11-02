@@ -5,13 +5,7 @@ use crate::fir::ResolvedFunctionOverrideTarget;
 use crate::ir::{ClassId, FunId, IrClass, IrField, IrFile, IrFunction, IrProperty, IrfFlags};
 use crate::types::Ty;
 
-pub fn function(
-    name: &str,
-    owner: &str,
-    params: Vec<Ty>,
-    ret: Ty,
-    abstract_: bool,
-) -> IrFunction {
+pub fn function(name: &str, owner: &str, params: Vec<Ty>, ret: Ty, abstract_: bool) -> IrFunction {
     IrFunction {
         name: name.to_string(),
         params,
@@ -100,12 +94,7 @@ pub fn add_method(ir: &mut IrFile, class: ClassId, function: IrFunction) -> FunI
     fid
 }
 
-pub fn record_override(
-    ir: &mut IrFile,
-    class: ClassId,
-    implementation: FunId,
-    overridden: FunId,
-) {
+pub fn record_override(ir: &mut IrFile, class: ClassId, implementation: FunId, overridden: FunId) {
     // The frontend records overrides by callable identity; the test uses the function index
     // as that identity, which is what `checked_callable_functions` maps back.
     use crate::fir::CallableId;

@@ -83,8 +83,7 @@ pub enum AnyMember {
 
 impl AnyMember {
     /// The three, in slot order.
-    pub(crate) const ALL: [Self; ANY_SLOTS as usize] =
-        [Self::Equals, Self::HashCode, Self::ToString];
+    pub const ALL: [Self; ANY_SLOTS as usize] = [Self::Equals, Self::HashCode, Self::ToString];
 
     /// The slot every table holds this member in.
     pub fn slot(self) -> u32 {
@@ -266,12 +265,12 @@ pub struct NumberedClassTables {
 }
 
 impl NumberedClassTables {
-    pub(crate) fn table(&self, class: ClassId) -> &ClassTable {
+    pub fn table(&self, class: ClassId) -> &ClassTable {
         &self.tables[class as usize]
     }
 
     /// The class slot a member dispatches through, looked up on the class the call names.
-    pub(crate) fn slot(&self, class: ClassId, key: &SlotKey) -> Option<u32> {
+    pub fn slot(&self, class: ClassId, key: &SlotKey) -> Option<u32> {
         self.table(class).slots.get(key).copied()
     }
 }

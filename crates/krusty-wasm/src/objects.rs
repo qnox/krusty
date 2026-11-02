@@ -16,7 +16,7 @@
 //! `toString` have none until the library's own bodies are compiled into the module, and a class
 //! that does not override them gets the trap every abstract slot gets.
 
-use crate::fx_hash::HashMap;
+use krusty::fx_hash::HashMap;
 
 use super::encode::{
     CompositeType, FieldType, Function, HeapType, Module, StorageType, SubType, ValType,

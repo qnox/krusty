@@ -3,9 +3,9 @@
 //! (`crate::native::interface_calls`).
 //!
 //! An interface member is numbered by the module that declares its interface
-//! (`crate::backend::class_tables::module_interfaces`), so it is identified here by that module and
+//! (`krusty::backend::class_tables::module_interfaces`), so it is identified here by that module and
 //! its number; a dependent module reaches it by the identity the declaring module published for it
-//! (`crate::backend::interface_identity`). A call through a member is `call $stub`, one function
+//! (`krusty::backend::interface_identity`). A call through a member is `call $stub`, one function
 //! per member that no file defines. Every class with instances records, for each member it
 //! implements, the function standing there, and every interface it is an instance of. When the
 //! module is finished each stub is written from those records: a direct call when one function
@@ -15,8 +15,8 @@
 //! at one index; a class's table is an immutable `(array funcref)` its dispatch table points to,
 //! null when it holds none. An `is` function per interface tests every implementing struct.
 
-use crate::fx_hash::HashMap;
-use crate::types::TypeName;
+use krusty::fx_hash::HashMap;
+use krusty::types::TypeName;
 
 use super::encode::{BlockType, Code, Function, HeapType, Module, ValType};
 use super::objects::{ObjectRoot, ITABLE_FIELD, REFERENCE};

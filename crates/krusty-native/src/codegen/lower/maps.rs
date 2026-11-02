@@ -434,7 +434,8 @@ impl BodyLowering<'_, '_, '_> {
         }
         let property = self.file.callables.property(target)?;
         let getter = self.file.callables.callable(property.getter)?;
-        let Some(krusty::types::SemanticCallableOwner::Classifier(owner)) = getter.declaration_owner
+        let Some(krusty::types::SemanticCallableOwner::Classifier(owner)) =
+            getter.declaration_owner
         else {
             return None;
         };
@@ -511,10 +512,7 @@ mod tests {
         ret: Ty,
     ) -> crate::intrinsics::FunctionSignature<'a> {
         crate::intrinsics::FunctionSignature::new(
-            crate::intrinsics::DeclarationOwner::callable(
-                krusty::types::type_name(owner),
-                None,
-            ),
+            crate::intrinsics::DeclarationOwner::callable(krusty::types::type_name(owner), None),
             name,
             params,
             ret,
@@ -621,32 +619,18 @@ mod tests {
             )),
         );
         let exact_params = [key, value];
-        let exact = crate::intrinsics::FunctionSignature::new(
-            package,
-            "set",
-            &exact_params,
-            Ty::Unit,
-        )
-        .with_receiver(Some(mutable_map));
+        let exact =
+            crate::intrinsics::FunctionSignature::new(package, "set", &exact_params, Ty::Unit)
+                .with_receiver(Some(mutable_map));
         assert!(is_map_set_extension(exact));
 
         assert!(!is_map_set_extension(
-            crate::intrinsics::FunctionSignature::new(
-                package,
-                "set",
-                &[key, Ty::Int],
-                Ty::Unit,
-            )
-            .with_receiver(Some(mutable_map)),
+            crate::intrinsics::FunctionSignature::new(package, "set", &[key, Ty::Int], Ty::Unit,)
+                .with_receiver(Some(mutable_map)),
         ));
         assert!(!is_map_set_extension(
-            crate::intrinsics::FunctionSignature::new(
-                package,
-                "set",
-                &[key, value],
-                Ty::Boolean,
-            )
-            .with_receiver(Some(mutable_map)),
+            crate::intrinsics::FunctionSignature::new(package, "set", &[key, value], Ty::Boolean,)
+                .with_receiver(Some(mutable_map)),
         ));
     }
 }

@@ -10,8 +10,8 @@
 //! The box type is the primitive's identity: a `Long` box never equals an `Int` box holding the
 //! same number, and unboxing casts to exactly the type the frontend checked the value is.
 
-use crate::fx_hash::HashMap;
-use crate::types::{Ty, TyKind};
+use krusty::fx_hash::HashMap;
+use krusty::types::{Ty, TyKind};
 
 use super::encode::{BlockType, Code, CompositeType, Function, HeapType, Module, SubType, ValType};
 use super::objects::immutable;

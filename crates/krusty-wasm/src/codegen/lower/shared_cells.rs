@@ -10,7 +10,7 @@
 //! through any other holder declines: nothing in this generator yet hands a cell to another body.
 
 use super::*;
-use crate::wasm::encode::{CompositeType, FieldType, StorageType};
+use crate::encode::{CompositeType, FieldType, StorageType};
 
 impl Body<'_> {
     /// Declare value `index` as the cell `init` (an [`IrExpr::RefNew`]) creates.
@@ -108,9 +108,9 @@ impl Body<'_> {
 
 #[cfg(test)]
 mod tests {
-    use crate::ir::{IrConst, IrExpr, IrFile, IrFunction};
-    use crate::types::Ty;
-    use crate::wasm::target::WasmTarget;
+    use crate::target::WasmTarget;
+    use krusty::ir::{IrConst, IrExpr, IrFile, IrFunction};
+    use krusty::types::Ty;
 
     /// The encoded module of one function whose body declares the cell `0` holding an `Int`,
     /// writes `1` into it, and either ends there or answers the write: a source assignment
@@ -154,7 +154,7 @@ mod tests {
             param_checks: Vec::new(),
         });
         let mut started = super::super::super::Started::new(WasmTarget::Wasi);
-        let properties = crate::backend::local_properties::realize(&mut ir)
+        let properties = krusty::backend::local_properties::realize(&mut ir)
             .expect("the body declares no local delegated property");
         super::super::lower_alone(&ir, &properties, &mut started).expect("the cell body lowers");
         started.module.encode()

@@ -18,8 +18,8 @@ use object::elf::{FileHeader64, DT_SONAME, ET_DYN, SHT_DYNSYM, STB_GLOBAL, STB_W
 use object::read::elf::{FileHeader, SectionTable, Sym};
 use object::{LittleEndian, SymbolIndex};
 
-use crate::Arch;
 use super::ProgramLinkError;
+use crate::Arch;
 
 /// What a symbol a library exports is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

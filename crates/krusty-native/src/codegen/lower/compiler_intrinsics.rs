@@ -287,8 +287,12 @@ impl BodyLowering<'_, '_, '_> {
             _ => {}
         }
         let operation = match intrinsic {
-            Some(krusty::backend::BackendCompilerIntrinsic::ArrayGet) => Some(IrIntrinsic::ArrayGet),
-            Some(krusty::backend::BackendCompilerIntrinsic::ArraySet) => Some(IrIntrinsic::ArraySet),
+            Some(krusty::backend::BackendCompilerIntrinsic::ArrayGet) => {
+                Some(IrIntrinsic::ArrayGet)
+            }
+            Some(krusty::backend::BackendCompilerIntrinsic::ArraySet) => {
+                Some(IrIntrinsic::ArraySet)
+            }
             Some(krusty::backend::BackendCompilerIntrinsic::ArraySize) => {
                 Some(IrIntrinsic::ArraySize)
             }

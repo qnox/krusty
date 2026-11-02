@@ -1,5 +1,5 @@
 //! The WasmGC form of one file's classes, built on the shared class tables
-//! (`crate::backend::class_tables`): a struct type per class, a dispatch-table type per class and
+//! (`krusty::backend::class_tables`): a struct type per class, a dispatch-table type per class and
 //! one instance of it, and the functions every class needs beyond its methods.
 //!
 //! **Objects.** A class's struct is the root `$Object`'s single field — the dispatch table — then
@@ -21,17 +21,17 @@
 //! ordinary class, interface or `object`, a superclass declared in another file, and an override
 //! whose signature needs a bridge in a class table.
 
-use crate::fx_hash::HashMap;
+use krusty::fx_hash::HashMap;
 
-use crate::backend::class_tables::module_classes::ModuleClasses;
-use crate::backend::class_tables::module_slots::ModuleSlotPlan;
-use crate::backend::class_tables::{
+use krusty::backend::class_tables::module_classes::ModuleClasses;
+use krusty::backend::class_tables::module_slots::ModuleSlotPlan;
+use krusty::backend::class_tables::{
     self, AnyMember, NumberedClassTables, Representation, Slot, SlotKey, ANY_SLOTS,
 };
-use crate::backend::local_properties::RealizedLocalPropertyAccess;
-use crate::fir::{PropertyId, ResolvedPropertyOverrideTarget};
-use crate::ir::{ClassId, FunId, IrClass, IrFile, IrLocalPropertyLayout};
-use crate::types::{Ty, TypeName};
+use krusty::backend::local_properties::RealizedLocalPropertyAccess;
+use krusty::fir::{PropertyId, ResolvedPropertyOverrideTarget};
+use krusty::ir::{ClassId, FunId, IrClass, IrFile, IrLocalPropertyLayout};
+use krusty::types::{Ty, TypeName};
 
 use super::super::encode::{
     Code, CompositeType, FieldType, HeapType, Module, StorageType, SubType, ValType,

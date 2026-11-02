@@ -50,13 +50,13 @@ impl DirectCFunction {
 /// authoritative for the slot's physical type; this contract authenticates only its classifier
 /// marker and stable parameter identity.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct KlibBodyCompanionReceiver {
+pub struct KlibBodyCompanionReceiver {
     classifier: TypeName,
     identity: crate::fir::ResolvedParameterIdentity,
 }
 
 impl KlibBodyCompanionReceiver {
-    pub(crate) fn new(classifier: TypeName) -> Self {
+    pub fn new(classifier: TypeName) -> Self {
         Self {
             classifier,
             identity: crate::fir::ResolvedParameterIdentity::ExtensionReceiver,
@@ -137,7 +137,7 @@ pub struct KlibBodyCallable<'a> {
 }
 
 /// The declared shape of a selected callable that its KLIB body is lowered against.
-pub(crate) struct KlibBodyCallableShape<'a> {
+pub struct KlibBodyCallableShape<'a> {
     pub(crate) name: &'a str,
     pub(crate) kind: ExternalCallableKind,
     pub(crate) visibility: crate::types::Visibility,

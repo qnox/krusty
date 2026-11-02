@@ -1,9 +1,9 @@
 use super::check_supported;
-use crate::fir::ClassCaptureIdentity;
-use crate::ir::{
+use krusty::fir::ClassCaptureIdentity;
+use krusty::ir::{
     ClassId, IrCapturedReceiver, IrClass, IrConstructorCapture, IrCtorParameterProvenance, IrFile,
 };
-use crate::types::{type_name, Ty};
+use krusty::types::{type_name, Ty};
 
 fn check_class(class: &IrClass) -> Result<(), super::Unsupported> {
     let mut ir = IrFile::default();
@@ -12,8 +12,8 @@ fn check_class(class: &IrClass) -> Result<(), super::Unsupported> {
 }
 
 fn forwarded_classes() -> Vec<IrClass> {
-    let ir = crate::fir_lower::tests::lower_single_source_with_jvm_stdlib(
-        include_str!("../../../../tests/box_regressions/nestedAnonymousConstructionOrder.kt"),
+    let ir = krusty::fir_lower::single_source_lowering::lower_single_source_with_jvm_stdlib(
+        include_str!("../../../../../tests/box_regressions/nestedAnonymousConstructionOrder.kt"),
         "NestedAnonymousConstructionOrder",
     );
     let classes = ir
@@ -53,14 +53,16 @@ fn stored_value_captures_use_the_existing_constructor_field_transport() {
     for (file, source) in [
         (
             "RetainedLexicalValueIdentity",
-            include_str!("../../../../tests/box_regressions/retainedLexicalValueIdentity.kt"),
+            include_str!("../../../../../tests/box_regressions/retainedLexicalValueIdentity.kt"),
         ),
         (
             "StoredClassCapturePrefixes",
-            include_str!("../../../../tests/box_regressions/storedClassCapturePrefixes.kt"),
+            include_str!("../../../../../tests/box_regressions/storedClassCapturePrefixes.kt"),
         ),
     ] {
-        let ir = crate::fir_lower::tests::lower_single_source_with_jvm_stdlib(source, file);
+        let ir = krusty::fir_lower::single_source_lowering::lower_single_source_with_jvm_stdlib(
+            source, file,
+        );
         let captured = ir
             .classes
             .iter()
@@ -141,8 +143,8 @@ fn capture_storage_and_unproven_prefix_roles_still_decline() {
 }
 
 fn capture_transport() -> (IrFile, ClassId, u32) {
-    let ir = crate::fir_lower::tests::lower_single_source_with_jvm_stdlib(
-        include_str!("../../../../tests/box_regressions/retainedLexicalValueIdentity.kt"),
+    let ir = krusty::fir_lower::single_source_lowering::lower_single_source_with_jvm_stdlib(
+        include_str!("../../../../../tests/box_regressions/retainedLexicalValueIdentity.kt"),
         "RetainedLexicalValueIdentity",
     );
     let (class, parameter) = ir
@@ -328,8 +330,8 @@ fn optional_and_upstream_capture_identities_are_separate_from_physical_fields() 
 
 #[test]
 fn forwarded_ordinals_ignore_preceding_capture_parameters() {
-    let mut ir = crate::fir_lower::tests::lower_single_source_with_jvm_stdlib(
-        include_str!("../../../../tests/box_regressions/storedClassCapturePrefixes.kt"),
+    let mut ir = krusty::fir_lower::single_source_lowering::lower_single_source_with_jvm_stdlib(
+        include_str!("../../../../../tests/box_regressions/storedClassCapturePrefixes.kt"),
         "StoredClassCapturePrefixes",
     );
     let (class, parameter) = ir

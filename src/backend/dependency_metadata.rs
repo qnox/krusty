@@ -256,7 +256,7 @@ impl DependencyExportSignatures {
     }
 
     /// Record one declaration at the metadata owner that computed its exact identity.
-    pub(crate) fn record_callable(&mut self, callable: FunId, identity: KlibDependencyCallable) {
+    pub fn record_callable(&mut self, callable: FunId, identity: KlibDependencyCallable) {
         let previous = self.callables.insert(callable, identity);
         assert!(
             previous.is_none(),
@@ -298,7 +298,7 @@ impl DependencyExportSignatures {
         );
     }
 
-    pub(crate) fn record_singleton_extension_unread_receiver(
+    pub fn record_singleton_extension_unread_receiver(
         &mut self,
         callable: FunId,
         receiver: crate::types::Ty,
@@ -317,7 +317,7 @@ impl DependencyExportSignatures {
         );
     }
 
-    pub(crate) fn record_singleton_member_receiver(
+    pub fn record_singleton_member_receiver(
         &mut self,
         callable: FunId,
         classifier: crate::types::TypeName,

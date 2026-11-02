@@ -6,13 +6,13 @@
 //! opcode of their physical class (and, for a conversion, the result's) instead of a call.
 
 use super::*;
-use crate::libraries::{CompilerIntrinsic, ScalarClass, ScalarComparison, ScalarInstruction};
+use krusty::libraries::{CompilerIntrinsic, ScalarClass, ScalarComparison, ScalarInstruction};
 
 impl Body<'_> {
     /// The scalar operation the provider authenticated as `target`'s implementation.
     pub(super) fn scalar_operation_of(
         &self,
-        target: crate::fir::ExternalCallableId,
+        target: krusty::fir::ExternalCallableId,
     ) -> Option<CompilerIntrinsic> {
         self.callables
             .callable(target)?
@@ -24,7 +24,7 @@ impl Body<'_> {
     /// extension's receiver is the instruction's first operand, followed by the call's arguments.
     pub(super) fn scalar_operation_call(
         &mut self,
-        target: crate::fir::ExternalCallableId,
+        target: krusty::fir::ExternalCallableId,
         receiver: Option<u32>,
         params: &[Ty],
         ret: Ty,
@@ -93,7 +93,7 @@ impl Body<'_> {
 }
 
 /// Whether the Wasm emitter realizes `operation` as one scalar instruction at its call.
-pub(in crate::wasm::codegen) fn is_scalar_operation(operation: CompilerIntrinsic) -> bool {
+pub(in crate::codegen) fn is_scalar_operation(operation: CompilerIntrinsic) -> bool {
     matches!(
         operation,
         CompilerIntrinsic::ScalarInstruction(_) | CompilerIntrinsic::ReinterpretBits
@@ -252,8 +252,8 @@ fn compare(comparison: ScalarComparison, class: ScalarClass) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::{opcode, Opcode};
-    use crate::libraries::{ScalarComparison, ScalarInstruction};
-    use crate::types::Ty;
+    use krusty::libraries::{ScalarComparison, ScalarInstruction};
+    use krusty::types::Ty;
 
     #[test]
     fn opcodes_match_the_wasm_numeric_instruction_table() {

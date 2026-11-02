@@ -16,12 +16,12 @@ use object::read::{Object, ObjectSymbol};
 use object::SymbolSection;
 
 use super::super::interface_calls::{stub_number, ITABLE_OFFSET, RECEIVER_TYPE_OFFSET};
-use crate::Arch;
 use super::elf::{symbol_name, Elf};
 pub(super) use super::interface_records::Target;
 use super::interface_tables::InterfaceTables;
 use super::relocate::split_hi_lo;
 use super::ProgramLinkError;
+use crate::Arch;
 
 /// Each stub starts on this boundary.
 const STUB_ALIGN: u64 = 16;

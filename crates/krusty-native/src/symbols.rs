@@ -199,7 +199,10 @@ fn mangle_ty(out: &mut String, ty: krusty::types::Ty) -> Option<()> {
 /// Symbol of the entry another file calls when it leaves arguments of a top-level function out:
 /// the function's whole parameter frame followed by a mask of the omitted ordinals. See
 /// `codegen::lower::defaults`.
-pub(super) fn module_default_symbol(module_name: &str, callable: krusty::fir::CallableId) -> String {
+pub(super) fn module_default_symbol(
+    module_name: &str,
+    callable: krusty::fir::CallableId,
+) -> String {
     format!(
         "kt_mod_{}_{}__defaults",
         module_namespace(module_name),

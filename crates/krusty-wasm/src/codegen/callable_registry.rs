@@ -5,15 +5,15 @@
 //! signature, which survives independent analysis and is the only key an external call may use.
 //! Wasm indices never come from a declaration spelling.
 
-use crate::fx_hash::{HashMap, HashSet};
+use krusty::fx_hash::{HashMap, HashSet};
 
-use crate::backend::{
+use krusty::backend::{
     CheckedBackendCallables, DependencyExportSignatures, DependencyFunctionSignature,
     DependencyMemberReceiver, KlibDependencyCallable, SingletonExtensionUnreadReceiver,
     SingletonMemberReceiver,
 };
-use crate::fir::{CallableId, ExternalCallableId};
-use crate::ir::{Callee, ExprId, IrExpr, IrFile};
+use krusty::fir::{CallableId, ExternalCallableId};
+use krusty::ir::{Callee, ExprId, IrExpr, IrFile};
 
 use super::super::encode::Module;
 use super::lower::Unsupported;
@@ -91,7 +91,7 @@ impl CallableRegistry {
             let Some(targets) = default_identities.get_mut(entry as usize) else {
                 return Err("an invalid default-argument entry".to_string());
             };
-            *targets = crate::backend::default_arguments::published_identities(ir, declaration);
+            *targets = krusty::backend::default_arguments::published_identities(ir, declaration);
         }
 
         let mut declared = HashSet::default();
@@ -100,7 +100,10 @@ impl CallableRegistry {
             .zip(default_identities)
             .enumerate()
             .map(|(function, (targets, default_targets))| {
-                if ir.inline_only_fns.contains(&(function as crate::ir::FunId)) {
+                if ir
+                    .inline_only_fns
+                    .contains(&(function as krusty::ir::FunId))
+                {
                     if targets.iter().any(|target| {
                         self.module
                             .get(target)
@@ -162,9 +165,9 @@ impl CallableRegistry {
             singleton_member_receivers: HashMap::default(),
             singleton_extension_unread_receivers: HashMap::default(),
         };
-        for expression in crate::ir::emitted_body_roots(ir)
+        for expression in krusty::ir::emitted_body_roots(ir)
             .into_iter()
-            .flat_map(|root| crate::ir::value_namespace_expressions(ir, root))
+            .flat_map(|root| krusty::ir::value_namespace_expressions(ir, root))
         {
             let accessor_call;
             let (callee, dispatch_receiver) = match ir.expr(expression) {
@@ -471,18 +474,18 @@ impl FileCallTargets {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::BackendCallableFact;
-    use crate::ir::IrFunction;
-    use crate::libraries::{
+    use crate::encode::{Code, Function};
+    use krusty::backend::BackendCallableFact;
+    use krusty::ir::IrFunction;
+    use krusty::libraries::{
         ExternalCallableKind, InlineKind, KlibBodyCompanionReceiver, KlibDeclarationSignature,
         MemberRealization,
     };
-    use crate::metadata::id_signature::{
+    use krusty::metadata::id_signature::{
         callable_signature, CallableShape, DeclarationContainer, Placement,
     };
-    use crate::metadata::semantic::KotlinType;
-    use crate::types::{type_name, Ty};
-    use crate::wasm::encode::{Code, Function};
+    use krusty::metadata::semantic::KotlinType;
+    use krusty::types::{type_name, Ty};
 
     #[test]
     fn a_recorded_singleton_member_edge_does_not_require_literal_receiver_syntax() {
@@ -512,7 +515,7 @@ mod tests {
         ));
     }
 
-    fn function(name: &str, body: Option<crate::ir::ExprId>) -> IrFunction {
+    fn function(name: &str, body: Option<krusty::ir::ExprId>) -> IrFunction {
         IrFunction {
             name: name.to_string(),
             param_checks: Vec::new(),
@@ -555,7 +558,7 @@ mod tests {
             physical_name: None,
             reflection_name: None,
             physical_owner: type_name("kotlin/Float"),
-            visibility: crate::types::Visibility::Public,
+            visibility: krusty::types::Visibility::Public,
             declaration_owner: None,
             singleton_dispatch: None,
             kind: ExternalCallableKind::TopLevel,
@@ -728,11 +731,11 @@ mod tests {
         let mut wasm = Module::default();
         let callable = CallableId::from_raw(0);
         let mut ir = IrFile::default();
-        let function = ir.add_fun(crate::ir::IrFunction {
+        let function = ir.add_fun(krusty::ir::IrFunction {
             name: "template".to_string(),
             param_checks: Vec::new(),
             params: Vec::new(),
-            ret: crate::types::Ty::String,
+            ret: krusty::types::Ty::String,
             body: None,
             is_static: true,
             dispatch_receiver: None,
@@ -802,7 +805,7 @@ mod tests {
             dispatch_receiver: None,
             args: Vec::new(),
         });
-        let mut class = crate::ir::IrClass::synthetic(crate::types::type_name("demo/Box"));
+        let mut class = krusty::ir::IrClass::synthetic(krusty::types::type_name("demo/Box"));
         class.init_body = Some(call);
         ir.classes.push(class);
 
@@ -868,7 +871,7 @@ mod tests {
         let call = caller.add_expr(IrExpr::Call {
             callee: Box::new(Callee::ModuleWithDefaults {
                 target,
-                default_provider: crate::fir::ResolvedFunctionOverrideTarget::Module(provider),
+                default_provider: krusty::fir::ResolvedFunctionOverrideTarget::Module(provider),
                 name: "answer".to_string(),
                 params: vec![Ty::String],
                 ret: Ty::String,
@@ -880,9 +883,9 @@ mod tests {
             args: Vec::new(),
         });
         caller.add_fun(function("box", Some(call)));
-        crate::backend::default_arguments::realize(
+        krusty::backend::default_arguments::realize(
             &mut caller,
-            &mut crate::backend::CheckedBackendCallables::default(),
+            &mut krusty::backend::CheckedBackendCallables::default(),
         );
         let calls = registry
             .file_calls(&caller, &CheckedBackendCallables::default(), &mut wasm)
@@ -893,8 +896,8 @@ mod tests {
         assert_eq!(calls.module_default(target), None);
 
         let mut declaration = IrFile::default();
-        let default = declaration.add_expr(IrExpr::Const(crate::ir::IrConst::String(
-            crate::kt_string::KtString::from("OK"),
+        let default = declaration.add_expr(IrExpr::Const(krusty::ir::IrConst::String(
+            krusty::kt_string::KtString::from("OK"),
         )));
         let body = declaration.add_expr(IrExpr::GetValue(0));
         let function = declaration.add_fun(IrFunction {
@@ -909,15 +912,18 @@ mod tests {
         declaration
             .checked_callable_functions
             .insert(target, function);
-        let mut parameters =
-            crate::ir::FnParamInfo::source_defaults(vec!["value".to_string()], vec![Some(default)]);
-        parameters.inherited_default_provider =
-            Some(crate::fir::ResolvedFunctionOverrideTarget::Module(provider));
+        let mut parameters = krusty::ir::FnParamInfo::source_defaults(
+            vec!["value".to_string()],
+            vec![Some(default)],
+        );
+        parameters.inherited_default_provider = Some(
+            krusty::fir::ResolvedFunctionOverrideTarget::Module(provider),
+        );
         declaration.fn_params.insert(function, parameters);
 
-        crate::backend::default_arguments::realize(
+        krusty::backend::default_arguments::realize(
             &mut declaration,
-            &mut crate::backend::CheckedBackendCallables::default(),
+            &mut krusty::backend::CheckedBackendCallables::default(),
         );
         let entry = declaration.default_entries[&function];
         let functions = registry

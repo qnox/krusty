@@ -158,10 +158,7 @@ impl ModuleInterfaces {
     }
 
     /// The numbered interface `interface`, `None` when the module declares no such interface.
-    pub fn interface(
-        &self,
-        interface: TypeName,
-    ) -> Option<Result<&NumberedInterface, &str>> {
+    pub fn interface(&self, interface: TypeName) -> Option<Result<&NumberedInterface, &str>> {
         self.interfaces
             .get(&interface)
             .map(|numbered| numbered.as_ref().map_err(String::as_str))

@@ -15,7 +15,7 @@ use std::sync::OnceLock;
 
 use krusty::backend::Entry;
 use krusty::conformance::TestTarget;
-use krusty::wasm::{WasmBackend, WasmTarget};
+use krusty_wasm::{WasmBackend, WasmTarget};
 
 use super::box_lane::{self, Lane, Libraries, Outcome};
 use super::box_ratchet::Platform;

@@ -239,7 +239,8 @@ impl NativeValueClasses {
 /// every backend, with carriers, boxes and descriptors of their own — the JVM's inventory skips the
 /// same set. They are never projected.
 fn is_builtin(classifier: TypeName) -> bool {
-    Ty::obj_name(classifier).is_unsigned() || krusty::types::prim_array_element(classifier).is_some()
+    Ty::obj_name(classifier).is_unsigned()
+        || krusty::types::prim_array_element(classifier).is_some()
 }
 
 #[cfg(test)]

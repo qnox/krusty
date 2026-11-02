@@ -7,18 +7,20 @@
 //! `$Object` for its table. The frontend proved the value is of the class; the cast is what tells
 //! the validator.
 
-use crate::backend::class_tables::module_slots::PlanKey;
-use crate::backend::class_tables::{function_key, local_property_target, AnyMember, Slot, SlotKey};
-use crate::backend::interface_identity::member_identity;
-use crate::fir::{
+use krusty::backend::class_tables::module_slots::PlanKey;
+use krusty::backend::class_tables::{
+    function_key, local_property_target, AnyMember, Slot, SlotKey,
+};
+use krusty::backend::interface_identity::member_identity;
+use krusty::fir::{
     CallableId, ExternalCallableId, PropertyId, ResolvedFunctionOverrideTarget,
     ResolvedPropertyOverrideTarget,
 };
-use crate::ir::{
+use krusty::ir::{
     Callee, ClassId, CtorDelegateTarget, FunId, IrLocalPropertyLayout, IrSuperCallKind, IrTypeOp,
     IrVirtualTarget,
 };
-use crate::types::{Ty, TyKind, TypeName};
+use krusty::types::{Ty, TyKind, TypeName};
 
 use super::super::super::encode::{BlockType, Code, Function, HeapType, Module, ValType};
 use super::super::super::interface_dispatch::MemberRef;
@@ -90,7 +92,7 @@ impl Body<'_> {
     /// `C(args)`: a new instance of `C`, then the constructor `selected` names run on it.
     pub(super) fn construction(
         &mut self,
-        internal: crate::types::TypeName,
+        internal: krusty::types::TypeName,
         args: &[u32],
         selected: Option<&[Ty]>,
     ) -> Result<(), Unsupported> {
@@ -177,7 +179,7 @@ impl Body<'_> {
     /// The instance of an `object` declaration, built on first use.
     pub(super) fn singleton(
         &mut self,
-        classifier: crate::types::TypeName,
+        classifier: krusty::types::TypeName,
     ) -> Result<(), Unsupported> {
         let singleton = self
             .classes
@@ -864,10 +866,10 @@ impl Body<'_> {
                         ty: declaration.ty,
                         mutable: declaration.is_var,
                         direct_read: declaration.accessors.getter
-                            != crate::ir::IrStaticAccessor::Declared,
+                            != krusty::ir::IrStaticAccessor::Declared,
                         direct_write: declaration.is_var
                             && declaration.accessors.setter
-                                != crate::ir::IrStaticAccessor::Declared,
+                                != krusty::ir::IrStaticAccessor::Declared,
                     }))
                 }
                 _ => Ok(None),
@@ -962,7 +964,7 @@ impl Body<'_> {
             TyKind::STRING => {
                 self.code.ref_test(nullable, STRING_HEAP);
             }
-            TyKind::Obj(name, _) if name == crate::types::wk::any() => {
+            TyKind::Obj(name, _) if name == krusty::types::wk::any() => {
                 self.code.ref_test(nullable, HeapType::Eq);
             }
             TyKind::Obj(name, _)
@@ -1133,7 +1135,7 @@ struct InterfaceCall {
 
 /// `kotlin.Any`, the type every class value is read as before its class is tested.
 fn any() -> Ty {
-    Ty::obj_name(crate::types::wk::any())
+    Ty::obj_name(krusty::types::wk::any())
 }
 
 /// Push the default value of a `value` field.
@@ -1161,7 +1163,7 @@ pub(super) fn define_class_functions(
         if let Some(constructor) = form.constructor {
             let mut parameters = vec![Ty::obj_name(class.fq_name)];
             parameters.extend(class.ctor_args.iter().map(|arg| arg.ty));
-            let mut declared = crate::fx_hash::HashMap::default();
+            let mut declared = krusty::fx_hash::HashMap::default();
             for &root in class
                 .super_arg_prelude
                 .iter()
@@ -1180,7 +1182,7 @@ pub(super) fn define_class_functions(
             let mut parameters = vec![Ty::obj_name(class.fq_name)];
             parameters.extend(secondary.prefix_params.iter().copied());
             parameters.extend(secondary.params.iter().copied());
-            let mut declared = crate::fx_hash::HashMap::default();
+            let mut declared = krusty::fx_hash::HashMap::default();
             for &root in secondary
                 .delegate_prelude
                 .iter()
@@ -1209,7 +1211,7 @@ pub(super) fn define_class_functions(
                 module,
                 runtime,
                 &[],
-                crate::fx_hash::HashMap::default(),
+                krusty::fx_hash::HashMap::default(),
                 Ty::Unit,
             );
             body.code

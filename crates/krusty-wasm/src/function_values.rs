@@ -10,7 +10,7 @@
 //! value of one arity is called one way. The entry unboxes each argument to the type the body
 //! declares and boxes the result (`super::boxes`); the body itself keeps its own types.
 
-use crate::fx_hash::HashMap;
+use krusty::fx_hash::HashMap;
 
 use super::encode::{CompositeType, Module, SubType, ValType};
 use super::objects::{immutable, ITABLE_FIELD, REFERENCE};

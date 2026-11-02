@@ -1,6 +1,6 @@
 //! Per-compilation Wasm array bounds policy, including the reference release's default.
 
-use crate::kotlin_version::{KotlinVersion, ReleaseRecords};
+use krusty::kotlin_version::{KotlinVersion, ReleaseRecords};
 
 const RANGE_CHECKS: ReleaseRecords<bool> = ReleaseRecords::new(&[
     (KotlinVersion::V2_4_0, false),
@@ -9,7 +9,7 @@ const RANGE_CHECKS: ReleaseRecords<bool> = ReleaseRecords::new(&[
 
 pub(super) fn default_range_checks() -> bool {
     *RANGE_CHECKS
-        .get(crate::kotlin_version::target())
+        .get(krusty::kotlin_version::target())
         .expect("every supported Kotlin release has a Wasm bounds default")
 }
 

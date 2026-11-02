@@ -4,11 +4,11 @@
 //! getter/setter entries for each ordinary member property. Other files reach either realization
 //! by the frontend's stable [`PropertyId`]; neither spelling nor a file facade is reconstructed.
 
-use crate::fx_hash::HashMap;
+use krusty::fx_hash::HashMap;
 
-use crate::fir::{DeclarationFlags, PropertyId};
-use crate::ir::{IrFile, IrLocalPropertyLayout};
-use crate::types::{Ty, TypeName};
+use krusty::fir::{DeclarationFlags, PropertyId};
+use krusty::ir::{IrFile, IrLocalPropertyLayout};
+use krusty::types::{Ty, TypeName};
 
 use super::super::encode::Module;
 
@@ -95,7 +95,7 @@ impl PropertyRegistry {
                 .classes
                 .get(class as usize)
                 .ok_or_else(|| "a member property with an invalid owner".to_string())?;
-            if declaration.visibility == crate::types::Visibility::Private
+            if declaration.visibility == krusty::types::Visibility::Private
                 || declaration.flags.has(DeclarationFlags::EXPECT)
                 || declaration.flags.has(DeclarationFlags::CONST)
                 || classifier.is_interface
@@ -126,18 +126,21 @@ impl PropertyRegistry {
             };
             if declaration.extension_receiver.is_some()
                 || !declaration.context_parameters.is_empty()
-                || declaration.visibility == crate::types::Visibility::Private
+                || declaration.visibility == krusty::types::Visibility::Private
                 || declaration.flags.has(DeclarationFlags::EXPECT)
                 || declaration.flags.has(DeclarationFlags::CONST)
                 || !matches!(
                     declaration.owner_kind,
                     Some(
-                        crate::ir::IrClassifierKind::Class
-                            | crate::ir::IrClassifierKind::Object
-                            | crate::ir::IrClassifierKind::Enum
+                        krusty::ir::IrClassifierKind::Class
+                            | krusty::ir::IrClassifierKind::Object
+                            | krusty::ir::IrClassifierKind::Enum
                     )
                 )
-                || !matches!(declaration.placement, crate::ir::IrStaticPlacement::Package)
+                || !matches!(
+                    declaration.placement,
+                    krusty::ir::IrStaticPlacement::Package
+                )
             {
                 continue;
             }
@@ -203,9 +206,9 @@ impl PropertyRegistry {
                 global: 0,
                 ty: declaration.ty,
                 mutable: declaration.is_var,
-                direct_read: declaration.accessors.getter != crate::ir::IrStaticAccessor::Declared,
+                direct_read: declaration.accessors.getter != krusty::ir::IrStaticAccessor::Declared,
                 direct_write: declaration.is_var
-                    && declaration.accessors.setter != crate::ir::IrStaticAccessor::Declared,
+                    && declaration.accessors.setter != krusty::ir::IrStaticAccessor::Declared,
             };
             let mut reserved = identities[storage]
                 .iter()

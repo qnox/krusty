@@ -115,10 +115,10 @@ fn interop_link_libraries(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use krusty::klib::write::KlibWriter;
-    use krusty::klib_libraries::KlibStdlibSemantics;
     use crate::linker::{Export, ExportKind};
     use crate::{Arch, Os};
+    use krusty::klib::write::KlibWriter;
+    use krusty::klib_libraries::KlibStdlibSemantics;
     use std::path::PathBuf;
 
     const LINUX_X64: NativeTarget = NativeTarget {

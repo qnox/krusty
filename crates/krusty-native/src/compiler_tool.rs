@@ -8,13 +8,13 @@
 
 use std::path::PathBuf;
 
+use crate::codegen::{CraneliftBackend, Entry};
+use crate::interop_libraries::NativeKlibInputs;
+use crate::NativeTarget;
 use krusty::compilation_target::CompilationTarget;
 use krusty::diag::DiagSink;
 use krusty::features::LangFeatures;
 use krusty::klib_libraries::{KlibLibraryInput, KlibStdlibSemantics};
-use crate::codegen::{CraneliftBackend, Entry};
-use crate::interop_libraries::NativeKlibInputs;
-use crate::NativeTarget;
 use krusty::source::SourceInput;
 
 /// One program compilation, as Kotlin/Native's `kotlinc-native` takes it.
@@ -175,9 +175,8 @@ pub fn compile_native(
         .filter(|(name, _)| name.ends_with(".o"))
         .map(|(_, bytes)| bytes.as_slice())
         .collect::<Vec<_>>();
-    let image =
-        crate::linker::link_program_with_libraries(&objects, &imports, options.target)
-            .map_err(|error| failed(format!("link: {error}")))?;
+    let image = crate::linker::link_program_with_libraries(&objects, &imports, options.target)
+        .map_err(|error| failed(format!("link: {error}")))?;
     let written =
         |error: std::io::Error| failed(format!("cannot write {}: {error}", output.display()));
     if let Some(parent) = output

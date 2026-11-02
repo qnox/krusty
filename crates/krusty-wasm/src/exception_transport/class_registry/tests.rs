@@ -1,7 +1,7 @@
 use super::*;
-use crate::backend::{BackendModuleFacts, CheckedBackendClassifiers};
-use crate::libraries::LibraryType;
-use crate::wasm::{exception_transport::ExceptionTransport, objects::ObjectRoot, runtime::Runtime};
+use crate::{exception_transport::ExceptionTransport, objects::ObjectRoot, runtime::Runtime};
+use krusty::backend::{BackendModuleFacts, CheckedBackendClassifiers};
+use krusty::libraries::LibraryType;
 
 fn runtime() -> (Module, ExceptionTransport) {
     let mut module = Module::default();
@@ -41,7 +41,7 @@ fn a_cached_leaf_still_authenticates_every_ancestor_without_partial_publication(
     let identity = RuntimeExceptionKind::IndexOutOfBounds.classifier();
     let parent = RuntimeExceptionKind::RuntimeException.classifier();
     let facts = BackendModuleFacts::from_classifiers(declarations(), []).unwrap();
-    let source = CheckedBackendClassifiers::new(&facts, &crate::libraries::EmptySymbolSource);
+    let source = CheckedBackendClassifiers::new(&facts, &krusty::libraries::EmptySymbolSource);
     let structure = transport
         .ensure_class(&mut module, &source, identity)
         .unwrap();
@@ -86,7 +86,7 @@ fn a_cached_leaf_still_authenticates_every_ancestor_without_partial_publication(
         ),
     ] {
         let facts = BackendModuleFacts::from_classifiers(records, []).unwrap();
-        let source = CheckedBackendClassifiers::new(&facts, &crate::libraries::EmptySymbolSource);
+        let source = CheckedBackendClassifiers::new(&facts, &krusty::libraries::EmptySymbolSource);
         assert_eq!(
             transport.ensure_class(&mut module, &source, identity),
             Err(expected)
@@ -111,7 +111,7 @@ fn a_cyclic_exception_parent_declines_before_declaring_any_class() {
         .unwrap()
         .parent = Some(identity);
     let facts = BackendModuleFacts::from_classifiers(records, []).unwrap();
-    let source = CheckedBackendClassifiers::new(&facts, &crate::libraries::EmptySymbolSource);
+    let source = CheckedBackendClassifiers::new(&facts, &krusty::libraries::EmptySymbolSource);
     let before = module.encode();
     assert_eq!(
         transport.ensure_class(&mut module, &source, identity),
@@ -125,10 +125,10 @@ fn a_cyclic_exception_parent_declines_before_declaring_any_class() {
 
 #[test]
 fn selected_wasm_stdlibs_publish_the_exception_chain_without_constructor_authority() {
-    use crate::compilation_target::CompilationTarget;
-    use crate::klib_libraries::{KlibLibraries, KlibLibraryInput, KlibStdlibSemantics};
+    use krusty::compilation_target::CompilationTarget;
+    use krusty::klib_libraries::{KlibLibraries, KlibLibraryInput, KlibStdlibSemantics};
     for target in [CompilationTarget::WasmJs, CompilationTarget::WasmWasi] {
-        let path = crate::toolchain::kotlin_stdlib_klib(target)
+        let path = krusty::toolchain::kotlin_stdlib_klib(target)
             .expect("the exact target stdlib must be provisioned");
         let libraries = KlibLibraries::open(&[KlibLibraryInput::platform_stdlib(
             path,

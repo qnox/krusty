@@ -1,8 +1,10 @@
 //! Exact dependency exports own calls and selected accessor operations before target primitives.
 //! Checked instantiation proves operand roles; the stored export signature owns physical carriers.
 
-use crate::backend::{instantiate_dependency_signature, DependencyCallShape, DependencyExportCall};
-use crate::ir::IrCheckedOperation;
+use krusty::backend::{
+    instantiate_dependency_signature, DependencyCallShape, DependencyExportCall,
+};
+use krusty::ir::IrCheckedOperation;
 
 use super::*;
 
@@ -111,7 +113,7 @@ impl Body<'_> {
             } else if callable.is_extension() {
                 dispatch_receiver.is_some_and(|receiver| {
                     unread.is_some_and(|effect| {
-                        crate::backend::authenticated_singleton_receiver(
+                        krusty::backend::authenticated_singleton_receiver(
                             Some(receiver),
                             selected.map(|s| s.classifier),
                             effect.semantic_type(),
@@ -159,7 +161,7 @@ impl Body<'_> {
         let omitted = call
             .omitted_operands(
                 defaults,
-                crate::backend::DeclaredOperandRoles {
+                krusty::backend::DeclaredOperandRoles {
                     context_count: callable.context_count,
                     defaults: callable
                         .klib_body_parameter_defaults
@@ -253,7 +255,7 @@ impl Body<'_> {
         }
         match default_entry {
             Some(entry) => {
-                for mask in crate::backend::default_arguments::omission_masks(
+                for mask in krusty::backend::default_arguments::omission_masks(
                     abi.len(),
                     omitted.iter().copied(),
                 ) {

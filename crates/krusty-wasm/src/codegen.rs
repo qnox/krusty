@@ -11,8 +11,8 @@ mod interface_members;
 mod lower;
 mod property_registry;
 
-use crate::backend::{Artifact, Backend, CheckedIrFile, Entry, BOX_RESULT_FRAME};
-use crate::diag::DiagSink;
+use krusty::backend::{Artifact, Backend, CheckedIrFile, Entry, BOX_RESULT_FRAME};
+use krusty::diag::DiagSink;
 
 use super::encode::{Code, Function, Module};
 use super::host::Host;
@@ -62,7 +62,7 @@ pub struct WasmModule {
     /// The interface member numbers of the source module being lowered, by its name.
     slot_plan: Option<(
         String,
-        crate::backend::class_tables::module_slots::ModuleSlotPlan,
+        krusty::backend::class_tables::module_slots::ModuleSlotPlan,
     )>,
     /// Each file's top-level property initializer, in file order. They all run before the entry,
     /// as the native target runs them at program start: a program's first touch of a file is
@@ -100,10 +100,10 @@ impl Started {
 impl Backend for WasmBackend {
     type State = WasmModule;
 
-    fn compilation_target(&self) -> crate::compilation_target::CompilationTarget {
+    fn compilation_target(&self) -> krusty::compilation_target::CompilationTarget {
         match self.target {
-            WasmTarget::Js => crate::compilation_target::CompilationTarget::WasmJs,
-            WasmTarget::Wasi => crate::compilation_target::CompilationTarget::WasmWasi,
+            WasmTarget::Js => krusty::compilation_target::CompilationTarget::WasmJs,
+            WasmTarget::Wasi => krusty::compilation_target::CompilationTarget::WasmWasi,
         }
     }
 
@@ -117,7 +117,7 @@ impl Backend for WasmBackend {
 
     fn realizes_dependency_intrinsic(
         &self,
-        operation: crate::backend::BackendCompilerIntrinsic,
+        operation: krusty::backend::BackendCompilerIntrinsic,
     ) -> bool {
         lower::is_direct_operation(operation)
     }
@@ -134,30 +134,30 @@ impl Backend for WasmBackend {
         let mut decline = |state: &mut WasmModule, construct: String| {
             state.declined = true;
             diags.error(
-                crate::diag::Span::new(0, 0),
+                krusty::diag::Span::new(0, 0),
                 format!("{DECLINE_PREFIX}{construct} yet"),
             );
         };
         let selected = match file.kind {
-            crate::backend::CheckedIrUnitKind::Source => self.entry.selected(&file.ir),
-            crate::backend::CheckedIrUnitKind::DependencySupport => None,
+            krusty::backend::CheckedIrUnitKind::Source => self.entry.selected(&file.ir),
+            krusty::backend::CheckedIrUnitKind::DependencySupport => None,
         };
         if selected.is_some_and(|(_, parameters)| {
-            parameters == crate::backend::MainEntryParameters::Arguments
+            parameters == krusty::backend::MainEntryParameters::Arguments
         }) {
             decline(state, "a `main` that takes its arguments".to_string());
             return Vec::new();
         }
-        crate::backend::counted_loops::realize(&mut file.ir, COUNTED_LOOPS);
-        crate::backend::default_arguments::realize(&mut file.ir, &mut file.callables);
-        let Ok(properties) = crate::backend::local_properties::realize(&mut file.ir) else {
+        krusty::backend::counted_loops::realize(&mut file.ir, COUNTED_LOOPS);
+        krusty::backend::default_arguments::realize(&mut file.ir, &mut file.callables);
+        let Ok(properties) = krusty::backend::local_properties::realize(&mut file.ir) else {
             decline(state, "a local delegated property".to_string());
             return Vec::new();
         };
         let started = state
             .started
             .get_or_insert_with(|| Started::new(self.target));
-        if file.kind == crate::backend::CheckedIrUnitKind::Source {
+        if file.kind == krusty::backend::CheckedIrUnitKind::Source {
             // A support unit has no source `CallableId`s. It is emitted immediately before the
             // source file that selected it, so rotating the source registry here would discard
             // cross-file reservations from the current source module.
@@ -213,7 +213,7 @@ impl Backend for WasmBackend {
             let stem = file.stems[file.source.raw() as usize].clone();
             match &state.entry {
                 Some((_, first)) => diags.error(
-                    crate::diag::Span::new(0, 0),
+                    krusty::diag::Span::new(0, 0),
                     format!(
                         "krusty: the program declares {} in both {first} and {stem}",
                         self.entry.declaration()
@@ -228,7 +228,7 @@ impl Backend for WasmBackend {
     fn check_module(&self, state: &Self::State, diags: &mut DiagSink) {
         if state.started.is_some() && !state.declined && state.entry.is_none() {
             diags.error(
-                crate::diag::Span::new(0, 0),
+                krusty::diag::Span::new(0, 0),
                 format!(
                     "krusty: the program declares no {} to start in",
                     self.entry.declaration()
@@ -290,20 +290,20 @@ impl Backend for WasmBackend {
 /// A counted loop keeps its entry test at the top, as on JavaScript and Native; wasm's `loop`
 /// branches back to its start, and the header calls nothing that could be inlined. An `until … step`
 /// loop builds its progression, as on JavaScript, until this generator is taught the counted form.
-const COUNTED_LOOPS: crate::backend::counted_loops::CountedLoopPolicy =
-    crate::backend::counted_loops::CountedLoopPolicy {
-        style: crate::backend::counted_loops::CounterLoopStyle::PreTested,
-        inlining: crate::backend::counted_loops::HeaderInlining::None,
-        until_steps: crate::backend::counted_loops::UntilSteps::Built,
+const COUNTED_LOOPS: krusty::backend::counted_loops::CountedLoopPolicy =
+    krusty::backend::counted_loops::CountedLoopPolicy {
+        style: krusty::backend::counted_loops::CounterLoopStyle::PreTested,
+        inlining: krusty::backend::counted_loops::HeaderInlining::None,
+        until_steps: krusty::backend::counted_loops::UntilSteps::Built,
     };
 
 #[cfg(test)]
 mod tests {
     use super::{WasmBackend, WasmTarget};
-    use crate::backend::{Artifact, Entry};
-    use crate::diag::DiagSink;
-    use crate::libraries::EmptySymbolSource;
-    use crate::source::SourceInput;
+    use krusty::backend::{Artifact, Entry};
+    use krusty::diag::DiagSink;
+    use krusty::libraries::EmptySymbolSource;
+    use krusty::source::SourceInput;
 
     /// Compile `sources`, the file stemmed `Main` first and then `Other1`, `Other2`, …, into a
     /// program starting in `entry`.
@@ -319,7 +319,7 @@ mod tests {
         target: WasmTarget,
         entry: Entry,
         sources: &[&str],
-        provider: Box<dyn crate::libraries::SemanticPlatform>,
+        provider: Box<dyn krusty::libraries::SemanticPlatform>,
     ) -> (Vec<Artifact>, Vec<String>) {
         let stems = (0..sources.len())
             .map(|ordinal| match ordinal {
@@ -333,16 +333,16 @@ mod tests {
             .map(|(source, stem)| SourceInput::kotlin(source).with_file_stem(stem))
             .collect::<Vec<_>>();
         let mut diags = DiagSink::new();
-        let analysis = crate::frontend::analyze_source_set_streaming_with_features(
+        let analysis = krusty::frontend::analyze_source_set_streaming_with_features(
             &inputs,
-            crate::frontend::PlatformProvider::new(
-                crate::compiler::Backend::compilation_target(&WasmBackend::new(target)),
+            krusty::frontend::PlatformProvider::new(
+                krusty::compiler::Backend::compilation_target(&WasmBackend::new(target)),
                 provider,
             ),
-            &crate::features::LangFeatures::new(),
+            &krusty::features::LangFeatures::new(),
             &mut diags,
         );
-        let outputs = crate::compiler::emit_analyzed(
+        let outputs = krusty::compiler::emit_analyzed(
             analysis,
             &stems,
             &WasmBackend::new(target).with_entry(entry),
@@ -547,11 +547,11 @@ mod tests {
 
     #[test]
     fn nothing_member_property_getter_has_no_wasm_result() {
-        use crate::klib_libraries::{KlibLibraries, KlibLibraryInput, KlibStdlibSemantics};
+        use krusty::klib_libraries::{KlibLibraries, KlibLibraryInput, KlibStdlibSemantics};
 
         for target in WasmTarget::ALL {
-            let path = crate::toolchain::kotlin_stdlib_klib(
-                crate::backend::Backend::compilation_target(&WasmBackend::new(target)),
+            let path = krusty::toolchain::kotlin_stdlib_klib(
+                krusty::backend::Backend::compilation_target(&WasmBackend::new(target)),
             )
             .expect("the exact target stdlib must be provisioned");
             let libraries = KlibLibraries::open(&[KlibLibraryInput::platform_stdlib(
@@ -676,15 +676,15 @@ mod tests {
 
     #[test]
     fn unsigned_carriers_require_an_explicit_unsigned_operation() {
-        assert!(super::lower::carrier(crate::types::Ty::UInt)
+        assert!(super::lower::carrier(krusty::types::Ty::UInt)
             .expect("UInt has a physical carrier")
             .is_some());
         assert_eq!(
-            super::lower::ordinary_numeric_carrier(crate::types::Ty::UInt).unwrap_err(),
+            super::lower::ordinary_numeric_carrier(krusty::types::Ty::UInt).unwrap_err(),
             "an ordinary operator on `kotlin.UInt`"
         );
         assert_eq!(
-            super::lower::ordinary_numeric_carrier(crate::types::Ty::ULong).unwrap_err(),
+            super::lower::ordinary_numeric_carrier(krusty::types::Ty::ULong).unwrap_err(),
             "an ordinary operator on `kotlin.ULong`"
         );
     }

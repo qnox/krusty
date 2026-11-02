@@ -16,7 +16,7 @@
 //! `String` is on every target. A string constant is copied out of the module's passive data
 //! segment with `array.new_data`.
 
-use crate::fx_hash::HashMap;
+use krusty::fx_hash::HashMap;
 
 use super::boxes::Boxes;
 use super::encode::{

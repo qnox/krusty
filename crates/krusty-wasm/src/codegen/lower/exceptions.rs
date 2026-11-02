@@ -1,9 +1,9 @@
 //! Base Throwable realization and structured catch-only Kotlin exception transport.
 
-use crate::backend::BackendCompilerIntrinsic as CompilerIntrinsic;
-use crate::fir::ExternalCallableId;
-use crate::ir::IrCatch;
-use crate::types::TypeName;
+use krusty::backend::BackendCompilerIntrinsic as CompilerIntrinsic;
+use krusty::fir::ExternalCallableId;
+use krusty::ir::IrCatch;
+use krusty::types::TypeName;
 
 use super::*;
 
@@ -51,7 +51,7 @@ impl Body<'_> {
         let structure = self.runtime.exceptions.ensure_class(
             self.module,
             self.classifiers,
-            crate::libraries::RuntimeExceptionKind::NullPointer.classifier(),
+            krusty::libraries::RuntimeExceptionKind::NullPointer.classifier(),
         )?;
         let value = self.local(reference);
         self.expression(operand)?;
@@ -130,7 +130,7 @@ impl Body<'_> {
 
     pub(super) fn is_throwable_message_property(
         &self,
-        target: crate::fir::ExternalPropertyId,
+        target: krusty::fir::ExternalPropertyId,
     ) -> bool {
         self.callables
             .property(target)
@@ -183,7 +183,7 @@ impl Body<'_> {
             .and_then(|identity| self.classifiers.classifier(identity))
             .and_then(|fact| fact.runtime_exception);
         if catch.ty.is_nullable()
-            || !matches!(catch_layout, Some(layout) if layout.kind == crate::libraries::RuntimeExceptionKind::Throwable)
+            || !matches!(catch_layout, Some(layout) if layout.kind == krusty::libraries::RuntimeExceptionKind::Throwable)
         {
             return Err(format!("a catch of `{}`", describe(catch.ty)));
         }

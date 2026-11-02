@@ -4,7 +4,7 @@
 //! A class with instances records, for each member number of its module's interfaces, the function
 //! at that number of its interface table (`class_tables::planned_itable`); for each member of a
 //! dependency's interface, by the member's published identity
-//! (`crate::backend::interface_identity`), its override or the default it inherits; and every
+//! (`krusty::backend::interface_identity`), its override or the default it inherits; and every
 //! interface it is an instance of. A file declaring an interface publishes each member's identity
 //! beside its number, which is what a dependent module's classes name their implementations by.
 //!
@@ -13,20 +13,20 @@
 //! value the implementation does not (a primitive behind a type parameter) declines, since that
 //! thunk does not box or unbox yet (see `super::super::boxes`).
 
-use crate::fx_hash::HashMap;
+use krusty::fx_hash::HashMap;
 
-use crate::backend::class_tables::module_interfaces::ModuleInterfaces;
-use crate::backend::class_tables::module_slots::PlanKey;
-use crate::backend::class_tables::planned_itable::InterfaceEntry;
-use crate::backend::class_tables::{function_key, Slot, SlotKey};
-use crate::backend::interface_identity::{member_identity, property_member_identity};
-use crate::backend::{CheckedBackendCallables, DependencyExportSignatures};
-use crate::fir::{
+use krusty::backend::class_tables::module_interfaces::ModuleInterfaces;
+use krusty::backend::class_tables::module_slots::PlanKey;
+use krusty::backend::class_tables::planned_itable::InterfaceEntry;
+use krusty::backend::class_tables::{function_key, Slot, SlotKey};
+use krusty::backend::interface_identity::{member_identity, property_member_identity};
+use krusty::backend::{CheckedBackendCallables, DependencyExportSignatures};
+use krusty::fir::{
     InheritedDefaultBody, InheritedMemberName, ResolvedFunctionOverrideTarget,
     ResolvedPropertyOverrideTarget,
 };
-use crate::ir::{ClassId, IrFile, IrLocalPropertyLayout};
-use crate::types::Ty;
+use krusty::ir::{ClassId, IrFile, IrLocalPropertyLayout};
+use krusty::types::Ty;
 
 use super::super::encode::{Code, Function, Module, ValType};
 use super::super::interface_dispatch::{ClassRef, MemberRef};
@@ -566,8 +566,8 @@ impl FileRecorder<'_, '_, '_> {
     /// identity `identity` computes from its published one; `None` for a library's member.
     fn dependency_member(
         &self,
-        target: crate::fir::ExternalCallableId,
-        identity: impl FnOnce(&crate::backend::KlibDependencyCallable) -> Option<Vec<u8>>,
+        target: krusty::fir::ExternalCallableId,
+        identity: impl FnOnce(&krusty::backend::KlibDependencyCallable) -> Option<Vec<u8>>,
     ) -> Option<MemberRef> {
         let published = self
             .recording

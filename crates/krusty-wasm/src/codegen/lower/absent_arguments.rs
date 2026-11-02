@@ -5,7 +5,7 @@
 //! zero is the one every carrier has.
 
 use super::*;
-use crate::wasm::encode::HeapType;
+use crate::encode::HeapType;
 
 impl Body<'_> {
     /// An [`IrExpr::AbsentArgument`] of type `ty`.

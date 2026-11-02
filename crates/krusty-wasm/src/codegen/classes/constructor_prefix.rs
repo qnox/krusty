@@ -1,7 +1,7 @@
 //! Constructor-prefix transport proved by common IR, separately from physical field ordinals.
 
-use crate::fir::ClassCaptureIdentity;
-use crate::ir::{ClassId, IrCtorArg, IrCtorParameterProvenance, IrFile};
+use krusty::fir::ClassCaptureIdentity;
+use krusty::ir::{ClassId, IrCtorArg, IrCtorParameterProvenance, IrFile};
 
 pub(super) fn supported(ir: &IrFile, id: ClassId) -> bool {
     let class = &ir.classes[id as usize];

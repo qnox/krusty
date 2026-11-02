@@ -20,8 +20,8 @@ use std::path::{Path, PathBuf};
 
 use krusty::backend::{Artifact, Backend as _};
 use krusty::diag::DiagSink;
-use krusty_native::{CraneliftBackend, NativeTarget};
 use krusty::source::SourceInput;
+use krusty_native::{CraneliftBackend, NativeTarget};
 
 use super::common;
 

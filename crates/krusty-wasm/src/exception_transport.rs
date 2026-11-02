@@ -53,8 +53,8 @@ impl ExceptionTransport {
     pub(super) fn ensure_class(
         &mut self,
         module: &mut Module,
-        source: &dyn crate::backend::BackendClassifierSource,
-        identity: crate::types::TypeName,
+        source: &dyn krusty::backend::BackendClassifierSource,
+        identity: krusty::types::TypeName,
     ) -> Result<u32, String> {
         self.classes.ensure(module, source, identity)
     }

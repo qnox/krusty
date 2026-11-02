@@ -1,5 +1,5 @@
 //! Boxing and unboxing a primitive where a use carries it as a reference (see
-//! `crate::wasm::boxes`).
+//! `crate::boxes`).
 
 use super::*;
 

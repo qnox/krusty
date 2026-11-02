@@ -25,7 +25,7 @@ impl IrFile {
 /// Common lowering retains the source name separately in `IrFile::value_names` and records only
 /// the semantic role/depth here. A target owns separators, escaping, and synthetic spelling.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum IrDebugLocalProvenance {
+pub enum IrDebugLocalProvenance {
     InlineValue {
         role: IrInlineLocalRole,
         depth: u32,
@@ -114,7 +114,7 @@ impl IrDebugLocalProvenance {
 /// `this` and the extension's receiver are different values with different debug identities — so
 /// one receiver role cannot stand for the other.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum IrInlineLocalRole {
+pub enum IrInlineLocalRole {
     Value,
     /// The containing class's `this`, bound because the inline callable is a member.
     DispatchReceiver,

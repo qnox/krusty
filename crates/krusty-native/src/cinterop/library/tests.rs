@@ -10,12 +10,12 @@ use std::path::{Path, PathBuf};
 use super::super::def_file::DefFile;
 use super::super::preprocessor::IncludeDir;
 use super::{interop_library, InteropRequest};
+use crate::{Arch, NativeTarget, Os};
 use krusty::klib::write::KlibStamp;
 use krusty::kotlin_version::KotlinVersion;
 use krusty::language_version::LanguageVersion;
 use krusty::metadata::decode::Pb;
 use krusty::metadata::fragment_text::render_fragment;
-use crate::{Arch, NativeTarget, Os};
 
 const HEADERS: &[(&str, &str)] = &[
     ("basics.h", include_str!("testdata/basics.h")),

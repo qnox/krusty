@@ -1,6 +1,6 @@
 //! Reference-element array storage and checked reads, owned by the Wasm representation boundary.
 
-use crate::libraries::RuntimeExceptionKind;
+use krusty::libraries::RuntimeExceptionKind;
 
 use super::*;
 
@@ -41,7 +41,10 @@ impl Body<'_> {
             return Err("an array literal with a spread".into());
         }
         for &element in elements {
-            self.value(element, Ty::nullable(Ty::obj_name(crate::types::wk::any())))?;
+            self.value(
+                element,
+                Ty::nullable(Ty::obj_name(krusty::types::wk::any())),
+            )?;
         }
         let length = u32::try_from(elements.len())
             .map_err(|_| "an array literal exceeding Wasm's length space".to_string())?;
@@ -95,6 +98,9 @@ impl Body<'_> {
             .array_get(self.runtime.references);
         // The physical element is eqref, even when the checked read's type is String. Preserve
         // that distinction so the ordinary coercion emits the required concrete GC cast.
-        self.coerce_emitted_value(Ty::nullable(Ty::obj_name(crate::types::wk::any())), element)
+        self.coerce_emitted_value(
+            Ty::nullable(Ty::obj_name(krusty::types::wk::any())),
+            element,
+        )
     }
 }

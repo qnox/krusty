@@ -199,9 +199,7 @@ impl<'a> OpenedKlibLibraries<'a> {
     }
 
     /// Open Native inputs with their target import channels in the same immutable snapshot.
-    pub fn open_native(
-        libraries: &'a [KlibLibraryInput],
-    ) -> Result<Self, KlibLibrariesOpenError> {
+    pub fn open_native(libraries: &'a [KlibLibraryInput]) -> Result<Self, KlibLibrariesOpenError> {
         Self::open_snapshot(libraries, true)
     }
 

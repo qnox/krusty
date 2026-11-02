@@ -126,7 +126,7 @@ fn declares_defaults(ir: &IrFile, function: FunId) -> bool {
 /// The identities other files of the module call `declaration`'s entry by: the declaration whose
 /// defaults it evaluates. An `actual` declaration's entry is keyed by its `expect`, which is what
 /// the callers selected; one whose defaults come from a dependency has no module identity.
-pub(crate) fn published_identities(ir: &IrFile, declaration: FunId) -> Vec<CallableId> {
+pub fn published_identities(ir: &IrFile, declaration: FunId) -> Vec<CallableId> {
     if ir.functions[declaration as usize]
         .dispatch_receiver
         .is_some()

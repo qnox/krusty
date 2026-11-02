@@ -1,9 +1,9 @@
 //! Physical exception classes keyed by their authenticated declaration identity.
 
-use crate::backend::BackendClassifierSource;
-use crate::fx_hash::{HashMap, HashSet};
-use crate::libraries::{RuntimeExceptionKind, RuntimeExceptionLayout};
-use crate::types::TypeName;
+use krusty::backend::BackendClassifierSource;
+use krusty::fx_hash::{HashMap, HashSet};
+use krusty::libraries::{RuntimeExceptionKind, RuntimeExceptionLayout};
+use krusty::types::TypeName;
 
 use super::{immutable, CompositeType, Module, SubType, ValType, REFERENCE};
 

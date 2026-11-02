@@ -96,13 +96,13 @@ pub struct BackendCallableFact {
     /// Exact Native C entry the selected interop declaration's provider authenticated.
     pub direct_c_function: Option<DirectCFunction>,
     /// Frozen KLIB-only receiver contract for an associated companion extension body.
-    pub(crate) klib_body_companion_receiver: Option<KlibBodyCompanionReceiver>,
-    pub(crate) klib_body_type_parameters: Box<[Ty]>,
-    pub(crate) klib_body_declaration_modifiers:
+    pub klib_body_companion_receiver: Option<KlibBodyCompanionReceiver>,
+    pub klib_body_type_parameters: Box<[Ty]>,
+    pub klib_body_declaration_modifiers:
         Option<crate::libraries::KlibBodyDeclarationModifiers>,
-    pub(crate) klib_body_class_contract: Option<crate::libraries::KlibBodyClassContract>,
-    pub(crate) klib_body_accessor: Option<crate::libraries::KlibBodyAccessor>,
-    pub(crate) klib_body_vararg_index: Option<usize>,
+    pub klib_body_class_contract: Option<crate::libraries::KlibBodyClassContract>,
+    pub klib_body_accessor: Option<crate::libraries::KlibBodyAccessor>,
+    pub klib_body_vararg_index: Option<usize>,
     pub klib_body_parameter_defaults: Option<crate::libraries::ParamFlags>,
     /// Qualified identities of the annotations the provider recorded on this declaration. A
     /// compiler plugin keys its own calling convention on them (Compose's `@Composable`).
@@ -168,7 +168,7 @@ impl BackendCallableFact {
     /// Authenticate a serialized associated-extension call whose dependency body already carries
     /// the retained companion receiver in `call_params`. This is a provider-owned callable-shape
     /// check, so target registries do not need to import the compiler type model to repeat it.
-    pub(crate) fn serialized_companion_receiver_position(
+    pub fn serialized_companion_receiver_position(
         &self,
         call_params: &[Ty],
         extension_receiver_parameter: Option<u32>,
@@ -648,10 +648,7 @@ impl CheckedBackendCallables {
     }
 
     /// Exact singleton dispatch chosen for this checked call edge, if it has one.
-    pub fn singleton_dispatch(
-        &self,
-        expression: crate::ir::ExprId,
-    ) -> Option<SingletonDispatch> {
+    pub fn singleton_dispatch(&self, expression: crate::ir::ExprId) -> Option<SingletonDispatch> {
         self.singleton_dispatches.get(&expression).copied()
     }
 

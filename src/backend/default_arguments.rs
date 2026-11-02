@@ -21,8 +21,8 @@ mod masks;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use entries::published_identities;
-pub(crate) use masks::{mask_words, omission_masks};
+pub use entries::published_identities;
+pub use masks::{mask_words, omission_masks};
 
 use super::CheckedBackendCallables;
 use crate::fx_hash::HashSet;
@@ -31,7 +31,7 @@ use crate::ir::IrFile;
 /// Build the default-argument entries of `ir`'s declarations and rewrite every emitted call that
 /// leaves arguments out to call one. `callables` are the facts frozen for `ir` before this
 /// lowering; each expression an entry copies from a default gets the facts of its original.
-pub(crate) fn realize(ir: &mut IrFile, callables: &mut CheckedBackendCallables) {
+pub fn realize(ir: &mut IrFile, callables: &mut CheckedBackendCallables) {
     let mut entries = entries::Entries::default();
     entries.publish(ir);
     entries.take_new_bodies();

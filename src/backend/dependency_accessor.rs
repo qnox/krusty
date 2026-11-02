@@ -6,7 +6,7 @@ use crate::ir::{Callee, ExprId, IrCheckedOperation, IrPropertyDispatch};
 use crate::types::Ty;
 
 pub struct DependencyAccessor<'a> {
-    pub(crate) target: ExternalCallableId,
+    pub target: ExternalCallableId,
     pub callable: &'a BackendCallableFact,
     pub receiver: Option<ExprId>,
     pub arguments: &'a [ExprId],

@@ -29,11 +29,11 @@ mod local_classifier_provenance;
 mod lowering_temporaries;
 mod ranges;
 
-use lambda_return_flow::expression_subtree_contains;
 pub(crate) use super::single_source_lowering::{
     lower_single_source, lower_single_source_with_jvm_stdlib, lower_single_source_with_platform,
     lower_source_from_set, lower_with_jvm_stdlib_into,
 };
+use lambda_return_flow::expression_subtree_contains;
 
 use super::lower_body;
 

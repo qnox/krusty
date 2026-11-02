@@ -1,4 +1,4 @@
-//! Creating and calling function values (see `crate::wasm::function_values`).
+//! Creating and calling function values (see `crate::function_values`).
 //!
 //! Each site that creates one, a lambda or a callable reference, gets its own struct, holding the
 //! captures after the dispatch table, its own table and the entry that table names. The entry
@@ -6,9 +6,9 @@
 //! type the body declares, calls the body and hands its result back as a reference.
 
 use super::*;
-use crate::wasm::encode::{CompositeType, SubType};
-use crate::wasm::function_values::INVOKE_FIELD;
-use crate::wasm::objects::immutable;
+use crate::encode::{CompositeType, SubType};
+use crate::function_values::INVOKE_FIELD;
+use crate::objects::immutable;
 
 /// Why a lambda or callable reference converted to a `fun interface` declines: SAM conversion
 /// has no Wasm representation yet.
@@ -125,7 +125,7 @@ impl Body<'_> {
     /// declaration's captures, then the bound receiver, then the caller's arguments.
     pub(super) fn callable_reference(
         &mut self,
-        reference: &crate::ir::IrCallableReference,
+        reference: &krusty::ir::IrCallableReference,
     ) -> Result<(), Unsupported> {
         let captures: Vec<u32> = reference
             .captures
@@ -148,7 +148,7 @@ impl Body<'_> {
         if params.len() != args.len() {
             return Err("a function value called with arguments that do not match it".into());
         }
-        let any = Ty::obj_name(crate::types::wk::any());
+        let any = Ty::obj_name(krusty::types::wk::any());
         let shape = self.runtime.function_shape(self.module, args.len());
         let callee = self.local(REFERENCE);
         self.expression(function)?;

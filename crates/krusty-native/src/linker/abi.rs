@@ -50,9 +50,9 @@ use object::read::elf::{FileHeader, SectionHeader};
 use object::read::Object;
 use object::LittleEndian;
 
-use crate::Arch;
 use super::elf::Elf;
 use super::{AbiMismatch, ProgramLinkError, RiscvAtomicAbi, RiscvFloatAbi, RiscvPrivSpec};
+use crate::Arch;
 
 const EF_RISCV_RVC: u32 = object::elf::EF_RISCV_RVC.0;
 const EF_RISCV_FLOAT_ABI: u32 = object::elf::EF_RISCV_FLOAT_ABI;

@@ -26,13 +26,13 @@ use object::{
 
 use super::super::interface_calls::is_implementations_section;
 use super::super::prebuilt;
-use crate::{Arch, NativeTarget};
 use super::abi;
 use super::dynamic::{self, Imports, Tables};
 use super::interface_stubs::{InterfaceStubs, Target};
 use super::libraries::ImportLibrary;
 use super::relocate::{relocate, Reloc};
 use super::{ProgramLinkError, RelocationTable};
+use crate::{Arch, NativeTarget};
 
 /// Every input is a 64-bit little-endian relocatable; [`parse`] refuses anything else first.
 pub(super) type Elf<'data> = ElfFile64<'data, LittleEndian>;

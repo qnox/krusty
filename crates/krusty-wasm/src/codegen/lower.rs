@@ -16,7 +16,7 @@
 //! **Declines.** A construct this generator has not been taught declines the whole file with a
 //! diagnostic naming it, as the native generator does. Nothing is emitted on a guess.
 
-use crate::fx_hash::{HashMap, HashSet};
+use krusty::fx_hash::{HashMap, HashSet};
 
 mod absent_arguments;
 mod arrays;
@@ -34,17 +34,17 @@ use tests::lower_alone;
 
 pub(super) use scalar_instructions::is_scalar_operation;
 
-pub(super) fn is_direct_operation(operation: crate::backend::BackendCompilerIntrinsic) -> bool {
+pub(super) fn is_direct_operation(operation: krusty::backend::BackendCompilerIntrinsic) -> bool {
     is_scalar_operation(operation)
-        || operation == crate::backend::BackendCompilerIntrinsic::ThrowableMessage
-        || operation == crate::backend::BackendCompilerIntrinsic::ArrayGet
+        || operation == krusty::backend::BackendCompilerIntrinsic::ThrowableMessage
+        || operation == krusty::backend::BackendCompilerIntrinsic::ArrayGet
 }
 
-use crate::backend::class_tables::module_interfaces::ModuleInterfaces;
-use crate::backend::class_tables::module_slots::ModuleSlotPlan;
-use crate::backend::{CheckedBackendCallables, DependencyExportSignatures};
-use crate::ir::{Callee, FunId, IrBinOp, IrConst, IrExpr, IrFile, IrIntrinsic, IrTypeOp};
-use crate::types::{EqualityMode, Ty, TyKind};
+use krusty::backend::class_tables::module_interfaces::ModuleInterfaces;
+use krusty::backend::class_tables::module_slots::ModuleSlotPlan;
+use krusty::backend::{CheckedBackendCallables, DependencyExportSignatures};
+use krusty::ir::{Callee, FunId, IrBinOp, IrConst, IrExpr, IrFile, IrIntrinsic, IrTypeOp};
+use krusty::types::{EqualityMode, Ty, TyKind};
 
 use super::super::encode::{BlockType, Code, Function, HeapType, Module, ValType};
 use super::super::objects::REFERENCE;
@@ -68,7 +68,7 @@ pub(super) struct LoweredFile {
 /// One file's checked IR and the facts frozen beside it.
 pub(super) struct FileInput<'a> {
     pub(super) array_range_checks: bool,
-    pub(super) classifiers: &'a dyn crate::backend::BackendClassifierSource,
+    pub(super) classifiers: &'a dyn krusty::backend::BackendClassifierSource,
     pub(super) ir: &'a IrFile,
     pub(super) properties: &'a RealizedProperties,
     pub(super) callables: &'a CheckedBackendCallables,
@@ -148,7 +148,7 @@ pub(super) fn lower_file(
     }
     let indices = callable_registry.declare_file(ir, module)?;
     let call_targets = callable_registry.file_calls(ir, callables, module)?;
-    let inert_singleton_bindings = crate::backend::inert_staged_singleton_bindings(
+    let inert_singleton_bindings = krusty::backend::inert_staged_singleton_bindings(
         ir,
         |expression| {
             callables
@@ -279,7 +279,7 @@ pub(super) fn lower_file(
                 );
             }
             Err(reason) => {
-                crate::trace_compiler!(
+                krusty::trace_compiler!(
                     "lower",
                     "Wasm function {id} {:?} declined: {reason}",
                     function.name
@@ -338,7 +338,7 @@ pub(super) fn lower_file(
 /// went in the module.
 struct FileContext<'a> {
     array_range_checks: bool,
-    classifiers: &'a dyn crate::backend::BackendClassifierSource,
+    classifiers: &'a dyn krusty::backend::BackendClassifierSource,
     module_name: &'a str,
     /// The module-wide numbers of the module's interface members.
     numbers: &'a ModuleInterfaces,
@@ -352,7 +352,7 @@ struct FileContext<'a> {
     /// Provider facts frozen for exactly the dependency identities this file calls.
     callables: &'a CheckedBackendCallables,
     /// Staged bound singleton accesses proven inert by the exact checked call and export effect.
-    inert_singleton_bindings: &'a HashSet<crate::ir::ExprId>,
+    inert_singleton_bindings: &'a HashSet<krusty::ir::ExprId>,
     /// Top-level property storage reserved or published by files of this source module.
     properties: &'a PropertyRegistry,
 }
@@ -439,7 +439,7 @@ fn expression_type(
         IrExpr::Checked(checked_op)
             if matches!(
                 &**checked_op,
-                crate::ir::IrCheckedOperation::PropertyWrite { .. }
+                krusty::ir::IrCheckedOperation::PropertyWrite { .. }
             ) =>
         {
             Ty::Unit
@@ -544,7 +544,7 @@ struct Loop {
 
 struct Body<'a> {
     array_range_checks: bool,
-    classifiers: &'a dyn crate::backend::BackendClassifierSource,
+    classifiers: &'a dyn krusty::backend::BackendClassifierSource,
     module_name: &'a str,
     numbers: &'a ModuleInterfaces,
     ir: &'a IrFile,
@@ -558,7 +558,7 @@ struct Body<'a> {
     calls: &'a FileCallTargets,
     /// Provider facts frozen for exactly the dependency identities this file calls.
     callables: &'a CheckedBackendCallables,
-    inert_singleton_bindings: &'a HashSet<crate::ir::ExprId>,
+    inert_singleton_bindings: &'a HashSet<krusty::ir::ExprId>,
     properties: &'a PropertyRegistry,
     code: Code,
     /// Locals beyond the parameters, in index order.
@@ -772,7 +772,7 @@ impl<'a> Body<'a> {
             return Ok(());
         };
         if source == Ty::Unit && carrier(target)?.is_some() {
-            crate::trace_compiler!(
+            krusty::trace_compiler!(
                 "lower",
                 "Wasm value {id} {:?} is Unit but is requested at {target:?}",
                 self.ir.expr(id)
@@ -1047,7 +1047,7 @@ impl<'a> Body<'a> {
                 let mut frame = params.clone();
                 frame.extend(std::iter::repeat_n(
                     Ty::Int,
-                    crate::backend::default_arguments::mask_words(params.len()),
+                    krusty::backend::default_arguments::mask_words(params.len()),
                 ));
                 self.direct_call(function, &frame, &args)?;
             }
@@ -1066,7 +1066,7 @@ impl<'a> Body<'a> {
                 && params.as_slice() == [Ty::Int]
                 && self.callables.callable(*target).is_some_and(|fact| {
                     fact.compiler_operation()
-                        == Some(crate::backend::BackendCompilerIntrinsic::ArrayGet)
+                        == Some(krusty::backend::BackendCompilerIntrinsic::ArrayGet)
                 }) =>
             {
                 let (Some(receiver), [index]) = (dispatch_receiver, args.as_slice()) else {
@@ -1244,7 +1244,7 @@ impl<'a> Body<'a> {
                 ..
             } => self.realized_property_write(id, receiver, value)?,
             IrExpr::Checked(ref checked_op)
-                if let crate::ir::IrCheckedOperation::PropertyRead {
+                if let krusty::ir::IrCheckedOperation::PropertyRead {
                     target,
                     dispatch_receiver,
                     extension_receiver: None,
@@ -1256,9 +1256,9 @@ impl<'a> Body<'a> {
                 self.property_read(*target, *dispatch_receiver)?
             }
             IrExpr::Checked(ref checked_op)
-                if let crate::ir::IrCheckedOperation::ExternalPropertyRead {
+                if let krusty::ir::IrCheckedOperation::ExternalPropertyRead {
                     target,
-                    dispatch: crate::ir::IrPropertyDispatch::Ordinary,
+                    dispatch: krusty::ir::IrPropertyDispatch::Ordinary,
                     receiver,
                     arguments,
                     parameters,
@@ -1271,7 +1271,7 @@ impl<'a> Body<'a> {
                 self.throwable_message(*receiver, arguments, *result)?;
             }
             IrExpr::Checked(ref checked_op)
-                if let crate::ir::IrCheckedOperation::PropertyWrite {
+                if let krusty::ir::IrCheckedOperation::PropertyWrite {
                     target,
                     dispatch_receiver,
                     extension_receiver: None,
@@ -1785,11 +1785,11 @@ mod tests {
         properties: &RealizedProperties,
         started: &mut super::super::Started,
     ) -> Result<LoweredFile, Unsupported> {
-        let module_facts = crate::backend::BackendModuleFacts::from_classifiers([], [])
+        let module_facts = krusty::backend::BackendModuleFacts::from_classifiers([], [])
             .expect("empty classifier facts");
-        let classifiers = crate::backend::CheckedBackendClassifiers::new(
+        let classifiers = krusty::backend::CheckedBackendClassifiers::new(
             &module_facts,
-            &crate::libraries::EmptySymbolSource,
+            &krusty::libraries::EmptySymbolSource,
         );
         lower_file(
             FileInput {
@@ -1811,10 +1811,7 @@ mod tests {
         )
     }
 
-    fn lower_unit_operand(
-        target: crate::wasm::WasmTarget,
-        diverges: bool,
-    ) -> Result<(), Unsupported> {
+    fn lower_unit_operand(target: crate::WasmTarget, diverges: bool) -> Result<(), Unsupported> {
         let mut ir = IrFile::default();
         let seven = ir.add_expr(IrExpr::Const(IrConst::Int(7)));
         ir.logical_types.insert(seven, Ty::Int);
@@ -1835,7 +1832,7 @@ mod tests {
             stmts: vec![returned],
             value: None,
         });
-        ir.add_fun(crate::ir::IrFunction {
+        ir.add_fun(krusty::ir::IrFunction {
             name: "nestedReturn".to_owned(),
             params: Vec::new(),
             ret: Ty::Int,
@@ -1845,13 +1842,13 @@ mod tests {
             param_checks: Vec::new(),
         });
         let mut started = super::super::Started::new(target);
-        let properties = crate::backend::local_properties::realize(&mut ir).unwrap();
+        let properties = krusty::backend::local_properties::realize(&mut ir).unwrap();
         lower_alone(&ir, &properties, &mut started).map(|_| ())
     }
 
     #[test]
     fn only_a_proven_nonreturning_unit_operand_can_satisfy_a_value_use() {
-        for target in crate::wasm::WasmTarget::ALL {
+        for target in crate::WasmTarget::ALL {
             assert_eq!(lower_unit_operand(target, true), Ok(()));
             assert_eq!(
                 lower_unit_operand(target, false),
@@ -1864,7 +1861,7 @@ mod tests {
     fn an_untyped_call_uses_only_its_published_declared_result() {
         let mut ir = IrFile::default();
         let formal = Ty::ty_param("declaration-owned-T", Ty::nullable(Ty::obj("kotlin/Any")));
-        let function = ir.add_fun(crate::ir::IrFunction {
+        let function = ir.add_fun(krusty::ir::IrFunction {
             name: "sample".to_owned(),
             params: Vec::new(),
             ret: formal,
@@ -1879,7 +1876,7 @@ mod tests {
             args: Vec::new(),
         });
         let coercion = ir.add_expr(IrExpr::TypeOp {
-            op: crate::ir::IrTypeOp::ImplicitCoercion,
+            op: krusty::ir::IrTypeOp::ImplicitCoercion,
             arg: call,
             type_operand: Ty::String,
         });
@@ -1906,7 +1903,7 @@ mod tests {
     fn a_checked_call_keeps_its_checked_type_over_declared_provenance() {
         let mut ir = IrFile::default();
         let declared = Ty::nullable(Ty::obj("kotlin/Any"));
-        let function = ir.add_fun(crate::ir::IrFunction {
+        let function = ir.add_fun(krusty::ir::IrFunction {
             name: "sample".to_owned(),
             params: Vec::new(),
             ret: declared,
