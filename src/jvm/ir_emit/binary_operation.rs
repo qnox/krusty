@@ -17,7 +17,11 @@ impl Emitter<'_> {
         if self.suppress_unsigned_local_line {
             return;
         }
-        if crate::jvm::line_numbers::marks_value_line_at_start(self.ir, expression) {
+        if crate::jvm::line_numbers::marks_value_line_at_start(
+            self.ir,
+            self.default_call_operands,
+            expression,
+        ) {
             self.mark_expression_start(expression, code);
         }
     }

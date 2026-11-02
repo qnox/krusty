@@ -1943,9 +1943,6 @@ pub struct IrFile {
     /// Blocks that realize a source safe call `receiver?.selector`: a receiver temporary and a
     /// null-guarded selector.
     pub safe_calls: crate::fx_hash::HashSet<ExprId>,
-    /// Calls kotlinc's JVM codegen realizes as an intrinsic method of its own (`IntrinsicMethods`),
-    /// which states the call's line before its operands.
-    pub jvm_intrinsic_calls: crate::fx_hash::HashSet<ExprId>,
     /// Temporaries that hold an elvis's left value, by the line the elvis starts on.
     pub elvis_temporaries: crate::fx_hash::HashMap<ExprId, u32>,
     /// Compiler-generated `Variable` declarations whose semantic role is holding a call operand:

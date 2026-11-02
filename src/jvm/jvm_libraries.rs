@@ -49,7 +49,7 @@ mod return_types;
 use return_types::{java_collection_return_lower_bound, metadata_declared_nonnull_return};
 mod static_properties;
 mod synthetic_properties;
-mod unsigned_intrinsics;
+pub(super) mod unsigned_intrinsics;
 use static_properties::StaticAccessor;
 use synthetic_properties::{accessor_property_name, setter_name_for_getter, AccessorInventory};
 
@@ -1571,7 +1571,6 @@ impl JvmLibraries {
                 if m.is_static() {
                     member.realization = crate::libraries::MemberRealization::Direct {
                         pass_receiver: dispatch_parameter,
-                        intrinsic: false,
                     };
                 }
                 parameter_plans::member(
@@ -2887,7 +2886,6 @@ impl JvmLibraries {
                     if value_dispatch {
                         getter.member_realization = crate::libraries::MemberRealization::Direct {
                             pass_receiver: true,
-                            intrinsic: false,
                         };
                     }
                     parameter_plans::callable(&mut getter, value_dispatch, false);
@@ -2921,7 +2919,6 @@ impl JvmLibraries {
                             callable.member_realization =
                                 crate::libraries::MemberRealization::Direct {
                                     pass_receiver: true,
-                                    intrinsic: false,
                                 };
                         }
                         parameter_plans::callable(&mut callable, value_dispatch, false);

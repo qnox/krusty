@@ -103,7 +103,11 @@ impl Emitter<'_> {
         expression: ExprId,
         code: &mut CodeBuilder,
     ) {
-        if !crate::jvm::line_numbers::states_line_before_operands(self.ir, expression) {
+        if !crate::jvm::line_numbers::states_line_before_operands(
+            self.ir,
+            self.default_call_operands,
+            expression,
+        ) {
             return;
         }
         if let Some(line) = self.ir.source_line(expression) {

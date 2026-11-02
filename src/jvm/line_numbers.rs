@@ -31,6 +31,7 @@ pub(crate) use intrinsic_calls::{inversion_mask_line, states_line_before_operand
 
 use crate::fir::SyntheticOriginKind;
 use crate::ir::{ExprId, IrExpr, IrFile, IrNodeOrigin, IrTypeOp, NullCheck};
+use crate::jvm::default_call_operands::DefaultCallOperands;
 
 /// kotlinc's `LineNumberMapper` for one method body: the line it marked last and whether marks
 /// are suppressed.
@@ -164,14 +165,22 @@ pub(crate) fn states_line_at_start(ir: &IrFile, expression: ExprId) -> bool {
 /// Whether `expression` marks its own line before its operands wherever it is emitted, a statement
 /// included: an intrinsic or safe call ([`states_line_before_operands`]) or a node whose kind
 /// kotlinc marks so ([`states_line_at_start`]).
-pub(crate) fn marks_line_before_operands(ir: &IrFile, expression: ExprId) -> bool {
-    states_line_before_operands(ir, expression) || states_line_at_start(ir, expression)
+pub(crate) fn marks_line_before_operands(
+    ir: &IrFile,
+    realized: &DefaultCallOperands,
+    expression: ExprId,
+) -> bool {
+    states_line_before_operands(ir, realized, expression) || states_line_at_start(ir, expression)
 }
 
 /// Whether a value `expression` marks its line where its code starts: its kind marks there
 /// ([`marks_line_at_start`]), or it marks before its operands wherever it is emitted.
-pub(crate) fn marks_value_line_at_start(ir: &IrFile, expression: ExprId) -> bool {
-    marks_line_at_start(ir, expression) || marks_line_before_operands(ir, expression)
+pub(crate) fn marks_value_line_at_start(
+    ir: &IrFile,
+    realized: &DefaultCallOperands,
+    expression: ExprId,
+) -> bool {
+    marks_line_at_start(ir, expression) || marks_line_before_operands(ir, realized, expression)
 }
 
 /// Whether `expression`'s line is one the inliner copies with an inline function's compiled body

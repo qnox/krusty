@@ -14,11 +14,17 @@ use crate::fir::{FirBinaryOperation, FirUnaryOperation, SyntheticOriginKind};
 use crate::ir::{
     Callee, ExprId, IrBuiltinCall, IrBuiltinCallKind, IrExpr, IrFile, IrIntrinsic, IrNodeOrigin,
 };
+use crate::jvm::default_call_operands::DefaultCallOperands;
 use crate::types::Ty;
 
 /// Whether `expression` states its own line before its operands, keeping that entry where an
-/// operand marks another line at the same offset.
-pub(crate) fn states_line_before_operands(ir: &IrFile, expression: ExprId) -> bool {
+/// operand marks another line at the same offset. `realized` says which calls JVM realization
+/// implemented with one of kotlinc's intrinsic methods.
+pub(crate) fn states_line_before_operands(
+    ir: &IrFile,
+    realized: &DefaultCallOperands,
+    expression: ExprId,
+) -> bool {
     // `typeOf<T>()` is kotlinc's `TypeOf` intrinsic wherever it is realized, a reified body's
     // included.
     if is_type_of(ir, expression) {
@@ -29,7 +35,7 @@ pub(crate) fn states_line_before_operands(ir: &IrFile, expression: ExprId) -> bo
     }
     // A safe call states its line where it declares the receiver temporary, before the receiver,
     // unless an elvis folds it (`JvmSafeCallChainFoldingLowering`).
-    ir.jvm_intrinsic_calls.contains(&expression)
+    realized.is_intrinsic_call(expression)
         || ir.safe_calls.contains(&expression) && !is_elvis_operand(ir, expression)
 }
 

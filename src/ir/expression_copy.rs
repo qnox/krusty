@@ -83,7 +83,6 @@ pub(super) fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: Exp
         callable_scopes,
         builtin_calls,
         safe_calls,
-        jvm_intrinsic_calls,
         elvis_temporaries,
         call_operand_bindings,
         argument_evaluation_bindings,
@@ -352,7 +351,7 @@ pub(super) fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: Exp
         lambda_sam_jvm_signature: _,
     } = ir;
 
-    let inherited: [&mut dyn InheritedFacts; 79] = [
+    let inherited: [&mut dyn InheritedFacts; 78] = [
         module_constructions,
         callable_reference_provenance,
         callable_reference_enclosures,
@@ -395,7 +394,6 @@ pub(super) fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: Exp
         callable_scopes,
         builtin_calls,
         safe_calls,
-        jvm_intrinsic_calls,
         elvis_temporaries,
         call_operand_bindings,
         argument_evaluation_bindings,

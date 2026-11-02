@@ -631,7 +631,6 @@ pub(super) fn realize_super_calls(
                 holder.descriptor,
                 crate::libraries::MemberRealization::Direct {
                     pass_receiver: true,
-                    intrinsic: false,
                 },
             ),
             None => (owner, descriptor, realization),
