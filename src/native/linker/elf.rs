@@ -9,7 +9,7 @@
 //!
 //! Read-only data sharing the executable segment is a simplification, not an oversight: a third
 //! read-only segment is cheap to add when the runtime grows something worth protecting. The
-//! decisions are recorded in `docs/IMPLEMENTATION_PLAN.md` ("Native linker").
+//! decisions are recorded in `docs/NATIVE.md` ("The linker").
 //!
 //! Every input is untrusted in the sense that matters here: krusty's own code generator produces
 //! some of them, and a bug there must surface as an error naming the object, never as a panic or a

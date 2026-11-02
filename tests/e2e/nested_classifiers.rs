@@ -8,6 +8,8 @@ mod classifier_precedence_e2e;
 mod companion_nested_classifier_scope_e2e;
 #[path = "../interface_nested_classifier_e2e.rs"]
 mod interface_nested_classifier_e2e;
+#[path = "../interface_nested_classifier_scope_e2e.rs"]
+mod interface_nested_classifier_scope_e2e;
 #[path = "../nested_class_annotation_scope_e2e.rs"]
 mod nested_class_annotation_scope_e2e;
 #[path = "../nested_class_ctor_scope_e2e.rs"]
