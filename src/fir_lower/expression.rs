@@ -201,6 +201,7 @@ impl BodyLowering<'_> {
                     if let Some(stability) = self.binding_stability.get(value).copied() {
                         self.ir.binding_read_stability.insert(read, stability);
                     }
+                    self.record_crossinline_read(read, self.crossinline_parameter_slot(*value));
                     read
                 }
             }
@@ -2228,12 +2229,25 @@ impl BodyLowering<'_> {
             .dispatch_receiver_slot()
             .map(|slot| self.ir.add_expr(IrExpr::GetValue(slot)))
             .ok_or(FirLoweringFailure::MissingLocalClass(owner))?;
+        self.capture_field_read(receiver, class, field)
+    }
+
+    /// Read capture `field` (its identity) of `class` from `receiver`, keeping the capture's
+    /// `crossinline` provenance on the read.
+    fn capture_field_read(
+        &mut self,
+        receiver: ExprId,
+        class: crate::ir::ClassId,
+        field: u32,
+    ) -> Result<ExprId, FirLoweringFailure> {
         let index = self.capture_field_index(class, field)?;
-        Ok(self.ir.add_expr(IrExpr::GetField {
+        let read = self.ir.add_expr(IrExpr::GetField {
             receiver,
             class,
             index,
-        }))
+        });
+        self.record_crossinline_read(read, self.class_field_crossinline_parameter(class, field));
+        Ok(read)
     }
 
     /// The field-table position of capture `field` (its identity) of `class`. A local class stores
@@ -2257,6 +2271,30 @@ impl BodyLowering<'_> {
             }
             _ => Ok(field),
         }
+    }
+
+    /// The `crossinline` parameter capture `field` (its identity) of local class `owner` holds, as
+    /// recorded when the class's captures were prepared.
+    pub(super) fn class_capture_crossinline_parameter(
+        &self,
+        owner: crate::fir::DeclarationId,
+        field: u32,
+    ) -> Result<Option<u32>, FirLoweringFailure> {
+        Ok(self.class_field_crossinline_parameter(self.storage_class(owner)?, field))
+    }
+
+    fn class_field_crossinline_parameter(
+        &self,
+        class: crate::ir::ClassId,
+        field: u32,
+    ) -> Option<u32> {
+        let declaration = &self.ir.classes[class as usize];
+        declaration
+            .ctor_args
+            .get(field as usize)
+            .filter(|_| field < declaration.constructor_prefix_count)
+            .and_then(|argument| argument.capture.as_ref())
+            .and_then(|capture| capture.crossinline_parameter)
     }
 
     pub(super) fn constructor_capture_parameter(
@@ -2291,7 +2329,10 @@ impl BodyLowering<'_> {
                 if !valid_owner || field >= self.class_constructor_capture_count {
                     return Err(FirLoweringFailure::InvalidConstructorCapture { owner, field });
                 }
-                return Ok(self.ir.add_expr(IrExpr::GetValue(field + 1)));
+                let read = self.ir.add_expr(IrExpr::GetValue(field + 1));
+                let parameter = self.class_capture_crossinline_parameter(owner, field)?;
+                self.record_crossinline_read(read, parameter);
+                return Ok(read);
             }
         };
         let capture = self
@@ -2302,7 +2343,9 @@ impl BodyLowering<'_> {
                 enclosing_depth,
                 source,
             })?;
-        Ok(self.ir.add_expr(IrExpr::GetValue(capture.slot)))
+        let read = self.ir.add_expr(IrExpr::GetValue(capture.slot));
+        self.record_crossinline_read(read, capture.crossinline_parameter);
+        Ok(read)
     }
 
     fn constructor_context_parameter(
@@ -2365,12 +2408,7 @@ impl BodyLowering<'_> {
                 ),
             });
         }
-        let index = self.capture_field_index(class, field)?;
-        Ok(self.ir.add_expr(IrExpr::GetField {
-            receiver,
-            class,
-            index,
-        }))
+        self.capture_field_read(receiver, class, field)
     }
 
     pub(super) fn enclosing_class_storage_read(
@@ -2415,12 +2453,7 @@ impl BodyLowering<'_> {
             return Err(FirLoweringFailure::MissingLocalClass(owner));
         }
         let class = self.storage_class(owner)?;
-        let index = self.capture_field_index(class, field)?;
-        Ok(self.ir.add_expr(IrExpr::GetField {
-            receiver,
-            class,
-            index,
-        }))
+        self.capture_field_read(receiver, class, field)
     }
 
     /// Realize the checker-published semantic enclosing-instance path in the current common class

@@ -34,11 +34,6 @@ pub(in crate::jvm::ir_emit) enum SpliceReason {
     /// A lambda the callee may pass to an object it creates reaches a private declaration, which
     /// kotlinc reaches from the regenerated object through synthetic accessors.
     PrivateMemberInObject,
-    /// An object the callee constructs reads a suspend lambda of the call from a method without
-    /// the `$$forInline` copy kotlinc writes for it
-    /// ([`inliner::suspend_lambda_without_for_inline_copy`]): a library krusty compiled, which
-    /// writes no such copy yet.
-    SuspendMethodWithoutForInlineCopy,
 }
 
 impl Emitter<'_> {
@@ -111,61 +106,6 @@ impl Emitter<'_> {
                 if self.lambda_reaches_private_members(argument)? {
                     return splice(SpliceReason::PrivateMemberInObject);
                 }
-            }
-            let mut lambdas = Vec::new();
-            let mut captured = Vec::new();
-            let mut lambda_bindings = HashMap::default();
-            for (index, &argument) in args.iter().enumerate() {
-                if !lambda_arguments.contains(&argument) {
-                    continue;
-                }
-                let (mut lambda, captures) = self.lambda_shape(argument)?;
-                let start = captured.len();
-                for (capture, ty) in captures {
-                    captured.push(Parameter {
-                        category: Category::of_descriptor(&type_descriptor(ty)),
-                        binding: self.capture_binding(capture, ty),
-                    });
-                }
-                lambda.captured = start..captured.len();
-                lambda_bindings.insert(index, lambdas.len());
-                lambdas.push(lambda);
-            }
-            let loaded = self
-                .load_default_lambdas(call, &default_lambdas, &physical)
-                .and_then(|loaded| {
-                    for (operand, mut lambda) in loaded {
-                        default_bridge::append_default_lambda_captures(&mut lambda, &mut captured)?;
-                        lambda_bindings.insert(operand, lambdas.len());
-                        lambdas.push(lambda);
-                    }
-                    Ok(())
-                });
-            loaded.map_err(|error| {
-                crate::trace_compiler!("splice", "a default lambda is not inlined: {error:?}");
-                "a default lambda of the call cannot be inlined"
-            })?;
-            let parameters = self.call_parameters(
-                &supplies,
-                &physical,
-                args,
-                &lambda_bindings,
-                captured,
-                &lambdas,
-            );
-            // kotlinc's `MethodInliner` regenerates every object it meets; only a body krusty wrote
-            // can lack the `$$forInline` copy a regenerated suspend method is built over.
-            if inliner::suspend_lambda_without_for_inline_copy(
-                &callee,
-                &parameters,
-                &lambdas,
-                &self.bodies,
-            )
-            .map_err(|error| {
-                crate::trace_compiler!("splice", "the call's objects do not read: {error:?}");
-                "an anonymous object a compiled inline body constructs cannot be read"
-            })? {
-                return splice(SpliceReason::SuspendMethodWithoutForInlineCopy);
             }
         }
         Ok(LambdaCallRoute::MethodInliner(callee, default_lambdas))
