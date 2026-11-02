@@ -2065,11 +2065,7 @@ impl BodyLowering<'_> {
                         matches!(receiver, crate::ir::IrCapturedReceiver::Context { .. })
                     })
             });
-            if captured_context {
-                if let Some(line) = source_line {
-                    self.ir.mark_dispatch_line(call, line);
-                }
-            } else if let (Some(operand), Some(line)) = (first, source_line) {
+            if let (false, Some(operand), Some(line)) = (captured_context, first, source_line) {
                 if self.ir.is_positionless(operand) && line != 0 {
                     self.ir.build_operand_at_operation_start(operand, line);
                 }

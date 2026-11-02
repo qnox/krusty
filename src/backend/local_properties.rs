@@ -131,11 +131,7 @@ pub(crate) fn realize(ir: &mut IrFile) -> Result<Vec<RealizedLocalPropertyAccess
             }
             _ => None,
         };
-        if let (Some(operand), Some(line)) = (
-            first_operand,
-            ir.dispatch_line(operation)
-                .or_else(|| ir.source_line(operation)),
-        ) {
+        if let (Some(operand), Some(line)) = (first_operand, ir.source_line(operation)) {
             if ir.is_positionless(operand) && line != 0 {
                 ir.build_operand_at_operation_start(operand, line);
             }

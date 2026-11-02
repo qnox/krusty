@@ -23838,6 +23838,8 @@ The remaining details follow kotlinc:
   implicit context argument) is built at the operation's start, as fir2ir builds the arguments it
   adds at the call's offsets: it takes the operation's line, so it marks that line where its code
   starts. No table records which operations start at such an operand.
+- A call over a captured context receiver is an ordinary call: it marks its own line at its invoke
+  from its own position, with no separate dispatch line.
 
 ### Whether a mark writes an entry
 
