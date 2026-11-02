@@ -446,6 +446,39 @@ pub(crate) fn ty_subst_keep_unbound(ty: Ty, bindings: &HashMap<String, Ty>) -> T
     substitute_type_parameters(ty, |name| recorded_binding(bindings, name), |_| true, true)
 }
 
+/// Apply inference bindings whose values may name other bound variables, in one substitution of
+/// their closure: each binding is expanded through the bindings it names, and a variable is never
+/// expanded inside its own expansion. A binding that names its own variable, such as `T := Out<T>`
+/// for `interface Out<out T : Out<T>>`, denotes a recursive type; substituting it again and again
+/// only builds an ever larger type and never reaches a fixpoint.
+pub(crate) fn ty_subst_keep_unbound_closed(ty: Ty, bindings: &HashMap<String, Ty>) -> Ty {
+    let expanding = std::cell::RefCell::new(Vec::new());
+    closed_substitution(ty, bindings, &expanding)
+}
+
+/// Substitute `ty` with each binding expanded in turn, keeping a variable already being expanded.
+fn closed_substitution(
+    ty: Ty,
+    bindings: &HashMap<String, Ty>,
+    expanding: &std::cell::RefCell<Vec<String>>,
+) -> Ty {
+    substitute_type_parameters(
+        ty,
+        |name| {
+            let binding = recorded_binding(bindings, name)?;
+            if expanding.borrow().iter().any(|open| open == name) {
+                return None;
+            }
+            expanding.borrow_mut().push(name.to_string());
+            let expanded = closed_substitution(binding, bindings, expanding);
+            expanding.borrow_mut().pop();
+            Some(expanded)
+        },
+        |_| true,
+        true,
+    )
+}
+
 /// Apply arguments from an already-validated classifier use without narrowing them against the
 /// inline bound carried by a symbolic occurrence. Type checking validated `KFunction1<String?, R>`
 /// when the classifier was formed; projecting its `invoke` shape must retain `String?` exactly.
@@ -466,6 +499,42 @@ mod tests {
 
     fn nullable_bounded_parameter(name: &'static str) -> Ty {
         Ty::ty_param(name, Ty::nullable(Ty::obj("kotlin/Any")))
+    }
+
+    #[test]
+    fn closed_bindings_expand_through_each_other_once() {
+        let t = nullable_bounded_parameter("call:T");
+        let u = nullable_bounded_parameter("call:U");
+        let chained = HashMap::from_iter([
+            (
+                "call:T".to_string(),
+                Ty::obj_args("kotlin/collections/List", &[u]),
+            ),
+            ("call:U".to_string(), Ty::obj("kotlin/String")),
+        ]);
+        assert_eq!(
+            ty_subst_keep_unbound_closed(t, &chained),
+            Ty::obj_args("kotlin/collections/List", &[Ty::obj("kotlin/String")])
+        );
+    }
+
+    #[test]
+    fn a_binding_that_names_its_own_variable_is_expanded_once() {
+        let t = nullable_bounded_parameter("call:T");
+        let recursive = Ty::obj_args("Out", &[t]);
+        let bindings = HashMap::from_iter([("call:T".to_string(), recursive)]);
+        assert_eq!(ty_subst_keep_unbound_closed(t, &bindings), recursive);
+        let mutual = HashMap::from_iter([
+            (
+                "call:T".to_string(),
+                Ty::obj_args("Out", &[nullable_bounded_parameter("call:U")]),
+            ),
+            ("call:U".to_string(), Ty::obj_args("Out", &[t])),
+        ]);
+        assert_eq!(
+            ty_subst_keep_unbound_closed(t, &mutual),
+            Ty::obj_args("Out", &[Ty::obj_args("Out", &[t])])
+        );
     }
 
     #[test]
