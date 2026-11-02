@@ -71,6 +71,9 @@ pub struct HeaderFileScope {
     /// Whether this file enables explicit context arguments. Candidate applicability needs this
     /// language-mode fact during signature solving after the parser-owned file has been released.
     pub explicit_context_arguments: bool,
+    /// Whether this file enables eager lambda analysis, under which a lambda's checked result
+    /// decides overload applicability during signature solving as well.
+    pub eager_lambda_analysis: bool,
 }
 
 #[derive(Default)]
@@ -135,6 +138,7 @@ impl HeaderScopeArena {
             },
             is_common,
             explicit_context_arguments: file.explicit_context_arguments,
+            eager_lambda_analysis: file.eager_lambda_analysis,
         });
     }
 
