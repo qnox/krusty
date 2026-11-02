@@ -3,11 +3,15 @@
 // and the nullable overload is selected for `Column<A?>`. The overloads return different types so
 // their JVM signatures differ without a platform-specific name. A formal the receiver reaches
 // only covariantly stays a lower bound: `Duo<T, T>` takes a `Duo<A, B>` at their common supertype.
+// One reached only contravariantly is solved from every upper bound: `Inputs<T, T>` takes an
+// `Inputs<Any, String>` with `T = String`, inferred or explicit.
 class Column<T>
 
 interface Transformer<U, W>
 
 class Duo<out X, out Y>(val x: X, val y: Y)
+
+class Inputs<in A, in B>
 
 class Pair<U, W> : Transformer<U, W>
 
@@ -45,6 +49,12 @@ object Columns {
 
     fun <A : Any, B : Any> head(duo: Duo<A, B>): Any = duo.first()
 
+    fun <T> Inputs<T, T>.accepts(): String = "accepts"
+
+    fun inferred(input: Inputs<Any, String>): String = input.accepts()
+
+    fun explicit(input: Inputs<Any, String>): String = input.accepts<String>()
+
     fun implicitOn(column: Column<Int>): String = column.implicit()
 
     fun mappedOn(column: Column<Int>): String = column.mapped({ it + 1 }, { it - 1 })
@@ -61,5 +71,7 @@ fun box(): String {
     val merged = Column<String>()
     if (Columns.merged(Duo(first, "a"), merged) !== merged) return "Fail merge"
     if (Columns.head(Duo(first, "a")) !== first) return "Fail first"
+    if (Columns.inferred(Inputs<Any, String>()) != "accepts") return "Fail inferred"
+    if (Columns.explicit(Inputs<Any, String>()) != "accepts") return "Fail explicit"
     return "OK"
 }

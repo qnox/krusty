@@ -94,7 +94,7 @@ pub(super) fn instantiate_member_extension_with(
         &mut lower_inputs,
     );
     let bound_before_receiver = bindings.clone();
-    crate::symbol_resolver::unify_ty_from_symbols(
+    crate::symbol_resolver::unify_receiver_from_symbols(
         source,
         declared_receiver,
         extension_receiver,
@@ -117,17 +117,11 @@ pub(super) fn instantiate_member_extension_with(
         })
         .collect::<Vec<_>>();
     // The receiver is applicable only as the instantiated declaration: `Column<U?>` admits a
-    // caller's `Column<A>` (`A : Any`) structurally, but `U? = A` has no solution. A formal the
-    // receiver reaches only covariantly is a lower bound still open to a join (`Duo<T, T>` takes
-    // `Duo<A, B>` at their common supertype), so it does not constrain this check.
-    let mut receiver_bindings = bindings.clone();
-    for formal in &covariant_receiver_formals {
-        receiver_bindings.insert((*formal).clone(), Ty::nullable(Ty::obj("kotlin/Any")));
-    }
+    // caller's `Column<A>` (`A : Any`) structurally, but `U? = A` has no solution.
     if !crate::symbol_resolver::resolution_subtype(
         source,
         extension_receiver,
-        apply_inference_bindings(declared_receiver, &receiver_bindings),
+        apply_inference_bindings(declared_receiver, &bindings),
     ) {
         return None;
     }

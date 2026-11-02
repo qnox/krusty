@@ -3,7 +3,7 @@
 use super::{
     infer_generic_call_bindings_from_symbols, merge_call_argument_bindings,
     merge_specialized_return, seed_undeclared_return_bindings, seeded_gsig_binds, ty_subst,
-    ty_subst_keep_unbound, unify_ty_from_symbols, CallArgKind, GSigBinds,
+    ty_subst_keep_unbound, unify_receiver_from_symbols, CallArgKind, GSigBinds,
 };
 use crate::libraries::{
     GenericSig, InlineBodyPlan, InlineCollectionAppend, InlineCollectionCapacity,
@@ -80,7 +80,7 @@ pub(super) fn bind_member_return_from_call_args_tracking(
         }
     }
     if let Some(declared_receiver) = gsig.receiver {
-        unify_ty_from_symbols(source, declared_receiver, receiver, &mut binds);
+        unify_receiver_from_symbols(source, declared_receiver, receiver, &mut binds);
         preserve_receiver_identity_bindings(declared_receiver, receiver, &mut binds);
     } else {
         seed_undeclared_return_bindings(gsig.ret, provider_ret, &gsig.formals, &mut binds);
@@ -725,7 +725,7 @@ fn specialize_fixed_extension(
         return None;
     }
     let mut bindings = GSigBinds::default();
-    super::unify_ty_from_symbols(source, declared_receiver, receiver, &mut bindings);
+    super::unify_receiver_from_symbols(source, declared_receiver, receiver, &mut bindings);
     for (&declared, &actual) in signature.params.iter().zip(arguments) {
         super::unify_ty_from_symbols(source, declared, actual, &mut bindings);
     }
