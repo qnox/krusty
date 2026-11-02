@@ -502,6 +502,9 @@ fn bind_parameters_and_check_defaults(
         if parameter.inline_expansion_mode() == crate::types::InlineExpansionMode::Splice {
             checker.body.add_spliced_inline_parameter(value);
         }
+        if parameter.inline_modifier == crate::types::InlineParameterModifier::Crossinline {
+            checker.body.add_crossinline_parameter(value);
+        }
     }
     if defaults.next().is_some() {
         return Err(checker.failure(None, BodyCheckFailureKind::UnsupportedCallShape));

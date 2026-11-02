@@ -1478,6 +1478,10 @@ The nested setter's checked write names the original property and matches its le
 capture; an anonymous constructor-prefix read is not a substitute for that caller-owned binding.
 This strengthens the ownership regression without changing metadata or the capture inventory.
 
+Direct synchronous source-lambda invocation consumes the prepared inline body through the common
+splice contract. Parameter identities and receiver roles remain declaration-owned, and a consumed
+implementation is recorded as inline-only. Escaping values keep their ordinary function ABI.
+
 ## Serialized getter declaration contracts
 
 KLIB normalization tags a getter or setter from its actual property slot, retaining the property's
