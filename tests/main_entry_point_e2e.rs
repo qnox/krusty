@@ -137,7 +137,10 @@ fn a_parameterless_main_gets_no_bridge_beside_a_launcher_signature() {
         ("Varargs", "fun main(vararg args: String) {}"),
         ("NullableElements", "fun main(args: Array<String?>) {}"),
         ("Extension", "fun Array<String>.main() {}"),
-        ("Renamed", "@JvmName(\"main\")\nfun foo(args: Array<String>) {}"),
+        (
+            "Renamed",
+            "@JvmName(\"main\")\nfun foo(args: Array<String>) {}",
+        ),
     ] {
         let src = format!("fun main() {{}}\n\n{other}\n");
         let Some((ours, reference)) = compile_both(stem, &src) else {
