@@ -217,8 +217,7 @@ pub(super) fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, env:
         let Some(init) = stored_clinit_initializer(ir, s) else {
             continue;
         };
-        code.mark_line_retained(initializer_line(ir, s, init));
-        e.emit_static_initializer_store(facade, index, init, &mut code);
+        e.emit_clinit_static_store(facade, index, init, &mut code);
     }
     code.ret_void();
     let mut clinit_lines: Vec<(u16, u32)> = code.line_marks()[first_mark..]
@@ -980,23 +979,21 @@ pub(super) fn emit_class_static_initializer(
             Vec::new()
         };
         emit_companion_init(e.cw, &mut clinit, fq_name, c);
-        // Every hoisted-property store gets an entry at its pc, mapping to the property's
-        // declaration line in the COMPANION source. The `Companion` construction itself has no
-        // entry.
+        // The `Companion` construction itself has no entry. Each store opens on its initializer's
+        // line and keeps the lines its value marks inside itself, as a file facade's do.
         // A generated static that ends the initializer returns on its declaration's last line.
         let mut closing_line = None;
         for &(static_index, s, _) in &clinit_statics {
             let Some(init) = stored_clinit_initializer(ir, s) else {
                 continue;
             };
-            let pc = clinit.bytes.len() as u16;
-            // Every static carries its declaration's line: a hoisted companion property and its
-            // `x$delegate` storage the companion declaration's, a plugin-generated static its own.
-            let line = s.line;
-            if line != 0 && clinit_lines.last().map(|&(_, last)| last) != Some(line) {
-                clinit_lines.push((pc, line));
-            }
-            e.emit_static_initializer_store(fq_name, static_index, init, &mut clinit);
+            let first = clinit.line_marks().len();
+            e.emit_clinit_static_store(fq_name, static_index, init, &mut clinit);
+            let marks = clinit.line_marks()[first..]
+                .iter()
+                .map(|&(pc, line)| (pc, u32::from(line)));
+            clinit_lines.extend(marks);
+            clinit_lines.dedup();
             closing_line = (s.source_order == u32::MAX)
                 .then_some(s.accessor_lines.declaration_end)
                 .filter(|&end| end != 0);
@@ -1456,6 +1453,27 @@ impl Emitter<'_> {
     /// Emit one checked static initializer through its declared JVM storage boundary. Facade,
     /// class/object, interface, and enum `<clinit>` paths share this operation so boxing and carrier
     /// selection cannot diverge by owner shape.
+    /// Emit the `<clinit>` store of static `static_index` as kotlinc's `InitializersLowering`
+    /// places it: the field store takes its initializer expression's offsets, so it opens on the
+    /// initializer's own line (not the declaration's), and the lines its value marks inside
+    /// itself follow. The store's mark is retained so an argument line at the same offset follows
+    /// it. `add_method` drops a `<clinit>`'s marks, so callers collect them from `code`.
+    pub(super) fn emit_clinit_static_store(
+        &mut self,
+        owner: &str,
+        static_index: u32,
+        init: crate::ir::ExprId,
+        code: &mut CodeBuilder,
+    ) {
+        let field = &self.ir.statics[static_index as usize];
+        // A generated static with no position (Compose's `$stable`) marks nothing.
+        let line = initializer_line(self.ir, field, init);
+        if line != 0 {
+            code.mark_line_retained(line);
+        }
+        self.emit_static_initializer_store(owner, static_index, init, code);
+    }
+
     pub(super) fn emit_static_initializer_store(
         &mut self,
         owner: &str,
