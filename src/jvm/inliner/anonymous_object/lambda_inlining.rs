@@ -40,20 +40,17 @@ pub(super) fn reads_lambda(method: &MethodNode, lambdas: &[FieldLambda<'_>]) -> 
     })
 }
 
-/// Whether `method` reads the field of one of `lambdas` that is a suspend lambda.
-pub(super) fn reads_suspend_lambda(method: &MethodNode, lambdas: &[FieldLambda<'_>]) -> bool {
-    method.instructions().any(|insn| {
-        matches!(insn, Insn::Field { op: GETFIELD, name, .. }
-            if lambdas.iter().any(|lambda| lambda.lambda.suspend && lambda.field == *name))
-    })
-}
-
 /// `method` of the copy `owner`, its types already renamed, with every `invoke` of one of `lambdas`
 /// replaced by the lambda's body. Its own lines are mapped through `lines`; the lambdas' lines are
-/// lines of the caller, resolved through `caller` and mapped into the copy's map.
+/// lines of the caller, resolved through `caller` and mapped into the copy's map. `for_inline` says
+/// whether `method` is a `$$forInline` copy: only its machine takes the suspension points a suspend
+/// lambda brings, so a suspend lambda invoked anywhere else cannot be inlined. A method that only
+/// passes the lambda on to an object it constructs regenerates that object instead, which answers
+/// for its own methods.
 pub(super) fn inline_into(
     method: &MethodNode,
     owner: &str,
+    for_inline: bool,
     lambdas: &[FieldLambda<'_>],
     lines: &mut CopiedLines,
     caller: &SourceMap,
@@ -72,6 +69,16 @@ pub(super) fn inline_into(
         object_regeneration::regenerate_objects(&mut node, &parameters, &placed, classes, objects)
             .map_err(inlining)?;
     let invokes = functional_arguments::mark_places(&mut node, &parameters).map_err(inlining)?;
+    if !for_inline
+        && invokes
+            .iter()
+            .flatten()
+            .any(|&lambda| lambdas.get(lambda).is_some_and(|it| it.lambda.suspend))
+    {
+        return Err(RegenerationError::Unsupported(
+            "a suspend lambda invoked in a method without a $$forInline copy",
+        ));
+    }
     object_regeneration::complete_constructor_calls(&mut node, constructors).map_err(inlining)?;
     let context = lambda_expansion::Context {
         parameters: &parameters,
