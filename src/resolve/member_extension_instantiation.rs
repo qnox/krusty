@@ -100,6 +100,15 @@ pub(super) fn instantiate_member_extension_with(
         extension_receiver,
         &mut bindings,
     );
+    // The receiver is applicable only as the instantiated declaration: `Column<U?>` admits a
+    // caller's `Column<A>` (`A : Any`) structurally, but `U? = A` has no solution.
+    if !crate::symbol_resolver::resolution_subtype(
+        source,
+        extension_receiver,
+        apply_inference_bindings(declared_receiver, &bindings),
+    ) {
+        return None;
+    }
     // A formal the receiver reaches only covariantly (`Assert<out T>`) gets a lower bound from
     // it, not an equality: an argument's lower bound joins it at their common supertype, as an
     // ordinary extension's receiver and arguments do in `merge_call_argument_bindings`.
