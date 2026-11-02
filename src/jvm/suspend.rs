@@ -1898,8 +1898,8 @@ struct Flat<'a> {
     /// `r_v` (`e = (E) r_v`) once on entry, and it is spilled/restored like any local so it survives the
     /// catch's own suspension (after which `r_v` holds the resume value, no longer the exception).
     catch_spills: crate::fx_hash::HashMap<ExprId, u32>,
-    /// Per-suspension lexical scope lists (kotlinc's positional-spill model, see
-    /// docs/POSITIONAL_SPILLS.md): suspend-call expr id → `params ++ in-scope locals`.
+    /// Per-suspension lexical scope lists (kotlinc's positional-spill model): suspend-call expr id
+    /// → `params ++ in-scope locals`.
     scopes: SuspensionScopes,
     /// The positional field layout (per-kind maxima over every scope list).
     layout: SpillLayout,
