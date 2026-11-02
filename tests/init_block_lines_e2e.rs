@@ -47,3 +47,29 @@ class OnlySecondary {
         &["Primary", "OnlySecondary", "InitBlockLinesKt"],
     );
 }
+
+/// An inlined call inside an `init` block's condition writes the caller's line again for the jump
+/// that follows, exactly as in a method body. The constructor's table keeps that entry beside the
+/// equal one the statement began with; krusty collapsed the two.
+#[test]
+fn an_init_condition_restates_its_line_after_an_inlined_call_like_kotlinc() {
+    let src = r#"
+class Checked(name: String) {
+    init {
+        require(name.isNotBlank()) { "blank" }
+    }
+}
+
+class Stored(val name: String) {
+    init {
+        val n = name
+        require(n.isNotBlank()) { "blank" }
+    }
+}
+"#;
+    common::assert_classes_identical_to_kotlinc(
+        "InitInlineRestatedLine",
+        src,
+        &["Checked", "Stored"],
+    );
+}

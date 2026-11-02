@@ -62,7 +62,7 @@ pub(super) fn compile_declared_classes(
         let class_id = class_id as ClassId;
         // A continuation class is code of the suspend function whose machine it carries.
         let scope = class.enclosure.or_else(|| {
-            ir.continuation_owners
+            ir.jvm_continuation_functions
                 .get(&class_id)
                 .map(|&owner| crate::ir::IrEnclosure::Function(owner))
         });

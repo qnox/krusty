@@ -102,11 +102,12 @@ pub(super) enum PropertyReferenceRealizationTarget {
 
 pub(super) fn realize(
     ir: &mut IrFile,
-    facades: &[String],
+    file_classes: &super::file_facades::FileClasses,
     callables: &crate::backend::CheckedBackendCallables,
     current_facade: &str,
     delegate_helpers: &super::local_delegate_accessors::HelperAccess,
 ) -> Result<PropertyReferenceRealizations, PropertyReferenceRealizationTarget> {
+    let facades = &file_classes.containers[..];
     let mut realizations = PropertyReferenceRealizations::default();
     realizations.local_delegated =
         local_delegated_properties::LocalDelegatedProperties::collect(ir, facades)
@@ -194,7 +195,7 @@ pub(super) fn realize(
                 };
                 module_property(
                     declaration,
-                    facades,
+                    file_classes,
                     target,
                     mutable,
                     declared,
@@ -230,7 +231,7 @@ pub(super) fn realize(
                     (written_getter.is_some(), written_setter.is_some());
                 let (property_ref, mut realization) = module_property(
                     declaration,
-                    facades,
+                    file_classes,
                     property,
                     mutable,
                     declared_accessors(ir, property),
@@ -835,7 +836,7 @@ fn referenced_member_dispatch(
 
 fn module_property(
     property: &IrModuleProperty,
-    facades: &[String],
+    file_classes: &super::file_facades::FileClasses,
     target: PropertyId,
     reference_mutable: bool,
     declared: DeclaredAccessors,
@@ -853,8 +854,13 @@ fn module_property(
     } else {
         None
     };
+    let facades = &file_classes.containers[..];
     let static_owner =
         super::module_calls::static_owner(property.placement, property.source, facades)
+            .ok_or(failure)?;
+    // A multifile part's declared accessors are invoked through its facade.
+    let static_call_owner =
+        super::module_calls::call_owner(property.placement, property.source, file_classes)
             .ok_or(failure)?;
     let enclosing = property.owner;
     let companion_associated = property.companion_associated;
@@ -927,10 +933,15 @@ fn module_property(
         .is_none()
         .then_some(referenced.as_ref())
         .flatten();
+    let bridged = bridged_getter.is_some() || bridged_setter.is_some();
     let call_owner = call_dispatch
         .map(|dispatch| dispatch.class)
         .or(enclosing)
-        .unwrap_or(static_owner);
+        .unwrap_or(if bridged {
+            static_owner
+        } else {
+            static_call_owner
+        });
     let owner_is_interface = call_dispatch
         .map(|dispatch| dispatch.is_interface)
         .unwrap_or_else(|| super::module_calls::owner_is_jvm_interface(property));
@@ -943,7 +954,13 @@ fn module_property(
     } else if companion_associated {
         None
     } else {
-        property.extension_receiver.map(|_| static_owner)
+        property.extension_receiver.map(|_| {
+            if bridged {
+                static_owner
+            } else {
+                static_call_owner
+            }
+        })
     }
     .map(Some);
     let getter_descriptor = if access_bridge {

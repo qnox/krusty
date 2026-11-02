@@ -36,6 +36,7 @@ mod member_names;
 mod module_members;
 mod operand_nullness;
 mod parameter_guards;
+mod private_accessor_calls;
 mod property_annotation_markers;
 mod property_references;
 mod reference_returns;
@@ -58,15 +59,16 @@ use crate::jvm::names::{method_descriptor, property_getter_name, type_descriptor
 use crate::jvm::operation_relocation::clone_below_representation_wrapper;
 use crate::jvm::physical_type::ir_ty_to_jvm;
 use crate::libraries::InlineKind;
-use crate::types::{existing_type_name, type_name, SemanticCallRole, Ty, TyKind, TypeName};
+use crate::types::{type_name, SemanticCallRole, Ty, TyKind, TypeName};
 use body_scopes::{append_inline_body_scopes, collect_reachable, collect_reachable_scoped};
 use boxing_rewrites::{box_wrap, box_wrap_nullable, to_string_wrap};
 use call_results::CallTypes;
 pub(crate) use class_annotations::class_file_annotations;
 pub(crate) use declaration_inventory::record_referenced as record_referenced_value_classes;
+use descriptor_parameters::erase_descriptor;
 pub(crate) use inherited_default_calls::InheritedDefaultStatics;
 use lambda_slots::{boxed_lambda_own_params_from, lambda_sam_params, lambda_slot_is_boxed};
-pub(crate) use member_names::suspend_lambda_invoke_name;
+pub(crate) use member_names::{member_signature_is_mangled, suspend_lambda_invoke_name};
 use member_names::{vc_mangle, vc_mangle_once, vc_member_entry_name, vc_member_impl_name};
 pub(crate) use module_members::*;
 use operand_nullness::{operand_nonnull, operand_null_only};
@@ -214,6 +216,7 @@ pub(crate) fn lower_value_classes(
     if under.is_empty() && callable_under.is_empty() {
         return true;
     }
+    private_accessor_calls::realize(ir, &under, &callable_under);
     call_result_boundaries::realize(ir, &callable_under);
     type_operation_roles::record_primitive_array_allocation_carriers(ir, &under);
     // Publish only the distinction the existing unified value-class lookup cannot answer: which
@@ -707,11 +710,7 @@ pub(crate) fn lower_value_classes(
     // `(owner-internal, plain name, arity)` → mangled name for declaration-owned JVM synthetics:
     // annotation markers and override bridges that name their own target method.
     let mut mangle_map: HashMap<(TypeName, String, usize), String> = HashMap::default();
-    let property_annotation_markers = ir
-        .property_annotation_markers
-        .values()
-        .copied()
-        .collect::<HashSet<_>>();
+    let property_annotation_markers = ir.jvm_property_annotation_markers().collect::<HashSet<_>>();
     // `(fid, param idx, boxed value-class Ty)` for DEFAULTED nullable-underlying value-class params —
     // the base method unboxes them (below), but its `$default` stub + call site keep them boxed.
     let mut default_boxed: Vec<(u32, usize, Ty)> = Vec::new();
@@ -728,6 +727,13 @@ pub(crate) fn lower_value_classes(
     let mut lowered_value_members = HashSet::default();
     // Functions whose physical name the mangling below changed, by stable identity.
     let mut renamed_functions = HashSet::default();
+    // kotlinc names a property accessor's extension receiver after the property, not after the
+    // accessor's mangled name.
+    let property_accessors: HashSet<u32> = ir
+        .local_property_layouts
+        .values()
+        .flat_map(crate::ir::IrLocalPropertyLayout::accessor_functions)
+        .collect();
     for (fid, f) in ir.functions.iter_mut().enumerate() {
         let is_box_impl = f.name == "box-impl";
         // A USER value-class member function's body runs on the BOXED object; its value-class-typed
@@ -801,6 +807,13 @@ pub(crate) fn lower_value_classes(
                 if let Some(owner) = f.dispatch_receiver {
                     let key = (owner, source_name.clone(), orig_params[fid].len());
                     mangle_map.insert(key, mangled.clone());
+                }
+                if let Some(suffix) = mangled
+                    .strip_prefix(&source_name)
+                    .filter(|_| !vc_member && !property_accessors.contains(&(fid as u32)))
+                {
+                    ir.value_class_mangle_suffixes
+                        .insert(fid as u32, suffix.to_owned());
                 }
                 f.name = mangled;
                 renamed_functions.insert(fid as u32);
@@ -1062,26 +1075,7 @@ pub(crate) fn lower_value_classes(
         );
     }
     sam_names::rename(ir, &callable_under);
-    // Common IR keeps the SAM declaration semantic. Once this backend has chosen value-class
-    // carriers, publish the exact physical interface slot beside it. LambdaMetafactory (and the
-    // class-based SAM strategy) must implement that erased slot, not a descriptor reconstructed
-    // from the value-class classifier spelling.
-    ir.lambda_sam_jvm_signature = ir
-        .lambda_sam_signature
-        .iter()
-        .map(|(&implementation, (parameters, result))| {
-            (
-                implementation,
-                (
-                    parameters
-                        .iter()
-                        .map(|parameter| erase(parameter, &under))
-                        .collect(),
-                    erase(result, &under),
-                ),
-            )
-        })
-        .collect();
+    sam_names::publish_jvm_signatures(ir, &under);
     // A member of a sibling file's value class is realized by that file's pass as a static
     // implementation over the carrier: derive the same name from the declared signature the call
     // retains (and its checked suspend fact); step 4 moves the receiver to parameter zero. The
@@ -1196,7 +1190,9 @@ pub(crate) fn lower_value_classes(
                 ir.declaration_argument_boundaries
                     .contains_key(&(index as ExprId))
             } else {
-                *name = vc_mangle(name, params, ret, &callable_under, true, false);
+                if !private_accessor_calls::keeps_name(&ir.private_property_accessor_calls, index) {
+                    *name = vc_mangle(name, params, ret, &callable_under, true, false);
+                }
                 false
             };
             for parameter in params.iter_mut() {
@@ -4660,41 +4656,6 @@ fn sam_declares_vc_return(
     ir.lambda_sam_signature
         .get(&impl_fn)
         .is_some_and(|(_, ret)| ret.non_null().obj_internal() == Some(x))
-}
-
-/// Erase the value-class types in a JVM method descriptor: each `L<fq>;` whose `<fq>` is a value class
-/// becomes its underlying descriptor (`(LIv;)Ljava/lang/String;` → `(I)Ljava/lang/String;`).
-fn erase_descriptor(descriptor: &str, under: &Under) -> String {
-    let bytes = descriptor.as_bytes();
-    let mut out = String::with_capacity(descriptor.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'L' {
-            let start = i + 1;
-            let mut j = start;
-            while j < bytes.len() && bytes[j] != b';' {
-                j += 1;
-            }
-            let fq = &descriptor[start..j];
-            // A value class in a JVM reference-array component is necessarily BOXED. Erase a
-            // declaration slot `LValue;` to its carrier, but never rewrite the component of
-            // `[LValue;`: doing so silently changes `Array<UInt>` into `IntArray` and likewise turns
-            // `Array<Data>` into the array-valued carrier of `Data`.
-            let underlying = (bytes.get(i.wrapping_sub(1)) != Some(&b'['))
-                .then(|| existing_type_name(fq).and_then(|name| under.get(&name)))
-                .flatten();
-            if let Some(u) = underlying {
-                out.push_str(&desc(&erase(u, under)));
-            } else {
-                out.push_str(&descriptor[i..=j]);
-            }
-            i = j + 1;
-        } else {
-            out.push(bytes[i] as char);
-            i += 1;
-        }
-    }
-    out
 }
 
 fn desc(t: &Ty) -> String {

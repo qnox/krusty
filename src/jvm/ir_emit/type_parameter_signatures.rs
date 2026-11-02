@@ -45,7 +45,17 @@ pub(super) fn jvm_type_params(
             s.push_str(":Ljava/lang/Object;");
             continue;
         }
-        let bounds = parameter.bounds.iter();
+        // kotlinc's `writeFormalTypeParameter`: the class bound leads, whatever position the
+        // declaration wrote it in, and the remaining bounds follow in written order. Kotlin
+        // metadata keeps the written order itself.
+        let class_bound = parameter
+            .bounds
+            .iter()
+            .position(|(bound, is_interface)| !*is_interface && !bound.non_null().is_ty_param());
+        let bounds = class_bound
+            .into_iter()
+            .chain((0..parameter.bounds.len()).filter(|&index| Some(index) != class_bound))
+            .map(|index| &parameter.bounds[index]);
         if bounds.clone().all(|(_, is_interface)| *is_interface) {
             s.push(':');
         }

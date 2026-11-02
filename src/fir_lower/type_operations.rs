@@ -132,6 +132,7 @@ impl BodyLowering<'_> {
                     init: Some(operand),
                     named: false,
                 });
+                self.ir.safe_cast_temporaries.insert(declaration);
                 (Some(declaration), temporary)
             }
         };
@@ -242,6 +243,7 @@ impl BodyLowering<'_> {
                     init: Some(value),
                     named: false,
                 });
+                self.ir.safe_cast_temporaries.insert(declaration);
                 (Some(declaration), temporary)
             }
         };

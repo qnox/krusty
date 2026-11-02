@@ -27,6 +27,7 @@ pub(super) fn binary_operation(intrinsic: CompilerIntrinsic) -> Option<FirBinary
         | CompilerIntrinsic::ScalarInstruction(_)
         | CompilerIntrinsic::FloatingIsNaN { .. }
         | CompilerIntrinsic::FloatingIsInfinite { .. }
+        | CompilerIntrinsic::RadixToString { .. }
         | CompilerIntrinsic::ArrayGet
         | CompilerIntrinsic::ArraySet
         | CompilerIntrinsic::ArraySize

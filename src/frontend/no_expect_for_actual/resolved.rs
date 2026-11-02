@@ -22,7 +22,7 @@
 use crate::fx_hash::HashMap;
 use crate::resolve::declaration_index::{ResolvedSourceDeclaration, ResolvedSourceDeclarations};
 use crate::resolve::{ClassSig, SymbolTable};
-use crate::types::{Ty, TypeName};
+use crate::types::TypeName;
 
 /// What one resolved source declaration contributes to a rendering: resolution's own record,
 /// under the name this check has always called it by.
@@ -31,7 +31,7 @@ pub(super) type Resolved<'symbols> = ResolvedSourceDeclaration<'symbols>;
 /// Every source declaration the check can be asked about, by stable declaration identity.
 pub(super) struct ResolvedDeclarations<'symbols> {
     published: ResolvedSourceDeclarations<'symbols>,
-    aliases: &'symbols HashMap<TypeName, (Vec<String>, Ty)>,
+    aliases: &'symbols HashMap<TypeName, crate::libraries::TypeAliasTemplate>,
     /// A source `typealias`'s qualified identity as a declared TYPE, by its declaration identity.
     ///
     /// The expansion table is keyed by that qualified name, which is what a use site resolves; the
@@ -111,7 +111,7 @@ impl<'symbols> ResolvedDeclarations<'symbols> {
     pub(super) fn alias_expansion(
         &self,
         declaration: crate::fir::DeclarationId,
-    ) -> Option<&(Vec<String>, Ty)> {
+    ) -> Option<&crate::libraries::TypeAliasTemplate> {
         self.aliases.get(self.alias_identities.get(&declaration)?)
     }
 }

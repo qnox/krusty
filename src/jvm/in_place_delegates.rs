@@ -427,6 +427,9 @@ fn approximate_type_parameters(
         TyKind::PlatformNullable(inner) => {
             approximate_type_parameter_wrapper(inner, parameters, visiting, Ty::platform_nullable)
         }
+        TyKind::MutabilityFlexible(inner) => {
+            approximate_type_parameter_wrapper(inner, parameters, visiting, Ty::mutability_flexible)
+        }
         TyKind::InProjection(inner) => {
             approximate_type_parameter_wrapper(inner, parameters, visiting, Ty::in_projection)
         }

@@ -16,6 +16,7 @@ mod body_local_ownership;
 mod body_trace;
 #[cfg(test)]
 mod bottom_value_tests;
+mod builtin_calls;
 #[cfg(test)]
 mod builtin_operation_tests;
 #[cfg(test)]
@@ -396,6 +397,10 @@ struct BodyLowering<'a> {
     class_constructor_capture_count: u32,
     class_constructor_context_count: u32,
     capture_slots: HashMap<(u32, crate::fir::FirCaptureSource), CaptureSlot>,
+    /// The reads this body lowered that yield an inline function's `crossinline` parameter, by
+    /// that parameter's slot in the function declaring it. Recorded where each read is produced,
+    /// so an argument keeps its provenance however an inline expansion stages it.
+    crossinline_reads: HashMap<ExprId, u32>,
     implicit_receiver_capture_slots: Vec<(crate::fir::FirImplicitReceiverCapture, u32)>,
     shared_locals: HashMap<crate::fir::LocalValueId, crate::fir::ResolvedTy>,
     /// Checked source-binding reassignment facts, inventoried before expression lowering so every
@@ -411,6 +416,9 @@ struct BodyLowering<'a> {
     /// Nesting depth of the recursive expression funnel, used to decide when to re-check the
     /// remaining stack. See [`BodyLowering::expression`].
     expression_depth: u32,
+    /// The start line of the elvis chain whose next link is being lowered. kotlinc folds
+    /// `a ?: b ?: c` into one chain, so every later link declares its temporary at the chain's start.
+    elvis_chain_start: Option<u32>,
     /// The executable scope the classes this body declares or generates belong to.
     enclosure: Option<crate::ir::IrEnclosure>,
     /// The declaration whose body or default fragment contains an inline expansion. Unlike
@@ -626,6 +634,9 @@ struct CaptureSlot {
     shared_cell: bool,
     /// The captured declaration is a `val` or a parameter, which no code can reassign.
     stable: bool,
+    /// When the captured declaration is a `crossinline` parameter: its value slot in the inline
+    /// function that declares it.
+    crossinline_parameter: Option<u32>,
     /// The captured declaration as the callable that supplies this slot named and classified it.
     /// A callable nested deeper captures the same value through this slot, and names it the same.
     declared: CapturedDeclaration,
@@ -711,6 +722,7 @@ impl<'a> BodyLowering<'a> {
             class_constructor_capture_count,
             class_constructor_context_count,
             capture_slots,
+            crossinline_reads: HashMap::default(),
             implicit_receiver_capture_slots,
             shared_locals: directly_shared_locals(body),
             binding_stability: binding_stability::inventory(body),
@@ -728,6 +740,7 @@ impl<'a> BodyLowering<'a> {
             declaration_lambda: None,
             in_default_argument: body.is_default_fragment(),
             expression_depth: 0,
+            elvis_chain_start: None,
             root_block: root_scope_block(body),
             lowered_root_block: None,
             operand_bound_calls: HashMap::default(),
@@ -1208,6 +1221,11 @@ fn consume_trailing_unit_result(ir: &mut IrFile, roots: &mut Vec<ExprId>) {
             // intact: flattening it would also flatten its lexical scope and extend the inlined
             // locals through the caller's return.
             if ir.retains_inline_unit_line(*value) {
+                return;
+            }
+            // A dependency's inline expansion closes its frame on the block itself, which writes
+            // the declaration's closing line on a `nop`. A replacement block would not own it.
+            if ir.external_frame_closes.contains_key(&trailing) {
                 return;
             }
             let effects = stmts.clone();

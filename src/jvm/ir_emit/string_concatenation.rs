@@ -164,11 +164,16 @@ impl Emitter<'_> {
     }
 
     /// Emit a template part for the slot that consumes it. A smart cast is kotlinc's
-    /// `IMPLICIT_CAST`, so the part reaches that slot unnarrowed and the slot casts it if it must;
-    /// answers the stack type left.
+    /// `IMPLICIT_CAST`, and a generic result keeps its declaration's erased slot, so either part
+    /// reaches that slot unnarrowed and the slot casts it if it must: `append(String)` does,
+    /// `valueOf(Object)`, `append(Object)` and an `invokedynamic` argument do not. Answers the
+    /// stack type left.
     fn emit_template_part(&mut self, part: u32, code: &mut CodeBuilder) -> Ty {
         if let Some(operand) = self.consumed_implicit_cast_operand(part) {
             return self.emit_consumed_operand(operand, code);
+        }
+        if self.erased_reference_result(part).is_some() {
+            return self.emit_consumed_operand(part, code);
         }
         self.emit_value(part, code);
         self.value_ty(part)

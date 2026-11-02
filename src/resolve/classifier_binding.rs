@@ -216,7 +216,13 @@ impl Checker<'_> {
                 return binding;
             }
         }
-        match self.inherited_nested_type_name(root_name) {
+        let inherited = match self.inherited_nested_type_name(root_name) {
+            InheritedNestedClassifier::NotFound => {
+                self.classifier_header_enclosing_inherited_type(root_name)
+            }
+            inherited => inherited,
+        };
+        match inherited {
             InheritedNestedClassifier::Found(internal) => {
                 if let Some(binding) = offer(internal, None) {
                     return binding;
@@ -621,6 +627,24 @@ impl Checker<'_> {
         None
     }
 
+    /// Inherited nested classifiers of the classifiers enclosing a classifier header. The header
+    /// sits inside their bodies, so these rank with the lexical class rungs, ahead of the file and
+    /// imports; only the header owner's own inherited classifiers wait until after imports.
+    fn classifier_header_enclosing_inherited_type(&self, name: &str) -> InheritedNestedClassifier {
+        let Some(owner) = self.classifier_header_owner else {
+            return InheritedNestedClassifier::NotFound;
+        };
+        let mut enclosing = owner.nested_owner();
+        while let Some(candidate_owner) = enclosing {
+            match self.inherited_nested_type_for_owner(name, candidate_owner) {
+                InheritedNestedClassifier::NotFound => {}
+                found => return found,
+            }
+            enclosing = candidate_owner.nested_owner();
+        }
+        InheritedNestedClassifier::NotFound
+    }
+
     fn invalid_alias_selection(
         name: &str,
     ) -> (
@@ -807,6 +831,7 @@ mod tests {
             target,
             Some(crate::libraries::AliasExpansion {
                 identity: alias,
+                declaration_name: None,
                 target: other,
                 formals: vec!["T".to_string()],
                 expansion: Ty::obj_name(other),

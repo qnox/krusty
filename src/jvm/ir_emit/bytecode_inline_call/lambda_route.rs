@@ -105,8 +105,9 @@ impl Emitter<'_> {
                 return splice(SpliceReason::CaptureOutsideFrame);
             }
         }
-        let constructs_objects = inliner::constructs_regenerated_object(&callee, &self.bodies);
-        if constructs_objects {
+        // Whether the call's objects regenerate is settled from the callee's facts before any code
+        // is emitted; once routed here, a failure to regenerate is an error, never another route.
+        if inliner::constructs_regenerated_object(&callee, &self.bodies) {
             for &argument in &lambda_arguments {
                 if self.lambda_reaches_private_members(argument)? {
                     return splice(SpliceReason::PrivateMemberInObject);
@@ -160,35 +161,6 @@ impl Emitter<'_> {
             .map_err(|_| "a compiled inline body does not analyze")?
         {
             return splice(SpliceReason::LambdaKeptAsValue);
-        }
-        // Whether the call's objects regenerate is settled before any code is emitted: the body is
-        // inlined once with each lambda's shape in place of its body, and nothing of it is kept.
-        if constructs_objects {
-            let probe = inliner::inline(
-                &callee,
-                &parameters,
-                &lambdas,
-                target.inline_only,
-                self.inline_splice_base(self.frame.size()),
-                call.reified,
-                inliner::InliningContext {
-                    lines: &mut UnmappedLines,
-                    classes: &self.bodies,
-                    objects: &mut self.call_objects(
-                        call_expression,
-                        target.name,
-                        false,
-                        SourceMap::default(),
-                    ),
-                    enum_entries: &mut self.call_enum_entries(false),
-                },
-            );
-            if let Err(error) = probe {
-                crate::trace_compiler!("splice", "the call's objects do not regenerate: {error:?}");
-                return splice(SpliceReason::CalleeShape(
-                    inliner::UnsupportedShape::AnonymousObject,
-                ));
-            }
         }
         Ok(LambdaCallRoute::MethodInliner(callee, default_lambdas))
     }

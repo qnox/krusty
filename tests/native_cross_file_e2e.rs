@@ -16,6 +16,43 @@ fn expect_portable_sources(sources: &[(&str, &str)]) {
     expect_native_sources(sources, "OK");
 }
 
+/// Native object linkage: two emitted files must share the same declaration marker address.
+/// Keep this representation regression in e2e; it introduces no separate box inventory.
+#[test]
+fn callable_reference_markers_are_shared_between_native_object_files() {
+    let sources = [
+        (
+            "Declarations.kt",
+            r#"
+package identity
+fun target(value: Int) {}
+fun different(value: Int) {}
+fun fromDeclarations(): Any = ::target
+"#,
+        ),
+        (
+            "Box.kt",
+            r#"
+package identity
+fun fromConsumer(): Any = ::target
+fun box(): String {
+    val first = fromDeclarations()
+    val second = fromConsumer()
+    if (first != second || second != first) return "declaration identity"
+    if (first.hashCode() != second.hashCode()) return "declaration hash"
+    if (first == ::different || ::different == second) return "different declaration"
+    return "OK"
+}
+"#,
+        ),
+    ];
+    assert_eq!(
+        crate::common::kotlinc_box_files_result_with_classpath(&sources, "identity.BoxKt", &[]),
+        "OK"
+    );
+    expect_portable_sources(&sources);
+}
+
 #[test]
 fn a_file_calls_a_top_level_function_defined_in_another_file() {
     expect_native_sources(

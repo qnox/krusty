@@ -3,7 +3,7 @@
 
 use super::capture_storage::{
     anonymous_body_expressions, anonymous_descendant_uses_name, anonymous_descendant_writes_name,
-    anonymous_descendants, enclosing_value_visible_beside_member,
+    anonymous_descendants, enclosing_value_visible_beside_member, ConstructorArgumentUses,
 };
 use super::scope::ContextReceiverKind;
 use super::{
@@ -181,6 +181,12 @@ pub(super) struct AnonymousCaptureCandidate {
     pub(super) receiver_role: Option<super::ReceiverDeclarationRole>,
 }
 
+pub(super) struct ReceiverCaptureUses<'a> {
+    pub(super) mark: usize,
+    pub(super) extension: Option<Span>,
+    pub(super) forwarded: &'a super::receiver_uses::ReceiverUseSites,
+}
+
 fn receiver_capture_source(
     class_receiver: bool,
     current: bool,
@@ -243,15 +249,18 @@ impl Checker<'_> {
         declaration: DeclId,
         candidate: &AnonymousCaptureCandidate,
         receiver_identity: (usize, usize),
-        uses_before: usize,
-        extension_use: Option<(Span, usize)>,
+        uses: ReceiverCaptureUses<'_>,
         finalized: &[AnonymousObjectCapture],
     ) -> bool {
-        let semantically_used = self.implicit_receiver_identity_use_count(receiver_identity)
-            > uses_before
-            || extension_use.is_some_and(|(declaration, before)| {
-                self.extension_receiver_use_count(declaration) > before
-            });
+        let semantically_used = self
+            .implicit_receiver_identity_uses
+            .first_use_since_excluding(
+                uses.mark,
+                receiver_identity,
+                uses.extension,
+                uses.forwarded,
+            )
+            != usize::MAX;
         semantically_used
             || self.selected_anonymous_super_outer_candidate(declaration, candidate)
             || finalized
@@ -1037,6 +1046,7 @@ pub(super) struct SelectedLocalCallableCaptures<'a> {
     pub(super) calls: &'a HashMap<ExprId, ResolvedCall>,
     pub(super) expressions: &'a HashMap<ExprId, ExprLowering>,
     pub(super) statements: &'a HashMap<StmtId, StmtLowering>,
+    pub(super) constructor_arguments: ConstructorArgumentUses<'a>,
 }
 
 fn expression_uses_selected_local_callable_capture(
@@ -1101,7 +1111,7 @@ fn anonymous_descendant_uses_selected_local_callable_capture(
     selected: SelectedLocalCallableCaptures<'_>,
 ) -> bool {
     anonymous_descendants(declaration, lexical_scope).any(|candidate| {
-        anonymous_body_expressions(file, candidate)
+        anonymous_body_expressions(file, candidate, selected.constructor_arguments)
             .into_iter()
             .any(|expression| {
                 expression_uses_selected_local_callable_capture(file, expression, name, selected)
@@ -1167,6 +1177,7 @@ pub(super) fn record_anonymous_construction_captures(
                         &candidate.name,
                         candidate.ty,
                         candidate.function_local,
+                        selected_local_callables.constructor_arguments,
                     )
                     || anonymous_descendant_uses_selected_local_callable_capture(
                         file,
@@ -1181,6 +1192,7 @@ pub(super) fn record_anonymous_construction_captures(
                         lexical_scope,
                         &candidate.name,
                         candidate.function_local,
+                        selected_local_callables.constructor_arguments,
                     ))
             }
         })

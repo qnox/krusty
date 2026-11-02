@@ -2487,8 +2487,11 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         // The companion object of a BUILT-IN type. Its members are constants the frontend folds,
         // so the object itself is only ever an identity — and that identity is asked about:
         // `o === Int.Companion` is a corpus case, and `Int` written as a value is the same object.
-        // The runtime holds one static object per companion, each with its own descriptor.
-        if let Some(symbol) = super::super::super::intrinsics::builtin_companion(classifier) {
+        // The runtime holds one static object per companion, each with its own descriptor, and
+        // one shared empty set, which a library body reads as its `EmptySet`.
+        if let Some(symbol) = super::super::super::intrinsics::builtin_companion(classifier)
+            .or_else(|| super::super::super::intrinsics::runtime_object(classifier))
+        {
             return self.runtime_call(symbol, &[], any(), &[]);
         }
         if super::super::super::intrinsics::is_stateless_runtime_object(classifier) {

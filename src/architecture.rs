@@ -26,6 +26,9 @@ mod tests {
                 // The definition a script compiles against shapes its parsed script class.
                 "script_definitions",
                 "source",
+                // The resolved spellings of declared types (the alias each node names and its
+                // type-use annotations), which the published declarations record.
+                "spelling",
                 "trace_compiler",
             ],
         );
@@ -333,11 +336,14 @@ mod tests {
                 let mut allowed = allowed.to_vec();
                 allowed.push("java_source");
                 assert_allowed_crate_modules_in_file(&path, &allowed);
-            } else if path.ends_with("src/jvm/array_casts.rs") {
-                // Array-cast realization reuses the core subtype relation over checked types and
-                // the frozen classifier inventory. Its oracle cannot resolve declarations or
-                // infer bindings; keep this dependency local rather than duplicating subtyping
-                // or admitting semantic selection throughout the JVM backend.
+            } else if path.ends_with("src/jvm/array_casts.rs")
+                || path.ends_with("src/jvm/read_only_collection_stubs.rs")
+            {
+                // Array-cast realization and read-only stub result compatibility reuse the core
+                // subtype relation over checked types and the frozen classifier inventory. Their
+                // oracles cannot resolve declarations or infer bindings; keep this dependency
+                // local rather than duplicating subtyping or admitting semantic selection
+                // throughout the JVM backend.
                 let mut allowed = allowed.to_vec();
                 allowed.push("assignable");
                 assert_allowed_crate_modules_in_file(&path, &allowed);
@@ -1021,9 +1027,14 @@ mod tests {
     fn assert_allowed_crate_modules_in_file(path: &Path, allowed: &[&str]) {
         let text = fs::read_to_string(path)
             .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
-        // `fx_hash` is the standard hash map and set with a fixed hasher: using one is no more a
-        // dependency on another compiler layer than using `std::collections` is.
-        let allowed: BTreeSet<_> = allowed.iter().copied().chain(["fx_hash"]).collect();
+        // `fx_hash` is the standard hash map and set with a fixed hasher, and `archive` opens a zip
+        // file: using either is no more a dependency on another compiler layer than using
+        // `std::collections` or the `zip` crate is.
+        let allowed: BTreeSet<_> = allowed
+            .iter()
+            .copied()
+            .chain(["fx_hash", "archive"])
+            .collect();
         let actual = crate_modules(&text);
         let offenders: Vec<_> = actual
             .iter()
@@ -1041,7 +1052,12 @@ mod tests {
     fn assert_allowed_external_crate_modules_in_file(path: &Path, allowed: &[&str]) {
         let text = fs::read_to_string(path)
             .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
-        let allowed: BTreeSet<_> = allowed.iter().copied().chain(["fx_hash"]).collect();
+        // As in `assert_allowed_crate_modules_in_file`: `fx_hash` and `archive` are leaf modules.
+        let allowed: BTreeSet<_> = allowed
+            .iter()
+            .copied()
+            .chain(["fx_hash", "archive"])
+            .collect();
         let actual = external_crate_modules(&text);
         let offenders: Vec<_> = actual
             .iter()

@@ -356,6 +356,6 @@ pub(super) fn build_continuation_class(
         annotation_retention: None,
     };
     let class = ir.add_class(class);
-    ir.continuation_owners.insert(class, outer_fid);
+    ir.jvm_continuation_functions.insert(class, outer_fid);
     class
 }

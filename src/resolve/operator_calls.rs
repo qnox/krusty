@@ -157,14 +157,22 @@ impl<'a> Checker<'a> {
     ) -> Option<Ty> {
         let key = SyntheticOperatorCall::from_name(name)
             .expect("a binary operator expression names a synthetic operator");
-        let (ret, call) = self.operator_expression_call_ret(
+        self.binary_operator_reported = false;
+        let Some((ret, call)) = self.operator_expression_call_ret(
             scope,
             expression,
             receiver,
             name,
             operand,
             expected_result,
-        )?;
+        ) else {
+            // An inaccessible or ambiguous selection already carries kotlinc's diagnostic; the
+            // expression must not add a second "operator cannot be applied" for it.
+            return std::mem::take(&mut self.binary_operator_reported).then_some(Ty::Error);
+        };
+        if let Expr::Binary { lhs, .. } = self.file.expr(expression) {
+            self.narrow_operator_receiver(*lhs, &call);
+        }
         self.resolved_operator_calls.insert((expression, key), call);
         Some(ret)
     }
@@ -271,6 +279,11 @@ impl<'a> Checker<'a> {
                     && (candidate.kind != crate::libraries::FnKind::Member
                         || candidate.context_count == 0)
             });
+            self.drop_members_hidden_by_applicable_extensions(
+                receiver,
+                &mut functions.overloads,
+                super::access_control::OperatorCallShape::IndexedSet { args: &arg_kinds },
+            );
             let callables = crate::libraries::Callables::from_parts(functions, properties);
             let indexed = resolver.select_receiver_indexed_set_function_with_params(
                 receiver,
@@ -422,6 +435,14 @@ impl<'a> Checker<'a> {
                 && (candidate.kind != crate::libraries::FnKind::Member
                     || candidate.context_count == 0)
         });
+        self.drop_members_hidden_by_applicable_extensions(
+            receiver,
+            &mut functions.overloads,
+            super::access_control::OperatorCallShape::Call {
+                name,
+                args: &arg_kinds,
+            },
+        );
         let mut members = functions.clone();
         members
             .overloads
@@ -536,6 +557,14 @@ impl<'a> Checker<'a> {
             expected_result,
         ) {
             crate::symbol_resolver::ReceiverFunctionSelection::Selected(selected) => selected,
+            crate::symbol_resolver::ReceiverFunctionSelection::Ambiguous(candidates)
+                if matches!(self.file.expr(site), Expr::Binary { .. }) =>
+            {
+                drop(resolver);
+                self.report_callable_ambiguity(site, name, &candidates);
+                self.binary_operator_reported = true;
+                return None;
+            }
             crate::symbol_resolver::ReceiverFunctionSelection::None
             | crate::symbol_resolver::ReceiverFunctionSelection::Ambiguous(_) => return None,
         };
@@ -554,6 +583,17 @@ impl<'a> Checker<'a> {
             );
             return None;
         };
+        if selected.kind == crate::libraries::FnKind::Member
+            && matches!(self.file.expr(site), Expr::Binary { .. })
+            && self.reject_function_if_inaccessible(
+                &selected,
+                selected.callable.owner,
+                self.call_callee_name_span(site),
+            )
+        {
+            self.binary_operator_reported = true;
+            return None;
+        }
         if selected.kind == crate::libraries::FnKind::Member
             && !self.callable_accessible(
                 selected.visibility,
@@ -636,6 +676,20 @@ impl<'a> Checker<'a> {
                 && (candidate.kind != crate::libraries::FnKind::Member
                     || candidate.context_count == 0)
         });
+        self.drop_members_hidden_by_applicable_extensions(
+            receiver,
+            &mut functions.overloads,
+            if name == "set" {
+                super::access_control::OperatorCallShape::IndexedSet {
+                    args: &argument_kinds,
+                }
+            } else {
+                super::access_control::OperatorCallShape::Call {
+                    name,
+                    args: &argument_kinds,
+                }
+            },
+        );
         let callables = crate::libraries::Callables::Functions(functions);
         if name == "set" {
             match resolver.select_receiver_indexed_set_function_with_params(

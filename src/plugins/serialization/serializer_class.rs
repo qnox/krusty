@@ -811,7 +811,6 @@ fn declare_type_serializer_constructor(
             decl_line: start_line,
             delegation_line: start_line,
             decl_end_line: end_line,
-            defaults: Vec::new(),
         },
         annotations: crate::ir::DeclarationAnnotations::default(),
         source_order: u32::MAX,

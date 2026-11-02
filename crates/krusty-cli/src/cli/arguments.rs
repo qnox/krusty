@@ -268,6 +268,7 @@ pub(super) fn apply(
         "-progressive" => parsed.progressive = flag,
         "-Werror" => parsed.all_warnings_as_errors = flag,
         "-nowarn" => parsed.suppress_warnings = flag,
+        "-Xreport-all-warnings" => opts.report_all_warnings = flag,
         "-Xmetadata-version" => match parse_metadata_level(text) {
             Some(version) => opts.metadata_version = Some(version),
             None => opts.errors.push(format!(
@@ -288,6 +289,7 @@ pub(super) fn apply(
         "-jdk-home" => opts.jdk_home = Some(PathBuf::from(text)),
         "-Xno-param-assertions" => opts.no_param_assertions = flag,
         "-Xno-call-assertions" => opts.no_call_assertions = flag,
+        "-Xuse-inline-scopes-numbers" => opts.inline_scopes_numbers = flag,
         // `-Xlambdas` / `-Xsam-conversions` select how a lambda and a SAM conversion are realized:
         // `indy` is a `LambdaMetafactory` call site (kotlinc's default since 2.0), `class` gives each
         // lambda its own class extending `kotlin.jvm.internal.Lambda`. The two differ in the emitted

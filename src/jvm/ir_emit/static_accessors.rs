@@ -26,7 +26,7 @@ use super::access_bridges::ProtectedMemberAccessBridge;
 use super::*;
 use crate::fx_hash::{HashMap, HashSet};
 use crate::jvm::private_static_access::{
-    bridged_getter, bridged_setter, declared_backing_getter, declared_backing_setter,
+    bridged_getter_read, bridged_setter, declared_backing_getter, declared_backing_setter,
     member_property_accessor_name, StaticOwner,
 };
 use std::cell::RefCell;
@@ -85,6 +85,8 @@ pub(super) struct StaticAccessorPlan {
     exporting_private_access: HashSet<u32>,
     /// The bodies of `crossinline` literals, which reach every class's members through accessors.
     exporting_lambda_bodies: HashSet<crate::ir::ExprId>,
+    /// Top-level `lateinit` statics whose `isInitialized` some class other than the facade probes.
+    foreign_initialization_probes: HashSet<u32>,
 }
 
 impl StaticAccessorPlan {
@@ -106,6 +108,12 @@ impl StaticAccessorPlan {
     /// its class ([`super::crossinline_literals`]).
     pub(super) fn exports_lambda_body(&self, body: crate::ir::ExprId) -> bool {
         self.exporting_lambda_bodies.contains(&body)
+    }
+
+    /// Whether a class other than the facade probes top-level `lateinit` static `index` with
+    /// `isInitialized`. kotlinc then emits that property's default getter without its guard.
+    pub(super) fn probed_from_another_class(&self, index: u32) -> bool {
+        self.foreign_initialization_probes.contains(&index)
     }
 }
 
@@ -433,6 +441,7 @@ pub(super) fn plan(
         private_calls,
         helper_access: env.local_delegate_access,
         exporting_lambda_bodies: &exporting_lambda_bodies,
+        foreign_initialization_probes: RefCell::default(),
     };
     let mut carriers: HashMap<TypeName, Vec<Use>> = HashMap::default();
     for context in contexts {
@@ -515,10 +524,12 @@ pub(super) fn plan(
     // particular, `collect` places an assignment target before its value without moving that
     // setter ahead of unrelated reads elsewhere on the line.
     uses.sort_by_key(|found| found.line);
+    let foreign_initialization_probes = walk.foreign_initialization_probes.into_inner();
     let mut plan = StaticAccessorPlan {
         protected: walk.protected.into_inner(),
         companion_fields: walk.companion_fields.into_inner(),
         exporting_private_access,
+        foreign_initialization_probes,
         exporting_lambda_bodies,
         ..StaticAccessorPlan::default()
     };
@@ -791,6 +802,8 @@ struct Walk<'a> {
     helper_access: &'a crate::jvm::local_delegate_accessors::HelperAccess,
     /// The bodies of `crossinline` literals, whose code exports private access wherever it is.
     exporting_lambda_bodies: &'a HashSet<crate::ir::ExprId>,
+    /// Top-level `lateinit` statics probed with `isInitialized` outside the facade.
+    foreign_initialization_probes: RefCell<HashSet<u32>>,
 }
 
 impl Walk<'_> {
@@ -882,6 +895,16 @@ impl Walk<'_> {
                     }
                 }
                 continue;
+            }
+            if let IrExpr::GetStatic(index) = ir.expr(expression) {
+                if context != StaticOwner::Facade
+                    && ir.statics[*index as usize].owner.is_none()
+                    && ir.lateinit_initialization_probes.contains(&expression)
+                {
+                    self.foreign_initialization_probes
+                        .borrow_mut()
+                        .insert(*index);
+                }
             }
             let carrier = match ir.expr(expression) {
                 IrExpr::StaticInstance { owner, .. } => Some(ir.classes[*owner as usize].fq_name),
@@ -1009,7 +1032,7 @@ impl Walk<'_> {
                 StaticOwner::Class(*owner),
                 StaticAccessor::Function(*function),
             )),
-            IrExpr::GetStatic(index) => bridged_getter(self.ir, *index)
+            IrExpr::GetStatic(index) => bridged_getter_read(self.ir, *index, expression)
                 .or_else(|| declared_backing_getter(self.ir, *index))
                 .map(|storage| (storage.owner, StaticAccessor::Getter(*index)))
                 .or_else(|| hoisted_field_accessor(self.ir, *index, false)),
@@ -1836,7 +1859,7 @@ impl Accessor<'_> {
         let parameters = jvm_function_params(ir, function);
         let result = jvm_declared_ty(&target.ret);
         let descriptor = method_descriptor(&parameters, result);
-        let name = format!("access${}", target.name);
+        let name = format!("access${}", ir.accessor_base_name(function));
         // One accessor per target: a function whose emission-built state machine re-enters it
         // through `access$<name>` already has it.
         if cw.declares_method(&name, &descriptor) {

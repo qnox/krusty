@@ -129,16 +129,41 @@ fn an_unsigned_array_walks_its_elements_unsigned() {
 }
 
 #[test]
-fn each_width_allocates_loads_and_stores_through_its_own_opcodes() {
+fn each_width_allocates_its_carrier_and_indexes_through_its_own_members() {
     // The claim this change makes is about BYTECODE, and a program that prints the right number
     // cannot prove which opcodes produced it — `int[]` holds a 255 perfectly well. So the four
     // shapes are read off the disassembly: the `newarray` operand, the store, the load, and the
-    // local's descriptor.
+    // local's descriptor. The subscript is the value class's own `get`/`set` operator, which
+    // kotlinc calls as the class's static on the carrier, never the carrier's own opcode.
     for (kind, atype, store, load, returned) in [
-        ("UByteArray", "byte", "bastore", "baload", "byte[] box()"),
-        ("UShortArray", "short", "sastore", "saload", "short[] box()"),
-        ("UIntArray", "int", "iastore", "iaload", "int[] box()"),
-        ("ULongArray", "long", "lastore", "laload", "long[] box()"),
+        (
+            "UByteArray",
+            "byte",
+            "kotlin/UByteArray.\"set-VurrAj0\":([BIB)V",
+            "kotlin/UByteArray.\"get-w2LRezQ\":([BI)B",
+            "byte[] box()",
+        ),
+        (
+            "UShortArray",
+            "short",
+            "kotlin/UShortArray.\"set-01HTLdE\":([SIS)V",
+            "kotlin/UShortArray.\"get-Mh2AYeg\":([SI)S",
+            "short[] box()",
+        ),
+        (
+            "UIntArray",
+            "int",
+            "kotlin/UIntArray.\"set-VXSXFK8\":([III)V",
+            "kotlin/UIntArray.\"get-pVg5ArA\":([II)I",
+            "int[] box()",
+        ),
+        (
+            "ULongArray",
+            "long",
+            "kotlin/ULongArray.\"set-k8EXiF4\":([JIJ)V",
+            "kotlin/ULongArray.\"get-s-VKNKU\":([JI)J",
+            "long[] box()",
+        ),
     ] {
         let stem = format!("Opcodes{kind}");
         let dumped = disassembled_box(

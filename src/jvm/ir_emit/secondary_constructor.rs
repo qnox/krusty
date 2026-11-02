@@ -181,7 +181,6 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
         let mut sctor = CodeBuilder::new(1 + sc_words);
         let sec_max;
         let mut sec_diverges = false;
-        let body_locals;
         {
             let mut e = Emitter::new(
                 ir,
@@ -454,7 +453,10 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
                 sctor.mark_line(sc.lines.decl_end_line);
             }
             sec_max = e.frame.max();
-            body_locals = std::mem::take(&mut e.open_locals);
+            // Body locals precede `this` and the parameters in kotlinc's table, as in a method,
+            // and stay in scope through the return.
+            let body_locals = std::mem::take(&mut e.open_locals);
+            e.record_open_locals(body_locals, |_| None, &mut sctor);
         }
         if !sec_diverges {
             if sc.generated_debug.fallthrough_line().is_some() {
@@ -463,11 +465,6 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
             } else {
                 sctor.ret_void();
             }
-        }
-        // Body locals precede `this` and the parameters in kotlinc's table, as in a method, and
-        // stay in scope through the return.
-        for local in body_locals {
-            local.record(None, &mut sctor);
         }
         if !generated {
             sctor.add_local_entry(0, None, 0, "this", &format!("L{fq_name};"));
@@ -526,7 +523,7 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
         let body_ranged_locals = if generated && debug_locals.is_some() {
             let code_length = sctor.bytes.len();
             sctor
-                .local_entries()
+                .named_local_entries()
                 .iter()
                 .filter(|&&(start, ..)| usize::from(start) < code_length)
                 .map(|&(start, length, slot, ref name, ref desc)| {
@@ -545,6 +542,10 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
             cw.reserve_method_lvt(locals);
         }
         let body_line_marks = sctor.line_marks().to_vec();
+        let restated_pcs = sctor
+            .inlined_line_marks()
+            .map(|(pc, _)| pc)
+            .collect::<Vec<_>>();
         cw.add_method_sig(
             sc_access,
             "<init>",
@@ -584,14 +585,18 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
                 .map(|line| (0u16, line));
             // Consecutive entries for the SAME line collapse, exactly as `CodeBuilder::mark_line`
             // collapses them within one body: the opening entry and the body's first mark are both
-            // the declaration's line, and kotlinc writes it once.
+            // the declaration's line, and kotlinc writes it once. An inlined line, or the caller's
+            // line restated after an inlined body, keeps its entry beside an equal one, as it does in
+            // any other body.
             let mut entries: Vec<(u16, u32)> = Vec::new();
             for (pc, line) in opening.into_iter().chain(
                 body_line_marks
                     .iter()
                     .map(|&(pc, line)| (pc, u32::from(line))),
             ) {
-                if entries.last().is_some_and(|&(_, last)| last == line) {
+                if entries.last().is_some_and(|&(_, last)| last == line)
+                    && !restated_pcs.contains(&pc)
+                {
                     continue;
                 }
                 entries.push((pc, line));
@@ -621,24 +626,16 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
                 cw.set_method_synthetic("<init>", &sc_desc);
             }
         }
-        if sc.defaults.iter().any(Option::is_some) {
+        if let Some(defaults) = crate::jvm::default_wrappers::secondary_constructor(sc) {
             // The stub's physical prefix is everything ahead of the declared parameters — the
             // owner's synthetic entries included, which is what makes an enum's stub
             // `(String, int, …declared, mask, marker)` as kotlinc writes it. Only the capture
             // prefix is LOGICAL: a default initializer can mention a capture, never `$enum$name`.
             // This stub belongs to the SECONDARY constructor, so its line table is the secondary's:
-            // each masked fill maps to the default expression it evaluates, and the entry to the
-            // first of them — the `constructor(…)` declaration itself. Borrowing the primary's
-            // class/field/closing-paren provenance put the whole stub on the class line.
-            // Every one of these is the DECLARATION's own recorded line, never a descendant
-            // expression's: the entry at the `constructor` keyword, each masked fill at that
-            // parameter's default, and the delegation at the declaration's closing line.
-            let default_lines = sc
-                .lines
-                .defaults
-                .iter()
-                .map(|line| (*line != 0).then_some(*line))
-                .collect::<Vec<_>>();
+            // the entry, each mask test and the delegation at the `constructor` keyword, the
+            // return at the declaration's closing line, and each masked fill on the lines its
+            // default expression marks. Borrowing the primary's class/closing-paren provenance put
+            // the whole stub on the class line.
             // An enum's constructors are private, and kotlinc marks the synthetic overload of a
             // private constructor ACC_SYNTHETIC alone: PUBLIC|SYNTHETIC would publish a way to build
             // the class that the declaration does not grant.
@@ -656,12 +653,8 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
                         .collect::<Vec<_>>(),
                     logical_prefix_count: sc_prefix_tys.len(),
                     real_params: &sc_source_tys,
-                    defaults: &sc.defaults,
-                    secondary_lines: Some((
-                        sc.lines.decl_line,
-                        &default_lines,
-                        sc.lines.decl_end_line,
-                    )),
+                    defaults,
+                    secondary_lines: Some((sc.lines.decl_line, sc.lines.decl_end_line)),
                     target_uses_marker_accessor: sc.vc_params
                         || super::constructor_accessors::hides_secondary(ir, c, secondary_ordinal),
                     deprecated: sc.annotations.deprecated(),

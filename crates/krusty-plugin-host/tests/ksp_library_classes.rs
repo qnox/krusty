@@ -134,6 +134,10 @@ fn logged_annotation(annotation: &KspAnnotation, origin: &str) -> String {
 
 fn logged_value(value: &KspValue, origin: &str) -> String {
     match value {
+        KspValue::UByte(value) => format!("{value}:UByte"),
+        KspValue::UShort(value) => format!("{value}:UShort"),
+        KspValue::UInt(value) => format!("{value}:UInt"),
+        KspValue::ULong(value) => format!("{value}:ULong"),
         KspValue::Boolean(value) => format!("{value}:Boolean"),
         KspValue::Byte(value) => format!("{value}:Byte"),
         KspValue::Short(value) => format!("{value}:Short"),

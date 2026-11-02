@@ -260,7 +260,9 @@ pub(crate) fn lower_suspend(
             if expr_calls_suspend(ir, b, &suspend_set) {
                 let clones = crate::ir::make_expression_children_unique_tracked(ir, b);
                 for (source, target) in clones {
-                    let IrExpr::Call { args, .. } = &ir.exprs[target as usize] else {
+                    let (IrExpr::Call { args, .. } | IrExpr::New { args, .. }) =
+                        &ir.exprs[target as usize]
+                    else {
                         continue;
                     };
                     if !outputs
@@ -1651,6 +1653,7 @@ fn build_state_machine(
                 &physical_parameters(ir, fid, &ir.functions[fid as usize].params),
                 &ir.functions[fid as usize].ret,
             ),
+            enclosing_function: Some(fid),
         };
         continuation_metadata.insert(cont_internal.clone(), metadata);
     }
@@ -1897,8 +1900,8 @@ struct Flat<'a> {
     /// `r_v` (`e = (E) r_v`) once on entry, and it is spilled/restored like any local so it survives the
     /// catch's own suspension (after which `r_v` holds the resume value, no longer the exception).
     catch_spills: crate::fx_hash::HashMap<ExprId, u32>,
-    /// Per-suspension lexical scope lists (kotlinc's positional-spill model, see
-    /// docs/POSITIONAL_SPILLS.md): suspend-call expr id → `params ++ in-scope locals`.
+    /// Per-suspension lexical scope lists (kotlinc's positional-spill model): suspend-call expr id
+    /// → `params ++ in-scope locals`.
     scopes: SuspensionScopes,
     /// The positional field layout (per-kind maxima over every scope list).
     layout: SpillLayout,
@@ -3826,7 +3829,9 @@ fn typed_suspension_operands(
                 | Callee::LocalDefault(_)
                 | Callee::ClassStaticWithDefaults { .. }
                 | Callee::ClassStaticDefault { .. } => return None,
-                Callee::ModuleWithDefaults { .. } => return None,
+                Callee::ModuleWithDefaults { .. } | Callee::ModuleDefaultEntry { .. } => {
+                    return None
+                }
             };
             zip(args, &params, &mut out)?;
         }

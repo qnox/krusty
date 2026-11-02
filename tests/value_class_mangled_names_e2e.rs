@@ -99,3 +99,158 @@ fn a_constructor_is_hidden_exactly_when_a_parameter_requires_mangling() {
         &["ResultHolder", "Bounded", "HiddenConstructorsKt"],
     );
 }
+
+/// An extension function's receiver is named after the function's IR name, which kotlinc's
+/// inline-class lowering has already replaced with the `-<hash>` mangle: `$this$top_u2dK5cTq2M`.
+/// A value class's own member and a property accessor keep the source spelling (`$this$memberExt`,
+/// `$this$prop`). The receiver's null-check guard still quotes the name it was declared under
+/// (`$this$top2`). krusty named every receiver after the source declaration.
+const MANGLED_RECEIVERS: &str = r#"@JvmInline
+value class IC(val x: Int) {
+    fun Int.memberExt(y: IC): Int = this + y.x + x
+}
+
+class Holder {
+    fun IC.ext(): Int = x
+    fun String.ext2(y: IC): Int = y.x + length
+}
+
+fun IC.top(): Int = x
+fun String.top2(y: IC): Int = y.x + length
+internal fun IC.internalTop(): Int = x
+val IC.prop: Int get() = x
+
+fun box(): String {
+    val ic = IC(1)
+    val sum = with(ic) { 2.memberExt(ic) } + with(Holder()) { ic.ext() + "s".ext2(ic) } +
+        ic.top() + "x".top2(ic) + ic.internalTop() + ic.prop
+    return if (sum == 12) "OK" else "fail $sum"
+}
+"#;
+
+#[test]
+fn an_extension_receiver_is_named_after_the_mangled_function() {
+    common::assert_classes_identical_to_kotlinc(
+        "MangledReceivers",
+        MANGLED_RECEIVERS,
+        &["MangledReceiversKt", "Holder", "IC"],
+    );
+}
+
+#[test]
+fn mangled_receivers_run() {
+    common::expect_box_ok_with_stdlib(MANGLED_RECEIVERS, "MangledReceivers");
+}
+
+/// A mangled function whose JVM descriptor a reader can rebuild from its declared types (every
+/// value-class parameter nullable and boxed) still records its physical name in `@Metadata`, with
+/// no descriptor: `JvmMethodSignature(name = "accept-6FUe0Y4")`. krusty recorded a name only beside
+/// a descriptor, so the facade's metadata lost the mangled name.
+const NAME_ONLY_SIGNATURE: &str = r#"@JvmInline
+value class NX(val x: String?)
+
+@JvmInline
+value class NY(val y: Number?)
+
+fun accept(x: NX?, y: NY?): String = if (x == null && y?.y == 1) "OK" else "fail"
+
+fun box(): String = accept(null, NY(1))
+"#;
+
+#[test]
+fn a_derivable_mangled_signature_records_only_its_name() {
+    common::assert_classes_identical_to_kotlinc(
+        "NameOnlySignature",
+        NAME_ONLY_SIGNATURE,
+        &["NameOnlySignatureKt"],
+    );
+}
+
+#[test]
+fn name_only_signature_runs() {
+    common::expect_box_ok_with_stdlib(NAME_ONLY_SIGNATURE, "NameOnlySignature");
+}
+
+/// A top-level extension property over a value class records its accessors' physical descriptors
+/// in the facade's `@Metadata`: the getter takes the receiver's carrier (`getXx-IQRRRT4(I)I`), as
+/// the method declares it. krusty described the receiver as the box (`(LZ;)I`).
+const VALUE_CLASS_EXTENSION_PROPERTY: &str = r#"@JvmInline
+value class Z(val x: Int)
+
+@JvmInline
+value class S(val x: String)
+
+val Z.xx: Int get() = x
+var S.text: String
+    get() = x
+    set(value) {}
+
+fun box(): String {
+    S("a").text = "b"
+    return if (Z(1).xx == 1 && S("OK").text == "OK") "OK" else "fail"
+}
+"#;
+
+#[test]
+fn an_extension_property_over_a_value_class_records_erased_accessors() {
+    common::assert_classes_identical_to_kotlinc(
+        "ValueClassExtensionProperty",
+        VALUE_CLASS_EXTENSION_PROPERTY,
+        &["ValueClassExtensionPropertyKt"],
+    );
+}
+
+#[test]
+fn value_class_extension_property_runs() {
+    common::expect_box_ok_with_stdlib(
+        VALUE_CLASS_EXTENSION_PROPERTY,
+        "ValueClassExtensionProperty",
+    );
+}
+
+/// An overridable suspend member extension keeps its declaration as a trampoline and moves its
+/// body to the static `<name>$suspendImpl`. kotlinc names the trampoline's receiver after the
+/// mangled declaration (`$this$work_u2dwnUzFvI`) and annotates its CPS result `@Nullable`; the
+/// static takes the receiver as `$receiver`. krusty split the declaration from its body before
+/// carrying the mangle over, naming the trampoline's receiver `$this$work`, and annotated the
+/// trampoline's result from the declared value-class type.
+const SUSPEND_MEMBER_EXTENSIONS: &str = r#"import kotlin.coroutines.*
+
+@JvmInline
+value class IC(val x: Int)
+
+open class Base {
+    open suspend fun IC.work(y: IC): Int = x + y.x
+    open suspend fun String.label(y: IC): String = this + y.x
+}
+
+interface Api {
+    suspend fun IC.twice(): Int = x * 2
+}
+
+class Impl : Base(), Api
+
+fun box(): String {
+    var result = ""
+    suspend {
+        with(Impl()) {
+            result = "" + IC(1).work(IC(2)) + "k".label(IC(3)) + IC(4).twice()
+        }
+    }.startCoroutine(Continuation(EmptyCoroutineContext) { it.getOrThrow() })
+    return if (result == "3k38") "OK" else result
+}
+"#;
+
+#[test]
+fn a_suspend_member_extension_trampoline_names_its_mangled_receiver() {
+    common::assert_classes_identical_to_kotlinc(
+        "SuspendMemberExtensions",
+        SUSPEND_MEMBER_EXTENSIONS,
+        &["Base", "Api", "Api$DefaultImpls"],
+    );
+}
+
+#[test]
+fn suspend_member_extensions_run() {
+    common::expect_box_ok_with_stdlib(SUSPEND_MEMBER_EXTENSIONS, "SuspendMemberExtensions");
+}

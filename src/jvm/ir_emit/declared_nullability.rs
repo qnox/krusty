@@ -49,7 +49,8 @@ pub(super) fn declared_nullability(ir: &IrFile, fid: u32) -> DeclaredNullability
         .is_some_and(|body| body_has_reified_markers(ir, body));
     // A suspend function returns its result or `COROUTINE_SUSPENDED` through the CPS `Object`,
     // which kotlinc annotates `@Nullable` whatever the declared result.
-    let suspend = ir.suspend_funs.contains(&fid);
+    let suspend =
+        ir.suspend_funs.contains(&fid) || crate::jvm::suspend_impls::is_suspend_trampoline(ir, fid);
     // An inferred Java result retains its flexible declaration type and therefore commits to
     // neither nullability face.
     let flexible_result = ir

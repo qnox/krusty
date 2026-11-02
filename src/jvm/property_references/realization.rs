@@ -100,8 +100,8 @@ pub(crate) struct PropertyReferenceRealization {
     pub setter_field: Option<PropertyFieldAccess>,
     /// The selected property IS the underlying storage of the value class that declares it.
     ///
-    /// Reading it is the unbox itself, so its accessor stays an ordinary instance getter on the
-    /// box (`Z.getX()I`) rather than a static realization over the carrier. A value class's
+    /// Reading it is the unbox itself: the reference reports its getter (`Z.getX()I`) and reads
+    /// the box with `unbox-impl`, never a static realization over the carrier. A value class's
     /// underlying property has no distinguishing spelling, so this is taken from the declaration's
     /// own storage position — the class's sole field — or, for a dependency, from the underlying
     /// property its `@Metadata` publishes.

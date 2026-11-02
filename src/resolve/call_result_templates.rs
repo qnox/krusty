@@ -244,7 +244,7 @@ impl Checker<'_> {
             formals: classifier.type_params().clone(),
             formal_bounds: classifier.type_param_bounds().clone(),
             receiver: None,
-            params: Vec::new(),
+            params: constructor_parameter_shapes(constructor).to_vec(),
             ret: Ty::obj_args_name(owner, &arguments),
             return_policy: GenericReturnPolicy::Exact,
         }))
@@ -462,6 +462,7 @@ impl Checker<'_> {
                 }
                 (TyKind::Nullable(symbolic), TyKind::Nullable(actual))
                 | (TyKind::PlatformNullable(symbolic), TyKind::PlatformNullable(actual))
+                | (TyKind::MutabilityFlexible(symbolic), TyKind::MutabilityFlexible(actual))
                 | (TyKind::InProjection(symbolic), TyKind::InProjection(actual))
                 | (TyKind::OutProjection(symbolic), TyKind::OutProjection(actual))
                 | (TyKind::StarProjection(symbolic), TyKind::StarProjection(actual)) => {
@@ -481,6 +482,22 @@ impl Checker<'_> {
             || ty_mentions_param(actual, &signature.formals)
             || declaration_fallback)
             .then_some(signature)
+    }
+}
+
+/// The selected constructor's parameter shapes before classifier type-argument substitution. They
+/// tell which classifier formals the call's own value arguments determine, so a constructor's
+/// result template is input-constrained exactly when a function's would be.
+fn constructor_parameter_shapes(constructor: &ResolvedConstructor) -> &[Ty] {
+    match constructor {
+        ResolvedConstructor::Source {
+            declaration_params, ..
+        } => declaration_params,
+        ResolvedConstructor::Plain { member, .. }
+        | ResolvedConstructor::PlainSlots { member, .. } => member.constructor_declaration_params(),
+        ResolvedConstructor::Synthetic { ctor, .. } => {
+            ctor.declaration.constructor_declaration_params()
+        }
     }
 }
 

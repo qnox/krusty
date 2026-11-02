@@ -432,7 +432,15 @@ impl Checker<'_> {
             .map(|alias| self.publish_constructor_alias_rigid_formals(alias))
             .unwrap_or_default();
         let signature = candidate.semantic_signature();
-        let receiver_bindings = constraints.receiver_bindings(&self.fed_source(), &signature);
+        let mut receiver_bindings = constraints.receiver_bindings(&self.fed_source(), &signature);
+        if let Some(declaration) = candidate.source_inputs.as_deref() {
+            receiver_bindings.extend(
+                declaration
+                    .receiver_bindings
+                    .iter()
+                    .map(|(formal, &actual)| (formal.clone(), actual)),
+            );
+        }
         let whole_arrays = named_whole_array_varargs(parameters, argument_names, &shape.call_sig);
         for (source, &parameter) in parameters.iter().enumerate() {
             let Some((&declared, &actual)) = shape.params.get(parameter).zip(arg_tys.get(source))
@@ -448,7 +456,15 @@ impl Checker<'_> {
                 declared
             };
             let declaration_parameter = shape.parameter_indices[parameter];
-            let raw_input = signature.params[declaration_parameter];
+            let raw_input = candidate
+                .source_inputs
+                .as_deref()
+                .map(|declaration| {
+                    declaration
+                        .declared_input(declaration_parameter)
+                        .expect("retained declaration inputs preserve the mapped parameter layout")
+                })
+                .unwrap_or(signature.params[declaration_parameter]);
             let raw_input = if shape.call_sig.vararg_index == Some(parameter)
                 && !self.file.is_spread_arg(args[source])
                 && !whole_arrays[source]
@@ -469,9 +485,22 @@ impl Checker<'_> {
             {
                 let receiver =
                     self.diagnostic_type_name(constraints.receiver, &[constraints.receiver]);
-                let display = self
-                    .source_callable_display(candidate)
-                    .unwrap_or_else(|| Self::callable_candidate_display(name, candidate));
+                let display = self.source_callable_display(candidate).unwrap_or_else(|| {
+                    candidate.source_inputs.as_deref().map_or_else(
+                        || Self::callable_candidate_display(name, candidate),
+                        |declaration| {
+                            Self::semantic_callable_display(
+                                name,
+                                &declaration.signature,
+                                &candidate.call_sig,
+                                candidate.context_count,
+                                candidate.callable.suspend,
+                                candidate.flags.reified,
+                                declaration.signature.receiver,
+                            )
+                        },
+                    )
+                });
                 let projection = match projection {
                     crate::symbol_resolver::InputProjection::Out => "out",
                     crate::symbol_resolver::InputProjection::Star => "star",
@@ -886,6 +915,158 @@ impl Checker<'_> {
         }
     }
 
+    /// Report a receiver call that no member or extension of its receiver's type answers. The
+    /// same-named extensions in scope are then kotlinc's candidates, each rejected by its receiver
+    /// type alone, whatever the arguments; only when there are none is the reference unresolved.
+    pub(super) fn report_unresolved_receiver_call(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        call_args: CallArgs<'_>,
+        (receiver, name): (ExprId, &str),
+        constraints: CallConstraints<'_>,
+    ) {
+        let extensions = self.resolver().receiver_mismatched_extensions(name);
+        if !extensions.is_empty() {
+            let message = match self.unique_most_specific_rejected(
+                call_args.call,
+                call_args.args,
+                &extensions,
+            ) {
+                Some(candidate) => format!(
+                    "candidate '{}' is inapplicable because of a receiver type mismatch.",
+                    self.receiver_mismatch_candidate_display(name, &candidate)
+                ),
+                None => self.receiver_mismatch_candidates_message(name, &extensions),
+            };
+            self.diags
+                .error(self.call_callee_name_span(call_args.call), message);
+            return;
+        }
+        let message =
+            self.unresolved_member_diagnostic(scope, Some(receiver), name, constraints.receiver);
+        self.diags
+            .error(self.call_callee_name_span(call_args.call), message);
+        self.report_unshaped_lambda_diagnostics(scope, call_args.args);
+    }
+
+    /// The one candidate more specific than every other rejected one, a non-generic declaration
+    /// breaking a tie with generic ones; kotlinc reports only that candidate when there is one.
+    fn unique_most_specific_rejected(
+        &self,
+        call: ExprId,
+        args: &[ExprId],
+        candidates: &[crate::libraries::FunctionInfo],
+    ) -> Option<crate::libraries::FunctionInfo> {
+        let argument_names = self.file.call_arg_names.get(&call.0).map(Vec::as_slice);
+        let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
+        let mut contenders = candidates
+            .iter()
+            .map(|candidate| {
+                let shape = rejected_candidate_argument_shape(
+                    candidate,
+                    args.len(),
+                    argument_names,
+                    trailing_lambda,
+                );
+                let generic = candidate
+                    .generic_sig
+                    .as_ref()
+                    .is_some_and(|signature| !signature.formals.is_empty());
+                (candidate, shape, generic)
+            })
+            .collect::<Vec<_>>();
+        crate::symbol_resolver::retain_most_specific_declarations(
+            &self.fed_source(),
+            None,
+            &mut contenders,
+            |(candidate, shape, generic)| {
+                (
+                    candidate.semantic_receiver(),
+                    shape.as_slice(),
+                    *generic,
+                    None,
+                )
+            },
+        );
+        match contenders.as_slice() {
+            [(only, _, _)] => Some((*only).clone()),
+            _ => None,
+        }
+    }
+
+    /// kotlinc's NONE_APPLICABLE over candidates each rejected by its receiver type: every
+    /// candidate, in declaration order, followed by its reason.
+    fn receiver_mismatch_candidates_message(
+        &self,
+        name: &str,
+        candidates: &[crate::libraries::FunctionInfo],
+    ) -> String {
+        let mut message = String::from("none of the following candidates is applicable:");
+        for candidate in candidates {
+            let display = self.receiver_mismatch_candidate_display(name, candidate);
+            message.push_str(&format!(
+                "\n\n{display}:\n  Candidate '{display}' is inapplicable because of a receiver type mismatch."
+            ));
+        }
+        message
+    }
+
+    /// A candidate a receiver type mismatch rejected, as kotlinc renders it.
+    fn receiver_mismatch_candidate_display(
+        &self,
+        name: &str,
+        candidate: &crate::libraries::FunctionInfo,
+    ) -> String {
+        self.source_callable_display(candidate).unwrap_or_else(|| {
+            Self::callable_candidate_display_with_alias_constructor(
+                name,
+                candidate,
+                |signature, member| {
+                    Self::generic_constructor_display_with_type(signature, member, &|ty| {
+                        self.declared_function_semantic_type(ty).source_name()
+                    })
+                },
+            )
+        })
+    }
+
+    /// A candidate as kotlinc renders it in a diagnostic: its source declaration when there is
+    /// one, otherwise its signature.
+    pub(super) fn member_candidate_display(
+        &self,
+        name: &str,
+        candidate: &crate::libraries::FunctionInfo,
+    ) -> String {
+        self.source_callable_display(candidate).unwrap_or_else(|| {
+            // An extension's `callable.params` prepends the receiver while `call_sig` does not;
+            // skip it so names and types stay parallel.
+            let (params, receiver) = match candidate.kind {
+                crate::libraries::FnKind::Extension => (
+                    &candidate.callable.params[1.min(candidate.callable.params.len())..],
+                    candidate.receiver,
+                ),
+                _ => (candidate.callable.params.as_slice(), None),
+            };
+            let parameters = Self::callable_ref_parameters(params, &candidate.call_sig.param_names);
+            let suspend = if candidate.callable.suspend {
+                "suspend "
+            } else {
+                ""
+            };
+            match receiver {
+                Some(receiver) => format!(
+                    "{suspend}fun {}.{name}({parameters}): {}",
+                    receiver.source_name(),
+                    candidate.callable.ret.source_name()
+                ),
+                None => format!(
+                    "{suspend}fun {name}({parameters}): {}",
+                    candidate.callable.ret.source_name()
+                ),
+            }
+        })
+    }
+
     /// Report NONE_APPLICABLE over tied rejected candidates.
     pub(super) fn report_member_and_extensions_inapplicable(
         &mut self,
@@ -1038,17 +1219,7 @@ impl Checker<'_> {
             }
         }
 
-        let display = self.source_callable_display(candidate).unwrap_or_else(|| {
-            Self::callable_candidate_display_with_alias_constructor(
-                name,
-                candidate,
-                |signature, member| {
-                    Self::generic_constructor_display_with_type(signature, member, &|ty| {
-                        self.declared_function_semantic_type(ty).source_name()
-                    })
-                },
-            )
-        });
+        let display = self.receiver_mismatch_candidate_display(name, candidate);
         self.diags.error(
             self.call_callee_name_span(call),
             format!("candidate '{display}' is inapplicable because of a receiver type mismatch."),

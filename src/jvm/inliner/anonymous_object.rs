@@ -11,8 +11,7 @@
 //! An object whose constructor is passed one of the call's inline lambdas (a `crossinline` one)
 //! inlines it: the copy keeps the lambda's captured values instead of the lambda, and each of its
 //! methods that called the lambda runs the lambda's body in its place (see `lambda_inlining`).
-//! Objects whose bodies create anonymous objects of their own are a later stage (see "JVM unified
-//! inliner" in `docs/IMPLEMENTATION_PLAN.md`).
+//! Objects whose bodies create anonymous objects of their own are a later stage.
 
 mod constructor;
 use constructor::DeclaredCapture;
@@ -360,7 +359,15 @@ pub(crate) fn regenerate(
             sam_wrappers: Vec::new(),
             reified_parameters_remain: false,
         };
-        let body = transform_method(body, new, &[], &mut remapper, &mut lines, &mut objects)?;
+        let body = transform_method(
+            body,
+            new,
+            false,
+            &[],
+            &mut remapper,
+            &mut lines,
+            &mut objects,
+        )?;
         nested.extend(objects.classes);
         sam_wrappers.extend(objects.sam_wrappers);
         reified_parameters_remain |= objects.reified_parameters_remain;
@@ -428,13 +435,6 @@ pub(crate) fn regenerate(
         };
         remap_declaration(&mut method, &mut remapper)?;
         if let Some(code) = &method.code {
-            // Only a `$$forInline` copy's machine takes the suspension points a suspend lambda
-            // brings: kotlinc writes one for every suspend method that invokes such a lambda.
-            if continuation.is_none() && lambda_inlining::reads_suspend_lambda(code, &lambdas) {
-                return Err(RegenerationError::Unsupported(
-                    "a suspend lambda in a method without a $$forInline copy",
-                ));
-            }
             // kotlinc's `MethodInliner` transforms every method of a copy: one that reads an inlined
             // lambda, or names an object the copy regenerates in turn (a reified lambda nested in
             // it), has its objects regenerated as the copy's next ones.
@@ -462,6 +462,7 @@ pub(crate) fn regenerate(
                 let code = transform_method(
                     code.clone(),
                     new,
+                    continuation.is_some(),
                     &lambdas,
                     &mut remapper,
                     &mut lines,
@@ -843,10 +844,12 @@ fn references_other_regenerated_class(
 /// `code`, a method of the copy `new` with its types not yet renamed, as kotlinc's `MethodInliner`
 /// transforms it: every `invoke` of one of `lambdas` becomes the lambda's body, and each object it
 /// constructs that the copy regenerates in turn is regenerated into `objects`, whose originals the
-/// method and the copy's later methods then name by their copies.
+/// method and the copy's later methods then name by their copies. `for_inline` says whether `code`
+/// is a `$$forInline` copy ([`lambda_inlining::inline_into`]).
 fn transform_method(
     mut code: MethodNode,
     new: &str,
+    for_inline: bool,
     lambdas: &[FieldLambda<'_>],
     remapper: &mut TypeRemapper,
     lines: &mut CopiedLines,
@@ -854,7 +857,15 @@ fn transform_method(
 ) -> Result<MethodNode, RegenerationError> {
     remapper.remap_method(&mut code)?;
     let caller_lines = objects.regeneration.caller_lines;
-    let mut code = lambda_inlining::inline_into(&code, new, lambdas, lines, caller_lines, objects)?;
+    let mut code = lambda_inlining::inline_into(
+        &code,
+        new,
+        for_inline,
+        lambdas,
+        lines,
+        caller_lines,
+        objects,
+    )?;
     for (original, copy) in &objects.renamed {
         remapper.add_mapping(original, copy);
     }

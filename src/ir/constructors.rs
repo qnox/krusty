@@ -119,8 +119,6 @@ pub struct IrSecondaryCtorLines {
     pub delegation_line: u32,
     /// The declaration's last line — its delegation's closing `)` or its block's `}`.
     pub decl_end_line: u32,
-    /// Each parameter's default expression, parallel to the DECLARED parameters; 0 = no default.
-    pub defaults: Vec<u32>,
 }
 
 impl IrSecondaryCtorLines {
@@ -215,6 +213,12 @@ pub struct IrConstructorCapture {
     pub source_name: Box<str>,
     /// What the capture is when it holds a receiver rather than a value.
     pub receiver: Option<IrCapturedReceiver>,
+    /// When the captured declaration is a `crossinline` parameter, captured here directly or
+    /// through any chain of enclosing callables and classes: that parameter's value slot in the
+    /// inline function that declares it, the operand an expansion of that function binds. Lowering
+    /// records it where the capture is produced, and a call-site copy remaps it through the
+    /// expansion's bindings; a target reads it instead of tracing the constructor operand back.
+    pub crossinline_parameter: Option<u32>,
 }
 
 /// What a captured receiver was in source. kotlinc's LocalDeclarationsLowering names each kind's

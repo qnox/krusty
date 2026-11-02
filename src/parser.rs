@@ -1747,18 +1747,6 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Whether the expression tree at `e` reads the property backing field — a bare `field`
-    /// identifier. Used to detect that a custom getter (`get() = field + …`) has a backing field.
-    fn expr_reads_field(&self, e: ExprId) -> bool {
-        if let Expr::Name(n) = self.file.expr(e) {
-            if n == "field" {
-                return true;
-            }
-        }
-        self.file
-            .any_child_expr(e, &mut |c| self.expr_reads_field(c), &mut |_| false)
-    }
-
     /// Consume an accessor's `()`. Returns `Some(())` on success. `require` controls whether a
     /// missing `(` is an error (getter) — setters route through `parse_setter_param` instead.
     fn eat_accessor_parens(&mut self, require: bool) -> Option<()> {
@@ -3516,6 +3504,7 @@ impl<'a> Parser<'a> {
             base_args,
             interface_delegations,
         ) = self.parse_supertypes();
+        let hoisted_from = self.file.decls.len();
         let (methods, body_props, init_order, type_aliases) = self.parse_object_body(&name);
         let end = self.t[self.i.saturating_sub(1)].span;
         let synth = ClassDecl {
@@ -3573,6 +3562,7 @@ impl<'a> Parser<'a> {
             Span::new(span.lo, end.hi),
         );
         self.file.anonymous_object_classes.insert(construction, did);
+        self.file.adopt_hoisted_classifiers(did, hoisted_from);
         construction
     }
 
@@ -3602,10 +3592,8 @@ impl<'a> Parser<'a> {
             loop {
                 self.skip_newlines();
                 let mods = self.parse_member_decl_prefix();
-                // Named singleton owners use the same classifier-registration invariant as class
-                // owners. The flag only excludes `inner` classes, whose semantics require an
-                // enclosing instance that a singleton cannot supply. Anonymous-object bodies use
-                // `parse_object_body` instead and have no stable owner identity to publish here.
+                // Named singletons exclude `inner` classes, which require an enclosing instance.
+                // Anonymous objects publish their classifier owner after `parse_object_body`.
                 if self.parse_and_register_nested_classifier(&name, &mods, false) {
                     continue;
                 }
@@ -4707,8 +4695,8 @@ mod tests {
         exact_members.sort_unstable();
         assert_eq!(
             exact_members,
-            vec!["`missing name`", "`missing safe`", "missing"],
-            "rebuilt safe calls must each have one live exact-name entry"
+            vec!["`missing name`", "`missing safe`", "missing", "y"],
+            "each rebuilt safe call and `y = 1`'s kept `y.assign(1)` has one exact-name entry"
         );
     }
 

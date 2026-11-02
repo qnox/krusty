@@ -235,7 +235,7 @@ impl ProductionSignatureSemantics<'_> {
                 expected,
             ) {
                 RejectedCandidateResult::Fixed(ty) => {
-                    let ty = if candidate.bound_inner_constructor.is_some() {
+                    let ty = if candidate.constructor.is_some() {
                         self.named_construction_result(
                             scope,
                             origin,
@@ -784,6 +784,20 @@ impl ProductionSignatureSemantics<'_> {
                 ty.source_name()
             ),
         )
+    }
+
+    /// The ambiguity the body check reports for the same call, so both phases publish one
+    /// diagnostic.
+    pub(super) fn record_ambiguous_call(
+        &self,
+        scope: crate::fir::SignatureScope,
+        origin: crate::fir::OriginId,
+        spelling: &str,
+        candidates: &std::cell::RefCell<Vec<crate::libraries::FunctionInfo>>,
+    ) -> crate::fir::DiagnosticId {
+        let message =
+            super::super::Checker::ambiguous_candidates_message(spelling, &*candidates.borrow());
+        self.record_source_diagnostic(scope.owner, origin, message)
     }
 
     fn record_inapplicable_member_call(

@@ -231,6 +231,27 @@ impl BodyLowering<'_, '_, '_> {
                 }
                 return Some(self.result_operation(operation, args, ret));
             }
+            Some(crate::backend::BackendCompilerIntrinsic::RadixToString { operand }) => {
+                let (None, [value, radix]) = (receiver, args) else {
+                    return Some(Err("a radix rendering with malformed operands".into()));
+                };
+                let symbol = match operand {
+                    Ty::Int => "kt_int_to_string_radix",
+                    Ty::Long => "kt_long_to_string_radix",
+                    _ => return Some(Err("a radix rendering of an unsupported width".into())),
+                };
+                if ret != Ty::obj("kotlin/String") {
+                    return Some(Err("a radix rendering with a non-String result".into()));
+                }
+                let params = [operand, Ty::Int];
+                return Some((|| {
+                    let arguments = self.arguments(&[*value, *radix], &params)?;
+                    if self.terminated {
+                        return Ok(None);
+                    }
+                    self.runtime_call(symbol, &params, ret, &arguments)
+                })());
+            }
             Some(crate::backend::BackendCompilerIntrinsic::FloatingIsNaN { operand }) => {
                 let Some(value) = floating_extension_operand(operand) else {
                     return Some(Err(

@@ -74,7 +74,11 @@ fn class_member_value_params_round_trip() {
         Ty::String,
     )];
     let (d1, d2) = build_class(
-        type_name("com/example/Greeter"),
+        &krusty::metadata::class_id::ResolvedClassId::declared(
+            type_name("com/example/Greeter"),
+            type_name("com/example"),
+            &["Greeter"],
+        ),
         &[("name".to_string(), Ty::String)],
         &[],
         &methods,
@@ -84,7 +88,8 @@ fn class_member_value_params_round_trip() {
             primary_constructor: Some(JvmConstructorSignature::init("(Ljava/lang/String;)V")),
             ..Default::default()
         },
-    );
+    )
+    .expect("valid declared metadata class name");
     let ci = class_info("com/example/Greeter", d1, d2);
 
     let fns = class_functions(&ci);
@@ -108,7 +113,11 @@ fn class_member_value_params_round_trip() {
 #[test]
 fn value_class_constructor_realization_name_round_trips() {
     let (d1, d2) = build_class(
-        type_name("sample/Name"),
+        &krusty::metadata::class_id::ResolvedClassId::declared(
+            type_name("sample/Name"),
+            type_name("sample"),
+            &["Name"],
+        ),
         &[("value".to_string(), Ty::String)],
         &[],
         &[],
@@ -124,7 +133,8 @@ fn value_class_constructor_realization_name_round_trips() {
             }),
             ..Default::default()
         },
-    );
+    )
+    .expect("valid declared metadata class name");
     let ci = class_info_kind("sample/Name", d1, d2, Some(1));
     let constructors = class_constructors(&ci);
 
@@ -154,7 +164,11 @@ fn secondary_constructor_default_flags_round_trip() {
         annotations: &krusty::metadata::NO_ANNOTATIONS,
     }];
     let (d1, d2) = build_class(
-        type_name("sample/Secondary"),
+        &krusty::metadata::class_id::ResolvedClassId::declared(
+            type_name("sample/Secondary"),
+            type_name("sample"),
+            &["Secondary"],
+        ),
         &[],
         &[],
         &[],
@@ -174,7 +188,8 @@ fn secondary_constructor_default_flags_round_trip() {
             )],
             ..Default::default()
         },
-    );
+    )
+    .expect("valid declared metadata class name");
     // Constructors are a `Class`-schema field. Preserve the carrier kind the real `@Metadata`
     // annotation supplies so the decoder does not reinterpret an unknown carrier as a class.
     let constructors =
@@ -195,7 +210,11 @@ fn synthesized_data_equals_recovers_its_implicit_equality_bound() {
     );
     equals.flags = EQUALS_FN_FLAGS;
     let (d1, d2) = build_class(
-        type_name("sample/Data"),
+        &krusty::metadata::class_id::ResolvedClassId::declared(
+            type_name("sample/Data"),
+            type_name("sample"),
+            &["Data"],
+        ),
         &[],
         &[],
         &[equals],
@@ -211,7 +230,8 @@ fn synthesized_data_equals_recovers_its_implicit_equality_bound() {
             }),
             ..Default::default()
         },
-    );
+    )
+    .expect("valid declared metadata class name");
     let ci = class_info_kind("sample/Data", d1, d2, Some(1));
     let equals = class_functions(&ci)
         .iter()
@@ -232,7 +252,11 @@ fn class_type_parameter_bound_and_variance_round_trip() {
     };
     let names = vec!["T".to_string()];
     let (d1, d2) = build_class(
-        type_name("com/example/Producer"),
+        &krusty::metadata::class_id::ResolvedClassId::declared(
+            type_name("com/example/Producer"),
+            type_name("com/example"),
+            &["Producer"],
+        ),
         &[],
         &[],
         &[],
@@ -249,7 +273,8 @@ fn class_type_parameter_bound_and_variance_round_trip() {
             }),
             ..Default::default()
         },
-    );
+    )
+    .expect("valid declared metadata class name");
     let ci = class_info_kind("com/example/Producer", d1, d2, Some(1));
     assert_eq!(
         ci.meta.class_type_parameters.type_param_variances(),
@@ -321,7 +346,11 @@ fn inner_member_metadata_maps_captured_and_own_type_parameters_to_distinct_ids()
     let own_names = vec!["U".to_string()];
     let captured = vec![outer];
     let (d1, d2) = build_class(
-        type_name("sample/Outer$Inner"),
+        &krusty::metadata::class_id::ResolvedClassId::declared(
+            type_name("sample/Outer$Inner"),
+            type_name("sample"),
+            &["Outer", "Inner"],
+        ),
         &[],
         &[],
         &methods,
@@ -339,7 +368,8 @@ fn inner_member_metadata_maps_captured_and_own_type_parameters_to_distinct_ids()
             }),
             ..Default::default()
         },
-    );
+    )
+    .expect("valid declared metadata class name");
     let ci = class_info_within(
         "sample/Outer$Inner",
         d1,
@@ -399,7 +429,11 @@ fn nested_inner_metadata_numbers_captures_from_outermost_to_innermost() {
     let own_names = vec!["V".to_string()];
     let captured = vec![outer, middle];
     let (d1, d2) = build_class(
-        type_name("sample/Outer$Middle$Inner"),
+        &krusty::metadata::class_id::ResolvedClassId::declared(
+            type_name("sample/Outer$Middle$Inner"),
+            type_name("sample"),
+            &["Outer", "Middle", "Inner"],
+        ),
         &[],
         &[],
         &methods,
@@ -417,7 +451,8 @@ fn nested_inner_metadata_numbers_captures_from_outermost_to_innermost() {
             }),
             ..Default::default()
         },
-    );
+    )
+    .expect("valid declared metadata class name");
     let ci = class_info_within(
         "sample/Outer$Middle$Inner",
         d1,
@@ -459,7 +494,11 @@ fn member_type_parameter_bounds_can_reference_later_parameters() {
     get.type_param_bounds = vec![vec![t_bound], vec![any]];
 
     let (d1, d2) = build_class(
-        type_name("sample/ErrorTest"),
+        &krusty::metadata::class_id::ResolvedClassId::declared(
+            type_name("sample/ErrorTest"),
+            type_name("sample"),
+            &["ErrorTest"],
+        ),
         &[],
         &[],
         &[get],
@@ -472,7 +511,8 @@ fn member_type_parameter_bounds_can_reference_later_parameters() {
             }),
             ..Default::default()
         },
-    );
+    )
+    .expect("valid declared metadata class name");
     let ci = class_info("sample/ErrorTest", d1, d2);
     let signature = class_functions(&ci)
         .iter()

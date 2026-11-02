@@ -298,6 +298,17 @@ impl<'a> FileLowering<'a> {
 
 /// The mask words a module default entry takes after the function's frame: bit `k % 32` of word
 /// `k / 32` marks parameter `k` as omitted.
+/// Whether a function's module exports a default entry for it: a function without a dispatch
+/// receiver that declares a default.
+pub(in crate::native::codegen) fn exports_default_entry(ir: &IrFile, function: u32) -> bool {
+    ir.functions[function as usize].dispatch_receiver.is_none()
+        && ir
+            .fn_params
+            .get(&function)
+            .and_then(|info| info.defaults.as_ref())
+            .is_some_and(|defaults| defaults.iter().any(Option::is_some))
+}
+
 pub(super) fn module_default_masks(parameters: usize) -> Vec<Ty> {
     vec![Ty::Int; parameters.div_ceil(32)]
 }
@@ -316,15 +327,8 @@ impl<'a> FileLowering<'a> {
             .checked_callable_functions
             .iter()
             .filter(|(_, &function)| {
-                let declaration = &self.ir.functions[function as usize];
-                declaration.dispatch_receiver.is_none()
-                    && self.functions[function as usize].is_some()
-                    && self
-                        .ir
-                        .fn_params
-                        .get(&function)
-                        .and_then(|info| info.defaults.as_ref())
-                        .is_some_and(|defaults| defaults.iter().any(Option::is_some))
+                self.functions[function as usize].is_some()
+                    && exports_default_entry(self.ir, function)
             })
             .filter_map(|(callable, &function)| {
                 let identity = match self.ir.inherited_param_default_provider(function) {

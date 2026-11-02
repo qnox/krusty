@@ -482,6 +482,7 @@ impl Checker<'_> {
         explicit: &[Ty],
         bound: &super::library_constructor_failure::BoundConstructorDiagnostic,
         display: &str,
+        report_candidate: bool,
     ) -> bool {
         let Some(written) = self.file.call_type_args.get(&call.0) else {
             return false;
@@ -506,7 +507,9 @@ impl Checker<'_> {
         {
             return false;
         }
-        self.report_bound_inapplicable_candidate(call, display);
+        if report_candidate {
+            self.report_bound_inapplicable_candidate(call, display);
+        }
         true
     }
 

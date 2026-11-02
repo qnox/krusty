@@ -6,7 +6,7 @@ use super::*;
 mod super_calls;
 mod targets;
 use targets::ExternalCallTarget;
-pub(super) use targets::{MemberExtensionFirTarget, SelectedOperatorTarget};
+pub(super) use targets::{is_intrinsic_const, MemberExtensionFirTarget, SelectedOperatorTarget};
 
 use crate::resolve::ResolvedCall;
 
@@ -595,6 +595,7 @@ impl BodyFirChecker<'_> {
                     declared_result: member.declared_ret,
                     overridden_results: &member.overridden_results,
                     semantic_role: member.semantic_role,
+                    intrinsic_const: targets::is_intrinsic_const(&member.annotations),
                     overridden_declarations: &member.overridden_declarations,
                     suspend: member.suspend(),
                     inline: member.inline,
@@ -891,6 +892,9 @@ impl BodyFirChecker<'_> {
                         declared_result: extension.callable.declared_ret,
                         overridden_results: &extension.callable.overridden_results,
                         semantic_role: extension.callable.semantic_role,
+                        intrinsic_const: targets::is_intrinsic_const(
+                            &extension.callable.annotations,
+                        ),
                         overridden_declarations: &extension.callable.overridden_declarations,
                         suspend: extension.callable.suspend,
                         inline: extension.callable.inline,
@@ -1103,6 +1107,7 @@ impl BodyFirChecker<'_> {
                             .collect::<Result<Vec<_>, _>>()?
                             .into_boxed_slice(),
                         semantic_role: selected.member.semantic_role,
+                        intrinsic_const: targets::is_intrinsic_const(&selected.member.annotations),
                         overridden_declarations: selected.member.overridden_declarations.clone(),
                         suspend: selected.member.suspend(),
                         inline: selected.member.inline,
@@ -1200,6 +1205,9 @@ impl BodyFirChecker<'_> {
                             .collect::<Result<Vec<_>, _>>()?
                             .into_boxed_slice(),
                         semantic_role: selected.callable.semantic_role,
+                        intrinsic_const: targets::is_intrinsic_const(
+                            &selected.callable.annotations,
+                        ),
                         overridden_declarations: selected.callable.overridden_declarations.clone(),
                         suspend: selected.callable.suspend,
                         inline: selected.callable.inline,
@@ -1306,6 +1314,7 @@ impl BodyFirChecker<'_> {
                             .collect::<Result<Vec<_>, _>>()?
                             .into_boxed_slice(),
                         semantic_role: None,
+                        intrinsic_const: false,
                         overridden_declarations: Box::new([]),
                         suspend: *suspend,
                         inline: *inline,
@@ -1450,6 +1459,7 @@ impl BodyFirChecker<'_> {
                 declared_result: callable.declared_ret,
                 overridden_results: &callable.overridden_results,
                 semantic_role: callable.semantic_role,
+                intrinsic_const: targets::is_intrinsic_const(&callable.annotations),
                 overridden_declarations: &callable.overridden_declarations,
                 suspend: callable.suspend,
                 inline: callable.inline,
@@ -1599,6 +1609,7 @@ impl BodyFirChecker<'_> {
                 declared_result: *declared_ret,
                 overridden_results,
                 semantic_role: None,
+                intrinsic_const: false,
                 overridden_declarations: &[],
                 suspend: *suspend,
                 inline: *inline,
@@ -1675,6 +1686,7 @@ impl BodyFirChecker<'_> {
             declared_result,
             overridden_results,
             semantic_role,
+            intrinsic_const,
             overridden_declarations,
             suspend,
             inline,
@@ -1751,6 +1763,7 @@ impl BodyFirChecker<'_> {
                     .collect::<Result<Vec<_>, _>>()?
                     .into_boxed_slice(),
                 semantic_role,
+                intrinsic_const,
                 overridden_declarations: overridden_declarations.into(),
                 suspend,
                 inline,
@@ -2419,6 +2432,7 @@ impl BodyFirChecker<'_> {
                 declared_result: selected.member.declared_ret,
                 overridden_results: &selected.member.overridden_results,
                 semantic_role: selected.member.semantic_role,
+                intrinsic_const: targets::is_intrinsic_const(&selected.member.annotations),
                 overridden_declarations: &selected.member.overridden_declarations,
                 suspend: selected.member.suspend(),
                 inline: selected.member.inline,
@@ -2491,13 +2505,14 @@ impl BodyFirChecker<'_> {
                 operands,
             );
         }
-        self.source_member_operator_call_on_value(
+        let mut call = self.source_member_operator_call_on_value(
             expression,
             convention,
             dispatch_receiver,
             operands,
-        )
-        .map(FirExprKind::Call)
+        )?;
+        self.guard_operator_extension_receiver(receiver, &mut call)?;
+        Ok(FirExprKind::Call(call))
     }
 
     pub(super) fn source_member_operator_call_on_value(
@@ -2731,6 +2746,7 @@ impl BodyFirChecker<'_> {
                 }
             }
         }
+        let receiver_source = receiver;
         let receiver = FirReceiver {
             value: self.expression(receiver)?,
             conversion: None,
@@ -2763,23 +2779,27 @@ impl BodyFirChecker<'_> {
             let dispatch_receiver = self
                 .materialize_implicit_receiver(cause, span, &dispatch)?
                 .ok_or_else(|| self.failure(span, BodyCheckFailureKind::UnsupportedCallShape))?;
-            return Ok(FirCall {
+            let mut call = FirCall {
                 target: selected.target,
                 dispatch_receiver: Some(dispatch_receiver),
                 extension_receiver: Some(receiver),
                 parameter_types,
                 arguments: arguments.into_boxed_slice(),
                 substitutions: Box::new([]),
-            });
+            };
+            self.guard_operator_extension_receiver(receiver_source, &mut call)?;
+            return Ok(call);
         }
-        Ok(FirCall {
+        let mut call = FirCall {
             target: selected.target,
             dispatch_receiver: (!selected.extension).then_some(receiver),
             extension_receiver: selected.extension.then_some(receiver),
             parameter_types,
             arguments: arguments.into_boxed_slice(),
             substitutions: Box::new([]),
-        })
+        };
+        self.guard_operator_extension_receiver(receiver_source, &mut call)?;
+        Ok(call)
     }
 
     pub(super) fn source_member_statement_operator_on_value(

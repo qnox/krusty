@@ -72,6 +72,141 @@ fun box(): String = if (My().selfTest() == 34) \"OK\" else \"fail: ${My().selfTe
     common::expect_box_ok_with_stdlib(SRC, "P");
 }
 
+/// A getter's `field` binds lexically: a local `val field` or a lambda or local-function parameter
+/// named `field` shadows the backing field, so those properties are computed and get no field,
+/// while a read through a lambda, a local function or an object expression still uses it.
+#[test]
+fn getter_field_binding_decides_storage() {
+    const SRC: &str = "// WITH_STDLIB
+class My {
+    val shadowed: Int
+        get() {
+            val field = 8
+            return field
+        }
+    val lambdaParameter: Int
+        get() = 9.let { field -> field }
+    val localFunctionParameter: Int
+        get() {
+            fun read(field: Int) = field
+            return read(10)
+        }
+    val throughLambda: Int
+        get() = run { field + 1 }
+    val throughLocalFunction: Int
+        get() {
+            fun read() = field + 1
+            return read()
+        }
+    val throughObject: Int
+        get() = object {
+            fun read() = field + 1
+        }.read()
+    val throughParameterDefault: Int
+        get() {
+            fun read(x: Int = field) = x + 1
+            return read()
+        }
+    val shadowingParameterDefault: Int
+        get() {
+            fun read(field: Int = 11, x: Int = field) = x
+            return read()
+        }
+    val objectMember: Int
+        get() = object {
+            val field = 0
+            fun read() = field + 1
+        }.read()
+    var setterWrites: Int = 12
+        get() = 0
+        set(value) {
+            field = value
+        }
+
+    init {
+        throughLambda = 13
+        throughLocalFunction = 14
+        throughObject = 15
+        throughParameterDefault = 16
+        objectMember = 17
+    }
+}
+fun box(): String {
+    val m = My()
+    m.setterWrites = 1
+    val values = listOf(
+        m.shadowed, m.lambdaParameter, m.localFunctionParameter,
+        m.throughLambda, m.throughLocalFunction, m.throughObject,
+        m.throughParameterDefault, m.shadowingParameterDefault, m.objectMember, m.setterWrites,
+    )
+    return if (values == listOf(8, 9, 10, 14, 15, 16, 17, 11, 18, 0)) \"OK\" else \"fail: $values\"
+}
+";
+    common::expect_box_ok_with_stdlib(SRC, "P");
+}
+
+/// `field` in an accessor names the backing field even where a member or top-level property of
+/// that name is in scope, as kotlinc binds it.
+#[test]
+fn field_in_an_accessor_wins_over_properties_named_field() {
+    const SRC: &str = "// WITH_STDLIB
+val field = 100
+class C {
+    val x: Int = 1
+        get() = field + 0
+}
+class D {
+    val field = 5
+    val y: Int = 2
+        get() = field + 0
+    var z: Int = 3
+        set(value) {
+            field = value
+        }
+}
+fun box(): String {
+    val d = D()
+    d.z = 4
+    val values = listOf(C().x, d.y, d.z, d.field, field)
+    return if (values == listOf(1, 2, 4, 5, 100)) \"OK\" else \"fail: $values\"
+}
+";
+    common::expect_box_ok_with_stdlib(SRC, "Q");
+}
+
+/// A getter whose property declares neither a type nor an initializer infers the property's type
+/// from itself, so kotlinc gives it no backing field `field`: a property named `field` is read
+/// instead. Its setter, and a getter of a typed or initialized property, keep the backing field.
+#[test]
+fn a_getter_inferring_its_property_type_reads_a_property_named_field() {
+    const SRC: &str = "// WITH_STDLIB
+class A {
+    val field: Any = \"member\"
+    val inferred get() = field
+    val initialized = \"backing\"
+        get() = field
+    var mutable get() = field
+        set(value) {}
+}
+val nested = object {
+    inner class Inner {
+        val field: Any
+        constructor(field: Any) {
+            this.field = field
+        }
+        val property get() = field
+    }
+    override fun toString() = Inner(\"inner\").property as String
+}
+fun box(): String {
+    val a = A()
+    val values = listOf(a.inferred, a.initialized, a.mutable, nested.toString())
+    return if (values == listOf(\"member\", \"backing\", \"member\", \"inner\")) \"OK\" else \"fail: $values\"
+}
+";
+    common::expect_box_ok_with_stdlib(SRC, "A");
+}
+
 /// The `inline` modifier on a property ACCESSOR (`inline get()`, `private inline set(…)`) — accepted
 /// (erased; krusty emits an ordinary accessor) rather than misparsed as an unterminated declaration.
 #[test]

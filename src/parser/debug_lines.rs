@@ -150,10 +150,12 @@ pub(super) fn attach(file: &mut File, src: &str) {
         }
     };
     // A bodiless (abstract) function still ends somewhere: its declaration's last line, where a
-    // generated forwarder of it (a `$DefaultImpls` stub) returns.
+    // generated forwarder of it (a `$DefaultImpls` stub) returns. An expression body ends there
+    // too: parentheses leave no node, so the closing `)` of `= !(\n  a\n)` lies past the body
+    // expression's own span but is still the body's last character.
     let function_lines = |body: &FunBody, span: Span| {
         let mut lines = body_lines(body);
-        if lines.end == 0 && span.hi != 0 {
+        if (lines.end == 0 || matches!(body, FunBody::Expr(_))) && span.hi != 0 {
             lines.end = line_at(span.hi.saturating_sub(1));
         }
         lines
@@ -234,10 +236,10 @@ pub(super) fn attach(file: &mut File, src: &str) {
                     }
                 }
                 // A secondary constructor is a declaration of its own, and its lines are its own:
-                // kotlinc anchors the synthetic `$default` overload on the `constructor` keyword,
-                // each masked fill on that parameter's default expression, and the delegation on
-                // the `this`/`super` keyword. Three different source facts on three lines — which
-                // is why none of them may be recovered from another later.
+                // kotlinc anchors the synthetic `$default` overload on the `constructor` keyword
+                // and the delegation on the `this`/`super` keyword; each masked fill carries its
+                // default expression's own lines. Different source facts on different lines —
+                // which is why none of them may be recovered from another later.
                 for constructor in &mut c.secondary_ctors {
                     constructor.decl_line = line_at(constructor.span.lo);
                     constructor.decl_end_line = if constructor.span.hi == 0 {
@@ -248,16 +250,6 @@ pub(super) fn attach(file: &mut File, src: &str) {
                     if constructor.delegation_line != 0 {
                         constructor.delegation_line = line_at(constructor.delegation_line);
                     }
-                    constructor.default_lines = constructor
-                        .params
-                        .iter()
-                        .map(|parameter| {
-                            parameter
-                                .default
-                                .and_then(|default| expr_lo.get(default.0 as usize).copied())
-                                .map_or(0, line_at)
-                        })
-                        .collect();
                 }
             }
             Decl::Fun(f) => {

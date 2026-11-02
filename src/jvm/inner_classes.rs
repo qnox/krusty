@@ -1,15 +1,15 @@
 //! JVM `InnerClasses` candidates prepared once per emitted IR file.
 //!
 //! Source resolution has already assigned every classifier a stable [`TypeName`]. This boundary
-//! derives nesting from those identities and renders only the final classfile payload; it never uses
-//! rendered spellings as lookup keys or reparses them to recover semantic owners.
+//! consumes non-local declaration ownership and renders only the final classfile payload. Local
+//! implementation classes retain their separate checked naming provenance.
 
 use crate::fx_hash::{HashMap, HashSet};
 use std::rc::Rc;
 
 use crate::ir::{IrClass, IrFile};
 use crate::jvm::classfile::{ClassWriter, DeclarationPaths, InnerClassSpec, TableOrders};
-use crate::types::{type_name, TypeName};
+use crate::types::{type_name, ClassifierDeclarationName, TypeName};
 
 /// The complete ordered candidate list for one IR file. Every class writer receives the same list;
 /// `ClassWriter::finish` retains only entries referenced by that classfile.
@@ -18,6 +18,8 @@ pub(super) struct InnerClasses {
     paths: DeclarationPaths,
     /// The class each class declared in executable code is declared in, by internal name.
     declaring: Rc<HashMap<String, String>>,
+    /// Source declaration visitation order, independent of emitted constructor evaluation.
+    source_orders: Rc<HashMap<String, u32>>,
     /// Specialized lambdas regenerated at a call site. kotlinc's inliner copies the
     /// `new` into the caller without giving that caller an `InnerClasses` row.
     call_sites: Rc<HashSet<String>>,
@@ -145,29 +147,6 @@ impl InnerClasses {
                 continue;
             }
 
-            // Generated local names and source identifiers containing `$` make textual boundaries
-            // ambiguous. Compare every already-interned candidate, deepest first, with the exact
-            // declaration set; do not reinterpret any of them as a semantic lexical-owner edge.
-            let declared_owner = identity
-                .existing_nested_owners()
-                .into_iter()
-                .find(|owner| declared.contains_key(owner));
-            let (outer, name) = match declared_owner {
-                Some(owner) => (
-                    owner.render(),
-                    identity
-                        .nested_segment_within(owner)
-                        .expect("a resolved nested owner must prefix its nested segment")
-                        .to_string(),
-                ),
-                None => {
-                    let Some(parts) = identity.jvm_nested_parts() else {
-                        continue; // top-level class
-                    };
-                    parts
-                }
-            };
-
             // A source local class is not a member of the textual classifier prefix in its generated
             // JVM name, and kotlinc lists it under its source name from the checked naming
             // provenance. kotlinc names an outer class exactly when the declaration's parent is a
@@ -178,6 +157,38 @@ impl InnerClasses {
             // declaration, and so is a lambda realized as a class.
             let coroutine = is_coroutine_state_machine(class) || class.lambda.is_some();
             let local = class.is_local_class && class.enclosure.is_some();
+            let (outer, name) = match &class.declaration_name {
+                Some(ClassifierDeclarationName::TopLevel { .. }) => continue,
+                Some(ClassifierDeclarationName::Nested { owner, name }) => {
+                    (owner.render(), name.to_string())
+                }
+                // Body-local classes and coroutine/lambda implementations retain their existing
+                // checked local naming provenance, independently of non-local declaration facts.
+                None if class.is_local_class || coroutine => {
+                    let declared_owner = identity
+                        .existing_nested_owners()
+                        .into_iter()
+                        .find(|owner| declared.contains_key(owner));
+                    match declared_owner {
+                        Some(owner) => (
+                            owner.render(),
+                            identity
+                                .nested_segment_within(owner)
+                                .expect("a resolved local owner must prefix its nested segment")
+                                .to_string(),
+                        ),
+                        None => {
+                            let Some(parts) = identity.jvm_nested_parts() else {
+                                continue;
+                            };
+                            parts
+                        }
+                    }
+                }
+                // No declaration evidence means no member row. A generated spelling is not a
+                // declaration of a lexical owner.
+                None => continue,
+            };
             let name = if local && !coroutine {
                 source_name(
                     ir,
@@ -192,9 +203,14 @@ impl InnerClasses {
                 outer: (!coroutine && !local).then_some(outer),
                 name: (!coroutine).then_some(name),
                 access: if coroutine {
+                    let class_id =
+                        u32::try_from(class_id).expect("too many classes for a class id");
                     let public = u16::from(
                         (suspend_lambda && suspend_lambda_is_public(ir, class))
-                            || published_inline_lambda(ir, class),
+                            || published_inline_lambda(ir, class)
+                            || crate::jvm::suspend_inline_functions::constructed_by_method_copy(
+                                ir, class_id,
+                            ),
                     );
                     0x0008 | 0x0010 | public
                 } else {
@@ -224,10 +240,20 @@ impl InnerClasses {
                 Some((class.fq_name(), owner))
             })
             .collect();
+        let source_orders = ir
+            .classes
+            .iter()
+            .enumerate()
+            .filter_map(|(class_id, class)| {
+                let order = ir.class_source_order(class_id.try_into().expect("packed class id"))?;
+                Some((class.fq_name(), order))
+            })
+            .collect();
         Self {
             specs: specs.into_iter().map(Rc::new).collect(),
             paths: Rc::new(paths),
             declaring: Rc::new(declaring),
+            source_orders: Rc::new(source_orders),
             call_sites: Rc::new(call_site_regenerated_lambdas(ir)),
             copied_inline_holders: Rc::new(copied_inline_capture_holders(ir, facade, lambda_modes)),
             independent_capture_holders: Rc::new(independent_capture_holders(
@@ -244,6 +270,7 @@ impl InnerClasses {
         writer.add_inner_classes(&self.specs);
         writer.set_declaration_paths(self.paths.clone());
         writer.set_declaring_classes(self.declaring.clone());
+        writer.set_declaration_source_orders(self.source_orders.clone());
         writer.set_call_site_classes(self.call_sites.clone());
         writer.set_copied_inline_capture_holders(
             self.copied_inline_holders.clone(),
@@ -707,6 +734,37 @@ mod tests {
     use crate::jvm::ir_emit::{LambdaMode, LambdaModes};
     use crate::types::Ty;
 
+    #[test]
+    fn nested_anonymous_classes_publish_declaration_visitation_order() {
+        let ir = crate::fir_lower::tests::lower_single_source_with_jvm_stdlib(
+            include_str!("../../tests/box_regressions/nestedAnonymousConstructionOrder.kt"),
+            "NestedAnonymousConstructionOrder",
+        );
+        let order = |base| {
+            let classes = ir
+                .classes
+                .iter()
+                .enumerate()
+                .filter(|(_, class)| {
+                    class.is_local_class
+                        && class
+                            .supertypes
+                            .iter()
+                            .any(|ty| ty.kotlin_class_internal() == Some(type_name(base)))
+                })
+                .collect::<Vec<_>>();
+            let [(class, _)] = classes.as_slice() else {
+                panic!("one anonymous subclass of {base}")
+            };
+            ir.class_source_order((*class).try_into().expect("packed class id"))
+                .expect("source declaration order")
+        };
+        assert!(
+            order("Container") < order("Leaf"),
+            "containing declaration is visited before its constructor operands"
+        );
+    }
+
     fn function(name: &str) -> IrFunction {
         IrFunction {
             name: name.to_string(),
@@ -895,7 +953,12 @@ mod tests {
         let mut companion_class = IrClass::synthetic(companion);
         companion_class.is_companion = true;
         ir.add_class(companion_class);
-        ir.add_class(IrClass::synthetic(nested_with_dollars));
+        let mut nested_class = IrClass::synthetic(nested_with_dollars);
+        nested_class.declaration_name = Some(ClassifierDeclarationName::Nested {
+            owner: outer,
+            name: "Nested$With$Dollars".into(),
+        });
+        ir.add_class(nested_class);
 
         let prepared = InnerClasses::new(
             &ir,
@@ -926,6 +989,44 @@ mod tests {
                 },
             ]
             .map(Rc::new)
+        );
+    }
+
+    #[test]
+    fn declaration_names_preserve_literal_dollars_without_inventing_member_rows() {
+        use crate::types::type_name_child;
+        let mut ir = IrFile::default();
+        let package = type_name("table/ownership");
+        let top = type_name_child(package, "Outer$Part");
+        for name in ["Outer", "Outer$Part", "Outer$Part$Leaf"] {
+            let mut class = IrClass::synthetic(type_name_child(package, name));
+            class.declaration_name = Some(ClassifierDeclarationName::TopLevel {
+                package,
+                name: name.into(),
+            });
+            ir.add_class(class);
+        }
+        let nested = top.nested_child("Leaf$Name");
+        let mut class = IrClass::synthetic(nested);
+        class.declaration_name = Some(ClassifierDeclarationName::Nested {
+            owner: top,
+            name: "Leaf$Name".into(),
+        });
+        ir.add_class(class);
+        let prepared = InnerClasses::new(
+            &ir,
+            &crate::jvm::override_results::OverrideResults::default(),
+            "table/ownership/FacadeKt",
+            crate::jvm::ir_emit::LambdaModes::default(),
+        );
+        assert_eq!(
+            prepared.specs,
+            [Rc::new(InnerClassSpec {
+                inner: nested.render(),
+                outer: Some(top.render()),
+                name: Some("Leaf$Name".into()),
+                access: 0x0019,
+            })]
         );
     }
 

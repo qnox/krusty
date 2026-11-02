@@ -142,10 +142,7 @@ pub(in super::super) fn closure_header(
                 capture.symbol.clone(),
                 ParameterValue {
                     index: index as u32,
-                    stable_read: !matches!(
-                        capture.identity.role,
-                        IrParameterRole::CapturedReceiver { .. }
-                    ),
+                    stable_read: true,
                     erased: None,
                 },
             )

@@ -38,6 +38,17 @@ pub(super) fn declaration_result_call(ir: &IrFile, mut expression: ExprId) -> Op
     }
 }
 
+/// Whether emission evaluates `call` as that call. A statically inlined call and a compiled inline
+/// module call keep their expression ID while emission replaces them with the inlined body, which
+/// owns its own result value.
+pub(super) fn emits_as_call(ir: &IrFile, call: ExprId) -> bool {
+    !matches!(
+        ir.exprs.get(call as usize),
+        Some(IrExpr::Call { callee, .. })
+            if matches!(&**callee, Callee::Static { inline, .. } if inline.can_inline())
+    ) && ir.compiled_inline_call(call).is_none()
+}
+
 fn realized_call_result(ir: &IrFile, call: ExprId) -> Option<Ty> {
     let expression = ir.exprs.get(call as usize)?;
     let IrExpr::Call { callee, .. } = expression else {
@@ -131,7 +142,94 @@ pub(super) fn realize_call_result_boundaries(ir: &mut IrFile) {
     }
     fold_nullable_widenings(ir, &boundaries);
     fold_asserted_number_unbox(ir);
+    test_erased_result_directly(ir);
     check_enhanced_result_before_unbox(ir);
+}
+
+/// `m["k"] as? String`, `m["k"] is String` and `m["k"] as String`, where the call leaves an erased
+/// reference slot, test or cast that slot directly. kotlinc evaluates a type operator's operand,
+/// and the temporary of a safe cast, as a plain reference, so the substituted result's own
+/// `checkcast` (`CharSequence` for a `Map<String, CharSequence>`) is never written there. A named
+/// binding (`when (val v = m["k"])`) still converts to its declared type, and so does the operand
+/// of a cast whose substituted result is non-null or an array.
+fn test_erased_result_directly(ir: &mut IrFile) {
+    let folds = (0..ir.exprs.len())
+        .filter_map(|index| {
+            let (coercion, cast) = match &ir.exprs[index] {
+                IrExpr::TypeOp {
+                    op: IrTypeOp::InstanceOf | IrTypeOp::NotInstanceOf | IrTypeOp::SafeCast,
+                    arg,
+                    type_operand,
+                } if type_operand.is_reference() => (*arg, false),
+                IrExpr::TypeOp {
+                    op: IrTypeOp::Cast | IrTypeOp::CastNonNull,
+                    arg,
+                    type_operand,
+                } if type_operand.is_reference() => (*arg, true),
+                IrExpr::Variable {
+                    init: Some(init), ..
+                } if ir.safe_cast_temporaries.contains(&(index as ExprId)) => (*init, false),
+                _ => return None,
+            };
+            let (produced, slot) = erased_reference_operand(ir, coercion)?;
+            // A cast still reads its operand's semantic type: whether it needs a null check, and
+            // whether an array cast is only a covariant view. Only a nullable, non-array result
+            // leaves both decisions unchanged when the cast reads the erased slot.
+            if cast {
+                let IrExpr::TypeOp {
+                    type_operand: substituted,
+                    ..
+                } = &ir.exprs[coercion as usize]
+                else {
+                    return None;
+                };
+                if !substituted.is_nullable() || substituted.non_null().is_reference_array() {
+                    return None;
+                }
+            }
+            Some((index, produced, coercion, slot))
+        })
+        .collect::<Vec<_>>();
+    for (index, produced, coercion, slot) in folds {
+        match &mut ir.exprs[index] {
+            IrExpr::TypeOp { arg, .. } => *arg = produced,
+            IrExpr::Variable { init, ty, .. } => {
+                *init = Some(produced);
+                *ty = slot;
+            }
+            _ => continue,
+        }
+        ir.declaration_result_coercions.remove(&coercion);
+        ir.jvm_external_result_coercions.remove(&coercion);
+    }
+}
+
+/// The call result a reference coercion converts and the erased reference slot that call leaves.
+/// Only a coercion that owns a call boundary qualifies: one common lowering marked between a
+/// declaration's result and its substitution, or the one dependency realization placed over a
+/// provider's physical result. Its operand must still be the retained call itself, not an expanded
+/// inline region or another transformed value; any other coercion converts an already realized
+/// semantic result and keeps its conversion.
+fn erased_reference_operand(ir: &IrFile, coercion: ExprId) -> Option<(ExprId, Ty)> {
+    if !ir.declaration_result_coercions.contains(&coercion)
+        && !ir.jvm_external_result_coercions.contains(&coercion)
+    {
+        return None;
+    }
+    let IrExpr::TypeOp {
+        op: IrTypeOp::ImplicitCoercion,
+        arg: produced,
+        type_operand: substituted,
+    } = ir.exprs.get(coercion as usize)?
+    else {
+        return None;
+    };
+    if declaration_result_call(ir, *produced) != Some(*produced) || !emits_as_call(ir, *produced) {
+        return None;
+    }
+    let slot = *ir.physical_types.get(produced)?;
+    let physical = crate::jvm::physical_type::ir_ty_to_jvm(&slot);
+    (substituted.is_reference() && physical.is_reference()).then_some((*produced, slot))
 }
 
 /// An erased reference slot read as a primitive and then widened to that primitive's nullable type
@@ -350,5 +448,103 @@ mod tests {
         assert!(
             matches!(ir.expr(assertion), IrExpr::NotNullAssert { operand, .. } if *operand == region)
         );
+    }
+
+    /// `produced() is String` over a coercion to `CharSequence`, marked or not.
+    fn instance_test(
+        marked: bool,
+        operand: impl FnOnce(&mut IrFile, ExprId) -> ExprId,
+    ) -> (IrFile, ExprId, ExprId, ExprId) {
+        let (mut ir, call) = producer();
+        let produced = operand(&mut ir, call);
+        let coercion = ir.add_expr(IrExpr::TypeOp {
+            op: IrTypeOp::ImplicitCoercion,
+            arg: produced,
+            type_operand: Ty::obj("kotlin/CharSequence"),
+        });
+        if marked {
+            ir.declaration_result_coercions.insert(coercion);
+        }
+        let test = ir.add_expr(IrExpr::TypeOp {
+            op: IrTypeOp::InstanceOf,
+            arg: coercion,
+            type_operand: Ty::String,
+        });
+        realize_call_result_boundaries(&mut ir);
+        (ir, call, coercion, test)
+    }
+
+    fn tested_operand(ir: &IrFile, test: ExprId) -> ExprId {
+        let IrExpr::TypeOp { arg, .. } = ir.expr(test) else {
+            panic!("the instance test survives");
+        };
+        *arg
+    }
+
+    #[test]
+    fn a_marked_checked_result_is_tested_in_its_erased_slot() {
+        let (ir, call, _, test) = instance_test(true, |_, call| call);
+        assert_eq!(tested_operand(&ir, test), call);
+    }
+
+    #[test]
+    fn an_unmarked_coercion_keeps_its_semantic_conversion() {
+        let (mut ir, call) = producer();
+        ir.physical_types.insert(call, Ty::obj("kotlin/Any"));
+        let coercion = ir.add_expr(IrExpr::TypeOp {
+            op: IrTypeOp::ImplicitCoercion,
+            arg: call,
+            type_operand: Ty::obj("kotlin/CharSequence"),
+        });
+        let test = ir.add_expr(IrExpr::TypeOp {
+            op: IrTypeOp::InstanceOf,
+            arg: coercion,
+            type_operand: Ty::String,
+        });
+        realize_call_result_boundaries(&mut ir);
+        assert_eq!(tested_operand(&ir, test), coercion);
+    }
+
+    #[test]
+    fn a_replaced_inline_result_keeps_its_semantic_conversion() {
+        let (ir, _, coercion, test) = instance_test(true, |ir, call| {
+            let region = ir.add_expr(IrExpr::Block {
+                stmts: Vec::new(),
+                value: Some(call),
+            });
+            ir.inline_regions.insert(region);
+            ir.physical_types.insert(region, Ty::obj("kotlin/Any"));
+            region
+        });
+        assert_eq!(tested_operand(&ir, test), coercion);
+    }
+
+    #[test]
+    fn a_transformed_result_keeps_its_semantic_conversion() {
+        let (ir, _, coercion, test) = instance_test(true, |ir, call| {
+            let asserted = ir.add_expr(IrExpr::NotNullAssert {
+                operand: call,
+                check: NullCheck::Source,
+            });
+            ir.physical_types.insert(asserted, Ty::obj("kotlin/Any"));
+            asserted
+        });
+        assert_eq!(tested_operand(&ir, test), coercion);
+    }
+
+    #[test]
+    fn a_compiled_inline_call_keeps_its_semantic_conversion() {
+        let (ir, _, coercion, test) = instance_test(true, |ir, call| {
+            let IrExpr::Call { callee, .. } = ir.expr(call) else {
+                panic!("the producer is a call");
+            };
+            let Callee::Local(function) = **callee else {
+                panic!("the producer calls a local declaration");
+            };
+            ir.set_same_module_inlining(crate::ir::SameModuleInlining::CompiledBodies);
+            ir.record_compiled_inline_call(call, function);
+            call
+        });
+        assert_eq!(tested_operand(&ir, test), coercion);
     }
 }

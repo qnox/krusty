@@ -43,16 +43,9 @@ impl Emitter<'_> {
                 .unwrap_or("Ljava/lang/Object;");
             unbox_prim_from_descriptor(self.cw, code, component, primitive);
         }
-        // `Array<UIntArray>` holds the box. The Kotlin value of that element is the carrier, so a
-        // following index can load a primitive from it.
-        if reference_array {
-            if let Some(owner) = crate::jvm::names::boxed_primitive_array_element(element) {
-                let owner = crate::jvm::names::classfile_internal_name_of(owner);
-                let descriptor = format!("(){}", type_descriptor(element));
-                let method = self.cw.methodref(owner, "unbox-impl", &descriptor);
-                code.invokevirtual(method, 0, 1);
-            }
-        }
+        // `Array<UIntArray>` holds the box, and the load leaves it boxed. The value-class pass owns
+        // the boundary where a consumer needs the carrier (the class's `get-pVg5ArA` receiver)
+        // and leaves the box where a reference is wanted (`val a: Any = back[1]`).
     }
 
     pub(super) fn emit_array_set(
