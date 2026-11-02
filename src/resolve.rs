@@ -27880,7 +27880,7 @@ fun box(): String {
     }
 
     #[test]
-    fn same_contravariant_classifier_join_uses_the_bottom_argument() {
+    fn same_contravariant_classifier_join_meets_at_the_argument_intersection() {
         let mut diagnostics = DiagSink::new();
         let file = parse_file("class A\nclass B\ninterface Contra<in T>", &mut diagnostics);
         let files = vec![file];
@@ -27900,7 +27900,7 @@ fun box(): String {
                 Ty::obj_args("Contra", &[Ty::obj("B")]),
                 Span::new(0, 0),
             ),
-            Ty::obj_args("Contra", &[Ty::Nothing])
+            Ty::obj_args("Contra", &[Ty::intersection(&[Ty::obj("A"), Ty::obj("B")])])
         );
         assert_no_diags(&probe_diagnostics);
     }

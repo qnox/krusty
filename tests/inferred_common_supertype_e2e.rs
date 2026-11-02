@@ -84,3 +84,69 @@ fun box(): String {
 fn a_contravariant_argument_joins_at_the_meet_of_the_arguments() {
     common::expect_box_same_as_kotlinc(CONTRAVARIANT_ARGUMENT_MEET, "InferredContravariantMeet");
 }
+
+/// Unrelated contravariant arguments meet at their intersection, as kotlinc's common supertype
+/// intersects them: `Sink<A>` and `Sink<B>` join at `Sink<A & B>`, which accepts an `AB` that is
+/// both. An empty meet at `Nothing` would reject the call.
+const CONTRAVARIANT_ARGUMENT_INTERSECTION: &str = r#"interface Sink<in T> { fun put(t: T): String }
+interface A { fun a(): String = "O" }
+interface B { fun b(): String = "K" }
+class AB : A, B
+class SinkA : Sink<A> { override fun put(t: A): String = t.a() }
+class SinkB : Sink<B> { override fun put(t: B): String = t.b() }
+
+fun <T> pick(first: T, second: T, takeFirst: Boolean): T = if (takeFirst) first else second
+
+fun box(): String {
+    val first = pick(SinkA(), SinkB(), takeFirst = true)
+    val second = pick(SinkA(), SinkB(), takeFirst = false)
+    return first.put(AB()) + second.put(AB())
+}
+"#;
+
+#[test]
+fn unrelated_contravariant_arguments_meet_at_their_intersection() {
+    common::expect_box_same_as_kotlinc(
+        CONTRAVARIANT_ARGUMENT_INTERSECTION,
+        "InferredContravariantIntersection",
+    );
+}
+
+/// A reified argument cannot carry an intersection, so it is approximated by the position the
+/// intersection occupies: a contravariant one reifies as `Nothing`, a covariant one as the common
+/// supertype, and an invariant one as an `out` projection of it. kotlinc must agree on every
+/// rendered type for the fixture to return `OK`.
+const REIFIED_INTERSECTION_ARGUMENTS: &str = r#"import kotlin.reflect.typeOf
+class In<in T>
+class Out<out T>
+class Inv<T>
+interface A
+interface B
+
+@OptIn(kotlin.ExperimentalStdlibApi::class)
+inline fun <reified K> reify(first: K, second: K): String =
+    typeOf<K>().toString().substringBefore(" (") + " " +
+        Array<K>(1) { first }.javaClass.componentType.simpleName
+
+fun box(): String {
+    val rendered = listOf(
+        reify(In<A>(), In<B>()),
+        reify(Out<A>(), Out<B>()),
+        reify(Inv<A>(), Inv<B>()),
+    )
+    val expected = listOf(
+        "In<kotlin.Nothing> In",
+        "Out<java.lang.Object> Out",
+        "Inv<out java.lang.Object> Inv",
+    )
+    return if (rendered == expected) "OK" else rendered.toString()
+}
+"#;
+
+#[test]
+fn a_reified_intersection_argument_is_approximated_by_its_position() {
+    common::expect_box_same_as_kotlinc(
+        REIFIED_INTERSECTION_ARGUMENTS,
+        "ReifiedIntersectionArguments",
+    );
+}

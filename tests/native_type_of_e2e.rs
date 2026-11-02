@@ -119,6 +119,24 @@ fn a_reified_intersection_describes_its_common_supertype() {
 }
 
 #[test]
+fn a_reified_contravariant_intersection_argument_describes_nothing() {
+    // `In<A>` and `In<B>` join at `In<A & B>`, which kotlinc reifies as `In<Nothing>`.
+    both(
+        "import kotlin.reflect.KType\n\
+         import kotlin.reflect.typeOf\n\
+         class In<in T>\n\
+         interface A\n\
+         interface B\n\
+         inline fun <reified K> select(x: K, y: K): KType = typeOf<K>()\n\
+         fun box(): String {\n\
+         \x20   val described = select(In<A>(), In<B>())\n\
+         \x20   return if (described == typeOf<In<Nothing>>()) \"OK\" else \"fail: $described\"\n\
+         }\n",
+        "TypeOfContravariantIntersection",
+    );
+}
+
+#[test]
 fn files_naming_one_type_share_its_object_and_its_class() {
     // Portable: the files' types are equal, hash alike and name one classifier.
     let declarations = (

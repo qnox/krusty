@@ -2121,6 +2121,18 @@ impl ResolvedModuleIndex {
         )
     }
 
+    /// Declaration-site variance of a recorded classifier's type argument at `index`, counting
+    /// its own parameters first and then the ones it captures, as [`Ty::type_args`] does.
+    pub fn recorded_type_argument_variance(
+        &self,
+        classifier: TypeName,
+        index: usize,
+    ) -> Option<crate::types::TypeVariance> {
+        let declaration = self.classifier_declaration(classifier)?;
+        let parameter = *self.classifier_type_arguments(declaration)?.get(index)?;
+        Some(self.type_parameter_header(parameter)?.flags.variance())
+    }
+
     pub(crate) fn publish_classifier_hierarchy(
         &mut self,
         declaration: DeclarationId,

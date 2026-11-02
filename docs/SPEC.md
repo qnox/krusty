@@ -13891,8 +13891,9 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   bounds and branch results alike: equal arguments stay; arguments that differ only by one
   top-level platform wrapper keep the platform form; any star makes a star of the parameter's
   bound; readable arguments join covariantly (out-projected unless the parameter is `out`);
-  writable arguments meet at the one that is a subtype of the others, else `Nothing` (`*` when a
-  built-in scalar is involved, `Comparable<UInt>` and `Comparable<ULong>` give `Comparable<*>`);
+  writable arguments meet at the intersection of the most specific ones (`In<A>` and `In<B>` give
+  `In<A & B>`; `*` when a built-in scalar is involved, `Comparable<UInt>` and `Comparable<ULong>`
+  give `Comparable<*>`);
   mixed in and out projections give the out-projected bound. Lower-bound joins used to turn every
   differing contravariant argument into `*`, so `pick(SinkA(), SinkAB())` with `Sink<in T>`,
   `SinkA : Sink<A>`, `SinkAB : Sink<AB>`, `AB : A` became a `Sink<*>` that rejected `put(AB())`.
@@ -13912,7 +13913,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   Inference computes that supertype when it commits the call, over every constituent's declared
   hierarchy, a dependency's classifiers included, so the cross-module corpus case reifies its
   library's `A & B` as the single-module one does. It is the runtime classifier only: the
-  semantic argument and its bounds stay the checked intersection.
+  semantic argument and its bounds stay the checked intersection. An intersection nested in a
+  reified argument is approximated by the position it occupies: a covariant argument takes the
+  common supertype, an invariant one an `out` projection of it, and a contravariant one `Nothing`
+  (`select(In<A>(), In<B>())` infers `In<A & B>` and reifies `In<Nothing>`; `Out<Any>` and
+  `Inv<out Any>` for the other variances), as kotlinc's `typeOf` prints. A missing hierarchy or
+  declaration variance keeps the checked argument.
+  Corpus: `reified/reifiedTypeArgumentWithIntersectionTypeAsTypeArgument.kt`. Test:
+  `tests/inferred_common_supertype_e2e.rs`.
   Corpus: `reflection/typeOf/intersectionType.kt`, `reified/reifiedIntersectionTypeArgument.kt`
   and `reified/reifiedIntersectionTypeArgumentCrossModule.kt`
   (`-ProhibitIntersectionReifiedTypeParameter`).

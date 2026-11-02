@@ -11,9 +11,10 @@
 //!   the joined argument a star.
 //! - Readable (out or invariant) arguments join covariantly: the joined argument is the arguments'
 //!   common supertype, out-projected unless the parameter is declared `out`.
-//! - Writable (in) arguments meet: the argument that is a subtype of all the others, else the empty
-//!   intersection `Nothing`. A built-in scalar shares no denotable intersection with another
-//!   argument, so `Comparable<UInt>` and `Comparable<ULong>` join at `Comparable<*>`.
+//! - Writable (in) arguments meet at the intersection of the most specific ones: `In<A>` and
+//!   `In<AB>`, `AB : A`, give `In<AB>`; unrelated `In<A>` and `In<B>` give `In<A & B>`. A built-in
+//!   scalar shares no denotable intersection with another argument, so `Comparable<UInt>` and
+//!   `Comparable<ULong>` join at `Comparable<*>`.
 //! - Mixed in and out projections join at the star.
 //!
 //! The element join is the caller's: it is the same common-supertype operation one level down,
@@ -157,19 +158,34 @@ fn join_arguments(
         });
     }
     if declaration_variance != TypeVariance::Out && writable {
+        // An argument with a distinct subtype among the others adds nothing to the meet.
         let context = crate::assignable::TyCtx::new();
-        let meet = inners
-            .iter()
-            .copied()
-            .find(|candidate| {
-                inners.iter().all(|other| {
-                    crate::assignable::is_assignable(&context, oracle, *candidate, *other)
-                })
-            })
-            .unwrap_or(Ty::Nothing);
-        if meet == Ty::Nothing && inners.iter().copied().any(builtin_scalar) {
-            return Ok(Ty::star_projection(star_bound(element_join)?));
+        let subtype =
+            |sub: Ty, sup: Ty| crate::assignable::is_assignable(&context, oracle, sub, sup);
+        let mut most_specific = Vec::<Ty>::new();
+        for (index, candidate) in inners.iter().copied().enumerate() {
+            let refined = inners
+                .iter()
+                .copied()
+                .enumerate()
+                .any(|(other_index, other)| {
+                    other_index != index
+                        && subtype(other, candidate)
+                        && (!subtype(candidate, other) || other_index < index)
+                });
+            if !refined && !most_specific.contains(&candidate) {
+                most_specific.push(candidate);
+            }
         }
+        let meet = match most_specific.as_slice() {
+            [single] => *single,
+            parts => {
+                if parts.iter().copied().any(builtin_scalar) {
+                    return Ok(Ty::star_projection(star_bound(element_join)?));
+                }
+                Ty::intersection(parts)
+            }
+        };
         return Ok(if declaration_variance == TypeVariance::In {
             meet
         } else {
@@ -280,7 +296,7 @@ mod tests {
     }
 
     #[test]
-    fn unrelated_contravariant_arguments_meet_at_nothing_and_scalars_at_the_star() {
+    fn unrelated_contravariant_arguments_meet_at_their_intersection_and_scalars_at_the_star() {
         let bound = Ty::nullable(Ty::obj("kotlin/Any"));
         assert_eq!(
             join(
@@ -288,7 +304,7 @@ mod tests {
                 &[Ty::obj("sample/A"), Ty::obj("sample/B")],
                 bound
             ),
-            Ty::Nothing
+            Ty::intersection(&[Ty::obj("sample/A"), Ty::obj("sample/B")])
         );
         assert_eq!(
             join(TypeVariance::In, &[Ty::Int, Ty::obj("sample/B")], bound),

@@ -511,14 +511,24 @@ impl Checker<'_> {
         } else {
             checked
         };
-        crate::symbol_resolver::reified_runtime_type(checked, &|name| {
-            Some(
-                crate::assignable::TypeOracle::direct_supertypes(self, Ty::obj_name(name))
-                    .into_iter()
-                    .filter_map(|supertype| supertype.obj_internal())
-                    .collect(),
-            )
-        })
+        crate::symbol_resolver::reified_runtime_type(
+            checked,
+            &crate::symbol_resolver::ReifiedDeclarations {
+                direct_supertypes: &|name| {
+                    Some(
+                        crate::assignable::TypeOracle::direct_supertypes(self, Ty::obj_name(name))
+                            .into_iter()
+                            .filter_map(|supertype| supertype.obj_internal())
+                            .collect(),
+                    )
+                },
+                variance_at: &|name, index| {
+                    Some(crate::assignable::TypeOracle::type_param_variance(
+                        self, name, index,
+                    ))
+                },
+            },
+        )
     }
 
     fn reified_parameters(

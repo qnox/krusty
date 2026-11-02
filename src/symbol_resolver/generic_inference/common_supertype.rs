@@ -13,7 +13,7 @@ use super::super::hierarchy_projection::{direct_supertypes, intersection_compone
 use super::super::SourceOracle;
 use super::classifier_application_join::{join_classifier_applications, ClassifierJoinFailure};
 use crate::symbol_source::SymbolSource;
-use crate::types::{Ty, TyKind, TypeName};
+use crate::types::{Ty, TyKind, TypeName, TypeVariance};
 
 pub(crate) fn common_super_types(source: &dyn SymbolSource, bounds: &[Ty]) -> Ty {
     CommonSupertypeSolver::new(source).common(bounds)
@@ -279,27 +279,105 @@ fn same_bound_set(left: &[Ty], right: &[Ty]) -> bool {
     left.len() == right.len() && left.iter().all(|bound| right.contains(bound))
 }
 
-/// The classifier a reified operation records. An intersection is not a runtime class. When every
-/// component is a resolved classifier, the operation uses their single common supertype (`Any`
-/// when they share none, that shared classifier when they do). An unresolved component keeps the
-/// checked intersection: a missing hierarchy is not evidence that the components meet only at `Any`.
-pub(crate) fn reified_runtime_type(
-    ty: Ty,
-    direct_supertypes: &dyn Fn(TypeName) -> Option<Vec<TypeName>>,
-) -> Ty {
+/// The declarations a reified type argument is approximated against: each classifier's direct
+/// supertypes and the declaration-site variance of each of its type parameters. `None` means the
+/// declaration is missing, which is not evidence of any hierarchy or variance.
+pub(crate) struct ReifiedDeclarations<'a> {
+    pub(crate) direct_supertypes: &'a dyn Fn(TypeName) -> Option<Vec<TypeName>>,
+    pub(crate) variance_at: &'a dyn Fn(TypeName, usize) -> Option<TypeVariance>,
+}
+
+/// The type a reified operation records. An intersection is not a runtime type, so kotlinc
+/// approximates every intersection in the argument by the position it occupies:
+///
+/// - Where a supertype is wanted (the top level, a covariant argument, an `out` projection), an
+///   intersection whose components are all resolved classifiers becomes their single common
+///   supertype: `Any` when they share none, that shared classifier when they do. An invariant
+///   argument that changed becomes an `out` projection of it (`Inv<A & B>` reifies as
+///   `Inv<out Any>`).
+/// - Where a subtype is wanted (a contravariant argument, an `in` projection), an intersection
+///   becomes `Nothing` (`In<A & B>` reifies as `In<Nothing>`).
+///
+/// An unresolved component or an undeclared variance keeps the checked type: a missing declaration
+/// is not evidence that the components meet only at `Any`.
+pub(crate) fn reified_runtime_type(ty: Ty, declarations: &ReifiedDeclarations<'_>) -> Ty {
     let nullable = ty.is_nullable();
     let inner = ty.non_null().projection_read_ty().non_null();
-    let TyKind::Intersection(parts) = inner.kind() else {
-        return ty;
-    };
-    let Some(approximated) = approximate_reified_intersection(parts.as_slice(), direct_supertypes)
-    else {
-        return ty;
-    };
-    if nullable {
+    if !matches!(inner.kind(), TyKind::Intersection(_)) {
+        return reified_approximation(ty, true, declarations);
+    }
+    let approximated = reified_approximation(inner, true, declarations);
+    if approximated == inner {
+        ty
+    } else if nullable {
         Ty::nullable(approximated)
     } else {
         approximated
+    }
+}
+
+fn reified_approximation(ty: Ty, to_super: bool, declarations: &ReifiedDeclarations<'_>) -> Ty {
+    match ty.kind() {
+        TyKind::Nullable(inner) => {
+            let approximated = reified_approximation(inner, to_super, declarations);
+            if approximated == inner {
+                ty
+            } else {
+                Ty::nullable(approximated)
+            }
+        }
+        TyKind::Intersection(parts) if to_super => {
+            approximate_reified_intersection(parts.as_slice(), declarations.direct_supertypes)
+                .unwrap_or(ty)
+        }
+        TyKind::Intersection(_) => Ty::Nothing,
+        TyKind::Obj(classifier, arguments) if !arguments.is_empty() => {
+            let approximated = arguments
+                .as_slice()
+                .iter()
+                .enumerate()
+                .map(|(index, argument)| {
+                    reified_argument(classifier, index, *argument, to_super, declarations)
+                })
+                .collect::<Vec<_>>();
+            if approximated.as_slice() == arguments.as_slice() {
+                ty
+            } else {
+                Ty::obj_args_name(classifier, &approximated)
+            }
+        }
+        _ => ty,
+    }
+}
+
+fn reified_argument(
+    classifier: TypeName,
+    index: usize,
+    argument: Ty,
+    to_super: bool,
+    declarations: &ReifiedDeclarations<'_>,
+) -> Ty {
+    match argument.kind() {
+        TyKind::OutProjection(inner) => {
+            Ty::out_projection(reified_approximation(inner, to_super, declarations))
+        }
+        TyKind::InProjection(inner) => {
+            Ty::in_projection(reified_approximation(inner, !to_super, declarations))
+        }
+        TyKind::StarProjection(_) | TyKind::RawProjection(_) => argument,
+        _ => match (declarations.variance_at)(classifier, index) {
+            Some(TypeVariance::Out) => reified_approximation(argument, to_super, declarations),
+            Some(TypeVariance::In) => reified_approximation(argument, !to_super, declarations),
+            Some(TypeVariance::Invariant) if to_super => {
+                let approximated = reified_approximation(argument, true, declarations);
+                if approximated == argument {
+                    argument
+                } else {
+                    Ty::out_projection(approximated)
+                }
+            }
+            Some(TypeVariance::Invariant) | None => argument,
+        },
     }
 }
 
@@ -408,7 +486,7 @@ fn closure(source: &dyn SymbolSource, root: Ty) -> Vec<Ty> {
 
 #[cfg(test)]
 mod tests {
-    use super::{common_super_types, reified_runtime_type};
+    use super::{common_super_types, reified_runtime_type, ReifiedDeclarations};
     use crate::libraries::{Callables, ClassifierDeclaration, LibraryType, ResolvedSymbols};
     use crate::symbol_source::{SymbolNamespace, SymbolSource};
     use crate::types::{type_name, Ty, TypeParameters, TypeVariance};
@@ -539,8 +617,14 @@ mod tests {
                 left,
                 right,
             ),
-            // Contravariant arguments meet: two unrelated classes share only `Nothing`.
-            Ty::obj_args("demo/Inv", &[Ty::Nothing])
+            // Contravariant arguments meet at the intersection of two unrelated classifiers.
+            Ty::obj_args(
+                "demo/Inv",
+                &[Ty::intersection(&[
+                    Ty::obj("demo/Left"),
+                    Ty::obj("demo/Right")
+                ])]
+            )
         );
     }
 
@@ -615,6 +699,29 @@ mod tests {
         assert_eq!(forward, reverse);
     }
 
+    fn reify(
+        ty: Ty,
+        direct_supertypes: &dyn Fn(crate::types::TypeName) -> Option<Vec<crate::types::TypeName>>,
+    ) -> Ty {
+        reified_runtime_type(
+            ty,
+            &ReifiedDeclarations {
+                direct_supertypes,
+                variance_at: &|name, _| {
+                    [
+                        ("demo/In", TypeVariance::In),
+                        ("demo/Out", TypeVariance::Out),
+                        ("demo/Inv", TypeVariance::Invariant),
+                    ]
+                    .into_iter()
+                    .find_map(|(declared, variance)| {
+                        (name == type_name(declared)).then_some(variance)
+                    })
+                },
+            },
+        )
+    }
+
     #[test]
     fn an_intersection_reifies_as_its_single_common_supertype() {
         let x = type_name("demo/X");
@@ -622,16 +729,16 @@ mod tests {
         let z = type_name("demo/Z");
         let intersection = Ty::intersection(&[Ty::obj_name(x), Ty::obj_name(y)]);
         assert_eq!(
-            reified_runtime_type(intersection, &|_| None),
+            reify(intersection, &|_| None),
             intersection,
             "a missing classifier hierarchy must not become Any"
         );
         assert_eq!(
-            reified_runtime_type(intersection, &|_| Some(Vec::new())),
+            reify(intersection, &|_| Some(Vec::new())),
             Ty::obj_name(crate::types::wk::any())
         );
         assert_eq!(
-            reified_runtime_type(intersection, &|name| {
+            reify(intersection, &|name| {
                 if name == x || name == y {
                     Some(vec![z])
                 } else if name == z {
@@ -641,6 +748,37 @@ mod tests {
                 }
             }),
             Ty::obj_name(z)
+        );
+    }
+
+    #[test]
+    fn an_intersection_argument_reifies_by_the_position_it_occupies() {
+        let intersection = Ty::intersection(&[Ty::obj("demo/X"), Ty::obj("demo/Y")]);
+        let unrelated = |_| Some(Vec::new());
+        let any = Ty::obj_name(crate::types::wk::any());
+        assert_eq!(
+            reify(Ty::obj_args("demo/In", &[intersection]), &unrelated),
+            Ty::obj_args("demo/In", &[Ty::Nothing])
+        );
+        assert_eq!(
+            reify(Ty::obj_args("demo/Out", &[intersection]), &unrelated),
+            Ty::obj_args("demo/Out", &[any])
+        );
+        assert_eq!(
+            reify(Ty::obj_args("demo/Inv", &[intersection]), &unrelated),
+            Ty::obj_args("demo/Inv", &[Ty::out_projection(any)])
+        );
+        assert_eq!(
+            reify(
+                Ty::obj_args("demo/Out", &[Ty::obj_args("demo/In", &[intersection])]),
+                &unrelated
+            ),
+            Ty::obj_args("demo/Out", &[Ty::obj_args("demo/In", &[Ty::Nothing])])
+        );
+        assert_eq!(
+            reify(Ty::obj_args("demo/Unknown", &[intersection]), &unrelated),
+            Ty::obj_args("demo/Unknown", &[intersection]),
+            "an undeclared variance is not evidence of a position"
         );
     }
 }
