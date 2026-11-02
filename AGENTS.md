@@ -192,6 +192,10 @@ review explanation tied to an active migration plan.
   the selected getter/setter slot. Matching a function signature alone does not prove membership.
   Positive primitive queries do not preempt function-invocation/builtin priority or replace the
   canonical producer-origin and selected-declaration ambiguity diagnostics.
+- A fact every expression of a kind has, or one a copy of the expression must keep, belongs on
+  the IR node or in its operation's payload, not in a new `IrFile` side table. A table that stays
+  (a backend's own realization fact) is classified in `src/ir/expression_copy.rs`, which does not
+  compile until every `IrFile` field is. See `docs/PHASE_FACTS.md`.
 - Common FIR/IR lowering records debug-local source identity, semantic role, and inline-frame
   provenance. It must not format JVM/kotlinc synthetic local spellings such as `$iv`, `_u24`, or a
   `$lambda$N` implementation name; the JVM debug-info boundary owns those conventions.

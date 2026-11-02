@@ -4003,6 +4003,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   functions, constructors and a `vararg val` constructor property alike. Tests:
   `tests/metadata_array_signature_e2e.rs` (byte-identity vs kotlinc 2.4.10); table in
   `docs/METADATA_NOTES.md`.
+- **A recorded `JvmMethodSignature.desc` is the emitted descriptor.** Package functions, member
+  functions and facade property accessors build the descriptor they record with the same
+  declaration-descriptor rule the method is emitted with, never a second carrier mapping. An
+  `Array` of an unsigned (value-class) element is a reference array of the boxed class, so
+  `fun d(): Array<UInt>` records `()[Lkotlin/UInt;`, a member parameter `Array<UShort>` records
+  `([Lkotlin/UShort;)I`, and a facade `val c: Array<ULong>?` records `()[Lkotlin/ULong;` for its
+  getter, as kotlinc 2.4.21 does. Tests:
+  `a_package_unsigned_array_records_the_boxed_element_descriptor` and
+  `a_members_unsigned_array_records_the_boxed_element_descriptor` in
+  `tests/metadata_array_signature_e2e.rs`.
 - **A backing field's descriptor is recorded only when a reader cannot rebuild it.** kotlinc's
   `requiresSignature` maps the property type's class id through `ClassMapperLite` and writes
   `JvmFieldSignature.desc` exactly when the physical field descriptor differs, which covers a
@@ -23596,7 +23606,11 @@ storage used by an array builder follows the holder. The initializer still sees 
 semantic value map; the new binding becomes visible at the store. Named arguments retain source
 evaluation order and one evaluation. Common IR retains that holder's semantic purpose through
 cloning; an inline expansion that adopts it as its formal receiver records the changed purpose.
-Expanded parameters and captures retain operand-first binding. Deferred inline-return results, folded safe-call chains and
+Expanded parameters and captures retain operand-first binding. Only the temporaries of a call reordered
+by its named arguments are argument-evaluation holders (kotlinc's variables); a holder that only stages
+an operand, such as an inline call's receiver, is stored once it is evaluated, so an inline call in its
+value keeps its frame marker's slot and the holder takes the next one, as kotlinc's `let` receiver does
+(`inline_operand_holder_slots_e2e`). Deferred inline-return results, folded safe-call chains and
 grouped invocation operands retain their existing allocation contracts. Complete class and runtime
 controls in `named_argument_operands_e2e` cover ordinary constructors, effectful arrays and wide values.
 
