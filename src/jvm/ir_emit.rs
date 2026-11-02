@@ -91,8 +91,8 @@ mod field_write;
 mod frame_map;
 mod function_annotations;
 mod function_debug;
-mod main_bridge;
 mod function_invocation;
+mod main_bridge;
 mod static_function_calls;
 use function_invocation::{
     is_high_arity_function, jvm_function_interface, jvm_function_invoke_descriptor,
@@ -1522,7 +1522,10 @@ fn emit_pass(
             &mut cw,
         );
         facade_has_method = true;
-        if let Some(bridge) = main_bridge.as_ref().filter(|bridge| bridge.follows(i as u32)) {
+        if let Some(bridge) = main_bridge
+            .as_ref()
+            .filter(|bridge| bridge.follows(i as u32))
+        {
             bridge.emit(ir, facade, &mut cw);
         }
         // A top-level function (or extension) with parameter defaults gets kotlinc's

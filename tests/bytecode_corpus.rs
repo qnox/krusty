@@ -409,15 +409,17 @@ impl Tally {
                 }
                 Outcome::CompilerPanic(reason) => {
                     tally.panics += 1;
-                    tally.fatal.push(format!("{key}: krusty panicked: {reason}"));
+                    tally
+                        .fatal
+                        .push(format!("{key}: krusty panicked: {reason}"));
                 }
                 Outcome::Excluded(reason) if listed => tally.problems.push(format!(
                     "{key}: listed as not applicable but already excluded ({reason})"
                 )),
                 Outcome::Excluded(_) => tally.excluded += 1,
-                Outcome::Unavailable(reason) => {
-                    tally.fatal.push(format!("{key}: cannot run here: {reason}"))
-                }
+                Outcome::Unavailable(reason) => tally
+                    .fatal
+                    .push(format!("{key}: cannot run here: {reason}")),
             }
         }
         if full {
@@ -463,9 +465,9 @@ impl Tally {
                     "{key}: listed as failing but excluded ({reason}); remove it from the \
                      expected failures"
                 )),
-                Some(Outcome::Fail(_)) if not_applicable.contains(key) => self
-                    .problems
-                    .push(format!("{key}: listed both as failing and as not applicable")),
+                Some(Outcome::Fail(_)) if not_applicable.contains(key) => self.problems.push(
+                    format!("{key}: listed both as failing and as not applicable"),
+                ),
                 // Already fatal: a listed failure never excuses a panic or an unrun case.
                 Some(Outcome::Fail(_) | Outcome::CompilerPanic(_) | Outcome::Unavailable(_)) => {}
                 None if full => self.problems.push(format!(
