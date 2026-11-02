@@ -244,3 +244,43 @@ fun worst() = 3.gen {{ it.toString() }}\n"
         ],
     );
 }
+
+#[test]
+fn a_result_tie_across_different_argument_mappings_is_ambiguous_like_kotlinc() {
+    // The trailing lambda maps to the second parameter of the defaulted or vararg overload and to
+    // the only parameter of the other, so the two are compared through each one's own mapping.
+    // Their function types are incomparable, and the lambda's result does not refine an
+    // unannotated tie: every call is ambiguous, with no other diagnostic in signature position.
+    let source = "fun Int.pick(suffix: String = \"!\", f: (Int) -> String): String = \"d\" + f(this) + suffix\n\
+fun Int.pick(f: (Int) -> Int): String = \"p\" + f(this)\n\
+fun Int.tag(vararg extra: Int, f: (Int) -> String): String = \"v\" + f(this) + extra.size\n\
+fun Int.tag(f: (Int) -> Int): String = \"t\" + f(this)\n\
+fun bad() = 1.pick { it.toString() }\n\
+fun worse() = 2.tag { \"x$it\" }\n";
+    const PICK: [&str; 2] = [
+        "fun Int.pick(suffix: String = ..., f: (Int) -> String): String",
+        "fun Int.pick(f: (Int) -> Int): String",
+    ];
+    const TAG: [&str; 2] = [
+        "fun Int.tag(vararg extra: Int, f: (Int) -> String): String",
+        "fun Int.tag(f: (Int) -> Int): String",
+    ];
+    assert_diagnostics_match_kotlinc(
+        "MappedPick.kt",
+        source,
+        &[
+            &[
+                "5:15: error: overload resolution ambiguity between candidates:",
+                PICK[0],
+                PICK[1],
+            ],
+            &["5:22: error: unresolved reference 'it'."],
+            &[
+                "6:17: error: overload resolution ambiguity between candidates:",
+                TAG[0],
+                TAG[1],
+            ],
+            &["6:26: error: unresolved reference 'it'."],
+        ],
+    );
+}

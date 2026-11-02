@@ -660,7 +660,7 @@ impl ProductionSignatureSemantics<'_> {
             let selected = match resolver.select_receiver_function_with_params_tracking(
                 receiver,
                 spelling,
-                &kinds,
+                crate::symbol_resolver::FamilyArguments::Shared(&kinds),
                 &resolved_type_arguments,
                 &callables,
                 None,
@@ -1455,18 +1455,17 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                     .receiver_member_level_with_context_status(scope, resolver, receiver, spelling)
                     .ok()?;
                 let callables = level.callables;
-                let (selected_arguments, selected_argument_types) =
-                    Self::mapped_call_arguments(callables.functions(), arguments, trailing_lambda)?;
+                let mapped = Self::family_arguments(&callables, arguments, trailing_lambda)?;
                 let projected = self.project_postponed_callables(
                     scope,
                     receiver,
                     callables,
-                    &selected_arguments,
+                    mapped.family(&mapped.kinds),
                 );
                 let selection = resolver.select_receiver_function_with_params_tracking(
                     receiver,
                     spelling,
-                    projected.arguments(),
+                    mapped.family(projected.arguments()),
                     &resolved_type_arguments,
                     projected.callables(),
                     None,
@@ -1489,6 +1488,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                     return None;
                 };
                 let postponed_bindings = projected.selected_bindings(&selected);
+                let selected_argument_types = mapped.selected_types(&selected);
                 selected_constructor.set(selected.constructor.is_some());
                 if selected_constructor.get() {
                     *selected_alias.borrow_mut() = selected.constructor_alias().cloned();
@@ -1870,11 +1870,11 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 spelling,
                 candidates.clone(),
                 match &calls {
-                    Some(calls) => crate::symbol_resolver::TopLevelArguments::PerCandidate {
+                    Some(calls) => crate::symbol_resolver::FamilyArguments::PerCandidate {
                         calls,
                         source: &argument_kinds,
                     },
-                    None => crate::symbol_resolver::TopLevelArguments::Shared(&selected_arguments),
+                    None => crate::symbol_resolver::FamilyArguments::Shared(&selected_arguments),
                 },
                 &resolved_type_arguments,
                 expected.map(crate::fir::ResolvedTy::get),
@@ -3870,19 +3870,18 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 trailing_lambda,
             );
             let callables = crate::libraries::Callables::from_parts(functions, properties);
-            let (argument_kinds, argument_types) =
-                Self::mapped_call_arguments(callables.functions(), arguments, trailing_lambda)?;
+            let mapped = Self::family_arguments(&callables, arguments, trailing_lambda)?;
             let projected = self.project_postponed_callables(
                 scope,
                 receiver.get(),
                 callables,
-                &argument_kinds,
+                mapped.family(&mapped.kinds),
             );
             use crate::symbol_resolver::ReceiverFunctionSelection as Selection;
             let selection = resolver.select_receiver_function_with_applied_receiver_tracking(
                 receiver.get(),
                 spelling,
-                projected.arguments(),
+                mapped.family(projected.arguments()),
                 &type_arguments,
                 projected.callables(),
                 None,
@@ -3911,6 +3910,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 selected.source_key,
             );
             let postponed_bindings = projected.selected_bindings(&selected);
+            let argument_types = mapped.selected_types(&selected);
             let parameter_by_argument = Self::selected_argument_parameters(
                 &selected,
                 arguments,
@@ -4382,7 +4382,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             )) = resolver.select_receiver_function_with_params_tracking(
                 callee.get(),
                 "invoke",
-                &argument_kinds,
+                crate::symbol_resolver::FamilyArguments::Shared(&argument_kinds),
                 &[],
                 &callables,
                 None,

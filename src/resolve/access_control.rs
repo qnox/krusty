@@ -279,7 +279,7 @@ impl<'a> Checker<'a> {
                 resolver.select_receiver_function_with_params_tracking(
                     receiver,
                     name,
-                    args,
+                    crate::symbol_resolver::FamilyArguments::Shared(args),
                     &[],
                     &extensions,
                     None,

@@ -58477,7 +58477,7 @@ impl<'a> Checker<'a> {
                 .select_receiver_function_with_params_tracking(
                     rt,
                     name,
-                    &argument_kinds,
+                    crate::symbol_resolver::FamilyArguments::Shared(&argument_kinds),
                     &[],
                     callables,
                     Some(ret),
@@ -59747,7 +59747,7 @@ impl<'a> Checker<'a> {
             resolver.select_receiver_function_with_params_tracking(
                 recv,
                 name,
-                &[],
+                crate::symbol_resolver::FamilyArguments::Shared(&[]),
                 &[],
                 &callables,
                 None,
