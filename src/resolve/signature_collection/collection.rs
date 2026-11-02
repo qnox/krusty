@@ -3073,7 +3073,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                         type_parameters: &class_type_parameters,
                         annotations: &resolved_annotations,
                         annotation_class_arguments: &resolved_annotation_class_arguments,
-                        declared_functions: &methods,
+                        declared_functions: &frontend_declared_functions(&methods),
                     };
                     let mut contributed_members = Vec::new();
                     frontend_plugins.generate_frontend_declarations(

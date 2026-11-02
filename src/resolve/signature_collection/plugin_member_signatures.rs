@@ -5,7 +5,7 @@
 //! implements it. Every other signature fact is the one of a final public member with no source
 //! declaration behind it.
 
-use crate::plugins::{FrontendCallable, FrontendCallableOwner};
+use crate::plugins::{FrontendCallable, FrontendCallableOwner, FrontendDeclaredFunction};
 
 use super::*;
 
@@ -53,4 +53,17 @@ pub(super) fn frontend_plugin_member_signature(
         plugin_expression: member.plugin_expression,
     };
     (member.name, member.owner, signature)
+}
+
+/// The functions a class declares in source, as its frontend plugins see them.
+pub(super) fn frontend_declared_functions(methods: &MethodMap) -> Vec<FrontendDeclaredFunction> {
+    methods
+        .iter()
+        .flat_map(|(name, signatures)| {
+            signatures.iter().map(|signature| FrontendDeclaredFunction {
+                name: name.clone(),
+                params: signature.params.clone(),
+            })
+        })
+        .collect()
 }

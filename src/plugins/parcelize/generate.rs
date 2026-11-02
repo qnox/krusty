@@ -287,9 +287,8 @@ fn bridge(
         parameters: parameters
             .iter()
             .zip(&overridden.params)
-            .map(|(&parameter, &semantic)| crate::ir::BridgeParameter {
-                identity: crate::fir::ResolvedParameterIdentity::Source(parameter.into()),
-                semantic: semantic.non_null(),
+            .map(|(&parameter, &semantic)| {
+                crate::ir::BridgeParameter::source(parameter, semantic.non_null())
             })
             .collect(),
         name: name.to_string(),

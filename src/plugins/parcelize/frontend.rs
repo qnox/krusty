@@ -35,20 +35,17 @@ pub(super) fn declare_members(
     {
         return;
     }
-    let declared = |name: &str| {
+    let declared = |name: &'static str| {
         ctx.declared_functions
-            .get(name)
-            .map_or(&[][..], Vec::as_slice)
+            .iter()
+            .filter(move |function| function.name == name)
     };
-    if !declared(DESCRIBE_CONTENTS)
-        .iter()
-        .any(|signature| signature.params.is_empty())
-    {
+    if !declared(DESCRIBE_CONTENTS).any(|function| function.params.is_empty()) {
         members.push(member(DESCRIBE_CONTENTS, Vec::new(), Ty::Int));
     }
     let parcel = type_name(super::PARCEL);
-    if !declared(WRITE_TO_PARCEL).iter().any(|signature| {
-        matches!(signature.params.as_slice(), [dest, flags]
+    if !declared(WRITE_TO_PARCEL).any(|function| {
+        matches!(function.params.as_slice(), [dest, flags]
             if matches!(dest.non_null().kind(), TyKind::Obj(name, _) if name == parcel)
                 && *flags == Ty::Int)
     }) {

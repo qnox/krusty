@@ -223,9 +223,16 @@ pub struct FrontendClassContext<'a> {
     pub annotations: &'a [TypeName],
     /// Resolved class-literal arguments grouped by the ordinal of the annotation occurrence.
     pub annotation_class_arguments: &'a [(u32, TypeName)],
-    /// The functions the class itself declares in source, by name. A plugin that generates a
-    /// member only where the class does not declare it reads its decision from here.
-    pub declared_functions: &'a crate::resolve::MethodMap,
+    /// The functions the class itself declares in source. A plugin that generates a member only
+    /// where the class does not declare it reads its decision from here.
+    pub declared_functions: &'a [FrontendDeclaredFunction],
+}
+
+/// A function a source class declares itself, as a frontend plugin sees it.
+pub struct FrontendDeclaredFunction {
+    pub name: String,
+    /// The value parameter types, without receivers.
+    pub params: Vec<Ty>,
 }
 
 /// A source class as a frontend plugin CHECKER sees it: the resolved identities of its
