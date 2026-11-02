@@ -95,6 +95,9 @@ Federation stops at the first present record; source-unit caches retain all thre
 backend module facts keep source class and alias names independently of alias targets, and forward
 only absent identities to the dependency inventory. Literal-dollar ownership stays snapshot-owned.
 The metadata encoder callback and class-ID sinks remain a separate consumer change.
+JVM enclosing-super accessor naming consumes the same exact declaration segment: package and
+nesting encodings are not recovered from an internal class name. The original selected qualifier
+remains distinct from an invocation owner translated for the platform.
 
 ## Alias declaration-name evidence
 

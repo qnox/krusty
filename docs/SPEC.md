@@ -18595,6 +18595,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `super.toString()` reaching `Object`/an open stdlib method work). Modeled by a new `Callee::Special`
   (the first non-virtual instance-call node). `owner` is the direct superclass — the JVM resolves
   `invokespecial` up the chain to the actual declaring class.
+  An enclosing labeled call uses one static accessor per selected target, dispatch class,
+  qualifier and JVM signature. Its name is `access$<mapped-method>$s<hash>`: the signed JVM string
+  hash of the qualifier's exact declared simple name, including a literal `$`, without its package.
+  Repeated sites share the accessor but evaluate their own receiver and arguments. Property
+  getter/setter calls follow the same rule. Whole-class inventories and Kotlin-first runtime
+  controls are in `tests/labeled_super_e2e.rs`.
 
 - **`if`/`when` branch join: two values of the same class.** Two branches whose static types are the
   same class (`List<C>` and `List<D>`, or `A` and `A`) join to that class with erased type arguments

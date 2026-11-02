@@ -5928,6 +5928,10 @@ reached through `super` is already a property operation. The JVM realization rea
 declaration as it read the old module-only `source`. Tests: `fir_lower/call_target_tests.rs`, and
 `fir/body_check/receiver_tests.rs` for a dependency `super.toString()`. Gap: the serialization
 plugin's synthesized super call names no declaration.
+The original qualifier is retained separately from the platform invocation owner. JVM enclosing
+accessors reuse that selected target with its dispatch owner and ABI, and retain their exact
+invocation identity until value-class and internal-member naming finish. Only then is the
+accessor name formatted from the mapped method and the qualifier's declaration-owned name.
 
 ## The selected member on a virtual call  ✅
 
