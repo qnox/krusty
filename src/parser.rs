@@ -1981,6 +1981,7 @@ impl<'a> Parser<'a> {
         // Optional explicit `constructor` keyword and primary constructor:
         // `enum class C constructor(val rgb: Int, …)`.
         let mut ctor_open_offset = 0u32;
+        let mut ctor_close_lo = 0u32;
         // `NL* primaryConstructor`: the `constructor` keyword may also start on a later line.
         if self.primary_constructor_header_follows() {
             self.skip_newlines();
@@ -2055,6 +2056,8 @@ impl<'a> Parser<'a> {
                 }
                 self.skip_newlines();
             }
+            // As for a class, kotlinc maps the primary constructor `$default`'s `return` to `)`.
+            ctor_close_lo = self.tok().span.lo;
             self.expect(TokenKind::RParen, "')'");
         }
         // Optional supertype list (`enum class E : I1, I2`): an enum may implement interfaces; the
@@ -2326,6 +2329,7 @@ impl<'a> Parser<'a> {
             span: Span::new(start.lo, end.hi),
             primary_ctor_lines: PrimaryCtorLines {
                 open_line: ctor_open_offset,
+                close_line: ctor_close_lo,
                 ..PrimaryCtorLines::default()
             },
             companion_block_members: companions.block_members,

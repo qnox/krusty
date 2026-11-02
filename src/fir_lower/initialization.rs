@@ -178,10 +178,10 @@ pub(super) fn finalize_enum_entries(ir: &mut IrFile) -> Result<(), FirFileLoweri
                 entry.declaration,
             ));
         }
-        let subclass = ir.classes[entry.class as usize]
+        let (subclass, entry_line) = ir.classes[entry.class as usize]
             .enum_entries
             .get(entry.ordinal as usize)
-            .and_then(|entry| entry.subclass);
+            .map_or((None, 0), |entry| (entry.subclass, entry.decl_line));
         let constructor_parameters = constructor_parameters.unwrap_or_else(|| {
             ir.classes[entry.class as usize]
                 .ctor_args
@@ -200,7 +200,14 @@ pub(super) fn finalize_enum_entries(ir: &mut IrFile) -> Result<(), FirFileLoweri
             let mut super_args = Vec::with_capacity(constructor_parameters.len());
             for (parameter, &ty) in constructor_parameters.iter().enumerate() {
                 let argument = if default_parameters.contains(&(parameter as u32)) {
-                    ir.add_expr(IrExpr::Const(crate::ir::IrConst::zero_for_value_type(ty)))
+                    // The operand standing in for an omitted argument is generated at the
+                    // constructor call, the entry's, so it marks the entry's line.
+                    let placeholder =
+                        ir.add_expr(IrExpr::Const(crate::ir::IrConst::zero_for_value_type(ty)));
+                    if entry_line != 0 {
+                        ir.expr_source_lines.insert(placeholder, entry_line);
+                    }
+                    placeholder
                 } else {
                     supplied
                         .next()

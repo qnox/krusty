@@ -80,6 +80,7 @@ mod emission_readiness;
 mod emit_options;
 pub(crate) use emission_readiness::jvm_can_emit;
 pub(super) mod enclosure;
+mod enum_entry_construction;
 mod enum_entry_subclass;
 mod enum_reflection_call;
 mod enum_synthetic_fields;
@@ -3953,96 +3954,7 @@ fn emit_enum_class(
         if delegated_property_array::exists(env, c.fq_name) {
             e.cw.omit_method_lines("<clinit>", "()V");
         }
-        // kotlinc gives each entry's construction its own `<clinit>` LineNumberTable entry, on that
-        // Consecutive enum entries on one source line share one LNT entry.
-        for (i, entry) in c.enum_entries.iter().enumerate() {
-            if entry.decl_line != 0 && clinit_lines.last().map(|&(_, l)| l) != Some(entry.decl_line)
-            {
-                clinit_lines.push((clinit.bytes.len() as u16, entry.decl_line));
-            }
-            for &statement in &entry.argument_prelude {
-                e.emit(statement, &mut clinit);
-            }
-            let args = &entry.args;
-            // An entry arg that cannot carry the operand stack (`X(try { 1 } finally {})`) runs on a
-            // clean stack: spill all args to temps first, then construct (as the `New` node does).
-            let spill = args.iter().any(|&a| e.spills_operand_prefix(a));
-            let temps = if spill {
-                e.spill_to_temps(args, &mut clinit)
-            } else {
-                Vec::new()
-            };
-            // A bodied entry is an instance of its synthesized subclass (`new Enum$ENTRY(...)`); the
-            // subclass constructor shares the enum's `(String,int,<user>)V` descriptor.
-            let new_class = entry
-                .subclass
-                .map(TypeName::render)
-                .unwrap_or_else(|| fq.clone());
-            let cls = e.cw.class_ref(&new_class);
-            clinit.new_obj(cls);
-            clinit.dup();
-            clinit.push_string(&entry.name, e.cw);
-            clinit.push_int(i as i32, e.cw);
-            let entry_parameter_types = &entry.constructor_parameter_types;
-            if spill {
-                let mut supplied = temps.iter();
-                for (parameter, ty) in entry_parameter_types.iter().copied().enumerate() {
-                    if entry.default_parameters.contains(&(parameter as u32)) {
-                        push_zero(ty, &mut clinit, e.cw);
-                    } else {
-                        let (slot, ty, _) = supplied
-                            .next()
-                            .expect("checked enum constructor supplied-argument count");
-                        load(*ty, *slot, &mut clinit);
-                    }
-                }
-                e.release_operand_spills(&temps);
-            } else {
-                let mut supplied = args.iter().copied();
-                for (parameter, ty) in entry_parameter_types.iter().copied().enumerate() {
-                    if entry.default_parameters.contains(&(parameter as u32)) {
-                        push_zero(ty, &mut clinit, e.cw);
-                    } else {
-                        e.emit_value(
-                            supplied
-                                .next()
-                                .expect("checked enum constructor supplied-argument count"),
-                            &mut clinit,
-                        );
-                    }
-                }
-            }
-            let mut entry_ctor_params = vec![Ty::String, Ty::Int];
-            entry_ctor_params.extend(entry_parameter_types.iter().copied());
-            let (entry_ctor_desc, entry_ctor_argw) = if entry.default_parameters.is_empty() {
-                let words = entry_ctor_params
-                    .iter()
-                    .map(|ty| slot_words(*ty) as i32)
-                    .sum();
-                (method_descriptor(&entry_ctor_params, Ty::Unit), words)
-            } else {
-                emit_constructor_default_arguments(
-                    &entry.default_parameters,
-                    entry_parameter_types.len(),
-                    &mut clinit,
-                    e.cw,
-                );
-                entry_ctor_params.extend(std::iter::repeat_n(
-                    Ty::Int,
-                    default_mask_count(entry_parameter_types.len()),
-                ));
-                entry_ctor_params.push(Ty::obj("kotlin/jvm/internal/DefaultConstructorMarker"));
-                let words = entry_ctor_params
-                    .iter()
-                    .map(|ty| slot_words(*ty) as i32)
-                    .sum();
-                (method_descriptor(&entry_ctor_params, Ty::Unit), words)
-            };
-            let ctor_ref = e.cw.methodref(&new_class, "<init>", &entry_ctor_desc);
-            clinit.invokespecial(ctor_ref, entry_ctor_argw, 0);
-            let fref = e.cw.fieldref(&fq, &entry.name, &self_desc);
-            clinit.putstatic(fref, 1);
-        }
+        e.emit_enum_entry_constructions(c, &fq, &self_desc, &mut clinit, &mut clinit_lines);
         // `$VALUES = $values()` — kotlinc factors the array build into a private `$values()` helper.
         let vfn = e.cw.methodref(&fq, "$values", &format!("(){arr_desc}"));
         clinit.invokestatic(vfn, 0, 1);

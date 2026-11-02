@@ -11,6 +11,8 @@ mod class_header_newline_e2e;
 mod decl_body_on_next_line_e2e;
 #[path = "../elvis_newline_continuation_e2e.rs"]
 mod elvis_newline_continuation_e2e;
+#[path = "../enum_entry_argument_lines_e2e.rs"]
+mod enum_entry_argument_lines_e2e;
 #[path = "../infix_newline_operand_e2e.rs"]
 mod infix_newline_operand_e2e;
 #[path = "../multiline_receiver_access_line_e2e.rs"]
