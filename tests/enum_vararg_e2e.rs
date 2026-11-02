@@ -45,3 +45,18 @@ fun box(): String {
         "EnumEntryVarargArray",
     );
 }
+
+#[test]
+fn enum_entry_takes_a_shadowing_array_factory_as_an_ordinary_call() {
+    // A declared zero-argument `arrayOf` shadows the stdlib factory in an enum entry argument too.
+    common::expect_box_same_as_kotlinc(
+        r#"
+fun arrayOf(): String = "shadow"
+
+enum class Kind(val value: String) { A(arrayOf()) }
+
+fun box(): String = if (Kind.A.value == "shadow") "OK" else "Fail ${Kind.A.value}"
+"#,
+        "EnumEntryShadowedArrayFactory",
+    );
+}

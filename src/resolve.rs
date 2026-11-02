@@ -48247,7 +48247,16 @@ impl<'a> Checker<'a> {
                         .copied()
                         .unwrap_or(false);
                     let actual =
-                        self.check_argument_expected(scope, argument, expected, has_receiver, None);
+                        match self.commit_postponed_array_factory(scope, argument, expected) {
+                            Some(actual) => actual,
+                            None => self.check_argument_expected(
+                                scope,
+                                argument,
+                                expected,
+                                has_receiver,
+                                None,
+                            ),
+                        };
                     if !self.commit_implicit_integer_coercion(
                         argument,
                         expected,
@@ -49200,14 +49209,11 @@ impl<'a> Checker<'a> {
             self.contextual_annotation_array_argument(scope, argument, actual, expected)
         {
             committed
-        } else if self.expr_types[argument.0 as usize] == Ty::Error
-            && self.postponed_empty_reference_array_factory(scope, argument)
-            && expected.non_null().is_reference_array()
-            && expected.non_null().array_elem().is_some()
+        } else if let Some(actual) = self.commit_postponed_array_factory(scope, argument, expected)
         {
             // A postponed empty array factory is still uncommitted: its `Error` placeholder is
-            // not a checked result, so the selected parameter supplies its element type now.
-            self.expr_expected(scope, argument, expected)
+            // not a checked result. Check it under the selected parameter now.
+            actual
         } else if matches!(self.file.expr(argument), Expr::Call { .. })
             && self.expr_types[argument.0 as usize] == actual
             && (actual == expected
@@ -59336,10 +59342,7 @@ impl<'a> Checker<'a> {
                 // exclusively a backend decision and cannot make a source element inapplicable.
                 Some(e) => return Some(Ty::obj_args("kotlin/Array", &[e])),
                 None => {
-                    self.diags.error(
-                        span,
-                        "krusty: empty arrayOf() needs an explicit type (unsupported)".to_string(),
-                    );
+                    self.report_uninferred_array_factory(call, synthetic);
                     return Some(Ty::Error);
                 }
             }
