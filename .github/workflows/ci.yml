@@ -26,9 +26,10 @@ jobs:
   # Lint and coverage are independent merge gates. Give each its own runner so the clean Clippy
   # build does not sit on the coverage critical path. Conformance and Gradle run prebuilt artifact
   # families from their independent producer jobs below; neither matrix compiles krusty again.
-  # Jobs run on self-hosted runners with one size label each (rust-8c-16gb, rust-4c-12gb,
-  # rust-4c-8gb, helper-1c-1gb). build-release stays on GitHub-hosted for its matrix's operating
-  # systems. Fork PRs run on ubuntu-latest: self-hosted runners never take fork PR jobs.
+  # Jobs run on self-hosted runners with one size label each (rust-4c-12gb, rust-4c-8gb,
+  # helper-1c-1gb). The coverage build in ci and build-release are heavy builds and stay on
+  # GitHub-hosted runners. Fork PRs run on ubuntu-latest: self-hosted runners never take fork PR
+  # jobs.
   lint:
     runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
     steps:
@@ -80,7 +81,7 @@ jobs:
         run: cargo test -p krusty-plugin-host -- --include-ignored
 
   ci:
-    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust-8c-16gb"]') }}
+    runs-on: ubuntu-latest
     outputs:
       # Release packaging waits for coverage, then starts only while this master commit is still the
       # publishable tip. The release job repeats the check while holding the publisher lock.
