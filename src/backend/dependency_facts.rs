@@ -98,8 +98,7 @@ pub struct BackendCallableFact {
     /// Frozen KLIB-only receiver contract for an associated companion extension body.
     pub klib_body_companion_receiver: Option<KlibBodyCompanionReceiver>,
     pub klib_body_type_parameters: Box<[Ty]>,
-    pub klib_body_declaration_modifiers:
-        Option<crate::libraries::KlibBodyDeclarationModifiers>,
+    pub klib_body_declaration_modifiers: Option<crate::libraries::KlibBodyDeclarationModifiers>,
     pub klib_body_class_contract: Option<crate::libraries::KlibBodyClassContract>,
     pub klib_body_accessor: Option<crate::libraries::KlibBodyAccessor>,
     pub klib_body_vararg_index: Option<usize>,
