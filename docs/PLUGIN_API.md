@@ -220,6 +220,33 @@ calls after the plugin pass, as it realizes the file's own dependency calls. The
 is placed as the one lambda lifted out of its function, so the JVM lifted-name pass names it
 `<name>$lambda$0`.
 
+### Partial reimplementation — `parcelize`
+
+`src/plugins/parcelize` reimplements `org.jetbrains.kotlin.parcelize` the same way, byte for byte
+with kotlinc's output, and is registered as `ExtensionKind::PartialNative` too. Its frontend hook
+declares `describeContents()` and `writeToParcel(Parcel, Int)` on every `@Parcelize` class (or one
+of the `additionalAnnotation` options) that does not declare them, as overrides of `Parcelable`'s
+members; `FrontendCallable::is_override` carries that edge, and a plugin-declared member keeps a
+`Unit` result instead of storing `kotlin.Unit`. `record_source_facts` records each parcelized
+class's primary-constructor properties with their serializers, binds the `Parcel` and
+`Parcelable.Creator` members the generated code calls through `PluginRuntime`, and gives the two
+declared members placeholder bodies. The backend pass then writes the bodies, the static `CREATOR`
+and its local class `Creator`, which implements `Parcelable.Creator<C>` with bridges to its erased
+members. `Creator` has no declaration behind it, so it is marked declarationless with a local
+visibility (`IrDeclarationlessVisibility::Local`), which its synthetic-class `@Metadata` records;
+its bridges name their parameters after the plugin's own declaration of `Parcelable.Creator`
+(`source`, `size`), as kotlinc's `AndroidSymbols` does, not after the platform class file.
+
+Covered so far: final, non-generic, non-inner classes without a superclass or companion that
+implement `Parcelable` directly and whose primary-constructor properties are `String`, `Byte`,
+`Int`, `Long`, `Float` or `Double`, nullable or not (a nullable primitive is written behind a
+presence flag, as kotlinc's `IrNullAwareParcelSerializer` does). Everything else is rejected at the
+class with `krusty's Parcelize compiler plugin does not support <construct> yet; compile this
+module with kotlinc`: objects, enums and value classes, open, abstract and sealed classes,
+superclasses, companions (custom `Parceler`s), properties declared in the class body, other
+property types, and the runtime's other annotations (`@IgnoredOnParcel`, `@TypeParceler`,
+`@WriteWith`, `@RawValue`). `experimentalCodeGeneration=true` is an `UnimplementedOption` error.
+
 ## World 2 — codegen host (`ksp`)
 
 The host models the **codegen-only fixpoint** that KSP and APT both follow:

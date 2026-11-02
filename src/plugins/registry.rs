@@ -31,11 +31,12 @@ use crate::plugins::allopen::AllOpenPlugin;
 use crate::plugins::assignment::AssignmentPlugin;
 use crate::plugins::cli::{
     PluginConfig, PluginOption, ALLOPEN_PLUGIN_ID, ASSIGNMENT_PLUGIN_ID, COMPOSE_PLUGIN_ID,
-    KAPT_PLUGIN_ID, KSP_PLUGIN_ID, NOARG_PLUGIN_ID, SAM_WITH_RECEIVER_PLUGIN_ID,
-    SCRIPTING_PLUGIN_ID, SERIALIZATION_PLUGIN_ID,
+    KAPT_PLUGIN_ID, KSP_PLUGIN_ID, NOARG_PLUGIN_ID, PARCELIZE_PLUGIN_ID,
+    SAM_WITH_RECEIVER_PLUGIN_ID, SCRIPTING_PLUGIN_ID, SERIALIZATION_PLUGIN_ID,
 };
 use crate::plugins::compose::{ComposeOptions, ComposePlugin};
 use crate::plugins::noarg::NoArgPlugin;
+use crate::plugins::parcelize::ParcelizePlugin;
 use crate::plugins::sam_with_receiver::SamWithReceiverPlugin;
 use crate::plugins::serialization::{PluginRelease, SerializationAbi, SerializationPlugin};
 use crate::plugins::{IrPlugin, PluginHost};
@@ -401,6 +402,15 @@ fn build_sam_with_receiver(
     Box::new(SamWithReceiverPlugin::from_options(options))
 }
 
+/// Build the native Parcelize plugin from the compilation's options for it.
+fn build_parcelize(
+    _act: &Activation,
+    _release: Option<&str>,
+    options: &[PluginOption],
+) -> Box<dyn IrPlugin> {
+    Box::new(ParcelizePlugin::from_options(options))
+}
+
 /// Build the native assignment plugin from the compilation's options for it.
 fn build_assignment(
     _act: &Activation,
@@ -466,6 +476,16 @@ impl PluginRegistry {
             kind: ExtensionKind::PartialNative(build_compose),
             option_keys: Some(ComposeOptions::KEYS),
             unimplemented_options: ComposeOptions::UNIMPLEMENTED,
+        });
+        r.register(RegisteredExtension {
+            plugin_id: PARCELIZE_PLUGIN_ID,
+            registrar: "org.jetbrains.kotlin.parcelize.ParcelizeComponentRegistrar",
+            kind: ExtensionKind::PartialNative(build_parcelize),
+            option_keys: Some(&["additionalAnnotation", "experimentalCodeGeneration"]),
+            unimplemented_options: &[(
+                "experimentalCodeGeneration",
+                OptionSetting::Exactly("true"),
+            )],
         });
         r.register(RegisteredExtension {
             plugin_id: KSP_PLUGIN_ID,

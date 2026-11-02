@@ -4,6 +4,16 @@
 use super::{ExprId, IrClass, IrFile, IrGenericSig, IrTypeParameter};
 use crate::types::{Ty, TypeName};
 
+/// The Kotlin visibility a plugin gives a class it generates without a declaration. No declaration
+/// record describes the class, so its synthetic-class `@Metadata` records this one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum IrDeclarationlessVisibility {
+    /// A file-level class of the module, such as Compose's `ComposableSingletons$<File>Kt`.
+    Internal,
+    /// A class local to a declaration's body or initializer, such as Parcelize's `Creator`.
+    Local,
+}
+
 impl IrFile {
     pub(crate) fn record_declared_class_self_type(&mut self, classifier: TypeName, self_type: Ty) {
         assert_eq!(self_type.kotlin_class_internal(), Some(classifier));
@@ -26,12 +36,20 @@ impl IrFile {
         self.synthetic_classes.contains(&internal)
     }
 
-    pub(crate) fn mark_declarationless_class(&mut self, internal: TypeName) {
-        self.declarationless_classes.insert(internal);
+    pub(crate) fn mark_declarationless_class(
+        &mut self,
+        internal: TypeName,
+        visibility: IrDeclarationlessVisibility,
+    ) {
+        self.declarationless_classes.insert(internal, visibility);
     }
 
-    pub(crate) fn is_declarationless_class(&self, internal: TypeName) -> bool {
-        self.declarationless_classes.contains(&internal)
+    /// The visibility a class generated without a declaration was given, if it is one.
+    pub(crate) fn declarationless_class(
+        &self,
+        internal: TypeName,
+    ) -> Option<IrDeclarationlessVisibility> {
+        self.declarationless_classes.get(&internal).copied()
     }
 
     pub fn mark_deprecated_class(&mut self, internal: TypeName) {

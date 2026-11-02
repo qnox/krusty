@@ -22,6 +22,7 @@ pub const NOARG_PLUGIN_ID: &str = "org.jetbrains.kotlin.noarg";
 pub const SAM_WITH_RECEIVER_PLUGIN_ID: &str = "org.jetbrains.kotlin.samWithReceiver";
 pub const ASSIGNMENT_PLUGIN_ID: &str = "org.jetbrains.kotlin.assignment";
 pub const COMPOSE_PLUGIN_ID: &str = "androidx.compose.compiler.plugins.kotlin";
+pub const PARCELIZE_PLUGIN_ID: &str = "org.jetbrains.kotlin.parcelize";
 /// kotlinc's default scripting plugin, which kotlinc loads into every compilation and the Kotlin
 /// Gradle plugin also passes explicitly on every JVM compile's `-Xplugin` classpath.
 pub const SCRIPTING_PLUGIN_ID: &str = "kotlin.scripting";
