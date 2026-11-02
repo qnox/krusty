@@ -60,6 +60,7 @@ pub mod java_stub;
 pub mod jvm_class_map;
 pub mod jvm_libraries;
 mod lambda_classes;
+mod lambda_offsets;
 mod lifted_declaration_ownership;
 mod lifted_names;
 pub(crate) mod line_numbers;
