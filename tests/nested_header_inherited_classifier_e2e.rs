@@ -93,3 +93,42 @@ fn constructor_signature_takes_the_inherited_nested_classifier_like_kotlinc() {
     };
     result.expect("Child byte-identical to kotlinc");
 }
+
+/// A type-parameter bound sits in the class's declaration header, outside its body: the classifiers
+/// the class inherits are not visible there, so the bound `Limit` is the top-level class and only
+/// `Base.Limit` violates it, as kotlinc reports.
+#[test]
+fn type_parameter_bound_does_not_see_the_classifiers_its_class_inherits() {
+    let result = common::compiler_diagnostics(
+        &[(
+            "Bound.kt",
+            "open class Limit\n\
+             open class Base {\n\
+             \x20   open class Limit\n\
+             }\n\
+             \n\
+             class Child<T : Limit> : Base()\n\
+             \n\
+             val accepted: Child<Limit>? = null\n\
+             val rejected: Child<Base.Limit>? = null\n",
+        )],
+        &[],
+    );
+    common::expect_identical_rejection(&result, "type_parameter_bound_skips_inherited_classifiers");
+}
+
+#[test]
+fn inherited_classifier_alone_does_not_resolve_a_type_parameter_bound() {
+    let result = common::compiler_diagnostics(
+        &[(
+            "Bound.kt",
+            "open class Base {\n\
+             \x20   open class Limit\n\
+             }\n\
+             \n\
+             class Child<T : Limit> : Base()\n",
+        )],
+        &[],
+    );
+    common::expect_identical_rejection(&result, "inherited_classifier_type_parameter_bound");
+}

@@ -31044,7 +31044,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         this_narrow: None,
         this_labels: Vec::new(),
         lexical_class_context: Vec::new(),
-        classifier_header_owner: None,
+        classifier_header: None,
         exact_anonymous_class_roots: crate::fx_hash::HashSet::default(),
         extension_receiver_labels: Vec::new(),
         local_function_receivers: crate::fx_hash::HashSet::default(),
@@ -33511,10 +33511,8 @@ struct Checker<'a> {
     /// Source class owners of a hoisted anonymous-object declaration, nearest first. They contribute
     /// lexical classifier scope but are not implicit runtime receivers (captures remain a separate ABI).
     lexical_class_context: Vec<TypeName>,
-    /// Classifier whose declaration header is currently being checked. Its own declaration and
-    /// enclosing classifier namespaces precede package/import lookup, while nested classifiers
-    /// inherited by this owner form a later fallback rung. It never becomes an implicit receiver.
-    classifier_header_owner: Option<TypeName>,
+    /// Classifier header currently being checked and its part. It never becomes an implicit receiver.
+    classifier_header: Option<classifier_binding::ClassifierHeader>,
     /// Anonymous classifiers in the current structural ownership chain. Their generated `$` names are
     /// exact roots, never evidence of lexical parents; those come only from `lexical_class_context`.
     exact_anonymous_class_roots: crate::fx_hash::HashSet<TypeName>,
@@ -42721,7 +42719,7 @@ impl<'a> Checker<'a> {
 
     fn access_context_class_names(&self) -> Vec<TypeName> {
         let mut classes = self.lexical_source_class_names();
-        if let Some(owner) = self.classifier_header_owner {
+        if let Some(owner) = self.classifier_header.map(|header| header.owner) {
             classes.retain(|candidate| *candidate != owner);
             classes.insert(0, owner);
         }
@@ -45247,11 +45245,9 @@ impl<'a> Checker<'a> {
                 None
             };
             // Primary-constructor parameters, class context parameters, and class bounds are
-            // classifier-header declarations. Resolve them before the class dispatch-receiver rung
-            // exists. Nested declarations are still lexical classifier bindings in primary
-            // parameter types, while inherited nested classifiers remain a fallback after
-            // lexical/file scope. Enclosing classifiers plus own/captured type parameters are
-            // visible here. Pass 1 publishes these signatures from this same boundary.
+            // classifier-header declarations, resolved before the class dispatch-receiver rung
+            // exists. See `ClassifierHeaderPart` for which classifiers each part sees. Pass 1
+            // publishes these signatures from this same boundary.
             let classifier_header_scope = scope.child(ScopeKind::Block);
             if let Some((names, captured)) = &captured_type_parameters {
                 classifier_header_scope.declare_tparams(names, captured, |name| {
@@ -45259,8 +45255,7 @@ impl<'a> Checker<'a> {
                 });
             }
             classifier_header_scope.declare_tparams(&cl.type_params, &class_tparams, |_| false);
-            let previous_header_owner =
-                std::mem::replace(&mut self.classifier_header_owner, current_owner);
+            let previous_header = self.enter_classifier_header(current_owner);
             let stable_primary_constructor = body_local_class
                 .then(|| {
                     stable_local_classifier.zip(self.resolved_index).and_then(
@@ -45487,6 +45482,7 @@ impl<'a> Checker<'a> {
                     )
                 })
                 .collect::<Vec<_>>();
+            self.enter_classifier_type_parameter_bounds();
             if finalized_local_classifier_header {
                 if let Some(declaration) = stable_local_classifier {
                     if !self.record_finalized_type_parameter_bounds(
@@ -45503,7 +45499,7 @@ impl<'a> Checker<'a> {
                     self.check_type_parameter_bound(&classifier_header_scope, bound);
                 }
             }
-            self.classifier_header_owner = previous_header_owner;
+            self.classifier_header = previous_header;
             // Executable declarations inside the classifier—including constructor defaults,
             // enum-entry arguments, companion initializers, and nested anonymous declarations—do
             // have its lexical classifier rung even when they have no dispatch receiver. Introduce
