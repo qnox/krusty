@@ -68,7 +68,9 @@ pub(crate) use call_argument::CallArgKind;
 pub(crate) use callable_shapes::{
     classifier_callable_signature, classifier_callable_signatures, declared_function_type,
 };
-pub(crate) use declaration_specificity::retain_most_specific_declarations;
+pub(crate) use declaration_specificity::{
+    declarations_equally_specific, retain_most_specific_declarations,
+};
 use extension_specialization::{
     bind_defaulted_ext_ret, bind_defaulted_ext_ret_slots, bind_ext_ret, bind_ext_ret_tracking,
     extension_bindings_are_determinate, specialized_extension_return,
@@ -113,7 +115,8 @@ use member_specialization::{
 #[cfg(test)]
 use overload_selection::fun_return_compatible;
 pub(crate) use overload_selection::{
-    best_by_args, CandidateSelectionWithTies, ReceiverFunctionSelection, SelectedReceiverFunction,
+    best_by_args, extension_tower_rank, CandidateSelectionWithTies, ReceiverFunctionSelection,
+    SelectedReceiverFunction,
 };
 use overload_selection::{
     generic_bounds_admit, generic_bounds_admit_slots, indexed_call_shape, integer_literal_overload,
@@ -718,21 +721,7 @@ fn ranked_extension_candidates<'a>(
     // matters to consumers that walk the list to shape postponed lambdas: a same-file `Any.map`
     // must shape its lambda before the more receiver-specific imported `Result<T>.map`, exactly as
     // final overload selection evaluates applicability one scope-tower rung at a time.
-    out.sort_by_key(|(rank, _, o)| {
-        let hides_members = o
-            .callable
-            .annotations
-            .contains(&crate::types::type_name("kotlin/internal/HidesMembers"));
-        (
-            !hides_members,
-            if hides_members {
-                (0, 0)
-            } else {
-                o.scope_rung.selection_key(o.scope_rank)
-            },
-            *rank,
-        )
-    });
+    out.sort_by_key(|(rank, _, o)| extension_tower_rank(*rank, o));
     out
 }
 
@@ -811,6 +800,8 @@ pub struct SymbolResolver<'a> {
     visibility_suppressed: bool,
     /// Type variables of the enclosing postponed calls; extension receivers match over them.
     type_variables: &'a [String],
+    /// `+EagerLambdaAnalysis` in the calling file: a lambda's checked result decides applicability.
+    eager_lambda_results: bool,
 }
 
 /// Which accessor a property selection will execute. Provider-normalized candidate availability
@@ -1139,6 +1130,7 @@ impl<'a> SymbolResolver<'a> {
                 fn_scope: self.fn_scope,
                 source: &self.src,
                 type_variables: self.type_variables,
+                eager_lambda_results: self.eager_lambda_results,
             },
             callables.functions(),
             IndexedConvention::Get,
@@ -1226,6 +1218,7 @@ impl<'a> SymbolResolver<'a> {
                 fn_scope: self.fn_scope,
                 source: &self.src,
                 type_variables: self.type_variables,
+                eager_lambda_results: self.eager_lambda_results,
             },
             callables.functions(),
             IndexedConvention::Set,
@@ -1887,6 +1880,7 @@ impl<'a> SymbolResolver<'a> {
                         fn_scope: self.fn_scope,
                         source: &self.src,
                         type_variables: self.type_variables,
+                        eager_lambda_results: self.eager_lambda_results,
                     },
                     Some(callables.functions()),
                     &mut call_ambiguous,
@@ -3345,6 +3339,7 @@ fn select_instance_info(
             fn_scope: None,
             source,
             type_variables: &[],
+            eager_lambda_results: false,
         },
     )
 }
@@ -5097,8 +5092,9 @@ mod tests {
 
         let int_transform = Ty::fun(vec![Ty::Int], Ty::Int);
         let string_transform = Ty::fun(vec![Ty::Int], Ty::String);
+        // Only a refinable family lets the lambda's result choose between same-input overloads.
         let candidate = |name: &str, transform: Ty| {
-            FunctionInfo::plain(
+            let mut candidate = FunctionInfo::plain(
                 FnKind::TopLevel,
                 None,
                 LibraryCallable::library(
@@ -5109,7 +5105,11 @@ mod tests {
                     Ty::Unit,
                     "(Lkotlin/jvm/functions/Function1;)V",
                 ),
-            )
+            );
+            candidate.callable.annotations = vec![crate::types::type_name(
+                "kotlin/OverloadResolutionByLambdaReturnType",
+            )];
+            candidate
         };
         let int_candidate = candidate("chooseInt", int_transform);
         let string_candidate = candidate("chooseString", string_transform);
