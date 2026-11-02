@@ -27,9 +27,10 @@ jobs:
   # build does not sit on the coverage critical path. Conformance and Gradle run prebuilt artifact
   # families from their independent producer jobs below; neither matrix compiles krusty again.
   # Heavy jobs every run waits on use self-hosted runners; the wide matrices stay on
-  # GitHub-hosted. Self-hosted runners never take fork PR jobs.
+  # GitHub-hosted. Fork PRs run them on ubuntu-latest: self-hosted runners never take
+  # fork PR jobs.
   lint:
-    runs-on: [self-hosted, rust]
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust"]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -79,7 +80,7 @@ jobs:
         run: cargo test -p krusty-plugin-host -- --include-ignored
 
   ci:
-    runs-on: [self-hosted, rust, large]
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust", "large"]') }}
     outputs:
       # Release packaging waits for coverage, then starts only while this master commit is still the
       # publishable tip. The release job repeats the check while holding the publisher lock.
@@ -231,7 +232,7 @@ jobs:
   # matrix waits for the slowest required build instead of serializing every unrelated target graph
   # on one runner. Consumers never compile krusty again.
   build-conformance-bin:
-    runs-on: [self-hosted, rust]
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust"]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
@@ -265,7 +266,7 @@ jobs:
           if-no-files-found: error
 
   build-klib-test-bins:
-    runs-on: [self-hosted, rust]
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust"]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
@@ -297,7 +298,7 @@ jobs:
           if-no-files-found: error
 
   build-tool-bins:
-    runs-on: [self-hosted, rust]
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust"]') }}
     outputs:
       # Every consumer already waits for this artifact family. Publish the manifest-derived matrix
       # here instead of scheduling a separate ten-second runner solely for these two values.
