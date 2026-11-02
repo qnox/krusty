@@ -60,7 +60,15 @@ fn library_suspend_inline_calls_match_kotlinc() {
     common::assert_classes_identical_to_kotlinc_against_jdk(
         "SuspendInlineLibrary",
         SOURCE,
-        &["Store", "Store$update$1", "Store$owned$1", "Store$permit$1"],
+        &[
+            "Store",
+            "Store$update$1",
+            "Store$owned$1",
+            "Store$permit$1",
+            "Store$updateSuspending$1",
+            "Store$ownedSuspending$1",
+            "Store$permitSuspending$1",
+        ],
         &[common::coroutines_jar()],
     );
 }
