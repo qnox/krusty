@@ -4115,7 +4115,6 @@ impl JvmLibraries {
                     let prefix = match member.realization {
                         crate::libraries::MemberRealization::Direct {
                             pass_receiver: true,
-                            ..
                         } => params.as_slice(),
                         _ => params.get(1..).unwrap_or_default(),
                     };
