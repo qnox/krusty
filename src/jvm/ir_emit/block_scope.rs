@@ -178,7 +178,7 @@ impl Emitter<'_> {
                     bound_operands -= 1;
                     continue;
                 }
-                self.open_external_inline_body(opening, statement, code);
+                self.open_external_inline_body(opening, index, statement, code);
                 self.enter_copied_function_frame(
                     copied_caller.is_some().then_some(block),
                     statement,
@@ -966,8 +966,8 @@ impl Emitter<'_> {
             .expr_source_lines
             .get(&block)
             .copied()
-            .filter(|line| *line != 0)?;
-        let marker = stmts.iter().copied().find(|&statement| {
+            .filter(|line| *line != 0);
+        let marker_index = stmts.iter().position(|&statement| {
             matches!(
                 self.ir.debug_local_provenance(statement),
                 Some(
@@ -976,27 +976,46 @@ impl Emitter<'_> {
                 )
             )
         })?;
+        let binds_operands = matches!(
+            self.ir.debug_local_provenance(stmts[marker_index]),
+            Some(IrDebugLocalProvenance::FunctionFrameMarker)
+        );
         Some(InlineBodyOpening {
             block,
-            marker,
+            marker_index,
+            binds_operands,
             line,
         })
     }
 
+    /// The inline callable's parameters bound before an external expansion's first frame marker hold
+    /// the call's operands. kotlinc's `genValueAndPut` stores each straight into its parameter
+    /// slot, with no line of its own, as a same-module call's operands are bound
+    /// ([`Self::enter_copied_function_frame`]). A spliced lambda's own parameter is stored inside
+    /// the body, after the opening, and keeps the call's line.
     fn open_external_inline_body(
         &mut self,
         opening: Option<InlineBodyOpening>,
+        index: usize,
         statement: u32,
         code: &mut CodeBuilder,
     ) {
-        let Some(opening) = opening.filter(|opening| opening.marker == statement) else {
+        let Some(opening) = opening else {
             return;
         };
-        if code.is_dead() {
+        if index < opening.marker_index {
+            if opening.binds_operands {
+                self.copied_operand_binding = Some(statement);
+            }
             return;
         }
-        self.mark_expression_line(opening.block, opening.line, code);
-        code.nop();
+        if index != opening.marker_index || code.is_dead() {
+            return;
+        }
+        if let Some(line) = opening.line {
+            self.mark_expression_line(opening.block, line, code);
+            code.nop();
+        }
     }
 
     fn opens_spliced_lambda_frame(&self, stmts: &[u32]) -> bool {
@@ -1187,7 +1206,7 @@ impl Emitter<'_> {
                 bound_operands -= 1;
                 continue;
             }
-            self.open_external_inline_body(opening, statement, code);
+            self.open_external_inline_body(opening, index, statement, code);
             self.enter_copied_function_frame(copied_function, statement, code);
             // FixStack replaces the opening marker with the saved caller stack. Keep that
             // generated store inside the lambda frame's mapped line interval.
@@ -1721,13 +1740,16 @@ pub(super) struct InlineBodyEntry {
     discarded_frame_result: Option<CopiedFrameTail>,
 }
 
-/// The first frame marker of an external inline expansion and the call line its opening `nop`
-/// carries.
+/// The position of an external inline expansion's first frame marker, after the bindings of the
+/// call's operands, and the call line its opening `nop` carries.
 #[derive(Clone, Copy)]
 struct InlineBodyOpening {
     block: u32,
-    marker: u32,
-    line: u32,
+    marker_index: usize,
+    /// The expansion opens its own function frame, so the statements before it bind the inline
+    /// callable's parameters.
+    binds_operands: bool,
+    line: Option<u32>,
 }
 
 #[derive(Clone, Copy)]
