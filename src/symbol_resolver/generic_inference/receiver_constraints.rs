@@ -131,10 +131,11 @@ fn receiver_occurrence_constraints(
             let TyKind::Fun(actual_shape) = actual.kind() else {
                 return;
             };
+            // The semantic function relation compares the flattened receiver, context and value
+            // parameters, so `String.() -> R` and `(String) -> R` values are interchangeable; only
+            // a `suspend` value never reaches a regular function type.
             if declared_shape.params.len() != actual_shape.params.len()
-                || declared_shape.context_count != actual_shape.context_count
-                || declared_shape.has_receiver != actual_shape.has_receiver
-                || declared_shape.suspend != actual_shape.suspend
+                || (actual_shape.suspend && !declared_shape.suspend)
             {
                 return;
             }
