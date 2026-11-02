@@ -26,6 +26,8 @@ jobs:
   # Lint and coverage are independent merge gates. Give each its own runner so the clean Clippy
   # build does not sit on the coverage critical path. Conformance and Gradle run prebuilt artifact
   # families from their independent producer jobs below; neither matrix compiles krusty again.
+  # Builds run on GitHub-hosted runners. The conformance jobs only run the prebuilt binaries, so
+  # they use self-hosted runners, except for fork PRs: self-hosted runners never take fork PR jobs.
   lint:
     runs-on: ubuntu-latest
     steps:
@@ -326,7 +328,7 @@ jobs:
       matrix:
         version: ${{ fromJson(needs.build-tool-bins.outputs.matrix) }}
         target: [jvm]
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust"]') }}
     steps: &conformance-steps
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
@@ -655,7 +657,7 @@ jobs:
       matrix:
         version: ${{ fromJson(needs.build-tool-bins.outputs.matrix) }}
         target: [native, wasm]
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust"]') }}
     steps: *conformance-steps
 
   # The one check a ruleset requires: its context does not change with either matrix. A required
