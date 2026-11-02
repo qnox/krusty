@@ -475,6 +475,13 @@ mod tests {
         let declaration = |name: &str| {
             let matches = (0..index.declaration_count())
                 .map(|raw| DeclarationId::from_raw(u32::try_from(raw).unwrap()))
+                .filter(|declaration| {
+                    index
+                        .declaration_header(*declaration)
+                        .is_some_and(|header| {
+                            !header.flags.has(DeclarationFlags::COMPILER_GENERATED)
+                        })
+                })
                 .filter(|declaration| index.declaration_name(*declaration) == Some(name))
                 .filter(|declaration| {
                     index
