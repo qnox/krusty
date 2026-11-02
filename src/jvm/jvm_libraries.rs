@@ -3667,11 +3667,15 @@ impl JvmLibraries {
             .into_iter()
             .flat_map(|package| self.cp.package_facades_name(package))
         {
-            if !self.cp.facade_declares_function(facade, name) {
-                continue;
-            }
-            let lambda_return_overload = self.cp.lambda_return_overloads(facade).contains(name);
-            for mf in self.cp.meta_functions_name(facade).iter() {
+            // Only a facade that declares the name is decoded; functions and properties are
+            // asked separately because a facade's parts merge each kind on its own.
+            let functions = self
+                .cp
+                .facade_declares_function(facade, name)
+                .then(|| self.cp.meta_functions_name(facade));
+            let lambda_return_overload =
+                functions.is_some() && self.cp.lambda_return_overloads(facade).contains(name);
+            for mf in functions.iter().flat_map(|functions| functions.iter()) {
                 if mf.kotlin_name != name || !mf.is_extension() {
                     continue;
                 }
@@ -3905,6 +3909,9 @@ impl JvmLibraries {
             // Metadata records the property with its REAL accessor names (`JvmPropertySignature`), so the
             // getter name is authoritative, never a `getX` guess. Facade parts are merged in the shared
             // cached decode (`meta_properties_name`), the property analogue of `meta_functions_name`.
+            if !self.cp.facade_declares_property(facade, name) {
+                continue;
+            }
             let mprops = self.cp.meta_properties_name(facade);
             let matching_properties = mprops
                 .iter()

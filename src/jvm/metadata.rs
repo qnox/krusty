@@ -3,8 +3,8 @@
 //! The `d1` protobuf is decoded against `d2` string-table identities before semantic facts publish.
 
 pub(crate) mod anonymous_origin;
-use function_names::function_jvm_name;
-pub use function_names::FunctionName;
+use member_names::function_jvm_name;
+pub use member_names::{FunctionName, PackageMemberNames};
 pub use inline_class::InlineClass;
 pub use lazy_members::{KotlinMembers, LazyMembers};
 pub(super) mod builtin_bridge;
@@ -13,9 +13,9 @@ mod class_identity;
 mod contract;
 mod enclosing_type_parameters;
 mod function;
-mod function_names;
 mod inline_class;
 mod lazy_members;
+mod member_names;
 mod property_declarations;
 mod property_identity;
 mod realization_facts;
