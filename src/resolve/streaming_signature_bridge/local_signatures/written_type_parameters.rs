@@ -10,7 +10,13 @@ use crate::types::{Ty, TypeVariance};
 
 /// One formal as `publish_type_parameters_atomically` takes it: ordinal, source and semantic
 /// names, flags, and its resolved bounds with whether each is an interface.
-type PreparedTypeParameter = (u32, String, String, ResolvedTypeParameterFlags, Vec<(Ty, bool)>);
+type PreparedTypeParameter = (
+    u32,
+    String,
+    String,
+    ResolvedTypeParameterFlags,
+    Vec<(Ty, bool)>,
+);
 
 /// The type parameters a body-local member declares in source.
 pub(super) struct WrittenTypeParameters<'a> {
