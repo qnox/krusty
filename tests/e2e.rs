@@ -796,6 +796,8 @@ mod diagnostics_language_parity_e2e;
 mod diagnostics_parity_support;
 #[path = "diagnostics_receiver_reference_cases_e2e.rs"]
 mod diagnostics_receiver_reference_cases_e2e;
+#[path = "diagnostics_signature_ambiguity_e2e.rs"]
+mod diagnostics_signature_ambiguity_e2e;
 #[path = "diagnostics_type_inference_cases_e2e.rs"]
 mod diagnostics_type_inference_cases_e2e;
 #[path = "discarded_dependency_result_e2e.rs"]

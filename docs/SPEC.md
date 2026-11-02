@@ -16456,6 +16456,20 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`tests/bound_inner_alias_inference_e2e.rs`: runtime, complete source/dependency ABI, and exact
   diagnostic comparisons with kotlinc.)
 
+- **An ambiguous call names each candidate by its resolved signature, once.** kotlinc renders
+  `overload resolution ambiguity between candidates:` with every candidate's result type, even
+  when that result is inferred from an expression body (`fun f(a: Any, b: String) = 1` reads
+  `fun f(a: Any, b: String): Int`). A call in an expression body whose own result is inferred is
+  selected twice, while the declaration's signature is solved and again by the body check; the
+  signature solver may meet the call before it has inferred a candidate's result, and used to print
+  it as `<not determined>`, so the two texts differed and both were reported. Signature position now
+  records the tied candidates with the diagnostic and renders them when the diagnostic is reported,
+  after the solver has finished, by the results it published: both phases print kotlinc's text and
+  the call reports one diagnostic. Rendering never demands a candidate's signature, so a candidate
+  whose result depends on the failing call itself adds no recursion error and keeps
+  `<not determined>` (kotlinc prints an error type there). Top-level, extension, member, generic
+  and forward-declared candidates are covered. (`tests/diagnostics_signature_ambiguity_e2e.rs`.)
+
 - **Inner constructors and same-named member functions are one overload family.** kotlinc places
   the constructors of an `inner` classifier in the member level of the receiver that supplies its
   outer instance, beside that receiver's member functions of the same name. `o.Inner(args)`,
