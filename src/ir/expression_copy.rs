@@ -171,6 +171,7 @@ pub(super) fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: Exp
         local_delegate_plans: _,
         local_delegate_plan_ids: _,
         jvm_suspend_impl_bodies: _,
+        jvm_continuation_functions: _,
         generated_member_publications: _,
         generated_facade_functions: _,
         synthesized_data_class_members: _,
