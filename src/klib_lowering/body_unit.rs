@@ -615,6 +615,10 @@ impl CallLinker for Linker<'_, '_> {
         self.sources.callees.is_subtype(parameters, sub, sup)
     }
 
+    fn same_type(&self, left: Ty, right: Ty) -> bool {
+        self.sources.callees.same_type(left, right)
+    }
+
     fn link_constructor(
         &mut self,
         ir: &mut IrFile,
