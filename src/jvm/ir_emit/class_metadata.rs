@@ -367,9 +367,9 @@ impl<'a> JvmClassRealization<'a> {
         let f = &self.ir.functions[fid as usize];
         // Recorded exactly when a reader cannot rebuild the physical descriptor from the
         // declared types (kotlinc's `requiresFunctionSignature`).
-        let physical = crate::jvm::names::method_descriptor(
+        let physical = crate::jvm::method_descriptors::ir_method_desc(
             &f.params,
-            self.override_results.physical_result(self.ir, fid),
+            &self.override_results.physical_result(self.ir, fid),
         );
         let desc = (super::super::metadata_method_signatures::requires_function_signature(
             record.receiver,

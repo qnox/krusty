@@ -4003,6 +4003,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   functions, constructors and a `vararg val` constructor property alike. Tests:
   `tests/metadata_array_signature_e2e.rs` (byte-identity vs kotlinc 2.4.10); table in
   `docs/METADATA_NOTES.md`.
+- **A recorded `JvmMethodSignature.desc` is the emitted descriptor.** Package functions, member
+  functions and facade property accessors build the descriptor they record with the same
+  declaration-descriptor rule the method is emitted with, never a second carrier mapping. An
+  `Array` of an unsigned (value-class) element is a reference array of the boxed class, so
+  `fun d(): Array<UInt>` records `()[Lkotlin/UInt;`, a member parameter `Array<UShort>` records
+  `([Lkotlin/UShort;)I`, and a facade `val c: Array<ULong>?` records `()[Lkotlin/ULong;` for its
+  getter, as kotlinc 2.4.21 does. Tests:
+  `a_package_unsigned_array_records_the_boxed_element_descriptor` and
+  `a_members_unsigned_array_records_the_boxed_element_descriptor` in
+  `tests/metadata_array_signature_e2e.rs`.
 - **A backing field's descriptor is recorded only when a reader cannot rebuild it.** kotlinc's
   `requiresSignature` maps the property type's class id through `ClassMapperLite` and writes
   `JvmFieldSignature.desc` exactly when the physical field descriptor differs, which covers a
@@ -16339,9 +16349,25 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `compareTo` orders the unsigned values. `<`, `<=`, `>`, `>=` over a selected `compareTo` fold with
   it (`"a" < "b"`). `hashCode` is not intrinsic-const and stays a call.
   (`constant_evaluation_e2e::builtin_member_calls_over_constants_fold`.)
-  kotlinc's interpreter also folds the remaining `@IntrinsicConstEvaluation` library calls, which
-  krusty does not fold yet: `floorDiv`/`mod`, and unsigned arithmetic and conversions (`1u + 2u` is
-  `iconst_3` boxed to `UInt`). Neither folds an `if`/`when` over constants.
+  The unsigned value classes' operations and conversions, the `kotlin` package's signed-to-unsigned
+  conversions (`3.toUInt()`), and `floorDiv`/`mod` are ordinary `@IntrinsicConstEvaluation` stdlib
+  declarations. The provider classifies each from its complete declaration (the annotation, the
+  qualified owner or package, receiver, parameters and result) into the semantic role
+  `IntrinsicConstNumeric`, and a call to one folds the same way: `1u + 2u` is `iconst_3`, not
+  `iadd` and `UInt.constructor-impl`, and `(7u / 2u).toString()` is `ldc "3"`. Values wrap to the
+  declared result: an operation on two widths computes at the wider operand type (at least `UInt`
+  for unsigned operands, `Int` for signed ones), so `300u.mod(7.toUByte())` is `6`. The evaluator
+  uses wrapping 128-bit arithmetic over the exact operands, so a product of two `ULong` values
+  wraps at the result width instead of overflowing the compiler's intermediate
+  (`18446744073709551615uL * 18446744073709551615uL` is `1uL`), and `Long.MIN_VALUE.floorDiv(-1L)`
+  is `Long.MIN_VALUE` as at run time;
+  `floorDiv` rounds toward negative infinity and `mod` takes the divisor's sign (`Double.mod` too);
+  a signed value converts to an unsigned type by its bits (`(-1).toByte().toUInt()` is 4294967295),
+  a floating value saturates (`(-3.5).toUInt()` is 0), and an unsigned value converts to `Float`
+  through `Double`. The unsigned `and`, `or`, `xor`, `shl`, `shr` and `inv` intrinsics fold at their
+  width. A division by zero stays a call.
+  (`constant_evaluation_e2e::unsigned_and_floor_operations_over_constants_fold`.)
+  Neither compiler folds an `if`/`when` over constants.
   An overflowing constant expression wraps without a diagnostic, as in kotlinc.
   (`tests/constant_evaluation_e2e.rs`.)
   A safe call's selector does not fold over a constant receiver: kotlinc's safe-call lowering puts
@@ -23572,7 +23598,11 @@ storage used by an array builder follows the holder. The initializer still sees 
 semantic value map; the new binding becomes visible at the store. Named arguments retain source
 evaluation order and one evaluation. Common IR retains that holder's semantic purpose through
 cloning; an inline expansion that adopts it as its formal receiver records the changed purpose.
-Expanded parameters and captures retain operand-first binding. Deferred inline-return results, folded safe-call chains and
+Expanded parameters and captures retain operand-first binding. Only the temporaries of a call reordered
+by its named arguments are argument-evaluation holders (kotlinc's variables); a holder that only stages
+an operand, such as an inline call's receiver, is stored once it is evaluated, so an inline call in its
+value keeps its frame marker's slot and the holder takes the next one, as kotlinc's `let` receiver does
+(`inline_operand_holder_slots_e2e`). Deferred inline-return results, folded safe-call chains and
 grouped invocation operands retain their existing allocation contracts. Complete class and runtime
 controls in `named_argument_operands_e2e` cover ordinary constructors, effectful arrays and wide values.
 
@@ -23872,3 +23902,13 @@ call within an operand-evaluation block, preserving any existing origin. The JVM
 call's position at its invoke after inline operands reset the active line. Return endpoints, inline
 origins and positionless expressions keep their existing contracts. Complete class artifacts and
 runtime controls cover expression/explicit returns, reordered operands and source/compiled inlining.
+
+## Stored by-value class captures on Wasm
+
+Local and anonymous classes may carry copied values in their checked constructor fields. Capture
+stores execute before the selected superclass constructor, so an override called there observes
+the copied values. Physical fields, capture identities and forwarded-super ordinals stay separate;
+forwarded operands execute once in their checked order. The shared complete programs
+`retainedLexicalValueIdentity.kt` and `storedClassCapturePrefixes.kt` cover member reads, inherited
+storage, mixed prefixes and nested recapture. Shared-holder and fieldless capture transport retain
+their explicit unsupported results until their complete Wasm ABI is implemented.
