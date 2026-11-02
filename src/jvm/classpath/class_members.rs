@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use super::Classpath;
 use crate::jvm::classreader::{ClassInfo, ReadError};
-use crate::jvm::metadata::{FunctionName, KotlinMembers};
+use crate::jvm::metadata::{FunctionName, KotlinMembers, PackageMemberNames};
 use crate::types::{Ty, TypeName, Visibility};
 
 impl Classpath {
@@ -58,14 +58,18 @@ impl Classpath {
             })
     }
 
-    /// The names of the `Package.function`s `class` declares, without their signatures. A failure is
-    /// recorded as [`Self::class_members`] records it.
-    fn package_function_names<'a>(&self, class: &'a ClassInfo) -> &'a [FunctionName] {
-        match class.meta.members.package_function_names() {
+    /// The names of the `Package.function`s and `Package.property`s `class` declares, without
+    /// their signatures. A failure is recorded as [`Self::class_members`] records it.
+    fn package_member_names<'a>(&self, class: &'a ClassInfo) -> &'a PackageMemberNames {
+        static NONE: PackageMemberNames = PackageMemberNames {
+            functions: Vec::new(),
+            properties: Vec::new(),
+        };
+        match class.meta.members.package_member_names() {
             Ok(names) => names,
             Err(error) => {
                 self.record_class_load_error(class.this_class, ReadError::BadKotlinMetadata(error));
-                &[]
+                &NONE
             }
         }
     }
@@ -75,34 +79,45 @@ impl Classpath {
     /// functions of its own takes its parts' functions, and a part's private function is never
     /// offered for the facade's forwarder of the same JVM name.
     pub(super) fn facade_function_names(&self, owner: TypeName) -> Vec<FunctionName> {
-        let declaring = self.function_declaring_classes(owner);
+        let declaring = self.declaring_classes(owner, MemberKind::Function);
         declaring
             .classes
             .iter()
-            .flat_map(|class| self.package_function_names(class))
+            .flat_map(|class| &self.package_member_names(class).functions)
             .filter(|name| !(declaring.merged_parts && name.visibility == Visibility::Private))
             .cloned()
             .collect()
     }
 
     /// Whether [`Self::meta_functions_name`] of `owner` holds a function named `kotlin_name`,
-    /// answered from the function names alone.
+    /// answered from the names alone.
     pub(crate) fn facade_declares_function(&self, owner: TypeName, kotlin_name: &str) -> bool {
-        self.function_declaring_classes(owner)
+        self.declaring_classes(owner, MemberKind::Function)
             .classes
             .iter()
-            .flat_map(|class| self.package_function_names(class))
+            .flat_map(|class| &self.package_member_names(class).functions)
             .any(|name| name.kotlin_name == kotlin_name)
     }
 
-    /// The class files whose `Package.function`s `owner` exposes: `owner` itself, or, for a
-    /// multifile facade without functions of its own, its parts.
-    fn function_declaring_classes(&self, owner: TypeName) -> FunctionDeclaringClasses {
+    /// Whether [`Self::meta_properties_name`] of `owner` holds a property named `name`, answered
+    /// from the names alone.
+    pub(crate) fn facade_declares_property(&self, owner: TypeName, name: &str) -> bool {
+        self.declaring_classes(owner, MemberKind::Property)
+            .classes
+            .iter()
+            .flat_map(|class| &self.package_member_names(class).properties)
+            .any(|property| property == name)
+    }
+
+    /// The class files whose package members of `kind` `owner` exposes: `owner` itself, or, for a
+    /// multifile facade without members of that kind of its own, its parts. Functions and
+    /// properties merge independently, as [`Self::meta_functions_name`] merges them.
+    fn declaring_classes(&self, owner: TypeName, kind: MemberKind) -> DeclaringClasses {
         let Some(class) = self.find_name(owner) else {
-            return FunctionDeclaringClasses::default();
+            return DeclaringClasses::default();
         };
-        if !self.package_function_names(&class).is_empty() {
-            return FunctionDeclaringClasses {
+        if kind.declared_by(self.package_member_names(&class)) {
+            return DeclaringClasses {
                 classes: vec![class],
                 merged_parts: false,
             };
@@ -113,15 +128,30 @@ impl Classpath {
             .iter()
             .filter_map(|part| self.find(part))
             .collect();
-        FunctionDeclaringClasses {
+        DeclaringClasses {
             merged_parts: !parts.is_empty(),
             classes: parts,
         }
     }
 }
 
+#[derive(Clone, Copy)]
+enum MemberKind {
+    Function,
+    Property,
+}
+
+impl MemberKind {
+    fn declared_by(self, names: &PackageMemberNames) -> bool {
+        match self {
+            MemberKind::Function => !names.functions.is_empty(),
+            MemberKind::Property => !names.properties.is_empty(),
+        }
+    }
+}
+
 #[derive(Default)]
-struct FunctionDeclaringClasses {
+struct DeclaringClasses {
     classes: Vec<Arc<ClassInfo>>,
     /// Whether `classes` are a facade's parts, whose private functions the facade never forwards.
     merged_parts: bool,

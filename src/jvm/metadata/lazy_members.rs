@@ -11,7 +11,7 @@
 use std::sync::{Arc, OnceLock};
 
 use super::enclosing_type_parameters::{self, ScopedTypeParameter};
-use super::function_names::{function_names, FunctionName};
+use super::member_names::{package_member_names, PackageMemberNames};
 use super::realization_facts::Realizations;
 use super::string_table::{parse_string_table, split_d1};
 use super::{
@@ -67,7 +67,7 @@ struct PackedMembers {
     data_equality_bound: Option<Ty>,
     declares_package_members: bool,
     decoded: OnceLock<MetadataResult<KotlinMembers>>,
-    package_function_names: OnceLock<MetadataResult<Arc<[FunctionName]>>>,
+    package_member_names: OnceLock<MetadataResult<PackageMemberNames>>,
 }
 
 impl std::fmt::Debug for PackedMembers {
@@ -103,7 +103,7 @@ impl LazyMembers {
             data_equality_bound,
             declares_package_members: declared[0] || declared[1],
             decoded: OnceLock::new(),
-            package_function_names: OnceLock::new(),
+            package_member_names: OnceLock::new(),
         })))
     }
 
@@ -136,17 +136,21 @@ impl LazyMembers {
             .map_err(|error| *error)
     }
 
-    /// The names of the `Package.function` messages, read without decoding their signatures (see
-    /// [`FunctionName`]). A package member index needs only these; the signatures stay packed until
-    /// [`Self::decode`].
-    pub fn package_function_names(&self) -> MetadataResult<&[FunctionName]> {
+    /// The names of the `Package.function` and `Package.property` messages, read without decoding
+    /// their signatures (see [`PackageMemberNames`]). A package member index and a lookup by name
+    /// need only these; the signatures stay packed until [`Self::decode`].
+    pub fn package_member_names(&self) -> MetadataResult<&PackageMemberNames> {
+        static NONE: PackageMemberNames = PackageMemberNames {
+            functions: Vec::new(),
+            properties: Vec::new(),
+        };
         let Some(packed) = &self.0 else {
-            return Ok(&[]);
+            return Ok(&NONE);
         };
         packed
-            .package_function_names
-            .get_or_init(|| packed.with_ctx(|ctx| function_names(ctx, 3).map(Into::into)))
-            .as_deref()
+            .package_member_names
+            .get_or_init(|| packed.with_ctx(package_member_names))
+            .as_ref()
             .map_err(|error| *error)
     }
 }
