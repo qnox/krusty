@@ -239,12 +239,12 @@ fn aggregate_is_one_stable_always_scheduled_job_over_every_merge_gate() {
     );
     assert!(
         manifest.contains(
-            "name = \"klib_e2e\"\npath = \"tests/klib_e2e.rs\"\nrequired-features = [\"focused-klib-tests\"]"
+            "name = \"klib_e2e\"\npath = \"tests/klib.rs\"\nrequired-features = [\"focused-klib-tests\"]"
         ),
         "the focused target stays opt-in instead of duplicating tests in the ordinary suite: {manifest}"
     );
     let focused_klib =
-        fs::read_to_string(root.join("tests/klib_e2e.rs")).expect("read focused KLIB test target");
+        fs::read_to_string(root.join("tests/klib.rs")).expect("read focused KLIB test target");
     for module in [
         "klib_class_surface_e2e",
         "klib_container_e2e",
