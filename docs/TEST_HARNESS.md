@@ -8,7 +8,7 @@ parameters.
 The `e2e` target declares one module for every `tests/*_e2e.rs` file, through
 `krusty_test_modules::declare_test_modules!` in `tests/e2e.rs`, so a new test file needs no list
 edit anywhere. A module's own child modules live in `tests/<parent>_e2e/` without the suffix, so
-they are not also declared at the root. Cargo does not notice a file appearing or disappearing, so
+they are not also declared at the root; the macro rejects a suffixed child at compile time. Cargo does not notice a file appearing or disappearing, so
 the generated `declared_test_modules_match_the_tests_directory` test fails until the target is
 rebuilt; touch `tests/e2e.rs` to rebuild it. `cargo fmt` does not follow macro-declared modules,
 which is why `just fmt` and `just fmt-check` also pass `tests/*_e2e.rs` to rustfmt.

@@ -7,7 +7,8 @@
 //!
 //! Cargo records the files rustc read, not the directory listing, so adding or removing a file does not
 //! by itself rebuild the target. The macro therefore also emits a test that lists the directory again at
-//! run time and fails when the compiled module set is out of date.
+//! run time and fails when the compiled module set is out of date. A discovered file that declares
+//! another suffixed file as its child is a compile error, since that file would be declared twice.
 
 use proc_macro::TokenStream;
 use std::path::{Path, PathBuf};
@@ -30,6 +31,20 @@ pub fn declare_test_modules(input: TokenStream) -> TokenStream {
             return compile_error(&format!("cannot list {}: {error}", tests_dir.display()));
         }
     };
+
+    for file in &files {
+        let source = match std::fs::read_to_string(tests_dir.join(file)) {
+            Ok(source) => source,
+            Err(error) => return compile_error(&format!("cannot read tests/{file}: {error}")),
+        };
+        if let Some(child) = suffixed_child(&source, &suffix) {
+            return compile_error(&format!(
+                "tests/{file} declares tests/{child} as a child module, so it would also be \
+                 declared at the root; move it to tests/{}/ without the `{suffix}` suffix",
+                &file[..file.len() - ".rs".len()]
+            ));
+        }
+    }
 
     let mut out = String::new();
     for file in &files {
@@ -61,6 +76,21 @@ fn suffixed_files(dir: &Path, suffix: &str) -> std::io::Result<Vec<String>> {
     }
     files.sort();
     Ok(files)
+}
+
+/// The first `#[path = "…"]` module in `source` whose file name ends with `suffix`.
+fn suffixed_child<'a>(source: &'a str, suffix: &str) -> Option<&'a str> {
+    source.lines().find_map(|line| {
+        let path = line
+            .trim_start()
+            .strip_prefix("#[path")?
+            .trim_start()
+            .strip_prefix('=')?
+            .trim_start()
+            .strip_prefix('"')?;
+        let path = &path[..path.find('"')?];
+        path.rsplit('/').next()?.ends_with(suffix).then_some(path)
+    })
 }
 
 /// A test that lists `dir` again when it runs and compares it with the modules compiled in.
