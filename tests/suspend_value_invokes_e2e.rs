@@ -2,7 +2,9 @@
 //! invoked, in the regenerated copy of an object the inline function creates, as a suspension
 //! point of the copy's machine: kotlinc's `surroundInvokesWithSuspendMarkersIfNeeded`. The
 //! library's `$$forInline` body leaves the invoke unmarked, since its compiler cannot know whether
-//! a call inlines the lambda; the inliner marks it once it knows the call does not.
+//! a call inlines the lambda; the inliner marks it once it knows the call does not. The same holds
+//! for an invoke in the inline body itself, which a suspend caller inlines into its own machine
+//! (kotlinc's `markNoinlineLambdaIfSuspend` on the body's parameter).
 
 use super::common;
 
@@ -96,5 +98,60 @@ fun box(): String {{
     );
     let output = common::expect_box_run_against_ref("suspend_value_invokes", LIB, &main)
         .expect("reference kotlinc is provisioned");
+    assert_eq!(output, "OK");
+}
+
+const DIRECT_LIB: &str = r#"
+package lib
+
+suspend inline fun twiceOf(block: suspend () -> Int): Int = listOf(block()).first() * 2
+"#;
+
+const DIRECT_CALLS: &str = r#"
+suspend fun viaValue(step: suspend () -> Int): Int = twiceOf(step)
+"#;
+
+/// A suspend caller that inlines a body invoking a function value it passes without inlining
+/// suspends at that invoke, with the list construction's operands saved around it: the caller's
+/// machine is kotlinc's, byte for byte.
+#[test]
+fn a_directly_invoked_uninlined_suspend_value_is_a_suspension_point_of_the_caller_like_kotlinc() {
+    let main = format!("import lib.*\n{DIRECT_CALLS}");
+    let classes =
+        common::classes_against_kotlinc_lib("Direct", &[("Direct.kt", DIRECT_LIB)], &main)
+            .expect("reference kotlinc is provisioned");
+    assert_eq!(
+        classes.reference.keys().collect::<Vec<_>>(),
+        ["DirectKt", "DirectKt$viaValue$1"]
+    );
+    let differences = classes.differences();
+    assert!(differences.is_empty(), "{}", differences.join("\n\n"));
+}
+
+/// The caller suspends inside the function value and resumes with its result.
+#[test]
+fn a_directly_invoked_uninlined_suspend_value_suspends_and_resumes_the_caller() {
+    let main = format!(
+        r#"import lib.*
+import kotlin.coroutines.*
+{DIRECT_CALLS}
+var pending: Continuation<Int>? = null
+
+suspend fun later(): Int = suspendCoroutine {{ pending = it }}
+
+fun box(): String {{
+    var result: Any? = null
+    suspend {{ viaValue {{ later() }} }}.startCoroutine(Continuation(EmptyCoroutineContext) {{
+        result = it.getOrThrow()
+    }})
+    if (result != null) return "FAIL completed before resuming: $result"
+    pending!!.resume(21)
+    return if (result == 42) "OK" else "FAIL resumed: $result"
+}}
+"#
+    );
+    let output =
+        common::expect_box_run_against_ref("suspend_value_direct_invoke", DIRECT_LIB, &main)
+            .expect("reference kotlinc is provisioned");
     assert_eq!(output, "OK");
 }

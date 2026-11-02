@@ -5766,9 +5766,10 @@ regress.
     (`flatMapLatest(::fetch)`): its template's call is a suspension point the coroutine pass places
     only in a literal's inline body, so the template is declined. ✅ `surroundInvokesWithSuspendMarkersIfNeeded`
     in a regenerated copy's machine for a function value of an inline suspend parameter the call
-    does not inline (`OTHER`). ☐ The same marking where such a value is invoked directly in the
+    does not inline (`OTHER`). ✅ The same marking where such a value is invoked directly in the
     body a suspend caller inlines (`suspend inline fun f(b: suspend () -> Int) = listOf(b()).first()`
-    called with a value): the caller still reads the invoke's result without a suspension. ☐ kotlinc's conditional marking of a
+    called with a value, kotlinc's `markNoinlineLambdaIfSuspend` on the body's parameter); before,
+    the caller cast `COROUTINE_SUSPENDED` to the invoke's result. ☐ kotlinc's conditional marking of a
     recaptured suspend lambda (`INLINE_LAMBDA_AS_VARIABLE`).
     ☐ krusty's own `$$forInline` copy of an object's suspend method in an inline function it
     compiles.

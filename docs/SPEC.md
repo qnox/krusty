@@ -7660,6 +7660,13 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   inline call (kotlinc's `surroundInvokesWithSuspendMarkersIfNeeded`,
   `jvm/inliner/suspend_invoke_markers.rs`). Before, a named method's copy that used such a value's
   result after the invoke missed the suspension and cast `COROUTINE_SUSPENDED` to the result.
+  An invoke of such a value in the inlined body itself is marked the same way, as kotlinc's
+  `markNoinlineLambdaIfSuspend` marks an invoke of a parameter whose argument is `OTHER`: the
+  method inliner's analysis follows the value from its parameter slot
+  (`functional_arguments::InvokeTarget::NonInlineSuspend`), and the expanded body surrounds its
+  invoke before the caller's machine is built over it. A suspend caller of
+  `suspend inline fun twiceOf(block: suspend () -> Int) = listOf(block()).first() * 2` with a
+  value then suspends inside the value, where it used to cast `COROUTINE_SUSPENDED` to `Number`.
   Tests: `tests/suspend_lambda_regeneration_e2e.rs`, `tests/suspend_value_invokes_e2e.rs`. The
   body is not inlined on trial: once a call is routed to the inliner, or a lambda-free call to a
   compiled body is, a failure to inline or regenerate is an emission error, never a direct call.

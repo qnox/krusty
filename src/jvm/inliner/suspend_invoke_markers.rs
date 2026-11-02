@@ -19,10 +19,32 @@ use crate::jvm::method_node::{Insn, MethodNode, Node};
 use super::functional_arguments::is_invoke_on_lambda;
 use super::InlineError;
 
+/// Surround each `FunctionN.invoke` at `invokes` in `node` with suspend markers, and bracket it from
+/// the first instruction of its function value's read as an inline call. Each invokes a function
+/// value the call passes for an inline suspend parameter without inlining it, read from the inlined
+/// body's own parameter (kotlinc's `markNoinlineLambdaIfSuspend` on a parameter's invoke).
+pub(super) fn surround_invokes(
+    node: &mut MethodNode,
+    invokes: &[usize],
+) -> Result<(), InlineError> {
+    if invokes.is_empty() {
+        return Ok(());
+    }
+    let receivers = invoke_receivers(node, None)?;
+    let marked = receivers
+        .into_iter()
+        .filter(|&(invoke, _)| invokes.contains(&invoke))
+        .filter_map(|(invoke, receiver)| Some((receiver?.start, invoke)))
+        .collect();
+    surround(node, marked);
+    Ok(())
+}
+
 /// Surround each `FunctionN.invoke` in `node` whose function value is read from one of `fields` of
 /// `owner` with suspend markers, and bracket it from the first instruction of that read as an
 /// inline call. The fields hold function values of inline suspend parameters the call does not
-/// inline (kotlinc's `NonInlineArgumentForInlineSuspendParameter.OTHER`).
+/// inline (kotlinc's `NonInlineArgumentForInlineSuspendParameter.OTHER`), which a regenerated
+/// object's methods read as their captured values.
 pub(super) fn surround_field_invokes(
     node: &mut MethodNode,
     owner: &str,
@@ -31,18 +53,35 @@ pub(super) fn surround_field_invokes(
     if fields.is_empty() {
         return Ok(());
     }
+    let receivers = invoke_receivers(node, Some(owner))?;
+    let marked = receivers
+        .into_iter()
+        .filter_map(|(invoke, receiver)| {
+            let load = receiver?;
+            let field = load.field?;
+            fields.contains(&field).then_some((load.start, invoke))
+        })
+        .collect();
+    surround(node, marked);
+    Ok(())
+}
+
+/// The function value's read of each reachable `FunctionN.invoke` in `node`, by the invoke's index:
+/// kotlinc's `CapturedLambdaInterpreter`. With `owner`, a read of one of its fields names the field.
+fn invoke_receivers(
+    node: &MethodNode,
+    owner: Option<&str>,
+) -> Result<Vec<(usize, Option<LambdaLoad>)>, InlineError> {
     let frames = analyze(
         node,
         "fake",
         &mut CapturedLambdaInterpreter {
             owner,
-            fields,
             nodes: &node.nodes,
         },
     )
     .map_err(|error| InlineError::Analysis(error.message))?;
-    // Each marked invoke, with the instruction its function value's read starts at.
-    let mut marked: Vec<(usize, usize)> = Vec::new();
+    let mut receivers = Vec::new();
     for (at, entry) in node.nodes.iter().enumerate() {
         let Node::Insn(insn @ Insn::Method { desc, .. }) = entry else {
             continue;
@@ -61,13 +100,19 @@ pub(super) fn surround_field_invokes(
             .stack
             .len()
             .checked_sub(arguments + 1)
-            .map(|index| &frame.stack[index]);
-        if let Some(CapturedValue::Load { start, .. }) = receiver {
-            marked.push((*start, at));
-        }
+            .and_then(|index| match &frame.stack[index] {
+                CapturedValue::Load(load) => Some(load.clone()),
+                CapturedValue::Basic(_) => None,
+            });
+        receivers.push((at, receiver));
     }
+    Ok(receivers)
+}
+
+/// Insert the markers around each `(start, invoke)` of `marked`.
+fn surround(node: &mut MethodNode, marked: Vec<(usize, usize)>) {
     if marked.is_empty() {
-        return Ok(());
+        return;
     }
     let mut nodes = Vec::with_capacity(node.nodes.len() + marked.len() * 6);
     for (at, entry) in std::mem::take(&mut node.nodes).into_iter().enumerate() {
@@ -85,21 +130,28 @@ pub(super) fn surround_field_invokes(
         }
     }
     node.nodes = nodes;
-    Ok(())
 }
 
-/// A value of the analyzed body: a plain value, or a function value read from one of the marked
-/// fields, with the instruction its read starts at (kotlinc's `PossibleLambdaLoad`).
+/// A read of a function value (kotlinc's `PossibleLambdaLoad`): the instruction it starts at and,
+/// for a read of one of the analyzed owner's fields, that field.
+#[derive(Clone, Debug, PartialEq)]
+struct LambdaLoad {
+    start: usize,
+    field: Option<String>,
+    value: BasicValue,
+}
+
+/// A value of the analyzed body: a plain value, or a read of a function value.
 #[derive(Clone, Debug, PartialEq)]
 enum CapturedValue {
     Basic(BasicValue),
-    Load { start: usize, value: BasicValue },
+    Load(LambdaLoad),
 }
 
 impl CapturedValue {
     fn basic(&self) -> &BasicValue {
         match self {
-            CapturedValue::Basic(value) | CapturedValue::Load { value, .. } => value,
+            CapturedValue::Basic(value) | CapturedValue::Load(LambdaLoad { value, .. }) => value,
         }
     }
 }
@@ -114,12 +166,11 @@ fn plain(value: Option<BasicValue>) -> Option<CapturedValue> {
     value.map(CapturedValue::Basic)
 }
 
-/// kotlinc's `CapturedLambdaInterpreter`, following the marked fields' function values. A read
-/// of one starts at the instruction before its chain of `getfield`s; an `aload` of a local that
-/// holds one starts a read of its own there.
+/// kotlinc's `CapturedLambdaInterpreter`. Every `aload` starts a read there; a `getfield` of a
+/// captured function value starts one at the instruction before its chain of `getfield`s. An
+/// `aload` of a local that holds a field's read keeps naming that field.
 struct CapturedLambdaInterpreter<'a> {
-    owner: &'a str,
-    fields: &'a [String],
+    owner: Option<&'a str>,
     nodes: &'a [Node],
 }
 
@@ -156,13 +207,15 @@ impl Interpreter for CapturedLambdaInterpreter<'_> {
         at: &At,
         value: &CapturedValue,
     ) -> Result<CapturedValue, AnalyzerError> {
-        Ok(match (at.insn, value) {
-            (Insn::Var { op: ALOAD, .. }, CapturedValue::Load { value, .. }) => {
-                CapturedValue::Load {
-                    start: at.index,
-                    value: value.clone(),
-                }
-            }
+        Ok(match at.insn {
+            Insn::Var { op: ALOAD, .. } => CapturedValue::Load(LambdaLoad {
+                start: at.index,
+                field: match value {
+                    CapturedValue::Load(load) => load.field.clone(),
+                    CapturedValue::Basic(_) => None,
+                },
+                value: value.basic().clone(),
+            }),
             _ => value.clone(),
         })
     }
@@ -179,15 +232,14 @@ impl Interpreter for CapturedLambdaInterpreter<'_> {
                     op: GETFIELD,
                     owner,
                     name,
-                    ..
+                    desc,
                 },
                 Some(result),
-            ) if owner == self.owner && self.fields.iter().any(|field| field == name) => {
-                Some(CapturedValue::Load {
-                    start: self.chain_start(at.index),
-                    value: result,
-                })
-            }
+            ) if is_captured_function_field(name, desc) => Some(CapturedValue::Load(LambdaLoad {
+                start: self.chain_start(at.index),
+                field: (self.owner == Some(owner.as_str())).then(|| name.clone()),
+                value: result,
+            })),
             (_, result) => plain(result),
         })
     }
@@ -244,4 +296,14 @@ impl Interpreter for CapturedLambdaInterpreter<'_> {
         }
         CapturedValue::Basic(BasicInterpreter.merge(first.basic(), second.basic()))
     }
+}
+
+/// kotlinc's `fieldLoad` for a `getfield`: a captured value (`isCapturedFieldName`) of a
+/// `FunctionN` type.
+fn is_captured_function_field(name: &str, desc: &str) -> bool {
+    let function = desc
+        .strip_prefix("Lkotlin/jvm/functions/Function")
+        .and_then(|rest| rest.strip_suffix(';'))
+        .is_some_and(|arity| !arity.is_empty() && arity.bytes().all(|b| b.is_ascii_digit()));
+    function && (name.starts_with('$') || name == "this$0" || name == "receiver$0")
 }
