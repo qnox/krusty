@@ -47,30 +47,69 @@ fn declaration_maxima(
     let classifier_shapes = receivers
         .iter()
         .zip(parameter_shapes)
-        .map(|(receiver, parameters)| {
-            receiver
-                .iter()
-                .chain(parameters.iter())
-                .map(|parameter| {
-                    let parameter = parameter.non_null();
-                    parameter
-                        .kotlin_class_internal()
-                        .map_or(parameter, Ty::obj_name)
-                })
-                .collect::<Vec<_>>()
-        })
+        .map(|(receiver, parameters)| classifier_shape(*receiver, parameters))
         .collect::<Vec<_>>();
     let borrowed = classifier_shapes
         .iter()
         .map(Vec::as_slice)
         .collect::<Vec<_>>();
     let mut maximal = most_specific_indices(&borrowed, |_, left, right| {
-        left == right || super::resolution_subtype(src, left, right)
+        classifier_at_least_as_specific(src, left, right)
     });
     if maximal.iter().any(|index| !generic[*index]) {
         maximal.retain(|index| !generic[*index]);
     }
     maximal
+}
+
+/// A declaration's receiver and value parameters as the classifiers specificity compares.
+fn classifier_shape(receiver: Option<Ty>, parameters: &[Ty]) -> Vec<Ty> {
+    receiver
+        .iter()
+        .chain(parameters.iter())
+        .map(|parameter| {
+            let parameter = parameter.non_null();
+            parameter
+                .kotlin_class_internal()
+                .map_or(parameter, Ty::obj_name)
+        })
+        .collect()
+}
+
+fn classifier_at_least_as_specific(src: &dyn SymbolSource, left: Ty, right: Ty) -> bool {
+    left == right || super::resolution_subtype(src, left, right)
+}
+
+/// Whether two declarations are each at least as specific as the other, the only relation in
+/// which Kotlin's omitted-default and vararg discrimination may choose between them. Each side's
+/// type parameters are open variables while the other side is checked against it, so
+/// `(Int) -> T1` and `(Int) -> T2` are equally specific; type arguments are compared in full, so
+/// `(Int) -> String` and `(Int) -> Int` are not.
+pub(crate) fn declarations_equally_specific(
+    src: &dyn SymbolSource,
+    (left_receiver, left): (Option<Ty>, &[Ty]),
+    (right_receiver, right): (Option<Ty>, &[Ty]),
+) -> bool {
+    let left = left_receiver
+        .iter()
+        .chain(left)
+        .copied()
+        .collect::<Vec<_>>();
+    let right = right_receiver
+        .iter()
+        .chain(right)
+        .copied()
+        .collect::<Vec<_>>();
+    let open = crate::fx_hash::HashMap::default();
+    let at_least_as_specific = |specific: Ty, general: Ty| {
+        specific == general
+            || super::resolution_subtype(src, specific, crate::types::ty_subst(general, &open))
+    };
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(&right)
+            .all(|(&l, &r)| at_least_as_specific(l, r) && at_least_as_specific(r, l))
 }
 
 /// Retain declarations after semantic specificity, then apply non-genericity only as a tiebreaker.
