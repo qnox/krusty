@@ -89,6 +89,10 @@ jobs:
       # Coverage mappings are compiler-version dependent. Keep the committed baseline and the
       # instrumenting compiler on the same immutable nightly.
       KRUSTY_COVERAGE_TOOLCHAIN: nightly-2026-09-05
+      # The instrumented build compiles krusty's lib and test targets side by side, and every
+      # extra job token also lets rustc run more LLVM threads. Four jobs fit in 16 GB, which is
+      # what GitHub's four-core runners use; eight do not.
+      CARGO_BUILD_JOBS: "4"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
