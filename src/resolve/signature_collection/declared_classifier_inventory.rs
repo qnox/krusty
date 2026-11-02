@@ -28,6 +28,8 @@ pub(in crate::resolve) struct DeclaredClassifierInventory {
     /// Direct supertypes each source classifier was written with, already bound to qualified
     /// identities.
     pub(in crate::resolve) source_direct_supertypes: HashMap<TypeName, Vec<TypeName>>,
+    /// Source classifiers declared as interfaces, whose nested classifiers are never inherited.
+    pub(in crate::resolve) source_interfaces: crate::fx_hash::HashSet<TypeName>,
 }
 
 pub(in crate::resolve) fn declared_classifier_inventory(
@@ -89,6 +91,7 @@ pub(in crate::resolve) fn declared_classifier_inventory(
         },
     );
     let mut source_direct_supertypes: HashMap<TypeName, Vec<TypeName>> = HashMap::default();
+    let mut source_interfaces = crate::fx_hash::HashSet::default();
     if let Some(headers) = compact_headers {
         let empty_context = PassOneLocalClassContext::default();
         for stub in headers
@@ -144,6 +147,9 @@ pub(in crate::resolve) fn declared_classifier_inventory(
             {
                 supertypes.push(type_name("kotlin/Annotation"));
             }
+            if stub.flags.has(crate::fir::DeclarationFlags::INTERFACE) {
+                source_interfaces.insert(internal);
+            }
             source_direct_supertypes.insert(internal, supertypes);
         }
     } else {
@@ -190,6 +196,9 @@ pub(in crate::resolve) fn declared_classifier_inventory(
                     declared_supertype_name(class, &base.name, &names, &lexical_classifiers)
                 }));
                 supertypes.extend(implicit_source_supertypes(class));
+                if class.is_interface() {
+                    source_interfaces.insert(internal);
+                }
                 source_direct_supertypes.insert(internal, supertypes);
             }
         }
@@ -200,7 +209,31 @@ pub(in crate::resolve) fn declared_classifier_inventory(
         legacy_local_class_siblings,
         source_classifier_visibility,
         source_direct_supertypes,
+        source_interfaces,
     }
+}
+
+/// The direct supertypes through which `owner` inherits nested classifiers during signature
+/// collection: its declared source supertypes, or its library supertypes, without interfaces.
+pub(in crate::resolve) fn source_nested_classifier_supertypes(
+    source_direct_supertypes: &HashMap<TypeName, Vec<TypeName>>,
+    source_interfaces: &crate::fx_hash::HashSet<TypeName>,
+    libraries: &dyn crate::symbol_source::SymbolSource,
+    owner: TypeName,
+) -> Vec<TypeName> {
+    let Some(supertypes) = source_direct_supertypes.get(&owner) else {
+        return crate::symbol_resolver::nested_classifier_supertypes(libraries, owner);
+    };
+    supertypes
+        .iter()
+        .copied()
+        .filter(|supertype| {
+            !source_interfaces.contains(supertype)
+                && crate::symbol_resolver::inherits_nested_classifiers_through(
+                    libraries, *supertype,
+                )
+        })
+        .collect()
 }
 
 /// The classifier a function-type supertype instantiates (`class C : suspend (Int) -> R` extends
