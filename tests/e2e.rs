@@ -287,6 +287,8 @@ mod callable_ref_generic_signature_e2e;
 mod callable_ref_to_inferred_member_e2e;
 #[path = "callable_ref_unresolved_e2e.rs"]
 mod callable_ref_unresolved_e2e;
+#[path = "callable_reference_misfit_e2e.rs"]
+mod callable_reference_misfit_e2e;
 #[path = "caller_type_param_receiver_e2e.rs"]
 mod caller_type_param_receiver_e2e;
 #[path = "cannot_infer_cascade_e2e.rs"]
@@ -497,6 +499,8 @@ mod classpath_value_class_builder_e2e;
 mod classpath_value_class_default_e2e;
 #[path = "classpath_value_class_member_e2e.rs"]
 mod classpath_value_class_member_e2e;
+#[path = "classpath_value_class_override_e2e.rs"]
+mod classpath_value_class_override_e2e;
 #[path = "classpath_value_class_param_e2e.rs"]
 mod classpath_value_class_param_e2e;
 #[path = "classpath_valueclass_param_ext_e2e.rs"]
@@ -752,6 +756,8 @@ mod dep_resolution;
 mod dependency_override_signature_e2e;
 #[path = "dependency_property_reference_name_e2e.rs"]
 mod dependency_property_reference_name_e2e;
+#[path = "dependency_value_class_override_e2e.rs"]
+mod dependency_value_class_override_e2e;
 #[path = "descriptor_arity_fails_closed_e2e.rs"]
 mod descriptor_arity_fails_closed_e2e;
 #[path = "descriptor_element_companion_serializer_e2e.rs"]
@@ -1392,8 +1398,6 @@ mod kotlin_fun_java_sam_param_e2e;
 mod kotlin_native_provisioning_e2e;
 #[path = "kotlin_script_e2e.rs"]
 mod kotlin_script_e2e;
-#[path = "kotlinc_argument_conformance_e2e.rs"]
-mod kotlinc_argument_conformance_e2e;
 #[path = "krusty_dep_dir_e2e.rs"]
 mod krusty_dep_dir_e2e;
 #[path = "krusty_roundtrip_class_metadata_e2e.rs"]
@@ -1820,6 +1824,8 @@ mod value_class_suspend_override_e2e;
 mod value_class_suspend_resume_e2e;
 #[path = "value_class_try_value_e2e.rs"]
 mod value_class_try_value_e2e;
+#[path = "vararg_generic_signature_e2e.rs"]
+mod vararg_generic_signature_e2e;
 #[path = "variance_conflicts_e2e.rs"]
 mod variance_conflicts_e2e;
 
@@ -3014,6 +3020,9 @@ mod intersection_bound_metadata_order_e2e;
 mod type_safe_override_call_e2e;
 #[path = "where_bound_arguments_e2e.rs"]
 mod where_bound_arguments_e2e;
+
+#[path = "immediate_lambda_invocation_e2e.rs"]
+mod immediate_lambda_invocation_e2e;
 
 #[path = "facade_local_classifier_metadata_e2e.rs"]
 mod facade_local_classifier_metadata_e2e;

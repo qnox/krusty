@@ -675,6 +675,13 @@ pub enum IrExpr {
     /// role in `debug_local_provenance`. A backend that emits debug locals materializes the slot,
     /// the zero store, and the name.
     InlineFrameMarker,
+    /// The operand of a parameter a call leaves to its callee's default, in the full parameter
+    /// frame a default-argument entry takes. The entry overwrites it before any code reads it, so
+    /// it carries no value: each backend realizes it as the zero of `ty`'s carrier. It is a node
+    /// of its own because a null constant cannot stand for every carrier, such as a value class.
+    AbsentArgument {
+        ty: Ty,
+    },
     /// Invoke a function value (`f(args)` where `f: (A,…) -> R`) via the `FunctionN.invoke` interface
     /// method. Arguments are boxed to `Object`; the `Object` result is cast/unboxed to `ret`.
     /// `params` retains the semantic Kotlin parameter types through backend carrier lowering so an
@@ -1283,6 +1290,10 @@ pub struct IrSpecializedAnonymousClass {
     pub caller_source_name: String,
     pub inline_callee: crate::fir::CallableId,
     pub inline_callee_source_name: String,
+    /// For each of the callee's operands, by its value slot: the caller's `crossinline` parameter
+    /// the expansion binds it to, when it is one. A copy remaps its captures' provenance through
+    /// it, and so does an object nested in the copy that is specialized later.
+    pub crossinline_operands: Vec<Option<u32>>,
     /// Source function → the function on this copy. Accessor functions materialized after the
     /// copy are added here before bridges and metadata read the copy.
     pub method_clones: crate::fx_hash::HashMap<FunId, FunId>,
@@ -1360,6 +1371,9 @@ pub struct IrFile {
     /// these identities; they must not recover either one from the generated `$suspendImpl`
     /// spelling.
     pub(crate) jvm_suspend_impl_bodies: crate::fx_hash::HashMap<FunId, (TypeName, FunId)>,
+    /// JVM continuation classes, keyed by class id, with the suspend function each one re-enters.
+    /// The class's access and ABI scope are that function's facts.
+    pub(crate) jvm_continuation_functions: crate::fx_hash::HashMap<ClassId, FunId>,
     /// Exact generated function metadata/debug contracts, keyed by semantic owning classifier.
     /// Producers publish once; backends consume function identities without name/descriptor scans.
     generated_member_publications: crate::fx_hash::HashMap<TypeName, IrGeneratedMemberPublication>,
@@ -1816,6 +1830,9 @@ pub struct IrFile {
     /// adaptation boundary records this edge when it creates the call; later representation
     /// analysis consumes the identity and never recognizes an unbox operation by its spelling.
     pub(crate) value_class_unbox_type_operation_edges: crate::fx_hash::HashMap<ExprId, ExprId>,
+    /// Each declaration's default-argument entry, by the declaration's `FunId`, once a target's
+    /// shared default-argument lowering has realized it as an ordinary function of this file.
+    pub(crate) default_entries: crate::fx_hash::HashMap<FunId, FunId>,
     /// `FunId` → source parameter names and, when present, default-value expressions.
     pub fn_params: crate::fx_hash::HashMap<u32, FnParamInfo>,
     /// Per declared method/function, whether each SOURCE parameter was declared nullable (`a: String?`).

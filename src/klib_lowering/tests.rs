@@ -544,6 +544,7 @@ fn render_node(ir: &IrFile, expression: ExprId) -> String {
             completion,
         } => format!("{completion:?}({})", render(ir, *producer)),
         IrExpr::UnitInstance => "Unit".to_owned(),
+        IrExpr::SingletonValue { classifier } => format!("object {}", classifier.render()),
         IrExpr::Checked(checked) => match checked.as_ref() {
             crate::ir::IrCheckedOperation::RangeContains {
                 operation,
