@@ -361,7 +361,7 @@ box-corpus VERSION=`just max-version`:
     # Kotlin's command-line test corpus (`.args`/`.out` pairs) and the third-party annotation
     # sources some of its cases put on the classpath; kotlin_cli_jvm_conformance runs it. Its
     # diagnostics test data, which kotlin_diagnostics_jvm_conformance scores by false accepts.
-    cli_dirs="compiler/testData/cli third-party/annotations third-party/java8-annotations third-party/jsr305 compiler/testData/diagnostics/tests compiler/testData/diagnostics/testsWithStdLib"
+    cli_dirs="compiler/testData/cli third-party/annotations third-party/java8-annotations third-party/jsr305 compiler/testData/diagnostics/tests compiler/testData/diagnostics/testsWithStdLib compiler/testData/diagnostics/helpers"
     mock_dir=""
     if [ -d "$root/.git" ] && [ -d "$box" ]; then
         mock_dir="$(mock_dir_at_tag)"

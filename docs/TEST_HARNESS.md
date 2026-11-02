@@ -429,25 +429,40 @@ being skipped, so the gate never tests fewer cases than it claims. JDKs are foun
 
 ## Diagnostics False-Accept Ratchet
 
-`tests/kotlin_diagnostics_jvm_conformance.rs` compiles Kotlin's diagnostics test data
-(`compiler/testData/diagnostics/tests` and `testsWithStdLib` of the provisioned checkout) with
-kotlinc and with krusty, using the same sources and `-XXLanguage:` arguments, and compares only
-whether each compiler rejects the case. A false accept, a case kotlinc rejects and krusty compiles
-without an error, is the divergence it ratchets: `tests/diagnostics_false_accepts/jvm/<version>.txt`
-lists them, and a case joining or leaving the list fails the run until the list is rewritten:
+`tests/kotlin_diagnostics_jvm_conformance.rs` runs Kotlin's diagnostics test data
+(`compiler/testData/diagnostics/tests` and `testsWithStdLib` of the provisioned checkout) through the
+box lane's compile path: krusty compiles each case in process with the same topologies (`// FILE:`
+with Java, `// MODULE:`), the same mock JDK unless `// FULL_JDK`, and the same kotlinc reference
+oracle and `target/cache/ref-classes` cache. Before either compiler sees a case, the lane strips its
+diagnostic markers and adds the helper files its directives select, as kotlinc's test runner does
+(`// CHECK_TYPE` adds `diagnostics/helpers/types/checkType.kt`, `// INFERENCE_HELPERS` adds
+`inference/inferenceUtils.kt`). It compares only whether each compiler rejects the case.
+
+A false accept, a case kotlinc rejects and krusty compiles without an error, is the divergence it
+ratchets in `tests/diagnostics_false_accepts/jvm/<version>.txt`. A case kotlinc gives no verdict on
+(it crashes, or javac refuses the case's Java) is excused only where
+`tests/diagnostics_not_scored/jvm/<version>.txt` lists it, and the run proves that list in both
+directions. A listed false accept leaves the list only on a definite verdict from both compilers: an
+entry whose case lost kotlinc's or krusty's verdict fails the run, and blessing refuses while one
+does. Rewrite both lists with:
 
 ```sh
 KRUSTY_BLESS_DIAGNOSTICS_EXPECTATIONS=1 just diagnostics-conformance "$(just conformance-bin)" <v>
 ```
 
-False rejects and krusty failures (including a compile that runs past
-`KRUSTY_DIAGNOSTICS_CASE_TIMEOUT_SECONDS`, 60 by default) are printed with the totals, not
-ratcheted. `// MODULE:` cases are counted and not scored yet. kotlinc's verdicts are cached under
-`target/cache/diagnostics-reference`, keyed by each case's content and the exact compiler, so a
-warm run costs only krusty's compiles (tens of minutes) and a cold one takes hours. Ordinary runs
-therefore ignore the test; `just diagnostics-conformance` runs it under
-`KRUSTY_DIAGNOSTICS_TIMEOUT_SECONDS`, and CI runs it in the newest supported version's JVM
-conformance row, restoring the verdicts from the base and saving them from master.
+krusty compiles the cases in a pool of long-lived worker processes, one per test thread, each this
+same test binary running the ignored `diagnostics_krusty_worker` test. A worker pays krusty's
+startup once; a case that crashes its worker (a stack overflow aborts the process) or runs past
+`KRUSTY_DIAGNOSTICS_CASE_TIMEOUT_SECONDS` (60 by default) is a krusty failure of that case, and a
+fresh worker takes the next one. `scripts/check-outcome-lists.sh` guards the false-accept lists like
+the box lists; the not-scored lists are proven by the reference run instead. False rejects and
+krusty failures are printed with the totals, not ratcheted. With kotlinc's references cached a run
+takes about a minute and a half on four cores; a cold reference cache adds about 1.5 hours of
+kotlinc compiles. Ordinary runs therefore ignore
+the test; `just diagnostics-conformance` first checks that the binary lists the test (an older
+binary would select none and pass), then runs it under `KRUSTY_DIAGNOSTICS_TIMEOUT_SECONDS`. CI runs
+it in the newest supported version's JVM conformance row after the box conformance run, and saves the
+references even when the run fails.
 
 ## JVM processes
 

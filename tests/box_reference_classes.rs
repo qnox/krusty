@@ -942,6 +942,13 @@ fn read_cached_classes(cache: &Path) -> Result<ReferenceClasses, String> {
     Ok(classes)
 }
 
+/// Whether a [`reference_compile`] failure is kotlinc rejecting the case's source: an error
+/// anchored at a Kotlin source position. Anything else (a compiler crash, javac refusing the Java,
+/// an unavailable toolchain) says nothing about the program.
+pub fn is_source_rejection(reason: &str) -> bool {
+    reason.contains(".kt:") && reason.contains(": error:")
+}
+
 /// Publish a result to the cache. Success and a deterministic source-anchored rejection are stored;
 /// a transient failure is left uncached so the next run retries instead of being poisoned.
 fn store_cache(cache: &Path, fingerprint: u128, result: &Result<ReferenceClasses, String>) {
@@ -966,7 +973,7 @@ fn store_cache(cache: &Path, fingerprint: u128, result: &Result<ReferenceClasses
                 let _ = std::fs::remove_dir_all(&staging);
             }
         }
-        Err(reason) if reason.contains(".kt:") && reason.contains(": error:") => {
+        Err(reason) if is_source_rejection(reason) => {
             if std::fs::create_dir_all(cache).is_ok() {
                 let _ = std::fs::write(cache.join("FAILED"), reason);
             }

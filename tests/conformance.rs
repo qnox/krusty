@@ -13,6 +13,8 @@ mod common;
 #[path = "box_byte_score.rs"]
 mod box_byte_score;
 mod box_inventory;
+#[path = "box_jvm_compile.rs"]
+mod box_jvm_compile;
 #[path = "box_lane.rs"]
 mod box_lane;
 #[path = "box_ratchet.rs"]
@@ -36,6 +38,8 @@ mod kotlin_diagnostics_jvm_conformance;
 mod kotlin_native_multimodule_support;
 #[path = "kotlinc_argument_conformance_e2e.rs"]
 mod kotlinc_argument_conformance_e2e;
+#[path = "krusty_case_workers.rs"]
+mod krusty_case_workers;
 #[path = "common/reference_recording.rs"]
 mod reference_recording_support;
 #[path = "serialization_conformance.rs"]

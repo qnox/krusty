@@ -105,6 +105,8 @@ const FAILURES: &str = "tests/box_expected_failures/native-klib/2.4.20.txt";
 const NOT_APPLICABLE: &str = "tests/box_expected_not_applicable/jvm/2.4.20.txt";
 const CLI_FAILURES: &str = "tests/cli_expected_failures/jvm/2.4.20.txt";
 const CLI_NOT_APPLICABLE: &str = "tests/cli_expected_not_applicable/jvm/2.4.20.txt";
+const FALSE_ACCEPTS: &str = "tests/diagnostics_false_accepts/jvm/2.4.20.txt";
+const LATER_FALSE_ACCEPTS: &str = "tests/diagnostics_false_accepts/jvm/2.4.21.txt";
 const KLIB_UNCOVERED: &str = "tests/klib_uncovered_implementations/native/2.4.20.txt";
 const MIGRATIONS: &str = "scripts/outcome-list-migrations.tsv";
 
@@ -546,6 +548,58 @@ fn a_release_that_inherits_a_growing_file_is_charged_too() {
         String::from_utf8(output.stderr).expect("stderr is UTF-8"),
         "outcome-lists: tests/box_expected_failures/native-klib/2.4.20.txt gains 1 entry:\n    b/two.kt\n\
          outcome-lists: tests/box_expected_failures/native-klib/2.4.21.txt (reads tests/box_expected_failures/native-klib/2.4.20.txt) gains 1 entry:\n    b/two.kt\n\
+         outcome-lists: platform/version expectations only shrink; fix the files above instead of listing them\n"
+    );
+}
+
+#[test]
+fn a_growing_diagnostics_false_accept_manifest_fails() {
+    let repo = Repo::new("false-accepts-grow");
+    repo.write(FALSE_ACCEPTS, "# header\ntests/a.kt\n");
+    let base = repo.commit();
+    repo.write(FALSE_ACCEPTS, "# header\ntests/a.kt\ntests/b.kt\n");
+    let head = repo.commit();
+
+    let output = repo.check(&base, &head);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8(output.stderr).expect("stderr is UTF-8"),
+        "outcome-lists: tests/diagnostics_false_accepts/jvm/2.4.20.txt gains 1 entry:\n    tests/b.kt\n\
+         outcome-lists: platform/version expectations only shrink; fix the files above instead of listing them\n"
+    );
+}
+
+#[test]
+fn a_shrinking_diagnostics_false_accept_manifest_passes() {
+    let repo = Repo::new("false-accepts-shrink");
+    repo.write(FALSE_ACCEPTS, "# header\ntests/a.kt\ntests/b.kt\n");
+    let base = repo.commit();
+    repo.write(FALSE_ACCEPTS, "# header\ntests/b.kt\n");
+    let head = repo.commit();
+
+    let output = repo.check(&base, &head);
+
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(output.stderr, b"");
+}
+
+#[test]
+fn dropping_a_diagnostics_release_file_that_inherits_more_false_accepts_fails() {
+    let repo = Repo::new("false-accepts-inherit");
+    repo.write("kotlin-versions", "2.4.20 a\n2.4.21 b\n");
+    repo.write(FALSE_ACCEPTS, "tests/a.kt\ntests/b.kt\n");
+    repo.write(LATER_FALSE_ACCEPTS, "tests/a.kt\n");
+    let base = repo.commit();
+    repo.git(&["rm", "-q", LATER_FALSE_ACCEPTS]);
+    let head = repo.commit();
+
+    let output = repo.check(&base, &head);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8(output.stderr).expect("stderr is UTF-8"),
+        "outcome-lists: tests/diagnostics_false_accepts/jvm/2.4.21.txt (reads tests/diagnostics_false_accepts/jvm/2.4.20.txt) gains 1 entry:\n    tests/b.kt\n\
          outcome-lists: platform/version expectations only shrink; fix the files above instead of listing them\n"
     );
 }
