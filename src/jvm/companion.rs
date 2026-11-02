@@ -615,6 +615,17 @@ pub(super) fn lower_companion_properties(
             let getter = candidate.declared_getter.is_none().then(|| {
                 let read = ir.add_expr(IrExpr::GetStatic(static_index));
                 let returned = ir.add_expr(IrExpr::Return(Some(read)));
+                // fir2ir builds a default getter's `return field` at the getter's offsets: the
+                // field read marks that line where the body starts, and the `return` marks the
+                // same line, which writes nothing.
+                let getter_line = if candidate.accessor_lines.getter != 0 {
+                    candidate.accessor_lines.getter
+                } else {
+                    candidate.decl_line
+                };
+                if getter_line != 0 {
+                    ir.set_source_line(read, getter_line);
+                }
                 let getter_body = ir.add_expr(IrExpr::Block {
                     stmts: vec![returned],
                     value: None,

@@ -23957,8 +23957,10 @@ The remaining details follow kotlinc:
 - Whether a statement or operand marks its own line where its code starts is decided by its kind
   (`states_line_at_start` in `src/jvm/line_numbers.rs`), not recorded per node: a source `!!` is
   kotlinc's `CHECK_NOT_NULL` intrinsic and marks before its operand, through an implicit coercion of
-  its result; an elvis marks where its block starts, and the next link of a folded chain marks the
-  same line again, which writes nothing. A serializable property's default copied into
+  its result; an elvis marks where its block starts. A later link of a chain `a ?: b ?: c`, which
+  fir2ir builds left-nested, has no block of its own once `JvmSafeCallChainFoldingLowering` folds
+  the chain: its temporary and null test are built at the chain's start and mark nothing of their
+  own (`WhenFacts::elvis_chain_links`; `elvis_own_line_e2e`). A serializable property's default copied into
   `write$Self` or the deserialization constructor keeps the kinds of the nodes it copies, so it
   marks where its first node's kind marks.
 - A leading operand a call or property access generates without a position of its own (an
@@ -23967,6 +23969,23 @@ The remaining details follow kotlinc:
   starts. No table records which operations start at such an operand.
 - A call over a captured context receiver is an ordinary call: it marks its own line at its invoke
   from its own position, with no separate dispatch line.
+- `typeOf<T>()` is kotlinc's `TypeOf` intrinsic wherever it is realized, a reified body's
+  included, and marks its line before the type it builds (`type_of_e2e`,
+  `reified_anonymous_object_e2e`).
+- A `!=` of two `Long`, `Float` or `Double` values is `Not.BooleanNegation` over the equality: it
+  marks its line before the `lcmp`/`*cmp`, where `==` and `<` (`BooleanComparison`) mark after it,
+  before the jump (`suspend_value_class_results_e2e`).
+- A suspend call marks its line where it starts, before its arguments, as `visitCall` does for a
+  suspend callee. A block whose only content is a value that opens an inline frame marks where it
+  starts too, as the frame does.
+- A hoisted companion property's synthesized getter reads the field at the accessor's line (the
+  declaration's, when the accessor is not written); its `return` has no line of its own
+  (`companion_property_visibility_e2e`, `lateinit_companion_read_e2e`,
+  `written_default_accessor_e2e`). The outer class's `access$…$cp` bridges are still ordered by
+  the line the synthesized accessor stands at as a whole, not by the lines its code marks.
+- After an inlined call in an object's class initializer the mapper forgets its line like
+  anywhere else; only a condition registers the line again at once
+  (`object_initializer_receiver_e2e`).
 - Which nodes mark their line before their operands (an intrinsic or safe call, a source `!!`, an
   elvis) is one rule, `marks_line_before_operands` in `src/jvm/line_numbers.rs`, that a statement
   and a value both ask; a value also marks at its start where its kind does
@@ -24005,6 +24024,32 @@ Covered by `line_numbers::tests` and the line and byte differentials against kot
 Positions come from lowering. Nodes that lowering builds without a FIR element are given explicit
 positions where they are built: delegated-property getters, in-place delegate methods, local
 delegate accessors, and local-class capture arguments (which are settled to no position).
+
+A node built while lowering a FIR expression takes that expression's position only when kotlinc
+builds it there. These are settled to the position kotlinc gives them instead:
+
+- An inline function's expansion, an external declaration's or a same-module one's, is the callee's
+  code: copied nodes keep the template's positions and nodes built for the expansion have none
+  (`same_module_inline_frame_markers_e2e`, `inline_function_lambda_class_e2e`,
+  `inline_erased_capture_e2e`).
+- An annotation construction's element defaults are the annotation declaration's values and have
+  no position at the construction site (`constructor_default_expression_lines_e2e`).
+- A captured value transferred into an escaping lambda's regenerated class is loaded by the inliner
+  with no line: the caller's lambda is never built.
+- The continuation passed to a suspend lambda invoked in place takes the invocation's position and
+  inline-copy mark, so the suspend invocation marks where it starts
+  (`suspend_private_function_e2e`).
+- An intrinsic suspension (`suspendCoroutineUninterceptedOrReturn` and its kin) is `@InlineOnly`:
+  its lambda frame marker carries the call line, as a synthetic inline line when the lambda body
+  starts on that line. The resume join carries the call line as the coroutine transformer inserts
+  it, written outside the mapper (`suspend_value_class_results_e2e`).
+- A Compose restart group's `shouldExecute` test and the defaults, dirty checks and trace events
+  around the body are built by kotlinc's plugin without offsets: only the group's start, skip,
+  branch and end statements begin on a line, and the body keeps its own positions
+  (`kotlin_box_ir_jvm_conformance::compose_*`).
+- A serialization `serializer()` call realized after lowering, and the companion or object
+  receiver it reads, take the source call's position, as kotlinc builds them at the call's
+  offsets (`serializable_parent_dependency_e2e`).
 
 Covered by `expression_line_marks_e2e::line_entries_follow_kotlincs_rule_by_node_kind` and the line
 and byte differentials against kotlinc.

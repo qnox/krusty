@@ -46,7 +46,7 @@
 
 use crate::ir::{
     Callee, ExprId, FunId, IrBinOp, IrConst, IrEnclosure, IrExpr, IrFile, IrFunction,
-    IrParameterIdentity, IrTypeOp,
+    IrNodePosition, IrParameterIdentity, IrTypeOp,
 };
 use crate::types::{EqualityMode, Ty};
 
@@ -801,6 +801,11 @@ fn restart_group(ir: &mut IrFile, runtime: &ComposeRuntime, facts: &RestartableF
         branches: vec![(Some(execute), executed), (None, skipped)],
     });
     ir.whens.exhaustive.insert(branch, Ty::Unit);
+    // kotlinc's plugin builds the test and the code around the body without offsets: only the
+    // branch itself begins on the function's line, and the body keeps its own positions.
+    for built in [execute, executed] {
+        ir.settle_tree_positions(built, IrNodePosition::default());
+    }
     mark_line(ir, branch, function_line);
     statements.push(branch);
 

@@ -1106,13 +1106,7 @@ impl Emitter<'_> {
         // kotlinc's `markLineNumberAfterInlineIfNeeded`: inside a condition the caller's line is
         // marked again for the jump that follows; elsewhere it is forgotten, so the next mark of
         // any line is written.
-        code.line_after_inline(
-            self.inside_condition
-                || self
-                    .regeneration_site
-                    .as_ref()
-                    .is_some_and(RegenerationSite::is_class_initializer),
-        );
+        code.line_after_inline(self.inside_condition);
 
         for lease in leases {
             self.release_temporary(lease);

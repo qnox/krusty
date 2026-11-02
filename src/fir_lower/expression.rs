@@ -1073,6 +1073,7 @@ impl BodyLowering<'_> {
             FirExprKind::Elvis { lhs, rhs } => {
                 // Set only while this elvis is the next link of an enclosing chain.
                 let chain_start = self.elvis_chain_start.take();
+                let first_link_node = self.ir.exprs.len();
                 let lhs_value = self.expression(*lhs)?;
                 let temporary = self.allocate_temporary();
                 let variable = self.ir.add_expr(IrExpr::Variable {
@@ -1127,6 +1128,21 @@ impl BodyLowering<'_> {
                     (None, None) => self.body.expression_debug_lines(expression_id).source,
                 };
                 self.ir.whens.elvises.insert(result, line);
+                if let Some(chain_start) = chain_start {
+                    // fir2ir builds a chain left-nested, `(a ?: b) ?: c`, so every link after the
+                    // first is an elvis starting where the chain starts; folding the chain leaves
+                    // that link's temporary and null test at that position, in the chain's block.
+                    self.ir.whens.elvis_chain_links.insert(result);
+                    let position = crate::ir::IrNodePosition {
+                        start_line: Some(chain_start),
+                        source_line: Some(chain_start),
+                        end_line: Some(self.body.expression_debug_lines(expression_id).end)
+                            .filter(|&end| end != 0),
+                        ..crate::ir::IrNodePosition::default()
+                    };
+                    self.ir
+                        .settle_positions(first_link_node..self.ir.exprs.len(), position);
+                }
                 // An elvis over a safe call is one more guard of that call's chain: its left
                 // value's null check joins the chain's, and every `null` reaches the right side.
                 let over_safe_call = matches!(

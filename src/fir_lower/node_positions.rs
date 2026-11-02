@@ -110,11 +110,12 @@ impl BodyLowering<'_> {
             .settle_positions(first_generated..self.ir.exprs.len(), position);
     }
 
-    /// Settle the nodes an external inline function's body expanded to from `first_expanded` on.
-    /// They are that function's code, which kotlinc copies with its own lines, not code built for
-    /// the call: a node the expansion gave no line keeps none, and the operands lowered for the
-    /// call keep their own positions.
-    pub(super) fn settle_external_expansion_positions(&mut self, first_expanded: usize) {
+    /// Settle the nodes an inline function's body expanded to from `first_expanded` on, an
+    /// external declaration's or a same-module one's. They are that function's code, which
+    /// kotlinc's inliner copies with its own lines, not code built for the call: a node the
+    /// expansion gave no line keeps none, and the operands lowered for the call keep their own
+    /// positions.
+    pub(super) fn settle_inline_expansion_positions(&mut self, first_expanded: usize) {
         self.ir.settle_positions(
             first_expanded..self.ir.exprs.len(),
             IrNodePosition::default(),

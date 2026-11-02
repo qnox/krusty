@@ -19,6 +19,11 @@ use crate::types::Ty;
 /// Whether `expression` states its own line before its operands, keeping that entry where an
 /// operand marks another line at the same offset.
 pub(crate) fn states_line_before_operands(ir: &IrFile, expression: ExprId) -> bool {
+    // `typeOf<T>()` is kotlinc's `TypeOf` intrinsic wherever it is realized, a reified body's
+    // included.
+    if is_type_of(ir, expression) {
+        return true;
+    }
     if let Some(call) = ir.builtin_calls.get(&expression) {
         return is_intrinsic_call(ir, expression, call);
     }
@@ -69,6 +74,16 @@ fn is_intrinsic_call(ir: &IrFile, expression: ExprId, call: &IrBuiltinCall) -> b
             )
         ),
     }
+}
+
+fn is_type_of(ir: &IrFile, expression: ExprId) -> bool {
+    matches!(
+        ir.expr(expression),
+        IrExpr::Call { callee, .. } if matches!(
+            **callee,
+            Callee::Intrinsic { operation: IrIntrinsic::TypeOf { .. }, .. }
+        )
+    )
 }
 
 fn is_unsigned(ty: Ty) -> bool {

@@ -111,6 +111,15 @@ impl IrFile {
         self.positions.inherit(source, target);
     }
 
+    /// Settle `expression` with no position, whatever it carried: a node moved into code kotlinc
+    /// generates without offsets.
+    pub(crate) fn clear_position(&mut self, expression: ExprId) {
+        let position = self.positions.settle(expression);
+        position.start_line = None;
+        position.source_line = None;
+        position.end_line = None;
+    }
+
     /// Settle every node in `nodes` that is not settled yet with the start, source and end lines of
     /// `position`: the nodes lowering built for one FIR expression or statement take its position,
     /// and a node that an inner expression, an explicit write or a copy settled keeps its own.
@@ -123,6 +132,22 @@ impl IrFile {
                 settled.source_line = position.source_line;
                 settled.end_line = position.end_line;
             }
+        }
+    }
+
+    /// Settle every node of the tree rooted at `root` that is not settled yet with the start,
+    /// source and end lines of `position`: code a compiler plugin builds around nodes that keep
+    /// their own positions.
+    pub(crate) fn settle_tree_positions(&mut self, root: ExprId, position: IrNodePosition) {
+        let mut pending = vec![root];
+        while let Some(node) = pending.pop() {
+            if !self.positions.is_settled(node) {
+                let settled = self.positions.settle(node);
+                settled.start_line = position.start_line;
+                settled.source_line = position.source_line;
+                settled.end_line = position.end_line;
+            }
+            super::traversal::for_each_child(&self.exprs, node, &mut |child| pending.push(child));
         }
     }
 

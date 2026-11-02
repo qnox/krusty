@@ -94,6 +94,11 @@ pub(crate) fn marks_line_at_start(ir: &IrFile, expression: ExprId) -> bool {
     if realizes_inlined_call(ir, expression) {
         return true;
     }
+    // `suspendCoroutineUninterceptedOrReturn` realized in place is a suspend call, which kotlinc
+    // marks where it starts, ahead of the operand it passes the block.
+    if ir.is_unintercepted_suspension(expression) {
+        return true;
+    }
     match ir.expr(expression) {
         // `E.values()` and `E.entries` are calls without operands: their invoke is where they
         // start, so they mark there like any node that marks before its operands.
@@ -107,9 +112,12 @@ pub(crate) fn marks_line_at_start(ir: &IrFile, expression: ExprId) -> bool {
         // over the signed carrier, which marks once its arguments are generated; a signed one is
         // an intrinsic, which marks before them.
         IrExpr::PrimitiveBinOp { .. } => !has_unsigned_result(ir, expression),
-        IrExpr::Block { stmts, .. } => stmts
-            .first()
-            .is_some_and(|&first| matches!(ir.expr(first), IrExpr::InlineFrameMarker)),
+        // A block of no statements realizing an invocation in place around such a block marks
+        // the invocation's line there.
+        IrExpr::Block { stmts, value } => match stmts.first() {
+            Some(&first) => matches!(ir.expr(first), IrExpr::InlineFrameMarker),
+            None => value.is_some_and(|value| opens_inline_frame(ir, value)),
+        },
         // A property read or write is realized as a call of its accessor, which marks at its
         // invoke; one realized as a field access marks where its realization is chosen, as
         // kotlinc's `visitFieldAccess` does before the receiver.
@@ -133,7 +141,8 @@ pub(crate) fn marks_line_at_start(ir: &IrFile, expression: ExprId) -> bool {
 /// - a source `!!`, kotlinc's `CHECK_NOT_NULL` intrinsic call, which marks before its operand; an
 ///   implicit coercion of its result is a type operator, which marks nothing of its own;
 /// - an elvis, which kotlinc's `visitBlock` of the `ELVIS` block marks where it starts (the
-///   `when` it folds to marks the same line again, which writes nothing).
+///   `when` it folds to marks the same line again, which writes nothing). A later link of an elvis
+///   chain is folded into the chain's block and opens none.
 pub(crate) fn states_line_at_start(ir: &IrFile, expression: ExprId) -> bool {
     match ir.expr(expression) {
         IrExpr::NotNullAssert {
@@ -147,7 +156,7 @@ pub(crate) fn states_line_at_start(ir: &IrFile, expression: ExprId) -> bool {
         } => states_line_at_start(ir, *arg),
         IrExpr::Block {
             value: Some(value), ..
-        } => ir.whens.elvises.contains_key(value),
+        } => ir.whens.elvises.contains_key(value) && !ir.whens.elvis_chain_links.contains(value),
         _ => false,
     }
 }
@@ -185,6 +194,12 @@ pub(crate) fn realizes_inlined_call(ir: &IrFile, expression: ExprId) -> bool {
                 ..
             })
         )
+}
+
+/// Whether `expression` is a block whose first statement opens an inline frame.
+fn opens_inline_frame(ir: &IrFile, expression: ExprId) -> bool {
+    matches!(ir.expr(expression), IrExpr::Block { stmts, .. }
+        if stmts.first().is_some_and(|&first| matches!(ir.expr(first), IrExpr::InlineFrameMarker)))
 }
 
 /// Whether `expression`'s checked result is an unsigned integer.
