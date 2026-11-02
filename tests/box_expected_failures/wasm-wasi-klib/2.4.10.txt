@@ -3631,7 +3631,6 @@ localClass/virtualCallFromConstructor.kt
 localClasses/anonymousObjectInExtension.kt
 localClasses/anonymousObjectInParameterInitializer.kt
 localClasses/capturingInDefaultConstructorParameter.kt
-localClasses/closureOfInnerLocalClass.kt
 localClasses/closureOfLambdaInLocalClass.kt
 localClasses/closureWithSelfInstantiation.kt
 localClasses/defaultParameterInConstructor.kt
