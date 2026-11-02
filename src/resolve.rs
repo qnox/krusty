@@ -44261,14 +44261,9 @@ impl<'a> Checker<'a> {
             // declared non-null classifier (`String?` + a null proof is still `Nothing?`, never
             // `String & Nothing?`). Classifier type-test proofs continue through the intersection
             // path below.
-            let root_value = match (&path.root, path.segments.is_empty()) {
-                (scope::PathRoot::Value(identity), true) => {
-                    self.visible_flow_value(scope, *identity)
-                }
-                _ => None,
-            };
+            let declared = StablePathRead::new(self).declared_ty(scope, path);
             if ty.non_null() != Ty::Nothing {
-                if let Some(declared) = root_value.map(|(_, local)| local.declared_ty.non_null()) {
+                if let Some(declared) = declared.map(Ty::non_null) {
                     let context = crate::assignable::TyCtx::new();
                     let comparable = crate::assignable::is_subtype(&context, self, declared, *ty)
                         || crate::assignable::is_subtype(&context, self, *ty, declared);
