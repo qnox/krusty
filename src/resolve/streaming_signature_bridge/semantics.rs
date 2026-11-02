@@ -4521,21 +4521,17 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
 
     fn make_contextual_function_type(
         &self,
-        declaration: crate::fir::DeclarationId,
+        function: crate::fir::ContextualFunctionSite,
         parameters: &[crate::fir::ResolvedTy],
         result: crate::fir::ResolvedTy,
         context_count: u32,
         has_receiver: bool,
         suspend: bool,
     ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
-        let bindings = self
-            .completed_scoped_constraints
-            .borrow_mut()
-            .remove(&declaration)
-            .unwrap_or_default();
+        let bindings = self.complete_contextual_function(function);
         crate::trace_compiler!(
             "signature",
-            "make contextual function declaration={declaration:?} parameters={:?} result={:?} bindings={bindings:?}",
+            "make contextual function {function:?} parameters={:?} result={:?} bindings={bindings:?}",
             parameters.iter().map(|parameter| parameter.get()).collect::<Vec<_>>(),
             result.get(),
         );

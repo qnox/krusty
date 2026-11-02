@@ -422,7 +422,8 @@ impl ProductionSignatureSemantics<'_> {
         let constraint_frame = self.active_scoped_constraint_frame(scope.owner);
         let mut active = crate::fx_hash::HashSet::default();
         if let Some(inputs) = constraint_frame.and_then(|(owner, index)| {
-            self.scoped_constraint_inputs
+            self.scoped_frames
+                .inputs
                 .borrow()
                 .get(&owner)
                 .and_then(|stack| stack.get(index))
@@ -441,7 +442,8 @@ impl ProductionSignatureSemantics<'_> {
         }
         let known = constraint_frame
             .and_then(|(owner, index)| {
-                self.scoped_constraints
+                self.scoped_frames
+                    .active
                     .borrow()
                     .get(&owner)
                     .and_then(|stack| stack.get(index))
@@ -698,7 +700,8 @@ impl ProductionSignatureSemantics<'_> {
         if let Some(inputs) =
             self.active_scoped_constraint_frame(scope.owner)
                 .and_then(|(owner, index)| {
-                    self.scoped_constraint_inputs
+                    self.scoped_frames
+                        .inputs
                         .borrow()
                         .get(&owner)
                         .and_then(|stack| stack.get(index))
@@ -728,7 +731,7 @@ impl ProductionSignatureSemantics<'_> {
         else {
             return;
         };
-        let mut constraints = self.scoped_constraints.borrow_mut();
+        let mut constraints = self.scoped_frames.active.borrow_mut();
         let Some(active) = constraints
             .get_mut(&constraint_owner)
             .and_then(|stack| stack.get_mut(constraint_index))

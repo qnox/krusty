@@ -4253,6 +4253,22 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `tests/builder_nested_lambda_result_e2e.rs`,
   `nested_lambda_builder_result_keeps_value_evidence_in_receiver_position`
   (`src/fir/body_check/builder_inference_tests.rs`).
+- **A postponed call's formals are inference variables, and a retained capture takes the call's
+  solution.** Each postponed call expression replaces its callee formals with `TyKind::Var`
+  variables that the call owns (`CallSiteVariableMap::for_postponed_call`), never renamed type
+  parameters, so a variable that escapes the call is rejected at publication like any other. An
+  anonymous object or local class inside the call's lambda can capture the builder receiver
+  (`Buildee<T>`) before the call is solved. That capture keeps the variable while it awaits the
+  call, and a later revisit never replaces a determined or awaiting capture type with a pending
+  one. Pass 1 publishes the capture with the solution the signature graph completed that lambda
+  argument with, matched by the argument's source span; a call with no completed solution fails
+  the declaration closed. The variable's bound is never used in its place. A local method is
+  memoized only outside every postponed call frame, so the solved revisit re-records its
+  captures. Tests: `retained_builder_receiver_capture_publishes_the_completed_builder_solution`,
+  `selected_anonymous_member_effect_constrains_postponed_receiver_lambda`
+  (`src/resolve/streaming_signature_tests/postponed_builder_captures.rs`),
+  `type_parameter_identity::tests::nested_postponed_calls_own_distinct_variables`,
+  `tests/local_class_capture_constructors_e2e.rs::postponed_generic_receivers_survive_local_member_and_accessor_checks`.
 - **Equally specific candidates: a non-parameterized callable wins.** kotlinc's last tie-break
   (spec 11.7) applied to the receiver-less SAM selection: `assertDoesNotThrow(Executable)` beside
   `<T> assertDoesNotThrow(ThrowingSupplier<T>)` (JUnit, imported as a static) both take a `{ … }`
