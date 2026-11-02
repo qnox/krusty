@@ -112,7 +112,7 @@ check)
     if [ "$fail" -ne 0 ]; then
         cat >&2 <<'EOF'
 legacy-ratchet: the legacy surface grew. Route the change through the shared path, or delete the
-path it patches, instead of adding to a duplicate (AGENTS.md, "Phase ownership"; docs/RESOLUTION_ENGINE.md).
+path it patches, instead of adding to a duplicate (AGENTS.md, "Phase ownership").
 EOF
         exit 1
     fi

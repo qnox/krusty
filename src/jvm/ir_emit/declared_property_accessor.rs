@@ -217,7 +217,8 @@ pub(super) fn emit(
         }
         g.ensure_locals(1);
         g.link();
-        let access = default_accessor_access(property.visibility, overridable);
+        let access = default_accessor_access(property.visibility, overridable)
+            | super::method_access::annotated_method_modifiers(Some(annotations));
         cw.add_method_sig(access, getter, getter_desc, &g, sig.as_deref());
         super::function_annotations::emit_declared(cw, annotations, getter, getter_desc);
         // The class-wide pass annotates accessors by their backing field's type, which a boxed
@@ -317,7 +318,8 @@ pub(super) fn emit(
             st.ret_void();
             st.ensure_locals(1 + words);
             st.link();
-            let access = default_accessor_access(property.setter_visibility, overridable);
+            let access = default_accessor_access(property.setter_visibility, overridable)
+                | super::method_access::annotated_method_modifiers(Some(annotations));
             cw.add_method_sig(access, setter, setter_desc, &st, sig.as_deref());
             cw.set_method_param_annotations(setter, setter_desc, parameter_annotations);
             super::function_annotations::emit_declared(cw, annotations, setter, setter_desc);

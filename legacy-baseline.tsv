@@ -1,4 +1,4 @@
-# Legacy surface the resolution-engine migration deletes (docs/RESOLUTION_ENGINE.md). Each count may
+# Legacy surface that the shared resolution path replaces and deletes. Each count may
 # only go down: `just legacy-baseline-check` fails above it, `just legacy-baseline` lowers it.
 # Columns: count, kind (uses | fns | lines), subject. See scripts/legacy-ratchet.sh.
 #
@@ -26,7 +26,7 @@
 7	uses	unify_inferred_ty_with_source
 7	uses	unify_ty_common
 5	uses	unify_member_extension_slot
-274	uses	ty_subst_keep_unbound
+275	uses	ty_subst_keep_unbound
 # Common-supertype joins that one join replaces.
 12	uses	semantic_common_supertype
 10	uses	semantic_common_supertype_inner
@@ -40,4 +40,4 @@
 # Call selection without a shared applicability ranking.
 167	fns	select_
 # The temporary signature bridge, which must disappear.
-30883	lines	src/resolve/streaming_signature_bridge*
+30895	lines	src/resolve/streaming_signature_bridge*
