@@ -5851,6 +5851,9 @@ regress.
     `noinline` suspend parameter is a value its compiled body only passes on, so the call's
     suspend lambda is the caller's own object, as kotlinc's is; a `crossinline` one stays with
     `CrossinlineParameter` (`tests/inline_same_module_suspend_values_e2e.rs`).
+    ☐ The library `Continuation(context) { it.getOrThrow() }` copy (`…$$inlined$Continuation$1`)
+    still differs: kotlinc stores the lambda's `it` in a fresh local before the inlined
+    `throwOnFailure`, which ours reads in place (that test's builder uses an explicit object).
     ☐ `$default` calls, suspend callees (and the calls a suspend inline function holds),
     `crossinline` parameters, calls in default arguments, and callee bodies with local classes or
     enum switches.
