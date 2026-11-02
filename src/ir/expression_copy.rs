@@ -171,6 +171,7 @@ pub(super) fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: Exp
         local_delegate_plans: _,
         local_delegate_plan_ids: _,
         jvm_suspend_impl_bodies: _,
+        jvm_continuation_functions: _,
         generated_member_publications: _,
         generated_facade_functions: _,
         synthesized_data_class_members: _,
@@ -521,6 +522,10 @@ mod tests {
         let target = ir.add_expr(IrExpr::Const(IrConst::Int(1)));
         ir.jvm_member_targets.insert(source, 5);
         ir.initializer_blocks.insert(source);
+        // Class ids and expression ids use separate namespaces, even when their values coincide.
+        ir.jvm_continuation_functions.insert(source, 5);
+        ir.jvm_continuation_functions.insert(target, 6);
+        let continuation_functions = ir.jvm_continuation_functions.clone();
 
         copy_expression_facts(&mut ir, source, target);
 
@@ -528,5 +533,6 @@ mod tests {
         assert!(!ir.initializer_blocks.contains(&target));
         assert_eq!(ir.jvm_member_targets.get(&source), Some(&5));
         assert!(ir.initializer_blocks.contains(&source));
+        assert_eq!(ir.jvm_continuation_functions, continuation_functions);
     }
 }
