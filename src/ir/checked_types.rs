@@ -26,7 +26,7 @@ impl IrFile {
     /// A nested lambda's captures still read this namespace, but its inline body has the lambda
     /// function's own slots. [`value_namespace_expressions`] observes that boundary, so two
     /// unrelated slot zeroes never enter the same inventory.
-    pub(crate) fn declared_value_slot_types(
+    pub fn declared_value_slot_types(
         &self,
         root: ExprId,
     ) -> crate::fx_hash::HashMap<u32, Ty> {

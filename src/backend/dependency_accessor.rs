@@ -5,18 +5,18 @@ use crate::fir::ExternalCallableId;
 use crate::ir::{Callee, ExprId, IrCheckedOperation, IrPropertyDispatch};
 use crate::types::Ty;
 
-pub(crate) struct DependencyAccessor<'a> {
+pub struct DependencyAccessor<'a> {
     pub(crate) target: ExternalCallableId,
-    pub(crate) callable: &'a BackendCallableFact,
-    pub(crate) receiver: Option<ExprId>,
-    pub(crate) arguments: &'a [ExprId],
+    pub callable: &'a BackendCallableFact,
+    pub receiver: Option<ExprId>,
+    pub arguments: &'a [ExprId],
     parameters: &'a [Ty],
     result: Ty,
     dispatch: IrPropertyDispatch,
 }
 
 impl CheckedBackendCallables {
-    pub(crate) fn dependency_accessor<'a>(
+    pub fn dependency_accessor<'a>(
         &'a self,
         operation: &'a IrCheckedOperation,
     ) -> Option<DependencyAccessor<'a>> {
@@ -64,7 +64,7 @@ impl CheckedBackendCallables {
 }
 
 impl DependencyAccessor<'_> {
-    pub(crate) fn callee(&self) -> Result<Callee, &'static str> {
+    pub fn callee(&self) -> Result<Callee, &'static str> {
         if self.dispatch != IrPropertyDispatch::Ordinary {
             return Err("a dependency accessor export called through super");
         }

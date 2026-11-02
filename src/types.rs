@@ -302,7 +302,7 @@ impl TypeName {
     }
 
     /// The flattened JVM nested segment relative to an already-resolved enclosing classifier.
-    pub(crate) fn nested_segment_within(self, owner: TypeName) -> Option<&'static str> {
+    pub fn nested_segment_within(self, owner: TypeName) -> Option<&'static str> {
         type_names().nested_segment_within(self.name_id(), owner.name_id())
     }
 
@@ -547,7 +547,7 @@ impl fmt::Debug for Ty {
     }
 }
 
-pub(crate) fn stored_value_ty(ty: Ty) -> Ty {
+pub fn stored_value_ty(ty: Ty) -> Ty {
     if ty == Ty::Unit {
         Ty::obj("kotlin/Unit")
     } else {
@@ -1194,7 +1194,7 @@ impl Ty {
     }
 
     /// The upper bound carried by an occurrence of the type parameter identified by `name`.
-    pub(crate) fn type_parameter_occurrence_bound(self, name: &str) -> Option<Ty> {
+    pub fn type_parameter_occurrence_bound(self, name: &str) -> Option<Ty> {
         match self.kind() {
             TyKind::TyParam(candidate, bound) => (candidate == name).then_some(bound),
             TyKind::DefinitelyNotNull(inner) => inner.type_parameter_occurrence_bound(name),

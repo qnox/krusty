@@ -14,23 +14,23 @@ pub(crate) struct IrInlineDeclaration {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct IrLocalDelegateAccessorPlan {
-    pub(crate) body: ExprId,
-    pub(crate) parameters: Vec<Ty>,
+pub struct IrLocalDelegateAccessorPlan {
+    pub body: ExprId,
+    pub parameters: Vec<Ty>,
     pub(crate) parameter_identities: Vec<IrParameterIdentity>,
     /// Type parameters named by this static helper's semantic signature. A lifted helper cannot
     /// refer to its lexical class's type parameters directly, so it redeclares the exact shape.
-    pub(crate) type_parameters: Vec<IrTypeParameter>,
+    pub type_parameters: Vec<IrTypeParameter>,
     /// Checked source identities for `CapturedReceiver` parameter roles, in role-ordinal order.
     pub(crate) captured_receivers: Vec<IrCapturedReceiver>,
-    pub(crate) result: Ty,
+    pub result: Ty,
     pub(crate) source_order: u32,
     pub(crate) site: crate::fir::FirLiftingSite,
     pub(crate) line: u32,
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct IrLocalDelegatePlan {
+pub struct IrLocalDelegatePlan {
     /// The checked inline declaration whose copied body exposes this property, retained through
     /// nested local functions and lambdas. Targets must not rediscover it from containment.
     pub(crate) inline_declaration: Option<IrInlineDeclaration>,
@@ -42,15 +42,15 @@ pub(crate) struct IrLocalDelegatePlan {
     /// identity rather than creating another declaration at the caller.
     pub(crate) reference: super::IrLocalPropertyReference,
     pub(crate) storage_name: Box<str>,
-    pub(crate) getter: IrLocalDelegateAccessorPlan,
-    pub(crate) setter: Option<IrLocalDelegateAccessorPlan>,
+    pub getter: IrLocalDelegateAccessorPlan,
+    pub setter: Option<IrLocalDelegateAccessorPlan>,
 }
 
 /// A backend-neutral use of one checked local delegated-property plan.
 #[derive(Clone, Debug)]
 pub struct IrLocalDelegateAccess {
-    pub(crate) plan: u32,
-    pub(crate) delegate: ExprId,
-    pub(crate) dispatch_receiver: Option<ExprId>,
-    pub(crate) value: Option<ExprId>,
+    pub plan: u32,
+    pub delegate: ExprId,
+    pub dispatch_receiver: Option<ExprId>,
+    pub value: Option<ExprId>,
 }

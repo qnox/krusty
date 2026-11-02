@@ -305,6 +305,7 @@ jobs:
           path: |
             klib-e2e-tests
             klib-unit-tests
+            klib-native-unit-tests
           if-no-files-found: error
 
   build-tool-bins:
@@ -585,7 +586,7 @@ jobs:
           RUST_MIN_STACK: "134217728"
         run: |
           set -euo pipefail
-          chmod +x klib-e2e-tests klib-unit-tests
+          chmod +x klib-e2e-tests klib-unit-tests klib-native-unit-tests
           root=$(just kotlin-native "${{ matrix.version }}")
           kotlinc=$(just kotlinc "${{ matrix.version }}")
           export KRUSTY_KOTLIN_NATIVE="$root"
@@ -595,6 +596,7 @@ jobs:
           timeout 600s ./klib-e2e-tests \
             native_value_classes_e2e::a_value_class_needs_no_jvm_inline_on_native --nocapture
           timeout 600s ./klib-unit-tests klib_ --nocapture
+          timeout 600s ./klib-native-unit-tests klib_ --nocapture
       - name: save recorded kotlinc-native bytes
         if: matrix.target == 'native' && matrix.version == needs.build-tool-bins.outputs.max && steps.native-recording-mode.outputs.write == '1'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0

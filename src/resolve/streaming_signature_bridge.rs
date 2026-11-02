@@ -78,10 +78,10 @@ pub(crate) use local_signatures::{
     publish_checked_default_local_signatures, publish_checked_inline_local_signatures,
     publish_checked_local_signatures_in_pass_two_root,
 };
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) use local_signatures::publish_checked_local_signatures;
 #[cfg(test)]
-pub(crate) use local_signatures::{
-    publish_checked_local_signatures, publish_discovered_local_capture_declarations,
-};
+pub(crate) use local_signatures::publish_discovered_local_capture_declarations;
 use postponed_argument_mapping::MappedTopLevelSelection;
 pub(crate) use source_contracts::{extract_source_contract_candidates, SourceContractCandidate};
 use type_resolution::SelectedTypeSite;

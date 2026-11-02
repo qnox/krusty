@@ -27,7 +27,7 @@ use super::{AnyMember, Representation, Unsupported, FUNCTION_SLOT};
 
 /// A member's identity in a planned table, the same in every file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum PlanKey {
+pub enum PlanKey {
     Callable(CallableId),
     Getter(PropertyId),
     Setter(PropertyId),
@@ -65,30 +65,30 @@ pub(crate) enum PlannedSlot {
 
 /// One class's planned table.
 #[derive(Clone, Debug)]
-pub(crate) struct PlannedTable {
+pub struct PlannedTable {
     /// How many of `entries` the superclass's planned table holds.
     pub(crate) inherited: u32,
     pub(crate) entries: Vec<PlannedSlot>,
-    pub(crate) slots: HashMap<PlanKey, u32>,
+    pub slots: HashMap<PlanKey, u32>,
 }
 
 /// Every named class's planned table, or why it has none. A class without one is numbered by its
 /// declaring file alone, and no other file dispatches through it.
 #[derive(Debug, Default)]
-pub(crate) struct ModuleSlotPlan {
+pub struct ModuleSlotPlan {
     tables: HashMap<TypeName, Result<PlannedTable, Unsupported>>,
     interfaces: ModuleInterfaces,
 }
 
 impl ModuleSlotPlan {
     /// A plan that numbers nothing: every class is numbered by its declaring file alone.
-    #[cfg(test)]
-    pub(crate) fn empty() -> Self {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn empty() -> Self {
         Self::default()
     }
 
     /// Plan every class of `classes`, superclasses first.
-    pub(crate) fn build(classes: &ModuleClasses, representation: &dyn Representation) -> Self {
+    pub fn build(classes: &ModuleClasses, representation: &dyn Representation) -> Self {
         let carriers: HashMap<CallableId, (&[Ty], Ty)> = classes
             .iter()
             .flat_map(|(_, class)| class.members.iter())
@@ -132,12 +132,12 @@ impl ModuleSlotPlan {
     }
 
     /// The module-wide numbers of interface members.
-    pub(crate) fn interfaces(&self) -> &ModuleInterfaces {
+    pub fn interfaces(&self) -> &ModuleInterfaces {
         &self.interfaces
     }
 
     /// The planned table of `classifier`, `None` when the plan does not cover it at all.
-    pub(crate) fn table(&self, classifier: TypeName) -> Option<Result<&PlannedTable, &str>> {
+    pub fn table(&self, classifier: TypeName) -> Option<Result<&PlannedTable, &str>> {
         self.tables
             .get(&classifier)
             .map(|table| table.as_ref().map_err(String::as_str))

@@ -1636,8 +1636,8 @@ impl ResolvedModuleIndex {
 
     /// Same-parse test adapter for a generated child of a body-local classifier. Production Pass 2
     /// carries capture storage directly in checked FIR and never grows the finalized module index.
-    #[cfg(test)]
-    pub(crate) fn intern_checked_local_declaration(
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn intern_checked_local_declaration(
         &mut self,
         anchor: crate::fir::DeclarationAnchor,
         header: ResolvedDeclarationHeader,

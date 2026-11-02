@@ -594,7 +594,7 @@ impl BackendModuleFacts {
     }
 
     /// The dispatch shape of every named class of the module, when the target asked for it.
-    pub(crate) fn classes(&self) -> &super::class_tables::module_classes::ModuleClasses {
+    pub fn classes(&self) -> &super::class_tables::module_classes::ModuleClasses {
         &self.classes
     }
 

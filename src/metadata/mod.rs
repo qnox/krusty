@@ -13,10 +13,10 @@ pub(crate) mod classifier_inventory;
 pub(crate) mod contract_decoder;
 pub(crate) mod declaration_flags;
 pub(crate) mod declaration_records;
-pub(crate) mod decode;
+pub mod decode;
 pub mod encoding;
-#[cfg(test)]
-pub(crate) mod fragment_text;
+#[cfg(any(test, feature = "test-support"))]
+pub mod fragment_text;
 pub mod id_signature;
 pub(crate) mod inner_classifiers;
 pub mod klib_fragment;
@@ -30,7 +30,7 @@ pub mod protobuf;
 pub mod semantic;
 mod value_parameter_flags;
 pub use value_parameter_flags::DeclaredValueParameter;
-pub(crate) mod type_encoder;
+pub mod type_encoder;
 pub(crate) use type_encoder::MetadataTypeLookups;
 pub use type_encoder::{InnerClassifier, InnerClassifiers};
 pub mod version_requirements;

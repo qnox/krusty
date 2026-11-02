@@ -818,13 +818,10 @@ version = "0.0.1"
 dependencies = [
  "ahash",
  "backtrace",
- "cranelift-codegen",
- "cranelift-frontend",
- "cranelift-module",
- "cranelift-object",
  "dhat",
  "flate2",
  "krusty-cli",
+ "krusty-native",
  "krusty-plugin-ir",
  "libc",
  "object 0.40.0",
@@ -833,7 +830,6 @@ dependencies = [
  "sha2",
  "stacker",
  "syn 3.0.9",
- "target-lexicon",
  "unicode-general-category",
  "zip",
 ]
@@ -852,6 +848,7 @@ version = "0.0.1"
 dependencies = [
  "krusty",
  "krusty-build",
+ "krusty-native",
  "libc",
  "mimalloc",
  "serde",
@@ -874,6 +871,19 @@ dependencies = [
  "sha2",
  "url",
  "zip",
+]
+
+[[package]]
+name = "krusty-native"
+version = "0.0.1"
+dependencies = [
+ "cranelift-codegen",
+ "cranelift-frontend",
+ "cranelift-module",
+ "cranelift-object",
+ "krusty",
+ "object 0.40.0",
+ "target-lexicon",
 ]
 
 [[package]]

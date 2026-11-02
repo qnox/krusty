@@ -27,7 +27,7 @@ use super::{
 
 /// The classifier that lexically owns a local classifier's executable context.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum IrLocalClassOwner {
+pub enum IrLocalClassOwner {
     /// A classifier realized in this IR file.
     Class(ClassId),
     /// A classifier declared outside executable code in another source, reached when this file
@@ -36,7 +36,7 @@ pub(crate) enum IrLocalClassOwner {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct IrLocalClassNameProvenance {
+pub struct IrLocalClassNameProvenance {
     /// Source file whose facade roots the name when there is no lexical owner. An inline payload
     /// classifier keeps its declaring source's facade, not the file that realizes the payload.
     pub source: super::IrModuleSource,
@@ -1761,7 +1761,7 @@ impl super::IrFile {
     /// [`Self::realize_local_class_names`] for a target without facade classes: a local
     /// classifier that no classifier owns starts in its declaring source's package, so the one
     /// local to a top-level `box` is `box$Local` and its first anonymous object `box$1`.
-    pub(crate) fn realize_local_class_names_in_packages(&mut self) {
+    pub fn realize_local_class_names_in_packages(&mut self) {
         self.realize_local_class_names(|source, first| {
             crate::types::type_name_child(source.package, first)
         });

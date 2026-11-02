@@ -46,13 +46,13 @@ impl<'a> CheckedDependencyApplication<'a> {
 /// The exact semantic carriers of one emitted function, including retained class dispatch.
 /// Targets retain this beside the export identity, not beside an individual call site.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct DependencyFunctionSignature {
+pub struct DependencyFunctionSignature {
     parameters: Box<[Ty]>,
     result: Ty,
 }
 
 impl DependencyFunctionSignature {
-    pub(crate) fn from_ir(
+    pub fn from_ir(
         ir: &IrFile,
         function: FunId,
         receiver: Option<DependencyMemberReceiver>,
@@ -82,23 +82,23 @@ impl DependencyFunctionSignature {
         })
     }
 
-    pub(crate) fn parameters(&self) -> &[Ty] {
+    pub fn parameters(&self) -> &[Ty] {
         &self.parameters
     }
-    pub(crate) fn result(&self) -> Ty {
+    pub fn result(&self) -> Ty {
         self.result
     }
 }
 
 /// The provider declaration instantiated by this exact checked call. This validates source
 /// operand roles; it is NOT the physical signature of the already-emitted dependency export.
-pub(crate) struct InstantiatedDependencySignature {
-    pub(crate) parameters: Box<[Ty]>,
-    pub(crate) receiver: Option<Ty>,
-    pub(crate) result: Ty,
+pub struct InstantiatedDependencySignature {
+    pub parameters: Box<[Ty]>,
+    pub receiver: Option<Ty>,
+    pub result: Ty,
 }
 
-pub(crate) fn instantiate_dependency_signature(
+pub fn instantiate_dependency_signature(
     fact: &BackendCallableFact,
     callee: &Callee,
 ) -> Result<InstantiatedDependencySignature, &'static str> {

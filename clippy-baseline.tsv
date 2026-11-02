@@ -127,13 +127,13 @@
 1	src/metadata/class_builder/schema.rs	the loop variable `index` is used to index `func_msgs`
 1	src/metadata/class_builder/schema.rs	the loop variable `index` is used to index `prop_msgs`
 1	src/metadata/semantic/klib/semantic_decoder_tests.rs	unnecessary use of `clone` to create a slice from a reference
-1	src/native/c_abi.rs	redundant guard
-1	src/native/c_abi.rs	using `contains()` instead of `iter().any()` is more efficient: help: try: `class.methods.contains(&id)`
-1	src/native/cinterop/library/sha256.rs	using `chunks_exact` with a constant chunk size
-1	src/native/cinterop/library/sha256.rs	using `chunks_exact` with a constant chunk size: help: consider using `as_chunks` instead: `as_chunks::<64>().0`
-1	src/native/codegen/lower/calls.rs	this function has too many arguments (11/7)
-1	src/native/codegen/lower/calls.rs	this function has too many arguments (12/7)
-1	src/native/intrinsics.rs	match expression looks like `matches!` macro
+1	crates/krusty-native/src/c_abi.rs	redundant guard
+1	crates/krusty-native/src/c_abi.rs	using `contains()` instead of `iter().any()` is more efficient: help: try: `class.methods.contains(&id)`
+1	crates/krusty-native/src/cinterop/library/sha256.rs	using `chunks_exact` with a constant chunk size
+1	crates/krusty-native/src/cinterop/library/sha256.rs	using `chunks_exact` with a constant chunk size: help: consider using `as_chunks` instead: `as_chunks::<64>().0`
+1	crates/krusty-native/src/codegen/lower/calls.rs	this function has too many arguments (11/7)
+1	crates/krusty-native/src/codegen/lower/calls.rs	this function has too many arguments (12/7)
+1	crates/krusty-native/src/intrinsics.rs	match expression looks like `matches!` macro
 1	src/parser.rs	field assignment outside of initializer for an instance created with Default::default()
 1	src/parser.rs	this manual char comparison can be written more succinctly: help: consider using an array of `char`: `['L', 'l', 'u', 'U']`
 1	src/parser.rs	this method chain can be written more clearly with `if .. else ..`: help: try: `if header_ctor_kw { self.tok().span.lo } else { 0 }`
@@ -257,7 +257,7 @@
 2	src/jvm/ir_emit/comparison_branches/mod.rs	this function has too many arguments (8/7)
 2	src/jvm/jvm_libraries.rs	using `clone` on type `SingletonDispatch` which implements the `Copy` trait: help: try removing the `clone` call: `singleton`
 2	src/klib_libraries/declaration_bodies.rs	the `Err`-variant returned from this function is very large: the `Err`-variant is at least 136 bytes
-2	src/native/interop_libraries.rs	the `Err`-variant returned from this function is very large
+2	crates/krusty-native/src/interop_libraries.rs	the `Err`-variant returned from this function is very large
 2	src/resolve.rs	returning the result of a `let` binding from a block
 2	src/resolve/call_diagnostics.rs	this function has too many arguments (8/7)
 2	src/resolve/intersection_inference.rs	this function has too many arguments (10/7)

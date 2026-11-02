@@ -19,7 +19,7 @@ pub use crate::libraries::KlibDependencyCallable;
 /// abstract declaration has no body in this IR unit. Those declarations remain in the library's
 /// semantic metadata, but recording either one in [`DependencyExportSignatures`] would promise a
 /// physical definition which no backend can emit.
-pub(crate) fn has_standalone_dependency_code(ir: &crate::ir::IrFile, callable: FunId) -> bool {
+pub fn has_standalone_dependency_code(ir: &crate::ir::IrFile, callable: FunId) -> bool {
     ir.functions
         .get(callable as usize)
         .is_some_and(|function| function.body.is_some())
@@ -30,7 +30,7 @@ pub(crate) fn has_standalone_dependency_code(ir: &crate::ir::IrFile, callable: F
 /// body recorded. The receiver node may be a local read after inline callable-reference staging;
 /// its syntax carries no authority. The per-expression singleton classifier frozen from common IR
 /// is the semantic proof, while a present receiver preserves the source call's operand shape.
-pub(crate) fn authenticated_singleton_receiver(
+pub fn authenticated_singleton_receiver(
     receiver: Option<crate::ir::ExprId>,
     selected_classifier: Option<crate::types::TypeName>,
     expected: crate::types::Ty,
@@ -48,7 +48,7 @@ pub(crate) fn authenticated_singleton_receiver(
 /// dependency call, and that every such call joins to the same inert exported receiver effect.
 /// A shared `GetValue` node used in any second position fails the edge-count equality and remains
 /// evaluated.
-pub(crate) fn inert_staged_singleton_bindings(
+pub fn inert_staged_singleton_bindings(
     ir: &crate::ir::IrFile,
     mut singleton_dispatch: impl FnMut(crate::ir::ExprId) -> Option<crate::types::TypeName>,
     mut receiver_is_inert: impl FnMut(crate::fir::ExternalCallableId, crate::types::TypeName) -> bool,

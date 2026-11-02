@@ -2,9 +2,9 @@
 //!
 //! A backend consumes checked frontend output and emits target artifacts.
 
-pub(crate) mod class_tables;
+pub mod class_tables;
 pub(crate) mod coroutines;
-pub(crate) mod counted_loops;
+pub mod counted_loops;
 pub(crate) mod default_arguments;
 mod dependency_accessor;
 mod dependency_call_shape;
@@ -12,21 +12,21 @@ mod dependency_facts;
 mod dependency_metadata;
 mod dependency_signature;
 mod entry;
-pub(crate) mod interface_identity;
+pub mod interface_identity;
 pub(crate) mod local_properties;
 mod module_facts;
 
-pub(crate) use dependency_call_shape::{
+pub use dependency_call_shape::{
     DeclaredOperandRoles, DependencyCallShape, DependencyExportCall,
 };
-#[cfg(test)]
-pub(crate) use dependency_facts::referenced_dependencies;
+#[cfg(any(test, feature = "test-support"))]
+pub use dependency_facts::referenced_dependencies;
 pub use dependency_facts::{
     BackendCallableFact, BackendCompilerIntrinsic, BackendPropertyFact, BackendSemanticCallRole,
     CheckedBackendCallables, DependencyClassifier, DependencyFactError, DependencyGetterSignature,
 };
-pub(crate) use dependency_metadata::KlibDependencyCallable;
-pub(crate) use dependency_metadata::{
+pub use dependency_metadata::KlibDependencyCallable;
+pub use dependency_metadata::{
     authenticated_singleton_receiver, has_standalone_dependency_code,
     inert_staged_singleton_bindings,
 };
@@ -34,7 +34,7 @@ pub use dependency_metadata::{
     DependencyExportSignatures, DependencyMemberReceiver, DependencyMetadata,
     SingletonExtensionUnreadReceiver, SingletonMemberReceiver,
 };
-pub(crate) use dependency_signature::{
+pub use dependency_signature::{
     instantiate_dependency_signature, DependencyFunctionSignature,
 };
 

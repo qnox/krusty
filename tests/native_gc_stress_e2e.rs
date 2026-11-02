@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 
 use krusty::backend::{Artifact, Backend as _};
 use krusty::diag::DiagSink;
-use krusty::native::{CraneliftBackend, NativeTarget};
+use krusty_native::{CraneliftBackend, NativeTarget};
 use krusty::source::SourceInput;
 
 use super::common;
@@ -45,7 +45,7 @@ impl Drop for Scratch {
 
 fn host() -> Option<NativeTarget> {
     let target = NativeTarget::host()?;
-    (krusty::native::can_link(target)
+    (krusty_native::can_link(target)
         && krusty::toolchain::stdlib_jar().is_some()
         && krusty::toolchain::jdk_modules().is_some())
     .then_some(target)
@@ -94,7 +94,7 @@ fn run(source: &str) -> String {
         .filter(|(name, _)| name.ends_with(".o"))
         .map(|(_, bytes)| bytes.as_slice())
         .collect::<Vec<_>>();
-    let image = krusty::native::link_program(&objects, target).expect("link");
+    let image = krusty_native::link_program(&objects, target).expect("link");
     let scratch = Scratch::new();
     let executable = scratch.path().join("program");
     std::fs::write(&executable, &image).expect("write");

@@ -57,7 +57,7 @@ pub mod metadata;
 pub mod module_symbols;
 pub mod name_tree;
 pub mod names;
-pub mod native;
+pub mod native_target;
 pub mod parser;
 pub mod plugins;
 mod program_entry;
@@ -74,7 +74,7 @@ pub mod toolchain;
 pub mod trace;
 pub mod type_engine;
 pub mod types;
-pub(crate) mod value_classes;
+pub mod value_classes;
 pub mod wasm;
 mod wide_stack;
 

@@ -389,7 +389,7 @@ impl IrFile {
     }
 
     /// The exact checked declaration that supplied inherited defaults for `fid`.
-    pub(crate) fn inherited_param_default_provider(
+    pub fn inherited_param_default_provider(
         &self,
         fid: u32,
     ) -> Option<crate::fir::ResolvedFunctionOverrideTarget> {

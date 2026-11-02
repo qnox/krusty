@@ -41,7 +41,7 @@ pub struct KlibBackend {
 /// One validated pairing of krusty's target model with Kotlin/Native's serialized identity.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct NativeKlibTarget {
-    target: crate::native::NativeTarget,
+    target: crate::native_target::NativeTarget,
     konan_name: &'static str,
 }
 
@@ -56,7 +56,7 @@ impl NativeKlibTarget {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum KlibTargetBindingError {
     NonNativePlatform(KlibPlatform),
-    UnsupportedNativeTarget(crate::native::NativeTarget),
+    UnsupportedNativeTarget(crate::native_target::NativeTarget),
 }
 
 impl std::fmt::Display for KlibTargetBindingError {
@@ -92,7 +92,7 @@ impl KlibBackend {
     /// Native platform and a target Kotlin/Native itself names; it never substitutes the host.
     pub fn with_native_target(
         mut self,
-        target: crate::native::NativeTarget,
+        target: crate::native_target::NativeTarget,
     ) -> Result<Self, KlibTargetBindingError> {
         if self.platform != KlibPlatform::Native {
             return Err(KlibTargetBindingError::NonNativePlatform(self.platform));
@@ -926,7 +926,7 @@ fn constant_value(
 #[cfg(test)]
 mod target_binding_tests {
     use super::*;
-    use crate::native::{Arch, NativeTarget, Os};
+    use crate::native_target::{Arch, NativeTarget, Os};
 
     fn stamp() -> KlibStamp {
         KlibStamp::new(
