@@ -390,32 +390,6 @@ impl Emitter<'_> {
             && self.ir.source_line(expression).is_some()
     }
 
-    /// Common IR identifies an operation whose source line owns its generated leading operand,
-    /// which lowering built with no position of its own: the operation's line marks at the
-    /// operand's start, where kotlinc's node carrying that position starts. Ordinary calls keep
-    /// operand-then-dispatch marking.
-    pub(super) fn mark_generated_operand_start(
-        &self,
-        call: ExprId,
-        first_operand: Option<ExprId>,
-        code: &mut CodeBuilder,
-    ) {
-        if !self.ir.starts_at_generated_operand(call)
-            || !first_operand.is_some_and(|operand| self.ir.is_positionless(operand))
-        {
-            return;
-        }
-        if let Some(line) = self
-            .ir
-            .dispatch_line(call)
-            .or_else(|| self.ir.source_line(call))
-        {
-            if line != 0 {
-                code.mark_line(line);
-            }
-        }
-    }
-
     /// Run `emit` as the emission of a `when` branch condition (kotlinc's `isInsideCondition`).
     pub(super) fn in_condition<R>(&mut self, emit: impl FnOnce(&mut Self) -> R) -> R {
         let outer = std::mem::replace(&mut self.inside_condition, true);

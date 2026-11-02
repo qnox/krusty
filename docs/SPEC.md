@@ -23834,6 +23834,10 @@ The remaining details follow kotlinc:
   same line again, which writes nothing. A serializable property's default copied into
   `write$Self` or the deserialization constructor keeps the kinds of the nodes it copies, so it
   marks where its first node's kind marks.
+- A leading operand a call or property access generates without a position of its own (an
+  implicit context argument) is built at the operation's start, as fir2ir builds the arguments it
+  adds at the call's offsets: it takes the operation's line, so it marks that line where its code
+  starts. No table records which operations start at such an operand.
 
 ### Whether a mark writes an entry
 

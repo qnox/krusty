@@ -2069,8 +2069,10 @@ impl BodyLowering<'_> {
                 if let Some(line) = source_line {
                     self.ir.mark_dispatch_line(call, line);
                 }
-            } else if first.is_some_and(|operand| self.ir.is_positionless(operand)) {
-                self.ir.mark_generated_operand_start(call);
+            } else if let (Some(operand), Some(line)) = (first, source_line) {
+                if self.ir.is_positionless(operand) && line != 0 {
+                    self.ir.build_operand_at_operation_start(operand, line);
+                }
             }
         }
         // Preserve the declaration's unspecialized result on the concrete call node. Value-class
