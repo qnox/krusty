@@ -55,7 +55,7 @@ pub use call_realization::{
     KlibDependencyCallable, NonvirtualCallRealization, OverriddenCallKind,
     OverriddenCallRealization,
 };
-pub(crate) use call_realization::{KlibBodyCallableShape, KlibBodyCompanionReceiver};
+pub use call_realization::{KlibBodyCallableShape, KlibBodyCompanionReceiver};
 pub use call_sig::required_arity;
 pub use callable_scope_rung::CallableScopeRung;
 pub(crate) use classifier_callables::{

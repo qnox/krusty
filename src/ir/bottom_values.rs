@@ -107,7 +107,7 @@ fn physically_invoked(callee: &Callee) -> bool {
 }
 
 impl IrFile {
-    pub(crate) fn expr_diverges_by(
+    pub fn expr_diverges_by(
         &self,
         expression: ExprId,
         leaf: &impl Fn(ExprId, &IrExpr) -> bool,

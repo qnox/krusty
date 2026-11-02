@@ -80,8 +80,8 @@ use krusty::types::{Ty, TypeName};
 
 use super::super::classes::{self as model, AnyMember, ClassModel, Slot};
 use super::super::symbols::Symbols;
-use crate::NativeTarget;
 use super::{Entry, BOX_RESULT_FRAME, PROGRAM_ENTRY};
+use crate::NativeTarget;
 
 /// A construct the lowering declined, and the checked node it was declined at.
 ///
@@ -514,8 +514,10 @@ struct FileLowering<'a> {
     /// lets the runtime's walking entry points reach an object it did not make. This says which
     /// class that is, so a receiver typed by the class rather than by the interface plays the
     /// shape too, so its iteration-protocol members use the same descriptor dispatch as a list.
-    walkable_classes:
-        krusty::fx_hash::HashMap<krusty::types::TypeName, super::super::intrinsics::CollectionShape>,
+    walkable_classes: krusty::fx_hash::HashMap<
+        krusty::types::TypeName,
+        super::super::intrinsics::CollectionShape,
+    >,
     /// The shapes among those that the runtime cannot walk an object of this file's behind; see
     /// [`unwalkable_collections`].
     unwalkable_collections: krusty::fx_hash::HashSet<super::super::intrinsics::CollectionShape>,

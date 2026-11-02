@@ -21,8 +21,8 @@ pub(super) fn operation_plan(operation: CompilerIntrinsic) -> Option<DependencyO
 #[cfg(test)]
 mod tests {
     use super::*;
-    use krusty::backend::Backend;
     use crate::{CraneliftBackend, NativeTarget};
+    use krusty::backend::Backend;
 
     #[test]
     fn klib_target_string_plus_is_a_native_dependency_capability() {

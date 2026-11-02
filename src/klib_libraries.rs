@@ -166,9 +166,7 @@ impl KlibLibraries {
         &self.references
     }
 
-    pub fn dependency_body_snapshot(
-        &self,
-    ) -> Option<&crate::libraries::DependencyBodySnapshot> {
+    pub fn dependency_body_snapshot(&self) -> Option<&crate::libraries::DependencyBodySnapshot> {
         self.body_snapshot.as_ref()
     }
 }

@@ -823,6 +823,7 @@ dependencies = [
  "krusty-cli",
  "krusty-native",
  "krusty-plugin-ir",
+ "krusty-wasm",
  "libc",
  "object 0.40.0",
  "pprof",
@@ -849,6 +850,7 @@ dependencies = [
  "krusty",
  "krusty-build",
  "krusty-native",
+ "krusty-wasm",
  "libc",
  "mimalloc",
  "serde",
@@ -914,6 +916,13 @@ dependencies = [
  "saphyr-parser",
  "serde_json",
  "sha2",
+]
+
+[[package]]
+name = "krusty-wasm"
+version = "0.0.1"
+dependencies = [
+ "krusty",
 ]
 
 [[package]]

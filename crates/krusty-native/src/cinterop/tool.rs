@@ -12,10 +12,10 @@ use super::def_file::DefFile;
 use super::library::{interop_library, CinteropError, InteropRequest};
 use super::link_facts::{self, LinkerOptions};
 use super::preprocessor::IncludeDir;
+use crate::NativeTarget;
 use krusty::klib::write::KlibStamp;
 use krusty::kotlin_version;
 use krusty::language_version::LanguageVersion;
-use crate::NativeTarget;
 
 /// One `cinterop` invocation, as Kotlin/Native's tool takes it.
 #[derive(Clone, Debug, PartialEq, Eq)]

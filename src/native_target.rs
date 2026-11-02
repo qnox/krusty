@@ -45,8 +45,7 @@ impl NativeTarget {
     /// script's list, which is the one it prebuilds the runtime for.
     pub const ALL: &'static [Self] = &{
         let supported = contract::SUPPORTED;
-        let mut all =
-            [Self::new(supported[0].0, supported[0].1); contract::SUPPORTED.len()];
+        let mut all = [Self::new(supported[0].0, supported[0].1); contract::SUPPORTED.len()];
         let mut index = 0;
         while index < supported.len() {
             all[index] = Self::new(supported[index].0, supported[index].1);

@@ -741,7 +741,8 @@ impl BodyLowering<'_, '_, '_> {
         // Read the selected property's normalized name, not its accessor's target spelling (for
         // example KLIB's `<get-size>`). The property ID already joins these exact declarations.
         let getter = self.file.callables.callable(property.getter)?;
-        let Some(krusty::types::SemanticCallableOwner::Classifier(owner)) = getter.declaration_owner
+        let Some(krusty::types::SemanticCallableOwner::Classifier(owner)) =
+            getter.declaration_owner
         else {
             return None;
         };
@@ -1339,18 +1340,15 @@ mod tests {
         ret: Ty,
     ) -> crate::intrinsics::FunctionSignature<'a> {
         crate::intrinsics::FunctionSignature::new(
-            crate::intrinsics::DeclarationOwner::callable(
-                krusty::types::type_name(owner),
-                None,
-            ),
+            crate::intrinsics::DeclarationOwner::callable(krusty::types::type_name(owner), None),
             name,
             params,
             ret,
         )
     }
 
-    use krusty::types::MappedCollection;
     use classifier_shapes::{CollectionDeclaration, StandardCollectionImplementation};
+    use krusty::types::MappedCollection;
 
     fn face(kind: CollectionKind, mutable: bool) -> CollectionDeclaration {
         CollectionDeclaration::Interface(MappedCollection { kind, mutable })

@@ -7,8 +7,8 @@
 
 use krusty::fx_hash::HashMap;
 
-use crate::Arch;
 use super::ProgramLinkError;
+use crate::Arch;
 
 /// One relocation, resolved: where it is, what it points at.
 pub(super) struct Reloc {

@@ -61,11 +61,9 @@ mod enums;
 mod expect_actualization;
 mod expression_copy;
 mod expression_provenance;
-pub(crate) use emitted_body_roots::{
-    emitted_body_roots, emitted_declaration_roots, EmittedDeclaration,
-};
-mod field_flags;
-mod fields;
+pub use emitted_body_roots::{emitted_body_roots, emitted_declaration_roots, EmittedDeclaration};
+pub mod field_flags;
+pub mod fields;
 mod function_scope;
 mod inline_copies;
 mod suspension_points;
@@ -1433,8 +1431,7 @@ pub struct IrFile {
     pub checked_classifier_classes: crate::fx_hash::HashMap<crate::fir::DeclarationId, ClassId>,
     /// Backend-neutral lexical naming context for source classifiers declared in executable code.
     /// A target consumes this exact class-id ownership graph and chooses physical spellings.
-    pub local_class_name_provenance:
-        crate::fx_hash::HashMap<ClassId, IrLocalClassNameProvenance>,
+    pub local_class_name_provenance: crate::fx_hash::HashMap<ClassId, IrLocalClassNameProvenance>,
     /// The same naming context for each source callable-reference node and each lambda node, by
     /// expression id. A target that realizes one as a class of its own names that class
     /// from it.
@@ -1548,11 +1545,10 @@ pub struct IrFile {
     pub shared_super_capture_parameters: crate::fx_hash::HashMap<(ClassId, u32), Ty>,
     /// The same holder edge for a secondary `super(…)` that lowering prefixed with superclass
     /// captures. Keyed by `(subclass, secondary index, selected-super-parameter)`.
-    pub(crate) shared_secondary_super_capture_parameters:
-        crate::fx_hash::HashMap<(ClassId, u32, u32), Ty>,
+    pub shared_secondary_super_capture_parameters: crate::fx_hash::HashMap<(ClassId, u32, u32), Ty>,
     /// Exact closure identity of each local/anonymous-class capture by constructor-prefix identity.
     /// Transitive superclass forwarding consumes this coordinate instead of synthetic field names.
-    pub(crate) class_capture_identities:
+    pub class_capture_identities:
         crate::fx_hash::HashMap<(ClassId, u32), crate::fir::ClassCaptureIdentity>,
     /// A local class's capture order by first use (`order[position]` is a field), JVM-applied.
     pub(crate) class_capture_order: crate::fx_hash::HashMap<ClassId, Box<[u32]>>,
@@ -1833,7 +1829,7 @@ pub struct IrFile {
     pub(crate) value_class_unbox_type_operation_edges: crate::fx_hash::HashMap<ExprId, ExprId>,
     /// Each declaration's default-argument entry, by the declaration's `FunId`, once a target's
     /// shared default-argument lowering has realized it as an ordinary function of this file.
-    pub(crate) default_entries: crate::fx_hash::HashMap<FunId, FunId>,
+    pub default_entries: crate::fx_hash::HashMap<FunId, FunId>,
     /// `FunId` → source parameter names and, when present, default-value expressions.
     pub fn_params: crate::fx_hash::HashMap<u32, FnParamInfo>,
     /// Per declared method/function, whether each SOURCE parameter was declared nullable (`a: String?`).
@@ -2835,12 +2831,10 @@ mod debug_locals;
 mod external_overrides;
 mod generated_members;
 pub use data_class_members::IrDataClassMemberRole;
-pub(crate) use debug_lines::UnitBodyExit;
+pub use debug_lines::UnitBodyExit;
 pub use debug_locals::{IrCatchBinding, IrLambdaForm, IrLambdaOrigin};
-pub(crate) use debug_locals::{IrDebugLocalProvenance, IrInlineLocalRole};
-pub(crate) use generated_members::{
-    IrGeneratedClassRole, IrGeneratedFunctionRole, IrValueClassAnyMember,
-};
+pub use debug_locals::{IrDebugLocalProvenance, IrInlineLocalRole};
+pub use generated_members::{IrGeneratedClassRole, IrGeneratedFunctionRole, IrValueClassAnyMember};
 pub use generated_members::{
     IrGeneratedDeclarationDebug, IrGeneratedFunctionMetadata, IrGeneratedFunctionMetadataScope,
     IrGeneratedFunctionPublication, IrGeneratedMemberPublication,
@@ -2851,7 +2845,7 @@ mod function_parameters;
 pub use function_parameters::*;
 mod traversal;
 pub use traversal::*;
-mod clone;
+pub mod clone;
 pub use clone::clone_expression_dag;
 #[cfg(test)]
 pub(crate) use clone::make_expression_children_unique;

@@ -10,9 +10,9 @@ use object::{
     SymbolFlags, SymbolKind, SymbolScope,
 };
 
-use crate::{Arch, NativeTarget, Os};
 use super::elf::link_static;
 use super::ProgramLinkError;
+use crate::{Arch, NativeTarget, Os};
 
 /// The address the first text section of the first input lands at: the image base plus the ELF
 /// header and two program headers (176 bytes, already 16-aligned).

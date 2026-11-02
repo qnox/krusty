@@ -222,7 +222,8 @@ impl<'a> FileLowering<'a> {
         };
         match self.ir.local_property_layouts.get(property) {
             Some(krusty::ir::IrLocalPropertyLayout::TopLevelAccessor {
-                context_parameters, ..
+                context_parameters,
+                ..
             }) if !context_parameters.is_empty() => format!(
                 "a reference to the property `{}`, which has context parameters this object has \
                  no room for",

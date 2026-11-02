@@ -16,7 +16,7 @@ pub(crate) struct KlibBodyClassParameters {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct KlibBodyClassContract {
+pub struct KlibBodyClassContract {
     pub(crate) module: String,
     pub(crate) signature: KlibPublicIdSignature,
     pub(crate) classifier: TypeName,

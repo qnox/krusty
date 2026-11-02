@@ -10,10 +10,10 @@ use std::process::Command;
 
 use krusty::backend::Backend as _;
 use krusty::diag::DiagSink;
-use krusty_native::{Arch, CraneliftBackend, Entry, NativeTarget};
 use krusty::source::SourceInput;
 use krusty::symbol_source::{SymbolNamespace, SymbolSource};
 use krusty::types::type_name;
+use krusty_native::{Arch, CraneliftBackend, Entry, NativeTarget};
 
 use super::common;
 

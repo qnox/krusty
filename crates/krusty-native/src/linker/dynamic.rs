@@ -24,12 +24,12 @@ use krusty::fx_hash::{HashMap, HashSet};
 use object::read::{Object, ObjectSymbol};
 use object::{SymbolKind, SymbolSection};
 
-use crate::{Arch, NativeTarget};
 use super::elf::{symbol_name, Elf};
 use super::libraries::{ExportKind, ImportLibrary};
 use super::reachability::reachable_globals;
 use super::relocate::split_hi_lo;
 use super::ProgramLinkError;
+use crate::{Arch, NativeTarget};
 
 /// Bytes per stub, on every architecture: four instructions, or one jump and padding.
 const STUB_SIZE: u64 = 16;

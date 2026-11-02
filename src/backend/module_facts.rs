@@ -506,8 +506,8 @@ impl BackendModuleFacts {
         })
     }
 
-    #[cfg(test)]
-    pub(crate) fn from_classifiers(
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn from_classifiers(
         source: impl IntoIterator<Item = (TypeName, LibraryType)>,
         body_local_classifiers: impl IntoIterator<Item = TypeName>,
     ) -> Result<Self, BackendFactError> {
@@ -702,7 +702,7 @@ pub struct CheckedBackendClassifiers<'a> {
 }
 
 impl<'a> CheckedBackendClassifiers<'a> {
-    pub(crate) fn new(module: &'a BackendModuleFacts, dependencies: &'a dyn SymbolSource) -> Self {
+    pub fn new(module: &'a BackendModuleFacts, dependencies: &'a dyn SymbolSource) -> Self {
         Self {
             module,
             dependencies,

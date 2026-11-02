@@ -288,9 +288,7 @@ impl FileLowering<'_> {
                 .enumerate()
                 .find(|(_, property)| property.name == name)
             {
-                if let Some(target) =
-                    crate::classes::local_property_target(self.ir, id, index)
-                {
+                if let Some(target) = crate::classes::local_property_target(self.ir, id, index) {
                     let key = crate::classes::SlotKey::Getter(target);
                     return self.model.slot(class, &key).map_or(0, |slot| slot + 1);
                 }
