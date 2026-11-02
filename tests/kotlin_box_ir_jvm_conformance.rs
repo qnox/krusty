@@ -1468,6 +1468,11 @@ fn compose_value_class_stability_is_byte_identical_to_kotlinc() {
     assert_compose_fixture_matches_kotlinc("valueClassStability");
 }
 
+#[test]
+fn compose_generic_field_stability_is_byte_identical_to_kotlinc() {
+    assert_compose_fixture_matches_kotlinc("genericFieldStability");
+}
+
 fn assert_compose_fixture_matches_kotlinc(stem: &str) {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/compose")

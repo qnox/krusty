@@ -28,6 +28,8 @@ mod package_property_annotation_marker_clash_e2e;
 mod package_property_annotations_e2e;
 #[path = "../property_accessor_annotation_e2e.rs"]
 mod property_accessor_annotation_e2e;
+#[path = "../synchronized_method_e2e.rs"]
+mod synchronized_method_e2e;
 #[path = "../unread_field_annotation_order_e2e.rs"]
 mod unread_field_annotation_order_e2e;
 #[path = "../volatile_field_e2e.rs"]

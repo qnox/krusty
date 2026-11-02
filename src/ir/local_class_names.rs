@@ -478,7 +478,7 @@ fn callee(callee: &mut Callee, names: &IdentityRemap<'_>) {
             tys(params, names);
             *ret = ty(*ret, names);
         }
-        Callee::Module { params, ret, .. } => {
+        Callee::Module { params, ret, .. } | Callee::ModuleDefaultEntry { params, ret, .. } => {
             tys(params, names);
             *ret = ty(*ret, names);
         }
@@ -599,6 +599,7 @@ fn remap_expression(expression: &mut IrExpr, names: &IdentityRemap<'_>) {
             ..
         }
         | IrExpr::Variable { ty: classifier, .. }
+        | IrExpr::AbsentArgument { ty: classifier }
         | IrExpr::PrimitiveNeg { ty: classifier, .. }
         | IrExpr::RefNew {
             elem: classifier, ..

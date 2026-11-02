@@ -3811,6 +3811,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
     ) -> Result<crate::fir::ResolvedMemberCall, crate::fir::DiagnosticId> {
         crate::trace_compiler!("signature", "select_member_call spelling={spelling}");
         self.forget_selected_result_publication(origin);
+        let ambiguous = std::cell::RefCell::new(Vec::new()); // tied most specific candidates
         let result_constraint = signature_call_result_constraint(signature_result_constraint);
         let expected =
             signature_result_constraint.map(crate::fir::SignatureCallResultConstraint::expected);
@@ -3877,14 +3878,8 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 callables,
                 &argument_kinds,
             );
-            crate::trace_compiler!(
-                "signature",
-                "member call selection receiver={:?} spelling={spelling} candidates={} arguments={:?}",
-                receiver.get(),
-                projected.callables().functions().len(),
-                projected.arguments(),
-            );
-            let selection = resolver.select_receiver_function_with_params_tracking(
+            use crate::symbol_resolver::ReceiverFunctionSelection as Selection;
+            let selection = resolver.select_receiver_function_with_applied_receiver_tracking(
                 receiver.get(),
                 spelling,
                 projected.arguments(),
@@ -3894,21 +3889,19 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             );
             crate::trace_compiler!(
                 "signature",
-                "member call selection result receiver={:?} spelling={spelling} selected={}",
+                "member call selection receiver={:?} spelling={spelling} candidates={} arguments={:?} selected={}",
                 receiver.get(),
-                match &selection {
-                    crate::symbol_resolver::CandidateSelection::Selected(_) => "yes",
-                    crate::symbol_resolver::CandidateSelection::Ambiguous => "ambiguous",
-                    crate::symbol_resolver::CandidateSelection::None => "none",
-                },
+                projected.callables().functions().len(),
+                projected.arguments(),
+                selection.outcome(),
             );
-            let crate::symbol_resolver::CandidateSelection::Selected((
-                selected,
-                parameters,
-                result,
-            )) = selection
-            else {
-                return None;
+            let (selected, parameters, result) = match selection {
+                Selection::Selected(selected) => (*selected.function, selected.params, selected.ret),
+                Selection::Ambiguous(candidates) => {
+                    *ambiguous.borrow_mut() = candidates;
+                    return None;
+                }
+                Selection::None => return None,
             };
             crate::trace_compiler!(
                 "signature",
@@ -4025,6 +4018,9 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                     argument_types,
                     publication,
                 )
+            }
+            Err(_) if !ambiguous.borrow().is_empty() => {
+                return Err(self.record_ambiguous_call(scope, origin, spelling, &ambiguous));
             }
             Err(_) => {
                 // A member PROPERTY whose value is callable participates in call syntax after
