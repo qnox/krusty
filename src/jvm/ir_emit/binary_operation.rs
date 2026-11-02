@@ -17,9 +17,7 @@ impl Emitter<'_> {
         if self.suppress_unsigned_local_line {
             return;
         }
-        if crate::jvm::line_numbers::marks_line_at_start(self.ir, expression)
-            || self.keeps_start_line(expression)
-        {
+        if crate::jvm::line_numbers::marks_value_line_at_start(self.ir, expression) {
             self.mark_expression_start(expression, code);
         }
     }
@@ -133,7 +131,7 @@ impl Emitter<'_> {
                 if unsigned && !self.spills_operand_prefix(rhs) {
                     self.emit_unsigned_bitwise_operands(expression, lhs, rhs, code);
                 } else if let Some(line) =
-                    super::debug_lines::inversion_mask_line(self.ir, expression)
+                    crate::jvm::line_numbers::inversion_mask_line(self.ir, expression)
                 {
                     // kotlinc's `inv` intrinsic restates its line where it pushes the mask.
                     self.emit_value(lhs, code);

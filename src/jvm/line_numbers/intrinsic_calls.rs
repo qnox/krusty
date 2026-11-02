@@ -18,10 +18,7 @@ use crate::types::Ty;
 
 /// Whether `expression` states its own line before its operands, keeping that entry where an
 /// operand marks another line at the same offset.
-pub(in crate::jvm::ir_emit) fn states_line_before_operands(
-    ir: &IrFile,
-    expression: ExprId,
-) -> bool {
+pub(crate) fn states_line_before_operands(ir: &IrFile, expression: ExprId) -> bool {
     if let Some(call) = ir.builtin_calls.get(&expression) {
         return is_intrinsic_call(ir, expression, call);
     }
@@ -86,7 +83,7 @@ fn is_elvis_operand(ir: &IrFile, value: ExprId) -> bool {
 }
 
 /// The line `inv()`'s intrinsic restates where it pushes the all-bits mask, after its receiver.
-pub(in crate::jvm::ir_emit) fn inversion_mask_line(ir: &IrFile, expression: ExprId) -> Option<u32> {
+pub(crate) fn inversion_mask_line(ir: &IrFile, expression: ExprId) -> Option<u32> {
     let call = ir.builtin_calls.get(&expression)?;
     (call.kind == IrBuiltinCallKind::Unary(FirUnaryOperation::BitwiseNot)
         && is_intrinsic_call(ir, expression, call))

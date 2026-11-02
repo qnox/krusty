@@ -634,7 +634,7 @@ impl Emitter<'_> {
             returned = match *self.ir.expr(returned) {
                 IrExpr::Block {
                     value: Some(inner), ..
-                } if !self.realizes_inlined_call(returned) => inner,
+                } if !crate::jvm::line_numbers::realizes_inlined_call(self.ir, returned) => inner,
                 IrExpr::TypeOp {
                     op: crate::ir::IrTypeOp::ImplicitCoercion,
                     arg,
@@ -1202,8 +1202,8 @@ impl Emitter<'_> {
             self.mark_statement_line(statement, code);
             // A statement that states its own line before its operands (a safe call, an
             // intrinsic call) keeps that entry where an operand marks another line.
-            if self.keeps_start_line(statement) {
-                self.mark_kept_start_line(statement, code);
+            if crate::jvm::line_numbers::marks_line_before_operands(self.ir, statement) {
+                self.mark_line_before_operands(statement, code);
             }
             if normalize_at_lambda_frame
                 && matches!(

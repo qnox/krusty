@@ -25,6 +25,10 @@
 //! forget that line (or, inside a condition, registers it again at once), and every other mark
 //! appends an entry, a second one at the same offset included.
 
+mod intrinsic_calls;
+
+pub(crate) use intrinsic_calls::{inversion_mask_line, states_line_before_operands};
+
 use crate::fir::SyntheticOriginKind;
 use crate::ir::{ExprId, IrExpr, IrFile, IrNodeOrigin, IrTypeOp, NullCheck};
 
@@ -146,6 +150,19 @@ pub(crate) fn states_line_at_start(ir: &IrFile, expression: ExprId) -> bool {
         } => ir.whens.elvises.contains_key(value),
         _ => false,
     }
+}
+
+/// Whether `expression` marks its own line before its operands wherever it is emitted, a statement
+/// included: an intrinsic or safe call ([`states_line_before_operands`]) or a node whose kind
+/// kotlinc marks so ([`states_line_at_start`]).
+pub(crate) fn marks_line_before_operands(ir: &IrFile, expression: ExprId) -> bool {
+    states_line_before_operands(ir, expression) || states_line_at_start(ir, expression)
+}
+
+/// Whether a value `expression` marks its line where its code starts: its kind marks there
+/// ([`marks_line_at_start`]), or it marks before its operands wherever it is emitted.
+pub(crate) fn marks_value_line_at_start(ir: &IrFile, expression: ExprId) -> bool {
+    marks_line_at_start(ir, expression) || marks_line_before_operands(ir, expression)
 }
 
 /// Whether `expression`'s line is one the inliner copies with an inline function's compiled body

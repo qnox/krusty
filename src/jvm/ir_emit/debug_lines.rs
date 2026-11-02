@@ -9,9 +9,6 @@ use crate::jvm::classfile::CodeBuilder;
 
 use super::Emitter;
 
-mod intrinsic_calls;
-pub(super) use intrinsic_calls::{inversion_mask_line, states_line_before_operands};
-
 fn first_block_expression(ir: &IrFile, block: ExprId) -> ExprId {
     let mut expression = block;
     loop {
@@ -106,7 +103,7 @@ impl Emitter<'_> {
         expression: ExprId,
         code: &mut CodeBuilder,
     ) {
-        if !states_line_before_operands(self.ir, expression) {
+        if !crate::jvm::line_numbers::states_line_before_operands(self.ir, expression) {
             return;
         }
         if let Some(line) = self.ir.source_line(expression) {
@@ -144,18 +141,10 @@ impl Emitter<'_> {
         Some(self.mapped_expression_line(expression, line))
     }
 
-    /// Whether `expression` states its own line before its operands, as a statement or a value:
-    /// an intrinsic or safe call ([`states_line_before_operands`]), or a node whose kind kotlinc
-    /// marks so ([`crate::jvm::line_numbers::states_line_at_start`]).
-    pub(super) fn keeps_start_line(&self, expression: ExprId) -> bool {
-        states_line_before_operands(self.ir, expression)
-            || crate::jvm::line_numbers::states_line_at_start(self.ir, expression)
-    }
-
     /// Mark `expression`'s line where kotlinc marks an intrinsic call before its operands (the
     /// `andand`/`oror` intrinsic's own mark). Operand code marking another line at this same offset
     /// keeps the entry, as kotlinc's line table does.
-    pub(super) fn mark_kept_start_line(&mut self, expression: ExprId, code: &mut CodeBuilder) {
+    pub(super) fn mark_line_before_operands(&mut self, expression: ExprId, code: &mut CodeBuilder) {
         let Some(line) = self.ir.source_line(expression) else {
             return;
         };
@@ -457,12 +446,6 @@ impl Emitter<'_> {
         }
     }
 
-    /// Whether `expression` realizes an inlined call in place (`SyntheticOriginKind::InlinedCall`)
-    /// or is an external-inline expansion lowered from its declaration plan.
-    pub(super) fn realizes_inlined_call(&self, expression: ExprId) -> bool {
-        crate::jvm::line_numbers::realizes_inlined_call(self.ir, expression)
-    }
-
     /// kotlinc's `markLineNumberAfterInlineIfNeeded`, after a node that realizes an inlined call in
     /// place (`SyntheticOriginKind::InlinedCall`), and after an external-inline expansion lowered
     /// from its declaration plan.
@@ -471,7 +454,7 @@ impl Emitter<'_> {
     /// anywhere else it is forgotten, so the next mark of any line is written — kotlinc resets its
     /// last line number after an inlined body, which ran under the callee's lines.
     pub(super) fn mark_after_inlined_call(&self, expression: ExprId, code: &mut CodeBuilder) {
-        if !self.realizes_inlined_call(expression) {
+        if !crate::jvm::line_numbers::realizes_inlined_call(self.ir, expression) {
             return;
         }
         if self.ir.inline_result_adaptation_restores_caller(expression) {

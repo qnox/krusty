@@ -351,7 +351,7 @@ impl Emitter<'_> {
             code.mark_line(line);
             code.nop();
         } else {
-            self.mark_kept_start_line(expression, code);
+            self.mark_line_before_operands(expression, code);
         }
         if let [(Some(null_test), rhs), (None, lhs)] = branches {
             if let Some(&line) = self.ir.whens.elvises.get(&expression) {

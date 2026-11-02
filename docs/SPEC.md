@@ -23840,6 +23840,10 @@ The remaining details follow kotlinc:
   starts. No table records which operations start at such an operand.
 - A call over a captured context receiver is an ordinary call: it marks its own line at its invoke
   from its own position, with no separate dispatch line.
+- Which nodes mark their line before their operands (an intrinsic or safe call, a source `!!`, an
+  elvis) is one rule, `marks_line_before_operands` in `src/jvm/line_numbers.rs`, that a statement
+  and a value both ask; a value also marks at its start where its kind does
+  (`marks_value_line_at_start`). Emission places the mark and decides nothing of its own.
 
 ### Whether a mark writes an entry
 
