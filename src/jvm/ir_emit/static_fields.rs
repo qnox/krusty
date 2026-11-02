@@ -444,12 +444,12 @@ pub(super) fn emit_default_static_accessor(
         g.aconst_null();
     }
     emit_return(jt, &mut g);
-    finish_code_sig::<0x0019>(
-        cw,
+    g.link();
+    cw.add_method_sig(
+        0x0019 | super::method_access::annotated_method_modifiers(annotations),
         &accessor_signature.name,
         &accessor_signature.descriptor,
-        &mut g,
-        0,
+        &g,
         signatures.getter.as_deref(),
     );
     cw.set_method_nullability(
@@ -568,7 +568,15 @@ fn emit_default_static_setter(
     // kotlinc writes the setter's `LocalVariableTable` as it finishes the method, so the
     // `<set-?>` name joins the pool right after the body's constants.
     cw.seed_utf8("<set-?>");
-    finish_code_sig::<0x0019>(cw, name, descriptor, &mut st, words, signature);
+    st.ensure_locals(words);
+    st.link();
+    cw.add_method_sig(
+        0x0019 | super::method_access::annotated_method_modifiers(annotations),
+        name,
+        descriptor,
+        &st,
+        signature,
+    );
     cw.set_method_nullability(name, descriptor, None, &[acc_ann]);
     cw.set_method_param_annotations(name, descriptor, parameter_annotations);
     if let Some(annotations) = annotations {

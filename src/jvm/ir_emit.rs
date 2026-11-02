@@ -233,8 +233,8 @@ use member_schedule::{
 };
 pub use metadata_policy::KotlinMetadata;
 use metadata_policy::{
-    finish_local_synthetic_class, is_continuation_class, is_coroutine_state_machine,
-    synthetic_class_xi, SYNTHETIC_LOCAL, SYNTHETIC_PROTECTED, SYNTHETIC_PUBLIC,
+    continuation_class_xi, finish_local_synthetic_class, is_continuation_class,
+    is_coroutine_state_machine, synthetic_class_xi, SYNTHETIC_LOCAL, SYNTHETIC_PUBLIC,
 };
 use method_defaults::{
     emit_default_stub, emit_facade_default_stub, static_default_stub_marker, DefaultStubSource,
@@ -1620,11 +1620,14 @@ fn emit_pass(
     for (class_id, c) in ir.classes.iter().enumerate() {
         let class_id = class_id as ClassId;
         let fq_name = c.fq_name();
-        // A function whose suspension points all turned out to be tail calls has no machine.
+        // A function whose suspension points all turned out to be tail calls has no machine, and
+        // its continuation is written only when a method's `$$forInline` copy constructs it.
         if let Some(crate::jvm::classfile::CoroutineOutcome::TailCalls) =
             env.run.transformed_coroutine(&fq_name)
         {
-            continue;
+            if !crate::jvm::suspend_inline_functions::constructed_by_method_copy(ir, class_id) {
+                continue;
+            }
         }
         if unwritten_continuations.contains(&c.fq_name) {
             continue;
@@ -2303,9 +2306,11 @@ fn emit_class(
     let has_abstract = c.methods.iter().any(|&fid| {
         !standalone_method_is_elided(ir, fid, env) && ir.functions[fid as usize].body.is_none()
     });
-    // A synthesized continuation class is package-private in kotlinc.
+    // A synthesized continuation class is package-private in kotlinc, unless a method's
+    // `$$forInline` copy constructs it.
     let mut access = if is_continuation {
-        0x0020 // SUPER (package-private)
+        let public = crate::jvm::suspend_inline_functions::constructed_by_method_copy(ir, class_id);
+        u16::from(public) | 0x0020 // [PUBLIC |] SUPER
     } else {
         class_public_bit(ir, c) | 0x0020 // [PUBLIC |] SUPER
     };
@@ -2452,7 +2457,13 @@ fn emit_class(
     // declared (`L$0`, `I$0`, …), and kotlinc's pool carries each of those strings once, first visited
     // with the FIELD. Building the annotation earlier interned the subset the array happens to mention
     // ahead of the table and left the rest to the fields, reordering the whole pool.
-    if let Some(metadata) = continuation_metadata {
+    // A machine-less continuation (its function's suspension points all tail calls, written for
+    // a method's `$$forInline` copy) has no states to describe.
+    let tail_calls = matches!(
+        transformed,
+        Some(crate::jvm::classfile::CoroutineOutcome::TailCalls)
+    );
+    if let Some(metadata) = continuation_metadata.filter(|_| !tail_calls) {
         cw.set_debug_metadata(&crate::jvm::bytecode_passes::coroutines::DebugMetadata {
             source_file: opts.source_file.clone().unwrap_or_default(),
             line_numbers: metadata.l.clone(),
@@ -4221,13 +4232,14 @@ fn emit_method_inner(
         },
     };
     emit_placed_method(ir, fid, placement, owner, facade, cw, env);
-    if crate::jvm::suspend_inline_functions::has_for_inline_copy(ir, fid)
-        && env.emit_time_machines.transformed(fid).is_some()
-    {
+    let for_inline = crate::jvm::suspend_inline_functions::for_inline_copy(ir, fid)
+        .filter(|_| env.emit_time_machines.transformed(fid).is_some());
+    if let Some(kind) = for_inline {
         let copy = MethodPlacement::ForInlineCopy {
             static_owner,
             instance: instance && singleton.is_none(),
             singleton,
+            kind,
         };
         emit_placed_method(ir, fid, copy, owner, facade, cw, env);
     }
@@ -4251,6 +4263,7 @@ fn emit_placed_method(
             static_owner,
             instance,
             singleton,
+            ..
         } => (Some(static_owner), instance, None, singleton),
         MethodPlacement::Holder(receiver) => (None, true, Some(receiver), None),
         MethodPlacement::Singleton {
@@ -4499,6 +4512,22 @@ fn emit_placed_method(
             store(Ty::Int, slot, &mut code);
             (slot, code.bytes.len() as u16)
         });
+    if placement.constructs_fake_continuation() {
+        let completion = param_tys.len().saturating_sub(1) as u32 + u32::from(receiver_value);
+        let completion = e
+            .slots
+            .get(&completion)
+            .map(|&(slot, _)| slot)
+            .expect("a suspend method's copy has a completion parameter");
+        // The class the machine re-enters, under its final name: a copy's continuation is renamed
+        // with the copy, after coroutine lowering named it.
+        let continuation = env
+            .emit_time_machines
+            .transformed(fid)
+            .map(|machine| machine.continuation_class.clone())
+            .expect("a method's `$$forInline` copy is written beside its transformed machine");
+        e.emit_fake_continuation_construction(&continuation, completion, &mut code);
+    }
     // The marker and the parameter guards carry no line. The method's first entry is the first
     // statement, or the expression body — kotlinc does not also record the signature line there.
     // Building the machine: everything the discovery pass learned is in hand, so the entry,
@@ -4854,8 +4883,7 @@ fn method_signature_shape(
     }
     if let Some(generic) = ir.signatures.get(&fid) {
         let generic = value_class_signatures::physical_generic_signature(ir, fid, generic);
-        let vararg_index = ir.fn_varargs.get(&fid).map(|vararg| vararg.index);
-        return formatter.method_signature(&generic, f, vararg_index);
+        return formatter.method_signature(&generic, f, vararg_parameter_position(ir, fid));
     }
     if let (Some((params, ret)), Some(_)) = (
         ir.member_semantic_sigs.get(&fid),
@@ -4883,7 +4911,12 @@ fn method_signature_shape(
     if let Some((params, ret)) = value_class_signatures::declared_value_class_signature(ir, fid) {
         return formatter.method_positions(&params, &ret);
     }
-    method_parameterized_sig(formatter, &signature_function_params(ir, fid), &f.ret)
+    method_parameterized_sig(
+        formatter,
+        &signature_function_params(ir, fid),
+        &f.ret,
+        vararg_parameter_position(ir, fid),
+    )
 }
 
 fn suspend_generic_method_sig(
@@ -4919,6 +4952,21 @@ fn suspend_method_sig(
     Some(s)
 }
 
+/// The position of `fid`'s `vararg` among its lowered parameters. The recorded index counts the
+/// declared context and value parameters; captures and the extension receiver are lowered among
+/// them, so the position is the parameter whose identity is that declared parameter.
+fn vararg_parameter_position(ir: &IrFile, fid: u32) -> Option<usize> {
+    let vararg = ir.fn_varargs.get(&fid)?;
+    ir.fn_params
+        .get(&fid)?
+        .identities
+        .iter()
+        .enumerate()
+        .filter(|(_, identity)| identity.role.is_declared_parameter())
+        .nth(vararg.index)
+        .map(|(position, _)| position)
+}
+
 /// A method's generic `Signature` when a concrete param/return type is parameterized (`getXs()` →
 /// `()Ljava/util/List<Ljava/lang/String;>;`); non-generic positions keep their erased descriptor,
 /// `None` when none are parameterized.
@@ -4926,6 +4974,7 @@ fn method_parameterized_sig(
     formatter: &JvmSignatureFormatter<'_>,
     params: &[Ty],
     ret: &Ty,
+    vararg_index: Option<usize>,
 ) -> Option<String> {
     // Runs for every emitted method — bail before building any string when no position can carry one.
     let is_parameterized = |t: &Ty| {
@@ -4941,7 +4990,7 @@ fn method_parameterized_sig(
         return None;
     }
     // A `Unit` parameter is the `kotlin.Unit` object, not `void`.
-    let s = formatter.method_positions(params, ret)?;
+    let s = formatter.method_positions_with_vararg(params, ret, vararg_index)?;
     (s != ir_method_desc(params, ret)).then_some(s)
 }
 
@@ -5065,8 +5114,8 @@ struct Emitter<'a> {
     /// Safe-call guards that share one null exit (`a?.b?.c`), by guard `When`: the label, and whether
     /// this guard is the chain's outermost one, which binds it and yields the null result.
     safe_call_null_exits: HashMap<u32, (Label, bool)>,
-    /// A safe-call receiver already on the operand stack. The one read of this temporary consumes
-    /// it in place (`dup; ifnull`) instead of loading a slot that was never stored.
+    /// An inline return frame's result already on the operand stack at its landing label. The one
+    /// read of this value consumes it in place instead of loading a slot that was never stored.
     stack_resident_value: Option<u32>,
     /// The exact selector currently emitted by a safe-call guard. Its copied inline frame may
     /// need to adapt a value before the selector joins the null arm.
@@ -6339,7 +6388,7 @@ impl<'a> Emitter<'a> {
         // The jump that reaches this label already pushed the result. The linear tracker still
         // shows the dead path in front of the label (an `athrow` leaves height 0), so the landing
         // use would load the slot again. A label that does not carry a result leaves whatever
-        // value is already stack-resident: a safe-call receiver can cross an unrelated bind.
+        // value is already stack-resident.
         if let Some(value) = resident {
             if joins_fallthrough {
                 self.stack_resident_value = None;

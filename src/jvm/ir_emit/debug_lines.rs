@@ -11,9 +11,8 @@ use crate::jvm::classfile::CodeBuilder;
 use super::Emitter;
 
 mod intrinsic_calls;
-pub(super) use intrinsic_calls::{
-    inversion_mask_line, safe_call_read_line, states_line_before_operands,
-};
+use intrinsic_calls::safe_call_read_line;
+pub(super) use intrinsic_calls::{inversion_mask_line, states_line_before_operands};
 
 fn first_block_expression(ir: &IrFile, block: ExprId) -> ExprId {
     let mut expression = block;
