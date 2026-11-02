@@ -712,6 +712,11 @@ impl Emitter<'_> {
         let supplies = self
             .parameter_supplies(call, &physical, callee, &declared)
             .ok_or("a function-typed argument has no published crossinline/noinline modifier")?;
+        let callee_suspends = self.ir.suspend_calls.contains_key(&call_expression)
+            || self
+                .ir
+                .compiled_inline_call(call_expression)
+                .is_some_and(|function| self.ir.suspend_funs.contains(&function));
         let mut lambdas = Vec::new();
         let mut captured = Vec::new();
         let mut captures = Vec::new();
@@ -726,7 +731,7 @@ impl Emitter<'_> {
             )? {
                 continue;
             }
-            let argument = self.inline_lambda_node(argument, target.name)?;
+            let argument = self.inline_lambda_node(argument, target.name, callee_suspends)?;
             let start = captured.len();
             for &(capture, ty) in &argument.captures {
                 captured.push(Parameter {
