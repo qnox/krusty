@@ -752,6 +752,8 @@ mod dep_resolution;
 mod dependency_override_signature_e2e;
 #[path = "dependency_property_reference_name_e2e.rs"]
 mod dependency_property_reference_name_e2e;
+#[path = "dependency_value_class_override_e2e.rs"]
+mod dependency_value_class_override_e2e;
 #[path = "descriptor_arity_fails_closed_e2e.rs"]
 mod descriptor_arity_fails_closed_e2e;
 #[path = "descriptor_element_companion_serializer_e2e.rs"]
@@ -1392,8 +1394,6 @@ mod kotlin_fun_java_sam_param_e2e;
 mod kotlin_native_provisioning_e2e;
 #[path = "kotlin_script_e2e.rs"]
 mod kotlin_script_e2e;
-#[path = "kotlinc_argument_conformance_e2e.rs"]
-mod kotlinc_argument_conformance_e2e;
 #[path = "krusty_dep_dir_e2e.rs"]
 mod krusty_dep_dir_e2e;
 #[path = "krusty_roundtrip_class_metadata_e2e.rs"]

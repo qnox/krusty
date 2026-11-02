@@ -7632,14 +7632,37 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   no lines. The copy's locals are renumbered as kotlinc's class builder sorts them, the machine's
   `$continuation`, `$result` and suspension marker first. The lambda is no function of its own: no
   `access$…$lambda$0` bridge is written for it, nor the continuation its lowering prepared, unless
-  a call keeps it as a value. A library object without the `$$forInline` copy (one krusty compiled,
-  which writes no such copy for an object's method yet) keeps the lambda as a value. That route is
-  decided once from the callee's facts before any code is emitted: the constructions the body
-  passes a suspend lambda are paired with their classes, and a method other than a `$$forInline`
-  copy that reads the lambda's field names the bridge (`SuspendMethodWithoutForInlineCopy`). The
-  body is not inlined on trial: once a call is routed to the inliner, or a lambda-free call to a
+  a call keeps it as a value. krusty writes the same copy for a library it compiles: a suspend method
+  of a class in an inline function that reads a field the class stores a `crossinline` parameter
+  in (kotlinc's `isSuspendCapturingCrossinline`, suspend lambda or not) gets `name$$forInline`, the
+  marked body with the method's access, opened by `InlineMarker.mark(4)`, the construction of the
+  method's continuation on the receiver and `$completion`, `mark(5)` and a `pop`
+  (`jvm::suspend_inline_functions`). Eligibility is a semantic fact, not a shape of the body:
+  common lowering records on each constructor capture whether the captured declaration is a
+  `crossinline` parameter (`IrConstructorCapture::crossinline`), where the capture is produced,
+  through any chain of enclosing lambdas, local functions and classes, so a capture an object
+  receives from a lambda's capture or from its enclosing object's field keeps it. The fact is the
+  parameter's value slot in the declaring inline function; a call-site copy of the class remaps it
+  through the expansion's bindings, so a capture bound to one of the caller's own `crossinline`
+  parameters (a reified wrapper forwarding its parameter to a reified factory) keeps it, and one
+  bound to anything else, such as a literal lambda, loses it. The binding is the selected
+  argument's provenance, recorded on each read of such a parameter, its capture slot or its class
+  capture field where the read is produced, so it holds however the expansion stages the argument:
+  an object's method that forwards the outer parameter from its capture field to a reified factory
+  keeps the factory copy's `$$forInline` method, as kotlinc does. A call-site copy's methods take
+  their source methods' lines, and the continuations of its suspend methods are named with the
+  copy, `{copy}$N` in method order, as kotlinc numbers the classes a regenerated object declares. That
+  continuation is public, constructor included, its
+  `@Metadata.xi` carries the public visibility and, like any continuation whose function is in a
+  public inline function's scope, `METADATA_PUBLIC_ABI_FLAG`; it is written even when the method's
+  own suspension points are all tail calls, then without `@DebugMetadata`. The route is decided
+  once from the callee's facts before any code is emitted, and the body is not inlined on trial: once a call is routed to the inliner, or a lambda-free call to a
   compiled body is, a failure to inline or regenerate is an emission error, never a direct call.
-  Tests: `tests/crossinline_suspend_object_e2e.rs`. An object the copied method constructs that reads the lambda through the copy's field (the
+  Tests: `tests/crossinline_suspend_object_e2e.rs`. Only a `$$forInline` copy's machine takes
+  the suspension points a suspend lambda brings, so a regenerated method without one is refused
+  when it invokes a suspend lambda; a method that only passes the lambda to an object it constructs
+  (a non-suspend lambda's `invoke` building the object) is regenerated, and the object takes the
+  lambda into its own copy. An object the copied method constructs that reads the lambda through the copy's field (the
   `FlowCollector` that `Flow.map`'s object creates) is regenerated too, as kotlinc's
   `MethodInliner` does: it takes the copy's next number after the continuation
   (`…$map$1$2`, its own continuation `…$map$1$2$1`), the lambda is inlined into its methods, and
@@ -9483,6 +9506,40 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   actual element (a no-argument overload — the same-named lambda `sumOf` has an extra parameter). Test:
   `collection_members_e2e::numeric_reduction_extensions_by_element_type`.
 
+- **A lambda's result refines overload selection only as the specification allows.** Kotlin
+  decides applicability and the most specific candidate before analyzing a lambda body: a lambda
+  literal's result, typed parameters or not, never makes a candidate inapplicable. Only the
+  nearest callable-tower rank competes (`HidesMembers`, members, then extensions by semantic scope
+  rung, its rank inside the rung, and receiver distance; numeric ranks of different rungs are
+  never compared alone). An extension call's lambdas are shaped by the call's own pre-lambda
+  selection over the receiver's extension rung, with the declaration priorities and argument
+  mapping it applies (no omitted default, no vararg and a non-generic declaration beat equally
+  specific alternatives that also take the trailing lambda), not by comparing lambda parameter
+  types alone. Fewer omitted defaults decide only between declarations that are each at least as
+  specific as the other, so `<T> pick(suffix = "!", f: (Int) -> T)` loses to `<T> pick(f: (Int) -> T)`
+  although their type parameters differ, while `(Int) -> String` against `(Int) -> Int` stays
+  ambiguous like kotlinc. A non-lambda argument still waiting for its expectation
+  (`mapTo(HashSet()) { .. }`) is postponed rather than erroneous, and a bound that relates a
+  binding to a formal only the lambda fixes (`C := HashSet<R>` for `C : MutableCollection<in R>`)
+  is checked with that formal still open. When the only candidate the arguments can take is
+  inapplicable (a receiver mismatch), Kotlin resolves to it and its lambda is still analyzed
+  against it, so the body reports no second, `Any`-typed diagnostic. A unique most specific candidate keeps its own function type for the
+  lambda, so `(Int) -> String` beats `(Int) -> CharSequence` and `{ StringBuilder(it) }` is a return
+  type mismatch. A tie is refined by the checked lambda result only when a tied candidate is
+  `@OverloadResolutionByLambdaReturnType`, the call has exactly one lambda literal, and the tied
+  function types have the same inputs (`Sequence<T>.flatMap` over `(T) -> Iterable<R>` /
+  `(T) -> Sequence<R>`); the refined set then prefers unannotated candidates. As in kotlinc, the
+  lambda is analyzed once against the first tied candidate's expectation, so a labelled
+  `return@flatMap emptyList()` still infers from the call's expected result, and the first tied
+  candidate whose result accepts what the body produced shapes the lambda. Under
+  `+EagerLambdaAnalysis` the lambda's result instead drops every applicable candidate it does not
+  fit before most-specific selection, in body checking and declaration-signature inference alike
+  (`tests/eager_lambda_analysis_e2e.rs`). Any other tie is
+  `overload resolution ambiguity between candidates:` with the tied declarations, and its
+  lambdas stay unshaped (`unresolved reference 'it'.`, `cannot infer type for value parameter`),
+  in both body checking and declaration-signature inference. Tests:
+  `tests/lambda_return_overload_shape_e2e.rs`.
+
 - **Non-inline top-level generic HOF binds the lambda parameter type (`transform(Item(…)) { it.name }`).**
   A user `fun <T, R> transform(x: T, f: (T) -> R): R` binds `T` from the first value argument, so the
   lambda parameter `it` types as that concrete type and `R` is inferred from the lambda body (the call
@@ -10690,23 +10747,28 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `resolve::integer_constants::tests::division_by_zero_adapts_to_long_without_a_folded_value`,
   `tests/integer_literal_branch_join_e2e.rs::division_by_zero_int_constant_throws_after_adapting_to_long`,
   `tests/classpath_jdk_static_e2e.rs::non_literal_int_does_not_match_long_parameter`.
-- **A one-word safe call duplicates its receiver.** `a?.close()`, `foo()?.close()`, `a?.foo(x)`,
-  and `a?.n` evaluate the receiver once, `dup` it, and `ifnull` to a `pop`. The non-null path uses
-  the value still on the stack as the call or property receiver; that receiver is not stored in a
-  temporary. A classpath `inline` callee that needs an empty stack (a loop or a `try`) still takes
-  the method inliner: the duplicated receiver is that call's own argument and is stored before the
-  body. Only a value left underneath the argument keeps the call on the byte splice. After that
-  inline the caller's line is marked again on the null path's `pop`. The expression-body `return`
-  marks the body's end line as it does after any call, so it adds no entry on a one-line body and
-  marks the last line of a safe call spanning several (`tests/safe_call_return_line_e2e.rs`). The same holds when the safe call's receiver is folded out of its temporary
-  (`simplifyKnownSafeCallPatterns`) after a same-module inline selector: kotlinc's label
-  normalization merges the null result's line label into the jump's own, and the fold puts the
-  `pop` right after that label, so the line describes the `pop`. A discarded null result leaves a
-  `nop` behind it. Tests: `tests/safe_call_null_line_e2e.rs`,
-  `temporaries::tests::a_line_at_a_label_adjacent_to_the_null_target_describes_its_pop`. A chain
-  (`a?.b?.c`), a scalar receiver (`Int?`), a receiver wider than one word, and a selector that
-  reads the receiver more than once keep the temporary. Tests: `tests/safe_call_dup_e2e.rs`,
-  `tests/safe_call_inline_callable_reference_e2e.rs`.
+- **A one-word safe call duplicates its receiver through kotlinc's fold, not in the emitter.**
+  `a?.close()`, `foo()?.close()`, `a?.foo(x)`, and `a?.n` evaluate the receiver once, `dup` it,
+  and `ifnull` to a `pop`; the non-null path uses the value still on the stack. kotlinc's codegen
+  stores the receiver in a temporary that the null check and the selector load, and its optimizer
+  (`simplifyKnownSafeCallPatterns`, then temporary elimination) folds the store and the loads into
+  that `dup`. krusty emits the same temporary and leaves the fold to its port of those passes
+  (`bytecode_passes::temporaries`). The emitter used to predict the fold and write the `dup`
+  itself; the prediction could not reproduce where the fold leaves the null path's line, so a
+  discarded safe call over an inline selector (`c?.resume(x)`, `c?.resumeWithException(e)`) lost
+  the `nop` kotlinc keeps there. The fold places the `pop` right after the null target's label,
+  in front of the line the caller marks again after the inlined selector, so that line describes
+  the `pop`, and the `nop` the discarded null result leaves is the line's only other instruction,
+  which `RedundantNopsCleanup` keeps. A classpath `inline` callee that needs an empty stack (a
+  loop or a `try`) reads the receiver from the temporary like any argument. The expression-body
+  `return` marks the body's end line as it does after any call, so it adds no entry on a one-line
+  body and marks the last line of a safe call spanning several
+  (`tests/safe_call_return_line_e2e.rs`). A chain (`a?.b?.c`), a scalar receiver (`Int?`), a
+  receiver wider than one word, and a selector that reads the receiver more than once keep the
+  temporary, as kotlinc's fold leaves them. Tests: `tests/safe_call_null_line_e2e.rs` (a
+  same-file inline selector and a library `@InlineOnly` one),
+  `temporaries::tests::a_line_at_a_label_adjacent_to_the_null_target_describes_its_pop`,
+  `tests/safe_call_dup_e2e.rs`, `tests/safe_call_inline_callable_reference_e2e.rs`.
 - **An access on a receiver that spans lines states its own line.**
   - **Intrinsics state their line before their operands.** This covers `.size`, `[i]` on an
     array or a string, primitive `compareTo`, a unary operator other than `+`, a binary operator
@@ -14407,7 +14469,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   arguments in the child context: `Base<T>.set(T)` suppresses the parent's stub but not an applied
   child's `set(String)` stub and erased bridge. A concrete generic intermediate's existing stub is
   still inherited rather than repeated. The stubs never enter Kotlin metadata. The collection faces
-  (`Iterable`, `List`, `Set`, `Map`, `Map.Entry`; `Collection` is below), with `removeAt`, the lifted
+  (`Iterable`, `Set`, `Map`, `Map.Entry`; `Collection` and `List` are below), with `removeAt`, the lifted
   `iterator` result types, the JDK members and `toArray`, follow in later slices. Tests:
   `tests/read_only_iterator_stubs_e2e.rs`. Corpus: `objects/useAnonymousObjectAsIterator.kt`,
   `builtinStubMethods/customReadOnlyIterator.kt`.
@@ -14480,11 +14542,38 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `fun remove(element: String)` implements `remove(Object)`, which becomes kotlinc's
   `ACC_PUBLIC|ACC_FINAL|ACC_BRIDGE` special bridge returning `false` unless the argument is
   `instanceof String` (or `null`, for a `String?`), and an inherited `Base<T>.remove(e: T)` under
-  `Base<String>` already has the erased descriptor, so nothing is written for it. The List, Set
-  and Map faces, the JDK members (`removeIf`),
+  `Base<String>` already has the erased descriptor, so nothing is written for it. The Set and
+  Map faces, the JDK members (`removeIf`),
   `toArray`, the `Collection<?>` signature of a declared `containsAll` override and an abstract
   class's fake-override bridges follow in later slices. Tests:
   `tests/read_only_collection_face_stubs_e2e.rs` (member bytes and box runs against kotlinc).
+- **A read-only `List` gets `MutableList`'s members as stubs.** A class that implements
+  `kotlin.collections.List` without `MutableList` gets throwing stubs for the members
+  `MutableList` declares: `add`, `add(Int, E)`, `remove`, both `addAll`, `removeAll`,
+  `retainAll`, `clear`, `set` and `removeAt`, and `listIterator`, `listIterator(Int)` and
+  `subList` when the class leaves them abstract. As kotlinc reads a builtin's member scope, one
+  name's overloads stay together in their first declaration's place (`add(E)`, `add(Int, E)`). A
+  member takes the type-safe and signature policies of the declaration it overrides, so
+  `MutableList.remove` is `remove(Object)` and `removeAll`/`retainAll` are `Collection<?>` like
+  `MutableCollection`'s. A scalar result over the declaration's generic one is boxed
+  (kotlinc's `forceBoxedReturnTypeOnOverride`): `Integer set(int, int)` for a `List<Int>`, and
+  `Integer next()` with its `Object next()` bridge for an abstract `ListIterator<Int>`.
+  `removeAt` follows kotlinc's `createRemoveAtStub`: it is realized under its JVM name without
+  overriding anything, so it stays unboxed (`int remove(int)`), and its throwing
+  `ACC_BRIDGE|ACC_SYNTHETIC` `Object remove(int)` directly follows it unless the two erase alike
+  (`T remove(int)`). A class's own `removeAt` implements it and gets kotlinc's
+  `ACC_PUBLIC|ACC_FINAL|ACC_BRIDGE` `remove(int)` calling it, followed by the erased bridge
+  calling that, in the member's place among the bridges. The erased bridge is decided against the
+  implementation's own physical descriptor, so a `List<Any>`'s `fun removeAt(index: Int): String`
+  still gets `Object remove(int)` beside its `String remove(int)`, though a throwing stub's `Object`
+  result would have erased alike. The override check compares results
+  through applied supertypes: a builtin's generic supertypes from `.kotlin_builtins` and a source
+  classifier's checked applied hierarchy, so `listIterator(): MutableListIterator<String>` and
+  `listIterator(): Walk` with `Walk : ListIterator<String>` implement `listIterator`. The JDK
+  defaults (`replaceAll`, `sort`, the `SequencedCollection` members), `toArray`, a declared
+  `containsAll`'s signature and an abstract class's fake-override bridges follow later. Tests:
+  `tests/read_only_list_face_stubs_e2e.rs` (member bytes and box runs against kotlinc),
+  `tests/metadata_return_types.rs::list_impls_realize_remove_at_as_remove_int`.
 - **A nested value class over a reference carrier is read as its carrier.** In `ZN(val z: Z1?)`
   with `Z1(val x: En)`, `Z1?` is carried as `En?`, so `zn.z` and `zn.z!!` already are `Z1`'s
   carrier and `.x` of them is that carrier itself, with no cast. krusty took the unboxed property
@@ -17249,6 +17338,14 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   rank after imports; an enclosing class's inherited classifiers rank with that enclosing rung,
   before imports. The signature bridge and the checker bind the header the same way. Verified
   against kotlinc 2.4.21. (`tests/nested_header_inherited_classifier_e2e.rs`.)
+- **Nested classifiers are inherited along the superclass chain only.** An interface's nested
+  classifier reaches neither an implementing class nor a sub-interface by its simple name, whether
+  the interface is Kotlin or Java: in `class One : Left` a top-level `Category` binds although
+  `Left` declares `Category`, two interfaces that each declare one leave the name unambiguous, and
+  `interface Sub : Outer { fun make(): Nested }` reports `unresolved reference 'Nested'`. A
+  superclass's nested classifiers stay inherited. Every scope walk (checker, signature bridge,
+  signature collection, accessibility) steps only through supertypes that are not interfaces.
+  Verified against kotlinc 2.4.21. (`tests/interface_nested_classifier_scope_e2e.rs`.)
 - **A classifier's own annotations resolve where the classifier is declared.** `@Dsl class Inner`
   inside `Builder` binds `Builder.Dsl`, a nested classifier of `Builder`'s companion, or one of any
   enclosing classifier; the annotated classifier's own nested declarations are not in scope for its
@@ -23790,3 +23887,13 @@ call within an operand-evaluation block, preserving any existing origin. The JVM
 call's position at its invoke after inline operands reset the active line. Return endpoints, inline
 origins and positionless expressions keep their existing contracts. Complete class artifacts and
 runtime controls cover expression/explicit returns, reordered operands and source/compiled inlining.
+
+## Stored by-value class captures on Wasm
+
+Local and anonymous classes may carry copied values in their checked constructor fields. Capture
+stores execute before the selected superclass constructor, so an override called there observes
+the copied values. Physical fields, capture identities and forwarded-super ordinals stay separate;
+forwarded operands execute once in their checked order. The shared complete programs
+`retainedLexicalValueIdentity.kt` and `storedClassCapturePrefixes.kt` cover member reads, inherited
+storage, mixed prefixes and nested recapture. Shared-holder and fieldless capture transport retain
+their explicit unsupported results until their complete Wasm ABI is implemented.
