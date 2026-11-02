@@ -125,3 +125,39 @@ fn a_regenerated_suspend_lambda_resumes_through_its_machine() {
         .expect("reference kotlinc is provisioned");
     assert_eq!(output, "OK");
 }
+
+/// krusty writes kotlinc's `invokeSuspend$$forInline` beside the state machine of a suspend lambda
+/// it compiles that reads a `crossinline` capture (kotlinc's `isSuspendCapturingCrossinline`): the
+/// lambda class is kotlinc's, byte for byte, the copy included.
+#[test]
+fn a_suspend_lambda_reading_a_crossinline_capture_writes_kotlincs_for_inline_copy() {
+    let classes = common::classes_against_kotlinc_module(&[("Lib.kt", LIB)]);
+    let inventory = ["lib/LibKt", "lib/LibKt$mapped$1"];
+    assert_eq!(classes.reference.keys().collect::<Vec<_>>(), inventory);
+    assert_eq!(classes.krusty.keys().collect::<Vec<_>>(), inventory);
+    let lambda = "lib/LibKt$mapped$1";
+    let (reference, krusty) = classes
+        .method_declarations(lambda)
+        .expect("both compilers write the lambda");
+    assert_eq!(krusty, reference);
+    let copies = reference
+        .iter()
+        .filter(|declaration| declaration.contains(" invokeSuspend$$forInline("))
+        .count();
+    assert_eq!(copies, 1, "kotlinc writes one copy");
+    let (reference, krusty) = classes.class_listing(lambda);
+    assert_eq!(krusty, reference);
+    assert!(
+        classes.reference[lambda] == classes.krusty[lambda],
+        "the listings agree, the bytes do not"
+    );
+}
+
+/// A caller regenerates the lambda of a library krusty compiled from its `invokeSuspend$$forInline`,
+/// and the copy suspends and resumes through its own machine.
+#[test]
+fn a_krusty_compiled_suspend_lambda_copy_is_regenerated_and_resumes() {
+    let output = common::expect_box_run_against("suspend_lambda_for_inline", LIB, RUN_MAIN)
+        .expect("the library is compiled");
+    assert_eq!(output, "OK");
+}

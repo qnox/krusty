@@ -7669,7 +7669,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   reference (`flatMapLatest(::lookup)`) is not an inline lambda shape yet
   (`IrFile::callable_reference_inline_template` declines it), so its copy is refused. A captured function value the call does not inline would be invoked unmarked in the
   rebuilt machine (kotlinc marks it with `surroundInvokesWithSuspendMarkersIfNeeded`, not ported
-  yet), so such a copy is refused. Tests: `tests/suspend_lambda_regeneration_e2e.rs`. The route is decided
+  yet), so such a copy is refused. krusty writes the same `invokeSuspend$$forInline` for a suspend
+  lambda it compiles whose `invokeSuspend` reads a capture holding a `crossinline` parameter
+  (`IrValueCapture::crossinline_parameter`, recorded where the capture is produced like a class's
+  constructor capture): the marked body with the method's access and no continuation of its own,
+  since the lambda is its own continuation, so a caller regenerates a krusty-compiled library's
+  lambda as it does kotlinc's. Tests: `tests/suspend_lambda_regeneration_e2e.rs`. The route is decided
   once from the callee's facts before any code is emitted, and the body is not inlined on trial: once a call is routed to the inliner, or a lambda-free call to a
   compiled body is, a failure to inline or regenerate is an emission error, never a direct call.
   Tests: `tests/crossinline_suspend_object_e2e.rs`. Only a `$$forInline` copy's machine takes
