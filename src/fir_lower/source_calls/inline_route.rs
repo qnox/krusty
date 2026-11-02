@@ -56,7 +56,7 @@ pub(in super::super) enum ExpansionReason {
     /// keys. The keys are read from a table of the callee's own class (the JVM's `$WhenMappings`),
     /// numbered by every `when` of that class in source order; this file's emission sees only the
     /// callee's.
-    ForeignEnumSwitchInBody,
+    EnumSwitchInBody,
 }
 
 impl BodyLowering<'_> {
@@ -173,7 +173,7 @@ impl BodyLowering<'_> {
                 continue;
             }
             if foreign && self.ir.enum_switch_when(expression).is_some() {
-                return Some(ExpansionReason::ForeignEnumSwitchInBody);
+                return Some(ExpansionReason::EnumSwitchInBody);
             }
             match self.ir.expr(expression) {
                 IrExpr::New { internal, .. }

@@ -6263,7 +6263,7 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `when`s in source order before any code is emitted, so the body compiled for a same-file callee
   reads them as its class's own code does, and the inliner keeps a same-module body's
   `$WhenMappings` read (kotlinc regenerates one only across modules). A callee of another file
-  is still expanded in IR (`ForeignEnumSwitchInBody`, its own table in the caller's class): this
+  is still expanded in IR (`EnumSwitchInBody`, its own table in the caller's class): this
   file's emission sees only that callee, not the other file's `when`s that number its tables. Tests: `tests/inline_same_module_bytes_e2e.rs`
   (same-file and cross-file calls, a value-class argument, a call on an inlined result, and calls in
   a lambda, a local function, initializers, an `init` block, a secondary constructor and a getter,

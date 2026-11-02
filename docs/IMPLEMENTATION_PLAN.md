@@ -5845,15 +5845,15 @@ regress.
     caller's: 1 more box file is byte-identical on 2.4.21
     (`coroutines/featureIntersection/suspendInlineSuspendFinally`), none regresses, and all 7,184
     applicable files run.
-    ✓ Enum switches (`EnumSwitchInBody`): a class's `$WhenMappings` tables are numbered from
-    its `when`s in source order (an order key common lowering records on each) before an emission
-    pass writes code, so a same-file callee's compiled body reads its class's tables as kotlinc's
-    inlined copy does, and the inliner keeps a same-module body's table read; numbering in source
-    order also fixes a class whose emission order differs from its source order
-    (`tests/inline_enum_when_mappings_e2e.rs`). The box corpus is unchanged on 2.4.21.
+    ✓ Same-file enum switches (`EnumSwitchInBody` now covers only another file's callee): a
+    class's `$WhenMappings` tables are numbered from its `when`s in source order (an order key
+    common lowering records on each) before an emission pass writes code, so a same-file
+    callee's compiled body reads its class's tables as kotlinc's inlined copy does, and the
+    inliner keeps a same-module body's table read; numbering in source order also fixes a class
+    whose emission order differs from its source order (`tests/inline_enum_when_mappings_e2e.rs`). The box corpus is unchanged on 2.4.21.
     ☐ `$default` calls, suspend callees (and the calls a suspend inline function holds),
     `crossinline` parameters, calls in default arguments, callee bodies with local classes, and
-    another file's callee with an enum switch (`ForeignEnumSwitchInBody`: that file's numbering
+    another file's callee with an enum switch (`EnumSwitchInBody`: that file's numbering
     needs its other `when`s, which this file's emission does not see).
 - ☐ 7. Delete `InlineBodyPlan` and its resolver/FIR threading once the coroutine state machine runs
   on inlined bytecode (the plans exist only to reach IR before `lower_suspend`).

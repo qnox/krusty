@@ -123,7 +123,7 @@ fn a_public_inline_functions_lambda_marks_its_tables_public_abi_like_kotlinc() {
 }
 
 /// The declaration's file numbers its own tables as kotlinc does. A caller in another file still
-/// expands the callee in IR (`ForeignEnumSwitchInBody`): its emission sees only the callee of
+/// expands the callee in IR (`EnumSwitchInBody`): its emission sees only the callee of
 /// that file, not the file's other `when`s that number the tables.
 #[test]
 fn another_files_inline_function_keeps_its_own_tables_like_kotlinc_and_runs() {
