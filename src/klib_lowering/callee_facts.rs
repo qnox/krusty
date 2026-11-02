@@ -81,6 +81,10 @@ impl<'a> KlibCalleeFacts<'a> {
         super::type_evidence::ordinary_subtype(self.class_type_oracle, parameters, sub, sup)
     }
 
+    pub(super) fn same_type(&self, left: crate::types::Ty, right: crate::types::Ty) -> bool {
+        super::type_evidence::same_type(self.class_type_oracle, left, right)
+    }
+
     pub(super) fn constructor(
         &self,
         identity: &KlibDependencyCallable,
