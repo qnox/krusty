@@ -7852,6 +7852,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   The file facade does not keep an implementation method for it. The copy is named from the
   caller's final placement (`caller$$inlined$callee$N`) only after lifted names exist; until then
   it has a private identity so it cannot collide with the declaration class.
+  The same expansion can also copy an anonymous object for the binding
+  (`Checks({ it is T }, object : Check { … item is T })`). The escaping lambdas are regenerated
+  first, then the objects are copied: the object copy's classifier walk renames inside each
+  call-site lambda it reaches, which only this expansion owns (a lambda whose type names the
+  object keeps the copy's name). In the other order the walk detached the lambdas' shared
+  declaration implementations onto clones the lambda plan never specialized, and the call-site
+  lambda kept the reified marker and threw at run time. Tests:
+  `tests/escaping_reified_lambda_e2e.rs` (`a_reified_lambda_beside_a_reified_object_*`) and
+  `a_reified_check_beside_a_specialized_object_keeps_the_call_site_lambda`.
   An inline call inside a source lambda also retains whether its root executable context has no
   source callable-name segment (for example an initializer). Lowering records that fact once and
   inherits it through lambdas, including suspend lambdas, but resets it for named local functions.
