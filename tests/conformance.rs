@@ -33,6 +33,8 @@ mod kotlin_box_ir_jvm_conformance;
 mod kotlin_box_native_conformance;
 #[path = "kotlin_box_wasm_conformance.rs"]
 mod kotlin_box_wasm_conformance;
+#[path = "kotlin_bytecode_listing_conformance.rs"]
+mod kotlin_bytecode_listing_conformance;
 #[path = "kotlin_bytecode_text_conformance.rs"]
 mod kotlin_bytecode_text_conformance;
 #[path = "kotlin_cli_jvm_conformance.rs"]

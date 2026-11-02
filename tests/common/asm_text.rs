@@ -5,7 +5,8 @@
 //! rendered by a visitor over the same ASM model. Both oracles are reproduced with the ASM copy the
 //! reference compiler distribution itself ships (`org.jetbrains.org.objectweb.asm` inside
 //! `kotlin-compiler.jar`) rather than a reimplementation, so the text and the pattern semantics are
-//! the reference test infrastructure's own.
+//! the reference test infrastructure's own. The listing visitor itself ships only in JetBrains' test
+//! fixtures, so `asm_text/BytecodeListing.java` renders it line for line over that ASM.
 //!
 //! The server (`asm_text/AsmText.java`) is compiled once per source/JDK/compiler-jar identity and
 //! runs as a pool of persistent JVMs; no request starts a process.
@@ -22,7 +23,14 @@ use super::common::{
     server_pool, spawn_owned,
 };
 
-const SOURCE: &str = include_str!("asm_text/AsmText.java");
+/// The server's sources, by file name.
+const SOURCES: [(&str, &str); 2] = [
+    ("AsmText.java", include_str!("asm_text/AsmText.java")),
+    (
+        "BytecodeListing.java",
+        include_str!("asm_text/BytecodeListing.java"),
+    ),
+];
 
 /// How long one request may take. A class or a corpus pattern is small; a stalled JVM is a failure,
 /// not something to wait out.
@@ -36,7 +44,7 @@ pub struct ClassText {
     pub text: String,
 }
 
-/// Why [`textify`] has no answer.
+/// Why [`textify`] or [`listing`] has no answer.
 #[derive(Debug)]
 pub enum TextifyError {
     /// ASM cannot read one of the classes: the class file is malformed.
@@ -48,6 +56,37 @@ pub enum TextifyError {
 /// Each class file in `classes`, in order, as ASM reads it.
 pub fn textify(classes: &[&[u8]]) -> Result<Vec<ClassText>, TextifyError> {
     with_server(|server| server.textify(classes))
+        .map_err(TextifyError::Server)?
+        .map_err(TextifyError::Unreadable)
+}
+
+/// The `codegen/bytecodeListing` options a module's directives select.
+#[derive(Clone, Copy, Debug)]
+pub struct ListingOptions {
+    /// `WITH_SIGNATURES`.
+    pub with_signatures: bool,
+    /// Not `IGNORE_ANNOTATIONS`.
+    pub with_annotations: bool,
+    /// Not `DONT_SORT_DECLARATIONS`.
+    pub sort_declarations: bool,
+}
+
+/// One class file as JetBrains' bytecode listing renders it.
+pub struct ClassListing {
+    /// The source file its `SourceFile` attribute names, when it names one.
+    pub source_file: Option<String>,
+    /// Its JVM internal name.
+    pub name: String,
+    pub text: String,
+}
+
+/// Each class file in `classes`, in order, as JetBrains' `BytecodeListingTextCollectingVisitor`
+/// renders it under `options`.
+pub fn listing(
+    classes: &[&[u8]],
+    options: ListingOptions,
+) -> Result<Vec<ClassListing>, TextifyError> {
+    with_server(|server| server.listing(classes, options))
         .map_err(TextifyError::Server)?
         .map_err(TextifyError::Unreadable)
 }
@@ -101,8 +140,9 @@ fn server_classpath() -> Result<&'static str, String> {
 fn compile_server(jar: &Path) -> Result<PathBuf, String> {
     let java_home = java_home();
     let mut hash: u64 = 0xcbf29ce484222325;
-    for byte in SOURCE
-        .bytes()
+    for byte in SOURCES
+        .iter()
+        .flat_map(|(name, source)| name.bytes().chain(source.bytes()))
         .chain(producing_jdk::driver_cache_key(&java_home))
         .chain(jar.as_os_str().as_encoded_bytes().iter().copied())
     {
@@ -117,14 +157,14 @@ fn compile_server(jar: &Path) -> Result<PathBuf, String> {
     let staging = dir.with_extension(format!("staging-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&staging);
     std::fs::create_dir_all(&staging).map_err(|error| format!("create {staging:?}: {error}"))?;
-    let source = staging.join("AsmText.java");
-    std::fs::write(&source, SOURCE).map_err(|error| format!("write {source:?}: {error}"))?;
-    let output = Command::new(Path::new(&java_home).join("bin/javac"))
-        .arg("-cp")
-        .arg(jar)
-        .arg("-d")
-        .arg(&staging)
-        .arg(&source)
+    let mut javac = Command::new(Path::new(&java_home).join("bin/javac"));
+    javac.arg("-cp").arg(jar).arg("-d").arg(&staging);
+    for (name, source) in SOURCES {
+        let path = staging.join(name);
+        std::fs::write(&path, source).map_err(|error| format!("write {path:?}: {error}"))?;
+        javac.arg(path);
+    }
+    let output = javac
         .output()
         .map_err(|error| format!("run javac: {error}"))?;
     if !output.status.success() {
@@ -192,6 +232,39 @@ impl Server {
             })
             .collect::<std::io::Result<_>>()?;
         Ok(Ok(texts))
+    }
+
+    fn listing(
+        &mut self,
+        classes: &[&[u8]],
+        options: ListingOptions,
+    ) -> std::io::Result<Result<Vec<ClassListing>, String>> {
+        self.stdin.write_all(b"L")?;
+        self.stdin.write_all(&[
+            u8::from(options.with_signatures),
+            u8::from(options.with_annotations),
+            u8::from(options.sort_declarations),
+        ])?;
+        self.write_len(classes.len())?;
+        for class in classes {
+            self.write_bytes(class)?;
+        }
+        self.stdin.flush()?;
+        let deadline = Instant::now() + REQUEST_DEADLINE;
+        if let Some(error) = self.read_status(deadline)? {
+            return Ok(Err(error));
+        }
+        let listings = (0..classes.len())
+            .map(|_| {
+                let source_file = self.read_string(deadline)?;
+                Ok(ClassListing {
+                    source_file: (!source_file.is_empty()).then_some(source_file),
+                    name: self.read_string(deadline)?,
+                    text: self.read_string(deadline)?,
+                })
+            })
+            .collect::<std::io::Result<_>>()?;
+        Ok(Ok(listings))
     }
 
     fn count(
