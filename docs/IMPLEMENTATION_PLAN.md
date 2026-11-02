@@ -1,5 +1,12 @@
 # krusty — implementation plan
 
+## Classify every IrFile field for expression copies
+
+`copy_expression_facts` destructures `IrFile` exhaustively, and each table-holding field
+implements `InheritedFacts` in its owning module, so a new field cannot be added without deciding
+whether a copy of an expression inherits it. Behavior is unchanged. This is step 0 of
+`docs/PHASE_FACTS.md`; the next steps move positions, types, call selections and roles onto IR nodes.
+
 ## Class-generic dependency method exports
 
 Retain the complete declared self type, including captured parameters, at FIR lowering and consume
@@ -6528,3 +6535,10 @@ official-producer program and independent JVM-oracle controls.
   carriers distinct from the semantic model; validate full source payloads and the pinned KSP oracle.
 - [ ] Normalize raw dependency annotation defaults using their exact declaration parameter types;
   keep that provider work separate from checked-source publication and scalar wire decoding.
+
+## Admit stored class captures on Wasm
+
+Validate the producer-owned constructor-prefix roles against full IR storage facts, then reuse
+ordinary WasmGC class construction and pre-super stores. Check exact field/type/pair mappings and
+the shared-holder edges; keep forwarded ordinals independent of preceding captures. Cover the
+whole shared programs and malformed storage metadata before extending fieldless or shared captures.
