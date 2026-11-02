@@ -6634,6 +6634,15 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   uses `Lapp/Cargo;` — `tparam_bound_erasure` keeps `Any` for a nullable bound, deliberately.
   Tests: `tests/bounded_type_param_e2e.rs`, `tests/class_type_param_bound_erasure_e2e.rs`.
 
+- **A class type parameter's bound sees no rung of the class itself.** kotlinc resolves
+  `class Child<T : Limit> : Base()` to the package `Limit` even when `Base` declares a nested
+  `Limit`, and `class Own<T : Limit> { class Limit }` likewise; a bound that names only a nested
+  classifier of the class or of its supertypes is `unresolved reference`. The header path already
+  published the right bound and diagnostic, but signature collection resolved the class's own bounds
+  through the member scope (the class's body and inherited nested classifiers), so every member typed
+  by `T` erased to `LBase$Limit;`. The class's own bounds now resolve in the scope the class header
+  has before its own inherited fallback. Test: `class_type_param_bound_erasure_e2e::class_type_param_bound_ignores_nested_classifiers_of_the_class_and_its_supertypes`.
+
 - **A type parameter with a NON-NULL bound is a non-null reference.** `<T : Cargo>` and `<T : Any>`
   cannot hold null, so kotlinc annotates the field, the getter, the constructor parameter and a `var`
   setter's parameter `@NotNull`, and guards `<init>`/the setter/a method parameter with
