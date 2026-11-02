@@ -177,6 +177,14 @@ impl Emitter<'_> {
         }
     }
 
+    /// Mark the lines a value expression owns on entry, before it emits anything: its source
+    /// start, then a suspend callee's call line (see [`Self::mark_suspend_call_line`]).
+    pub(super) fn mark_value_entry_lines(&mut self, expression: ExprId, code: &mut CodeBuilder) {
+        begin_expression(self.ir, expression, code);
+        self.mark_value_expression_start(expression, code);
+        self.mark_suspend_call_line(expression, code);
+    }
+
     /// Mark a suspend callee's call line before anything its call generates, receiver and
     /// arguments included. kotlinc's `visitCall` does so for every suspend callee, so the line is
     /// in effect before the coroutine transformer spills around the call (KT-66413); the
