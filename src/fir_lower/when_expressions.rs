@@ -41,7 +41,12 @@ impl BodyLowering<'_> {
                     .expr(subject)
                     .ok_or(FirLoweringFailure::MissingExpression(subject))?;
                 let subject_ty = subject_expression.ty.get();
-                let value = self.expression(subject)?;
+                // `tmp_subject` is a declaration of its own, so a lambda in the subject is not
+                // positioned at a call enclosing the `when` (see `lambda_offsets`).
+                let enclosing_call_line = self.lambda_call_line.take();
+                let value = self.expression(subject);
+                self.lambda_call_line = enclosing_call_line;
+                let value = value?;
 
                 // Every subject gets its own value, a read of an immutable local included: kotlinc's
                 // FIR-to-IR declares `tmp_subject` for any subject expression, and

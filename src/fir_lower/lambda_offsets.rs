@@ -14,8 +14,8 @@ use crate::ir::{ExprId, IrExpr};
 
 impl BodyLowering<'_> {
     /// The line a lambda literal written under `expression` takes: the expression's own line when
-    /// it is a call (kotlinc's `IrCall`, a property setter and an array factory included), else
-    /// the line of the call enclosing it.
+    /// it is a call (kotlinc's `IrCall`, a property getter or setter and an array factory
+    /// included), else the line of the call enclosing it.
     pub(super) fn lambda_call_line_within(
         &self,
         expression_id: FirExprId,
@@ -28,6 +28,7 @@ impl BodyLowering<'_> {
                 | FirExprKind::FunctionInvoke { .. }
                 | FirExprKind::ComparisonCall { .. }
                 | FirExprKind::ContainmentCall { .. }
+                | FirExprKind::PropertyRead { .. }
                 | FirExprKind::PropertyWrite { .. }
                 | FirExprKind::IndexedWrite { .. }
                 | FirExprKind::ArrayLiteral { .. }

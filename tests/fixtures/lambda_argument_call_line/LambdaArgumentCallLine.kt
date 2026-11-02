@@ -5,6 +5,7 @@ fun two(a: Int, b: () -> Unit) = b
 fun <T> pass(t: T) = t
 fun String.ext(f: () -> Unit) = f
 class Box(val f: () -> Unit)
+val <T> (() -> T).asFunction: () -> T get() = this
 class Holder {
     var listener: () -> Unit = {}
     val slots = arrayOfNulls<() -> Unit>(1)
@@ -111,6 +112,28 @@ fun inlineBody(x: String) = run {
     }
 }
 
+// A property getter is a call: a lambda in its receiver takes the getter's line.
+fun getter(x: String) = pass(
+    ({
+        log.append(x)
+    }).asFunction
+)
+
+fun memberGetter(x: String) = pass(
+    Box({
+        log.append(x)
+    }).f
+)
+
+// A `when` subject is a declaration (`tmp_subject`).
+fun subject(x: String) = pass(
+    when ({
+        log.append(x)
+    }) {
+        else -> 1
+    }
+)
+
 // An anonymous function and a callable reference keep their own lines.
 fun anonymous(x: String) = take(
     fun() {
@@ -145,9 +168,12 @@ fun box(): String {
     local("k")()
     inlineBody("l")()
     anonymous("m")()
+    getter("p")()
+    memberGetter("q")()
+    subject("r")
     val h = Holder()
     assigned(h, "o")
     h.listener()
     h.slots[0]!!()
-    return if (log.toString() == "abcdenfghijklmoo") "OK" else "fail $log"
+    return if (log.toString() == "abcdenfghijklmpqoo") "OK" else "fail $log"
 }
