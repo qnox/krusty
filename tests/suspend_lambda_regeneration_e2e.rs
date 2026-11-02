@@ -11,17 +11,50 @@
 
 use super::common;
 
-const FLOWS: &str = r#"
+/// The flow fixture's file annotation and imports. A program that adds an import puts it after
+/// these and before [`flows_declarations`].
+macro_rules! flows_header {
+    () => {
+        r#"
 @file:OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 import kotlinx.coroutines.flow.*
+"#
+    };
+}
 
+/// The flow fixture's declarations: a literal and a capturing `flatMapLatest` lambda.
+macro_rules! flows_declarations {
+    () => {
+        r#"
 fun lookup(ids: Set<String>): Flow<List<String>> = flowOf(ids.sorted())
 
 fun byLiteral(f: Flow<Set<String>>): Flow<List<String>> = f.flatMapLatest { lookup(it) }
 
 fun capturing(f: Flow<Set<String>>, prefix: String): Flow<String> =
     f.flatMapLatest { ids -> flowOf(prefix + ids.size) }
-"#;
+"#
+    };
+}
+
+const FLOWS: &str = concat!(flows_header!(), flows_declarations!());
+
+/// [`FLOWS`] with `runBlocking` imported beside its own imports and a `box()` that collects both
+/// flows.
+const FLOWS_PROGRAM: &str = concat!(
+    flows_header!(),
+    "import kotlinx.coroutines.runBlocking\n",
+    flows_declarations!(),
+    r#"
+fun box(): String = runBlocking {
+    val ids = flowOf(setOf("b", "a"))
+    val literal = byLiteral(ids).toList()
+    if (literal != listOf(listOf("a", "b"))) return@runBlocking "FAIL literal: $literal"
+    val captured = capturing(flowOf(setOf("x")), "p").toList()
+    if (captured != listOf("p1")) return@runBlocking "FAIL capturing: $captured"
+    "OK"
+}
+"#
+);
 
 /// The regenerated suspend lambdas and the calling facade are kotlinc's, byte for byte.
 #[test]
@@ -41,20 +74,14 @@ fn flat_map_latest_regenerates_its_suspend_lambda_like_kotlinc() {
 /// The regenerated lambdas run, each element mapped through the inlined lambda.
 #[test]
 fn flat_map_latest_runs_through_the_regenerated_suspend_lambda() {
-    let main = format!(
-        "{FLOWS}\nimport kotlinx.coroutines.runBlocking\n\n\
-fun box(): String = runBlocking {{\n\
-    val ids = flowOf(setOf(\"b\", \"a\"))\n\
-    val literal = byLiteral(ids).toList()\n\
-    if (literal != listOf(listOf(\"a\", \"b\"))) return@runBlocking \"FAIL literal: $literal\"\n\
-    val captured = capturing(flowOf(setOf(\"x\")), \"p\").toList()\n\
-    if (captured != listOf(\"p1\")) return@runBlocking \"FAIL capturing: $captured\"\n\
-    \"OK\"\n\
-}}\n"
-    );
     let jdk = common::jdk_modules();
+    assert_eq!(
+        common::kotlinc_box_result_with_classpath(FLOWS_PROGRAM, &[common::coroutines_jar()]),
+        "OK",
+        "kotlinc's MainKt"
+    );
     let output = common::compile_and_run_box(
-        &main,
+        FLOWS_PROGRAM,
         "Main",
         &[common::stdlib_jar(), common::coroutines_jar(), jdk.clone()],
         Some(jdk.as_path()),
