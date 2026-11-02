@@ -177,7 +177,8 @@ pub(super) fn emit_dependencies<B: Backend>(
                 .iter()
                 .filter_map(|declaration| declaration.klib_body_callable()),
         )
-        .with_type_oracle(&type_oracle);
+        .with_type_oracle(&type_oracle)
+        .with_target_classifiers(&target_represents_classifier);
         let capabilities = DependencyLeafCapabilities {
             unit: &unit,
             callees: &callees,

@@ -268,4 +268,27 @@ impl Checker<'_> {
             })
             .collect()
     }
+
+    /// A named argument mapped to the selected constructor's vararg parameter passes the whole
+    /// array (`Base(parts = values)`), exactly as in an ordinary call. Constructor delegation and
+    /// enum entries commit that mapping here; checked FIR would otherwise pack it as one element.
+    pub(super) fn record_whole_array_delegation_arguments(
+        &mut self,
+        arguments: &CtorDelegationCall,
+        selected: &ResolvedCtorDelegation,
+    ) {
+        let Some(vararg) = selected.vararg else {
+            return;
+        };
+        for ((&argument, &slot), name) in arguments
+            .args
+            .iter()
+            .zip(&selected.argument_slots)
+            .zip(&arguments.names)
+        {
+            if slot == vararg && name.is_some() && !self.file.is_spread_arg(argument) {
+                self.resolved_whole_array_vararg_args.insert(argument);
+            }
+        }
+    }
 }

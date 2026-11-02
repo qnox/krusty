@@ -42,7 +42,11 @@ impl BodyLowering<'_> {
             return Err(mismatch("an object value is typed apart from its object"));
         }
         self.linker.singleton(classifier)?;
-        Ok(self.ir.add_expr(IrExpr::SingletonValue { classifier }))
+        // Recorded as checked FIR lowering records the source reference: `Unit` is its builtin
+        // type rather than its class.
+        let value = self.ir.add_expr(IrExpr::SingletonValue { classifier });
+        self.ir.logical_types.insert(value, object);
+        Ok(value)
     }
 
     pub(super) fn constructor_call(
