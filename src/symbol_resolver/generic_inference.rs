@@ -1158,24 +1158,48 @@ pub(crate) fn formal_variance_in_type(
 /// Whether every occurrence of `formal` in `shape` sits on an invariant path, so an argument at
 /// this parameter fixes the formal exactly. [`formal_variance_in_type`] also answers `Invariant`
 /// for mixed occurrences such as `(T) -> T`, which keep independent lower and upper bounds.
-pub(crate) fn formal_fixed_exactly_by(source: &dyn SymbolSource, shape: Ty, formal: &str) -> bool {
+///
+/// An occurrence that writes its own nullability (`T?` or `T & Any`) of a formal whose declared
+/// bound admits null fixes the formal only up to nullability: `Inv<T & Any>` against
+/// `Inv<String>` admits both `String` and `String?`, so it does not fix `T` exactly.
+pub(crate) fn formal_fixed_exactly_by(
+    source: &dyn SymbolSource,
+    shape: Ty,
+    formal: &str,
+    nullable_formal: bool,
+) -> bool {
     use crate::types::TypeVariance;
 
     fn occurrences(
         source: &dyn SymbolSource,
         shape: Ty,
         formal: &str,
+        nullable_formal: bool,
         invariant_path: bool,
         found: &mut Vec<bool>,
     ) {
-        if matches!(shape.non_null().kind(), TyKind::TyParam(name, _) if name == formal) {
-            found.push(invariant_path);
-            return;
+        let (occurrence, written_nullability) = match shape.kind() {
+            TyKind::Nullable(inner) | TyKind::DefinitelyNotNull(inner) => (inner, true),
+            _ => (shape.non_null(), false),
+        };
+        if let TyKind::TyParam(name, bound) = occurrence.kind() {
+            if name == formal {
+                // A compact `T & Any` carries a non-null occurrence bound.
+                let pinned_nullability =
+                    nullable_formal && (written_nullability || !bound.upper_bound_admits_null());
+                found.push(invariant_path && !pinned_nullability);
+                return;
+            }
         }
         match shape.non_null().kind() {
-            TyKind::InProjection(inner) | TyKind::OutProjection(inner) => {
-                occurrences(source, inner, formal, invariant_path, found)
-            }
+            TyKind::InProjection(inner) | TyKind::OutProjection(inner) => occurrences(
+                source,
+                inner,
+                formal,
+                nullable_formal,
+                invariant_path,
+                found,
+            ),
             TyKind::Obj(owner, arguments) => {
                 let classifier = source.classifier(owner);
                 for (index, argument) in arguments.iter().enumerate() {
@@ -1193,6 +1217,7 @@ pub(crate) fn formal_fixed_exactly_by(source: &dyn SymbolSource, shape: Ty, form
                         source,
                         *argument,
                         formal,
+                        nullable_formal,
                         invariant_path || invariant,
                         found,
                     );
@@ -1200,16 +1225,30 @@ pub(crate) fn formal_fixed_exactly_by(source: &dyn SymbolSource, shape: Ty, form
             }
             TyKind::Fun(function) => {
                 for parameter in &function.params {
-                    occurrences(source, *parameter, formal, invariant_path, found);
+                    occurrences(
+                        source,
+                        *parameter,
+                        formal,
+                        nullable_formal,
+                        invariant_path,
+                        found,
+                    );
                 }
-                occurrences(source, function.ret, formal, invariant_path, found);
+                occurrences(
+                    source,
+                    function.ret,
+                    formal,
+                    nullable_formal,
+                    invariant_path,
+                    found,
+                );
             }
             _ => {}
         }
     }
 
     let mut found = Vec::new();
-    occurrences(source, shape, formal, false, &mut found);
+    occurrences(source, shape, formal, nullable_formal, false, &mut found);
     !found.is_empty() && found.iter().all(|invariant| *invariant)
 }
 
