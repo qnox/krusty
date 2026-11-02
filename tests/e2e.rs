@@ -958,8 +958,6 @@ mod extension_function_value_receiver_e2e;
 mod extension_property_e2e;
 #[path = "extension_receiver_property_smartcast_e2e.rs"]
 mod extension_receiver_property_smartcast_e2e;
-#[path = "external_modifier_targets_e2e.rs"]
-mod external_modifier_targets_e2e;
 #[path = "facade_emission_e2e.rs"]
 mod facade_emission_e2e;
 #[path = "facade_lateinit_setter_e2e.rs"]
@@ -2274,6 +2272,8 @@ mod int_when_switch_e2e;
 mod library_function_reference_class_e2e;
 #[path = "loop_backedge_narrowing_e2e.rs"]
 mod loop_backedge_narrowing_e2e;
+#[path = "e2e/modifier_applicability.rs"]
+mod modifier_applicability;
 #[path = "nested_data_class_tostring_recipe_e2e.rs"]
 mod nested_data_class_tostring_recipe_e2e;
 #[path = "nested_inline_delegate_e2e.rs"]
