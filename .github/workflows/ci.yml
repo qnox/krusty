@@ -117,9 +117,10 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target/cache/box-corpus
-          # The checkout carries the box corpus, the mock JDK its tests compile against, and the CLI
-          # corpus. A key hit is never re-saved, so the salt changes whenever those inputs do.
-          key: box-and-cli-corpus-v1-${{ hashFiles('kotlin-versions') }}
+          # The checkout carries the box corpus, the mock JDK its tests compile against, the CLI
+          # corpus and the bytecode corpora. A key hit is never re-saved, so the salt changes
+          # whenever those inputs do.
+          key: box-and-cli-corpus-v2-${{ hashFiles('kotlin-versions') }}
       # A hit must already hold every corpus input: provisioning then refuses to fetch.
       - name: forbid corpus fetches after a cache hit
         if: steps.box-corpus.outputs.cache-hit == 'true'
@@ -415,9 +416,10 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target/cache/box-corpus/${{ matrix.version }}
-          # The checkout carries the box corpus, the mock JDK its tests compile against, and the CLI
-          # corpus. A key hit is never re-saved, so the salt changes whenever those inputs do.
-          key: box-and-cli-corpus-v1-${{ matrix.version }}-${{ hashFiles('kotlin-versions') }}
+          # The checkout carries the box corpus, the mock JDK its tests compile against, the CLI
+          # corpus and the bytecode corpora. A key hit is never re-saved, so the salt changes
+          # whenever those inputs do.
+          key: box-and-cli-corpus-v2-${{ matrix.version }}-${{ hashFiles('kotlin-versions') }}
       # A hit must already hold every corpus input: provisioning then refuses to fetch.
       - name: forbid corpus fetches after a cache hit (${{ matrix.version }})
         if: steps.box-corpus.outputs.cache-hit == 'true'

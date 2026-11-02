@@ -387,7 +387,7 @@ class-dump: live kotlinc summary cache-miss test=<module>::<case> invocations=<n
 `kotlin_cli_jvm_conformance` (in the `conformance` binary) runs Kotlin's own command-line test
 corpus, `compiler/testData/cli/jvm` at the reference tag, through the krusty binary. `just box-corpus`
 provisions it in the same checkout as the box corpus. CI caches that checkout under a key versioned
-for every input it carries (`box-and-cli-corpus-v1-…`); a cache hit sets `KRUSTY_BOX_CORPUS_OFFLINE=1`,
+for every input it carries (`box-and-cli-corpus-v2-…`); a cache hit sets `KRUSTY_BOX_CORPUS_OFFLINE=1`,
 and `just box-corpus` then fails rather than fetch into an incomplete restored checkout, so adding a
 corpus input means bumping the salt. Each case is an `.args` file and the `.out`
 file kotlinc's `AbstractCliTest` compares against: the normalized stderr followed by the exit code's
@@ -426,6 +426,35 @@ being skipped, so the gate never tests fewer cases than it claims. JDKs are foun
 `/usr/lib/jvm` and `/Library/Java/JavaVirtualMachines`, from `JAVA_HOME`, from the
 `JAVA_HOME_<release>_X64` variables `actions/setup-java` exports, and from
 `KRUSTY_JDK_<release>_HOME`, which overrides the rest.
+
+## Bytecode Text Ratchet
+
+`kotlin_bytecode_text_conformance` (in the `conformance` binary) compiles Kotlin's bytecode-text
+corpus, `compiler/testData/codegen/bytecodeText` at the reference tag, with krusty. `just box-corpus`
+checks it out beside the box corpus. Each case's `// <N> <pattern>` lines count a Java regular
+expression over the text ASM's `Textifier` prints for the case's Kotlin classes, as JetBrains'
+`BytecodeTextHandler` does; `// @<path>.class:` narrows the following lines to one class. The text
+and the pattern semantics come from the ASM copy and the JDK the reference distribution runs on,
+through a pooled server (`tests/common/asm_text`), so no request starts a JVM. Applicability and the
+compilation topology are the JVM box lane's, shared with the other bytecode corpora through
+`tests/bytecode_corpus.rs`. The lane reports `<passed>/<applicable>` on stderr.
+
+`tests/bytecode_text_expected_failures/jvm/<version>.txt` lists the cases krusty does not reproduce
+yet; any case joining or leaving it fails. A krusty panic is never an expected failure or a
+not-applicable case: it fails the lane whatever the lists say, and a bless refuses to write while
+any case panicked or could not run. Rewrite it from a full local run:
+
+```sh
+KRUSTY_BLESS_BYTECODE_TEXT_EXPECTATIONS=1 KRUSTY_LANGUAGE_VERSION=<v> \
+  ./run-tests.sh --test conformance kotlin_bytecode_text_conformance -- --nocapture
+```
+
+`KRUSTY_BYTECODE_TEXT_ONLY=<substring>` runs the matching cases and prints each mismatch.
+`tests/bytecode_text_expected_not_applicable/jvm/<version>.txt` lists the cases the reference
+kotlinc does not reproduce through this runner, each group under a comment saying why;
+`the_reference_compiler_reproduces_every_applicable_bytecode_text_case` holds it honest and runs in
+`scripts/conformance-regressions.sh` under `KRUSTY_BYTECODE_REFERENCE_TIMEOUT_SECONDS`. Its
+reference classes come from the box lane's reference-class cache.
 
 ## JVM processes
 

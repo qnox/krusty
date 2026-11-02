@@ -1,0 +1,47 @@
+# Kotlin 2.4.0 compiler/testData/codegen/bytecodeText cases the reference kotlinc does not reproduce
+# through this runner, relative to that directory. Each group says why. The conformance job runs
+# kotlin_bytecode_text_conformance::the_reference_compiler_reproduces_every_applicable_bytecode_text_case
+# for this release, which requires kotlinc to pass every other case and no listed one.
+
+# The reference compiler rejects the configuration the case requests: a feature whose first
+# release is no longer supported cannot be disabled, and a test-only feature cannot be enabled
+# from the command line.
+enum/enumEntriesMapping.kt
+enum/enumEntriesMultiMapping.kt
+inline/entriesMappingOnCallSite.kt
+inline/syntheticPropertyReference.kt
+
+# The expectation counts label names. JetBrains' test prints each class as its code generator
+# visits it, before ClassWriter, so a label the code generator visits but nothing references keeps
+# a number; this runner reads the written class file, where such a label no longer exists.
+disabledOptimizations/noUnusedLabel.kt
+forLoop/loopVarInterval.kt
+
+# The case selects a compiler option through a directive the box harness does not translate yet:
+# INHERIT_MULTIFILE_PARTS, SANITIZE_PARENTHESES, DISABLE_PARAM_ASSERTIONS and
+# USE_OLD_INLINE_CLASSES_MANGLING_SCHEME.
+flagsInMultiFileInherit.kt
+inlineClasses/mangledSamWrappersOld.kt
+mangling/parentheses.kt
+multifileClasses/optimizedMultifileClassFacadeMethods.kt
+notNullAssertions/doNotGenerateParamAssertions.kt
+notNullAssertions/noAssertionForNullableCaptured.kt
+notNullAssertions/noAssertionForNullableGenericMethod.kt
+
+# `// API_VERSION: LATEST` and `LATEST_STABLE` name no language level the box harness can pass on.
+inlineClasses/resultApiEqualsDoesntBox.kt
+notNullAssertions/assertionForNotNullTypeParam_1_4.kt
+nullCheckOptimization/multipleExclExcl_1_4.kt
+nullCheckOptimization/notNullExpressionValueTwice_1_4.kt
+nullCheckOptimization/nullCheckAfterExclExcl_1_4.kt
+
+# The text before the first `// FILE:` marker is a source file of the module in JetBrains' test
+# infrastructure, and its directives are the module's; the box harness's file split drops it, so
+# its declarations or code-generation mode are missing from both compilations.
+companion/protectedCompanionObjectAccessors_after.kt
+coroutines/destructuringInLambda/inlineSeparateFiles.kt
+defaultArguments/inheritedInterfaceFunctionJvmDefaultDisable.kt
+inlineClasses/noBoxingOperationsOnNonTrivialSpread.kt
+outerClass/classInClinit.kt
+sam/samWrapperInInlineLambda.kt
+sam/samWrapperOfReference.kt

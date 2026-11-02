@@ -692,9 +692,9 @@ fn write_classes_to_dir(classes: &[(String, Vec<u8>)], dir: &Path) -> Option<()>
 /// each module's contiguous half-open range into it, in emission order. A single-module topology
 /// holds one range covering every class under [`box_reference_classes::MAIN_MODULE`]; a multi-module
 /// build records one range per module so a class name shared by two modules stays two identities.
-struct CompiledClasses {
-    flat: Vec<(String, Vec<u8>)>,
-    module_ranges: Vec<(String, std::ops::Range<usize>)>,
+pub(super) struct CompiledClasses {
+    pub(super) flat: Vec<(String, Vec<u8>)>,
+    pub(super) module_ranges: Vec<(String, std::ops::Range<usize>)>,
 }
 
 impl CompiledClasses {
@@ -873,7 +873,7 @@ fn compile_module_test(
 /// Compile one box case with krusty through the topology its markers select: `// MODULE:` builds,
 /// then `// FILE:` multi-file sets (also used for `// WITH_COROUTINES`, which needs the generated
 /// `helpers` source compiled alongside it), then a single source file.
-fn compile_box_case(
+pub(super) fn compile_box_case(
     src: &str,
     stem: &str,
     cp_jars: &[PathBuf],

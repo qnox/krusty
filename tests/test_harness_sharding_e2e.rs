@@ -482,9 +482,12 @@ fn prebuilt_jvm_regressions_skip_the_runnable_target_modules() {
         format!(
             "bin={}\n--skip\nkotlin_codegen_box_conformance\n--skip\nkotlin_box_native_conformance::\n--skip\nkotlin_box_wasm_conformance::\n--test-threads\n{}\n\
              bin={}\n--ignored\n--exact\n\
-             kotlin_cli_jvm_conformance::the_reference_compiler_reproduces_every_applicable_cli_case\n",
+             kotlin_cli_jvm_conformance::the_reference_compiler_reproduces_every_applicable_cli_case\n\
+             bin={}\n--ignored\n--exact\n\
+             kotlin_bytecode_text_conformance::the_reference_compiler_reproduces_every_applicable_bytecode_text_case\n",
             sibling.display(),
             regression_threads(),
+            sibling.display(),
             sibling.display(),
         ),
         "stderr: {}",
@@ -531,11 +534,11 @@ fn the_cli_reference_run_compiles_missing_recordings_unless_told_otherwise() {
 
     assert_eq!(
         run(None),
-        "--skip compile_missing=unset\n--ignored compile_missing=1\n"
+        "--skip compile_missing=unset\n--ignored compile_missing=1\n--ignored compile_missing=unset\n"
     );
     assert_eq!(
         run(Some("0")),
-        "--skip compile_missing=0\n--ignored compile_missing=0\n"
+        "--skip compile_missing=0\n--ignored compile_missing=0\n--ignored compile_missing=0\n"
     );
     fs::remove_dir_all(temp).expect("remove regressions fixture");
 }
@@ -579,9 +582,12 @@ fn prebuilt_conformance_regressions_recipe_runs_the_script() {
         format!(
             "bin={}\n--skip\nkotlin_codegen_box_conformance\n--skip\nkotlin_box_native_conformance::\n--skip\nkotlin_box_wasm_conformance::\n--test-threads\n{}\n\
              bin={}\n--ignored\n--exact\n\
-             kotlin_cli_jvm_conformance::the_reference_compiler_reproduces_every_applicable_cli_case\n",
+             kotlin_cli_jvm_conformance::the_reference_compiler_reproduces_every_applicable_cli_case\n\
+             bin={}\n--ignored\n--exact\n\
+             kotlin_bytecode_text_conformance::the_reference_compiler_reproduces_every_applicable_bytecode_text_case\n",
             sibling.display(),
             regression_threads(),
+            sibling.display(),
             sibling.display(),
         ),
         "stderr: {}",
@@ -677,7 +683,10 @@ fn prebuilt_conformance_regressions_keep_an_explicit_cli() {
         .output()
         .expect("run conformance regressions");
     assert_eq!(output.status.code(), Some(0));
-    assert_eq!(output.stdout, b"bin=/opt/krusty\nbin=/opt/krusty\n");
+    assert_eq!(
+        output.stdout,
+        b"bin=/opt/krusty\nbin=/opt/krusty\nbin=/opt/krusty\n"
+    );
     fs::remove_dir_all(temp).expect("remove regressions fixture");
 }
 
@@ -821,8 +830,8 @@ fn ci_starts_jvm_without_waiting_for_focused_klib_binaries() {
         "a Native or Wasm row must not race to publish the JVM row's broader immutable cache"
     );
     for key in [
-        "key: box-and-cli-corpus-v1-${{ hashFiles('kotlin-versions') }}",
-        "key: box-and-cli-corpus-v1-${{ matrix.version }}-${{ hashFiles('kotlin-versions') }}",
+        "key: box-and-cli-corpus-v2-${{ hashFiles('kotlin-versions') }}",
+        "key: box-and-cli-corpus-v2-${{ matrix.version }}-${{ hashFiles('kotlin-versions') }}",
     ] {
         assert!(
             workflow.contains(key),
