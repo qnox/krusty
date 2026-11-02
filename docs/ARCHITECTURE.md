@@ -457,6 +457,10 @@ to reuse. LLVM is the right tool only for a future **native** backend (as in Kot
 - Representation coercions (box/unbox, erasure) are **explicit IR nodes** (`IrTypeOp::ImplicitCoercion`)
   inserted by backend lowering, not hidden in codegen — so they are visible and testable.
 - Index-based arenas (`u32` ids into `Vec`s), per krusty's no-`Box`/`Rc` invariant.
+- Facts about an expression travel on the node (position, type, origin) or in its operation's
+  payload (the checked selection), not in a side table every copy must remember. Every `IrFile`
+  field is classified for expression copies in `src/ir/expression_copy.rs`; see
+  `docs/PHASE_FACTS.md` for the rule and the migration order.
 
 Pipeline target: `checked AST → common IR → shared semantic passes → per-backend lowering + codegen`.
 Current state: the JVM backend consumes the current IR, but that IR is still partly JVM-lowered: common

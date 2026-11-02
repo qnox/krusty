@@ -355,5 +355,7 @@ pub(super) fn build_continuation_class(
         property_annotations: Vec::new(),
         annotation_retention: None,
     };
-    ir.add_class(class)
+    let class = ir.add_class(class);
+    ir.jvm_continuation_functions.insert(class, outer_fid);
+    class
 }

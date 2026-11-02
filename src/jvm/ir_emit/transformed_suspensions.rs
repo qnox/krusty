@@ -15,6 +15,7 @@ use std::cell::RefCell;
 use super::scalar_coercion::{semantic_scalar_adapter, unbox_prim_from};
 use super::{jvm_declared_ty, EmitRun, Emitter};
 use crate::ir::{ExprId, IrExpr, IrFile, IrTypeOp};
+use crate::jvm::bytecode::CodegenMarker;
 use crate::jvm::bytecode_passes::coroutines::markers::SuspendMarker;
 use crate::jvm::classfile::{
     ClassWriter, CodeBuilder, CoroutineOutcome, CoroutineRequest, TransformedCoroutine,
@@ -364,6 +365,38 @@ impl Emitter<'_> {
     ) {
         self.transformed_suspensions = suspensions;
         self.continuation_slot = continuation;
+    }
+
+    /// Construct the method's continuation `continuation` on the receiver and `completion` and drop
+    /// it, between `InlineMarker.mark(4)` and `mark(5)`: kotlinc opens a `$$forInline` copy of a
+    /// method that reads a `crossinline` capture with it, and the transformer that builds the
+    /// copy's machine at an inlining call site replaces it with the machine's own.
+    pub(super) fn emit_fake_continuation_construction(
+        &mut self,
+        continuation: &str,
+        completion: u16,
+        code: &mut CodeBuilder,
+    ) {
+        self.written_suspend_marker(SuspendMarker::BeforeFakeContinuationConstructorCall, code);
+        let class = self.cw.class_ref(continuation);
+        code.new_obj(class);
+        code.dup();
+        super::load(Ty::obj(&self.owner), 0, code);
+        super::load(Ty::obj("kotlin/coroutines/Continuation"), completion, code);
+        let descriptor = format!("(L{};Lkotlin/coroutines/Continuation;)V", self.owner);
+        let constructor = self.cw.methodref(continuation, "<init>", &descriptor);
+        code.invokespecial(constructor, 2, 0);
+        self.written_suspend_marker(SuspendMarker::AfterFakeContinuationConstructorCall, code);
+        code.pop();
+    }
+
+    /// `InlineMarker.mark(marker)` as the call the class file holds: no transformer runs over a
+    /// body kept for inlining, so nothing else writes its markers out.
+    fn written_suspend_marker(&mut self, marker: SuspendMarker, code: &mut CodeBuilder) {
+        let (name, descriptor) = CodegenMarker::Mark.method();
+        let mark = self.cw.methodref(CodegenMarker::OWNER, name, descriptor);
+        code.push_int(marker as i32, self.cw);
+        code.invokestatic(mark, 1, 0);
     }
 
     /// Leave `calls`, points of the machine just armed, unmarked: the body is kept for inlining
