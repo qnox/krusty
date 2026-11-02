@@ -158,6 +158,13 @@ impl EmitTimeMachines {
         self.suspend_lambdas.get(&class)
     }
 
+    /// Give `function`'s machine its continuation class's final name.
+    pub(crate) fn rename_continuation(&mut self, function: u32, to: crate::types::TypeName) {
+        if let Some(machine) = self.transformed.get_mut(&function) {
+            machine.continuation_class = to.render();
+        }
+    }
+
     pub(crate) fn remap_suspend_lambda_class(
         &mut self,
         function: u32,

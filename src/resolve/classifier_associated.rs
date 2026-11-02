@@ -226,7 +226,7 @@ impl Checker<'_> {
                     None,
                 ))
             }
-            Some(CallableCandidateSelection::Ambiguous(ambiguous)) => {
+            Some(CallableCandidateSelection::Ambiguous(ambiguous, _)) => {
                 self.report_callable_ambiguity(call, name, &ambiguous);
                 AssociatedCall::Selected(Ty::Error)
             }
