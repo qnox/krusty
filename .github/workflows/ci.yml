@@ -188,7 +188,12 @@ jobs:
       - name: install cross-architecture runners
         # The POSIX drivers compile against each target's own glibc headers, so the layer's
         # hand-copied numbers and layouts are checked against the target's, not the host's.
+        # Self-hosted runners ship these preinstalled and have no sudo.
         run: |
+          if [ -x /usr/bin/qemu-aarch64 ] && [ -x /usr/bin/qemu-riscv64 ] && [ -x /usr/bin/ld.lld ] &&
+            [ -d /usr/aarch64-linux-gnu/include ] && [ -d /usr/riscv64-linux-gnu/include ]; then
+            exit 0
+          fi
           sudo apt-get update
           sudo apt-get install -y qemu-user lld libc6-dev-arm64-cross libc6-dev-riscv64-cross
       - name: coverage gate
