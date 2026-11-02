@@ -23,7 +23,10 @@ pub(crate) fn jvm_can_emit(ir: &IrFile) -> bool {
                 None => true,
             },
             Callee::CrossFile { params, ret, .. } => params.iter().all(ty_ok) && ty_ok(ret),
+            // The JVM realizes defaults through its `$default` methods and never runs the shared
+            // default-argument lowering that builds a module default entry.
             Callee::Module { .. }
+            | Callee::ModuleDefaultEntry { .. }
             | Callee::ModuleWithDefaults { .. }
             | Callee::LocalWithDefaults { .. }
             | Callee::ClassStaticWithDefaults { .. }
@@ -55,6 +58,8 @@ pub(crate) fn jvm_can_emit(ir: &IrFile) -> bool {
         // specialize it) — decline the file rather than miscompile (the node has no JVM lowering).
         IrExpr::PluginPlaceholder { .. } => false,
         IrExpr::LocalDelegateAccess(_) => false,
+        // Built only by the shared default-argument lowering, which the JVM does not run.
+        IrExpr::AbsentArgument { .. } => false,
         _ => true,
     })
 }

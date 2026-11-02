@@ -1478,6 +1478,10 @@ The nested setter's checked write names the original property and matches its le
 capture; an anonymous constructor-prefix read is not a substitute for that caller-owned binding.
 This strengthens the ownership regression without changing metadata or the capture inventory.
 
+Direct synchronous source-lambda invocation consumes the prepared inline body through the common
+splice contract. Parameter identities and receiver roles remain declaration-owned, and a consumed
+implementation is recorded as inline-only. Escaping values keep their ordinary function ABI.
+
 ## Serialized getter declaration contracts
 
 KLIB normalization tags a getter or setter from its actual property slot, retaining the property's
@@ -1582,3 +1586,11 @@ KSP protocol 16 transports four unsigned value tags. Its JVM adapter boxes their
 as Kotlin unsigned wrapper objects, matching KSP2's runtime classes and full values. The class
 reader and build ABI fingerprint remain physical JVM contracts. Raw dependency annotation-default
 normalization remains a declaration-type-owned provider follow-up.
+
+## Wasm constructor capture transport
+
+Capture provenance and optional semantic closure identity belong to the constructor prefix. The
+stored field coordinate and pre-super pair belong to its physical layout. Wasm validates both
+without inferring identities from field names or prefix position. All shared-holder edge maps must
+be absent for this copied-value transport; their logical element types do not describe holder ABI.
+The existing class field and constructor emitters consume the same facts without a metadata change.
