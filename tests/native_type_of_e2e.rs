@@ -122,16 +122,7 @@ fn a_reified_intersection_describes_its_common_supertype() {
 fn a_reified_contravariant_intersection_argument_describes_nothing() {
     // `In<A>` and `In<B>` join at `In<A & B>`, which kotlinc reifies as `In<Nothing>`.
     both(
-        "import kotlin.reflect.KType\n\
-         import kotlin.reflect.typeOf\n\
-         class In<in T>\n\
-         interface A\n\
-         interface B\n\
-         inline fun <reified K> select(x: K, y: K): KType = typeOf<K>()\n\
-         fun box(): String {\n\
-         \x20   val described = select(In<A>(), In<B>())\n\
-         \x20   return if (described == typeOf<In<Nothing>>()) \"OK\" else \"fail: $described\"\n\
-         }\n",
+        include_str!("box_regressions/typeOfContravariantIntersection.kt"),
         "TypeOfContravariantIntersection",
     );
 }
