@@ -78,11 +78,11 @@ pub(super) fn build_class_metadata_with_facts(
         return Some(KotlinMetadata {
             k: 3,
             stamp: opts.metadata_stamp(),
-            xi: synthetic_class_xi(if is_continuation_class(c) {
-                SYNTHETIC_PROTECTED
+            xi: if is_continuation_class(c) {
+                continuation_class_xi(ir, c)
             } else {
-                SYNTHETIC_LOCAL
-            }),
+                synthetic_class_xi(SYNTHETIC_LOCAL)
+            },
             d1: vec![],
             d2: vec![],
         });
