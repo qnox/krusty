@@ -426,6 +426,10 @@ final class Symbols {
             case 6: return ConstantValue.of(Float.intBitsToFloat(in.readInt()));
             case 7: return ConstantValue.of(Double.longBitsToDouble(in.readLong()));
             case 8: return ConstantValue.of(Wire.readString(in));
+            case 13: return ConstantValue.unsigned(kotlin.UByte.class, byte.class, in.readByte());
+            case 14: return ConstantValue.unsigned(kotlin.UShort.class, short.class, in.readShort());
+            case 15: return ConstantValue.unsigned(kotlin.UInt.class, int.class, in.readInt());
+            case 16: return ConstantValue.unsigned(kotlin.ULong.class, long.class, in.readLong());
             case 9:
                 String enumClass = Wire.readString(in);
                 return ConstantValue.enumEntry(this, enumClass, Wire.readString(in));

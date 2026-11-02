@@ -7,6 +7,8 @@ use crate::jvm::inline::PropertyAccess;
 use crate::jvm::property_realizations::PropertyRealizations;
 use crate::types::TypeName;
 
+use super::file_facades::FileClasses;
+
 use super::default_call_operands::{DefaultCallOperand, DefaultCallOperands};
 
 #[cfg(test)]
@@ -404,7 +406,7 @@ fn realize_local_default_arguments(
 /// and marker operands must use the resulting physical parameter types.
 pub(super) fn realize_default_calls(
     ir: &mut IrFile,
-    facades: &[String],
+    file_classes: &FileClasses,
     default_call_operands: &mut DefaultCallOperands,
 ) -> Result<(), ModuleRealizationTarget> {
     for raw in 0..ir.exprs.len() {
@@ -487,9 +489,8 @@ pub(super) fn realize_default_calls(
                     .to_owned();
                 let owner = match provider.owner {
                     Some(owner) => owner,
-                    None => {
-                        static_owner(provider.placement, provider.source, facades).ok_or(failure)?
-                    }
+                    None => call_owner(provider.placement, provider.source, file_classes)
+                        .ok_or(failure)?,
                 };
                 let mut stub_boxed =
                     super::default_parameter_representation::defaulted_primitive_bounds(
@@ -825,12 +826,13 @@ pub(super) fn realize_super_calls(
 /// realization and therefore never reads imports, scopes, or overload sets.
 pub(super) fn realize(
     ir: &mut IrFile,
-    facades: &[String],
+    file_classes: &FileClasses,
     classifiers: &dyn crate::backend::BackendClassifierSource,
     callables: &crate::backend::CheckedBackendCallables,
     property_realizations: &mut PropertyRealizations,
     jvm_default: crate::jvm::ir_emit::JvmDefaultMode,
 ) -> Result<(), ModuleRealizationTarget> {
+    let facades = &file_classes.containers[..];
     realize_declared_function_names(ir)?;
     realize_default_accessor_names(ir)?;
     realize_super_calls(ir, callables, property_realizations, jvm_default)?;
@@ -871,7 +873,7 @@ pub(super) fn realize(
                     return Err(failure);
                 }
                 let owner =
-                    static_owner(callable.placement, callable.source, facades).ok_or(failure)?;
+                    call_owner(callable.placement, callable.source, file_classes).ok_or(failure)?;
                 Some(IrExpr::Call {
                     callee: Box::new(Callee::CrossFile {
                         facade: owner,
@@ -929,7 +931,7 @@ pub(super) fn realize(
                         private_accessor,
                     } = realize_property(
                         &property,
-                        facades,
+                        file_classes,
                         *target,
                         *dispatch_receiver,
                         *extension_receiver,
@@ -995,7 +997,7 @@ pub(super) fn realize(
                         ..
                     } = realize_property(
                         &property,
-                        facades,
+                        file_classes,
                         *target,
                         *dispatch_receiver,
                         *extension_receiver,
@@ -1191,7 +1193,7 @@ struct RealizedAccessor {
 
 fn realize_property(
     property: &IrModuleProperty,
-    facades: &[String],
+    file_classes: &FileClasses,
     target: PropertyId,
     dispatch_receiver: Option<crate::ir::ExprId>,
     extension_receiver: Option<crate::ir::ExprId>,
@@ -1297,13 +1299,24 @@ fn realize_property(
         if dispatch_receiver.is_some() {
             return Err(failure);
         }
-        let facade = static_owner(property.placement, property.source, facades).ok_or(failure)?;
-        let (name, private_accessor) = match private {
+        // A private property's synthetic accessor is the part's own; its declared accessors are
+        // invoked through the facade.
+        let (facade, name, private_accessor) = match private {
             Some(private) => {
                 let call = private_accessor_call(property, setter, &private, accessor, failure)?;
-                (private.name, Some(call))
+                let part = static_owner(
+                    property.placement,
+                    property.source,
+                    &file_classes.containers,
+                )
+                .ok_or(failure)?;
+                (part, private.name, Some(call))
             }
-            None => (accessor, None),
+            None => (
+                call_owner(property.placement, property.source, file_classes).ok_or(failure)?,
+                accessor,
+                None,
+            ),
         };
         Ok(RealizedAccessor {
             call: IrExpr::Call {
@@ -1404,6 +1417,26 @@ pub(super) fn static_owner(
     match placement {
         IrStaticPlacement::Package => facade_for(source, facades),
         IrStaticPlacement::CompanionBlock { declaring_class } => Some(declaring_class),
+    }
+}
+
+/// The class a call to a static declaration of `source` names: a multifile part's members are
+/// invoked through the part's public facade, everything else through its declaring class.
+pub(super) fn call_owner(
+    placement: IrStaticPlacement,
+    source: IrModuleSource,
+    file_classes: &FileClasses,
+) -> Option<crate::types::TypeName> {
+    match (
+        placement,
+        file_classes
+            .multifile_facades
+            .get(source.source.raw() as usize)?,
+    ) {
+        (IrStaticPlacement::Package, Some(facade)) => {
+            Some(crate::types::type_name_child(source.package, facade))
+        }
+        _ => static_owner(placement, source, &file_classes.containers),
     }
 }
 

@@ -575,6 +575,19 @@ fn annotation_arguments_and_accessors_are_what_ksp2_reports() {
 
 #[test]
 #[ignore = "downloads symbol-processing-api 2.3.12 and a JDK"]
+fn unsigned_annotation_values_are_what_ksp2_reports() {
+    log_is_what_ksp2_reports(
+        "Annotations",
+        "annotations.AnnotationsProvider",
+        &[Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/unsigned_annotation_values/UnsignedAnnotations.kt")],
+        "ksp-outputs-unsigned-annotations",
+        "unsigned-annotations.expected",
+    );
+}
+
+#[test]
+#[ignore = "downloads symbol-processing-api 2.3.12 and a JDK"]
 fn library_classes_are_what_ksp2_reports() {
     log_with_dependencies_is_what_ksp2_reports(
         "Library",

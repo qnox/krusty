@@ -23,6 +23,7 @@ fn hierarchy(edges: &[(&str, &[&str])]) -> Facts {
                 declaration_name: None,
                 access: crate::libraries::ClassifierAccess::Public,
                 is_kotlin: true,
+                mapped_builtin: false,
                 source: true,
                 outer_instance: None,
                 kind: crate::libraries::TypeKind::Class,

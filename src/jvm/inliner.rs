@@ -30,6 +30,7 @@ mod default_masks;
 mod finally_blocks;
 mod finally_markers;
 mod functional_arguments;
+pub(crate) mod inline_scopes;
 mod lambda_expansion;
 mod local_sorter;
 mod name_generator;
@@ -63,6 +64,7 @@ pub(crate) use default_masks::{
     expand as expand_default_masks, DefaultMasks, ExtractedDefaultLambda,
 };
 pub(crate) use functional_arguments::lambda_placements;
+pub(crate) use inline_scopes::InlineScopes;
 pub(crate) use lambda_expansion::{Lambda, SourceLines};
 pub(crate) use name_generator::ClassNameGenerators;
 pub(crate) use object_regeneration::{
@@ -125,6 +127,8 @@ pub(in crate::jvm) struct InliningContext<'a> {
     pub classes: &'a dyn ClassRoles,
     pub objects: &'a mut dyn AnonymousObjects,
     pub enum_entries: &'a mut dyn crate::jvm::reified_arguments::EnumEntriesReads,
+    /// The caller method's scope numbering, under `-Xuse-inline-scopes-numbers`.
+    pub scopes: Option<&'a mut InlineScopes>,
 }
 
 /// Rewrite `callee` into the code that replaces a call to it: kotlinc's `MethodInliner.doInline`
@@ -144,21 +148,29 @@ pub(in crate::jvm) fn inline(
     reified_arguments: &crate::jvm::reified_arguments::ReifiedArguments,
     call: InliningContext<'_>,
 ) -> Result<MethodNode, InlineError> {
+    let InliningContext {
+        lines,
+        classes,
+        objects,
+        enum_entries,
+        mut scopes,
+    } = call;
     let mut node = callee.clone();
-    reified::specialize(&mut node, reified_arguments, call.enum_entries)?;
-    let mut node = preparation::prepare(&node, inline_only, parameters);
+    reified::specialize(&mut node, reified_arguments, enum_entries)?;
+    if let Some(scopes) = scopes.as_deref_mut() {
+        scopes.number(&mut node, false);
+    }
+    let numbered_markers = scopes
+        .is_some()
+        .then(|| inline_scopes::nested_markers(&node));
+    let mut node = preparation::prepare(&node, inline_only, parameters, scopes.is_some());
     default_lambda::store_captured_values(&mut node, parameters, lambdas)?;
     try_blocks::move_try_starts_to_their_first_instruction(&mut node)?;
     let mut node = preprocess_node_before_inline(node)?;
     preparation::remove_fake_variable_initializations(&mut node);
     returns::normalize_local_returns(&mut node)?;
-    let constructors = object_regeneration::regenerate_objects(
-        &mut node,
-        parameters,
-        lambdas,
-        call.classes,
-        call.objects,
-    )?;
+    let constructors =
+        object_regeneration::regenerate_objects(&mut node, parameters, lambdas, classes, objects)?;
     let invokes = functional_arguments::mark_places(&mut node, parameters)?;
     object_regeneration::complete_constructor_calls(&mut node, constructors)?;
     let context = lambda_expansion::Context {
@@ -170,7 +182,7 @@ pub(in crate::jvm) fn inline(
     let lambda_expansion::Expanded {
         mut node,
         lambda_blocks,
-    } = lambda_expansion::expand(&node, &context, invokes, call.lines)?;
+    } = lambda_expansion::expand(&node, &context, invokes, &mut *lines, scopes)?;
     preparation::remove_closure_assertions(&mut node)?;
     let mut node = parameters.remap(&node, frame_base)?;
     let end = node.new_label();
@@ -180,6 +192,9 @@ pub(in crate::jvm) fn inline(
     // The declaration retains finally markers for an inliner; the finished caller never executes
     // them as ordinary runtime calls.
     finally_markers::remove(&mut node)?;
+    if let Some(markers) = numbered_markers {
+        inline_scopes::map_call_site_lines(&mut node, &markers, |line| lines.map(line));
+    }
     node.nodes.insert(0, Node::Insn(Insn::Op(NOP)));
     Ok(node)
 }

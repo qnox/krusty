@@ -516,8 +516,17 @@ fn unify_ty_impl(source: Option<&dyn SymbolSource>, sig: Ty, actual: Ty, binds: 
             let actual = actual.projection_inner().unwrap_or(actual);
             let flexible_upper = platform_flexible_upper_bound(source, actual).map(Ty::non_null);
             let mut actual = actual.non_null();
-            while let (Some(_), TyKind::TyParam(_, bound)) = (source, actual.kind()) {
-                actual = bound.projection_inner().unwrap_or(bound).non_null();
+            // A caller's variable stands for its bound here, and `V & Any` for the non-null bound
+            // of `V`: binding `E` from `V` through a nullable formal `E?` must still read `T` from
+            // `V : EntityID<String>?` in `E : EntityID<T>`.
+            while source.is_some() {
+                actual = match actual.kind() {
+                    TyKind::TyParam(_, bound) => {
+                        bound.projection_inner().unwrap_or(bound).non_null()
+                    }
+                    TyKind::DefinitelyNotNull(inner) => inner.non_null(),
+                    _ => break,
+                };
             }
             let projected = match actual.kind() {
                 TyKind::Obj(actual_name, _) if name == actual_name => Some(actual),

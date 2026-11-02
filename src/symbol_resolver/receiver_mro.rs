@@ -40,6 +40,7 @@ fn receiver_type_args_match(
     if decl_recv.mentions_ty_param() {
         let mut bindings = GSigBinds::default();
         unify_ty_from_symbols(src, decl_recv, recv, &mut bindings);
+        contravariant_formals_read_nothing(decl_recv, recv, &mut bindings);
         let specialized = ty_subst_keep_unbound(decl_recv, &bindings);
         // A callee-owned receiver variable may bind to a still-symbolic variable owned by the
         // caller: `Flow<Flow<T@flattenMerge>>` against `Flow<Flow<R@flatMapMerge>>`. The
@@ -71,12 +72,19 @@ fn receiver_type_args_match(
     // `Iterable<Double>`, so it is checked through its bounds like any other argument.
     let declared_wildcard =
         |t: Ty| t.projection_inner().unwrap_or(t).is_ty_param() || erased_top(t);
+    // A nullable formal (`E?`) is the same wildcard as `E` here. Whether the receiver admits the
+    // call (`Column<out E?>` takes `Column<EntityID<U>>`, an invariant `Column<E?>` does not) is
+    // decided by applicability once `E` is bound, which reports the receiver type mismatch.
+    let nullable_declared_wildcard = |d: Ty| {
+        let inner = d.projection_inner().unwrap_or(d);
+        inner.is_nullable() && inner.non_null().is_ty_param()
+    };
     decl_recv
         .type_args()
         .iter()
         .zip(recv.type_args().iter())
         .all(|(&d, &r)| {
-            if declared_wildcard(d) || erased_top(r) {
+            if declared_wildcard(d) || nullable_declared_wildcard(d) || erased_top(r) {
                 return true;
             }
             match d.kind() {
@@ -89,6 +97,25 @@ fn receiver_type_args_match(
                 _ => crate::assignable::is_assignable(&cx, &oracle, r, d),
             }
         })
+}
+
+/// A formal written `in S` takes only an upper constraint from an `out`-projected or star
+/// argument: `Expr<out Any>` is an `Expr<in S>` for `S = Nothing`, never for `S = Any`.
+fn contravariant_formals_read_nothing(decl_recv: Ty, recv: Ty, bindings: &mut GSigBinds) {
+    for (&declared, &actual) in decl_recv.type_args().iter().zip(recv.type_args().iter()) {
+        let TyKind::InProjection(inner) = declared.kind() else {
+            continue;
+        };
+        if !matches!(
+            actual.kind(),
+            TyKind::OutProjection(_) | TyKind::StarProjection(_)
+        ) {
+            continue;
+        }
+        if let TyKind::TyParam(name, _) = inner.non_null().kind() {
+            bindings.insert(name.to_string(), Ty::Nothing);
+        }
+    }
 }
 
 /// The rung of `decl_recv` in `recv`'s SOURCE-type supertype closure (0 = same class), or `None` if the

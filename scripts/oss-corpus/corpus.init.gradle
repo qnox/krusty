@@ -1,3 +1,14 @@
+import javax.inject.Inject
+import org.gradle.api.services.BuildService
+import org.gradle.api.services.BuildServiceParameters
+import org.gradle.build.event.BuildEventsListenerRegistry
+import org.gradle.tooling.events.FinishEvent
+import org.gradle.tooling.events.OperationCompletionListener
+import org.gradle.tooling.events.task.TaskFailureResult
+import org.gradle.tooling.events.task.TaskFinishEvent
+import org.gradle.tooling.events.task.TaskSkippedResult
+import org.gradle.tooling.events.task.TaskSuccessResult
+
 // Adds `corpusCompile`: every Kotlin/JVM compile task in the build, and lists them in
 // `$CORPUS_COMPILATIONS` when it is set. Tasks are picked by name before they are realized:
 // realizing every registered task would configure unrelated ones (a GraalVM native-image task
@@ -92,3 +103,40 @@ gradle.projectsEvaluated { g ->
     }
     new File(survey).text = lines.join('\n') + '\n'
 }
+
+// Records when each task of the build ran, in `$CORPUS_TASK_TIMES` when it is set: one line per
+// finished task, its path, its start and end (epoch milliseconds) and its outcome. The comparison
+// reads each compilation's compile time from here, kotlinc's task in one build and krusty's
+// replacement, support check and the Kotlin task in the other.
+abstract class CorpusTaskTimes implements BuildService<CorpusTaskTimes.Params>, OperationCompletionListener {
+    interface Params extends BuildServiceParameters {
+        Property<String> getOutput()
+    }
+
+    @Override
+    synchronized void onFinish(FinishEvent event) {
+        if (!(event instanceof TaskFinishEvent)) return
+        def result = event.result
+        def outcome = result instanceof TaskSkippedResult ? 'skipped'
+                : result instanceof TaskFailureResult ? 'failed'
+                : result instanceof TaskSuccessResult && result.upToDate ? 'up-to-date'
+                : 'executed'
+        new File(parameters.output.get()) << "${event.descriptor.taskPath}\t${result.startTime}\t${result.endTime}\t${outcome}\n"
+    }
+}
+
+abstract class CorpusTaskTimesPlugin implements Plugin<Gradle> {
+    @Inject
+    abstract BuildEventsListenerRegistry getRegistry()
+
+    void apply(Gradle gradle) {
+        def output = System.getenv('CORPUS_TASK_TIMES')
+        if (output == null) return
+        new File(output).text = ''
+        registry.onTaskCompletion(gradle.sharedServices.registerIfAbsent('corpusTaskTimes', CorpusTaskTimes) {
+            parameters.output.set(output)
+        })
+    }
+}
+
+apply plugin: CorpusTaskTimesPlugin

@@ -19,6 +19,11 @@ pub struct UnitCompilerConfiguration {
     pub arguments: Vec<String>,
     pub language_version: Option<LanguageVersion>,
     pub api_version: Option<LanguageVersion>,
+    /// `// USE_INLINE_SCOPES_NUMBERS`: kotlinc's `USE_INLINE_SCOPES_NUMBERS` configuration, which
+    /// Kotlin's test runner sets from the directive. krusty's command line does not accept
+    /// `-Xuse-inline-scopes-numbers` yet, so krusty's compile receives it through this typed field
+    /// and the reference compile through [`reference_only_kotlinc_arguments`].
+    pub inline_scopes_numbers: bool,
 }
 
 /// The kotlinc arguments one compilation unit of a case compiles under: the case-wide arguments of
@@ -59,6 +64,7 @@ fn case_compiler_configuration(src: &str) -> Result<UnitCompilerConfiguration, S
         arguments,
         language_version,
         api_version,
+        inline_scopes_numbers: super::directive(src, "USE_INLINE_SCOPES_NUMBERS"),
     })
 }
 
@@ -179,9 +185,16 @@ fn case_cli_arguments(src: &str) -> Result<Vec<String>, String> {
 /// krusty's command line keeps such a case applicable; it moves to [`case_kotlinc_arguments`] once
 /// krusty applies the argument. An unknown mode fails closed rather than reference-compiling under
 /// a guessed default.
+///
+/// `// USE_INLINE_SCOPES_NUMBERS` selects `-Xuse-inline-scopes-numbers`, which krusty's compile
+/// receives as [`UnitCompilerConfiguration::inline_scopes_numbers`] instead.
 pub fn reference_only_kotlinc_arguments(src: &str) -> Result<Vec<String>, String> {
+    let mut arguments = Vec::new();
+    if super::directive(src, "USE_INLINE_SCOPES_NUMBERS") {
+        arguments.push("-Xuse-inline-scopes-numbers".to_string());
+    }
     let Some(mode) = last_value(src, "RETURN_VALUE_CHECKER_MODE") else {
-        return Ok(Vec::new());
+        return Ok(arguments);
     };
     // The directive spells kotlinc's `ReturnValueCheckerMode` enum constants.
     let value = match mode {
@@ -194,7 +207,8 @@ pub fn reference_only_kotlinc_arguments(src: &str) -> Result<Vec<String>, String
             ))
         }
     };
-    Ok(vec![format!("-Xreturn-value-checker={value}")])
+    arguments.push(format!("-Xreturn-value-checker={value}"));
+    Ok(arguments)
 }
 
 /// The trimmed payload of every `// <name>:` directive line, in source order.
@@ -325,6 +339,7 @@ mod tests {
                 arguments: Vec::new(),
                 language_version: Some(LanguageVersion::new(1, 8)),
                 api_version: Some(LanguageVersion::new(1, 3)),
+                inline_scopes_numbers: false,
             })
         );
         assert_eq!(
@@ -352,7 +367,26 @@ mod tests {
                 ],
                 language_version: Some(LanguageVersion::new(2, 2)),
                 api_version: Some(LanguageVersion::new(2, 1)),
+                inline_scopes_numbers: false,
             })
+        );
+    }
+
+    #[test]
+    fn inline_scope_numbers_reach_krusty_typed_and_the_reference_as_an_argument() {
+        let source = "// USE_INLINE_SCOPES_NUMBERS\nfun box() = \"OK\"\n";
+        assert_eq!(
+            unit_compiler_configuration(source, [source]),
+            Ok(UnitCompilerConfiguration {
+                arguments: Vec::new(),
+                language_version: None,
+                api_version: None,
+                inline_scopes_numbers: true,
+            })
+        );
+        assert_eq!(
+            reference_only_kotlinc_arguments(source),
+            Ok(vec!["-Xuse-inline-scopes-numbers".to_string()])
         );
     }
 

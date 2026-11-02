@@ -478,7 +478,7 @@ fn callee(callee: &mut Callee, names: &IdentityRemap<'_>) {
             tys(params, names);
             *ret = ty(*ret, names);
         }
-        Callee::Module { params, ret, .. } => {
+        Callee::Module { params, ret, .. } | Callee::ModuleDefaultEntry { params, ret, .. } => {
             tys(params, names);
             *ret = ty(*ret, names);
         }
@@ -599,6 +599,7 @@ fn remap_expression(expression: &mut IrExpr, names: &IdentityRemap<'_>) {
             ..
         }
         | IrExpr::Variable { ty: classifier, .. }
+        | IrExpr::AbsentArgument { ty: classifier }
         | IrExpr::PrimitiveNeg { ty: classifier, .. }
         | IrExpr::RefNew {
             elem: classifier, ..
@@ -1347,6 +1348,10 @@ impl super::IrFile {
         }
         for alias in &mut self.package_type_aliases {
             type_alias(alias, names);
+        }
+        for applied in self.package_property_annotations.values_mut() {
+            annotations(&mut applied.property, names);
+            annotations(&mut applied.field, names);
         }
         for properties in self.member_ext_props.values_mut() {
             for property in properties {

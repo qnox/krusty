@@ -40,7 +40,7 @@ fn not_applicable(src: &str) -> Option<&'static str> {
     // "when the native target grows its own frontend semantics (klib ingestion, phase 7)" — which
     // is what the klib provider is.
     if !krusty::conformance::backend_targeted(src, &["NATIVE"]) {
-        return Some("targeted at another backend");
+        return Some(box_lane::TARGETED_AT_ANOTHER_BACKEND);
     }
     // Backend mutes are target-specific. A JVM mute cannot hide a shared-frontend or common-IR
     // failure from the Native lane; that failure belongs in this lane's exact outcome ratchet.
@@ -66,7 +66,7 @@ fn native_applicability_uses_native_directives_not_jvm_mutes() {
     );
     assert_eq!(
         not_applicable("// TARGET_BACKEND: JVM\nfun box() = \"OK\""),
-        Some("targeted at another backend")
+        Some(box_lane::TARGETED_AT_ANOTHER_BACKEND)
     );
     assert_eq!(
         not_applicable("// TARGET_BACKEND: ANY\nfun box() = \"OK\""),
@@ -416,5 +416,18 @@ fun box(): String {
         run_native_abi_case(source, stem),
         Outcome::Pass,
         "Native reference identity must use the source declaration across its KLIB export"
+    );
+}
+
+#[test]
+fn native_generic_class_members_instantiate_their_declared_dependency_exports() {
+    let source = include_str!("box_regressions/multimodule/multimoduleGenericClassMembers.kt");
+    let stem = "multimoduleGenericClassMembers";
+    super::box_reference_classes::checked_box(source, stem)
+        .expect("the JVM oracle must run the complete generic-member module graph");
+    assert_eq!(
+        run_native_abi_case(source, stem),
+        Outcome::Pass,
+        "class and method formals must instantiate independently without changing the export ABI"
     );
 }

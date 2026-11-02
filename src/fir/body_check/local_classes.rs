@@ -272,6 +272,7 @@ impl BodyFirChecker<'_> {
                                     classifier: None,
                                     context_binding: None,
                                     singleton: None,
+                                    construction_sites: Vec::new(),
                                 },
                             )?
                             .ok_or_else(|| {
@@ -938,6 +939,7 @@ impl BodyFirChecker<'_> {
                     classifier: None,
                     context_binding: None,
                     singleton: None,
+                    construction_sites: Vec::new(),
                 })
             {
                 return Ok(FirLocalClassCaptureSource::EnclosingReceiver { path });
@@ -1240,9 +1242,14 @@ impl BodyFirChecker<'_> {
                     }
                 }
                 AnonymousObjectCaptureSource::EnclosingInstance { current, depth } => {
-                    let semantic_receiver_depth = depth.checked_add(1).ok_or_else(|| {
-                        self.failure(Some(span), BodyCheckFailureKind::UnsupportedCallShape)
-                    })?;
+                    let semantic_receiver_depth = capture
+                        .semantic_receiver
+                        .map(AnonymousObjectReceiverSource::depth)
+                        .unwrap_or(depth)
+                        .checked_add(1)
+                        .ok_or_else(|| {
+                            self.failure(Some(span), BodyCheckFailureKind::UnsupportedCallShape)
+                        })?;
                     context.receivers.push(ClassCaptureBinding {
                         owner: declaration,
                         field,
@@ -1262,9 +1269,14 @@ impl BodyFirChecker<'_> {
                     )?
                 }
                 AnonymousObjectCaptureSource::ImplicitReceiver { current, depth } => {
-                    let semantic_receiver_depth = depth.checked_add(1).ok_or_else(|| {
-                        self.failure(Some(span), BodyCheckFailureKind::UnsupportedCallShape)
-                    })?;
+                    let semantic_receiver_depth = capture
+                        .semantic_receiver
+                        .map(AnonymousObjectReceiverSource::depth)
+                        .unwrap_or(depth)
+                        .checked_add(1)
+                        .ok_or_else(|| {
+                            self.failure(Some(span), BodyCheckFailureKind::UnsupportedCallShape)
+                        })?;
                     context.receivers.push(ClassCaptureBinding {
                         owner: declaration,
                         field,
@@ -1476,20 +1488,26 @@ impl BodyFirChecker<'_> {
             })?;
             let previous = self.hoist_anonymous_super_argument;
             self.hoist_anonymous_super_argument = true;
-            let value = if shells == 0 {
-                let expected = argument_types.get(index).copied().ok_or_else(|| {
-                    self.failure(Some(class.span), BodyCheckFailureKind::UnsupportedCallShape)
-                })?;
-                let target = crate::fir::ResolvedTy::new(expected).map_err(|error| {
-                    self.failure(
-                        self.file.expr_span(argument),
-                        BodyCheckFailureKind::UnpublishableType(error),
-                    )
-                })?;
-                self.value_at_selected_boundary(argument, target)
-            } else {
-                self.expression(core)
-            };
+            self.construction_site_receiver_frames.push(transient);
+            let value = (|| {
+                if shells == 0 {
+                    let expected = argument_types.get(index).copied().ok_or_else(|| {
+                        self.failure(Some(class.span), BodyCheckFailureKind::UnsupportedCallShape)
+                    })?;
+                    let target = crate::fir::ResolvedTy::new(expected).map_err(|error| {
+                        self.failure(
+                            self.file.expr_span(argument),
+                            BodyCheckFailureKind::UnpublishableType(error),
+                        )
+                    })?;
+                    self.value_at_selected_boundary(argument, target)
+                } else {
+                    self.expression(core)
+                }
+            })();
+            self.construction_site_receiver_frames
+                .pop()
+                .expect("anonymous super argument frame");
             self.hoist_anonymous_super_argument = previous;
             let value = value?;
             forwards.push(FirAnonymousSuperArgument {

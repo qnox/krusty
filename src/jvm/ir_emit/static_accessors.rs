@@ -1826,7 +1826,7 @@ impl Accessor<'_> {
         let parameters = jvm_function_params(ir, function);
         let result = jvm_declared_ty(&target.ret);
         let descriptor = method_descriptor(&parameters, result);
-        let name = format!("access${}", target.name);
+        let name = format!("access${}", ir.accessor_base_name(function));
         // One accessor per target: a function whose emission-built state machine re-enters it
         // through `access$<name>` already has it.
         if cw.declares_method(&name, &descriptor) {

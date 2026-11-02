@@ -582,6 +582,9 @@ impl BodyLowering<'_> {
             if let IrExpr::Variable { named, .. } = &mut self.ir.exprs[declaration as usize] {
                 *named = true;
             }
+            // The frame adopts this operand holder as its formal receiver. Its purpose is now
+            // binding that parameter, rather than a separate checked argument-order temporary.
+            self.ir.argument_evaluation_bindings.remove(&declaration);
             self.ir
                 .value_names
                 .insert(declaration, frame.callee.to_string());

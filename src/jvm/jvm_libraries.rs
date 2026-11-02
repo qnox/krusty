@@ -2486,6 +2486,7 @@ impl JvmLibraries {
                 annotation_targets: (kind == crate::libraries::TypeKind::Annotation)
                     .then(|| classpath_annotation_targets(&ci)),
                 mapped_collection: None,
+                mapped_builtin: is_mapped_builtin,
                 annotation_element_defaults: annotation_element_defaults(&ci),
                 deprecation,
             })

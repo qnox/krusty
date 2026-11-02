@@ -1,9 +1,11 @@
-//! JVM storage for source locals whose declaration omits an initializer.
+//! JVM local storage and initializer slot ownership.
 //!
 //! Common IR retains the declared semantic type and the parser-supplied zero placeholder. An inline
 //! expansion may specialize the local's semantic type, but that does not change the JVM erasure of
 //! the declaration that owns its slot. This boundary chooses both the erased slot and its matching
 //! physical zero; common lowering never rewrites a semantic type to encode either decision.
+//! A safe-cast snapshot of a reference cell likewise retains the holder field's erased slot until
+//! the type test chooses its result. Ordinary source declarations still materialize their type.
 
 use super::*;
 use crate::ir::{ExprId, IrExpr};
@@ -15,6 +17,9 @@ use crate::types::TyKind;
 /// entered, and the body-wide declaration table ([`super::collect_body_var_types`]) once its scope has
 /// closed or before it opens.
 pub(super) fn slot_type(ir: &IrFile, declaration: ExprId, semantic: Ty) -> Ty {
+    if let Some((_, _, slot)) = shared_cell_snapshot(ir, declaration) {
+        return slot;
+    }
     let declared = ir
         .deferred_local_types
         .get(&declaration)
@@ -22,6 +27,28 @@ pub(super) fn slot_type(ir: &IrFile, declaration: ExprId, semantic: Ty) -> Ty {
         .unwrap_or(semantic);
     let slot = ir_ty_to_jvm(&stored_value_ty(declared));
     erased_inline_parameter_slot(ir, declaration, semantic).unwrap_or(slot)
+}
+
+/// A safe cast snapshots an object cell's field before testing it, without narrowing that field
+/// to the captured variable's semantic type. Named locals and primitive cells keep their storage.
+fn shared_cell_snapshot(ir: &IrFile, declaration: ExprId) -> Option<(ExprId, Ty, Ty)> {
+    if !ir.safe_cast_temporaries.contains(&declaration) {
+        return None;
+    }
+    let IrExpr::Variable {
+        init: Some(initializer),
+        named: false,
+        ..
+    } = ir.expr(declaration)
+    else {
+        return None;
+    };
+    let IrExpr::RefGet { holder, elem } = ir.expr(*initializer) else {
+        return None;
+    };
+    let (_, descriptor) = crate::jvm::shared_captures::holder_class(elem);
+    let slot = crate::jvm::physical_type::descriptor_operand_ty(descriptor);
+    (ir_ty_to_jvm(elem).is_reference() && slot.is_reference()).then_some((*holder, *elem, slot))
 }
 
 /// The verifier type of an inlined type-parameter value.
@@ -128,16 +155,25 @@ impl Emitter<'_> {
                 *existing == slot_ty || (is_reference(*existing) && is_reference(slot_ty))
             })
             .map(|(slot, _)| slot);
-        // Enter before evaluating the initializer, as kotlinc does. A call-operand holder is the
-        // exception: its value is materialized first and the slot is entered afterwards.
+        // Reserve source declarations and argument-order holders before evaluating the initializer.
+        // An expanded callable's formal binding instead starts after its operand is evaluated.
+        // A pending argument-order holder has no semantic binding until its store, so initialization
+        // still sees the previous value map.
         let holds_operand = self.ir.call_operand_bindings.contains(&declaration);
-        // So is the receiver temporary of a folded safe-call chain (`a?.b?.c`): kotlinc's chain
+        let holds_evaluation = self.ir.argument_evaluation_bindings.contains(&declaration);
+        // The receiver temporary of a folded safe-call chain (`a?.b?.c`) is also delayed: the chain
         // folding declares the inner receiver's temporary first and keeps it until the chain
         // ends, so this one takes the slot above it.
         let chained_receiver = self.is_chained_receiver(index);
         let entered = reused.or_else(|| {
-            (!holds_operand && !chained_receiver)
-                .then(|| self.enter_unassigned_value(index, slot_ty, false))
+            (!chained_receiver && (!holds_operand || holds_evaluation)).then(|| {
+                if holds_operand {
+                    self.frame
+                        .enter(super::frame_map::FrameKey::CallOperand(index), slot_ty)
+                } else {
+                    self.enter_unassigned_value(index, slot_ty, false)
+                }
+            })
         });
 
         if let Some(cell) = initializer.and_then(|value| self.stored_shared_cell(value)) {
@@ -321,6 +357,8 @@ impl Emitter<'_> {
                     let source = self.emit_consumed_operand(initializer, code);
                     self.declared_try = outer_try;
                     source
+                } else if let Some((holder, elem, _)) = shared_cell_snapshot(self.ir, declaration) {
+                    self.emit_shared_cell_read(holder, elem, false, code)
                 } else {
                     self.emit_consumed_operand(initializer, code)
                 }

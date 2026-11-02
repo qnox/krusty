@@ -216,6 +216,16 @@ pub(super) fn attach_classifier_generic_facts(
         .map(|parameter| type_parameter(index, parameter))
         .collect::<Vec<_>>();
     let (own_parameters, captured_parameters) = parameters.split_at(own_count);
+    ir.record_declared_class_self_type(
+        header.classifier,
+        Ty::obj_args_name(
+            header.classifier,
+            &parameters
+                .iter()
+                .map(IrTypeParameter::ty)
+                .collect::<Vec<_>>(),
+        ),
+    );
     class.type_params = own_parameters
         .iter()
         .map(|parameter| parameter.name.clone())

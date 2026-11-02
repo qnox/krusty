@@ -62,6 +62,21 @@ impl KeyPath<'_> {
     pub(super) fn key(&self) -> i32 {
         java_string_hash(&self.path())
     }
+
+    /// The key of a composable lambda passed as argument `argument` of a call of `callee` in this
+    /// declaration's body: its path enters the call, then the argument, then the lambda. `sibling`
+    /// numbers the calls of `callee` the body made before this one, which `DurableKeyVisitor` keys
+    /// apart as `call-<callee>:<n>`.
+    pub(super) fn lambda_key(&self, callee: &str, sibling: u32, argument: u32) -> i32 {
+        let call = match sibling {
+            0 => format!("call-{callee}"),
+            n => format!("call-{callee}:{n}"),
+        };
+        java_string_hash(&format!(
+            "fun-$anonymous$()Unit/arg-{argument}/{call}/{}",
+            self.path()
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -82,6 +97,19 @@ mod tests {
         assert_eq!(key("Greeting(String)Unit", "demo", "a.kt"), 1219023440);
         assert_eq!(key("A()Unit", "demo", "a.kt"), 2014676179);
         assert_eq!(key("B()Unit", "demo", "a.kt"), 2045695986);
+    }
+
+    /// Keys kotlinc 2.4.21's Compose plugin gave the two lambdas `Card(title: String)` in package
+    /// `probe` passes to its first and second call of `Box`.
+    #[test]
+    fn lambda_keys_match_kotlinc() {
+        let card = KeyPath {
+            signature: "Card(String)Unit",
+            package: "probe",
+            file_name: "Probe.kt",
+        };
+        assert_eq!(card.lambda_key("Box", 0, 0), -300906309);
+        assert_eq!(card.lambda_key("Box", 1, 0), -1215453532);
     }
 
     #[test]

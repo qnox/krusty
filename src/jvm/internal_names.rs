@@ -170,7 +170,7 @@ fn retarget_property_bridges(
         }
         let accessor = synthesized
             .iter()
-            .find(|accessor| accessor.property == implementation.property)?;
+            .find(|accessor| accessor.property == Some(implementation.property))?;
         let old = if setter {
             accessor.setter.clone()
         } else {
@@ -370,8 +370,9 @@ fn annotations_publish_api(annotations: &crate::ir::DeclarationAnnotations) -> b
 }
 
 struct SynthesizedAccessor {
-    /// Checked identity retained only for calls and bridges that still name the source property.
-    property: crate::fir::PropertyId,
+    /// Checked identity retained only for calls and bridges that still name the source property;
+    /// `None` for a property a compiler plugin generates.
+    property: Option<crate::fir::PropertyId>,
     /// Exact declaration that owns the synthesized accessor. Source spelling is payload on that
     /// declaration, never a key used to recover it.
     class: crate::ir::ClassId,
@@ -383,19 +384,35 @@ struct SynthesizedAccessor {
 /// JVM names of internal accessors the emitter synthesizes because the property has no function.
 fn synthesized_internal_accessors(ir: &IrFile, facade: TypeName) -> Vec<SynthesizedAccessor> {
     let mut accessors = Vec::new();
-    for (&property, layout) in &ir.local_property_layouts {
-        let IrLocalPropertyLayout::Member {
-            class: class_id,
-            property: member_index,
-            ..
-        } = layout
-        else {
+    let mut members = ir
+        .local_property_layouts
+        .iter()
+        .filter_map(|(&property, layout)| match *layout {
+            IrLocalPropertyLayout::Member {
+                class,
+                property: member,
+                ..
+            } => Some((Some(property), class, member)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    // A compiler plugin's generated properties have no source identity to lay them out by.
+    let laid_out = members
+        .iter()
+        .map(|&(_, class, member)| (class, member))
+        .collect::<HashSet<_>>();
+    for (class, declaration) in (0..).zip(&ir.classes) {
+        for member in 0..declaration.properties.len() as u32 {
+            if !declaration.is_source_declared && !laid_out.contains(&(class, member)) {
+                members.push((None, class, member));
+            }
+        }
+    }
+    for (property, class_id, member_index) in members {
+        let Some(class) = ir.classes.get(class_id as usize) else {
             continue;
         };
-        let Some(class) = ir.classes.get(*class_id as usize) else {
-            continue;
-        };
-        let Some(member) = class.properties.get(*member_index as usize) else {
+        let Some(member) = class.properties.get(member_index as usize) else {
             continue;
         };
         if class.fq_name == facade || property_publishes_api(class, member.source_order) {
@@ -434,8 +451,8 @@ fn synthesized_internal_accessors(ir: &IrFile, facade: TypeName) -> Vec<Synthesi
         }
         accessors.push(SynthesizedAccessor {
             property,
-            class: *class_id,
-            member: *member_index,
+            class: class_id,
+            member: member_index,
             getter,
             setter,
         });
@@ -596,7 +613,7 @@ fn suffix_override_bridges(
             }
             if let Some(accessor) = synthesized
                 .iter()
-                .find(|accessor| accessor.property == property)
+                .find(|accessor| accessor.property == Some(property))
             {
                 let Some(ty) = property_type(ir, accessor) else {
                     continue;
@@ -779,14 +796,18 @@ fn rewrite_call_names(
             continue;
         };
         if let Some(getter) = &accessor.getter {
-            getter_names.insert(accessor.property, format!("{getter}{suffix}"));
+            if let Some(property) = accessor.property {
+                getter_names.insert(property, format!("{getter}{suffix}"));
+            }
             by_signature.insert(
                 (owner, getter.clone(), jvm_signature(&[], &ty)),
                 format!("{getter}{suffix}"),
             );
         }
         if let Some(setter) = &accessor.setter {
-            setter_names.insert(accessor.property, format!("{setter}{suffix}"));
+            if let Some(property) = accessor.property {
+                setter_names.insert(property, format!("{setter}{suffix}"));
+            }
             by_signature.insert(
                 (
                     owner,

@@ -164,8 +164,8 @@ Compiler plugins pass through the adapter as kotlinc receives them: each compile
 `-P plugin:<id>:<key>=<value>`, and the compiler resolves each jar by the registrar it declares.
 Plugin CLI free arguments stay rejected in favour of that structured input. Before the replacement
 runs, a `<task>KrustyCheck` task passes the same compiler arguments and plugin request to
-`krusty refusals`, which prints every kotlinc argument krusty does not implement (such as AGP's
-`-Xuse-inline-scopes-numbers`) and every plugin the compiler's registry refuses (one it neither
+`krusty refusals`, which prints every kotlinc argument krusty does not implement (such as
+`-Xvalidate-bytecode`) and every plugin the compiler's registry refuses (one it neither
 reimplements nor hosts, such as Compose, Parcelize, assignment, or kapt configured by options) and
 exits 1, or exits 0. kapt's stub task (`KaptGenerateStubs`) is a Kotlin compile that writes Java
 stubs, not classes, so it is never replaced; the compile after annotation processing carries only

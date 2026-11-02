@@ -1880,14 +1880,28 @@ fn merge_class_initialization(
             .push((initializer.initialization_order, initializer.body));
     }
     for (class_id, mut steps) in initialization {
+        let mut primary_header = None;
         if let Some(body) = ir.classes[class_id as usize].init_body.take() {
-            steps.push((u32::MAX, body));
+            let checked_primary = ir.checked_constructor_bodies.values().any(|constructor| {
+                constructor.class == class_id
+                    && constructor.ordinal == 0
+                    && constructor.body_attached
+                    && constructor.body == Some(body)
+            });
+            if checked_primary {
+                // Checked primary bodies contain header initialization, after the selected
+                // superclass delegation was removed. They precede source property/init steps.
+                primary_header = Some(body);
+            } else {
+                // Generated bodies keep their existing position after source initializers.
+                steps.push((u32::MAX, body));
+            }
         }
         steps.sort_by_key(|(order, _)| *order);
         let initialization = ir.add_expr(IrExpr::Block {
-            stmts: steps
+            stmts: primary_header
                 .into_iter()
-                .map(|(_, expression)| expression)
+                .chain(steps.into_iter().map(|(_, expression)| expression))
                 .collect(),
             value: None,
         });

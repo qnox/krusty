@@ -15,7 +15,8 @@ use crate::backend::class_tables::module_slots::PlanKey;
 /// An absent symbol is not an error here: platform KLIB declarations have no preceding source
 /// object and continue to their compiler-intrinsic/runtime realization below. Once an exact source
 /// export exists, however, it owns the call. An omission cannot fall through to a name-based
-/// realization, and the ordinary export cannot receive fewer operands than its declared ABI.
+/// realization, and the ordinary export cannot receive fewer operands than its declared ABI: a
+/// call leaving arguments out goes through the export's default entry, or not at all.
 fn direct_dependency_export<'a>(
     export: Option<&'a super::super::DependencyExport>,
     defaults: &[u32],
@@ -23,7 +24,7 @@ fn direct_dependency_export<'a>(
     let Some(export) = export else {
         return Ok(None);
     };
-    if !defaults.is_empty() {
+    if !defaults.is_empty() && export.default_entry.is_none() {
         return Err(declined!(
             "a top-level dependency call with omitted arguments and no exported default bridge"
         ));
@@ -1039,6 +1040,7 @@ mod tests {
             member_receiver: None,
             singleton_member_receiver: None,
             singleton_extension_receiver: None,
+            default_entry: None,
         };
         assert_eq!(
             direct_dependency_export(Some(&export), &[])
@@ -1055,6 +1057,15 @@ mod tests {
             direct_dependency_export(None, &[0])
                 .expect("a platform declaration may have an authenticated intrinsic realization"),
             None
+        );
+        let defaulted = DependencyExport {
+            default_entry: Some("kt_klib_export_0__defaults".to_string()),
+            ..export
+        };
+        assert_eq!(
+            direct_dependency_export(Some(&defaulted), &[0])
+                .expect("an omission goes through the export's default entry"),
+            Some(&defaulted)
         );
     }
 

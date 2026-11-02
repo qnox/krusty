@@ -538,3 +538,23 @@ fun starThenOut(value: Bucket<*, out Number>) {
 "#;
     common::assert_errors_match_kotlinc(&[("Main.kt", source)], &[]);
 }
+
+#[test]
+fn an_in_projected_receiver_formal_reads_nothing_from_an_out_projected_argument() {
+    // `Expr<out Any>` and `Expr<*>` are `Expr<in S>` only for `S = Nothing`: the extension
+    // applies, and its result exposes `Nothing`, as kotlinc reports.
+    let source = "open class Expr<T>\n\
+fun <S> Expr<in S>.sel(): List<S> = emptyList()\n\
+fun f(c: Expr<out Any>): Int = c.sel()\n\
+fun g(c: Expr<*>): Int = c.sel()\n";
+    let sources = [("Main.kt", source)];
+    let reference_args = common::language_directives::kotlinc_args(source);
+    assert_eq!(
+        common::reference_error_blocks(&sources, &reference_args),
+        [
+            "Main.kt:3:32: return type mismatch: expected 'Int', actual 'List<Nothing>'.",
+            "Main.kt:4:26: return type mismatch: expected 'Int', actual 'List<Nothing>'.",
+        ]
+    );
+    common::assert_error_blocks_match_kotlinc(&sources, &reference_args);
+}

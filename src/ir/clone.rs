@@ -580,6 +580,7 @@ fn remap_direct_children(expression: &mut IrExpr, mut map: impl FnMut(ExprId) ->
         | IrExpr::ReifiedClassMarker { .. }
         | IrExpr::UnitInstance
         | IrExpr::CurrentContinuation
+        | IrExpr::AbsentArgument { .. }
         | IrExpr::InlineFrameMarker => {}
     }
 }
@@ -679,6 +680,9 @@ fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId) {
     }
     if ir.call_operand_bindings.contains(&source) {
         ir.call_operand_bindings.insert(target);
+    }
+    if ir.argument_evaluation_bindings.contains(&source) {
+        ir.argument_evaluation_bindings.insert(target);
     }
     if ir.invocation_operand_bindings.contains(&source) {
         ir.invocation_operand_bindings.insert(target);

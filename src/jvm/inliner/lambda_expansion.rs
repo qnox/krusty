@@ -14,6 +14,7 @@ use crate::jvm::bytecode_passes::descriptors;
 use crate::jvm::method_node::{Category, Insn, LabelId, LocalVariable, MethodNode, Node};
 
 use super::functional_arguments::is_invoke_on_lambda;
+use super::inline_scopes::{self, InlineScopes};
 use super::local_sorter::Sorter;
 use super::{preparation, returns, InlineError, Parameter, Parameters};
 
@@ -285,12 +286,16 @@ impl LabelImport {
 
 /// The body with its lambdas expanded and every local renumbered, its lines mapped into the
 /// caller's source map. `invokes` names the lambda each `FunctionN.invoke` of the body calls.
+/// `scopes` numbers each lambda's scopes as it is inlined; kotlinc renames the lambda's own node,
+/// so a lambda invoked again is numbered from the names its previous expansion gave it.
 pub(super) fn expand(
     node: &MethodNode,
     context: &Context<'_>,
     invokes: Vec<Option<usize>>,
     lines: &mut dyn SourceLines,
+    mut scopes: Option<&mut InlineScopes>,
 ) -> Result<Expanded, InlineError> {
+    let mut numbered_lambdas: Vec<Option<MethodNode>> = vec![None; context.lambdas.len()];
     let mut out = node.clone();
     out.nodes = Vec::with_capacity(node.nodes.len());
     out.local_variables = Vec::new();
@@ -334,7 +339,17 @@ pub(super) fn expand(
                         let Insn::Method { desc, .. } = insn else {
                             unreachable!("an invoke is a method instruction");
                         };
-                        expansion.expand(desc, &mut out, &mut sorter, next_local_index, lines)?;
+                        expansion.expand(
+                            desc,
+                            &mut out,
+                            &mut sorter,
+                            next_local_index,
+                            lines,
+                            scopes.as_deref_mut().map(|scopes| Numbering {
+                                scopes,
+                                node: &mut numbered_lambdas[lambda],
+                            }),
+                        )?;
                     }
                 }
             }
@@ -375,6 +390,13 @@ pub(super) struct Expanded {
     pub lambda_blocks: usize,
 }
 
+/// The caller's scope numbering at one `invoke`, and the lambda's node as earlier expansions
+/// numbered it.
+struct Numbering<'a> {
+    scopes: &'a mut InlineScopes,
+    node: &'a mut Option<MethodNode>,
+}
+
 /// One `invoke` of a lambda, being replaced by the lambda's body.
 struct Expansion<'a> {
     context: &'a Context<'a>,
@@ -408,6 +430,7 @@ impl Expansion<'_> {
         sorter: &mut Sorter,
         next_local_index: i32,
         lines: &mut dyn SourceLines,
+        numbering: Option<Numbering<'_>>,
     ) -> Result<(), InlineError> {
         let types = &self.lambda.parameter_types;
         let arguments = descriptors::argument_types(invoke_desc)
@@ -461,7 +484,26 @@ impl Expansion<'_> {
             out.nodes.push(inline_call_marker(true));
         }
         let slot = u16::try_from(value_param_shift).map_err(|_| InlineError::LambdaArity)?;
-        let inlined = inline_lambda(self.lambda, self.context.parameters, slot)?;
+        let (lambda_node, nested_markers) = match numbering {
+            Some(Numbering { scopes, node }) => {
+                scopes.call_site_line = match u16::try_from(self.current_line) {
+                    Err(_) => 0,
+                    Ok(line) if self.context.inline_only => i32::from(line),
+                    Ok(line) => lines.map(line).map_or(-1, i32::from),
+                };
+                let node = node.get_or_insert_with(|| self.lambda.node.clone());
+                scopes.number(node, false);
+                let markers = inline_scopes::nested_markers(node);
+                (&*node, Some(markers))
+            }
+            None => (&self.lambda.node, None),
+        };
+        let mut inlined = inline_lambda(self.lambda, lambda_node, self.context.parameters, slot)?;
+        if let Some(markers) = nested_markers {
+            inline_scopes::map_call_site_lines(&mut inlined, &markers, |line| {
+                self.lambda_line(lines, line)
+            });
+        }
         let import = LabelImport::new(&inlined, out);
         for block in &inlined.try_catch_blocks {
             out.try_catch_blocks
@@ -528,11 +570,12 @@ impl Expansion<'_> {
 /// jump to the end, leaving its value on the stack.
 fn inline_lambda(
     lambda: &Lambda,
+    lambda_node: &MethodNode,
     host: &Parameters,
     value_param_shift: u16,
 ) -> Result<MethodNode, InlineError> {
     let parameters = lambda_parameters(lambda, host);
-    let mut node = lambda.node.clone();
+    let mut node = lambda_node.clone();
     super::try_blocks::move_try_starts_to_their_first_instruction(&mut node)?;
     let mut node = super::preprocess_node_before_inline(node)?;
     preparation::remove_fake_variable_initializations(&mut node);
@@ -547,7 +590,7 @@ fn inline_lambda(
     let Expanded {
         mut node,
         lambda_blocks,
-    } = expand(&node, &context, invokes, &mut CallerLines)?;
+    } = expand(&node, &context, invokes, &mut CallerLines, None)?;
     super::try_blocks::order_around_finally_blocks(&mut node, lambda_blocks);
     preparation::remove_closure_assertions(&mut node)?;
     let mut node = remap_lambda(&node, lambda, host, value_param_shift)?;

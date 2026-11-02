@@ -87,6 +87,17 @@ pub(super) fn build_class_metadata_with_facts(
             d2: vec![],
         });
     }
+    // A class a plugin generates with no declaration behind it has a synthetic-class record, whose
+    // `xi` carries no visibility, since no lowering of kotlinc's own made it.
+    if ir.is_declarationless_class(c.fq_name_id()) {
+        return Some(KotlinMetadata {
+            k: 3,
+            stamp: opts.metadata_stamp(),
+            xi: super::metadata_policy::class_xi(ir, c),
+            d1: vec![],
+            d2: vec![],
+        });
+    }
     if !class_metadata_common_shape_admitted(ir, c) {
         return None;
     }

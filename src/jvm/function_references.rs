@@ -251,6 +251,12 @@ fn realize_adapter_reference(
             .collect()
     });
     let mut module_reflection = None;
+    let reflected_function = match reference.target {
+        crate::ir::IrCallableReferenceTarget::Module(target) => {
+            ir.checked_callable_functions.get(&target).copied()
+        }
+        _ => None,
+    };
     let reflected = match reference.target {
         crate::ir::IrCallableReferenceTarget::Module(_) => crate::ir::ReflectedCallable::Source,
         crate::ir::IrCallableReferenceTarget::Local { function, .. } => {
@@ -463,6 +469,7 @@ fn realize_adapter_reference(
         function_type: reference.function_type.non_null(),
         reflection_signature,
         reflected,
+        reflected_function,
         invoke_renamed: false,
     });
     let class = ir.add_class(class);

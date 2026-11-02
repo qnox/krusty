@@ -708,6 +708,7 @@ mod tests {
             declaration_name: None,
             access: crate::libraries::ClassifierAccess::Public,
             is_kotlin: true,
+            mapped_builtin: false,
             source: false,
             outer_instance: None,
             kind: crate::libraries::TypeKind::Interface,

@@ -114,6 +114,8 @@ pub use inline_body::{
     InlineCollectionCapacity, InlineCollectionLocalNames, InlineIterationIndex,
     InlineIterationTraversal,
 };
+#[cfg(test)]
+pub(crate) use klib_body_class::test_fixture as klib_body_class_fixture;
 pub(crate) use klib_body_class::{KlibBodyClassContract, KlibBodyClassParameters};
 pub use member_flags::LmFlags;
 pub(crate) use metadata_normalization::{
@@ -1001,6 +1003,12 @@ pub struct LibraryCallable {
     /// placeholders for the omitted trailing ones, an `int` bit-mask (a bit set per omitted parameter),
     /// and a `null` marker — the JVM realization of default arguments. `false` for an ordinary call.
     pub default_call: bool,
+    /// The declaration fills its own omitted arguments: a dependency declaration whose defaults
+    /// are part of its declaring module, where that module's compilation realizes them as one
+    /// entry taking every operand and a mask of the omitted ones. A call omitting a computed
+    /// default to such a declaration keeps the declaration's identity, with
+    /// [`Self::default_call`] set; no platform `$default` symbol is named.
+    pub defaults_from_declaration: bool,
     /// For a generic `vararg` callable resolved with a bound element type (`listOf<Long>(…)` →
     /// `Long`): the *logical* element type the trailing arguments adapt to. `None` for a non-vararg
     /// call or when the element type is not recovered. The backend uses it to coerce each packed
@@ -2268,6 +2276,12 @@ pub struct LibraryType {
     /// map pairs them. Published by the provider that owns that map; `None` for every other
     /// classifier.
     pub mapped_collection: Option<crate::types::MappedCollection>,
+    /// This classifier is a Kotlin builtin declaration that the platform realizes by a distinct
+    /// class (`kotlin/collections/List` by `java/util/List`), as the platform's builtin class map
+    /// pairs them. It is a Kotlin declaration although its class carries no Kotlin metadata.
+    /// Published by the provider that owns that map; `false` for every other classifier,
+    /// including a platform class that merely shares a builtin's package.
+    pub mapped_builtin: bool,
     /// For an annotation classifier: each element that declares a default, as the provider's
     /// declaration format records it. A module annotation publishes none; its defaults are
     /// checked default expressions.
@@ -2375,6 +2389,7 @@ impl LibraryType {
             retention: None,
             annotation_targets: None,
             mapped_collection: None,
+            mapped_builtin: false,
             annotation_element_defaults: Vec::new(),
             deprecation: None,
         }
@@ -2671,6 +2686,7 @@ mod tests {
             retention: None,
             annotation_targets: None,
             mapped_collection: None,
+            mapped_builtin: false,
             annotation_element_defaults: Vec::new(),
             deprecation: None,
         };

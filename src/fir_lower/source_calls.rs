@@ -2099,14 +2099,7 @@ impl BodyLowering<'_> {
         if suspend {
             self.ir.suspend_calls.insert(call, signature.result.get());
         }
-        Some(Ok(if statements.is_empty() {
-            call
-        } else {
-            self.ir.add_expr(IrExpr::Block {
-                stmts: statements,
-                value: Some(call),
-            })
-        }))
+        Some(Ok(self.wrap_call_statements(statements, call)))
     }
 
     /// Consume the checker's parameter mapping once for all ordinary source calls. This is the
@@ -2262,6 +2255,7 @@ impl BodyLowering<'_> {
             named: false,
         });
         self.ir.call_operand_bindings.insert(declaration);
+        self.ir.argument_evaluation_bindings.insert(declaration);
         statements.push(declaration);
         let read = self.ir.add_expr(IrExpr::GetValue(temporary));
         // This read is generated while normalizing checked argument evaluation order, so it has no
