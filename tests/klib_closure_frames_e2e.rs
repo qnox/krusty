@@ -183,7 +183,7 @@ enum DependencyConsumer {
 /// Observe the same common preparation Native requests without claiming its imported-class
 /// storage implementation can execute the construction. Every capability is delegated to Native.
 struct ConstructorIdentityProbe {
-    native: krusty::native::CraneliftBackend,
+    native: krusty_native::CraneliftBackend,
     producer_module: String,
     initialization_layout: bool,
 }
@@ -383,9 +383,9 @@ fn assert_official_dependency_closures(
         &krusty::features::LangFeatures::new(),
         &mut diags,
     );
-    let target = krusty::native::NativeTarget::host().expect("host Native target");
-    let backend = krusty::native::CraneliftBackend::new(target)
-        .with_entry(krusty::native::Entry::Box)
+    let target = krusty_native::NativeTarget::host().expect("host Native target");
+    let backend = krusty_native::CraneliftBackend::new(target)
+        .with_entry(krusty_native::Entry::Box)
         .verified();
     let stems = ["Consumer".to_owned()];
     let artifacts = match purpose {
@@ -446,7 +446,7 @@ fn assert_official_dependency_closures(
         .filter_map(|(name, bytes)| name.ends_with(".o").then_some(bytes))
         .collect::<Vec<_>>();
     assert!(!objects.is_empty());
-    let image = krusty::native::link_program(
+    let image = krusty_native::link_program(
         &objects.iter().map(Vec::as_slice).collect::<Vec<_>>(),
         target,
     )

@@ -106,7 +106,11 @@ fn only_a_policy_that_counts_until_steps_skips_building_the_progression() {
     let source = "fun sink(x: Int) {}\n\
         fun stepped() { for (i in 0 until 16 step 2) { sink(i) } }\n";
     let jvm = realized_source(source, "UntilSteps", crate::jvm::COUNTED_LOOPS);
-    let native = realized_source(source, "UntilSteps", crate::native::COUNTED_LOOPS);
+    let counted = CountedLoopPolicy {
+        until_steps: crate::backend::counted_loops::UntilSteps::Counted,
+        ..crate::jvm::COUNTED_LOOPS
+    };
+    let native = realized_source(source, "UntilSteps", counted);
     assert_eq!(stored_progressions(&jvm), 1);
     assert_eq!(stored_progressions(&native), 0);
 }

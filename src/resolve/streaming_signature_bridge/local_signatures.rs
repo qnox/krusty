@@ -131,7 +131,7 @@ pub(crate) fn publish_checked_local_signatures_in_pass_two_root(
     )
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn publish_checked_local_signatures(
     file: &File,
     source: crate::fir::SourceFileId,

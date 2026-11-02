@@ -4,13 +4,13 @@
 //! interpretation stay in the declaration decoder that owns each message kind.
 
 /// A protobuf wire-format cursor over a message body.
-pub(crate) struct Pb<'a> {
+pub struct Pb<'a> {
     b: &'a [u8],
     i: usize,
 }
 
 impl<'a> Pb<'a> {
-    pub(crate) fn new(bytes: &'a [u8]) -> Self {
+    pub fn new(bytes: &'a [u8]) -> Self {
         Self { b: bytes, i: 0 }
     }
 
@@ -18,7 +18,7 @@ impl<'a> Pb<'a> {
         self.i
     }
 
-    pub(crate) fn varint(&mut self) -> Option<u64> {
+    pub fn varint(&mut self) -> Option<u64> {
         let mut value = 0u64;
         let mut shift = 0;
         loop {
@@ -35,13 +35,13 @@ impl<'a> Pb<'a> {
         }
     }
 
-    pub(crate) fn bytes(&mut self, length: usize) -> Option<&'a [u8]> {
+    pub fn bytes(&mut self, length: usize) -> Option<&'a [u8]> {
         let bytes = self.b.get(self.i..self.i.checked_add(length)?)?;
         self.i += length;
         Some(bytes)
     }
 
-    pub(crate) fn at_end(&self) -> bool {
+    pub fn at_end(&self) -> bool {
         self.i >= self.b.len()
     }
 
@@ -68,7 +68,7 @@ impl<'a> Pb<'a> {
 }
 
 /// Read a packed repeated integer field atomically.
-pub(crate) fn packed_varints(body: &[u8]) -> Option<Vec<u64>> {
+pub fn packed_varints(body: &[u8]) -> Option<Vec<u64>> {
     let mut protobuf = Pb::new(body);
     let mut values = Vec::new();
     while !protobuf.at_end() {

@@ -37,14 +37,14 @@
 //! unverified.
 
 mod class_vtable;
-#[cfg(test)]
-pub(crate) mod fixtures;
+#[cfg(any(test, feature = "test-support"))]
+pub mod fixtures;
 mod hierarchy;
 mod members;
-pub(crate) mod module_classes;
-pub(crate) mod module_interfaces;
-pub(crate) mod module_slots;
-pub(crate) mod planned_itable;
+pub mod module_classes;
+pub mod module_interfaces;
+pub mod module_slots;
+pub mod planned_itable;
 mod planned_vtable;
 #[cfg(test)]
 mod tests;
@@ -55,13 +55,13 @@ use crate::fir::ResolvedPropertyOverrideTarget;
 use crate::ir::{ClassId, FunId, IrFile};
 use crate::types::{Ty, TypeName};
 
-pub(crate) use members::{function_key, local_property_target};
+pub use members::{function_key, local_property_target};
 
 /// The construct a table declined, phrased for a diagnostic.
 pub(crate) type Unsupported = String;
 
 /// What a target answers about how it carries values, which is all the tables need to know of it.
-pub(crate) trait Representation {
+pub trait Representation {
     /// Whether a value of type `a` and one of type `b` are carried alike, so a member declared
     /// with one can be implemented with the other and called through the same slot.
     fn same(&self, a: Ty, b: Ty) -> bool;
@@ -75,7 +75,7 @@ pub(crate) trait Representation {
 
 /// Which of `kotlin.Any`'s three members a slot answers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum AnyMember {
+pub enum AnyMember {
     Equals,
     HashCode,
     ToString,
@@ -87,7 +87,7 @@ impl AnyMember {
         [Self::Equals, Self::HashCode, Self::ToString];
 
     /// The slot every table holds this member in.
-    pub(crate) fn slot(self) -> u32 {
+    pub fn slot(self) -> u32 {
         match self {
             Self::Equals => 0,
             Self::HashCode => 1,
@@ -98,7 +98,7 @@ impl AnyMember {
 
 /// What a table slot holds.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum Slot {
+pub enum Slot {
     /// `kotlin.Any`'s own member, which no class of the hierarchy overrides. The target decides
     /// what realizes it: the base the root class extends may own a rendering of its own.
     AnyMember(AnyMember),
@@ -181,7 +181,7 @@ pub(crate) enum Slot {
 
 /// The identity of a virtual member, independent of which class's implementation fills it.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum SlotKey {
+pub enum SlotKey {
     /// `kotlin.Any`'s slots, by number.
     Any(u32),
     /// A method, by its implementation in some class; an override registers under its own id too,
@@ -195,7 +195,7 @@ pub(crate) enum SlotKey {
 
 /// One class's place in the hierarchy and its dispatch table.
 #[derive(Clone, Debug)]
-pub(crate) struct ClassTable {
+pub struct ClassTable {
     /// The superclass in this file, or `None` for a class extending `kotlin.Any` or a base the
     /// target owns.
     pub superclass: Option<ClassId>,
@@ -212,10 +212,10 @@ pub(crate) struct ClassTable {
 }
 
 /// How many slots `kotlin.Any` occupies at the front of every table.
-pub(crate) const ANY_SLOTS: u32 = 3;
+pub const ANY_SLOTS: u32 = 3;
 
 /// The table number every function value's body occupies: right after `kotlin.Any`'s three.
-pub(crate) const FUNCTION_SLOT: u32 = 3;
+pub const FUNCTION_SLOT: u32 = 3;
 
 /// `kotlin.Any`'s table, the prefix of every class's.
 fn any_vtable() -> (Vec<Slot>, HashMap<SlotKey, u32>) {
@@ -230,7 +230,7 @@ fn any_vtable() -> (Vec<Slot>, HashMap<SlotKey, u32>) {
 /// The class tables of every class in `ir`, with the interface members' module-wide numbers in a
 /// table of each class's own ([`planned_itable`]) rather than in its class table. An interface's
 /// class table keeps only `kotlin.Any`'s slots and the function slot.
-pub(crate) fn build_numbered(
+pub fn build_numbered(
     representation: &dyn Representation,
     ir: &IrFile,
     plan: &module_slots::ModuleSlotPlan,
@@ -257,7 +257,7 @@ pub(crate) fn build_numbered(
 
 /// [`build_numbered`]'s answer.
 #[derive(Debug)]
-pub(crate) struct NumberedClassTables {
+pub struct NumberedClassTables {
     pub tables: Vec<ClassTable>,
     pub order: Vec<ClassId>,
     /// Every interface of this file each class implements, transitively. Indexed by `ClassId`.

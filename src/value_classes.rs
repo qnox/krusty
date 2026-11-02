@@ -9,7 +9,7 @@ use crate::fx_hash::{HashMap, HashSet};
 use crate::types::{Ty, TypeName};
 
 /// Exact value-class classifier identity to its declared underlying semantic type.
-pub(crate) type UnderlyingTypes = HashMap<TypeName, Ty>;
+pub type UnderlyingTypes = HashMap<TypeName, Ty>;
 
 /// Target policy consulted only when a nullable value-class occurrence is reached.
 ///
@@ -17,7 +17,7 @@ pub(crate) type UnderlyingTypes = HashMap<TypeName, Ty>;
 /// occurrence, a backend decides whether its carrier can preserve all semantic values and the
 /// additional outer `null`. The common traversal never equates "reference" with any particular
 /// target representation.
-pub(crate) trait RepresentationPolicy {
+pub trait RepresentationPolicy {
     fn project_nullable(
         &self,
         classifier: TypeName,
@@ -30,7 +30,7 @@ pub(crate) trait RepresentationPolicy {
 ///
 /// The returned [`Ty`] is still a semantic type. Selecting a machine carrier, box, storage layout,
 /// or emitted signature remains the backend's responsibility.
-pub(crate) fn project_underlying<P: RepresentationPolicy + ?Sized>(
+pub fn project_underlying<P: RepresentationPolicy + ?Sized>(
     ty: Ty,
     declarations: &UnderlyingTypes,
     policy: &P,
@@ -68,7 +68,7 @@ pub(crate) fn project_underlying<P: RepresentationPolicy + ?Sized>(
 /// This is the provider-neutral distinguishability constraint for a nullable outer value class:
 /// when true, an underlying `null` value and the outer value class's own `null` are semantically
 /// distinct. Backends decide how their carrier preserves that distinction.
-pub(crate) fn underlying_chain_accepts_null(ty: Ty, declarations: &UnderlyingTypes) -> bool {
+pub fn underlying_chain_accepts_null(ty: Ty, declarations: &UnderlyingTypes) -> bool {
     fn accepts(ty: Ty, declarations: &UnderlyingTypes, seen: &mut HashSet<TypeName>) -> bool {
         if ty.is_nullable() {
             return true;
@@ -125,7 +125,7 @@ pub(crate) fn terminal_underlying(
 /// Whether every declared underlying chain terminates outside the value-class declaration graph.
 /// Providers/backends must reject a cyclic graph before asking a target policy to project it; an
 /// arbitrary cycle edge is not a valid carrier choice on any target.
-pub(crate) fn declarations_are_acyclic(declarations: &UnderlyingTypes) -> bool {
+pub fn declarations_are_acyclic(declarations: &UnderlyingTypes) -> bool {
     fn visit(
         classifier: TypeName,
         declarations: &UnderlyingTypes,

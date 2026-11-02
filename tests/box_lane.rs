@@ -189,13 +189,13 @@ pub enum Libraries {
 
 struct PlatformLibraries {
     semantics: Box<dyn krusty::libraries::SemanticPlatform>,
-    native_imports: Vec<krusty::native::ImportLibrary>,
+    native_imports: Vec<krusty_native::ImportLibrary>,
 }
 
 /// Target artifacts and the frozen Native library facts selected by the same compilation inputs.
 pub struct CompiledProgram {
     pub artifacts: Vec<Artifact>,
-    pub native_imports: Vec<krusty::native::ImportLibrary>,
+    pub native_imports: Vec<krusty_native::ImportLibrary>,
 }
 
 impl Libraries {
@@ -330,15 +330,15 @@ fn open_klib_inputs(
 ) -> Result<
     (
         krusty::klib_libraries::KlibLibraries,
-        Vec<krusty::native::ImportLibrary>,
+        Vec<krusty_native::ImportLibrary>,
     ),
     String,
 > {
     if target == krusty::compilation_target::CompilationTarget::Native {
-        let native_target = krusty::native::NativeTarget::host()
+        let native_target = krusty_native::NativeTarget::host()
             .ok_or_else(|| "the host has no Native target".to_string())?;
-        return krusty::native::NativeKlibInputs::open(inputs, native_target)
-            .map(krusty::native::NativeKlibInputs::into_parts)
+        return krusty_native::NativeKlibInputs::open(inputs, native_target)
+            .map(krusty_native::NativeKlibInputs::into_parts)
             .map_err(|error| error.to_string());
     }
     krusty::klib_libraries::KlibLibraries::open(inputs)
@@ -368,7 +368,7 @@ thread_local! {
         Vec<(
             krusty::compilation_target::CompilationTarget,
             krusty::klib_libraries::KlibLibraries,
-            Vec<krusty::native::ImportLibrary>,
+            Vec<krusty_native::ImportLibrary>,
         )>,
     > = const { std::cell::RefCell::new(Vec::new()) };
 }
@@ -464,7 +464,7 @@ pub fn analyze_module(
     (
         krusty::frontend::StreamingSourceSetAnalysis,
         Vec<String>,
-        Vec<krusty::native::ImportLibrary>,
+        Vec<krusty_native::ImportLibrary>,
     ),
     Outcome,
 > {

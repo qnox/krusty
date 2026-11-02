@@ -33,7 +33,7 @@ impl BodyFirChecker<'_> {
     /// This runs while checked FIR still owns the resolved receiver identity. Later inline
     /// staging may turn the value into a local read, so consumers must use the published
     /// classifier rather than recover singleton authority from expression syntax.
-    pub(super) fn authenticated_singleton_receiver(
+    pub fn authenticated_singleton_receiver(
         &self,
         receiver: Option<&FirReceiver>,
         expected: Ty,

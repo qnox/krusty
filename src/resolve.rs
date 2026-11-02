@@ -417,10 +417,11 @@ pub(crate) use streaming_signature_bridge::{
     install_streamed_plugin_declarations, publish_checked_default_local_signatures,
     publish_checked_inline_local_signatures, publish_checked_local_signatures_in_pass_two_root,
 };
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) use streaming_signature_bridge::publish_checked_local_signatures;
 #[cfg(test)]
 pub(crate) use streaming_signature_bridge::{
-    publish_checked_local_signatures, publish_checked_local_signatures_in_active_root,
-    publish_discovered_local_capture_declarations,
+    publish_checked_local_signatures_in_active_root, publish_discovered_local_capture_declarations,
 };
 use type_join::join_type_projection;
 

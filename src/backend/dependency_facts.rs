@@ -10,8 +10,8 @@
 
 mod references;
 
-#[cfg(test)]
-pub(crate) use references::referenced_dependencies;
+#[cfg(any(test, feature = "test-support"))]
+pub use references::referenced_dependencies;
 
 use crate::fx_hash::HashMap;
 use std::collections::hash_map::Entry;
@@ -103,7 +103,7 @@ pub struct BackendCallableFact {
     pub(crate) klib_body_class_contract: Option<crate::libraries::KlibBodyClassContract>,
     pub(crate) klib_body_accessor: Option<crate::libraries::KlibBodyAccessor>,
     pub(crate) klib_body_vararg_index: Option<usize>,
-    pub(crate) klib_body_parameter_defaults: Option<crate::libraries::ParamFlags>,
+    pub klib_body_parameter_defaults: Option<crate::libraries::ParamFlags>,
     /// Qualified identities of the annotations the provider recorded on this declaration. A
     /// compiler plugin keys its own calling convention on them (Compose's `@Composable`).
     pub annotations: Box<[TypeName]>,
@@ -159,7 +159,7 @@ impl BackendCallableFact {
     /// The serialized receiver coordinate retained by an associated companion extension body.
     /// Source calls have no receiver operand; a target may insert an inert reference only when
     /// this exact provider contract and the lowered body's receiver effect are both present.
-    pub(crate) fn klib_body_companion_receiver_position(&self) -> Option<usize> {
+    pub fn klib_body_companion_receiver_position(&self) -> Option<usize> {
         self.klib_body_companion_receiver
             .as_ref()
             .map(|_| self.context_count)
@@ -648,7 +648,7 @@ impl CheckedBackendCallables {
     }
 
     /// Exact singleton dispatch chosen for this checked call edge, if it has one.
-    pub(crate) fn singleton_dispatch(
+    pub fn singleton_dispatch(
         &self,
         expression: crate::ir::ExprId,
     ) -> Option<SingletonDispatch> {

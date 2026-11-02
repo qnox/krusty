@@ -53,7 +53,7 @@ pub use compiled_inline_calls::{CompiledInlineOperands, SameModuleInlining};
 mod constants;
 mod constructors;
 mod default_arguments;
-pub(crate) use default_arguments::module_override_callable;
+pub use default_arguments::module_override_callable;
 mod enum_switch_whens;
 pub(crate) use enum_switch_whens::EnumSwitchWhen;
 mod emitted_body_roots;
@@ -92,7 +92,7 @@ mod package_declarations;
 mod progression;
 mod properties;
 mod property_layouts;
-pub(crate) mod referenced_classifiers;
+pub mod referenced_classifiers;
 mod references;
 mod reified_markers;
 mod sam_target;
@@ -839,7 +839,7 @@ pub struct IrCtorArg {
     pub provenance: IrCtorParameterProvenance,
     /// Semantic closure coordinate of a capture parameter. Absent for source parameters and for
     /// the enclosing instance, whose role is [`IrCtorParameterProvenance::EnclosingInstance`].
-    pub(crate) capture_identity: Option<crate::fir::ClassCaptureIdentity>,
+    pub capture_identity: Option<crate::fir::ClassCaptureIdentity>,
 }
 
 /// The executable scope a local, anonymous or generated class is declared in. A backend realizes it
@@ -1362,7 +1362,7 @@ pub struct IrFile {
     pub functions: Vec<IrFunction>,
     /// Target-neutral selected-call templates for local delegated properties. These are semantic
     /// plans, not function declarations: a backend may realize them without repeating resolution.
-    pub(crate) local_delegate_plans: Vec<IrLocalDelegatePlan>,
+    pub local_delegate_plans: Vec<IrLocalDelegatePlan>,
     /// Stable declaration identity to the file-wide plan arena. Nested callables access the
     /// declaring property's plan without copying it or manufacturing another helper.
     pub(crate) local_delegate_plan_ids:
@@ -1433,7 +1433,7 @@ pub struct IrFile {
     pub checked_classifier_classes: crate::fx_hash::HashMap<crate::fir::DeclarationId, ClassId>,
     /// Backend-neutral lexical naming context for source classifiers declared in executable code.
     /// A target consumes this exact class-id ownership graph and chooses physical spellings.
-    pub(crate) local_class_name_provenance:
+    pub local_class_name_provenance:
         crate::fx_hash::HashMap<ClassId, IrLocalClassNameProvenance>,
     /// The same naming context for each source callable-reference node and each lambda node, by
     /// expression id. A target that realizes one as a class of its own names that class
@@ -1566,7 +1566,7 @@ pub struct IrFile {
     /// identity. Their `$default` ABI uses the ordinary function marker rather than
     /// constructor/value-class markers; a target also uses the owner to re-enter a suspend local
     /// without scanning classes or recovering ownership from its generated name.
-    pub(crate) class_static_local_functions: crate::fx_hash::HashMap<FunId, TypeName>,
+    pub class_static_local_functions: crate::fx_hash::HashMap<FunId, TypeName>,
     /// A multifile part's private functions, which the JVM names `<name>$<Part>`, by the name
     /// they had before: a synthetic accessor of one is still named from it (`access$<name>`).
     pub(crate) multifile_private_names: crate::fx_hash::HashMap<FunId, String>,
@@ -1701,7 +1701,7 @@ pub struct IrFile {
     /// Exact `SetField` expression identities that realize a source property declaration's
     /// initializer. A later assignment can target the same field with the same value, so backend
     /// storage passes must consume this linkage instead of recognizing stores by shape or spelling.
-    pub(crate) property_initializer_stores: crate::fx_hash::HashSet<ExprId>,
+    pub property_initializer_stores: crate::fx_hash::HashSet<ExprId>,
     /// Sparse `ExprId` → 1-based source line for the `LineNumberTable`: statement roots, loop
     /// updates, and the implicit `Unit` return (the block's closing-brace line, kotlinc's mapping).
     /// Absent = no line mark starts at that expression.
@@ -2834,7 +2834,7 @@ mod debug_lines;
 mod debug_locals;
 mod external_overrides;
 mod generated_members;
-pub(crate) use data_class_members::IrDataClassMemberRole;
+pub use data_class_members::IrDataClassMemberRole;
 pub(crate) use debug_lines::UnitBodyExit;
 pub use debug_locals::{IrCatchBinding, IrLambdaForm, IrLambdaOrigin};
 pub(crate) use debug_locals::{IrDebugLocalProvenance, IrInlineLocalRole};

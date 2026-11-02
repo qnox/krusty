@@ -315,7 +315,7 @@ fn diagnostic_streamed_state(
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl StreamedPassState {
     /// Same-parse adapter for focused FIR unit tests. Production discovers bodies only inside the
     /// bounded Pass-2 callback; tests that intentionally retain a whole AST can enumerate that live

@@ -26,7 +26,7 @@ impl Entry {
     /// The function `ir` starts this kind of program in, as the frontend selected it, and its
     /// recorded parameter form. Backends consume that form according to their representation
     /// support; they never reselect the declaration from its spelling.
-    pub(crate) fn selected(
+    pub fn selected(
         self,
         ir: &crate::ir::IrFile,
     ) -> Option<(crate::ir::FunId, crate::ir::MainEntryParameters)> {

@@ -9,7 +9,7 @@ use crate::types::TypeName;
 /// [`FunId`]. Backends consume that identity directly; neither a physical rename nor a coincidental
 /// source spelling can change which declaration owns the role.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(crate) enum IrDataClassMemberRole {
+pub enum IrDataClassMemberRole {
     /// Zero-based primary-constructor property ordinal.
     Component(u32),
     Copy,
@@ -19,7 +19,7 @@ pub(crate) enum IrDataClassMemberRole {
 }
 
 impl IrFile {
-    pub(crate) fn record_data_class_member(
+    pub fn record_data_class_member(
         &mut self,
         owner: TypeName,
         role: IrDataClassMemberRole,
