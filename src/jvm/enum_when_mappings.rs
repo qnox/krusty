@@ -74,10 +74,12 @@ impl EnumWhenLowering {
         let mut registrations = nested.to_vec();
         registrations.extend(provider.claims.iter().cloned());
         let read = ir.add_expr(IrExpr::GetValue(subject_when.subject));
+        let source_order = ir.when_source_order(subject_when.when);
         let mapped = ir.add_expr(IrExpr::EnumSwitchOrdinal {
             classifier: subject_when.classifier,
             subject: read,
             registrations: registrations.into_boxed_slice(),
+            source_order,
         });
         let init = if subject_when.nullable {
             // `irIfNull(subject, -1, <mapping>[subject.ordinal()])`.

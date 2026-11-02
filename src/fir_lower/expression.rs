@@ -1243,17 +1243,14 @@ impl BodyLowering<'_> {
                 subject_variable,
                 branches,
                 deeply_exhaustive,
-            } => {
-                let line = self.body.expression_debug_lines(expression_id).source;
-                self.when_expression(
-                    *subject,
-                    *subject_variable,
-                    branches,
-                    expression.ty.get(),
-                    *deeply_exhaustive,
-                    line,
-                )?
-            }
+            } => self.when_expression(
+                *subject,
+                *subject_variable,
+                branches,
+                expression.ty.get(),
+                *deeply_exhaustive,
+                self.body.expression_debug_lines(expression_id),
+            )?,
             FirExprKind::Block { statements, result } => {
                 let mut lowered_statements = Vec::new();
                 for statement in statements.iter().copied() {

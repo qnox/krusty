@@ -351,6 +351,7 @@ impl Emitter<'_> {
             body: &callee.body,
             reified: &reified,
             defaults: None,
+            same_module: true,
         };
         let call_frame = self.frame.mark();
         let base = self.frame.size().max(code.max_locals);

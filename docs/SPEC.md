@@ -6259,10 +6259,12 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   after an inlined body. Not yet matched: a call on an inlined result that a value-class wrapper
   then unboxes keeps the line on the wrapper. An enum switch reads the `$WhenMappings` table of
   the callee's own class, and kotlinc's inlined copy keeps that read
-  (`getstatic LibKt$WhenMappings.$EnumSwitchMapping$0`); krusty numbers a class's tables as its
-  emission claims them, so a body compiled alone for the call site cannot know that class's
-  numbering, and such a callee is expanded in IR instead (`EnumSwitchInBody`, its own table in the
-  caller's class) rather than failing the emission. Tests: `tests/inline_same_module_bytes_e2e.rs`
+  (`getstatic LibKt$WhenMappings.$EnumSwitchMapping$0`): a class's tables are numbered from its
+  `when`s in source order before any code is emitted, so the body compiled for a same-file callee
+  reads them as its class's own code does, and the inliner keeps a same-module body's
+  `$WhenMappings` read (kotlinc regenerates one only across modules). A callee of another file
+  is still expanded in IR (`ForeignEnumSwitchInBody`, its own table in the caller's class): this
+  file's emission sees only that callee, not the other file's `when`s that number its tables. Tests: `tests/inline_same_module_bytes_e2e.rs`
   (same-file and cross-file calls, a value-class argument, a call on an inlined result, and calls in
   a lambda, a local function, initializers, an `init` block, a secondary constructor and a getter,
   against kotlinc's bytes, and a run; same-file and cross-file enum switches, including a nullable
@@ -10680,7 +10682,16 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   - **Visiting order.** As kotlinc's `visitBlock`, children are visited first: every subject
     `when` nested anywhere in a subject `when` claims its tables and keys before the `when` that
     holds it, which then claims its own entries in branch and clause order. The lowering records
-    these claims on the outer mapping read, which replays them at emission.
+    these claims on the outer mapping read. Across a class, kotlinc visits declarations in source
+    order before generating any code, so a method's `when` claims before a later property
+    initializer's or `init` block's, whatever order they are emitted in. Common lowering records
+    each source `when`'s order key (where it starts in its file); before an emission pass writes
+    any code, the backend numbers each class's tables from the `when`s placed in it, sorted by
+    that key, and emission (and the body of a same-module inline function compiled for its
+    callers) only reads the numbers. A lambda's `when` counts in the class whose code holds it; a
+    suspend lambda and an object expression are classes of their own. A mappings class whose
+    tables code in a non-private inline function's scope reads is part of that function's ABI
+    (`METADATA_PUBLIC_ABI_FLAG` in its `xi`), as kotlinc marks it.
   - **Dispatch.** The rewritten `when` is an `Int` switch: `a, b ->` clauses (an `||` chain) share
     one branch, a key repeated later is dropped and a branch left without a key is unreachable and
     not emitted, and one key remains a comparison. An exhaustive switch without `else` throws
@@ -10690,7 +10701,10 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   (`enum_when_reads_the_facade_mappings_like_kotlinc`,
   `facade_when_mappings_class_is_byte_identical_to_kotlinc`,
   `class_when_reads_its_own_mappings_like_kotlinc`,
-  `class_when_mappings_class_is_byte_identical_to_kotlinc`, `enum_when_mappings_execute`).
+  `class_when_mappings_class_is_byte_identical_to_kotlinc`, `enum_when_mappings_execute`) and
+  `tests/inline_enum_when_mappings_e2e.rs` (source order across a file and a class, an inline
+  function with two tables called before its class's own uses, a same-file inline member, a public
+  inline function's lambda, and another file's callee, against kotlinc's bytes and as runs).
 - **An unsigned integer literal takes its EXPECTED type.** Kotlin types an integer literal from its
   context, unsigned exactly like signed: `val a: UByte = 200u` is a `UByte` the same way
   `val b: Byte = 100` is a `Byte`, and `val c: ULong = 7u` is a `ULong` (verified against the reference

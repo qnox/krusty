@@ -313,6 +313,7 @@ impl Emitter<'_> {
             body: &body,
             reified,
             defaults: defaults.as_ref(),
+            same_module: false,
         };
         self.inline_call_with_body(&inline_call, base, code)
     }
@@ -602,7 +603,12 @@ impl Emitter<'_> {
         call: &ClasspathInlineCall<'_, '_>,
         code: &mut CodeBuilder,
     ) -> Option<()> {
-        let ClasspathInlineCall { target, args, .. } = *call;
+        let ClasspathInlineCall {
+            target,
+            args,
+            same_module,
+            ..
+        } = *call;
         if code.is_dead() {
             return Some(());
         }
@@ -617,7 +623,7 @@ impl Emitter<'_> {
                 return None;
             }
         };
-        if let Some(shape) = inliner::unsupported_shape(&callee) {
+        if let Some(shape) = inliner::unsupported_shape(&callee, same_module) {
             crate::trace_compiler!("splice", "unified inliner declines {shape:?}");
             return None;
         }
@@ -1851,6 +1857,8 @@ pub(super) struct ClasspathInlineCall<'a, 't> {
     pub reified: &'a crate::jvm::reified_arguments::ReifiedArguments,
     /// The masks of a default bridge call, which resolve the bridge's header before it is inlined.
     pub defaults: Option<&'a inliner::DefaultMasks>,
+    /// The body is the compiled body of a same-module inline function.
+    pub same_module: bool,
 }
 
 /// A call on its way through the port, with what the call site decided per parameter.

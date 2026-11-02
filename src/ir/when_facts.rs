@@ -15,6 +15,11 @@ pub(crate) struct IrWhenFacts {
     /// their `when` keyword. An `if`, and a `when` lowering builds, is not one. kotlinc's JVM codegen
     /// marks that line and a `nop` before the branches of such a `when` unless it becomes a switch.
     pub(crate) source_lines: HashMap<ExprId, u32>,
+    /// Where each source `when` starts among its file's expressions, an order key. kotlinc's
+    /// `MappedEnumWhenLowering` numbers a class's `$WhenMappings` tables, and an enum's keys in
+    /// them, as it visits the class's declarations in source order; a backend that numbers them
+    /// orders the `when`s it places in one class by this key. A copy keeps its source's key.
+    pub(crate) source_order: HashMap<ExprId, u32>,
     /// The `when` each elvis (`a ?: b`) lowers to, as fir2ir builds it, with the elvis's source line
     /// (`0` when it has none): the first branch tests the left value's temporary against `null` and
     /// yields the right side, the `else` yields the left value. A backend whose platform compiler

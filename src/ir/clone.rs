@@ -628,6 +628,9 @@ fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId) {
     if let Some(line) = ir.whens.source_lines.get(&source).copied() {
         ir.whens.source_lines.insert(target, line);
     }
+    if let Some(order) = ir.whens.source_order.get(&source).copied() {
+        ir.whens.source_order.insert(target, order);
+    }
     if let Some(line) = ir.whens.elvises.get(&source).copied() {
         ir.whens.elvises.insert(target, line);
     }

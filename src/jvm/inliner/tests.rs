@@ -477,6 +477,26 @@ fn a_loop_or_a_handler_needs_an_empty_stack() {
 }
 
 #[test]
+fn only_another_modules_when_mappings_read_is_a_shape_to_regenerate() {
+    let mut node = MethodNode::new(ACC_STATIC, "w", "()I");
+    node.nodes = vec![
+        Node::Insn(Insn::Field {
+            op: 0xb2,
+            owner: "DeclarationKt$WhenMappings".into(),
+            name: "$EnumSwitchMapping$0".into(),
+            desc: "[I".into(),
+        }),
+        op(0xbe),
+        op(0xac),
+    ];
+    assert_eq!(
+        unsupported_shape(&node, false),
+        Some(UnsupportedShape::WhenMappings)
+    );
+    assert_eq!(unsupported_shape(&node, true), None);
+}
+
+#[test]
 fn intrinsic_rewrites_require_the_exact_jvm_method_shape() {
     let method = |name: &str, desc: &str, interface: bool| {
         Node::Insn(Insn::Method {
@@ -492,11 +512,11 @@ fn intrinsic_rewrites_require_the_exact_jvm_method_shape() {
     // The exact marker is not refused here: the anonymous class it guards is copied and the
     // marker is removed. A different descriptor or an interface call is not that marker.
     reified.nodes = vec![method("needClassReification", "()V", false)];
-    assert_eq!(unsupported_shape(&reified), None);
+    assert_eq!(unsupported_shape(&reified, false), None);
     reified.nodes = vec![method("needClassReification", "(I)V", false)];
-    assert_eq!(unsupported_shape(&reified), None);
+    assert_eq!(unsupported_shape(&reified, false), None);
     reified.nodes = vec![method("needClassReification", "()V", true)];
-    assert_eq!(unsupported_shape(&reified), None);
+    assert_eq!(unsupported_shape(&reified, false), None);
 
     let mut null_check = MethodNode::new(ACC_STATIC, "n", "(Ljava/lang/Object;)V");
     null_check.nodes = vec![

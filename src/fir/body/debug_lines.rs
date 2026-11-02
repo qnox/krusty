@@ -15,6 +15,7 @@ fn expression_lines(file: &crate::ast::File, span: Span) -> Option<FirExpression
         start: file.expr_lines.get(raw).copied().unwrap_or(0),
         source: file.expr_source_lines.get(raw).copied().unwrap_or(0),
         end: file.expr_end_lines.get(raw).copied().unwrap_or(0),
+        source_order: span.lo,
         positionless: false,
     })
 }
@@ -39,6 +40,10 @@ pub struct FirExpressionDebugLines {
     pub start: u32,
     pub source: u32,
     pub end: u32,
+    /// Where the expression starts among its file's expressions: an order key, compared only with
+    /// another expression of the same file, for a decision kotlinc makes by visiting a file's
+    /// declarations in source order.
+    pub source_order: u32,
     /// kotlinc builds this expression without source offsets, so no line may begin at it: an
     /// implicit context argument, whose call's line is marked only at its dispatch.
     pub positionless: bool,
