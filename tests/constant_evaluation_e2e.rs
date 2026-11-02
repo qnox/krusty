@@ -133,6 +133,68 @@ fn builtin_member_calls_over_constants_fold() {
     );
 }
 
+/// The unsigned value classes' operations and conversions, the signed-to-unsigned conversions,
+/// and `floorDiv`/`mod` are `@IntrinsicConstEvaluation` stdlib declarations, so they fold over
+/// constants like the builtins: `1u + 2u` is `iconst_3`, `3.toUInt()` is `iconst_3`, and
+/// `(7u / 2u).toString()` is `ldc "3"`. Mixed widths compute at the wider operand type and wrap
+/// at the declared result width (`ULong.MAX_VALUE * ULong.MAX_VALUE` is `1uL`), a
+/// floating value converts to an unsigned type saturating, and a division by zero or a
+/// non-constant operand keeps the call.
+#[test]
+fn unsigned_and_floor_operations_over_constants_fold() {
+    assert_matches_kotlinc(
+        "FoldedNumericCalls",
+        "fun sink(value: Any?) {}\n\
+         fun unsigned() {\n\
+         \x20   sink(1u + 2u)\n\
+         \x20   sink((5u - 7u).toString())\n\
+         \x20   sink((7u / 2u).toString())\n\
+         \x20   sink(5u.rem(3u))\n\
+         \x20   sink(2u * 3u - 1u)\n\
+         \x20   sink(1uL + 2uL)\n\
+         \x20   sink(18446744073709551615uL * 18446744073709551615uL)\n\
+         \x20   sink((0uL - 18446744073709551615uL).toString())\n\
+         \x20   sink(18446744073709551615uL * 4294967295u)\n\
+         \x20   sink(3.toUByte() + 4.toUByte())\n\
+         \x20   sink(300u.mod(7.toUByte()))\n\
+         \x20   sink(7u.floorDiv(2u))\n\
+         \x20   sink(1u.compareTo(2.toUByte()))\n\
+         \x20   sink(1u.inv())\n\
+         \x20   sink((0xF0u and 0x3Cu).toString())\n\
+         \x20   sink((1u shl 3).toString())\n\
+         \x20   sink((1u shr 1).toString())\n\
+         }\n\
+         fun conversions() {\n\
+         \x20   sink(3.toUInt())\n\
+         \x20   sink(200.toUByte().toString())\n\
+         \x20   sink(7.toUShort().toString())\n\
+         \x20   sink((-1).toByte().toUInt())\n\
+         \x20   sink(4294967295u.toInt())\n\
+         \x20   sink(5u.toLong())\n\
+         \x20   sink(1u.toULong().toString())\n\
+         \x20   sink((-3.5).toUInt())\n\
+         \x20   sink(1e30.toULong())\n\
+         \x20   sink(18446744073709551615uL.toDouble())\n\
+         \x20   sink(3u.toFloat())\n\
+         }\n\
+         fun floors(x: Int) {\n\
+         \x20   sink(7L.floorDiv(2))\n\
+         \x20   sink((-7).floorDiv(2))\n\
+         \x20   sink((-7).mod(3))\n\
+         \x20   sink(7.mod(-3L))\n\
+         \x20   sink((-7L).mod(3))\n\
+         \x20   sink((-9223372036854775807L - 1L).floorDiv(-1L))\n\
+         \x20   sink((-9223372036854775807L - 1L).mod(-1L))\n\
+         \x20   sink(1.toByte().floorDiv(2.toShort()))\n\
+         \x20   sink(7.5.mod(2.0))\n\
+         \x20   sink((-7.5).mod(2.0))\n\
+         \x20   sink(7.5f.mod(2f))\n\
+         \x20   sink(7.floorDiv(0))\n\
+         \x20   sink(x.floorDiv(2))\n\
+         }\n",
+    );
+}
+
 #[test]
 fn operations_kotlinc_cannot_evaluate_stay_operations() {
     assert_matches_kotlinc(
@@ -259,6 +321,12 @@ fn folded_values_are_kotlin_values() {
                \x20   check(20, \"b\".compareTo(\"abc\") == 1 && \"ab\".compareTo(\"abcd\") == -2)\n\
                \x20   check(21, 4294967295u.compareTo(1u) == 1 && 4294967295u.toString() == \"4294967295\")\n\
                \x20   check(22, null.toString() == \"null\" && (-0.0).toString() == \"-0.0\")\n\
+               \x20   check(23, 5u - 7u == 4294967294u && 300u.mod(7.toUByte()) == 6.toUByte())\n\
+               \x20   check(24, (-7).floorDiv(2) == -4 && (-7).mod(3) == 2 && 7.mod(-3L) == -2L)\n\
+               \x20   check(25, (-1).toByte().toUInt() == 4294967295u && (-3.5).toUInt() == 0u)\n\
+               \x20   check(26, (-7.5).mod(2.0) == 0.5 && 18446744073709551615uL.toDouble() == 1.8446744073709552E19)\n\
+               \x20   check(27, 18446744073709551615uL * 18446744073709551615uL == 1uL && 0uL - 18446744073709551615uL == 1uL)\n\
+               \x20   check(28, (-9223372036854775807L - 1L).floorDiv(-1L) == -9223372036854775807L - 1L && (-9223372036854775807L - 1L).mod(-1L) == 0L)\n\
                \x20   if (failed.length > 0) return \"failed$failed\"\n\
                \x20   return \"${1.0f / 3}|${1e7}|${1e-4}|${100.0}|${'x'}${true}${null}|${7L * 3}\"\n\
                }\n";
