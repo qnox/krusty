@@ -1,5 +1,12 @@
 # krusty — implementation plan
 
+## Classify every IrFile field for expression copies
+
+`copy_expression_facts` destructures `IrFile` exhaustively, and each table-holding field
+implements `InheritedFacts` in its owning module, so a new field cannot be added without deciding
+whether a copy of an expression inherits it. Behavior is unchanged. This is step 0 of
+`docs/PHASE_FACTS.md`; the next steps move positions, types, call selections and roles onto IR nodes.
+
 ## Class-generic dependency method exports
 
 Retain the complete declared self type, including captured parameters, at FIR lowering and consume
@@ -5740,9 +5747,8 @@ regress.
     the caller's. The call site passes the captured values instead of the lambda; code compiled only
     for the object is rolled back from the caller's constant pool (`ClassWriter::checkpoint`). The
     route is decided from the callee's facts before any code is emitted, never by inlining the body
-    on trial: an object whose suspend method lacks the `$$forInline` copy keeps the bridge
-    (`SpliceReason::SuspendMethodWithoutForInlineCopy`), as does a lambda that reaches a private member of the caller (a backing
-    field, a private function, `invokespecial`, a materialized lambda) until kotlinc's synthetic
+    on trial: a lambda that reaches a private member of the caller (a backing
+    field, a private function, `invokespecial`, a materialized lambda) keeps the bridge until kotlinc's synthetic
     accessors are ported. ✅ Lambdas taking or returning a value class (`Continuation.resumeWith`'s
     `Result`): the inline body takes the parameter unboxed (`value_classes::inline_body_slots`) and
     `invoke`'s `Object` is coerced over the Kotlin types (`checkcast` + `unbox-impl`, `box-impl`),
@@ -5762,8 +5768,22 @@ regress.
     takes the inliner. ☐ A suspend callable reference as an inline lambda shape
     (`flatMapLatest(::lookup)`, nowinandroid). ☐ `surroundInvokesWithSuspendMarkersIfNeeded`
     for a captured function value the call does not inline (such a copy is refused).
-    ☐ krusty's own `$$forInline` copy of an object's suspend method in an inline function it
-    compiles.
+    ✅ krusty's own `$$forInline` copy of an object's suspend method that reads a `crossinline`
+    capture, with its public continuation (`suspend_inline_functions::for_inline_copy`). The
+    capture's `crossinline` provenance is recorded by common lowering where the capture is
+    produced (`IrConstructorCapture::crossinline`), so a capture moved through a lambda or an
+    enclosing object keeps the copy. A regenerated method refuses only a suspend lambda it invokes
+    without a `$$forInline` copy; one that passes the lambda on to an object it constructs
+    regenerates that object. A call-site copy remaps the provenance through the expansion's
+    bindings (the selected argument's provenance, kept through operand staging), names its
+    continuations `{copy}$N` and takes its source methods' lines. Still open:
+    a lambda returning an anonymous object takes the object's type for `invoke` instead of the
+    expected function type's `Source<T>`; a reified copy's generic signatures and constructor
+    debug tables differ from kotlinc's regenerated copy; a caller inlining a reified wrapper that
+    constructs such a copy is refused for a literal lambda, and for a function value regenerates
+    the copy from its `next` rather than its `$$forInline` body, failing the reified check at run
+    time (against kotlinc's library too); the copy's continuations are numbered apart from the
+    other classes it declares.
 - ☐ 5. `$default` inline functions (mask expansion) and `finally` blocks around inlined returns.
   Mask expansion and singleton default lambdas (`DefaultLambda`, with reification) are ported;
   a default lambda constructed with captured values and `finally` rewriting remain.
@@ -6522,3 +6542,10 @@ official-producer program and independent JVM-oracle controls.
   carriers distinct from the semantic model; validate full source payloads and the pinned KSP oracle.
 - [ ] Normalize raw dependency annotation defaults using their exact declaration parameter types;
   keep that provider work separate from checked-source publication and scalar wire decoding.
+
+## Admit stored class captures on Wasm
+
+Validate the producer-owned constructor-prefix roles against full IR storage facts, then reuse
+ordinary WasmGC class construction and pre-super stores. Check exact field/type/pair mappings and
+the shared-holder edges; keep forwarded ordinals independent of preceding captures. Cover the
+whole shared programs and malformed storage metadata before extending fieldless or shared captures.

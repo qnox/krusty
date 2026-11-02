@@ -53,7 +53,8 @@ impl ProductionSignatureSemantics<'_> {
         )
         .with_access_context(package, scope.source.raw(), lexical_classes)
         .with_visibility_suppression(self.scope_suppresses_visibility(scope))
-        .with_type_variables(&type_variables);
+        .with_type_variables(&type_variables)
+        .with_eager_lambda_results(file.eager_lambda_analysis);
         select(&resolver).ok_or_else(Self::failure)
     }
 
