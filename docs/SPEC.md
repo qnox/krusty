@@ -6206,9 +6206,18 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   hands an inline callee keeps its parameters' inline frame in the caller's `@DebugMetadata`
   (`inline_route::tests::calls_in_a_suspend_inline_function_stay_expanded`,
   `continuation_spill_order_e2e::a_lambda_declared_inside_an_inline_function_gains_its_frame`).
-  A default argument keeps its calls expanded, and so does a
-  call in an inline function with a literal that reads one of that function's inline parameters at
-  any depth (`InlineParameterInLiteral`):
+  A call in a default argument takes that route too: the `$default` stub of a function, a primary
+  constructor or a secondary constructor evaluates its default expressions as source code, so an
+  inline call there opens the frame it opens in any other body, its `$i$f$` marker store and
+  inlined locals entered in the stub's variable table (a constructor stub keeps the table its own
+  emission recorded rather than the one `add_method` curates for an `<init>` from its class's
+  declarations). An object such a call regenerates is named and enclosed by the stub, as kotlinc's
+  are: `f$default$$inlined$g$1` for a function's stub, `$special` for a constructor's
+  (`escaping_reified_lambda_e2e`). Tests: `tests/inline_call_in_default_argument_e2e.rs` (a
+  same-file callee in each kind of stub, another file's callee, and library callees with
+  lambdas, against kotlinc's bytes and as runs).
+  A call in an inline function with a literal that reads one of that function's inline parameters at
+  any depth (`InlineParameterInLiteral`) stays expanded:
   a caller that expands the function's template splices its own literal for that parameter, which
   reaches a literal only through an expanded body, never through one the backend inlines. Checking
   publishes the values it binds for the function's splice-mode parameters, so an anonymous context

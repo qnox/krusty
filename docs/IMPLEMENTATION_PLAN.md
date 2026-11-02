@@ -5845,9 +5845,16 @@ regress.
     caller's: 1 more box file is byte-identical on 2.4.21
     (`coroutines/featureIntersection/suspendInlineSuspendFinally`), none regresses, and all 7,184
     applicable files run.
+    ✓ Calls in default arguments (`DefaultArgument`): every `$default` stub records the frames of
+    its default expressions' inline calls, the `$i$f$` marker store kept by its variable-table
+    entry, and a constructor stub keeps its own tables instead of the class-curated `<init>` ones.
+    A stub's inline calls regenerate objects under the stub's own name (`f$default$$inlined$…`,
+    `$special` for a constructor's). Not yet matched in a stub: the `$i$a$` marker of a literal
+    that opens the default expression (`= run { … }`), a string template whose operand is an
+    inline call in a constructor's stub, and the place of a constructor's no-argument overload
+    when its default declares an indy lambda.
     ☐ `$default` calls, suspend callees (and the calls a suspend inline function holds),
-    `crossinline` parameters, calls in default arguments, and callee bodies with local classes or
-    enum switches.
+    `crossinline` parameters, and callee bodies with local classes or enum switches.
 - ☐ 7. Delete `InlineBodyPlan` and its resolver/FIR threading once the coroutine state machine runs
   on inlined bytecode (the plans exist only to reach IR before `lower_suspend`).
 

@@ -203,6 +203,28 @@ impl<'a> RegenerationSite<'a> {
         })
     }
 
+    /// The site of `function`'s `$default` stub `method`. kotlinc numbers the copies its default
+    /// expressions' inline calls make under the stub's own name and encloses them in the stub. A
+    /// constructor's stub is a constructor: [`Self::constructor`].
+    pub(in crate::jvm::ir_emit) fn default_stub(
+        ir: &IrFile,
+        function: u32,
+        method: &str,
+        descriptor: &str,
+        symbols: &'a dyn BackendClassifierSource,
+    ) -> RegenerationSite<'a> {
+        RegenerationSite {
+            method: method.to_string(),
+            descriptor: descriptor.to_string(),
+            function: method.to_string(),
+            special: false,
+            public_inline: ir.inline_fns.contains(&function)
+                && !ir.method_visibility(function).is_private(),
+            owner: None,
+            symbols,
+        }
+    }
+
     /// The site of a constructor. kotlinc numbers its regenerated objects under `$special` and
     /// points `EnclosingMethod` at `<init>` with `descriptor`.
     pub(in crate::jvm::ir_emit) fn constructor(
