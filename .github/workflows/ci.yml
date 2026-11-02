@@ -19,7 +19,7 @@ permissions:
 # One run per pull-request or merge-group ref, so an update supersedes its older run. Every master
 # push uses a unique group and remains authoritative evidence even when a newer commit is queued.
 concurrency:
-  group: ci-${{ github.ref == 'refs/heads/master' && github.run_id || github.ref }}
+  group: ci-run-${{ github.ref == 'refs/heads/master' && github.run_id || github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
 
 jobs:
