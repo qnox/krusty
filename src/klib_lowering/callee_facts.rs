@@ -19,6 +19,8 @@ pub struct KlibCalleeFacts<'a> {
     selected: HashSet<&'a KlibDependencyCallable>,
     /// Explicit same-compilation hierarchy evidence for authenticated dependency types.
     class_type_oracle: Option<&'a dyn crate::assignable::TypeOracle>,
+    /// The classifiers whose representation the target owns, and so their singleton values too.
+    target_classifiers: Option<&'a dyn Fn(crate::types::TypeName) -> bool>,
 }
 
 #[derive(Clone)]
@@ -46,6 +48,21 @@ impl<'a> KlibCalleeFacts<'a> {
         self
     }
 
+    pub(crate) fn with_target_classifiers(
+        mut self,
+        represents: &'a dyn Fn(crate::types::TypeName) -> bool,
+    ) -> Self {
+        self.target_classifiers = Some(represents);
+        self
+    }
+
+    /// Whether the target owns the representation of `classifier`, which a body then reads as the
+    /// target's own value rather than through a class this unit materializes.
+    pub(super) fn target_represents(&self, classifier: crate::types::TypeName) -> bool {
+        self.target_classifiers
+            .is_some_and(|represents| represents(classifier))
+    }
+
     pub(super) fn constructor_bound(
         &self,
         parameters: &super::klib_types::KlibTypeParameters,
@@ -62,6 +79,10 @@ impl<'a> KlibCalleeFacts<'a> {
         sup: crate::types::Ty,
     ) -> bool {
         super::type_evidence::ordinary_subtype(self.class_type_oracle, parameters, sub, sup)
+    }
+
+    pub(super) fn same_type(&self, left: crate::types::Ty, right: crate::types::Ty) -> bool {
+        super::type_evidence::same_type(self.class_type_oracle, left, right)
     }
 
     pub(super) fn constructor(

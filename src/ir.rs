@@ -1293,6 +1293,10 @@ pub struct IrSpecializedAnonymousClass {
     pub caller_source_name: String,
     pub inline_callee: crate::fir::CallableId,
     pub inline_callee_source_name: String,
+    /// For each of the callee's operands, by its value slot: the caller's `crossinline` parameter
+    /// the expansion binds it to, when it is one. A copy remaps its captures' provenance through
+    /// it, and so does an object nested in the copy that is specialized later.
+    pub crossinline_operands: Vec<Option<u32>>,
     /// Source function → the function on this copy. Accessor functions materialized after the
     /// copy are added here before bridges and metadata read the copy.
     pub method_clones: crate::fx_hash::HashMap<FunId, FunId>,
@@ -1370,6 +1374,9 @@ pub struct IrFile {
     /// these identities; they must not recover either one from the generated `$suspendImpl`
     /// spelling.
     pub(crate) jvm_suspend_impl_bodies: crate::fx_hash::HashMap<FunId, (TypeName, FunId)>,
+    /// JVM continuation classes, keyed by class id, with the suspend function each one re-enters.
+    /// The class's access and ABI scope are that function's facts.
+    pub(crate) jvm_continuation_functions: crate::fx_hash::HashMap<ClassId, FunId>,
     /// Exact generated function metadata/debug contracts, keyed by semantic owning classifier.
     /// Producers publish once; backends consume function identities without name/descriptor scans.
     generated_member_publications: crate::fx_hash::HashMap<TypeName, IrGeneratedMemberPublication>,
@@ -1953,10 +1960,11 @@ pub struct IrFile {
     /// for evaluation order. This is provenance, not a storage decision; a backend decides how
     /// that role participates in its own frame or register allocation.
     pub call_operand_bindings: crate::fx_hash::HashSet<ExprId>,
-    /// Call-operand declarations introduced to preserve checked argument evaluation order, rather
-    /// than to bind an expanded callable's parameters or captures. A reused declaration leaves this
-    /// subset when an inline expansion adopts it as its own formal binding. This records purpose;
-    /// each backend still owns storage and lifetime decisions.
+    /// Call-operand declarations a call reordered by its named arguments introduces to evaluate
+    /// them in source order (kotlinc's temporaries), rather than holders that stage an operand or
+    /// bind an expanded callable's parameters or captures. A reused declaration leaves this subset
+    /// when an inline expansion adopts it as its own formal binding. This records purpose; each
+    /// backend still owns storage and lifetime decisions.
     pub(crate) argument_evaluation_bindings: crate::fx_hash::HashSet<ExprId>,
     /// The call-operand holders of one inline lambda invocation, consecutive in its block: the
     /// invocation evaluates every operand before it binds any. A backend chooses the binding order.

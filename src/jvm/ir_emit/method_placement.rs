@@ -22,13 +22,14 @@ pub(super) enum MethodPlacement {
         static_owner: StaticOwner,
         singleton: crate::types::TypeName,
     },
-    /// The private `name$$forInline` copy beside a callable suspend inline function on its
-    /// declaring class: the same body, left untransformed for an inlining caller.
+    /// The `name$$forInline` copy beside a suspend function an inlining caller copies (`kind`
+    /// says which) on its declaring class: the same body, left untransformed for that caller.
     /// A named object's `@JvmStatic` member keeps its copy static, as `singleton` names.
     ForInlineCopy {
         static_owner: StaticOwner,
         instance: bool,
         singleton: Option<crate::types::TypeName>,
+        kind: crate::jvm::suspend_inline_functions::ForInlineCopy,
     },
 }
 
@@ -45,14 +46,27 @@ impl MethodPlacement {
         }
     }
 
-    /// The access of the method written for a declaration with `declared` access: the copy is
-    /// private and keeps every other flag.
+    /// The access of the method written for a declaration with `declared` access: an inline
+    /// function's copy is private and keeps every other flag; a method's copy keeps its access.
     pub(super) fn method_access(self, declared: u16) -> u16 {
         match self {
-            MethodPlacement::ForInlineCopy { .. } => {
-                declared & !(ACC_PUBLIC | ACC_PROTECTED) | ACC_PRIVATE
-            }
+            MethodPlacement::ForInlineCopy {
+                kind: crate::jvm::suspend_inline_functions::ForInlineCopy::InlineFunction,
+                ..
+            } => declared & !(ACC_PUBLIC | ACC_PROTECTED) | ACC_PRIVATE,
             _ => declared,
         }
+    }
+
+    /// Whether the method starts by constructing its continuation between `InlineMarker.mark(4)`
+    /// and `mark(5)`: a method's copy, whose inlining caller builds its machine over it.
+    pub(super) fn constructs_fake_continuation(self) -> bool {
+        matches!(
+            self,
+            MethodPlacement::ForInlineCopy {
+                kind: crate::jvm::suspend_inline_functions::ForInlineCopy::CrossinlineCapture,
+                ..
+            }
+        )
     }
 }
