@@ -107,18 +107,67 @@ fn receiver_occurrence_constraints(
                     continue;
                 }
                 let actual_arg = actual_arg.projection_inner().unwrap_or(actual_arg);
-                let composed = match (variance, own) {
-                    (TypeVariance::Invariant, _) | (_, TypeVariance::Invariant) => {
-                        TypeVariance::Invariant
-                    }
-                    (TypeVariance::Out, own) => own,
-                    (TypeVariance::In, TypeVariance::Out) => TypeVariance::In,
-                    (TypeVariance::In, TypeVariance::In) => TypeVariance::Out,
-                };
-                receiver_occurrence_constraints(source, declared_arg, actual_arg, composed, out);
+                receiver_occurrence_constraints(
+                    source,
+                    declared_arg,
+                    actual_arg,
+                    compose(variance, own),
+                    out,
+                );
             }
         }
+        // A function type reads its receiver, context and value parameters contravariantly and
+        // its result covariantly. A nominal functional actual is read through its function shape.
+        TyKind::Fun(declared_shape) => {
+            let actual = actual.non_null();
+            let actual = if actual.is_fun() {
+                actual
+            } else {
+                match crate::symbol_resolver::classifier_callable_signature(source, actual) {
+                    Some(shape) => shape,
+                    None => return,
+                }
+            };
+            let TyKind::Fun(actual_shape) = actual.kind() else {
+                return;
+            };
+            if declared_shape.params.len() != actual_shape.params.len()
+                || declared_shape.context_count != actual_shape.context_count
+                || declared_shape.has_receiver != actual_shape.has_receiver
+                || declared_shape.suspend != actual_shape.suspend
+            {
+                return;
+            }
+            for (&declared_param, &actual_param) in
+                declared_shape.params.iter().zip(&actual_shape.params)
+            {
+                receiver_occurrence_constraints(
+                    source,
+                    declared_param,
+                    actual_param,
+                    compose(variance, TypeVariance::In),
+                    out,
+                );
+            }
+            receiver_occurrence_constraints(
+                source,
+                declared_shape.ret,
+                actual_shape.ret,
+                compose(variance, TypeVariance::Out),
+                out,
+            );
+        }
         _ => {}
+    }
+}
+
+/// The variance at which a position read at `outer` reads a nested position it reads at `inner`.
+fn compose(outer: TypeVariance, inner: TypeVariance) -> TypeVariance {
+    match (outer, inner) {
+        (TypeVariance::Invariant, _) | (_, TypeVariance::Invariant) => TypeVariance::Invariant,
+        (TypeVariance::Out, inner) => inner,
+        (TypeVariance::In, TypeVariance::Out) => TypeVariance::In,
+        (TypeVariance::In, TypeVariance::In) => TypeVariance::Out,
     }
 }
 
