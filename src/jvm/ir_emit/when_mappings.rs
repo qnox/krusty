@@ -12,7 +12,7 @@
 
 use super::static_accessors::EmissionContext;
 use super::*;
-use crate::ir::EnumSwitchRegistration;
+use crate::ir::{EmittedDeclaration, EnumSwitchRegistration, FunId};
 use crate::jvm::classfile::InnerClassSpec;
 
 /// `JvmLoweredDeclarationOrigin.ENUM_MAPPINGS_FOR_WHEN` names its class `WhenMappings`.
@@ -70,13 +70,8 @@ impl WhenMappingTables {
         contexts: &[EmissionContext],
     ) -> Result<(), String> {
         self.owners.clear();
-        let body_functions = ir
-            .functions
-            .iter()
-            .enumerate()
-            .filter_map(|(function, declaration)| Some((declaration.body?, function as u32)))
-            .collect::<HashMap<_, _>>();
-        for context in contexts {
+        let roots = code_roots(ir, contexts)?;
+        for (context, roots) in contexts.iter().zip(roots) {
             let class_enclosure = context
                 .class
                 .and_then(|class| ir.classes.get(class))
@@ -84,12 +79,7 @@ impl WhenMappingTables {
             let mut public_abi =
                 super::metadata_policy::in_public_inline_scope(ir, class_enclosure);
             let mut sites = Vec::new();
-            for &root in &context.roots {
-                let function = body_functions.get(&root).copied();
-                if function.is_some_and(|function| ir.foreign_inline_templates.contains(&function))
-                {
-                    continue;
-                }
+            for (root, function) in roots {
                 let found = sites.len();
                 collect_sites(ir, root, &mut sites);
                 if sites.len() > found
@@ -220,6 +210,69 @@ impl WhenMappingTables {
             })
             .collect()
     }
+}
+
+/// One class's code roots, each with the function whose inline scope it is in.
+type ClassCode = Vec<(ExprId, Option<FunId>)>;
+
+/// The code each context's class holds, in `contexts` order: its emission roots, and the defaults
+/// its default-argument wrappers evaluate ([`crate::jvm::default_wrappers::evaluated_defaults`]),
+/// each with the function whose inline scope it is in. A foreign inline template is another
+/// file's code, whose tables that file numbers.
+fn code_roots(ir: &IrFile, contexts: &[EmissionContext]) -> Result<Vec<ClassCode>, String> {
+    let body_functions = ir
+        .functions
+        .iter()
+        .enumerate()
+        .filter_map(|(function, declaration)| Some((declaration.body?, function as FunId)))
+        .collect::<HashMap<_, _>>();
+    let method_classes = ir
+        .classes
+        .iter()
+        .enumerate()
+        .flat_map(|(class, declaration)| declaration.methods.iter().map(move |&m| (m, class)))
+        .collect::<HashMap<_, _>>();
+    let mut roots = contexts
+        .iter()
+        .map(|context| {
+            context
+                .roots
+                .iter()
+                .map(|&root| (root, body_functions.get(&root).copied()))
+                .filter(|(_, function)| {
+                    !function
+                        .is_some_and(|function| ir.foreign_inline_templates.contains(&function))
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    for (declaration, root) in crate::jvm::default_wrappers::evaluated_defaults(ir) {
+        let (class, function) = match declaration {
+            EmittedDeclaration::Function(function) => {
+                (method_classes.get(&function).copied(), Some(function))
+            }
+            EmittedDeclaration::PrimaryConstructor(class)
+            | EmittedDeclaration::SecondaryConstructor { class, .. } => {
+                (Some(class as usize), None)
+            }
+            EmittedDeclaration::Static(index) => (
+                ir.statics[index]
+                    .owner
+                    .and_then(|owner| ir.classes.iter().position(|c| c.fq_name == owner)),
+                None,
+            ),
+        };
+        let context = contexts
+            .iter()
+            .position(|context| context.class == class)
+            .ok_or_else(|| {
+                format!("the default-argument wrapper of {declaration:?} has no class")
+            })?;
+        if !roots[context].iter().any(|&(known, _)| known == root) {
+            roots[context].push((root, function));
+        }
+    }
+    Ok(roots)
 }
 
 /// Every subject `when` in the code under `root`, each once.

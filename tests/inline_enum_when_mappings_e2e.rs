@@ -72,6 +72,19 @@ enum class Size { S, M, L }
 inline fun label(s: Size): () -> String = { when (s) { Size.M -> "m"; else -> "x" } }
 "#;
 
+/// An enum `when` that only a top-level function's `$default` wrapper evaluates. `box` passes
+/// both arguments, so no call site copies the default.
+const DEFAULT_WRAPPER: &str = r#"
+enum class E { A, B }
+
+fun pick(e: E, s: String = when (e) {
+    E.A -> "OK"
+    E.B -> "FAIL"
+}): String = s
+
+fun box(): String = pick(E.A, "OK")
+"#;
+
 const CROSS_DECLARATION: &str = r#"
 enum class Size { S, M, L }
 
@@ -85,6 +98,16 @@ fun labels(): String = label(Size.S) + label(Size.L)
 
 fun box(): String = if (labels() == "sl" && before(Size.L) == 1) "OK" else "FAIL ${labels()}"
 "#;
+
+/// Kotlin's own program returns `OK` first, then krusty's does.
+fn assert_runs_like_kotlinc(sources: &[(&str, &str)], main_class: &str) {
+    assert_eq!(
+        common::kotlinc_box_files_result(sources, main_class),
+        "OK",
+        "kotlinc's {main_class}"
+    );
+    common::expect_box_ok_files_with_stdlib(sources, main_class);
+}
 
 fn assert_like_kotlinc(sources: &[(&str, &str)]) {
     let classes = common::classes_against_kotlinc_module(sources);
@@ -104,7 +127,7 @@ fn an_inline_function_with_two_tables_called_before_its_classs_own_uses_matches_
 
 #[test]
 fn an_inline_function_with_two_tables_called_before_its_classs_own_uses_runs() {
-    common::expect_box_ok_files_with_stdlib(&[("Two.kt", TWO_TABLES)], "TwoKt");
+    assert_runs_like_kotlinc(&[("Two.kt", TWO_TABLES)], "TwoKt");
 }
 
 #[test]
@@ -114,7 +137,7 @@ fn a_same_file_inline_member_reads_its_classs_tables_like_kotlinc() {
 
 #[test]
 fn a_same_file_inline_member_reads_its_classs_tables_and_runs() {
-    common::expect_box_ok_files_with_stdlib(&[("Member.kt", MEMBER)], "MemberKt");
+    assert_runs_like_kotlinc(&[("Member.kt", MEMBER)], "MemberKt");
 }
 
 #[test]
@@ -135,5 +158,15 @@ fn another_files_inline_function_keeps_its_own_tables_like_kotlinc_and_runs() {
             "{name} differs from kotlinc's bytes"
         );
     }
-    common::expect_box_ok_files_with_stdlib(&sources, "CallerKt");
+    assert_runs_like_kotlinc(&sources, "CallerKt");
+}
+
+#[test]
+fn a_when_only_a_top_level_default_wrapper_evaluates_is_numbered_like_kotlinc() {
+    assert_like_kotlinc(&[("Pick.kt", DEFAULT_WRAPPER)]);
+}
+
+#[test]
+fn a_when_only_a_top_level_default_wrapper_evaluates_runs() {
+    assert_runs_like_kotlinc(&[("Pick.kt", DEFAULT_WRAPPER)], "PickKt");
 }

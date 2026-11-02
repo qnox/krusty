@@ -10686,8 +10686,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
     order before generating any code, so a method's `when` claims before a later property
     initializer's or `init` block's, whatever order they are emitted in. Common lowering records
     each source `when`'s order key (where it starts in its file); before an emission pass writes
-    any code, the backend numbers each class's tables from the `when`s placed in it, sorted by
-    that key, and emission (and the body of a same-module inline function compiled for its
+    any code, the backend numbers each class's tables from the `when`s placed in it (its emission
+    roots and the defaults its default-argument wrappers evaluate), sorted by that key, and emission (and the body of a same-module inline function compiled for its
     callers) only reads the numbers. A lambda's `when` counts in the class whose code holds it; a
     suspend lambda and an object expression are classes of their own. A mappings class whose
     tables code in a non-private inline function's scope reads is part of that function's ABI
@@ -10704,7 +10704,8 @@ The harness (`harness/`) is a Rust integration test shelling out to the referenc
   `class_when_mappings_class_is_byte_identical_to_kotlinc`, `enum_when_mappings_execute`) and
   `tests/inline_enum_when_mappings_e2e.rs` (source order across a file and a class, an inline
   function with two tables called before its class's own uses, a same-file inline member, a public
-  inline function's lambda, and another file's callee, against kotlinc's bytes and as runs).
+  inline function's lambda, a `when` only a top-level `$default` wrapper evaluates, and another
+  file's callee, against kotlinc's bytes and as runs checked against kotlinc's own program).
 - **An unsigned integer literal takes its EXPECTED type.** Kotlin types an integer literal from its
   context, unsigned exactly like signed: `val a: UByte = 200u` is a `UByte` the same way
   `val b: Byte = 100` is a `Byte`, and `val c: ULong = 7u` is a `ULong` (verified against the reference
