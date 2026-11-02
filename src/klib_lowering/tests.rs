@@ -6,6 +6,7 @@ use std::path::PathBuf;
 mod accessor_calls;
 mod body_forms;
 mod callee_headers;
+mod captured_projections;
 mod closure_frames;
 mod closure_producers;
 mod constructor_calls;
@@ -544,6 +545,7 @@ fn render_node(ir: &IrFile, expression: ExprId) -> String {
             completion,
         } => format!("{completion:?}({})", render(ir, *producer)),
         IrExpr::UnitInstance => "Unit".to_owned(),
+        IrExpr::SingletonValue { classifier } => format!("object {}", classifier.render()),
         IrExpr::Checked(checked) => match checked.as_ref() {
             crate::ir::IrCheckedOperation::RangeContains {
                 operation,
