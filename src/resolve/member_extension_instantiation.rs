@@ -237,6 +237,16 @@ pub(super) fn instantiate_member_extension_with(
             &mut bindings,
             explicit_type_args,
         );
+        // A solved formal must satisfy its declared bounds, as for any other generic call:
+        // `<T : Any, S : T, C : Column<S>> C.references(ref: Column<T>)` does not apply to a
+        // `Column<Int>` receiver with an `EntityID<Int>` reference, since `S = Int` is not a `T`.
+        if !crate::symbol_resolver::generic_bindings_satisfy_bounds(
+            generic,
+            &bindings,
+            |actual, bound| crate::symbol_resolver::resolution_subtype(source, actual, bound),
+        ) {
+            return None;
+        }
     }
     // The call's evidence so far, before any unsolved formal stands for its bound: a lambda
     // argument is shaped from THIS view, so a formal only a lambda can solve stays open for the
