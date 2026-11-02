@@ -55,6 +55,7 @@ mod inline_catch_tests;
 mod inline_returns;
 mod inlining;
 mod interface_delegation;
+mod lambda_offsets;
 mod local_callables;
 mod local_delegates;
 #[cfg(test)]
@@ -444,6 +445,10 @@ struct BodyLowering<'a> {
     /// `Unit`: its implementation returns nothing, as the interface method does, rather than the
     /// `Unit` value a function type's `invoke` returns.
     unit_method_lambda: Option<FirExprId>,
+    /// The line of the nearest call enclosing the expression being lowered, which a lambda
+    /// literal under it is positioned at (see [`lambda_offsets`]). A local variable's initializer
+    /// clears it.
+    lambda_call_line: Option<u32>,
 }
 
 /// The block a body's executable root evaluates, through the implicit conversions checking put on
@@ -737,6 +742,7 @@ impl<'a> BodyLowering<'a> {
             lowered_root_block: None,
             operand_bound_calls: HashMap::default(),
             unit_method_lambda: None,
+            lambda_call_line: None,
         }
     }
 

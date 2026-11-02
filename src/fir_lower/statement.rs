@@ -35,9 +35,14 @@ impl BodyLowering<'_> {
                 initializer,
                 conversion,
             } => {
+                // The variable is a declaration of its own, so a lambda it is initialized with
+                // keeps its position (see `lambda_offsets`).
+                let enclosing_call_line = self.lambda_call_line.take();
                 let init = initializer
                     .map(|initializer| self.expression_with_conversion(initializer, *conversion))
-                    .transpose()?;
+                    .transpose();
+                self.lambda_call_line = enclosing_call_line;
+                let init = init?;
                 if let Some(initializer) = init {
                     self.ir.mark_early_inline_result_adaptation(initializer);
                 }
@@ -65,12 +70,25 @@ impl BodyLowering<'_> {
                 }
                 variable
             }
-            FirStatementKind::Expression(expression) => self.expression(*expression)?,
+            FirStatementKind::Expression(expression) => {
+                // An assignment's position is the statement's, which its setter call takes.
+                let enclosing_call_line = self.lambda_call_line;
+                if let Some(line) = self.assignment_call_line(statement_id, *expression) {
+                    self.lambda_call_line = Some(line);
+                }
+                let lowered = self.expression(*expression);
+                self.lambda_call_line = enclosing_call_line;
+                lowered?
+            }
             FirStatementKind::Destructure {
                 initializer,
                 entries,
             } => {
-                let initializer_value = self.expression(*initializer)?;
+                // The container is a variable, which a lambda in its initializer is positioned by.
+                let enclosing_call_line = self.lambda_call_line.take();
+                let initializer_value = self.expression(*initializer);
+                self.lambda_call_line = enclosing_call_line;
+                let initializer_value = initializer_value?;
                 // The container of a destructuring declaration is a compiler temporary. A read of
                 // an immutable binding is its own snapshot, so each component call reads that
                 // binding again instead (kotlinc drops the `<destruct>` temporary initialized from

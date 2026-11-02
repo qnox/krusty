@@ -385,8 +385,10 @@ fn remember(ir: &mut IrFile, runtime: &ComposeRuntime, lambda: &ComposableLambda
         type_operand: runtime::composable_lambda(),
     });
     // kotlinc builds the call at the lambda's offsets, so the lambda's line begins at its key.
+    // The call is now the one nearest the lambda, whose position the lambda takes (kotlinc's
+    // `PatchLambdaOffsetsLowering` runs after this transform): its own, not the composable call's.
     if lambda.opening_line != 0 {
-        for expression in [key, remembered, value] {
+        for expression in [key, lambda.lambda, remembered, value] {
             ir.expr_source_lines.insert(expression, lambda.opening_line);
         }
     }

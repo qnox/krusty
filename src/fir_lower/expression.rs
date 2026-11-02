@@ -34,11 +34,17 @@ impl BodyLowering<'_> {
             || self
                 .expression_depth
                 .is_multiple_of(EXPRESSION_STACK_CHECK_INTERVAL);
+        let enclosing_call_line = self.lambda_call_line;
+        let body = self.body;
+        if let Some(expression) = body.expr(expression_id) {
+            self.lambda_call_line = self.lambda_call_line_within(expression_id, expression);
+        }
         let result = if check_stack {
             crate::wide_stack::on_wide_stack(|| self.expression_inner(expression_id))
         } else {
             self.expression_inner(expression_id)
         };
+        self.lambda_call_line = enclosing_call_line;
         self.expression_depth -= 1;
         result
     }
@@ -1519,6 +1525,7 @@ impl BodyLowering<'_> {
                 debug.source = line;
             }
         }
+        debug.source = self.lambda_literal_line(expression, lowered, debug.source);
         if debug.positionless {
             self.ir.mark_positionless(lowered);
         }

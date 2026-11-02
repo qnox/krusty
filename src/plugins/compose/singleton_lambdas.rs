@@ -98,6 +98,12 @@ fn instance(ir: &mut IrFile, runtime: &ComposeRuntime, lambda: &ComposableLambda
         None,
         vec![key, tracked, lambda.lambda],
     );
+    // The factory call is now the one nearest the lambda, so the lambda takes its own position
+    // again, not the composable call's it was written in (see `fir_lower::lambda_offsets`).
+    if lambda.opening_line != 0 {
+        ir.expr_source_lines
+            .insert(lambda.lambda, lambda.opening_line);
+    }
     ir.add_expr(IrExpr::TypeOp {
         op: IrTypeOp::ImplicitCoercion,
         arg: created,
