@@ -69,6 +69,26 @@ pub fn discover(corpus: &Path) -> Result<Vec<PathBuf>, String> {
     join(corpus, upstream, owned)
 }
 
+/// The JetBrains checkout the box corpus was provisioned from, which `just box-corpus` also fills
+/// with the command-line and diagnostics corpora; `required` is the corpus directory the caller
+/// reads, relative to the checkout.
+pub fn kotlin_checkout(required: &str) -> PathBuf {
+    let box_dir = krusty::toolchain::box_corpus_dir()
+        .expect("the Kotlin box corpus is provisioned (`just box-corpus <version>`)");
+    let root = box_dir
+        .ancestors()
+        .nth(4)
+        .filter(|_| box_dir.ends_with("compiler/testData/codegen/box"))
+        .unwrap_or_else(|| panic!("{} is not a JetBrains checkout", box_dir.display()))
+        .to_path_buf();
+    assert!(
+        root.join(required).is_dir(),
+        "{} has no {required}; re-provision it with `just box-corpus <version>`",
+        root.display()
+    );
+    root
+}
+
 pub fn require_setup(unavailable: Option<&str>, provisioned: bool) -> Result<(), String> {
     if let Some(reason) = unavailable {
         return Err(format!("box lane is unavailable: {reason}"));

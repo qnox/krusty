@@ -1484,3 +1484,84 @@ fn coverage_profile_disables_intra_crate_thin_lto() {
         "the coverage profile must set lto = \"off\" so Cargo passes -C lto=off and rustc skips intra-crate ThinLTO"
     );
 }
+
+const DIAGNOSTICS_TEST: &str =
+    "kotlin_diagnostics_jvm_conformance::krusty_rejects_what_kotlinc_rejects_in_its_diagnostics_test_data";
+
+/// A conformance binary stand-in that lists `listed` for `--list` and otherwise runs `run`.
+#[cfg(unix)]
+fn diagnostics_fixture(name: &str, listed: &str, run: &str) -> (PathBuf, PathBuf) {
+    regression_fixture(
+        &format!("diagnostics-{name}"),
+        &format!(
+            "#!/usr/bin/env bash\nif [ \"$1\" = --list ]; then\n  printf '%s' '{listed}'\n  exit 0\nfi\n{run}\n"
+        ),
+    )
+}
+
+#[cfg(unix)]
+fn run_diagnostics_conformance(temp: &Path, binary: &Path, timeout: &str) -> std::process::Output {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    Command::new("bash")
+        .arg(root.join("scripts").join("diagnostics-conformance.sh"))
+        .arg(binary)
+        .arg("2.4.10")
+        .env("KRUSTY_KOTLINC", "/bin/true")
+        .env("KRUSTY_KOTLIN_BOX_DIR", temp)
+        .env("KRUSTY_DIAGNOSTICS_TIMEOUT_SECONDS", timeout)
+        .env(
+            "PATH",
+            format!("{}:/usr/bin:/bin", temp.join("bin").display()),
+        )
+        .output()
+        .expect("run diagnostics conformance")
+}
+
+#[cfg(unix)]
+#[test]
+fn diagnostics_conformance_refuses_a_binary_without_its_test() {
+    let (temp, binary) = diagnostics_fixture("stale", "", "exit 0");
+    let output = run_diagnostics_conformance(&temp, &binary, "30");
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8(output.stderr).expect("stderr is UTF-8"),
+        format!(
+            "diagnostics-conformance: {} has no ignored test {DIAGNOSTICS_TEST}\n",
+            binary.display()
+        )
+    );
+    fs::remove_dir_all(temp).expect("remove diagnostics fixture");
+}
+
+#[cfg(unix)]
+#[test]
+fn diagnostics_conformance_runs_the_listed_test_and_keeps_its_status() {
+    let (temp, binary) = diagnostics_fixture(
+        "status",
+        &format!("{DIAGNOSTICS_TEST}: test"),
+        "printf '%s\\n' \"$*\"\nexit 7",
+    );
+    let output = run_diagnostics_conformance(&temp, &binary, "30");
+    assert_eq!(output.status.code(), Some(7), "{output:?}");
+    assert_eq!(
+        String::from_utf8(output.stdout).expect("stdout is UTF-8"),
+        format!("--ignored --exact {DIAGNOSTICS_TEST} --nocapture\n")
+    );
+    fs::remove_dir_all(temp).expect("remove diagnostics fixture");
+}
+
+#[cfg(unix)]
+#[test]
+fn diagnostics_conformance_enforces_its_deadline() {
+    let (temp, binary) =
+        diagnostics_fixture("deadline", &format!("{DIAGNOSTICS_TEST}: test"), "sleep 10");
+    let started = std::time::Instant::now();
+    let output = run_diagnostics_conformance(&temp, &binary, "1");
+    assert_eq!(output.status.code(), Some(124));
+    assert_eq!(
+        String::from_utf8(output.stderr).expect("stderr is UTF-8"),
+        "diagnostics-conformance: timed out after 1s: Kotlin 2.4.10\n"
+    );
+    assert!(started.elapsed().as_secs() < 5);
+    fs::remove_dir_all(temp).expect("remove diagnostics fixture");
+}
