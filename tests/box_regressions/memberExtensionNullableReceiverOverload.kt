@@ -1,10 +1,13 @@
 // A member extension declared on `Column<U?>` does not apply to a caller's `Column<A>` with
 // `A : Any`: `U? = A` has no solution, so its `Column<U>` overload is selected without ambiguity,
 // and the nullable overload is selected for `Column<A?>`. The overloads return different types so
-// their JVM signatures differ without a platform-specific name.
+// their JVM signatures differ without a platform-specific name. A formal the receiver reaches
+// only covariantly stays a lower bound: `Duo<T, T>` takes a `Duo<A, B>` at their common supertype.
 class Column<T>
 
 interface Transformer<U, W>
+
+class Duo<out X, out Y>(val x: X, val y: Y)
 
 class Pair<U, W> : Transformer<U, W>
 
@@ -34,6 +37,14 @@ object Columns {
     fun <A : Any, B : Any> Column<A>.mapped(wrap: (A) -> B, unwrap: (B) -> A): String =
         transform(columnTransformer(unwrap, wrap))
 
+    fun <T> Duo<T, T>.merge(value: T): T = value
+
+    fun <T> Duo<T, T>.first(): T = x
+
+    fun <A : Any, B : Any> merged(duo: Duo<A, B>, value: Any): Any = duo.merge(value)
+
+    fun <A : Any, B : Any> head(duo: Duo<A, B>): Any = duo.first()
+
     fun implicitOn(column: Column<Int>): String = column.implicit()
 
     fun mappedOn(column: Column<Int>): String = column.mapped({ it + 1 }, { it - 1 })
@@ -46,5 +57,9 @@ fun box(): String {
     if (Columns.implicitOn(Column()) != "non-null") return "Fail implicit"
     if (Columns.transformed<Int, String>(Column()) != "non-null") return "Fail transform"
     if (Columns.mappedOn(Column()) != "non-null") return "Fail mapped"
+    val first = Column<Int>()
+    val merged = Column<String>()
+    if (Columns.merged(Duo(first, "a"), merged) !== merged) return "Fail merge"
+    if (Columns.head(Duo(first, "a")) !== first) return "Fail first"
     return "OK"
 }

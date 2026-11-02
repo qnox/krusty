@@ -100,15 +100,6 @@ pub(super) fn instantiate_member_extension_with(
         extension_receiver,
         &mut bindings,
     );
-    // The receiver is applicable only as the instantiated declaration: `Column<U?>` admits a
-    // caller's `Column<A>` (`A : Any`) structurally, but `U? = A` has no solution.
-    if !crate::symbol_resolver::resolution_subtype(
-        source,
-        extension_receiver,
-        apply_inference_bindings(declared_receiver, &bindings),
-    ) {
-        return None;
-    }
     // A formal the receiver reaches only covariantly (`Assert<out T>`) gets a lower bound from
     // it, not an equality: an argument's lower bound joins it at their common supertype, as an
     // ordinary extension's receiver and arguments do in `merge_call_argument_bindings`.
@@ -125,6 +116,21 @@ pub(super) fn instantiate_member_extension_with(
                 ) == Some(crate::types::TypeVariance::Out)
         })
         .collect::<Vec<_>>();
+    // The receiver is applicable only as the instantiated declaration: `Column<U?>` admits a
+    // caller's `Column<A>` (`A : Any`) structurally, but `U? = A` has no solution. A formal the
+    // receiver reaches only covariantly is a lower bound still open to a join (`Duo<T, T>` takes
+    // `Duo<A, B>` at their common supertype), so it does not constrain this check.
+    let mut receiver_bindings = bindings.clone();
+    for formal in &covariant_receiver_formals {
+        receiver_bindings.insert((*formal).clone(), Ty::nullable(Ty::obj("kotlin/Any")));
+    }
+    if !crate::symbol_resolver::resolution_subtype(
+        source,
+        extension_receiver,
+        apply_inference_bindings(declared_receiver, &receiver_bindings),
+    ) {
+        return None;
+    }
     let symbols = source;
     let declared_params = generic.map_or(function.signature.params.as_slice(), |signature| {
         signature.params.as_slice()
