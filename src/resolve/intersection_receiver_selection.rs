@@ -16,7 +16,7 @@ impl Checker<'_> {
         receiver: ExprId,
         name: &str,
     ) -> Option<Ty> {
-        let path = self.expr_access_path(receiver)?;
+        let path = self.flow_read_path(receiver)?;
         let bounds = self.lookup_intersection_narrowing(scope, &path);
         self.intersection_member_receiver(&bounds, name)
     }
@@ -30,9 +30,18 @@ impl Checker<'_> {
         name: &str,
         write: bool,
     ) -> Option<Ty> {
-        let path = self.expr_access_path(receiver)?;
+        let path = self.flow_read_path(receiver)?;
         let bounds = self.lookup_intersection_narrowing(scope, &path);
         self.intersection_property_receiver(&bounds, name, write)
+    }
+
+    /// The path whose flow type `receiver` reads. A cast `(x as T)` denotes `x`'s path, but its
+    /// value has the cast's target type, never the flow intersection proven for `x`.
+    fn flow_read_path(&self, receiver: ExprId) -> Option<NarrowPath> {
+        if matches!(self.file.expr(receiver), Expr::As { .. }) {
+            return None;
+        }
+        self.expr_access_path(receiver)
     }
 
     /// Select a property fake override inherited through several direct semantic supertypes. The
