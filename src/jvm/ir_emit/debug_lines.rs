@@ -208,15 +208,13 @@ impl Emitter<'_> {
     /// The suspend call `expression` is, or evaluates under casts of its result.
     fn suspend_call_under_result_casts(&self, expression: ExprId) -> Option<ExprId> {
         let mut current = expression;
-        loop {
-            match self.ir.expr(current) {
-                IrExpr::TypeOp {
-                    op: IrTypeOp::Cast | IrTypeOp::CastNonNull | IrTypeOp::ImplicitCoercion,
-                    arg,
-                    ..
-                } => current = *arg,
-                _ => break,
-            }
+        while let IrExpr::TypeOp {
+            op: IrTypeOp::Cast | IrTypeOp::CastNonNull | IrTypeOp::ImplicitCoercion,
+            arg,
+            ..
+        } = self.ir.expr(current)
+        {
+            current = *arg;
         }
         self.calls_suspend_callee(current).then_some(current)
     }
