@@ -23827,6 +23827,13 @@ The remaining details follow kotlinc:
   code of the `@InlineOnly` member's body and has none; a value class's boxed `equals` delegating
   to a source override's `equals-impl` builds its call at the override's offsets, so the call marks
   the signature line; a value-class equality realized as a call keeps the comparison's position.
+- Whether a statement or operand marks its own line where its code starts is decided by its kind
+  (`states_line_at_start` in `src/jvm/line_numbers.rs`), not recorded per node: a source `!!` is
+  kotlinc's `CHECK_NOT_NULL` intrinsic and marks before its operand, through an implicit coercion of
+  its result; an elvis marks where its block starts, and the next link of a folded chain marks the
+  same line again, which writes nothing. A serializable property's default copied into
+  `write$Self` or the deserialization constructor keeps the kinds of the nodes it copies, so it
+  marks where its first node's kind marks.
 
 ### Whether a mark writes an entry
 

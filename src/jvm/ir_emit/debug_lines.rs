@@ -144,12 +144,12 @@ impl Emitter<'_> {
         Some(self.mapped_expression_line(expression, line))
     }
 
-    /// Whether `expression`'s line keeps its entry where an operand marks another line at the same
-    /// offset: an intrinsic or safe call that states its line before its operands, or a node
-    /// common IR marks so.
+    /// Whether `expression` states its own line before its operands, as a statement or a value:
+    /// an intrinsic or safe call ([`states_line_before_operands`]), or a node whose kind kotlinc
+    /// marks so ([`crate::jvm::line_numbers::states_line_at_start`]).
     pub(super) fn keeps_start_line(&self, expression: ExprId) -> bool {
-        self.ir.kept_start_lines.contains(&expression)
-            || states_line_before_operands(self.ir, expression)
+        states_line_before_operands(self.ir, expression)
+            || crate::jvm::line_numbers::states_line_at_start(self.ir, expression)
     }
 
     /// Mark `expression`'s line where kotlinc marks an intrinsic call before its operands (the

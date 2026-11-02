@@ -1930,10 +1930,6 @@ pub struct IrFile {
     /// Anonymous initializer (`init { … }`) bodies. kotlinc gives such a block's opening and
     /// closing lines entries of their own, even where no instruction of the block sits on them.
     pub initializer_blocks: crate::fx_hash::HashSet<ExprId>,
-    /// Expressions whose own line keeps its entry when an operand marks another line at the same
-    /// offset, as kotlinc's line table does. A serializable property's default copied into a
-    /// generated method starts with a property read the plugin attributes to the class's line.
-    pub kept_start_lines: crate::fx_hash::HashSet<ExprId>,
     /// Source operator, conversion, indexing and member calls realized as builtin operations, on
     /// the node that realizes each.
     pub builtin_calls: crate::fx_hash::HashMap<ExprId, IrBuiltinCall>,

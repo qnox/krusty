@@ -26,7 +26,7 @@
 //! appends an entry, a second one at the same offset included.
 
 use crate::fir::SyntheticOriginKind;
-use crate::ir::{ExprId, IrExpr, IrFile, IrNodeOrigin};
+use crate::ir::{ExprId, IrExpr, IrFile, IrNodeOrigin, IrTypeOp, NullCheck};
 
 /// kotlinc's `LineNumberMapper` for one method body: the line it marked last and whether marks
 /// are suppressed.
@@ -120,6 +120,31 @@ pub(crate) fn marks_line_at_start(ir: &IrFile, expression: ExprId) -> bool {
         | IrExpr::BottomValue { .. }
         | IrExpr::InlineFrameMarker => false,
         _ => true,
+    }
+}
+
+/// Whether `expression` states its own line where its code starts even where it is a statement or
+/// an operand whose own kind marks nothing there:
+///
+/// - a source `!!`, kotlinc's `CHECK_NOT_NULL` intrinsic call, which marks before its operand; an
+///   implicit coercion of its result is a type operator, which marks nothing of its own;
+/// - an elvis, which kotlinc's `visitBlock` of the `ELVIS` block marks where it starts (the
+///   `when` it folds to marks the same line again, which writes nothing).
+pub(crate) fn states_line_at_start(ir: &IrFile, expression: ExprId) -> bool {
+    match ir.expr(expression) {
+        IrExpr::NotNullAssert {
+            check: NullCheck::Source,
+            ..
+        } => true,
+        IrExpr::TypeOp {
+            op: IrTypeOp::ImplicitCoercion,
+            arg,
+            ..
+        } => states_line_at_start(ir, *arg),
+        IrExpr::Block {
+            value: Some(value), ..
+        } => ir.whens.elvises.contains_key(value),
+        _ => false,
     }
 }
 
