@@ -756,6 +756,8 @@ mod dep_resolution;
 mod dependency_override_signature_e2e;
 #[path = "dependency_property_reference_name_e2e.rs"]
 mod dependency_property_reference_name_e2e;
+#[path = "dependency_value_class_override_e2e.rs"]
+mod dependency_value_class_override_e2e;
 #[path = "descriptor_arity_fails_closed_e2e.rs"]
 mod descriptor_arity_fails_closed_e2e;
 #[path = "descriptor_element_companion_serializer_e2e.rs"]
@@ -1205,6 +1207,8 @@ mod initializer_inline_local_scopes_e2e;
 mod inline;
 #[path = "inline_member_super_arguments_e2e.rs"]
 mod inline_member_super_arguments_e2e;
+#[path = "inline_operand_holder_slots_e2e.rs"]
+mod inline_operand_holder_slots_e2e;
 #[path = "inline_scopes_numbers_flag_e2e.rs"]
 mod inline_scopes_numbers_flag_e2e;
 #[path = "inlined_code_inner_classes_e2e.rs"]
@@ -1390,8 +1394,6 @@ mod kotlin_fun_java_sam_param_e2e;
 mod kotlin_native_provisioning_e2e;
 #[path = "kotlin_script_e2e.rs"]
 mod kotlin_script_e2e;
-#[path = "kotlinc_argument_conformance_e2e.rs"]
-mod kotlinc_argument_conformance_e2e;
 #[path = "krusty_dep_dir_e2e.rs"]
 mod krusty_dep_dir_e2e;
 #[path = "krusty_roundtrip_class_metadata_e2e.rs"]
@@ -1818,6 +1820,8 @@ mod value_class_suspend_override_e2e;
 mod value_class_suspend_resume_e2e;
 #[path = "value_class_try_value_e2e.rs"]
 mod value_class_try_value_e2e;
+#[path = "vararg_generic_signature_e2e.rs"]
+mod vararg_generic_signature_e2e;
 #[path = "variance_conflicts_e2e.rs"]
 mod variance_conflicts_e2e;
 

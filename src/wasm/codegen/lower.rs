@@ -484,6 +484,8 @@ fn expression_type(
             ir.functions[function as usize].ret
         }
         IrExpr::PropertyRead { ty, .. } if ir.checked_type(id).is_none() => *ty,
+        // A top-level property read has its storage's declared type.
+        IrExpr::GetStatic(index) if ir.checked_type(id).is_none() => ir.statics[*index as usize].ty,
         // A shared cell's element is read, and a write evaluates to what it stored, at the
         // element's declared type.
         IrExpr::RefGet { elem, .. } | IrExpr::RefSet { elem, .. }

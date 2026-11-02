@@ -322,6 +322,14 @@ impl CallLinker for TemplateCalls<'_> {
         )
     }
 
+    fn same_type(&self, left: Ty, right: Ty) -> bool {
+        super::type_evidence::same_type(
+            Some(&crate::symbol_resolver::SourceOracle(self.callees.source)),
+            left,
+            right,
+        )
+    }
+
     fn link_constructor(
         &mut self,
         _ir: &mut IrFile,
