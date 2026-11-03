@@ -420,6 +420,29 @@ pub(super) fn emit_suspend_lambda_class(
             ("$result".to_string(), OBJECT_DESC.to_string(), 1),
         ],
     );
+    // A lambda that reads a `crossinline` capture keeps its marked body beside the machine, for a
+    // call site that inlines the lambda into it to build its own machine over.
+    let reads_crossinline = ir.class_id_by_name(c.fq_name_id()).is_some_and(|class| {
+        crate::jvm::suspend_inline_functions::suspend_lambda_reads_crossinline_capture(
+            ir, class, lambda,
+        )
+    });
+    if reads_crossinline {
+        emit_placed_method(
+            ir,
+            lambda.invoke_suspend,
+            MethodPlacement::ForInlineCopy {
+                static_owner: StaticOwner::Class(c.fq_name),
+                instance: true,
+                singleton: None,
+                kind: crate::jvm::suspend_inline_functions::ForInlineCopy::SuspendLambda,
+            },
+            &shape.class,
+            facade,
+            &mut cw,
+            env,
+        );
+    }
     if shape.has_create() {
         emit_create(ir, &mut cw, &shape, lambda, env.java_parameters);
     }

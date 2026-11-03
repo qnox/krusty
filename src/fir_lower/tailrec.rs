@@ -513,6 +513,7 @@ fn capture_parameters(ir: &mut IrFile, uncaptured: &UncapturedParameters) {
                     crate::ir::IrValueCapture {
                         declaration: crate::ir::IrCapturedDeclaration::Parameter,
                         capturer: crate::ir::IrCapturingCallable::Lambda,
+                        crossinline_parameter: None,
                     },
                 ),
             );
