@@ -40,6 +40,7 @@ mod member_hierarchy;
 mod member_property_selection;
 mod member_specialization;
 mod overload_selection;
+mod postponed_lambda_selection;
 mod property_candidates;
 mod qualified_classifiers;
 mod raw_member_view;
@@ -51,12 +52,14 @@ mod resolved_symbol;
 mod sam;
 mod scope_level_callables;
 mod selected_call_instantiation;
+mod separately_mapped_selection;
 pub(crate) use selected_call_instantiation::{
     declaration_default_callable, selected_default_callable,
 };
 pub(crate) mod selected_constructor;
 pub(crate) use selected_constructor::SelectedConstructorDeclaration;
-pub(crate) use top_level_selection::{CandidateCall, TopLevelArguments, TopLevelSelection};
+pub(crate) use separately_mapped_selection::{CandidateCall, FamilyArguments};
+pub(crate) use top_level_selection::TopLevelSelection;
 mod source_view;
 mod statically_known_subtype;
 mod top_level_selection;
@@ -1134,7 +1137,12 @@ impl<'a> SymbolResolver<'a> {
         callables: &Callables,
     ) -> Option<(FunctionInfo, Vec<Ty>)> {
         match self.select_receiver_function_with_params_tracking(
-            receiver, name, args, type_args, callables, None,
+            receiver,
+            name,
+            FamilyArguments::Shared(args),
+            type_args,
+            callables,
+            None,
         ) {
             CandidateSelection::Selected((selected, params, _)) => Some((selected, params)),
             CandidateSelection::None | CandidateSelection::Ambiguous => None,
@@ -1168,34 +1176,6 @@ impl<'a> SymbolResolver<'a> {
                 (parameters.len() == args.len()).then_some(parameters)
             })
             .collect()
-    }
-
-    /// Tracking form used by synthesized language conventions. It preserves ambiguity and the exact
-    /// specialized return beside the selected declaration so the checker can commit one target and
-    /// lowering never has to repeat receiver or overload resolution.
-    pub(crate) fn select_receiver_function_with_params_tracking(
-        &self,
-        receiver: Ty,
-        name: &str,
-        args: &[CallArgKind],
-        type_args: &[Ty],
-        callables: &Callables,
-        expected_result: Option<Ty>,
-    ) -> CandidateSelection<(FunctionInfo, Vec<Ty>, Ty)> {
-        match self.select_receiver_function_with_applied_receiver_tracking(
-            receiver,
-            name,
-            args,
-            type_args,
-            callables,
-            expected_result,
-        ) {
-            ReceiverFunctionSelection::Selected(selected) => {
-                CandidateSelection::Selected((*selected.function, selected.params, selected.ret))
-            }
-            ReceiverFunctionSelection::None => CandidateSelection::None,
-            ReceiverFunctionSelection::Ambiguous(_) => CandidateSelection::Ambiguous,
-        }
     }
 
     /// Apply a convention constraint expressed on a selected supertype back to a raw concrete
@@ -1555,7 +1535,12 @@ impl<'a> SymbolResolver<'a> {
         );
         let CandidateSelection::Selected((selected, _, result)) = self
             .select_receiver_function_with_params_tracking(
-                receiver, name, args, type_args, &callables, None,
+                receiver,
+                name,
+                FamilyArguments::Shared(args),
+                type_args,
+                &callables,
+                None,
             )
         else {
             return None;
@@ -1663,7 +1648,7 @@ impl<'a> SymbolResolver<'a> {
         match self.select_top_level_candidates(
             name,
             candidates,
-            TopLevelArguments::Shared(args),
+            FamilyArguments::Shared(args),
             type_args,
             expected,
             include_invisible,
@@ -1968,7 +1953,7 @@ impl<'a> SymbolResolver<'a> {
         match self.pick_top_level_with_visibility(
             name,
             fs,
-            TopLevelArguments::Shared(args),
+            FamilyArguments::Shared(args),
             type_args,
             expected,
             false,
