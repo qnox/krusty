@@ -1535,11 +1535,14 @@ impl FunctionInfo {
     /// Parameters after overload selection has applied receiver, argument, and expected-result
     /// constraints. Raw declaration parameters remain available through [`Self::semantic_params`].
     pub fn applied_params(&self) -> Cow<'_, [Ty]> {
-        drop_extension_receiver(
-            &self.callable.params,
-            self.is_extension(),
-            self.context_count,
-        )
+        self.semantic_params_of(&self.callable.params)
+    }
+
+    /// `params`, a selection's instantiation of this declaration's physical parameters, in the
+    /// coordinates of [`Self::semantic_params`]: the extension receiver removed, the context
+    /// prefix kept.
+    pub fn semantic_params_of<'p>(&self, params: &'p [Ty]) -> Cow<'p, [Ty]> {
+        drop_extension_receiver(params, self.is_extension(), self.context_count)
     }
 
     /// The selected Kotlin parameter shape after combining receiver/class specialization from the
@@ -2025,6 +2028,16 @@ pub struct PropertyInfo {
 }
 
 impl PropertyInfo {
+    /// The getter's selected parameters in the coordinates of its generic signature: the
+    /// extension receiver removed, the context prefix kept.
+    pub fn semantic_getter_params(&self) -> Cow<'_, [Ty]> {
+        drop_extension_receiver(
+            &self.getter.params,
+            self.kind == PropKind::Extension,
+            self.context_count,
+        )
+    }
+
     /// Whether this declaration participates in property-read selection.
     pub fn readable(&self) -> bool {
         !self.deprecated_hidden && self.accessor_availability.getter
