@@ -3504,6 +3504,7 @@ impl<'a> Parser<'a> {
             base_args,
             interface_delegations,
         ) = self.parse_supertypes();
+        let hoisted_from = self.file.decls.len();
         let (methods, body_props, init_order, type_aliases) = self.parse_object_body(&name);
         let end = self.t[self.i.saturating_sub(1)].span;
         let synth = ClassDecl {
@@ -3561,6 +3562,7 @@ impl<'a> Parser<'a> {
             Span::new(span.lo, end.hi),
         );
         self.file.anonymous_object_classes.insert(construction, did);
+        self.file.adopt_hoisted_classifiers(did, hoisted_from);
         construction
     }
 
@@ -3590,10 +3592,8 @@ impl<'a> Parser<'a> {
             loop {
                 self.skip_newlines();
                 let mods = self.parse_member_decl_prefix();
-                // Named singleton owners use the same classifier-registration invariant as class
-                // owners. The flag only excludes `inner` classes, whose semantics require an
-                // enclosing instance that a singleton cannot supply. Anonymous-object bodies use
-                // `parse_object_body` instead and have no stable owner identity to publish here.
+                // Named singletons exclude `inner` classes, which require an enclosing instance.
+                // Anonymous objects publish their classifier owner after `parse_object_body`.
                 if self.parse_and_register_nested_classifier(&name, &mods, false) {
                     continue;
                 }
