@@ -57,15 +57,16 @@ impl<'a> CommonSupertypeSolver<'a> {
     /// round. Other shared classifiers still compete, and `Any` remains the sound result when no
     /// acyclic candidate exists.
     fn common_at(&mut self, bounds: &[Ty], permit_intersection: bool) -> Option<Ty> {
-        // A type parameter whose upper bound admits `null` may itself be instantiated with a
-        // nullable type, so a join that reaches past it to a shared supertype stays nullable:
-        // `listOf(t, Sub())` for `T : Base?` is `List<Base?>`.
-        let nullable = bounds.iter().any(|bound| {
-            bound.is_nullable()
-                || (matches!(bound.kind(), TyKind::TyParam(..)) && bound.upper_bound_admits_null())
-        });
+        let nullable = bounds.iter().any(|bound| bound.is_nullable());
+        // A type parameter whose upper bound admits `null` may be instantiated with a nullable
+        // type, so a join that approximates past it to a shared supertype is nullable:
+        // `listOf(t, Sub())` for `T : Base?` is `List<Base?>`. A join whose result is such a
+        // parameter itself (`T` with `Nothing`, or `T` with `T`) keeps that bare parameter.
+        let past_nullable_parameter = bounds.iter().any(|bound| admits_null_through_bound(*bound));
         let preserve_nullability = |result: Ty| {
-            if nullable && result != Ty::Error {
+            if result != Ty::Error
+                && (nullable || (past_nullable_parameter && !admits_null_through_bound(result)))
+            {
                 Ty::nullable(result)
             } else {
                 result
@@ -424,6 +425,11 @@ fn single_reified_supertype(
     }
 }
 
+/// A bare type-parameter occurrence whose upper bound admits `null`.
+fn admits_null_through_bound(ty: Ty) -> bool {
+    matches!(ty.kind(), TyKind::TyParam(..)) && ty.upper_bound_admits_null()
+}
+
 fn supertype_closure(
     name: TypeName,
     direct_supertypes: &dyn Fn(TypeName) -> Option<Vec<TypeName>>,
@@ -635,6 +641,55 @@ mod tests {
             ),
             Ty::obj_args("demo/Inv", &[Ty::nullable(Ty::Int)])
         );
+    }
+
+    fn unbounded(name: &str) -> Ty {
+        Ty::ty_param(name, Ty::nullable(Ty::obj("kotlin/Any")))
+    }
+
+    #[test]
+    fn bottom_keeps_a_bare_type_parameter_in_both_operand_orders() {
+        let t = unbounded("T");
+        assert_eq!(common_super_type(&EmptySource, t, Ty::Nothing), t);
+        assert_eq!(common_super_type(&EmptySource, Ty::Nothing, t), t);
+    }
+
+    #[test]
+    fn a_repeated_type_parameter_joins_to_itself() {
+        let t = unbounded("T");
+        assert_eq!(common_super_types(&EmptySource, &[t, t]), t);
+    }
+
+    #[test]
+    fn bottom_keeps_a_bare_type_parameter_inside_a_covariant_argument() {
+        let source = GenericSource {
+            variance: TypeVariance::Out,
+        };
+        let covariant_t = Ty::obj_args("demo/Inv", &[unbounded("T")]);
+        let covariant_bottom = Ty::obj_args("demo/Inv", &[Ty::Nothing]);
+        assert_eq!(
+            common_super_type(&source, covariant_t, covariant_bottom),
+            covariant_t
+        );
+        assert_eq!(
+            common_super_type(&source, covariant_bottom, covariant_t),
+            covariant_t
+        );
+    }
+
+    #[test]
+    fn a_join_past_a_nullable_bound_parameter_is_nullable() {
+        let left = Ty::obj("demo/Left");
+        let t = Ty::ty_param("T", Ty::nullable(left));
+        assert_eq!(common_super_type(&EmptySource, t, left), Ty::nullable(left));
+        assert_eq!(common_super_type(&EmptySource, left, t), Ty::nullable(left));
+    }
+
+    #[test]
+    fn a_join_past_a_non_null_bound_parameter_reaches_its_bound() {
+        let left = Ty::obj("demo/Left");
+        let t = Ty::ty_param("T", left);
+        assert_eq!(common_super_type(&EmptySource, t, left), left);
     }
 
     #[test]
