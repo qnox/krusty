@@ -54,7 +54,7 @@ pub(super) fn realize(ir: &mut IrFile) {
         for (ordinal, projected) in contravariant.into_iter().enumerate() {
             if projected {
                 function.params[captures + ordinal] =
-                    super::bridges::bridge_erasure(declared[ordinal]);
+                    super::bridge_erasure::bridge_erasure(declared[ordinal]);
             }
         }
     }

@@ -557,6 +557,22 @@ pub(crate) fn instanceof_internal_name(t: Ty) -> String {
     }
 }
 
+/// Characters kotlinc keeps in a module suffix. `$` and every other non-identifier character
+/// become `_`; letters outside ASCII, digits, and `_` stay (`my-lib` → `my_lib`, `a.b` → `a_b`,
+/// `a$b` → `a_b`, `Я` stays).
+pub(crate) fn sanitize_module_name(module_name: &str) -> String {
+    module_name
+        .chars()
+        .map(|c| {
+            if c != '$' && (c == '_' || c.is_alphanumeric()) {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

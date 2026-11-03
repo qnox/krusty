@@ -94,19 +94,6 @@ pub(super) fn lambda_implementation_name(origin: &IrLambdaOrigin) -> String {
     format!("{enclosing}$lambda${}", origin.implementation_ordinal)
 }
 
-/// The name a dependency's own debug local carries once its body is spliced into a caller.
-///
-/// kotlinc suffixes an inlined value with `$iv` and leaves its inline-depth markers (`$i$f$…`,
-/// `$i$a$…`) alone — those already name the inlining they belong to. The suffix is a property of
-/// being inlined rather than of the declaration, which is why it is applied here and not stored.
-pub(super) fn spliced_local_name(name: &str) -> String {
-    if name.starts_with("$i$f$") || name.starts_with("$i$a$") {
-        name.to_string()
-    } else {
-        format!("{name}$iv")
-    }
-}
-
 /// The name of the inline-depth marker a spliced lambda body opens with.
 ///
 /// kotlinc spells it `$i$a$-<inline callee>-<the lambda's own class>`. The lambda is inlined and no

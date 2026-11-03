@@ -191,11 +191,11 @@ pub(super) fn type_safe_override_realization(
     let parameters = declaration
         .parameters
         .iter()
-        .map(|parameter| crate::jvm::bridges::bridge_erasure(*parameter))
+        .map(|parameter| crate::jvm::bridge_erasure::bridge_erasure(*parameter))
         .collect::<Vec<_>>();
     let descriptor = crate::jvm::names::method_descriptor(
         &parameters,
-        crate::jvm::bridges::bridge_erasure(declaration.result),
+        crate::jvm::bridge_erasure::bridge_erasure(declaration.result),
     );
     collection_bridge_policy_for_declaration(
         declaration.owner,

@@ -440,10 +440,10 @@ fn declare_wrapper(
             .declared_parameters
             .iter()
             .copied()
-            .map(super::bridges::bridge_erasure)
+            .map(super::bridge_erasure::bridge_erasure)
             .collect::<Vec<_>>();
         for result in crate::jvm::override_results::sam_results_boxed_over(target) {
-            let erased_ret = super::bridges::bridge_erasure(result);
+            let erased_ret = super::bridge_erasure::bridge_erasure(result);
             if class.bridges.iter().any(|bridge| {
                 bridge.name == target.method
                     && bridge.erased_params == erased_params

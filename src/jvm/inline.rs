@@ -2088,7 +2088,7 @@ pub(super) fn splice_unified(
             start,
             length,
             compaction.compact(local.slot, base),
-            super::debug_local_names::spliced_local_name(&local.name),
+            spliced_local_name(&local.name),
             local.descriptor.clone(),
         ));
     }
@@ -2172,6 +2172,19 @@ pub(super) fn splice_unified(
         locals: relocated_locals,
         lines: relocated_lines,
     })
+}
+
+/// The name a dependency's own debug local carries once its body is spliced into a caller.
+///
+/// kotlinc suffixes an inlined value with `$iv` and leaves its inline-depth markers (`$i$f$…`,
+/// `$i$a$…`) alone — those already name the inlining they belong to. The suffix is a property of
+/// being inlined rather than of the declaration, which is why it is applied here and not stored.
+fn spliced_local_name(name: &str) -> String {
+    if name.starts_with("$i$f$") || name.starts_with("$i$a$") {
+        name.to_string()
+    } else {
+        format!("{name}$iv")
+    }
 }
 
 #[cfg(test)]

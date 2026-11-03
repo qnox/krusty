@@ -1,10 +1,11 @@
 //! Whether a file's IR is ready for JVM emission: every type and callee the emitter consumes has
 //! been realized, and no checked operation, plugin placeholder or local delegate access remains.
 
-use super::{Callee, IrExpr, IrFile, Ty};
+use crate::ir::{Callee, IrExpr, IrFile};
+use crate::types::Ty;
 use crate::types::TyKind;
 
-pub(crate) fn jvm_can_emit(ir: &IrFile) -> bool {
+pub fn jvm_can_emit(ir: &IrFile) -> bool {
     fn ty_ok(t: &Ty) -> bool {
         match t.non_null().kind() {
             TyKind::Fun(s) => s.params.iter().all(ty_ok) && ty_ok(&s.ret),
@@ -65,7 +66,7 @@ pub(crate) fn jvm_can_emit(ir: &IrFile) -> bool {
 }
 
 /// Name the residual nodes that made [`jvm_can_emit`] decline the file.
-pub(super) fn trace_residual_nodes(ir: &IrFile) {
+pub fn trace_residual_nodes(ir: &IrFile) {
     crate::trace_compiler!(
         "lower",
         "JVM emission declined residual IR nodes: {:?}",

@@ -182,7 +182,7 @@ pub(super) fn class_realized_lambda_method(
             })
         };
         (runtime_reified
-            || modes.for_lambda(sam.as_deref(), *arity) == LambdaMode::Class
+            || super::lambda_mode_for(modes, sam.as_deref(), *arity) == LambdaMode::Class
             || bounded_erasure())
         .then_some(
             sam.as_ref()

@@ -2229,7 +2229,7 @@ impl Classpath {
     /// read its `InnerClasses` attribute off (no JDK on the classpath). Takes the nested JVM name
     /// (`java/util/Map$Entry`) and answers with the enclosing JVM name, the nested simple name, and the
     /// access flags an `InnerClasses` entry records — the same triple
-    /// [`super::backend::classpath_inner_class_resolver`] otherwise reads off `java/util/Map.class`.
+    /// the JVM backend's classpath inner-class resolver otherwise reads off `java/util/Map.class`.
     ///
     /// The relation is not invented: a `$`-separated JVM name decomposes structurally, the enclosing
     /// half maps back to its Kotlin builtin, and the `.kotlin_builtins` fragment carries the nested
