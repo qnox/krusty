@@ -9,6 +9,10 @@ pub(super) enum SelectedTopLevelCall {
         source: Option<(u32, u32)>,
         declaration: Option<crate::fir::DeclarationId>,
         parameter_by_argument: Box<[Option<u32>]>,
+        /// The selected declaration's signature in the coordinates selection used, after any
+        /// supplied context prefix was projected away, with the parameters it instantiated.
+        /// `parameter_by_argument` indexes this signature, not the callable's own.
+        selection: Box<crate::resolve::selected_result_publication::SelectedSignature>,
     },
     Value(Box<crate::libraries::PropertyInfo>),
     /// A classifier whose constructors do not apply: its associated `operator fun invoke`, then the

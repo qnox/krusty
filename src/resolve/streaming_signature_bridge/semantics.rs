@@ -1547,6 +1547,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                             arguments,
                             trailing_lambda,
                         ),
+                        selection: Self::selected_signature(&selected, &callable),
                         callable: Box::new(callable),
                         source: selected.source_key,
                         declaration: selected.stable_declaration,
@@ -1629,6 +1630,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                             ),
                             source: selected.source_key,
                             declaration: selected.stable_declaration,
+                            selection: Self::selected_signature(&selected, &callable),
                             callable: Box::new(callable),
                         },
                         selected_types,
@@ -1743,6 +1745,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 source,
                 declaration,
                 parameter_by_argument,
+                selection,
             } => {
                 crate::trace_compiler!(
                     "signature",
@@ -1752,6 +1755,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 );
                 let publication = self.selected_callable_publication(
                     &callable,
+                    *selection,
                     parameter_by_argument.clone(),
                     arguments,
                     &resolved_type_arguments,
@@ -3665,8 +3669,17 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             }
             let mut publication_callable = selected.callable.clone();
             publication_callable.ret = result;
+            // Selection instantiated the value parameters; the context prefix it supplied
+            // separately keeps the declaration's own types.
+            let declared = selected.semantic_params();
+            let context = &declared[..selected.context_count.min(declared.len())];
+            let selection = crate::resolve::selected_result_publication::SelectedSignature {
+                parameters: context.iter().chain(&parameters).copied().collect(),
+                signature: selected.generic_sig.clone(),
+            };
             let publication = self.selected_callable_publication(
                 &publication_callable,
+                selection,
                 parameter_by_argument,
                 arguments,
                 &type_arguments,

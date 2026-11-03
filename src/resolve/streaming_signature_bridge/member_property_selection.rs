@@ -55,7 +55,16 @@ impl ProductionSignatureSemantics<'_> {
                 };
                 self.commit_postponed_property_receiver(scope, &extension, receiver);
                 let publication = publication_origin.map(|_| {
-                    self.selected_callable_publication(&extension.getter, Box::new([]), &[], &[])
+                    self.selected_callable_publication(
+                        &extension.getter,
+                        crate::resolve::selected_result_publication::SelectedSignature {
+                            signature: extension.getter.generic_sig.as_deref().cloned(),
+                            parameters: extension.semantic_getter_params().into(),
+                        },
+                        Box::new([]),
+                        &[],
+                        &[],
+                    )
                 });
                 let finish = |result: crate::fir::ResolvedTy, alias| {
                     if let (Some(origin), Some(publication)) =

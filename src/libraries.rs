@@ -2058,6 +2058,16 @@ pub struct PropertyInfo {
 }
 
 impl PropertyInfo {
+    /// The getter's selected parameters in the coordinates of its generic signature: the
+    /// extension receiver removed, the context prefix kept.
+    pub fn semantic_getter_params(&self) -> Cow<'_, [Ty]> {
+        drop_extension_receiver(
+            &self.getter.params,
+            self.kind == PropKind::Extension,
+            self.context_count,
+        )
+    }
+
     /// Whether this declaration participates in property-read selection.
     pub fn readable(&self) -> bool {
         !self.deprecated_hidden && self.accessor_availability.getter
