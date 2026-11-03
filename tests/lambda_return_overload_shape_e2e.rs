@@ -63,12 +63,11 @@ fn diagnostic_blocks(output: &str, echoes_source: bool) -> Vec<Vec<String>> {
 fn assert_diagnostics_match_kotlinc(file: &str, source: &str, expected: &[&[&str]]) {
     let stdlib = common::stdlib_jar();
     let result = common::compiler_diagnostics(&[(file, source)], std::slice::from_ref(&stdlib));
-    assert_ne!(result.krusty_code, 0, "krusty accepted {file}");
-    assert_ne!(result.reference_code, 0, "kotlinc accepted {file}");
-    let mut krusty_output = result.krusty_stderr.clone();
-    krusty_output.push_str(&result.krusty_stdout);
-    assert_eq!(errors(&krusty_output), errors(&result.reference_stderr));
-    let krusty = diagnostic_blocks(&krusty_output, false);
+    assert_eq!(result.krusty_code, 1, "krusty's exit status for {file}");
+    assert_eq!(result.reference_code, 1, "kotlinc's exit status for {file}");
+    assert_eq!(result.krusty_stdout, "", "krusty's stdout for {file}");
+    assert_eq!(errors(&result.krusty_stderr), errors(&result.reference_stderr));
+    let krusty = diagnostic_blocks(&result.krusty_stderr, false);
     assert_eq!(krusty, diagnostic_blocks(&result.reference_stderr, true));
     assert_eq!(
         krusty,
