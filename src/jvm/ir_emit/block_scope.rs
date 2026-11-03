@@ -437,6 +437,11 @@ impl Emitter<'_> {
         else {
             return None;
         };
+        // An enclosing copied frame whose tail reaches this conversion already owns its
+        // adaptation.
+        if self.inline_coercions.is_deferred(value) {
+            return None;
+        }
         self.transformed_result(value)
             .is_none()
             .then_some(CopiedFrameResult::Coercion {
