@@ -283,7 +283,7 @@ impl Emitter<'_> {
         // declaration still lets the literal own the line, and a nested unsigned operation that
         // is not under that flag forgets ahead of its own literal so that literal is kept.
         // An enclosing `&&`/`||` that kept its own mark of this line there owns the receiver too.
-        let line = self.ir.expr_source_lines.get(&expression).copied();
+        let line = self.ir.source_line(expression);
         let kept_line = line.is_some_and(|line| code.line_kept_here(line));
         let keep_receiver_line =
             self.inside_condition || self.unsigned_assignment_line || kept_line;
@@ -357,9 +357,7 @@ impl Emitter<'_> {
         loop {
             match self.ir.expr(expression) {
                 crate::ir::IrExpr::TypeOp { arg, .. } => expression = *arg,
-                crate::ir::IrExpr::Const(_) => {
-                    return self.ir.expr_source_lines.contains_key(&expression)
-                }
+                crate::ir::IrExpr::Const(_) => return self.ir.source_line(expression).is_some(),
                 _ => return false,
             }
         }

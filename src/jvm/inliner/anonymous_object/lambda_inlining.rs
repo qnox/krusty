@@ -300,10 +300,6 @@ impl ClassRoles for WithOwnCopy<'_> {
         self.classes.regenerated_class(internal)
     }
 
-    fn contains_reified_marker(&self, internal: &str) -> bool {
-        internal != self.copy && self.classes.contains_reified_marker(internal)
-    }
-
     fn class_file(&self, internal: &str) -> Option<Vec<u8>> {
         self.classes.class_file(internal)
     }
