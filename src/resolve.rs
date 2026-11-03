@@ -9726,16 +9726,16 @@ impl TParams {
             resolve: &dyn Fn(&str) -> Option<TypeName>,
             visiting: &mut crate::fx_hash::HashSet<String>,
         ) -> Ty {
+            // The declaration's own formals shadow an enclosing declaration's same-named ones:
+            // in `class C<T> { fun <T, S : T?> f() }` the bound of `S` is the function's `T`.
             tparam_bound_semantic_with(bound, resolve, &mut |candidate| {
-                if let Some(ty) = enclosing(candidate) {
-                    return Some(ty);
-                }
-                names.iter().any(|name| name == candidate).then(|| {
-                    Ty::ty_param(
+                if names.iter().any(|name| name == candidate) {
+                    return Some(Ty::ty_param(
                         candidate,
                         parameter_bound(candidate, names, bounds, resolve, enclosing, visiting),
-                    )
-                })
+                    ));
+                }
+                enclosing(candidate)
             })
         }
         fn parameter_bound(
