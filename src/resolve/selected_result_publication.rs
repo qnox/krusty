@@ -71,6 +71,10 @@ pub(super) struct CompactSelectedResultPublication {
     /// carries that abbreviation, so an inferred declaration result reached through it records
     /// the alias.
     result_alias: Option<crate::libraries::DeclaredResultAlias>,
+    /// The selected declaration's value parameters under the selection's solved substitution,
+    /// position for position with `signature.params`. They carry the solved type arguments even
+    /// where no operand's own type does (`tagged(Child(), Base())` solves `T := Base`).
+    selected_parameters: Box<[Ty]>,
     /// The classifier declaring the selected member, whose type parameters a result alias may
     /// mention (`fun taggedOf(): Tagged<T>` in `class Store<T>`).
     declaring_owner: Option<TypeName>,
@@ -136,6 +140,16 @@ impl CompactSelectedResultPublication {
                 &mut view,
             );
         };
+        // The selection's solved substitution comes first: each binding below keeps its first
+        // constraint, so an operand's own narrower type never replaces what selection solved.
+        if let Some(signature) = &self.signature {
+            if signature.params.len() == self.selected_parameters.len() {
+                for (&declared, &selected) in signature.params.iter().zip(&self.selected_parameters)
+                {
+                    constrain(declared, selected);
+                }
+            }
+        }
         constrain(self.declared, self.selected);
         if let (Some(declared), Some(actual)) = (self.receiver, receiver) {
             constrain(declared, actual);
@@ -232,6 +246,7 @@ impl CompactSelectedResultPublication {
             ),
             explicit_type_arguments,
             result_alias: callable.result_alias,
+            selected_parameters: callable.params.clone().into(),
             declaring_owner: Some(callable.owner),
         }
     }
@@ -265,6 +280,7 @@ impl CompactSelectedResultPublication {
             ),
             explicit_type_arguments,
             result_alias: member.result_alias,
+            selected_parameters: member.params.clone().into(),
             declaring_owner: member.owner,
         }
     }
@@ -319,6 +335,7 @@ impl CompactSelectedResultPublication {
             ),
             explicit_type_arguments,
             result_alias: None,
+            selected_parameters: Box::new([]),
             declaring_owner: None,
         }
     }
@@ -952,6 +969,7 @@ mod tests {
             arguments: Box::new([]),
             explicit_type_arguments: Box::new([]),
             result_alias: None,
+            selected_parameters: Box::new([]),
             declaring_owner: None,
         };
         let ordinary_receiver = Ty::obj_args_name(list, &[function]);
@@ -1012,6 +1030,7 @@ mod tests {
             arguments: Box::new([]),
             explicit_type_arguments: Box::new([]),
             result_alias: None,
+            selected_parameters: Box::new([]),
             declaring_owner: None,
         };
         assert_eq!(
@@ -1045,6 +1064,7 @@ mod tests {
             .into_boxed_slice(),
             explicit_type_arguments: Box::new([Ty::String]),
             result_alias: None,
+            selected_parameters: Box::new([]),
             declaring_owner: None,
         };
         let ordinary_receiver = Ty::obj_args_name(carrier, &[Ty::String]);
@@ -1079,6 +1099,7 @@ mod tests {
             arguments: Box::new([]),
             explicit_type_arguments: Box::new([]),
             result_alias: None,
+            selected_parameters: Box::new([]),
             declaring_owner: None,
         };
 
