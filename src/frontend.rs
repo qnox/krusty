@@ -59,7 +59,7 @@ pub struct SourceSetAnalysis {
     pub types: Vec<Option<FrontendTypeInfo>>,
     parse_errors: Vec<bool>,
     pub(crate) reparse_sources: ReparseSources,
-    pub streamed: Option<StreamedPassState>,
+    pub(crate) streamed: Option<StreamedPassState>,
 }
 
 impl SourceSetAnalysis {
@@ -80,6 +80,21 @@ impl SourceSetAnalysis {
             return None;
         }
         Some((anchor.owner?, anchor.sibling))
+    }
+
+    /// The finalized Pass-1 signature of the declaration named `name`, for backend tests that
+    /// check what Pass 1 published before Pass 2 runs. `None` when Pass 1 did not finalize or no
+    /// declaration of that name has a signature.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn finalized_signature(&self, name: &str) -> Option<&crate::fir::ResolvedSignature> {
+        let index = self.streamed.as_ref()?.module.index();
+        (0..index.declaration_count())
+            .map(|raw| crate::fir::DeclarationId::from_raw(raw as u32))
+            .find_map(|declaration| {
+                (index.declaration_name(declaration) == Some(name))
+                    .then(|| index.signature(declaration))
+                    .flatten()
+            })
     }
 
     /// Whether the compiler generated `declaration`, as it does a data class's `copy`.
@@ -291,7 +306,7 @@ impl ReparseSource {
 
 /// Connected stable-identity product of Pass 1. It is kept beside the legacy AST result only while
 /// callers migrate; none of its fields can retain syntax or a temporary signature graph.
-pub struct StreamedPassState {
+pub(crate) struct StreamedPassState {
     pub module: crate::fir::FrontendModule,
     pub diagnostic_recovery: bool,
 }

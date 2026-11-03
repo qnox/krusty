@@ -338,19 +338,10 @@ fn jvm_production_stream_realizes_checked_class_literals() {
     );
 
     assert!(!diagnostics.has_errors(), "{:?}", diagnostics.diags);
-    let streamed = analysis
-        .streamed
-        .as_ref()
-        .expect("class literal signatures must finalize before Pass 2");
     let signature = |name: &str| {
-        (0..streamed.module.index().declaration_count())
-            .map(|raw| krusty::fir::DeclarationId::from_raw(raw as u32))
-            .find_map(|declaration| {
-                (streamed.module.index().declaration_name(declaration) == Some(name))
-                    .then(|| streamed.module.index().signature(declaration))
-                    .flatten()
-            })
-            .expect("named class-literal declaration")
+        analysis
+            .finalized_signature(name)
+            .expect("class literal signatures must finalize before Pass 2")
             .result
             .get()
     };
