@@ -116,3 +116,26 @@ fun clash(flag: Boolean): Bag<String> =\n\
     assert_eq!(common::compiler_errors(&result.reference_stderr), reference);
     assert_eq!(common::compiler_errors(&result.krusty_stderr), krusty);
 }
+
+#[test]
+fn an_inferred_declaration_result_rebinds_an_open_dependency_branch() {
+    // Declaration results are typed by the signature graph, which shares the body checker's
+    // open-branch rule: a library call that leaves a result-only formal open (`emptyMap()`) takes
+    // it from its sibling, including inside a lambda result. The Wasm box lanes decline the
+    // lambda form, so the whole program is a JVM comparison.
+    const SOURCE: &str = "\
+fun pick(c: Boolean) = if (c) emptyMap() else mapOf(\"O\" to \"K\")\n\
+fun pickLast(c: Boolean) = if (c) mapOf(1 to \"K\") else emptyMap()\n\
+fun faced(c: Boolean) = if (c) emptyList() else mutableListOf(\"O\")\n\
+val graph = listOf(\"O\").let { keys ->\n\
+    if (keys.isEmpty()) emptyMap() else keys.associateWith { \"K\" }\n\
+}\n\
+fun box(): String {\n\
+    if (pick(false).getValue(\"O\") != \"K\") return \"pick\"\n\
+    if (pickLast(true).getValue(1) != \"K\") return \"last\"\n\
+    val first: String = faced(false)[0]\n\
+    return first + graph.getValue(\"O\")\n\
+}\n\
+";
+    common::expect_box_same_as_kotlinc(SOURCE, "conditional-open-dependency-branch");
+}

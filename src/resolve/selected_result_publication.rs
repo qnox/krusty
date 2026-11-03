@@ -74,6 +74,15 @@ struct CompactPublicationArgument {
 }
 
 impl CompactSelectedResultPublication {
+    /// The selected generic signature when the call left a result-only formal open: no explicit
+    /// type arguments and a formal only the result names.
+    pub(super) fn open_result_signature(&self) -> Option<&GenericSig> {
+        self.signature.as_ref().filter(|signature| {
+            !self.explicit_type_arguments
+                && crate::symbol_resolver::has_result_only_formal(signature)
+        })
+    }
+
     pub(super) fn with_selected(mut self, selected: Ty) -> Self {
         self.selected = selected;
         self
