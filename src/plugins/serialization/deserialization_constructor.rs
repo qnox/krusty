@@ -752,7 +752,7 @@ fn store_field_default(
         .copied()
         .filter(|line| *line != 0);
     if let Some(line) = property_line {
-        ir.expr_source_lines.insert(default, line);
+        ir.set_source_line(default, line);
         let start_line = ir.classes[class_id as usize].decl_start_line;
         if start_line != 0 {
             ir.expr_lines.insert(store, start_line);

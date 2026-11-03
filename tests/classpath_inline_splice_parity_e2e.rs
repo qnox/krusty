@@ -4,8 +4,7 @@
 //! keeps its number and everything above moves down one.
 //!
 //! krusty reserved that slot, which shifted every host local up and made the whole method differ
-//! from the reference compiler's — before any coroutine is involved. See
-//! `docs/JVM_INLINE_BEFORE_CPS.md` §7a.
+//! from the reference compiler's — before any coroutine is involved.
 
 use super::common;
 
@@ -144,7 +143,7 @@ fun many(v: Int): Int = twice(v) { one(it) }
 }
 
 // A lambda with no parameters is NOT pinned against the reference compiler here. Its host local
-// declared after the call lands one slot higher there than the slot rule reproduces — the open
-// question in `docs/JVM_INLINE_BEFORE_CPS.md` §7b. The behaviour is covered by
+// declared after the call lands one slot higher there than the slot rule reproduces, an open
+// question. The behaviour is covered by
 // `a_lambda_only_inline_call_reserves_no_slot_for_it` above; pinning the instructions would assert
 // a shape that is known not to match yet.

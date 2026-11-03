@@ -130,7 +130,7 @@ impl BodyLowering<'_> {
             implementation,
             crate::ir::FnParamInfo::identities(parameter_identities),
         );
-        if let Some(&line) = self.ir.expr_source_lines.get(&function) {
+        if let Some(line) = self.ir.source_line(function) {
             self.ir.fn_decl_lines.insert(implementation, line);
         }
         self.record_sam_adapter_origin(implementation);
