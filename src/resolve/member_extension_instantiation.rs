@@ -94,7 +94,7 @@ pub(super) fn instantiate_member_extension_with(
         &mut lower_inputs,
     );
     let bound_before_receiver = bindings.clone();
-    crate::symbol_resolver::unify_ty_from_symbols(
+    crate::symbol_resolver::unify_receiver_from_symbols(
         source,
         declared_receiver,
         extension_receiver,
@@ -116,6 +116,15 @@ pub(super) fn instantiate_member_extension_with(
                 ) == Some(crate::types::TypeVariance::Out)
         })
         .collect::<Vec<_>>();
+    // The receiver is applicable only as the instantiated declaration: `Column<U?>` admits a
+    // caller's `Column<A>` (`A : Any`) structurally, but `U? = A` has no solution.
+    if !crate::symbol_resolver::resolution_subtype(
+        source,
+        extension_receiver,
+        apply_inference_bindings(declared_receiver, &bindings),
+    ) {
+        return None;
+    }
     let symbols = source;
     let declared_params = generic.map_or(function.signature.params.as_slice(), |signature| {
         signature.params.as_slice()
