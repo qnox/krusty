@@ -26,12 +26,12 @@ jobs:
   # Lint and coverage are independent merge gates. Give each its own runner so the clean Clippy
   # build does not sit on the coverage critical path. Conformance and Gradle run prebuilt artifact
   # families from their independent producer jobs below; neither matrix compiles krusty again.
-  # Heavy builds (the coverage build in ci, the binary producers and build-release) run on
-  # GitHub-hosted runners. Every other job runs on a self-hosted runner with one size label
+  # Lint, coverage in ci, the binary producers and build-release run on GitHub-hosted
+  # runners. Other jobs run on a self-hosted runner with one size label
   # (rust-4c-8gb, helper-1c-1gb). Fork PRs run on ubuntu-latest: self-hosted runners never take
   # fork PR jobs.
   lint:
-    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
