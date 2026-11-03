@@ -51,6 +51,12 @@ pub(crate) fn declaration_default_callable(base: &FunctionInfo) -> Option<Librar
 }
 
 impl<'a> SymbolResolver<'a> {
+    /// Let a lambda's checked result decide applicability, as `+EagerLambdaAnalysis` does.
+    pub(crate) fn with_eager_lambda_results(mut self, eager: bool) -> Self {
+        self.eager_lambda_results = eager;
+        self
+    }
+
     /// Delegate conventions additionally need the receiver application inferred by their ordinary
     /// value arguments. For example, `D("K")` may initially have the raw type `D<>`, while
     /// `getValue(thisRef: R, ...)` fixes the owning `D<R>` to `D<String>`. Keep that application
@@ -67,17 +73,15 @@ impl<'a> SymbolResolver<'a> {
     ) -> ReceiverFunctionSelection {
         let selected = match select_receiver_overload_from_functions_tracking(
             self.lib,
-            receiver,
-            name,
-            args,
-            type_args,
-            ExtCtx {
-                fn_scope: self.fn_scope,
-                source: &self.src,
-                type_variables: self.type_variables,
+            OverloadCall {
+                recv: receiver,
+                name,
+                args,
+                type_args,
+                indexed: IndexedConvention::Ordinary,
             },
+            self.ext_ctx(),
             callables.functions(),
-            IndexedConvention::Ordinary,
         ) {
             CandidateSelectionWithTies::Selected(selected) => selected,
             CandidateSelectionWithTies::None => return ReceiverFunctionSelection::None,

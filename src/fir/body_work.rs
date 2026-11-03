@@ -4,6 +4,9 @@ use super::body::ResolvedCallableHeader;
 use super::header::{BodyKind, BodyOwnerId, DeclarationId, SourceMap, StreamedHeaderModule};
 use super::signature::ResolvedModuleIndex;
 
+mod checker_roots;
+pub(crate) use checker_roots::checker_root;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BodyWorkItem {
     pub declaration: DeclarationId,
@@ -276,50 +279,12 @@ fn checker_root_for_declaration(
     local_classifier_lexical_roots: &crate::fx_hash::HashMap<DeclarationId, DeclarationId>,
     declaration: DeclarationId,
 ) -> DeclarationId {
-    let ordinary_root = |mut declaration: DeclarationId| loop {
-        let Some(anchor) = declarations.anchor(declaration) else {
-            break declaration;
-        };
-        let local_classifier = anchor.kind == super::DeclarationKind::Classifier
-            && index
-                .declaration_header(declaration)
-                .is_some_and(|header| header.flags.has(super::DeclarationFlags::LOCAL_CLASS));
-        if (anchor.kind == super::DeclarationKind::Classifier && !local_classifier)
-            || anchor.owner.is_none()
-        {
-            break declaration;
-        }
-        declaration = anchor.owner.expect("a non-root declaration has an owner");
-    };
-
-    let mut declaration = declaration;
-    loop {
-        let Some(anchor) = declarations.anchor(declaration) else {
-            break declaration;
-        };
-        let local_classifier = anchor.kind == super::DeclarationKind::Classifier
-            && index
-                .declaration_header(declaration)
-                .is_some_and(|header| header.flags.has(super::DeclarationFlags::LOCAL_CLASS));
-        if local_classifier {
-            if let Some(root) = local_classifier_lexical_roots
-                .get(&declaration)
-                .copied()
-                .map(ordinary_root)
-            {
-                if root != declaration {
-                    declaration = root;
-                    continue;
-                }
-            }
-        }
-        if (anchor.kind == super::DeclarationKind::Classifier && !local_classifier)
-            || anchor.owner.is_none()
-        {
-            break declaration;
-        }
-        declaration = anchor.owner.expect("a non-root declaration has an owner");
-    }
+    checker_root(
+        index,
+        declaration,
+        |declaration| declarations.anchor(declaration).map(Into::into),
+        |declaration| local_classifier_lexical_roots.get(&declaration).copied(),
+    )
 }
 
 impl StreamedHeaderModule {
