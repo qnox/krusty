@@ -1341,6 +1341,7 @@ mod suspend_lambda_member_tests {
             IrValueCapture {
                 declaration: IrCapturedDeclaration::Variable,
                 capturer: IrCapturingCallable::Lambda,
+                crossinline_parameter: None,
             },
         );
         let lambda = SuspendLambdaParameters::new(

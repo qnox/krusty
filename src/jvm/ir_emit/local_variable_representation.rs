@@ -400,7 +400,7 @@ impl Emitter<'_> {
         initializer: ExprId,
         code: &mut CodeBuilder,
     ) {
-        self.mark_expression_start(initializer, code);
+        self.mark_initializer_end(initializer, code);
         match self.ir.external_frame_lines.get(&declaration).cloned() {
             Some(frame) => {
                 let line = self.map_external_frame_line(&frame);

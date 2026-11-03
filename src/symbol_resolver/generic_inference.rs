@@ -1158,24 +1158,48 @@ pub(crate) fn formal_variance_in_type(
 /// Whether every occurrence of `formal` in `shape` sits on an invariant path, so an argument at
 /// this parameter fixes the formal exactly. [`formal_variance_in_type`] also answers `Invariant`
 /// for mixed occurrences such as `(T) -> T`, which keep independent lower and upper bounds.
-pub(crate) fn formal_fixed_exactly_by(source: &dyn SymbolSource, shape: Ty, formal: &str) -> bool {
+///
+/// An occurrence that writes its own nullability (`T?` or `T & Any`) of a formal whose declared
+/// bound admits null fixes the formal only up to nullability: `Inv<T & Any>` against
+/// `Inv<String>` admits both `String` and `String?`, so it does not fix `T` exactly.
+pub(crate) fn formal_fixed_exactly_by(
+    source: &dyn SymbolSource,
+    shape: Ty,
+    formal: &str,
+    nullable_formal: bool,
+) -> bool {
     use crate::types::TypeVariance;
 
     fn occurrences(
         source: &dyn SymbolSource,
         shape: Ty,
         formal: &str,
+        nullable_formal: bool,
         invariant_path: bool,
         found: &mut Vec<bool>,
     ) {
-        if matches!(shape.non_null().kind(), TyKind::TyParam(name, _) if name == formal) {
-            found.push(invariant_path);
-            return;
+        let (occurrence, written_nullability) = match shape.kind() {
+            TyKind::Nullable(inner) | TyKind::DefinitelyNotNull(inner) => (inner, true),
+            _ => (shape.non_null(), false),
+        };
+        if let TyKind::TyParam(name, bound) = occurrence.kind() {
+            if name == formal {
+                // A compact `T & Any` carries a non-null occurrence bound.
+                let pinned_nullability =
+                    nullable_formal && (written_nullability || !bound.upper_bound_admits_null());
+                found.push(invariant_path && !pinned_nullability);
+                return;
+            }
         }
         match shape.non_null().kind() {
-            TyKind::InProjection(inner) | TyKind::OutProjection(inner) => {
-                occurrences(source, inner, formal, invariant_path, found)
-            }
+            TyKind::InProjection(inner) | TyKind::OutProjection(inner) => occurrences(
+                source,
+                inner,
+                formal,
+                nullable_formal,
+                invariant_path,
+                found,
+            ),
             TyKind::Obj(owner, arguments) => {
                 let classifier = source.classifier(owner);
                 for (index, argument) in arguments.iter().enumerate() {
@@ -1193,6 +1217,7 @@ pub(crate) fn formal_fixed_exactly_by(source: &dyn SymbolSource, shape: Ty, form
                         source,
                         *argument,
                         formal,
+                        nullable_formal,
                         invariant_path || invariant,
                         found,
                     );
@@ -1200,16 +1225,30 @@ pub(crate) fn formal_fixed_exactly_by(source: &dyn SymbolSource, shape: Ty, form
             }
             TyKind::Fun(function) => {
                 for parameter in &function.params {
-                    occurrences(source, *parameter, formal, invariant_path, found);
+                    occurrences(
+                        source,
+                        *parameter,
+                        formal,
+                        nullable_formal,
+                        invariant_path,
+                        found,
+                    );
                 }
-                occurrences(source, function.ret, formal, invariant_path, found);
+                occurrences(
+                    source,
+                    function.ret,
+                    formal,
+                    nullable_formal,
+                    invariant_path,
+                    found,
+                );
             }
             _ => {}
         }
     }
 
     let mut found = Vec::new();
-    occurrences(source, shape, formal, false, &mut found);
+    occurrences(source, shape, formal, nullable_formal, false, &mut found);
     !found.is_empty() && found.iter().all(|invariant| *invariant)
 }
 
@@ -1359,6 +1398,21 @@ pub(crate) fn merge_inferred_ty_from_symbols(
     if same_parameter_dnn(actual, current) {
         return actual;
     }
+    // `T & Any` is a subtype of `T` (and of `T?`), so the join of a parameter with its own
+    // definitely-non-null face is that parameter, in either representation of the face.
+    let own_dnn_face = |face: Ty, plain: Ty| {
+        let parameter = plain.non_null();
+        matches!(parameter.kind(), TyKind::TyParam(..))
+            && face != parameter
+            && (face == parameter.definitely_non_null()
+                || face == parameter.contributed_through_nullable_formal())
+    };
+    if own_dnn_face(actual, current) {
+        return current;
+    }
+    if own_dnn_face(current, actual) {
+        return actual;
+    }
     if current.non_null() == actual.non_null() {
         let base = current.non_null();
         return if current.is_nullable() || actual.is_nullable() {
@@ -1419,63 +1473,9 @@ pub(crate) fn merge_inferred_ty_from_symbols(
     if !merged.is_erased_top() || !current.is_reference() || !actual.is_reference() {
         return merged;
     }
-    let same_generic_classifier = match (current.non_null().kind(), actual.non_null().kind()) {
-        (TyKind::Obj(left, left_arguments), TyKind::Obj(right, right_arguments)) => {
-            left == right
-                && !left_arguments.is_empty()
-                && left_arguments.len() == right_arguments.len()
-        }
-        _ => false,
-    };
-    if same_generic_classifier {
-        // Two invariant instantiations (`Inv<A>` and `Inv<B>`) are not a raw classifier and not
-        // `Any`. Their common supertype keeps the classifier and captures the arguments' own common
-        // supertype. Do not apply this structural join to unrelated top-level classifiers: ordinary
-        // inference already has a stable nearest-hierarchy rule, and replacing it changes such
-        // established results as mixed scalar varargs and Java flexible collection expectations.
-        let supertype =
-            common_supertype::common_super_type(source, current.non_null(), actual.non_null());
-        if !supertype.is_erased_top() {
-            return if current.is_nullable() || actual.is_nullable() {
-                Ty::nullable(supertype)
-            } else {
-                supertype
-            };
-        }
-    }
-
-    let left = receiver_hierarchy(source, current.non_null());
-    let right = receiver_hierarchy(source, actual.non_null());
-    let mut common = left
-        .iter()
-        .flat_map(|(left_ty, left_depth)| {
-            right.iter().filter_map(move |(right_ty, right_depth)| {
-                let left_name = left_ty.obj_internal()?;
-                let right_name = right_ty.obj_internal()?;
-                (left_name == right_name).then_some((
-                    left_depth + right_depth,
-                    if left_ty == right_ty {
-                        *left_ty
-                    } else {
-                        common_supertype::common_super_type(source, *left_ty, *right_ty)
-                    },
-                ))
-            })
-        })
-        .collect::<Vec<_>>();
-    let Some(nearest) = common.iter().map(|(distance, _)| *distance).min() else {
-        return merged;
-    };
-    common.retain(|(distance, ty)| *distance == nearest && !ty.is_erased_top());
-    common.dedup_by(|left, right| left.1 == right.1);
-    let [(_, common)] = common.as_slice() else {
-        return merged;
-    };
-    if current.is_nullable() || actual.is_nullable() {
-        Ty::nullable(*common)
-    } else {
-        *common
-    }
+    // Two unrelated references join at their common supertype, the one relation that also
+    // reads a type parameter through its bounds and keeps a nullable bound's nullability.
+    common_supertype::common_super_type(source, inference_actual(current), inference_actual(actual))
 }
 
 /// Collapse a complete set of lower constraints in one operation. Keeping the original bounds is

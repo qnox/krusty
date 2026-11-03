@@ -76,7 +76,7 @@ fn a_unit_expression_body_marks_its_end_line_on_the_return() {
         stmts: Vec::new(),
         value: None,
     });
-    ir.expr_end_lines.insert(expression, 13);
+    ir.set_end_line(expression, 13);
     let callable_body = super::super::finish_callable_body(
         &mut ir,
         vec![expression],
