@@ -324,20 +324,7 @@ impl Checker<'_> {
             return None;
         }
         let signature = self.selected_generic_call_signature(expression)?;
-        signature
-            .formals
-            .iter()
-            .any(|formal| {
-                let formal = std::slice::from_ref(formal);
-                crate::types::ty_mentions_param(signature.ret, formal)
-                    && signature
-                        .receiver
-                        .is_none_or(|receiver| !crate::types::ty_mentions_param(receiver, formal))
-                    && signature
-                        .params
-                        .iter()
-                        .all(|parameter| !crate::types::ty_mentions_param(*parameter, formal))
-            })
+        crate::symbol_resolver::has_result_only_formal(signature)
             .then_some(std::borrow::Cow::Borrowed(signature))
     }
 

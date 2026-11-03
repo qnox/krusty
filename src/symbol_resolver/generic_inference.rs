@@ -27,7 +27,9 @@ pub(crate) use call_constraints::{
     seed_denotable_upper_placeholders, AssignabilityConstraints, GenericBoundViolation,
 };
 pub(crate) use call_site_variables::{CallSiteVariableMap, CallSiteVariables};
-pub(crate) use conditional_result::generic_return_expectation_from_sibling;
+pub(crate) use conditional_result::{
+    generic_return_expectation_from_sibling, has_result_only_formal,
+};
 pub(crate) use postponed_result::{
     completed_constructor_result_arguments, instantiate_unconstrained_result,
     nested_result_from_concrete_parameter, solved_constructor_type_arguments,
