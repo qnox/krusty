@@ -92,6 +92,7 @@ pub(super) fn emit_annotation_class(
         }
     }
     emit_jvm_interface_companion_surface(ir, c, facade, env, &mut cw);
+    super::companion_field::attach_companion_field_nullability(ir, c, &mut cw);
     // Documented/retention/target meta-annotations, matching kotlinc's ORDER: everything the source
     // declares comes first, in source order — `kotlin.annotation.Retention(X)` and
     // `kotlin.annotation.Target` among them — and the JVM mirrors are appended after:
