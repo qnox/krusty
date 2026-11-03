@@ -20,6 +20,7 @@ mod library_classifiers;
 mod local_class_names;
 pub(crate) use local_class_names::{settle_generated_class_names, SettledGeneratedClassNames};
 mod local_function_names;
+mod modifier_containing_declarations;
 mod no_expect_for_actual;
 mod published_declarations;
 mod published_overrides;
@@ -1253,6 +1254,7 @@ where
         }
         if source.kind == SourceKind::Kotlin {
             header_validation::validate(&file, diags);
+            modifier_containing_declarations::check(&file, diags);
             explicit_api::check(&file, &features, diags);
             // `expect`/`actual` outside a multiplatform project is an ERROR, not a no-op. Accepting
             // it emitted an artifact that could not link: a call to an unmatched `expect fun` was
