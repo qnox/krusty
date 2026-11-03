@@ -106,7 +106,12 @@ kotlinc 2.4.21 decides every `LineNumberTable` entry in one place, from IR node 
   and a suspend call (516).
 - Kinds that mark after their operands: a call marks before its `invoke*` (546-548); `IrReturn` after
   its value and any `finally` (1000); `IrVariable` marks its initializer's start after the
-  initializer, then its own start before the store (724-726; 733 without an initializer); `IrSetValue` marks its value's start
+  initializer, then its own start before the store (724-726; 733 without an initializer). A
+  temporary fir2ir declares for a value (`createTemporaryVariable`: a `when` subject, a safe call's
+  receiver, a call operand stored to keep evaluation order) is built at that value's offsets, and
+  so is an implicit conversion of a value; lowering gives both the value's position
+  (`value_temporary`, `settle_positions_of`), and the store marks the declaration's own source
+  line. `IrSetValue` marks its value's start
   first and its own before the store (883-890). Loop conditions mark their start (1132, 1176,
   1193); a catch clause marks at its handler (1314); a constant branch condition marks
   its start on a `nop` (1037).

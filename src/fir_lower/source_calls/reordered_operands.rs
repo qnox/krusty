@@ -54,15 +54,9 @@ impl BodyLowering<'_> {
         let read = self.spill_reordered_value(value, parameter_ty, statements);
         // These holders, and only these, are kotlinc's argument-order variables, which take their
         // slots before their values are evaluated. Any other call-operand holder is a staging of
-        // the operand, stored once it is evaluated. kotlinc's `visitVariable` marks each one at the
-        // argument's line once the value is stored: after an inlined argument has forgotten the
-        // line, that mark states it again.
-        let line = self.operand_source_line(value);
+        // the operand, stored once it is evaluated.
         for &declaration in &statements[first..] {
             self.ir.argument_evaluation_bindings.insert(declaration);
-            if let Some(line) = line {
-                self.ir.set_source_line(declaration, line);
-            }
         }
         read
     }
@@ -106,31 +100,10 @@ impl BodyLowering<'_> {
     /// Keep the operand's source line on that replay so the next direct operand can restore its own
     /// line, exactly as it would without the evaluation-order temporary.
     fn reordered_operand_replay(&mut self, source: ExprId, replay: ExprId) -> ExprId {
-        if let Some(line) = self.operand_source_line(source) {
+        if let Some(line) = self.ir.source_line(source) {
             self.ir.set_source_line(replay, line);
         }
         replay
-    }
-
-    /// The source line of a call operand that lowering stores in a temporary: kotlinc builds the
-    /// temporary and its reads at the argument's offsets. An implicit coercion of the argument to
-    /// its parameter has no position of its own, so the line is the value it coerces.
-    fn operand_source_line(&self, operand: ExprId) -> Option<u32> {
-        let mut operand = operand;
-        loop {
-            if let Some(line) = self.ir.source_line(operand) {
-                return Some(line);
-            }
-            let &IrExpr::TypeOp {
-                op: IrTypeOp::ImplicitCoercion,
-                arg,
-                ..
-            } = self.ir.expr(operand)
-            else {
-                return None;
-            };
-            operand = arg;
-        }
     }
 
     fn is_reference_value(&self, value: ExprId) -> bool {
