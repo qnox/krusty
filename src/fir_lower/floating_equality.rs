@@ -39,7 +39,7 @@ impl BodyLowering<'_> {
         // The negation of `!=` is built at the same offsets; the equality marks the line itself.
         let line = self.body.expression_debug_lines(expression).source;
         if line != 0 {
-            self.ir.expr_source_lines.insert(equal, line);
+            self.ir.set_source_line(equal, line);
         }
         if operation == FirBinaryOperation::Equal {
             return Ok(equal);

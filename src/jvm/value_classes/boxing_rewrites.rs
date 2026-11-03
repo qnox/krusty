@@ -19,9 +19,9 @@ pub(super) fn to_string_wrap(ir: &mut IrFile, id: ExprId, x: TypeName, under: &U
         dispatch_receiver: None,
         args: vec![new_id],
     };
-    ir.physical_types.insert(id, Ty::String);
+    ir.set_physical_type(id, Ty::String);
     // The part is still a value-class operand: its text is appended as that type, not as a String.
-    ir.logical_types.insert(id, Ty::obj_name(x));
+    ir.set_logical_type(id, Ty::obj_name(x));
 }
 
 /// Replace the unboxed value at `id` with `X.box-impl(value)`.
@@ -40,7 +40,7 @@ pub(super) fn box_wrap(ir: &mut IrFile, id: ExprId, x: TypeName, under: &Under) 
         dispatch_receiver: None,
         args: vec![new_id],
     };
-    ir.physical_types.insert(id, Ty::obj_name(x));
+    ir.set_physical_type(id, Ty::obj_name(x));
 }
 
 /// Null-safe box: replace the expr at `id` with `{ tmp = <orig>; if (tmp == null) null else box-impl(tmp) }`
@@ -54,10 +54,7 @@ pub(super) fn box_wrap_nullable(
     under: &Under,
     slot: u32,
 ) {
-    let nullable_carrier = ir
-        .physical_types
-        .get(&id)
-        .is_some_and(|ty| ty.is_nullable());
+    let nullable_carrier = ir.physical_type(id).is_some_and(|ty| ty.is_nullable());
     let orig_id = clone_below_representation_wrapper(ir, id);
     let u = under.get(&x).map(|t| erase(t, under)).unwrap_or(Ty::Error);
     let var = ir.exprs.len() as ExprId;
@@ -104,5 +101,5 @@ pub(super) fn box_wrap_nullable(
         stmts: vec![var],
         value: Some(when),
     };
-    ir.physical_types.insert(id, Ty::obj_name(x));
+    ir.set_physical_type(id, Ty::obj_name(x));
 }
