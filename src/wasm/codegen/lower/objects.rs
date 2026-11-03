@@ -947,6 +947,14 @@ impl Body<'_> {
         arg: u32,
         target: Ty,
     ) -> Result<(), Unsupported> {
+        if self.ir.names_reified_type_parameter(target) {
+            // Only a reified declaration's template tests its own unsubstituted parameter; every
+            // executed expansion tests the call's type argument instead. The template keeps the
+            // operand's effects and then traps, as the declaration's own unlowerable body does.
+            self.statement(arg)?;
+            self.code.unreachable();
+            return Ok(());
+        }
         if !matches!(self.carrier_of(arg)?, Some(ValType::Ref { .. }) | None) {
             return Err(format!(
                 "a type test of a `{}` value",
