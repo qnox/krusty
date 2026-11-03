@@ -31,20 +31,6 @@ impl Emitter<'_> {
             crate::ir::IrIntrinsic::StringGet | crate::ir::IrIntrinsic::StringLength => {
                 self.emit_string_member(expression, operation, receiver, arguments, code)
             }
-            crate::ir::IrIntrinsic::EnumName => {
-                self.emit_value(receiver, code);
-                self.mark_dispatch_line(expression, code);
-                // kotlinc names the receiver's checked static classifier in the Methodref. JVM
-                // lookup then finds the inherited `Enum.name()` implementation. The receiver type
-                // is already in its physical JVM form here; no source spelling is reconstructed.
-                let owner = self
-                    .value_ty(receiver)
-                    .obj_internal()
-                    .expect("checked Enum.name receiver has a JVM classifier")
-                    .render();
-                let method = self.cw.methodref(&owner, "name", "()Ljava/lang/String;");
-                code.invokevirtual(method, 0, 1);
-            }
             crate::ir::IrIntrinsic::NullableAnyToString => {
                 self.emit_string_conversion(expression, receiver, code)
             }

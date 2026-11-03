@@ -137,19 +137,6 @@ impl BodyLowering<'_, '_, '_> {
                 }
                 self.runtime_call("kt_string_length", &[any()], ret, &[value])
             }
-            // The frontend publishes the exact `kotlin.Enum.name` declaration as an intrinsic
-            // after ordinary property selection. Native enum objects already carry that base
-            // property's storage, so consume the selected identity through the same reader as an
-            // external `Enum`-typed property access.
-            IrIntrinsic::EnumName => {
-                let Some(receiver) = receiver else {
-                    return Err("a malformed `Enum.name` read".into());
-                };
-                if !args.is_empty() {
-                    return Err("a malformed `Enum.name` read".into());
-                }
-                self.enum_member("name", receiver)
-            }
             IrIntrinsic::NullableAnyToString => {
                 let Some(receiver) = receiver else {
                     return Err("a malformed `toString`".into());

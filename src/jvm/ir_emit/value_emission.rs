@@ -819,7 +819,6 @@ impl super::Emitter<'_> {
                     op @ (crate::ir::IrIntrinsic::ArraySize
                     | crate::ir::IrIntrinsic::StringGet
                     | crate::ir::IrIntrinsic::StringLength
-                    | crate::ir::IrIntrinsic::EnumName
                     | crate::ir::IrIntrinsic::NullableAnyToString) => {
                         self.emit_builtin_member(e, op, dispatch_receiver.unwrap(), args, code)
                     }

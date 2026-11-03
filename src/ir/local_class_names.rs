@@ -463,7 +463,6 @@ fn callee(callee: &mut Callee, names: &IdentityRemap<'_>) {
                 | super::IrIntrinsic::ArraySize
                 | super::IrIntrinsic::StringGet
                 | super::IrIntrinsic::StringLength
-                | super::IrIntrinsic::EnumName
                 | super::IrIntrinsic::NullableAnyToString
                 | super::IrIntrinsic::CoroutineContext => {}
             }
