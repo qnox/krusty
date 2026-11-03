@@ -97,6 +97,7 @@ mod property_layouts;
 pub(crate) mod referenced_classifiers;
 mod references;
 mod reified_markers;
+mod reified_templates;
 mod sam_target;
 mod source_debug;
 pub(crate) use source_debug::SourceDebug;

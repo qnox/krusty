@@ -53,21 +53,4 @@ impl IrFile {
             .map(|parameter| (parameter.semantic_name.as_str(), &*parameter.bounds));
         declared.chain(referenced).collect()
     }
-
-    /// Whether `ty` names a reified type parameter of one of this file's own declarations.
-    ///
-    /// Kotlin lets only an `inline` function declare one, and every expansion that executes
-    /// substitutes the call's type argument for it. An occurrence that survives therefore belongs
-    /// to the declaration's TEMPLATE: its own body, or a lambda or anonymous object that body
-    /// declares, which runs only if the declaration were called directly instead of inlined.
-    pub(crate) fn names_reified_type_parameter(&self, ty: Ty) -> bool {
-        self.signatures
-            .values()
-            .flat_map(|signature| &signature.type_params)
-            .filter(|parameter| parameter.reified)
-            .any(|parameter| {
-                ty.type_parameter_occurrence_bound(&parameter.semantic_name)
-                    .is_some()
-            })
-    }
 }
