@@ -79,3 +79,13 @@ pub(super) struct MachineSubject<'a> {
     pub(super) captured_scopes: Option<super::SuspensionScopes>,
     pub(super) suspension_lines: &'a krusty::fx_hash::HashMap<krusty::ir::ExprId, (u32, u32)>,
 }
+
+/// The backend pass facts suspend lowering records into.
+pub(crate) struct SuspendLoweringFacts<'a> {
+    pub(crate) continuation_metadata: &'a mut ContinuationMetadataMap,
+    pub(crate) default_call_operands: &'a mut crate::default_call_operands::DefaultCallOperands,
+    pub(crate) emit_time_machines: &'a mut super::EmitTimeMachines,
+    pub(crate) suspended_result_returns: &'a mut SuspendedResultReturns,
+    pub(crate) intrinsic_probe_continuations: &'a mut IntrinsicProbeContinuations,
+    pub(crate) specialized_lambda_classes: &'a mut super::SpecializedLambdaClasses,
+}

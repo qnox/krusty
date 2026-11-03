@@ -10,7 +10,7 @@ use super::Under;
 use krusty::fx_hash::{HashMap, HashSet};
 use krusty::ir::referenced_classifiers::{collect_classifier_names, referenced_classifier_names};
 use krusty::ir::IrFile;
-use krusty::types::TypeName;
+use krusty::types::{Ty, TypeName};
 
 /// Publish the value classes this file references into its value-class facts, ahead of JVM passes
 /// that need the declaration kind before the value-class representation pass runs (delegate-method
@@ -221,4 +221,17 @@ mod tests {
             None
         );
     }
+}
+
+/// This module's value classes, as the frontend froze them before Pass 2.
+#[derive(Clone, Copy)]
+pub(crate) struct ModuleValueClasses<'a> {
+    /// Same-module SOURCE value classes (internal name → sole-field underlying), collected from
+    /// the frontend symbols. A value class declared in ANOTHER file of this module is not in
+    /// `ir.classes`; the normalized classifier provider supplies its declaration facts without
+    /// leaking provider origin into representation decisions.
+    pub(crate) underlying: &'a HashMap<TypeName, Ty>,
+    /// Subset whose stable declaration headers describe a value-class shape supported by metadata
+    /// emission. No sibling body or source coordinate is retained.
+    pub(crate) readable: &'a HashSet<TypeName>,
 }
