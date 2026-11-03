@@ -4,6 +4,8 @@
 use super::*;
 
 mod java_hash_map;
+#[cfg(test)]
+mod result_tests;
 mod switch;
 
 /// Whether a discarded `when` still joins a value, as kotlinc's `visitWhen` has it: only a `when`
@@ -88,7 +90,9 @@ impl Emitter<'_> {
         if branches.iter().any(|(condition, _)| condition.is_none()) {
             self.run
                 .set_emit_error("a value `when` has no recorded result type".to_string());
-            return Ty::Error;
+            // The class is refused already; a reference only keeps the rest of this method's
+            // emission well-formed until the refusal discards it.
+            return Ty::obj_name(crate::types::wk::java_object());
         }
         Ty::Unit
     }
