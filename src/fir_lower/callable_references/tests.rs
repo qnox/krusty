@@ -1231,7 +1231,8 @@ fn ordinary_inner_constructor_keeps_source_property_after_physical_outer_prefix(
     assert_eq!(ir.checked_type(*outer), Some(Ty::obj("Outer")));
     assert_eq!(ir.checked_type(*value), Some(Ty::String));
     assert_eq!(
-        ir.construction_declared_params[&construction.0].as_ref(),
+        ir.construction_declared_params(construction.0)
+            .expect("declared parameters"),
         [Ty::obj("Outer"), Ty::String]
     );
 }
@@ -1383,6 +1384,7 @@ fn external_inner_constructor_prepends_the_checked_outer_receiver() {
             internal,
             args,
             ctor_params: Some(parameters),
+            declared_params: _,
             ctor_desc: None,
             external_target: Some(target),
             defaults,

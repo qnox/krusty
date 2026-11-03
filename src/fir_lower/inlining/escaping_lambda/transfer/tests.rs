@@ -967,6 +967,7 @@ fn invalid_nested_specialization_invalidates_the_outer_plan() {
         internal: anonymous,
         args: vec![copy],
         ctor_params: None,
+        declared_params: None,
         ctor_desc: None,
         external_target: None,
         defaults: Box::new([]),

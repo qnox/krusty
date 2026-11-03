@@ -639,10 +639,14 @@ fn remap_expression(expression: &mut IrExpr, names: &IdentityRemap<'_>) {
         IrExpr::New {
             internal,
             ctor_params,
+            declared_params,
             ..
         } => {
             name(internal, names);
             if let Some(parameters) = ctor_params {
+                tys(parameters, names);
+            }
+            if let Some(parameters) = declared_params {
                 tys(parameters, names);
             }
         }
@@ -1519,9 +1523,6 @@ impl super::IrFile {
         for values in self.call_declared_params.values_mut() {
             tys(values, names);
         }
-        for values in self.construction_declared_params.values_mut() {
-            tys(values, names);
-        }
         for (_, value) in self.property_selected_accessors.values_mut() {
             *value = ty(*value, names);
         }
@@ -1636,9 +1637,6 @@ fn remap_expression_facts(ir: &mut super::IrFile, expression: ExprId, names: &Id
         *value = ty(*value, names);
     }
     if let Some(parameters) = ir.call_declared_params.get_mut(&expression) {
-        tys(parameters, names);
-    }
-    if let Some(parameters) = ir.construction_declared_params.get_mut(&expression) {
         tys(parameters, names);
     }
     if let Some(parameters) = ir.physical_call_parameters.get_mut(&expression) {

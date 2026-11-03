@@ -1051,13 +1051,12 @@ impl SerializationPlugin {
                 internal: construction.serializer,
                 args,
                 ctor_params: (!declared_here).then(|| construction.parameters.to_vec()),
+                declared_params: Some(construction.parameters.clone()),
                 ctor_desc: None,
                 external_target,
                 defaults: Box::new([]),
                 default_prefix_count: 0,
             });
-            ir.construction_declared_params
-                .insert(new, construction.parameters.clone());
             if let Some(target) = target {
                 ir.construction_targets.insert(new, target);
             }

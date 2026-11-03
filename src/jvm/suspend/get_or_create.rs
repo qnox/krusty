@@ -44,6 +44,7 @@ pub(super) fn build_get_or_create(
             internal: cont_internal,
             args,
             ctor_params: None,
+            declared_params: None,
             ctor_desc: None,
             external_target: None,
             defaults: Box::new([]),

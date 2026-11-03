@@ -164,6 +164,7 @@ fn wrapper_construction(
         internal: wrapper,
         args: vec![value],
         ctor_params: constructor_parameter.map(|parameter| vec![parameter]),
+        declared_params: None,
         ctor_desc: None,
         external_target: None,
         defaults: Box::new([]),

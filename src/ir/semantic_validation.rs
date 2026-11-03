@@ -761,8 +761,14 @@ impl IrFile {
         )?;
         reject_all(
             "declared construction parameter",
-            self.construction_declared_params
-                .values()
+            self.exprs
+                .iter()
+                .filter_map(|expression| match expression {
+                    IrExpr::New {
+                        declared_params, ..
+                    } => declared_params.as_deref(),
+                    _ => None,
+                })
                 .flatten()
                 .copied(),
         )?;

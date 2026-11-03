@@ -38,7 +38,6 @@ pub(super) fn clone_below_representation_wrapper(ir: &mut IrFile, source: ExprId
     move_fact!(intrinsic_suspension_points);
     move_fact!(reified_call_subst);
     move_fact!(inline_call_type_arguments);
-    move_fact!(construction_declared_params);
     move_fact!(construction_targets);
     move_fact!(synthesized_accessor_calls);
     move_fact!(private_property_accessor_calls);

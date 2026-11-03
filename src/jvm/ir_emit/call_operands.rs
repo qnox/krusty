@@ -642,6 +642,7 @@ mod tests {
             internal: crate::types::type_name("sample/Holder"),
             args,
             ctor_params: None,
+            declared_params: None,
             ctor_desc: Some("(Ljava/lang/Object;Ljava/lang/Object;)V".into()),
             external_target: None,
             defaults: Box::new([]),

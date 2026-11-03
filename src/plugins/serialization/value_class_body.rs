@@ -292,6 +292,7 @@ impl ValueClassBody<'_> {
             internal,
             args: vec![underlying],
             ctor_params: None,
+            declared_params: None,
             ctor_desc: None,
             external_target: None,
             defaults: Box::new([]),
