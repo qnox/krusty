@@ -524,6 +524,11 @@ impl CallInferenceConstraints {
     /// one denotable solution. For `T : R` (`T <: R`), every lower bound of `T` is a lower bound of
     /// `R`, while every upper bound of `R` is an upper bound of `T`. A nullable bound `T : R?`
     /// admits null itself, so a lower bound `X` of `T` says only `X & Any <: R`.
+    ///
+    /// A classifier bound is incorporated the same way: each lower bound of `E` must reach
+    /// `E : EntityID<T>?`, so its applied `EntityID` supertype constrains `T` at the argument's
+    /// position (`E := EntityID<X>` contributes `X` to `T`). A bound that mentions its own formal
+    /// (`T : Comparable<T>`) relates the variable to itself and is left to bound checking.
     fn propagate_declaration_bounds(&mut self, source: &dyn SymbolSource, signature: &GenericSig) {
         loop {
             let mut changed = false;
@@ -531,6 +536,47 @@ impl CallInferenceConstraints {
             let upper = self.upper.clone();
             for (formal, bounds) in signature.formals.iter().zip(&signature.formal_bounds) {
                 for bound in bounds {
+                    if matches!(bound.non_null().kind(), TyKind::Obj(..))
+                        && crate::types::ty_mentions_param(*bound, &signature.formals)
+                        && !crate::types::ty_mentions_param(*bound, std::slice::from_ref(formal))
+                    {
+                        for &(actual, origin) in
+                            lower.get(formal).map(Vec::as_slice).unwrap_or_default()
+                        {
+                            let mut incorporated = CallInferenceConstraints::default();
+                            collect_call_inference_constraints(
+                                source,
+                                *bound,
+                                actual,
+                                ConstraintPosition::Lower,
+                                origin,
+                                &mut incorporated,
+                            );
+                            for (bound_formal, inputs) in incorporated.lower_inputs {
+                                for (input, origin) in inputs {
+                                    changed |= self.insert(
+                                        source,
+                                        bound_formal.as_str(),
+                                        input,
+                                        ConstraintPosition::Lower,
+                                        origin,
+                                    );
+                                }
+                            }
+                            for (bound_formal, inputs) in incorporated.upper {
+                                for input in inputs {
+                                    changed |= self.insert(
+                                        source,
+                                        bound_formal.as_str(),
+                                        input,
+                                        ConstraintPosition::Upper,
+                                        origin,
+                                    );
+                                }
+                            }
+                        }
+                        continue;
+                    }
                     let TyKind::TyParam(bound_formal, _) = bound.non_null().kind() else {
                         continue;
                     };
@@ -930,9 +976,16 @@ fn collect_call_inference_constraints(
             // A caller-owned type parameter contributes the applied shape of its upper bound to a
             // classifier-shaped constraint. Treating the variable itself as the callee's element
             // argument makes `T : Iterable<*>` bind `Iterable<E>.withIndex` as `E = T`; project
-            // through the bound so it correctly binds `E` to the star's readable upper type.
-            while let TyKind::TyParam(_, bound) = actual.kind() {
-                actual = bound.projection_inner().unwrap_or(bound).non_null();
+            // through the bound so it correctly binds `E` to the star's readable upper type. A
+            // definitely-non-null `E & Any` read through a nullable formal reaches the same bound.
+            loop {
+                actual = match actual.kind() {
+                    TyKind::TyParam(_, bound) => {
+                        bound.projection_inner().unwrap_or(bound).non_null()
+                    }
+                    TyKind::DefinitelyNotNull(inner) => inner,
+                    _ => break,
+                };
             }
             let projected = supertype_with_classifier(source, actual, owner);
             let Some(TyKind::Obj(_, actual_arguments)) = projected.map(Ty::kind) else {

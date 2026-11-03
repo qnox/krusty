@@ -143,7 +143,8 @@ fn dependent_applied_bounds_wait_for_complete_call_bindings() {
     );
     assert_eq!(inferred.bound_violation, None);
     assert_eq!(inferred.bindings.get("callee:B"), Some(&actual));
-    assert_eq!(inferred.bindings.get("callee:A"), None);
+    // `B <: Marker<A>` with `B := Marker<Int>` is itself evidence for `A`.
+    assert_eq!(inferred.bindings.get("callee:A"), Some(&Ty::Int));
     let mut completed = inferred.bindings;
     completed.insert("callee:A".into(), Ty::Int);
     assert_eq!(
@@ -159,6 +160,70 @@ fn dependent_applied_bounds_wait_for_complete_call_bindings() {
         }),
         Some((Ty::obj_args("test/Marker", &[Ty::String]), actual)),
     );
+}
+
+/// `<T : Any, E : Key<T>?, V : T?> match(key: Expr<E>, value: Expr<V>)`.
+fn keyed_match_signature() -> GenericSig {
+    let any = Ty::obj("kotlin/Any");
+    let t = Ty::ty_param("callee:T", any);
+    let key_bound = Ty::nullable(Ty::obj_args("test/Key", &[t]));
+    let e = Ty::ty_param("callee:E", key_bound);
+    let v = Ty::ty_param("callee:V", Ty::nullable(t));
+    GenericSig {
+        formals: vec!["callee:T".into(), "callee:E".into(), "callee:V".into()],
+        formal_bounds: vec![vec![any], vec![key_bound], vec![Ty::nullable(t)]],
+        receiver: None,
+        params: vec![
+            Ty::obj_args("test/Expr", &[e]),
+            Ty::obj_args("test/Expr", &[v]),
+        ],
+        ret: Ty::Unit,
+        return_policy: crate::libraries::GenericReturnPolicy::Exact,
+    }
+}
+
+#[test]
+fn a_classifier_bound_constrains_the_formal_it_mentions() {
+    let signature = keyed_match_signature();
+    let caller_t = Ty::ty_param("caller:T", Ty::obj("kotlin/Any"));
+    let caller_v = Ty::ty_param("caller:V", Ty::nullable(caller_t));
+    let key = Ty::obj_args("test/Key", &[caller_t]);
+    let inferred = infer_generic_call_constraints_from_symbols(
+        &crate::libraries::EmptySymbolSource,
+        &signature,
+        [
+            (0, Ty::obj_args("test/Expr", &[key]), false),
+            (1, Ty::obj_args("test/Expr", &[caller_v]), false),
+        ],
+        None,
+    );
+    assert_eq!(inferred.bound_violations, Vec::new());
+    assert_eq!(inferred.bindings.get("callee:E"), Some(&key));
+    assert_eq!(inferred.bindings.get("callee:V"), Some(&caller_v));
+    assert_eq!(inferred.bindings.get("callee:T"), Some(&caller_t));
+}
+
+#[test]
+fn a_caller_variable_reaches_a_classifier_bound_through_its_own_bound() {
+    let signature = keyed_match_signature();
+    let caller_t = Ty::ty_param("caller:T", Ty::obj("kotlin/Any"));
+    let caller_v = Ty::ty_param("caller:V", Ty::nullable(caller_t));
+    let caller_e = Ty::ty_param(
+        "caller:E",
+        Ty::nullable(Ty::obj_args("test/Key", &[caller_t])),
+    );
+    let inferred = infer_generic_call_constraints_from_symbols(
+        &crate::libraries::EmptySymbolSource,
+        &signature,
+        [
+            (0, Ty::obj_args("test/Expr", &[caller_e]), false),
+            (1, Ty::obj_args("test/Expr", &[caller_v]), false),
+        ],
+        None,
+    );
+    assert_eq!(inferred.bound_violations, Vec::new());
+    assert_eq!(inferred.bindings.get("callee:E"), Some(&caller_e));
+    assert_eq!(inferred.bindings.get("callee:T"), Some(&caller_t));
 }
 
 #[test]
