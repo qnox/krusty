@@ -12,6 +12,8 @@ mod common_supertype;
 pub(crate) use common_supertype::{common_super_types, reified_runtime_type};
 mod conditional_result;
 mod postponed_result;
+mod receiver_constraints;
+pub(crate) use receiver_constraints::unify_receiver_from_symbols;
 
 use bound_relations::complete_dependent_bound_bindings;
 pub(crate) use bound_relations::{

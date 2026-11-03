@@ -29,6 +29,8 @@ impl LoweringCheckpoint {
         ir.binding_read_stability
             .retain(|expression, _| *expression < first);
         ir.callable_scopes.retain(|expression| *expression < first);
+        ir.callable_reference_adapter_results
+            .retain(|body, result| *body < first && *result < first);
         ir.negations.retain(|expression| *expression < first);
         ir.short_circuits
             .retain(|expression, _| *expression < first);
