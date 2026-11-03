@@ -1262,10 +1262,9 @@ impl Emitter<'_> {
         // another class a plain top-level property is private, so go through `getX()` — kotlinc's
         // cross-file property-access compilation. A public `lateinit` calls `getX()` even from the
         // facade, so the throw lives in the getter. `isInitialized` still `getstatic`s the public
-        // field. A private `lateinit` inlines the guard on the raw read.
-        else if (self.static_owner == Some(StaticOwner::Facade)
-            || is_const
-            || (probe && !is_private))
+        // field. A private `lateinit` inlines the guard on the raw read. A body a caller may splice
+        // into another class reads a non-private property through `getX()` even in the facade.
+        else if (self.facade_field_reachable(i) || is_const || (probe && !is_private))
             && !calls_getter
         {
             let fref = self.cw.fieldref(
@@ -1352,6 +1351,7 @@ impl Emitter<'_> {
             if self.diverges(value) {
                 return;
             }
+            self.coerce_reference_on_stack(self.value_ty(value), jt, code);
             super::debug_lines::restore_initializer_store_line(initializer_line, code);
             let method = self.cw.methodref(
                 &companion_name,
@@ -1365,6 +1365,9 @@ impl Emitter<'_> {
         if self.diverges(value) {
             return;
         }
+        // The value is materialized at the property's type, as an instance field store does: a
+        // lambda singleton is cast to its function type before the field or setter receives it.
+        self.coerce_reference_on_stack(self.value_ty(value), jt, code);
         super::debug_lines::restore_initializer_store_line(initializer_line, code);
         // An inlined value leaves its own line in effect; kotlinc marks the statement's line
         // again at the store, as an instance field store does.
@@ -1427,7 +1430,7 @@ impl Emitter<'_> {
                 );
                 code.invokestatic(m, slot_words(jt) as i32, 0);
             }
-        } else if (self.static_owner == Some(StaticOwner::Facade) || is_const)
+        } else if (self.facade_field_reachable(index) || is_const)
             && !self.calls_facade_lateinit_setter(index)
         {
             let fref = self.cw.fieldref(
@@ -1444,6 +1447,18 @@ impl Emitter<'_> {
             );
             code.invokestatic(m, slot_words(jt) as i32, 0);
         }
+    }
+
+    /// Whether the code being emitted may name top-level property `index`'s facade field: it is
+    /// the facade's own code, and not a body a caller may splice into another class. Such a body (a
+    /// non-private inline function, or code copied from one) reaches a non-private property through
+    /// its accessors, as kotlinc does in a public inline scope; a private property has none and
+    /// keeps its field, and a `@JvmField` property's field is public.
+    fn facade_field_reachable(&self, index: u32) -> bool {
+        self.static_owner == Some(StaticOwner::Facade)
+            && (!self.export_private_calls
+                || self.ir.statics[index as usize].visibility.is_private()
+                || self.ir.is_jvm_field_static(index))
     }
 
     /// kotlinc keeps a `lateinit` property's default accessors even inside the facade that owns
