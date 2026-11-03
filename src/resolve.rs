@@ -19462,11 +19462,7 @@ impl<'a> Checker<'a> {
                     // receiver-less declaration and are evaluated by the later shared rung.
                     if let Some(ret) = self.check_member_extension_function_call(
                         scope,
-                        CallArgs {
-                            call,
-                            args,
-                            arg_tys: &arg_tys,
-                        },
+                        associated_site.call_args,
                         receiver,
                         &fname,
                         CallResultConstraint::direct(expected),

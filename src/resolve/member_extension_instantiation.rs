@@ -242,13 +242,35 @@ pub(super) fn instantiate_member_extension_with(
         }
     }
     // The expected result is an upper constraint: it fills a formal that the receiver, explicit
-    // type arguments, arguments and their declared bounds left open, but never replaces their
-    // solution or decides applicability. A contradiction is the call's result mismatch, not an
-    // inapplicable candidate. A formal it fills can expose another through that formal's bound.
+    // type arguments, arguments and their declared bounds left open, and raises a formal that
+    // only lower bounds solved, but never contradicts their solution or decides applicability.
+    // A contradiction is the call's result mismatch, not an inapplicable candidate. A formal it
+    // fills can expose another through that formal's bound.
     if let Some(expected) = result_constraint.expected() {
         let declared_ret = generic.map_or(function.signature.ret, |signature| signature.ret);
         let declared_ret = result_constraint.declaration_result(declared_ret);
+        // A formal solved only from arguments in its own bare slots (`value: T`) has lower
+        // bounds, not an equality: `Nothing` or `String` there still admits a `T` the expected
+        // result asks for, provided each lower bound is its subtype. The receiver, explicit and
+        // contextual bindings and every nested occurrence (`MutableList<T>`) stay equalities.
+        let lower_bounded_only = |formal: &String| {
+            !bound_before_receiver.contains_key(formal)
+                && !crate::types::ty_mentions_param(declared_receiver, std::slice::from_ref(formal))
+                && lower_inputs
+                    .get(formal)
+                    .is_some_and(|inputs| !inputs.is_empty())
+                && !declared_params.iter().enumerate().any(|(index, declared)| {
+                    let declared = if full_call_sig.vararg_index == Some(index) {
+                        declared.array_read_elem().unwrap_or(*declared)
+                    } else {
+                        *declared
+                    };
+                    declared.non_null().ty_param_name().is_none()
+                        && crate::types::ty_mentions_param(declared, std::slice::from_ref(formal))
+                })
+        };
         let mut from_expected = bindings.clone();
+        from_expected.retain(|formal, _| !lower_bounded_only(formal));
         unify_member_extension_slot(
             declared_ret,
             expected,
@@ -279,13 +301,28 @@ pub(super) fn instantiate_member_extension_with(
         // Only this call's own formals are solved here; the caller's type parameters
         // (`U` of an enclosing `wrongTable<U>`) are fixed types, never variables of this call.
         let mut completed = bindings.clone();
+        let mut refined = false;
         for (formal, solution) in from_expected {
             let own_formal = generic.is_some_and(|generic| generic.formals.contains(&formal));
-            if own_formal && !completed.contains_key(&formal) && !determined_by_bound(&formal) {
+            if !own_formal || determined_by_bound(&formal) {
+                continue;
+            }
+            let admitted = match completed.get(&formal) {
+                None => true,
+                Some(&current) => {
+                    current != solution
+                        && lower_bounded_only(&formal)
+                        && lower_inputs[&formal].iter().all(|lower| {
+                            crate::symbol_resolver::resolution_subtype(source, *lower, solution)
+                        })
+                }
+            };
+            if admitted {
                 completed.insert(formal, solution);
+                refined = true;
             }
         }
-        if let Some(generic) = generic.filter(|_| completed.len() > bindings.len()) {
+        if let Some(generic) = generic.filter(|_| refined) {
             crate::symbol_resolver::resolve_bound_violating_bindings(
                 Some(source),
                 generic,
