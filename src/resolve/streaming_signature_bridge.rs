@@ -1395,20 +1395,6 @@ impl ProductionSignatureSemantics<'_> {
             .then_some(slots)
     }
 
-    /// The selected declaration's normalized signature with the parameters `callable`, its
-    /// instantiation at this call, gives it, both in that signature's coordinates.
-    fn selected_signature(
-        selected: &crate::libraries::FunctionInfo,
-        callable: &crate::libraries::LibraryCallable,
-    ) -> Box<crate::resolve::selected_result_publication::SelectedSignature> {
-        Box::new(
-            crate::resolve::selected_result_publication::SelectedSignature {
-                signature: selected.generic_sig.clone(),
-                parameters: selected.semantic_params_of(&callable.params).into(),
-            },
-        )
-    }
-
     fn selected_argument_parameters(
         candidate: &crate::libraries::FunctionInfo,
         arguments: &[crate::fir::ResolvedSigCallArgument<'_>],

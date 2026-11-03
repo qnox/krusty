@@ -1900,15 +1900,12 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                     arguments,
                     &resolved_type_arguments,
                 );
-                let contract = callable.contract.clone().or_else(|| {
-                    declaration.and_then(|declaration| {
-                        self.source_contracts.borrow().get(&declaration).cloned()
-                    })
-                });
-                if let Some(contract) = contract {
-                    self.selected_calls
-                        .record_contract(origin, contract, parameter_by_argument);
-                }
+                self.record_selected_call_contract(
+                    origin,
+                    &callable,
+                    declaration,
+                    parameter_by_argument,
+                );
                 if let Some(source) = source {
                     if let Some(signature) =
                         self.demanded_source_signature(None, declaration, demand)?
@@ -3797,12 +3794,10 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 *selected_alias.borrow_mut() = selected.constructor_alias().cloned();
             }
             if selected.kind == crate::libraries::FnKind::Member || selected_constructor.get() {
-                let declared_receiver = selected.receiver;
-                let mut member = selected.member_with_return(result);
-                member.params = parameters;
-                let publication = self.selected_member_publication(
-                    &member,
-                    declared_receiver,
+                let (member, publication) = self.selected_member_call_publication(
+                    &selected,
+                    result,
+                    parameters,
                     parameter_by_argument,
                     arguments,
                     &type_arguments,
@@ -3818,19 +3813,10 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                     publication,
                 ));
             }
-            let mut publication_callable = selected.callable.clone();
-            publication_callable.ret = result;
-            // Selection instantiated the value parameters; the context prefix it supplied
-            // separately keeps the declaration's own types.
-            let declared = selected.semantic_params();
-            let context = &declared[..selected.context_count.min(declared.len())];
-            let selection = crate::resolve::selected_result_publication::SelectedSignature {
-                parameters: context.iter().chain(&parameters).copied().collect(),
-                signature: selected.generic_sig.clone(),
-            };
-            let publication = self.selected_callable_publication(
-                &publication_callable,
-                selection,
+            let publication = self.selected_extension_publication(
+                &selected,
+                result,
+                &parameters,
                 parameter_by_argument,
                 arguments,
                 &type_arguments,
