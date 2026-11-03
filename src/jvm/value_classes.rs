@@ -3358,6 +3358,10 @@ pub(crate) fn lower_value_classes(
                     Some(t) if t.is_nullable() => vec![(*value, *t)],
                     _ => continue,
                 },
+                IrExpr::When { .. } => match value_boundaries::when_merge_pairs(ir, id, &under) {
+                    Some(pairs) => pairs,
+                    None => continue,
+                },
                 _ => continue,
             };
             for (a, p) in pairs {
