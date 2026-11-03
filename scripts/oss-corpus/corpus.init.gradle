@@ -41,6 +41,21 @@ gradle.projectsEvaluated { g ->
             "${t.path}\t${root.projectDir.toPath().relativize(t.destinationDirectory.get().asFile.toPath())}\n"
         }.join('')
     }
+    // In the verify build (the krusty plugin in its `krustyVerify` mode, `$CORPUS_VERIFY_RECORDS`
+    // set), `corpusCompile` also runs the plugin's verify compile of each picked task, which the
+    // plugin registers beside it as `<task>KrustyVerify`, and the file lists each picked task's path
+    // and the record its verify compile writes. A picked task the plugin registered no verify compile
+    // for (a module it is not applied to) is left out.
+    def verifyRecords = System.getenv('CORPUS_VERIFY_RECORDS')
+    if (verifyRecords != null) {
+        def verifies = { picked.collectEntries { t -> [t, t.project.tasks.findByName("${t.name}KrustyVerify")] }.findAll { it.value != null } }
+        root.tasks.named('corpusCompile') { dependsOn { verifies().values() } }
+        g.taskGraph.whenReady {
+            new File(verifyRecords).text = verifies().collect { t, v ->
+                "${t.path}\t${v.record.get().asFile.absolutePath}\n"
+            }.join('')
+        }
+    }
 }
 
 // Records the plugins each project applies, for the corpus plugin survey: every Gradle plugin by

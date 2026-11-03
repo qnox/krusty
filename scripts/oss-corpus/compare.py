@@ -2,14 +2,17 @@
 """Compares one corpus project's class outputs: kotlinc (its own Gradle build) vs krusty (the same
 build with the krusty Gradle plugin).
 
-usage: compare.py <work dir> <name> <reference build exit code>
+usage: compare.py <work dir> <name> <reference build exit code> [<verify build exit code>]
 
 Reads <work dir>/out/<name>/{kotlinc,krusty}, <work dir>/logs/<name>.kotlinc.compilations.tsv (the
 reference build's compile tasks and their output directories), <work dir>/logs/<name>.krusty.log
 (fallback reasons and the first error of each failed compile), and each build's
 <work dir>/logs/<name>.<mode>.metrics.json and <name>.<mode>.tasks.tsv (what the build cost, and when
 each task ran), and <work dir>/logs/<name>.krusty.folded when the krusty build was sampled (its
-call stacks, ranked into the functions krusty spends the most time in). Writes
+call stacks, ranked into the functions krusty spends the most time in).
+<work dir>/logs/<name>.verify.records.tsv, written by the verify build, names the record krusty's
+verify compile wrote for each compilation: every error krusty reported when it compiled that
+compilation on its own. Writes
 <work dir>/out/<name>/compare.json and prints one line per compilation.
 """
 import glob
@@ -94,6 +97,34 @@ def build_failure(log_path):
                     innermost, depth = detail.strip().lstrip('> ').strip(), indent
             return innermost[:300] if innermost else None
     return None
+
+
+def verified(manifest, checkout):
+    """What krusty's verify compile found for each compilation the verify build listed: {task path:
+    {status, errors}}, `status` being the record's outcome (`compiled`, `failed`, `unsupported`,
+    `no-sources`) or `no record` when the verify compile wrote none, and `errors` every error krusty
+    reported, in its order. Paths inside the checkout are shown relative to it."""
+    found = {}
+    try:
+        with open(manifest) as f:
+            listed = [line.rstrip('\n').split('\t') for line in f if line.strip()]
+    except OSError:
+        return found
+    prefixes = ('file://' + checkout + '/', checkout + '/')
+    for task, path in listed:
+        try:
+            with open(path) as f:
+                outcome = json.load(f)['outcome']
+        except (OSError, ValueError, KeyError):
+            found[task] = dict(status='no record', errors=[])
+            continue
+        errors = []
+        for error in outcome.get('errors', []):
+            for prefix in prefixes:
+                error = error.replace(prefix, '')
+            errors.append(error)
+        found[task] = dict(status=outcome['status'], errors=errors)
+    return found
 
 
 def compilations(manifest):
@@ -191,6 +222,7 @@ def compare(work, name):
             not_run = 'not run: the krusty build failed: ' + failure
     times = {mode: task_seconds(os.path.join(work, 'logs', f'{name}.{mode}.tasks.tsv'))
              for mode in ('kotlinc', 'krusty')}
+    verify = verified(os.path.join(work, 'logs', name + '.verify.records.tsv'), os.path.join(work, 'src', name))
     rows, empty = [], []
     for task, rel in compilations(os.path.join(work, 'logs', name + '.kotlinc.compilations.tsv')):
         reference = files(os.path.join(kotlinc, rel))
@@ -213,16 +245,19 @@ def compare(work, name):
                          identical=identical if built else 0,
                          only_kotlinc=len(set(reference) - set(candidate)) if built else None,
                          only_krusty=len(set(candidate) - set(reference)) if built else None,
-                         seconds={mode: compile_seconds(times[mode], task, mode) for mode in times}))
+                         seconds={mode: compile_seconds(times[mode], task, mode) for mode in times},
+                         verify=verify.get(task)))
     return rows, empty
 
 
 def main():
     work, name, reference_exit = sys.argv[1], sys.argv[2], int(sys.argv[3])
+    verify_exit = int(sys.argv[4]) if len(sys.argv) > 4 else None
     rows, empty = compare(work, name)
     summary = dict(
         name=name,
         reference_exit=reference_exit,
+        verify_exit=verify_exit,
         loc=lines_of_code(os.path.join(work, 'src', name)),
         compilations=len(rows),
         built=sum(r['built'] for r in rows),
@@ -247,7 +282,8 @@ def main():
         print(f"  {state} {r['task']} ({r['dir']}): {r['identical']}/{r['classes']}"
               + (f" left to kotlinc: {r['fallback']}" if r['fallback'] else '')
               + (f" error: {r['error']}" if r['error'] else '')
-              + (f" only_kotlinc={r['only_kotlinc']} only_krusty={r['only_krusty']}" if r['built'] else ''))
+              + (f" only_kotlinc={r['only_kotlinc']} only_krusty={r['only_krusty']}" if r['built'] else '')
+              + (f" verify: {r['verify']['status']}, {len(r['verify']['errors'])} error(s)" if r['verify'] else ''))
     for r in empty:
         print(f"  --- {r['task']} ({r['dir']}): kotlinc wrote no class; krusty wrote {r['krusty_classes']}")
 

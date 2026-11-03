@@ -6,8 +6,12 @@
 #
 #   run.sh <name> <work dir> <krusty binary> <krusty Gradle plugin repository> <plugin version>
 #
+# A third build, in the krusty plugin's verify mode, compiles each compilation with krusty on its own
+# against kotlinc's classes of what it depends on, and records every error krusty reports.
+#
 # Writes <work dir>/out/<name>/{kotlinc,krusty} (class trees), <work dir>/logs/<name>.* (each build's
-# log, compile-task inventory, task times and metrics) and <work dir>/out/<name>/compare.json. Compiler arguments are never captured or replayed.
+# log, compile-task inventory, task times and metrics, and the verify build's records list) and
+# <work dir>/out/<name>/compare.json. Compiler arguments are never captured or replayed.
 
 # Setup fails fast: a failed fetch, checkout, patch or version-pin rewrite stops the run before
 # anything is measured. Only the two Gradle builds' exit statuses are captured rather than fatal.
@@ -130,4 +134,18 @@ if [ -n "${CORPUS_PERF:-}" ]; then
       >"$logs/$name.krusty.svg"
   fi
 fi
-python3 "$here/compare.py" "$work" "$name" "$reference"
+# The verify build compiles every compilation with kotlinc, as the reference build does, and krusty
+# compiles each one beside it against kotlinc's classes of the compilations it depends on: the
+# plugin's `krustyVerify` mode, which naming that task turns on. A krusty failure therefore never
+# keeps a dependent compilation from being compiled, and each compilation's record holds every
+# error krusty reported, not only the first error of the first failure. Only the picked compilations
+# are verified: `corpusCompile` depends on their verify compiles, and the plugin's report task, which
+# would verify every compilation of every module and variant, is excluded. Its kotlinc classes and
+# its cost are not compared.
+rm -f "$logs/$name.verify.records.tsv"
+KRUSTY_PLUGIN_REPOSITORY=$plugin_repository KRUSTY_PLUGIN_VERSION=$plugin_version \
+  CORPUS_VERIFY_RECORDS=$logs/$name.verify.records.tsv \
+  build verify --offline -I "$here/krusty.init.gradle" -Pkrusty.binary="$krusty" krustyVerify -x krustyVerify
+verified=$status
+rm -rf "$work/out/$name/verify" "$logs/$name.verify.metrics.json" "$logs/$name.verify.tasks.tsv"
+python3 "$here/compare.py" "$work" "$name" "$reference" "$verified"

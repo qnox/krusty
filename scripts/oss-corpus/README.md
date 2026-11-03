@@ -10,6 +10,11 @@ in Android as the Android sample, each from a pinned commit with its own Gradle 
    modules. A plugin build that rejects a multiplatform module leaves its compile tasks to
    kotlinc, and the init script reports each as a fallback. Compiler arguments are never captured
    or replayed.
+3. **Verify:** the same build in the krusty plugin's verify mode. Every compilation compiles with
+   kotlinc, as in the reference build, and krusty compiles each one beside it, against kotlinc's
+   classes of the compilations it depends on. A krusty failure therefore never keeps a dependent
+   compilation from being compiled, and each compilation's record holds every error krusty
+   reported. The verify build exists for those errors; its classes and cost are not compared.
 
 `corpus.init.gradle` adds the `corpusCompile` task, which depends on every non-Android Kotlin/JVM
 compile task, lists each with its output directory, and records the Gradle and compiler plugins
@@ -19,7 +24,11 @@ task inside the Gradle root; the next build therefore starts without them. `comp
 the class files of every compile task the reference build listed, byte for byte, and reports apart
 a listed task kotlinc wrote no class for. A compile task the plugin leaves to kotlinc (an
 unsupported compiler plugin or option) counts as a miss, with the plugin's reason; a compile krusty
-fails counts as a miss with the first error it logged. Android modules take part only in a project
+fails counts as a miss with the first error it logged. With `$CORPUS_VERIFY_RECORDS` set,
+`corpusCompile` also runs the plugin's verify compile (`<task>KrustyVerify`) of each listed task
+and lists the record each writes; `run.sh` names `krustyVerify`, which turns verify mode on, and
+excludes it, so only the listed compilations are verified rather than every module and variant.
+`compare.py` adds each compilation's verify outcome and all of its errors. Android modules take part only in a project
 that names a variant in `projects.tsv`, and then only that variant's compiles.
 
 Both builds are measured. `measure.py` runs each one as the child subreaper of everything it starts,
@@ -38,7 +47,10 @@ binary keeps frame pointers), `hotspots.py` folds the krusty processes' call sta
 and the report lists the top ones across the corpus with a link to each project's flame graph.
 
 `summarize.py` turns the per-project results into the run's report: stars, Kotlin and Java lines,
-compilations built, identical classes, the reason for every miss, what both builds cost, krusty's
+compilations built, identical classes, the reason for every miss, every error the verify build
+reported (grouped by cause: the message without its location, with quoted text and numbers masked,
+counted across the corpus and listed in full per project; a project whose verify build recorded
+nothing is reported as unverified, not left out), what both builds cost, krusty's
 hotspots, and the Gradle and compiler plugins the corpus uses. The nightly run, and a manual run
 with `publish` set, records the results on the `corpus-results` branch with `publish.py`:
 `README.md` is the scoreboard, `projects/<name>/` holds each project's latest result (a project a

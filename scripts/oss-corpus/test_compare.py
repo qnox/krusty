@@ -46,10 +46,11 @@ class MultiplatformJvmTarget(unittest.TestCase):
         self.assertEqual(summary['rows'], [
             dict(task=':core:compileKotlinJvm', dir='core/build/classes/kotlin/jvm/main', built=True,
                  fallback=None, error=None, classes=2, identical=1, only_kotlinc=0, only_krusty=0,
-                 seconds=dict(kotlinc=None, krusty=None)),
+                 seconds=dict(kotlinc=None, krusty=None), verify=None),
             dict(task=':core:compileTestKotlinJvm', dir='core/build/classes/kotlin/jvm/test',
                  built=False, fallback='unsupported plugin', error=None, classes=1, identical=0,
-                 only_kotlinc=None, only_krusty=None, seconds=dict(kotlinc=None, krusty=None)),
+                 only_kotlinc=None, only_krusty=None, seconds=dict(kotlinc=None, krusty=None),
+                 verify=None),
         ])
         # Neither build was measured.
         self.assertEqual(summary['cost'], dict(kotlinc=None, krusty=None))
@@ -87,6 +88,53 @@ class FailedCompile(unittest.TestCase):
             (':a:compileKotlin', False, 'e: a/src/main/kotlin/A.kt:3:5 Unresolved reference: foo'),
             (':b:compileKotlin', False, 'krusty wrote no class'),
             (':c:compileKotlin', False, 'not run: a task it depends on failed'),
+        ])
+
+
+class VerifyBuild(unittest.TestCase):
+    def test_every_error_of_each_verify_compile_is_recorded_for_its_compilation(self):
+        with tempfile.TemporaryDirectory() as work:
+            out = os.path.join(work, 'out', 'p')
+            checkout = os.path.join(work, 'src', 'p')
+            for task in 'abcde':
+                write(f'{out}/kotlinc/{task}/build/classes/kotlin/main/A.class', b'A')
+            write(f'{work}/logs/p.kotlinc.compilations.tsv', ''.join(
+                f':{task}:compileKotlin\t{task}/build/classes/kotlin/main\n' for task in 'abcde').encode())
+            # :a fails in the krusty build, so its dependent :b is never compiled there; the verify
+            # build compiles both, and :b's errors show.
+            write(f'{work}/logs/p.krusty.log', (
+                '> Task :a:compileKotlinWithKrusty\n'
+                f'{checkout}/a/A.kt:3:5: error: unresolved reference \'foo\'.\n'
+                '> Task :a:compileKotlinWithKrusty FAILED\n').encode())
+            records = {
+                'a': dict(status='failed', errors=[f'{checkout}/a/A.kt:3:5: error: unresolved reference \'foo\'.',
+                                                  f'{checkout}/a/A.kt:9:1: error: unresolved reference \'bar\'.']),
+                'b': dict(status='failed', errors=[f'file://{checkout}/b/B.kt:1:1: error: overload resolution ambiguity']),
+                'c': dict(status='compiled', comparison=dict(classes=1, identical_classes=1)),
+                'd': dict(status='unsupported', reasons=['compiler plugin']),
+            }
+            listed = []
+            for task, outcome in records.items():
+                record = f'{checkout}/{task}/build/krusty/verify/compileKotlin.json'
+                write(record, json.dumps(dict(compilation=f':{task}:compileKotlin', outcome=outcome)).encode())
+                listed.append(f':{task}:compileKotlin\t{record}\n')
+            # :e's verify compile was listed and wrote no record.
+            listed.append(f':e:compileKotlin\t{checkout}/e/build/krusty/verify/compileKotlin.json\n')
+            write(f'{work}/logs/p.verify.records.tsv', ''.join(listed).encode())
+            subprocess.run([sys.executable, os.path.join(HERE, 'compare.py'), work, 'p', '0', '1'],
+                           check=True, stdout=subprocess.DEVNULL)
+            with open(f'{out}/compare.json') as f:
+                summary = json.load(f)
+        self.assertEqual(summary['verify_exit'], 1)
+        self.assertEqual([(r['task'], r['error'], r['verify']) for r in summary['rows']], [
+            (':a:compileKotlin', "a/A.kt:3:5: error: unresolved reference 'foo'.", dict(
+                status='failed', errors=["a/A.kt:3:5: error: unresolved reference 'foo'.",
+                                         "a/A.kt:9:1: error: unresolved reference 'bar'."])),
+            (':b:compileKotlin', 'not run: a task it depends on failed', dict(
+                status='failed', errors=['b/B.kt:1:1: error: overload resolution ambiguity'])),
+            (':c:compileKotlin', 'not run: a task it depends on failed', dict(status='compiled', errors=[])),
+            (':d:compileKotlin', 'not run: a task it depends on failed', dict(status='unsupported', errors=[])),
+            (':e:compileKotlin', 'not run: a task it depends on failed', dict(status='no record', errors=[])),
         ])
 
 

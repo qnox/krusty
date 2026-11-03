@@ -6,8 +6,8 @@ usage: summarize.py [--stars <stars.tsv>] [--plugins <dir>] [--json <out.json>] 
 
 `--stars` lists `<name>\t<stars>` per project. `--plugins` is searched for the `<name>.plugins.tsv`
 plugin surveys the reference builds wrote. The report has the per-project table, the reasons for
-every missed compilation, what each build cost, and the Gradle and Kotlin compiler plugins the
-corpus uses most.
+every missed compilation, every error krusty's verify compiles reported grouped by cause, what each
+build cost, and the Gradle and Kotlin compiler plugins the corpus uses most.
 """
 import argparse
 import collections
@@ -100,6 +100,107 @@ def misses(project):
                       else row.get('error') or 'krusty wrote no class')
             reasons[reason] += 1
     return reasons.most_common()
+
+
+QUOTED = {quote: re.compile(f'{quote}[^{quote}]*{quote}') for quote in ("'", '`', '"')}
+
+
+def cause(error):
+    """An error reduced to its cause: its message without the location before `error: `, with
+    quoted text and numbers masked. `A.kt:3:5: error: unresolved reference 'bar'.` becomes
+    `unresolved reference '…'.`. A quote character that does not pair up is an apostrophe and stays."""
+    message = error.split(': error: ', 1)[1] if ': error: ' in error else error.removeprefix('error: ')
+    for quote, spans in QUOTED.items():
+        if message.count(quote) % 2 == 0:
+            message = spans.sub(f'{quote}…{quote}', message)
+    return re.sub(r'\b\d+\b', 'N', message.strip())
+
+
+def error_causes(project):
+    """Every distinct error krusty's verify compiles of a project reported, grouped by cause:
+    [(cause, [(error, [compilation task paths])])], the cause seen in the most compilations first."""
+    found = collections.defaultdict(lambda: collections.defaultdict(list))
+    for row in project['rows']:
+        for error in dict.fromkeys((row.get('verify') or {}).get('errors', [])):
+            found[cause(error)][error].append(row['task'])
+    ranked = [(c, sorted(errors.items())) for c, errors in found.items()]
+
+    def compilations(entry):
+        return len({task for _, tasks in entry[1] for task in tasks})
+    return sorted(ranked, key=lambda entry: (-compilations(entry), -len(entry[1]), entry[0]))
+
+
+def counted(number, noun):
+    return f'{number} {noun}' + ('' if number == 1 else 's')
+
+
+def code(text):
+    """`text` as inline code, fenced by more backticks than it holds in a row."""
+    fence = '`' * (max((len(run) for run in re.findall('`+', text)), default=0) + 1)
+    padding = ' ' if text.startswith('`') or text.endswith('`') else ''
+    return f'{fence}{padding}{text}{padding}{fence}'
+
+
+def verification(project):
+    """How far the verify build of a project got, or None for a result measured before the corpus
+    ran one (it has no `verify_exit`): the build's exit code, and how many compilations have a
+    verify record and how many have none (no verify compile, or one that wrote no record)."""
+    if project.get('verify_exit') is None:
+        return None
+    verified = sum(1 for r in project['rows']
+                   if r.get('verify') and r['verify']['status'] != 'no record')
+    return dict(exit=project['verify_exit'], verified=verified, unverified=len(project['rows']) - verified)
+
+
+def errors_section(projects):
+    """Every error krusty reported when it compiled each compilation on its own, grouped by cause:
+    one table across the corpus, then, for every project the verify build ran for, its errors under
+    their cause with the compilations that reported them, or that it verified nothing."""
+    measured = [p for p in projects if verification(p) is not None]
+    if not measured:
+        return []
+    out = ['', '## krusty errors', '',
+           'The verify build compiles every compilation with kotlinc, and krusty compiles each one on its own',
+           'beside it, against kotlinc\'s classes of the compilations it depends on (the krusty plugin\'s',
+           'verify mode). One failure therefore never hides the next: these are all the errors krusty',
+           'reported, grouped by cause, the message without its location and with quoted text and numbers',
+           'masked. A result measured before the corpus ran the verify build is left out.', '']
+    causes = {p['name']: error_causes(p) for p in measured}
+    corpus = collections.defaultdict(lambda: [set(), set(), set()])
+    for name, ranked in causes.items():
+        for c, errors in ranked:
+            corpus[c][0].add(name)
+            corpus[c][1].update((name, task) for _, tasks in errors for task in tasks)
+            corpus[c][2].update((name, error) for error, _ in errors)
+    if corpus:
+        out += ['| Cause | Projects | Compilations | Errors |', '| --- | ---: | ---: | ---: |']
+        for c, (names, tasks, errors) in sorted(
+                corpus.items(), key=lambda kv: (-len(kv[1][0]), -len(kv[1][1]), -len(kv[1][2]), kv[0])):
+            cell = code(c).replace('|', '\\|')
+            out.append(f'| {cell} | {len(names)} | {len(tasks)} | {len(errors)} |')
+    else:
+        out.append('No verified compilation reported an error.')
+    for p in measured:
+        ranked = causes[p['name']]
+        state = verification(p)
+        if not state['verified']:
+            out += ['', f"- **{p['name']}**: no compilation verified (verify build exit {state['exit']})"]
+            continue
+        failed = {task for _, errors in ranked for _, tasks in errors for task in tasks}
+        summary = (f"{counted(sum(len(errors) for _, errors in ranked), 'error')} in "
+                   f"{counted(len(failed), 'compilation')}, {counted(len(ranked), 'cause')}; "
+                   f"{state['verified']} of {counted(len(p['rows']), 'compilation')} verified")
+        if state['exit']:
+            summary += f" (verify build exit {state['exit']})"
+        out += ['', f"<details><summary><b>{p['name']}</b>: {summary}</summary>", '']
+        if not ranked:
+            out.append('None.')
+        for c, errors in ranked:
+            out.append(f'- {code(c)}')
+            for error, tasks in errors:
+                out.append(f"  - {code(error)} in {', '.join(code(task) for task in tasks)}")
+        out += ['', '</details>']
+    return out
 
 
 def share(part, whole):
@@ -233,6 +334,8 @@ def report(projects, stars, surveys, title):
     if not any_miss:
         out.append('None.')
 
+    out += errors_section(projects)
+
     out += cost_section(projects)
     out += hotspot_section(projects)
 
@@ -271,6 +374,9 @@ def main():
     if args.json:
         with open(args.json, 'w') as f:
             json.dump(dict(projects=[dict(p, stars=stars.get(p['name']), misses=misses(p),
+                                          errors=[dict(cause=c, errors=[dict(error=e, compilations=t) for e, t in errors])
+                                                  for c, errors in error_causes(p)],
+                                          verification=verification(p),
                                           plugins=surveys.get(p['name'], {})) for p in projects]),
                       f, indent=1)
 
