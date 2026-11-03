@@ -392,11 +392,13 @@ pub(super) fn emit_suspend_lambda_class(
     emit_method(
         ir,
         lambda.invoke_suspend,
-        StaticOwner::Class(c.fq_name),
+        MethodSlot {
+            static_owner: StaticOwner::Class(c.fq_name),
+            instance: true,
+        },
         &shape.class,
         facade,
         &mut cw,
-        true,
         env,
     );
     cw.set_method_debug(
@@ -457,11 +459,13 @@ pub(super) fn emit_suspend_lambda_class(
         emit_method(
             ir,
             method,
-            StaticOwner::Class(c.fq_name),
+            MethodSlot {
+                static_owner: StaticOwner::Class(c.fq_name),
+                instance: false,
+            },
             &shape.class,
             facade,
             &mut cw,
-            false,
             env,
         );
     }

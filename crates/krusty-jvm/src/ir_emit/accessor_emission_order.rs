@@ -10,7 +10,7 @@
 use super::{
     class_ctor_jvm_tys, constructor_accessors, constructor_defaults, emit_method,
     has_ctor_marker_accessor, marker_accessor_emitted_last, static_accessors, ClassWriter, EmitEnv,
-    StaticOwner,
+    MethodSlot, StaticOwner,
 };
 use krusty::ir::{FunId, IrClass, IrFile};
 use krusty::types::Visibility;
@@ -88,7 +88,18 @@ pub(super) fn emit(
         .filter(|&accessor| ir.functions[accessor as usize].body.is_some())
     {
         let owner = StaticOwner::Class(class.fq_name);
-        emit_method(ir, accessor, owner, fq_name, facade, writer, false, env);
+        emit_method(
+            ir,
+            accessor,
+            MethodSlot {
+                static_owner: owner,
+                instance: false,
+            },
+            fq_name,
+            facade,
+            writer,
+            env,
+        );
     }
     // kotlinc adds a value-class constructor's marker accessor after every declared member: the
     // primary's, then each secondary's in declaration order.

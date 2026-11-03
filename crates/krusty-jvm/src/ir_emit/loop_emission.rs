@@ -66,9 +66,11 @@ impl Emitter<'_> {
                 IrExpr::Block { stmts, value } => {
                     let saved = self.open_slot_scope();
                     let emitted = self.emit_open_block(
-                        body,
-                        stmts,
-                        value,
+                        super::block_scope::OpenBlock {
+                            block: body,
+                            stmts,
+                            value,
+                        },
                         Some(bottom),
                         super::block_scope::InlineBodyEntry::default(),
                         false,

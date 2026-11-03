@@ -337,14 +337,11 @@ fn owner_type_parameter_chain(
 ) -> Vec<&krusty::ir::IrTypeParameter> {
     let mut current = owner;
     let mut chain = Vec::new();
-    loop {
-        let Some(class) = ir
-            .classes
-            .iter()
-            .find(|candidate| candidate.fq_name == current)
-        else {
-            break;
-        };
+    while let Some(class) = ir
+        .classes
+        .iter()
+        .find(|candidate| candidate.fq_name == current)
+    {
         if let Some(signature) = ir.class_signature_name(current) {
             chain.push(signature.type_params.as_slice());
         }

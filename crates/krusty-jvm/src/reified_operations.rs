@@ -580,10 +580,10 @@ fn expression_emits_reified_marker(
     if !expression_reified_parameters(ir, expression, parameters).is_empty() {
         return true;
     }
-    match ir.expr(expression) {
-        IrExpr::ReifiedClassMarker { .. } | IrExpr::ReifiedTypeOp { .. } => true,
-        _ => false,
-    }
+    matches!(
+        ir.expr(expression),
+        IrExpr::ReifiedClassMarker { .. } | IrExpr::ReifiedTypeOp { .. }
+    )
 }
 
 fn member_uses_enclosing_reified_parameter(

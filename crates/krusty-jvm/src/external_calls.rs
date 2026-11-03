@@ -1103,7 +1103,7 @@ fn realize_expressions(
             continue;
         }
         // A member dispatch realizes the dependency declaration the frontend selected.
-        let selected = property_virtual_target.unwrap_or_else(|| {
+        let selected = property_virtual_target.unwrap_or({
             krusty::ir::IrVirtualTarget::Function(
                 krusty::fir::ResolvedFunctionOverrideTarget::External(target),
             )

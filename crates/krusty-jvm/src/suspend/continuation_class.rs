@@ -53,16 +53,28 @@ pub(super) fn reentry_owners(ir: &IrFile, function: u32) -> (Option<TypeName>, O
     (None, static_owner)
 }
 
+/// The suspend function a continuation class belongs to: its id, its dispatch receiver, the
+/// static owner of its body, and its declared parameters.
+pub(super) struct ContinuationOwner<'a> {
+    pub(super) function: u32,
+    pub(super) receiver: Option<TypeName>,
+    pub(super) static_owner: Option<TypeName>,
+    pub(super) params: &'a [Ty],
+}
+
 pub(super) fn build_continuation_class(
     ir: &mut IrFile,
     internal: &str,
-    outer_fid: u32,
     layout: &SpillLayout,
     suspended_result_returns: &mut SuspendedResultReturns,
-    receiver: Option<TypeName>,
-    static_owner: Option<TypeName>,
-    params: &[Ty],
+    owner: ContinuationOwner<'_>,
 ) -> ClassId {
+    let ContinuationOwner {
+        function: outer_fid,
+        receiver,
+        static_owner,
+        params,
+    } = owner;
     let class_id = ir.classes.len() as ClassId;
     let layout_fields = layout.fields();
     // result(0), label(1), spill slots(2..), and — for a member — the captured receiver `this$0` last.

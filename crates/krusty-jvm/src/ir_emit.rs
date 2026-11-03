@@ -920,9 +920,11 @@ fn emit_jvm_interface_companion_surface(
             ir,
             cw,
             env,
-            Some(StaticOwner::Class(c.fq_name)),
-            &fq_name,
-            facade,
+            EmitterOwner {
+                static_owner: Some(StaticOwner::Class(c.fq_name)),
+                owner: &fq_name,
+                facade,
+            },
             Ty::Unit,
             clinit_statics.iter().map(|&(_, _, init)| init),
         );
@@ -1390,22 +1392,26 @@ fn emit_pass(
             emit_method_inner(
                 ir,
                 i as u32,
-                StaticOwner::Facade,
+                MethodSlot {
+                    static_owner: StaticOwner::Facade,
+                    instance: false,
+                },
                 facade,
                 facade,
                 &mut cw,
-                false,
                 env,
             );
         } else {
             emit_method(
                 ir,
                 i as u32,
-                StaticOwner::Facade,
+                MethodSlot {
+                    static_owner: StaticOwner::Facade,
+                    instance: false,
+                },
                 facade,
                 facade,
                 &mut cw,
-                false,
                 env,
             );
         }
@@ -1828,11 +1834,13 @@ fn emit_declared_property_accessors(
             emit_method(
                 ir,
                 marker,
-                StaticOwner::Class(c.fq_name),
+                MethodSlot {
+                    static_owner: StaticOwner::Class(c.fq_name),
+                    instance: false,
+                },
                 fq_name,
                 facade,
                 cw,
-                false,
                 env,
             );
         }
@@ -1909,11 +1917,13 @@ fn emit_scheduled_member(
                 emit_method(
                     ir,
                     marker,
-                    StaticOwner::Class(c.fq_name),
+                    MethodSlot {
+                        static_owner: StaticOwner::Class(c.fq_name),
+                        instance: false,
+                    },
                     fq_name,
                     facade,
                     cw,
-                    false,
                     env,
                 );
             }
@@ -1960,11 +1970,13 @@ fn emit_scheduled_member(
         emit_method(
             ir,
             fid,
-            StaticOwner::Class(c.fq_name),
+            MethodSlot {
+                static_owner: StaticOwner::Class(c.fq_name),
+                instance: !f.is_static,
+            },
             fq_name,
             facade,
             cw,
-            !f.is_static,
             env,
         );
         seed_value_class_method_locals(byte_parity, ir, c, fid, cw);
@@ -2068,13 +2080,13 @@ fn assert_determined_member_signatures(ir: &IrFile, c: &krusty::ir::IrClass) {
 fn emit_class(
     ir: &IrFile,
     class_id: ClassId,
-    c: &krusty::ir::IrClass,
     facade: &str,
     env: &EmitEnv,
     opts: &EmitOptions,
     class_meta: Option<&KotlinMetadata>,
     extra: &mut Vec<(String, Vec<u8>)>,
 ) -> Vec<u8> {
+    let c = &ir.classes[class_id as usize];
     assert_determined_member_signatures(ir, c);
     if c.is_enum {
         return emit_enum_class(ir, c, facade, env, opts);
@@ -2459,9 +2471,11 @@ fn emit_class(
                 ir,
                 &mut cw,
                 env,
-                Some(StaticOwner::Class(c.fq_name)),
-                &fq_name,
-                facade,
+                EmitterOwner {
+                    static_owner: Some(StaticOwner::Class(c.fq_name)),
+                    owner: &fq_name,
+                    facade,
+                },
                 Ty::Unit,
                 c.super_arg_prelude
                     .iter()
@@ -2787,11 +2801,13 @@ fn emit_class(
             emit_method(
                 ir,
                 fid,
-                StaticOwner::Class(c.fq_name),
+                MethodSlot {
+                    static_owner: StaticOwner::Class(c.fq_name),
+                    instance: !f.is_static,
+                },
                 &fq_name,
                 facade,
                 &mut cw,
-                !f.is_static,
                 env,
             );
         }
@@ -3059,11 +3075,13 @@ fn emit_interface_class(
             emit_method(
                 ir,
                 fid,
-                StaticOwner::Class(c.fq_name),
+                MethodSlot {
+                    static_owner: StaticOwner::Class(c.fq_name),
+                    instance: !f.is_static,
+                },
                 &fq_name,
                 facade,
                 &mut cw,
-                !f.is_static,
                 env,
             );
             if ir.function_reference_access_bridges.contains(&fid) {
@@ -3489,9 +3507,11 @@ fn emit_enum_class(
             ir,
             &mut cw,
             env,
-            Some(StaticOwner::Class(c.fq_name)),
-            &fq,
-            facade,
+            EmitterOwner {
+                static_owner: Some(StaticOwner::Class(c.fq_name)),
+                owner: &fq,
+                facade,
+            },
             Ty::Unit,
             [init_body],
         );
@@ -3647,11 +3667,13 @@ fn emit_enum_class(
                 emit_method(
                     ir,
                     fid,
-                    StaticOwner::Class(c.fq_name),
+                    MethodSlot {
+                        static_owner: StaticOwner::Class(c.fq_name),
+                        instance: !f.is_static,
+                    },
                     &fq,
                     facade,
                     cw,
-                    !f.is_static,
                     env,
                 );
                 if ir.function_reference_access_bridges.contains(&fid) {
@@ -3843,9 +3865,11 @@ fn emit_enum_class(
             ir,
             &mut cw,
             env,
-            Some(StaticOwner::Class(c.fq_name)),
-            &fq,
-            facade,
+            EmitterOwner {
+                static_owner: Some(StaticOwner::Class(c.fq_name)),
+                owner: &fq,
+                facade,
+            },
             Ty::Unit,
             c.enum_entries
                 .iter()
@@ -4062,14 +4086,21 @@ fn emit_enum_class(
 }
 
 /// Emit function `fid` as a method on `owner`. `instance` = an instance method (`this` in slot 0).
+/// Where a declared method goes: the static owner it is placed against and whether it is an
+/// instance method (`this` in slot 0).
+#[derive(Clone, Copy)]
+pub(crate) struct MethodSlot {
+    pub(crate) static_owner: StaticOwner,
+    pub(crate) instance: bool,
+}
+
 fn emit_method(
     ir: &IrFile,
     fid: u32,
-    static_owner: StaticOwner,
+    slot: MethodSlot,
     owner: &str,
     facade: &str,
     cw: &mut ClassWriter,
-    instance: bool,
     env: &EmitEnv,
 ) {
     // An inline-only lambda impl (its body has a non-local `return`) is never a real callable method —
@@ -4078,7 +4109,7 @@ fn emit_method(
     if standalone_method_is_elided(ir, fid, env) {
         return;
     }
-    emit_method_inner(ir, fid, static_owner, owner, facade, cw, instance, env);
+    emit_method_inner(ir, fid, slot, owner, facade, cw, env);
 }
 
 /// Emit `fid`'s body as a `$DefaultImpls` static: same code and slot layout as the instance method
@@ -4107,13 +4138,16 @@ fn emit_holder_method(
 fn emit_method_inner(
     ir: &IrFile,
     fid: u32,
-    static_owner: StaticOwner,
+    slot: MethodSlot,
     owner: &str,
     facade: &str,
     cw: &mut ClassWriter,
-    instance: bool,
     env: &EmitEnv,
 ) {
+    let MethodSlot {
+        static_owner,
+        instance,
+    } = slot;
     let singleton = jvm_static_members::singleton_static_owner(ir, fid).filter(|_| instance);
     let placement = match singleton {
         Some(singleton) => MethodPlacement::Singleton {
@@ -4172,7 +4206,18 @@ fn emit_placed_method(
     let body = f.body.unwrap();
     let param_tys = jvm_function_params(ir, fid);
     let ret = jvm_declared_ty(&env.override_results.physical_result(ir, fid));
-    let mut e = Emitter::new(ir, cw, env, static_owner, owner, facade, ret, [body]);
+    let mut e = Emitter::new(
+        ir,
+        cw,
+        env,
+        EmitterOwner {
+            static_owner,
+            owner,
+            facade,
+        },
+        ret,
+        [body],
+    );
     e.function = Some(fid);
     e.method_exports_private_access = static_accessors::method_exports_private_calls(
         ir,
@@ -5154,17 +5199,29 @@ struct Emitter<'a> {
     singleton_receiver: Option<TypeName>,
 }
 
+/// The class an emitter writes code into: its internal name, the static owner its static
+/// accesses resolve against, and the file facade it belongs to.
+#[derive(Clone, Copy)]
+pub(crate) struct EmitterOwner<'s> {
+    pub(crate) static_owner: Option<StaticOwner>,
+    pub(crate) owner: &'s str,
+    pub(crate) facade: &'s str,
+}
+
 impl<'a> Emitter<'a> {
     fn new(
         ir: &'a IrFile,
         cw: &'a mut ClassWriter,
         env: &EmitEnv<'a>,
-        static_owner: Option<StaticOwner>,
-        owner: &str,
-        facade: &str,
+        placement: EmitterOwner<'_>,
         ret: Ty,
         roots: impl IntoIterator<Item = u32>,
     ) -> Self {
+        let EmitterOwner {
+            static_owner,
+            owner,
+            facade,
+        } = placement;
         let roots: Vec<u32> = roots.into_iter().collect();
         Self {
             ir,
@@ -5883,8 +5940,10 @@ impl<'a> Emitter<'a> {
             } else {
                 self.emit_property_receiver(
                     receiver,
-                    operation.owner,
-                    access_owner,
+                    property_access::PropertyOwners {
+                        lookup: operation.owner,
+                        access: access_owner,
+                    },
                     takes_receiver,
                     &receiver_ty,
                     property_access::PropertyReceiverUse::Write,

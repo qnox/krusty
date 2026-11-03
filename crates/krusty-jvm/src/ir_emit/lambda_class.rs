@@ -251,11 +251,13 @@ pub(super) fn emit_lambda_class(
     emit_method(
         ir,
         lambda.invoke,
-        StaticOwner::Class(c.fq_name),
+        MethodSlot {
+            static_owner: StaticOwner::Class(c.fq_name),
+            instance: true,
+        },
         &class,
         facade,
         &mut cw,
-        true,
         env,
     );
     for &method in &c.methods {
@@ -263,11 +265,13 @@ pub(super) fn emit_lambda_class(
             emit_method(
                 ir,
                 method,
-                StaticOwner::Class(c.fq_name),
+                MethodSlot {
+                    static_owner: StaticOwner::Class(c.fq_name),
+                    instance: false,
+                },
                 &class,
                 facade,
                 &mut cw,
-                false,
                 env,
             );
         }
@@ -403,9 +407,11 @@ fn emit_initialization(
         ir,
         writer,
         env,
-        Some(StaticOwner::Class(class.fq_name)),
-        internal,
-        facade,
+        EmitterOwner {
+            static_owner: Some(StaticOwner::Class(class.fq_name)),
+            owner: internal,
+            facade,
+        },
         Ty::Unit,
         std::iter::empty(),
     );

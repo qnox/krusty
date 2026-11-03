@@ -20,4 +20,5 @@ pub(crate) use type_shape::{
     parse_type_node, AnnotationArgumentValue, ParsedProjection, ParsedTypeArgument, ParsedTypeNode,
     TypeAnnotation,
 };
-pub use wire::{packed_varints, Pb};
+pub(crate) use wire::packed_varints;
+pub use wire::Pb;

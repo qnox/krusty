@@ -148,7 +148,8 @@ pub use fields::IrField;
 pub use function_scope::IrFunctionScope;
 pub use intrinsic::IrIntrinsic;
 pub use lambda_classes::{IrInvokeBridge, IrLambdaCapture, IrLambdaClass, IrSamWrapperClass};
-pub use lifting_sequences::{IrLiftingEntry, IrLiftingRoot, IrLiftingSequence};
+pub(crate) use lifting_sequences::IrLiftingEntry;
+pub use lifting_sequences::{IrLiftingRoot, IrLiftingSequence};
 pub use local_class_names::{IrLocalClassNameProvenance, IrLocalClassOwner};
 pub use local_property_references::IrLocalPropertyReference;
 pub use module_records::{
@@ -2827,7 +2828,7 @@ mod debug_locals;
 mod external_overrides;
 mod generated_members;
 pub use data_class_members::IrDataClassMemberRole;
-pub use debug_lines::UnitBodyExit;
+pub(crate) use debug_lines::UnitBodyExit;
 pub use debug_locals::{IrCatchBinding, IrLambdaForm, IrLambdaOrigin};
 pub use debug_locals::{IrDebugLocalProvenance, IrInlineLocalRole};
 pub use generated_members::{IrGeneratedClassRole, IrGeneratedFunctionRole, IrValueClassAnyMember};
@@ -2845,11 +2846,12 @@ pub mod clone;
 pub use clone::clone_expression_dag;
 #[cfg(test)]
 pub(crate) use clone::make_expression_children_unique;
-pub use clone::{
+pub use clone::make_expression_children_unique_tracked;
+pub(crate) use clone::{
     clone_class_method, clone_expression_with_own_lambdas, clone_function_implementation,
-    clone_with_operands, make_expression_children_unique_tracked,
+    clone_with_operands,
 };
-pub mod semantic_validation;
+mod semantic_validation;
 pub use semantic_validation::{
     IncompleteIrFact, InvalidIrContract, NullableSamContractViolation, UndeterminedIrType,
 };

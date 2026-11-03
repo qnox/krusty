@@ -10,6 +10,15 @@ use krusty::fx_hash::{HashMap, HashSet};
 use krusty::ir::{ClassId, ExprId, IrExpr, IrFile, IrTypeOp};
 use krusty::types::{Ty, TyKind, TypeName};
 
+/// Each shared-cell slot's declared type and the expressions that declare it.
+type DeclaredCells = HashMap<u32, (Ty, Vec<ExprId>)>;
+/// A captured slot, the implementation parameter that carries it, and the holder it requires.
+type CapturedCell = (u32, Option<(u32, u32)>, Ty);
+/// One implementation parameter capturing a slot, with the holder that edge requires.
+type SlotCapture = (Option<(u32, u32)>, Ty);
+/// A read or write of a cell: the access, the cell expression and the accessed type.
+type CellAccess = (ExprId, ExprId, Ty);
+
 const OBJECT_REF: &str = "kotlin/jvm/internal/Ref$ObjectRef";
 
 /// The JVM holder class and its `element` field descriptor for one captured element type.
@@ -165,10 +174,10 @@ fn restore_body(ir: &mut IrFile, body: ExprId) {
             _ => None,
         })
         .collect::<HashMap<_, _>>();
-    let mut declared: HashMap<u32, (Ty, Vec<ExprId>)> = HashMap::default();
-    let mut captured: Vec<(u32, Option<(u32, u32)>, Ty)> = Vec::new();
-    let mut reads: Vec<(ExprId, ExprId, Ty)> = Vec::new();
-    let mut writes: Vec<(ExprId, ExprId, Ty)> = Vec::new();
+    let mut declared: DeclaredCells = HashMap::default();
+    let mut captured: Vec<CapturedCell> = Vec::new();
+    let mut reads: Vec<CellAccess> = Vec::new();
+    let mut writes: Vec<CellAccess> = Vec::new();
     collect_body(
         ir,
         body,
@@ -182,7 +191,7 @@ fn restore_body(ir: &mut IrFile, body: ExprId) {
     // parameter is the holder that edge requires. The semantic type recorded when the capture
     // was built is not that holder: value-class lowering may already have specialized both the
     // cell and the parameter to `IntRef` while the record still names the value class.
-    let mut captures_by_slot: HashMap<u32, Vec<(Option<(u32, u32)>, Ty)>> = HashMap::default();
+    let mut captures_by_slot: HashMap<u32, Vec<SlotCapture>> = HashMap::default();
     for (slot, parameter, required) in captured {
         captures_by_slot
             .entry(slot)
@@ -462,10 +471,10 @@ fn erased_cell_element(parameter: Ty) -> Option<Ty> {
 fn collect_body(
     ir: &IrFile,
     root: ExprId,
-    declared: &mut HashMap<u32, (Ty, Vec<ExprId>)>,
-    captured: &mut Vec<(u32, Option<(u32, u32)>, Ty)>,
-    reads: &mut Vec<(ExprId, ExprId, Ty)>,
-    writes: &mut Vec<(ExprId, ExprId, Ty)>,
+    declared: &mut DeclaredCells,
+    captured: &mut Vec<CapturedCell>,
+    reads: &mut Vec<CellAccess>,
+    writes: &mut Vec<CellAccess>,
 ) {
     let mut pending = vec![root];
     let mut seen = HashSet::default();

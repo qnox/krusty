@@ -38,11 +38,12 @@ mod substitute;
 mod type_parameter_identity;
 pub use equality_mode::EqualityMode;
 
-pub use substitute::{
-    ty_canonicalize_params, ty_rename_params, ty_subst, ty_subst_alias_expansion, ty_subst_all,
-    ty_subst_applied_arguments, ty_subst_formals, ty_subst_keep_unbound,
-    ty_subst_supertype_template, ty_with_param_bounds, ty_with_transitive_param_bounds,
+pub(crate) use substitute::{
+    ty_canonicalize_params, ty_rename_params, ty_subst_alias_expansion, ty_subst_applied_arguments,
+    ty_subst_formals, ty_subst_keep_unbound, ty_subst_supertype_template, ty_with_param_bounds,
+    ty_with_transitive_param_bounds,
 };
+pub use substitute::{ty_subst, ty_subst_all};
 
 pub use crate::context_parameters::{CapturedContextKind, ContextParameterKind};
 pub use crate::inline_parameter_modifier::{InlineExpansionMode, InlineParameterModifier};
@@ -64,11 +65,17 @@ pub use thin_handles::{TyList, TyParamName};
 pub use ty_kind::TyKind;
 mod type_name_list;
 pub use type_name_list::TypeNameList;
-pub use type_parameter_identity::{
-    call_site_type_variable, constructor_type_parameter, declaration_type_parameter,
-    generated_function_type_parameter, hidden_captured_type_parameter, metadata_type_parameter,
-    postponed_call_type_variable, type_parameter_source_name,
+pub use type_parameter_identity::type_parameter_source_name;
+pub(crate) use type_parameter_identity::{
+    call_site_type_variable, constructor_type_parameter, generated_function_type_parameter,
+    hidden_captured_type_parameter, metadata_type_parameter, postponed_call_type_variable,
 };
+// Backend unit tests build declaration type parameters directly; production code outside the
+// frontend never allocates one.
+#[cfg(not(any(test, feature = "test-support")))]
+pub(crate) use type_parameter_identity::declaration_type_parameter;
+#[cfg(any(test, feature = "test-support"))]
+pub use type_parameter_identity::declaration_type_parameter;
 
 /// Compile-time policy for Kotlin's `assert` operation. Every backend must guard, retain, or elide
 /// the checked operation while preserving lazy condition/message evaluation.

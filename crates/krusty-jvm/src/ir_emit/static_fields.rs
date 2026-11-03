@@ -187,9 +187,11 @@ pub(super) fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, env:
         ir,
         cw,
         env,
-        Some(StaticOwner::Facade),
-        facade,
-        facade,
+        EmitterOwner {
+            static_owner: Some(StaticOwner::Facade),
+            owner: facade,
+            facade,
+        },
         Ty::Unit,
         facade_statics
             .iter()
@@ -966,9 +968,11 @@ pub(super) fn emit_class_static_initializer(
             ir,
             cw,
             env,
-            Some(StaticOwner::Class(c.fq_name)),
-            fq_name,
-            facade,
+            EmitterOwner {
+                static_owner: Some(StaticOwner::Class(c.fq_name)),
+                owner: fq_name,
+                facade,
+            },
             Ty::Unit,
             clinit_statics
                 .iter()

@@ -168,17 +168,30 @@ fn continuation_ty() -> Ty {
 /// name (e.g. `SKt`) — the continuation class for `bar` is `SKt$bar$1`. Returns `false` (skip the whole
 /// file, never miscompile) on any suspend shape this pass can't yet transform.
 #[must_use]
+/// The backend pass facts suspend lowering records into.
+pub(crate) struct SuspendLoweringFacts<'a> {
+    pub(crate) continuation_metadata: &'a mut ContinuationMetadataMap,
+    pub(crate) default_call_operands: &'a mut crate::default_call_operands::DefaultCallOperands,
+    pub(crate) emit_time_machines: &'a mut EmitTimeMachines,
+    pub(crate) suspended_result_returns: &'a mut SuspendedResultReturns,
+    pub(crate) intrinsic_probe_continuations: &'a mut IntrinsicProbeContinuations,
+    pub(crate) specialized_lambda_classes: &'a mut SpecializedLambdaClasses,
+}
+
 pub(crate) fn lower_suspend(
     ir: &mut IrFile,
     facade: &str,
-    continuation_metadata: &mut ContinuationMetadataMap,
-    default_call_operands: &mut crate::default_call_operands::DefaultCallOperands,
-    emit_time_machines: &mut EmitTimeMachines,
-    suspended_result_returns: &mut SuspendedResultReturns,
-    intrinsic_probe_continuations: &mut IntrinsicProbeContinuations,
-    specialized_lambda_classes: &mut SpecializedLambdaClasses,
+    facts: SuspendLoweringFacts<'_>,
     null_out_dead_spills: bool,
 ) -> bool {
+    let SuspendLoweringFacts {
+        continuation_metadata,
+        default_call_operands,
+        emit_time_machines,
+        suspended_result_returns,
+        intrinsic_probe_continuations,
+        specialized_lambda_classes,
+    } = facts;
     let mut outputs = MachineOutputs {
         continuation_metadata,
         default_call_operands,
@@ -189,7 +202,7 @@ pub(crate) fn lower_suspend(
     let suspend_set: HashSet<u32> = ir.suspend_funs.iter().copied().collect();
     // Snapshot every function's *declared* (pre-CPS) return type, so hoisted suspension temps are typed
     // by the callee's logical result type even after the callee has itself been CPS-rewritten to `Object`.
-    let orig_rets: Vec<Ty> = ir.functions.iter().map(|f| f.ret.clone()).collect();
+    let orig_rets: Vec<Ty> = ir.functions.iter().map(|f| f.ret).collect();
     let context = MachineContext {
         orig_rets: &orig_rets,
         null_out_dead_spills,
@@ -350,7 +363,7 @@ pub(crate) fn lower_suspend(
         // Desugar `return <suspend call>` (incl. an `= <suspend call>` expression body) into
         // `val tmp = <suspend call>; return tmp` so a tail-position suspension becomes a uniform
         // bound-local point. Uses the function's (pre-CPS) declared return type for `tmp`.
-        let ret_ty = ir.functions[fid as usize].ret.clone();
+        let ret_ty = ir.functions[fid as usize].ret;
         if let (Some(b), None) = (body, forward.as_ref()) {
             // An expression-bodied suspend function can carry a suspending `when`/`try` as the block's
             // trailing VALUE rather than as an explicit `return`. Materialize that tail first so the
@@ -918,7 +931,7 @@ fn rewrite_returns_to_pending(
     unit_return: bool,
 ) {
     match ir.exprs[expression as usize].clone() {
-        IrExpr::Lambda { .. } => return,
+        IrExpr::Lambda { .. } => (),
         IrExpr::Return(value) => {
             // A checked `Unit` expression may have a physical void coercion: it must execute for
             // effect, but it cannot be used as the operand of the pending-value store. Materialize
@@ -983,7 +996,7 @@ fn desugar_tail_suspend(ir: &mut IrFile, b: ExprId, suspend_set: &HashSet<u32>, 
                 let tmp = max_value_index(ir) + 1;
                 let var = ir.add_expr(IrExpr::Variable {
                     index: tmp,
-                    ty: ret_ty.clone(),
+                    ty: *ret_ty,
                     init: Some(e),
                     named: false,
                 });
@@ -1224,7 +1237,7 @@ fn build_state_machine(
     // CAPTURES it at construction (see `build_get_or_create` / `build_continuation_class`).
     let param_ty = |idx: u32| -> Option<Ty> {
         let hi = this_offset + real_params.len() as u32;
-        (idx >= this_offset && idx < hi).then(|| real_params[(idx - this_offset) as usize].clone())
+        (idx >= this_offset && idx < hi).then(|| real_params[(idx - this_offset) as usize])
     };
     // A local whose EVERY reference lies strictly AFTER the last top-level suspending statement is not
     // live across any suspension — e.g. the iterator/counter of a STRUCTURAL (non-suspending) loop that
@@ -1527,12 +1540,14 @@ fn build_state_machine(
     let cont_id = build_continuation_class(
         ir,
         &cont_internal,
-        fid,
         &layout,
         suspended_result_returns,
-        receiver,
-        static_owner,
-        &real_params,
+        continuation_class::ContinuationOwner {
+            function: fid,
+            receiver,
+            static_owner,
+            params: &real_params,
+        },
     );
 
     // A `suspendCoroutineUninterceptedOrReturn { c -> … }` block inside this body reads its
@@ -1690,7 +1705,7 @@ fn build_state_machine(
         ir,
         IrExpr::Variable {
             index: cont_v,
-            ty: cont_ty.clone(),
+            ty: cont_ty,
             init: Some(get_or_create),
             named: false,
         },
@@ -2399,7 +2414,7 @@ impl Flat<'_> {
                     unwrap_suspend_cast(self.ir, *init, self.suspend, /* ref_only */ false);
                 is_suspension_point(self.ir, suspension.point, self.suspend).then(|| {
                     (
-                        Some((*index, ty.clone())),
+                        Some((*index, *ty)),
                         suspension.point,
                         suspension_completion(suspension, false),
                     )
@@ -2434,7 +2449,7 @@ impl Flat<'_> {
         else {
             return None;
         };
-        let (index, ty, init) = (*index, ty.clone(), *init);
+        let (index, ty, init) = (*index, *ty, *init);
         let IrExpr::When { branches } = &self.ir.exprs[init as usize] else {
             return None;
         };
@@ -2558,7 +2573,7 @@ impl Flat<'_> {
                         if let Some(value) = value {
                             stmts.push(self.add(IrExpr::Variable {
                                 index: local,
-                                ty: ty.clone(),
+                                ty: *ty,
                                 init: Some(value),
                                 named: false,
                             }));
@@ -2567,7 +2582,7 @@ impl Flat<'_> {
                     }
                     IrExpr::When { .. } => vec![self.add(IrExpr::Variable {
                         index: local,
-                        ty: ty.clone(),
+                        ty: *ty,
                         init: Some(*value),
                         named: false,
                     })],
@@ -2590,7 +2605,7 @@ impl Flat<'_> {
                     } else {
                         bb.push(self.add(IrExpr::Variable {
                             index: local,
-                            ty: ty.clone(),
+                            ty: *ty,
                             init: Some(*value),
                             named: false,
                         }));

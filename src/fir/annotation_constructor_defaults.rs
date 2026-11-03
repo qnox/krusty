@@ -13,7 +13,7 @@ use crate::fir::{
 };
 use crate::libraries::DefaultValue;
 
-pub fn publish_checked_annotation_defaults(
+pub(crate) fn publish_checked_annotation_defaults(
     index: &mut ResolvedModuleIndex,
     store: &DefaultArgumentStore,
 ) {

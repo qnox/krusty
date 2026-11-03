@@ -98,11 +98,7 @@ pub(super) fn is_file_level(ir: &IrFile, index: usize) -> bool {
     {
         return false;
     }
-    if ir
-        .classes
-        .iter()
-        .any(|class| class.methods.iter().any(|method| *method == id))
-    {
+    if ir.classes.iter().any(|class| class.methods.contains(&id)) {
         return false;
     }
     true

@@ -107,11 +107,13 @@ pub(super) fn emit_sam_wrapper_class(
     emit_method(
         ir,
         wrapper.method,
-        StaticOwner::Class(c.fq_name),
+        MethodSlot {
+            static_owner: StaticOwner::Class(c.fq_name),
+            instance: true,
+        },
         &class,
         facade,
         &mut cw,
-        true,
         env,
     );
 

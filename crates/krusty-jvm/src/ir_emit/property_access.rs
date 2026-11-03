@@ -40,6 +40,14 @@ pub(super) fn declared_property_field<'a>(
     }
 }
 
+/// The class a property access is looked up on and the class whose member physically serves it.
+/// They differ for a companion property stored on its outer class.
+#[derive(Clone, Copy)]
+pub(super) struct PropertyOwners {
+    pub(super) lookup: TypeName,
+    pub(super) access: TypeName,
+}
+
 impl Emitter<'_> {
     /// Whether a static property write retains its source receiver's effects. Ordinary companion
     /// properties are instance-shaped lookup coordinates over hoisted private storage, so their
@@ -64,7 +72,7 @@ impl Emitter<'_> {
         let companion = self.ir.classes[*class as usize].fq_name;
         self.ir
             .jvm_companion_property_static(companion, *property)
-            .map_or(true, |static_| self.ir.is_jvm_field_static(static_))
+            .is_none_or(|static_| self.ir.is_jvm_field_static(static_))
     }
 
     /// Emit the source receiver according to an already-selected property realization. Instance
@@ -74,8 +82,10 @@ impl Emitter<'_> {
     pub(super) fn emit_property_receiver(
         &mut self,
         receiver: krusty::ir::ExprId,
-        lookup_owner: TypeName,
-        access_owner: TypeName,
+        PropertyOwners {
+            lookup: lookup_owner,
+            access: access_owner,
+        }: PropertyOwners,
         takes_receiver: bool,
         expected: &Ty,
         use_: PropertyReceiverUse,
@@ -227,8 +237,10 @@ impl Emitter<'_> {
         if let Some(receiver) = receiver.filter(|_| !receiver_is_static_field_qualifier) {
             self.emit_property_receiver(
                 receiver,
-                operation.owner,
-                access_owner,
+                PropertyOwners {
+                    lookup: operation.owner,
+                    access: access_owner,
+                },
                 takes_receiver,
                 &receiver_ty,
                 PropertyReceiverUse::Read,
@@ -514,9 +526,11 @@ impl Emitter<'_> {
             &self.facade,
             &planned,
             None,
-            *class,
-            *field,
-            write,
+            static_accessors::BackingFieldAccess {
+                class: *class,
+                field: *field,
+                write,
+            },
         )
     }
 

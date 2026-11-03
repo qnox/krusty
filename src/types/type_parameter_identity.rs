@@ -13,7 +13,7 @@ static NEXT_METADATA_TYPE_PARAMETER: AtomicU64 = AtomicU64::new(0);
 /// Allocate an opaque identity for a type parameter owned by a dependency declaration. The
 /// provider retains the identity beside the exact declaration key it decoded; only the source
 /// spelling is registered here for diagnostics.
-pub fn metadata_type_parameter(source: &str) -> &'static str {
+pub(crate) fn metadata_type_parameter(source: &str) -> &'static str {
     let ordinal = NEXT_METADATA_TYPE_PARAMETER.fetch_add(1, Ordering::Relaxed);
     let semantic = intern(&format!("\0metadata-tp:{ordinal}"));
     let source = intern(source);
@@ -51,7 +51,7 @@ pub fn declaration_type_parameter(
 /// It keeps the declaration's source spelling for diagnostics and never equals a declaration-owned
 /// identity, so the enclosing declaration's own `declared` stays a fixed type while the call's
 /// variable is solved.
-pub fn call_site_type_variable(declared: &'static str) -> &'static str {
+pub(crate) fn call_site_type_variable(declared: &'static str) -> &'static str {
     let fresh = intern(&format!("\0call:{declared}"));
     let mut sources = TYPE_PARAMETER_SOURCES
         .get_or_init(|| Mutex::new(HashMap::default()))
@@ -65,7 +65,7 @@ pub fn call_site_type_variable(declared: &'static str) -> &'static str {
 /// The inference variable owned by one postponed call expression. Unlike
 /// [`call_site_type_variable`], this identity includes the source call: nested invocations of the
 /// same generic builder are simultaneously active and must not share their variables.
-pub fn postponed_call_type_variable(
+pub(crate) fn postponed_call_type_variable(
     compilation: u64,
     file: u32,
     expression: u32,
@@ -88,7 +88,7 @@ pub fn postponed_call_type_variable(
 /// The JVM signature uses one name for both; they are different inference variables. `declaration`
 /// is the caller's stable constructor identity (owner alone cannot separate overloads) and is not
 /// interpreted. Diagnostics still print the source spelling.
-pub fn constructor_type_parameter(
+pub(crate) fn constructor_type_parameter(
     owner: super::TypeName,
     declaration: &str,
     ordinal: usize,
@@ -111,7 +111,7 @@ pub fn constructor_type_parameter(
 /// same spelling (`class Outer<T> { class Inner<T> }`). Java names both `T`; the captured one still
 /// takes its slot in `Outer<A>.Inner<B>` but no member can name it, so it gets an identity of its
 /// own. `owner` is the capturing class and `ordinal` the slot; neither is interpreted.
-pub fn hidden_captured_type_parameter(
+pub(crate) fn hidden_captured_type_parameter(
     owner: super::TypeName,
     ordinal: usize,
     source: &str,
@@ -132,7 +132,7 @@ pub fn hidden_captured_type_parameter(
 /// A type parameter a compiler plugin declares on a function it generates for `owner`, copying one
 /// of the owner's own. It never equals the owner's parameter it copies: the function binds its own.
 /// `function` is the producer's stable name for the generated function and is not interpreted.
-pub fn generated_function_type_parameter(
+pub(crate) fn generated_function_type_parameter(
     owner: super::TypeName,
     function: &str,
     ordinal: usize,

@@ -1098,9 +1098,7 @@ impl Walk<'_> {
         }
         // A same-class read still needs the accessor when an inline template is copied out.
         // `collect` keeps it only for another class or such a template.
-        if declared.backing_field.is_none() {
-            return None;
-        }
+        declared.backing_field?;
         let accessor = match (read, declared.getter.is_some(), declared.setter.is_some()) {
             (true, true, _) => return None,
             (true, false, _) => StaticAccessor::FieldGetter { class, property },
@@ -1194,7 +1192,18 @@ pub(super) fn emit(
     declaration_line: u32,
     cw: &mut ClassWriter,
 ) {
-    emit_selected(ir, run, plan, owner, facade, declaration_line, cw, None);
+    emit_selected(
+        ir,
+        run,
+        plan,
+        AccessorPlacement {
+            owner,
+            declaration_line,
+        },
+        facade,
+        cw,
+        None,
+    );
 }
 
 /// Accessors kotlinc places before a companion's synthetic marker constructor.
@@ -1211,9 +1220,11 @@ pub(super) fn emit_before_companion_marker(
         ir,
         run,
         plan,
-        owner,
+        AccessorPlacement {
+            owner,
+            declaration_line,
+        },
         facade,
-        declaration_line,
         cw,
         Some(false),
     );
@@ -1234,21 +1245,32 @@ pub(super) fn emit_after_companion_marker(
         ir,
         run,
         plan,
-        owner,
+        AccessorPlacement {
+            owner,
+            declaration_line,
+        },
         facade,
-        declaration_line,
         cw,
         Some(true),
     );
+}
+
+/// The static owner accessors are emitted on and the declaration line their bodies carry.
+#[derive(Clone, Copy)]
+struct AccessorPlacement {
+    owner: StaticOwner,
+    declaration_line: u32,
 }
 
 fn emit_selected(
     ir: &IrFile,
     run: &EmitRun,
     plan: &StaticAccessorPlan,
-    owner: StaticOwner,
+    AccessorPlacement {
+        owner,
+        declaration_line,
+    }: AccessorPlacement,
     facade: &str,
-    declaration_line: u32,
     cw: &mut ClassWriter,
     companion_instances: Option<bool>,
 ) {
@@ -1370,6 +1392,14 @@ fn field_accessor_shape(
 /// accessor when the field is private: a class that is not the owner, and an inline template that
 /// must not name its own private field. A private field whose property has a getter stays a direct
 /// load unless the plan published `access$get<X>$p`.
+/// A read or write of one class's backing field, by the class and field indices.
+#[derive(Clone, Copy)]
+pub(super) struct BackingFieldAccess {
+    pub(super) class: u32,
+    pub(super) field: u32,
+    pub(super) write: bool,
+}
+
 pub(super) fn cross_class_backing_field_method(
     cw: &mut ClassWriter,
     ir: &IrFile,
@@ -1377,9 +1407,11 @@ pub(super) fn cross_class_backing_field_method(
     facade: &str,
     plan: &StaticAccessorPlan,
     reader: Option<StaticOwner>,
-    class: u32,
-    field: u32,
-    write: bool,
+    BackingFieldAccess {
+        class,
+        field,
+        write,
+    }: BackingFieldAccess,
 ) -> Option<u16> {
     let class_decl = ir.classes.get(class as usize)?;
     if reader == Some(StaticOwner::Class(class_decl.fq_name)) {

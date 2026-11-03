@@ -17,6 +17,17 @@ use super::{
     semantic_scalar_adapter, unbox_prim_from, unbox_prim_from_descriptor, Emitter,
 };
 
+/// One type operation being emitted: the IR node, its operator and operand, the checked target
+/// type, that type's JVM erasure and the class name a check or cast names.
+#[derive(Clone, Copy)]
+struct TypeOperation<'a> {
+    expression: ExprId,
+    op: IrTypeOp,
+    arg: ExprId,
+    type_operand: Ty,
+    jvm_ty: Ty,
+    internal: &'a str,
+}
 impl Emitter<'_> {
     pub(super) fn emit_type_operation(
         &mut self,
@@ -63,7 +74,17 @@ impl Emitter<'_> {
             .then(|| self.inline_stack_coercion_block(arg, code.stack_height()))
             .flatten();
         let enclosing = self.inline_coercions.replace_pending(inline_stack_block);
-        self.emit_type_operation_now(expression, op, arg, type_operand, jvm_ty, &internal, code);
+        self.emit_type_operation_now(
+            TypeOperation {
+                expression,
+                op,
+                arg,
+                type_operand,
+                jvm_ty,
+                internal: &internal,
+            },
+            code,
+        );
         if inline_stack_block.is_some()
             && !self.finish_pending_inline_stack_coercion(code)
             && !code.is_dead()
@@ -75,16 +96,15 @@ impl Emitter<'_> {
         self.inline_coercions.restore_pending(enclosing);
     }
 
-    fn emit_type_operation_now(
-        &mut self,
-        expression: ExprId,
-        op: IrTypeOp,
-        arg: ExprId,
-        type_operand: Ty,
-        jvm_ty: Ty,
-        internal: &str,
-        code: &mut CodeBuilder,
-    ) {
+    fn emit_type_operation_now(&mut self, operation: TypeOperation<'_>, code: &mut CodeBuilder) {
+        let TypeOperation {
+            expression,
+            op,
+            arg,
+            type_operand,
+            jvm_ty,
+            internal,
+        } = operation;
         if op == IrTypeOp::ImplicitCoercion && self.emit_erased_suspension_result(arg, jvm_ty, code)
         {
             return;
@@ -188,16 +208,7 @@ impl Emitter<'_> {
                 }
             }
             IrTypeOp::CastNonNull => {
-                self.emit_non_null_cast(
-                    expression,
-                    arg,
-                    type_operand,
-                    jvm_ty,
-                    internal,
-                    physical_arg,
-                    semantic_arg,
-                    code,
-                );
+                self.emit_non_null_cast(operation, physical_arg, semantic_arg, code);
             }
             IrTypeOp::ImplicitCoercion => {
                 self.emit_implicit_coercion(arg, type_operand, physical_arg, code);
@@ -360,15 +371,19 @@ impl Emitter<'_> {
 
     fn emit_non_null_cast(
         &mut self,
-        expression: ExprId,
-        arg: ExprId,
-        type_operand: Ty,
-        jvm_ty: Ty,
-        internal: &str,
+        operation: TypeOperation<'_>,
         physical_arg: Ty,
         semantic_arg: Ty,
         code: &mut CodeBuilder,
     ) {
+        let TypeOperation {
+            expression,
+            arg,
+            type_operand,
+            jvm_ty,
+            internal,
+            ..
+        } = operation;
         let target_semantic = type_operand.non_null();
         let identical_scalar = physical_arg.is_jvm_scalar()
             && jvm_ty.is_jvm_scalar()

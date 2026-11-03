@@ -34,9 +34,11 @@ impl Emitter<'_> {
                 &self.facade,
                 &planned,
                 reader,
-                class,
-                index,
-                false,
+                static_accessors::BackingFieldAccess {
+                    class,
+                    field: index,
+                    write: false,
+                },
             )
         };
         if let Some(method) = method {

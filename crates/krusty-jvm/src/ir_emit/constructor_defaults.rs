@@ -86,9 +86,11 @@ pub(super) fn emit_ctor_default_stub_with_prefix(
         ir,
         cw,
         env,
-        Some(StaticOwner::Class(owner_identity)),
-        owner,
-        facade,
+        super::EmitterOwner {
+            static_owner: Some(StaticOwner::Class(owner_identity)),
+            owner,
+            facade,
+        },
         Ty::Unit,
         defaults.iter().flatten().copied(),
     );

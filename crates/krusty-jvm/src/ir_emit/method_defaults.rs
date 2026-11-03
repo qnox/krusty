@@ -96,9 +96,11 @@ pub(super) fn emit_default_stub(
         ir,
         cw,
         env,
-        static_owner,
-        owner,
-        facade,
+        EmitterOwner {
+            static_owner,
+            owner,
+            facade,
+        },
         ret,
         defaults.iter().flatten().copied(),
     );
@@ -573,9 +575,11 @@ pub(super) fn emit_facade_default_stub(
         ir,
         cw,
         env,
-        Some(static_owner),
-        facade,
-        facade,
+        EmitterOwner {
+            static_owner: Some(static_owner),
+            owner: facade,
+            facade,
+        },
         ret,
         defaults.iter().flatten().copied(),
     );
@@ -917,40 +921,6 @@ fn calls_default_bridge(ir: &IrFile, expression: krusty::ir::ExprId, target: u32
     }
 }
 
-#[cfg(test)]
-mod catch_marker_tests {
-    use super::body_has_reified_markers;
-    use krusty::ir::{IrExpr, IrFile};
-    use krusty::types::{type_name, Ty};
-
-    #[test]
-    fn a_recorded_reified_catch_marks_its_try() {
-        let mut ir = IrFile::default();
-        let handler = ir.add_expr(IrExpr::UnitInstance);
-        let thrown = ir.add_expr(IrExpr::UnitInstance);
-        let expression = ir.add_expr(IrExpr::Try {
-            body: thrown,
-            catches: vec![krusty::ir::IrCatch::generated(
-                0,
-                type_name("kotlin/Throwable"),
-                handler,
-            )],
-            finally: None,
-            result: Ty::Unit,
-        });
-        assert!(!body_has_reified_markers(&ir, expression));
-        ir.reified_markers
-            .catches
-            .insert(expression, vec![Some("E".to_owned())]);
-        assert!(body_has_reified_markers(&ir, expression));
-        let wrapper = ir.add_expr(IrExpr::Block {
-            stmts: vec![expression],
-            value: None,
-        });
-        assert!(body_has_reified_markers(&ir, wrapper));
-    }
-}
-
 impl Emitter<'_> {
     /// Emit the operands a call of `fid` passes its `$default` stub after any receiver: each
     /// supplied argument (or a zero placeholder for an omitted one, with its mask bit set), the
@@ -1021,5 +991,39 @@ impl Emitter<'_> {
         code.aconst_null();
         stub_params.push(Ty::obj("java/lang/Object"));
         stub_params
+    }
+}
+
+#[cfg(test)]
+mod catch_marker_tests {
+    use super::body_has_reified_markers;
+    use krusty::ir::{IrExpr, IrFile};
+    use krusty::types::{type_name, Ty};
+
+    #[test]
+    fn a_recorded_reified_catch_marks_its_try() {
+        let mut ir = IrFile::default();
+        let handler = ir.add_expr(IrExpr::UnitInstance);
+        let thrown = ir.add_expr(IrExpr::UnitInstance);
+        let expression = ir.add_expr(IrExpr::Try {
+            body: thrown,
+            catches: vec![krusty::ir::IrCatch::generated(
+                0,
+                type_name("kotlin/Throwable"),
+                handler,
+            )],
+            finally: None,
+            result: Ty::Unit,
+        });
+        assert!(!body_has_reified_markers(&ir, expression));
+        ir.reified_markers
+            .catches
+            .insert(expression, vec![Some("E".to_owned())]);
+        assert!(body_has_reified_markers(&ir, expression));
+        let wrapper = ir.add_expr(IrExpr::Block {
+            stmts: vec![expression],
+            value: None,
+        });
+        assert!(body_has_reified_markers(&ir, wrapper));
     }
 }

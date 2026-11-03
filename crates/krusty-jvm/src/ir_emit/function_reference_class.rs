@@ -356,11 +356,13 @@ pub(super) fn emit_func_ref_class(
         emit_method(
             ir,
             invoke,
-            StaticOwner::Class(c.fq_name),
+            MethodSlot {
+                static_owner: StaticOwner::Class(c.fq_name),
+                instance: true,
+            },
             &fq,
             facade,
             &mut cw,
-            true,
             env,
         );
         function_reference_invoke::emit_reference_invoke_bridge(

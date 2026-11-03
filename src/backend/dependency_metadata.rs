@@ -19,7 +19,7 @@ pub use crate::libraries::KlibDependencyCallable;
 /// abstract declaration has no body in this IR unit. Those declarations remain in the library's
 /// semantic metadata, but recording either one in [`DependencyExportSignatures`] would promise a
 /// physical definition which no backend can emit.
-pub fn has_standalone_dependency_code(ir: &crate::ir::IrFile, callable: FunId) -> bool {
+pub(crate) fn has_standalone_dependency_code(ir: &crate::ir::IrFile, callable: FunId) -> bool {
     ir.functions
         .get(callable as usize)
         .is_some_and(|function| function.body.is_some())

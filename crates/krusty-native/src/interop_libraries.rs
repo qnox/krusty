@@ -30,13 +30,13 @@ impl NativeKlibInputs {
         inputs: &[KlibLibraryInput],
         target: NativeTarget,
     ) -> Result<Self, NativeKlibInputsOpenError> {
-        let opened =
-            OpenedKlibLibraries::open_native(inputs).map_err(NativeKlibInputsOpenError::Klib)?;
-        let imports =
-            interop_link_libraries(&opened, target).map_err(NativeKlibInputsOpenError::Link)?;
+        let opened = OpenedKlibLibraries::open_native(inputs)
+            .map_err(|error| NativeKlibInputsOpenError::Klib(Box::new(error)))?;
+        let imports = interop_link_libraries(&opened, target)
+            .map_err(|error| NativeKlibInputsOpenError::Link(Box::new(error)))?;
         let libraries = opened
             .into_libraries()
-            .map_err(NativeKlibInputsOpenError::Klib)?;
+            .map_err(|error| NativeKlibInputsOpenError::Klib(Box::new(error)))?;
         Ok(Self { libraries, imports })
     }
 
@@ -60,9 +60,9 @@ impl NativeKlibInputs {
 #[derive(Debug)]
 pub enum NativeKlibInputsOpenError {
     /// The KLIB containers or their semantic channels are invalid.
-    Klib(KlibLibrariesOpenError),
+    Klib(Box<KlibLibrariesOpenError>),
     /// A Native interop library's target or captured link facts are invalid.
-    Link(ProgramLinkError),
+    Link(Box<ProgramLinkError>),
 }
 
 impl std::fmt::Display for NativeKlibInputsOpenError {

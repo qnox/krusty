@@ -53,9 +53,8 @@ mod test_support;
 mod value_class_erasure;
 
 use crate::language_version::LanguageVersion;
-pub use crate::libraries::{
-    ExternalCallableKind, ExternalCallableRealization, ExternalPropertyRealization,
-};
+pub(crate) use crate::libraries::ExternalPropertyRealization;
+pub use crate::libraries::{ExternalCallableKind, ExternalCallableRealization};
 pub use call_metadata::MetadataCallFacts;
 
 use self::ct_sym_index::cached_ct_sym_index;

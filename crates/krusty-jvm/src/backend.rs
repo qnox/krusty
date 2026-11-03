@@ -160,15 +160,17 @@ pub(crate) struct BackendPassFacts {
 /// Per-site concerns (timing counters, bail-reason strings, diagnostics) stay at the call sites.
 pub(crate) fn run_backend_passes(
     ir: &mut krusty::ir::IrFile,
-    facade: &str,
+    target: BackendPassTarget<'_>,
     plugins: BackendPassPlugins<'_>,
-    classifiers: &CheckedBackendClassifiers<'_>,
     callables: &mut krusty::backend::CheckedBackendCallables,
-    classpath: &krusty::jvm::classpath::Classpath,
     file_classes: &crate::file_facades::FileClasses,
-    lambda_modes: crate::ir_emit::LambdaModes,
     facts: &mut BackendPassFacts,
 ) -> Result<(), SkipReason> {
+    let BackendPassTarget {
+        classifiers,
+        classpath,
+        ..
+    } = target;
     let facades = &file_classes.containers[..];
     let lowered_expressions = ir.exprs.len();
     krusty::plugins::complete_enabled(
@@ -204,28 +206,38 @@ pub(crate) fn run_backend_passes(
     .map_err(|error| SkipReason::PluginRuntimeCalls(error.to_string()))?;
     run_backend_passes_after_plugins(
         ir,
-        facade,
+        target,
         plugins.module_name,
-        classifiers,
         callables,
-        classpath,
         Some(file_classes),
-        lambda_modes,
         facts,
     )
 }
 
+/// What every JVM backend pass over one file reads: the file's facade class, the checked
+/// classifiers and classpath it was analyzed against, and the selected lambda realizations.
+#[derive(Clone, Copy)]
+pub(crate) struct BackendPassTarget<'a> {
+    pub(crate) facade: &'a str,
+    pub(crate) classifiers: &'a CheckedBackendClassifiers<'a>,
+    pub(crate) classpath: &'a krusty::jvm::classpath::Classpath,
+    pub(crate) lambda_modes: crate::ir_emit::LambdaModes,
+}
+
 fn run_backend_passes_after_plugins(
     ir: &mut krusty::ir::IrFile,
-    facade: &str,
+    target: BackendPassTarget<'_>,
     module_name: &str,
-    classifiers: &CheckedBackendClassifiers<'_>,
     callables: &krusty::backend::CheckedBackendCallables,
-    classpath: &krusty::jvm::classpath::Classpath,
     file_classes: Option<&crate::file_facades::FileClasses>,
-    lambda_modes: crate::ir_emit::LambdaModes,
     facts: &mut BackendPassFacts,
 ) -> Result<(), SkipReason> {
+    let BackendPassTarget {
+        facade,
+        classifiers,
+        classpath,
+        lambda_modes,
+    } = target;
     let facades = file_classes.map(|classes| &classes.containers[..]);
     // Every later pass reads a type parameter's JVM carrier off its occurrences. Select it once,
     // from the declarations' complete bounds, before any of them runs.
@@ -355,8 +367,10 @@ fn run_backend_passes_after_plugins(
     if !crate::value_classes::lower_value_classes(
         ir,
         classifiers,
-        module_value_classes,
-        module_readable_value_classes,
+        crate::value_classes::ModuleValueClasses {
+            underlying: module_value_classes,
+            readable: module_readable_value_classes,
+        },
         &inherited_default_statics,
         &mut facts.bridge_adaptations,
         &mut facts.override_results,
@@ -423,12 +437,14 @@ fn run_backend_passes_after_plugins(
     if !crate::suspend::lower_suspend(
         ir,
         facade,
-        &mut facts.continuation_metadata,
-        &mut facts.default_call_operands,
-        &mut facts.emit_time_machines,
-        &mut facts.suspended_result_returns,
-        &mut facts.intrinsic_probe_continuations,
-        &mut facts.specialized_suspend_lambda_classes,
+        crate::suspend::SuspendLoweringFacts {
+            continuation_metadata: &mut facts.continuation_metadata,
+            default_call_operands: &mut facts.default_call_operands,
+            emit_time_machines: &mut facts.emit_time_machines,
+            suspended_result_returns: &mut facts.suspended_result_returns,
+            intrinsic_probe_continuations: &mut facts.intrinsic_probe_continuations,
+            specialized_lambda_classes: &mut facts.specialized_suspend_lambda_classes,
+        },
         null_out_dead_spills,
     ) {
         return Err(SkipReason::Suspend);
@@ -966,16 +982,18 @@ impl JvmBackend {
         pass_facts.property_realizations = property_realizations;
         if let Err(reason) = run_backend_passes(
             &mut ir,
-            &facade_name,
+            BackendPassTarget {
+                facade: &facade_name,
+                classifiers: &classifiers,
+                classpath: &self.cp,
+                lambda_modes: self.lambda_modes,
+            },
             BackendPassPlugins {
                 native_plugins,
                 module_name,
             },
-            &classifiers,
             &mut callables,
-            &self.cp,
             file_classes,
-            self.lambda_modes,
             &mut pass_facts,
         ) {
             report_backend_pass_failure(reason, diags);
@@ -1718,9 +1736,11 @@ pub fn facade_package_metadata_from_ir(
     let inner_classifier =
         |classifier| krusty::metadata::inner_classifiers::inner_classifier(ir, symbols, classifier);
     build_facade_metadata(
-        functions,
-        properties,
-        aliases,
+        FacadeMembers {
+            functions,
+            properties,
+            aliases,
+        },
         (module_name, locals),
         param_assertions,
         krusty::metadata::MetadataTypeLookups {
@@ -1815,10 +1835,19 @@ fn declared_method_descriptor(declaration: &krusty::ir::IrPackageFunction) -> St
     krusty::jvm::method_descriptors::ir_method_desc(&physical, &result)
 }
 
-fn build_facade_metadata(
+/// The declarations a file facade's package metadata publishes.
+struct FacadeMembers {
     functions: Vec<krusty::metadata::builder::FnMeta>,
     properties: Vec<krusty::metadata::builder::PropMeta>,
     aliases: Vec<krusty::metadata::builder::TypeAliasMeta>,
+}
+
+fn build_facade_metadata(
+    FacadeMembers {
+        functions,
+        properties,
+        aliases,
+    }: FacadeMembers,
     (module_name, locals): (&str, &[LocalPropertyMeta]),
     param_assertions: bool,
     lookups: krusty::metadata::MetadataTypeLookups<'_>,

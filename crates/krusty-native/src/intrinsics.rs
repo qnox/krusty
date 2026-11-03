@@ -1111,7 +1111,8 @@ pub(super) fn collection_algorithm(
                 .then_some(CollectionAlgorithm::WithIndex)
         }
         ("joinToString", [separator, prefix, postfix, limit, truncated, transform]) => {
-            let transform = match transform.non_null().kind() {
+            let transform = matches!(
+                transform.non_null().kind(),
                 TyKind::Fun(function)
                     if function.context_count == 0
                         && !function.has_receiver
@@ -1119,12 +1120,8 @@ pub(super) fn collection_algorithm(
                         && function.params.len() == 1
                         && function.params[0].canonical_semantic()
                             == element.canonical_semantic()
-                        && classifier_is(function.ret, "kotlin/CharSequence") =>
-                {
-                    true
-                }
-                _ => false,
-            };
+                        && classifier_is(function.ret, "kotlin/CharSequence")
+            );
             (classifier_is(*separator, "kotlin/CharSequence")
                 && classifier_is(*prefix, "kotlin/CharSequence")
                 && classifier_is(*postfix, "kotlin/CharSequence")

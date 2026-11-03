@@ -137,7 +137,7 @@ pub struct KlibBodyCallable<'a> {
 }
 
 /// The declared shape of a selected callable that its KLIB body is lowered against.
-pub struct KlibBodyCallableShape<'a> {
+pub(crate) struct KlibBodyCallableShape<'a> {
     pub(crate) name: &'a str,
     pub(crate) kind: ExternalCallableKind,
     pub(crate) visibility: crate::types::Visibility,

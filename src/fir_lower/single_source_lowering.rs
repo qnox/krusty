@@ -5,7 +5,8 @@
 use crate::fir::{DeclarationId, FirBody};
 use crate::ir::IrFile;
 
-pub fn lower_single_source(source: &str, stem: &str) -> IrFile {
+#[cfg(test)]
+pub(crate) fn lower_single_source(source: &str, stem: &str) -> IrFile {
     lower_single_source_with_platform(source, stem, Box::new(crate::libraries::EmptySymbolSource))
 }
 
@@ -14,7 +15,7 @@ pub fn lower_single_source_with_jvm_stdlib(source: &str, stem: &str) -> IrFile {
 }
 
 /// [`lower_single_source_with_jvm_stdlib`] into `ir`, which carries the backend's lowering choices.
-pub fn lower_with_jvm_stdlib_into(source: &str, stem: &str, ir: IrFile) -> IrFile {
+pub(crate) fn lower_with_jvm_stdlib_into(source: &str, stem: &str, ir: IrFile) -> IrFile {
     let mut classpath = crate::toolchain::classpath_jars_for("// WITH_STDLIB");
     if let Some(jdk) = crate::toolchain::jdk_modules() {
         classpath.push(jdk);

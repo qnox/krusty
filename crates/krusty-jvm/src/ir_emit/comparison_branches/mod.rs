@@ -9,6 +9,14 @@ use krusty::ir::ExprId;
 mod primitive_to_object;
 mod unsigned_equality;
 
+/// A comparison's operator, operands, and the equality mode an `==`/`!=` was checked with.
+#[derive(Clone, Copy)]
+struct ComparisonParts {
+    op: IrBinOp,
+    lhs: ExprId,
+    rhs: ExprId,
+    mode: Option<krusty::ir::EqualityMode>,
+}
 impl Emitter<'_> {
     /// Whether emitting a comparison introduces non-linear JVM control flow in its subtree.
     ///
@@ -118,7 +126,7 @@ impl Emitter<'_> {
     ) {
         let (op, lhs, rhs, mode) = self.comparison_parts(expression);
         self.at_comparison_line(expression, |this| {
-            this.emit_compare_branch(op, lhs, rhs, mode, target, jt, code)
+            this.emit_compare_branch(ComparisonParts { op, lhs, rhs, mode }, target, jt, code)
         });
     }
 
@@ -190,7 +198,8 @@ impl Emitter<'_> {
         // and materializes the resulting 0/1. This is intentionally one semantic path: keeping separate
         // null/reference/numeric case tables here previously let zero-left ordering acquire a different
         // node-shape rule depending on whether the comparison happened to be an `if` condition.
-        if self.emit_non_structural_compare_branch(op, lhs, rhs, mode, f, false, code) {
+        let parts = ComparisonParts { op, lhs, rhs, mode };
+        if self.emit_non_structural_compare_branch(parts, f, false, code) {
             self.materialize_cmp_bool(f, code);
             return;
         }
@@ -277,20 +286,18 @@ impl Emitter<'_> {
     /// operand/3-way/null/ref handling but ends in one fused branch with the right polarity.
     fn emit_compare_branch(
         &mut self,
-        op: IrBinOp,
-        lhs: u32,
-        rhs: u32,
-        mode: Option<krusty::ir::EqualityMode>,
+        parts: ComparisonParts,
         target: Label,
         jt: bool,
         code: &mut CodeBuilder,
     ) {
+        let ComparisonParts { op, lhs, rhs, .. } = parts;
         if matches!(op, IrBinOp::Eq | IrBinOp::Ne)
             && self.emit_unsigned_mixed_equality_branch(op, lhs, rhs, target, jt, code)
         {
             return;
         }
-        if self.emit_non_structural_compare_branch(op, lhs, rhs, mode, target, jt, code) {
+        if self.emit_non_structural_compare_branch(parts, target, jt, code) {
             return;
         }
 
@@ -314,14 +321,12 @@ impl Emitter<'_> {
     /// drift based on whether an identical IR node is consumed as a Boolean value or as control flow.
     fn emit_non_structural_compare_branch(
         &mut self,
-        op: IrBinOp,
-        lhs: u32,
-        rhs: u32,
-        mode: Option<krusty::ir::EqualityMode>,
+        parts: ComparisonParts,
         target: Label,
         jt: bool,
         code: &mut CodeBuilder,
     ) -> bool {
+        let ComparisonParts { op, lhs, rhs, mode } = parts;
         use IrBinOp::*;
         let lt = self.value_ty(lhs);
         // `x == null` / `x != null` / `x === null` / `x !== null` → single-operand `ifnull`/`ifnonnull`

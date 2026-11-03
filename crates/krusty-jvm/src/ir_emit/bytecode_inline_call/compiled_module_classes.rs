@@ -72,16 +72,7 @@ pub(super) fn compile_declared_classes(
         let plans = env.run.lambda_classes.borrow().len();
         let mut extra = Vec::new();
         let meta = class_meta(&fq_name);
-        let bytes = emit_class(
-            ir,
-            class_id,
-            class,
-            facade,
-            env,
-            opts,
-            meta.as_ref(),
-            &mut extra,
-        );
+        let bytes = emit_class(ir, class_id, facade, env, opts, meta.as_ref(), &mut extra);
         // The objects the class's methods regenerated for their own inline calls are read by a
         // call site that regenerates the class in turn, as the callee's own are.
         if foreign {
@@ -130,16 +121,7 @@ pub(in crate::ir_emit) fn write_class(
         None => {
             let meta = class_meta(&class.fq_name());
             let mut extra = Vec::new();
-            let bytes = emit_class(
-                ir,
-                class_id,
-                class,
-                facade,
-                env,
-                opts,
-                meta.as_ref(),
-                &mut extra,
-            );
+            let bytes = emit_class(ir, class_id, facade, env, opts, meta.as_ref(), &mut extra);
             (bytes, extra)
         }
     };

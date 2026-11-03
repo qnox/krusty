@@ -176,18 +176,44 @@ pub(super) fn vc_member_entry_name(
 /// class bound (`UInt`), which is the value class the hash includes. Parameters whose class bound
 /// is not a value class retain the already-selected physical call shape; this boundary must not
 /// remap unrelated generic, function, `Unit`, or reference parameters.
+/// The selected same-module callable a call's JVM name is derived from.
+pub(super) struct ModuleCallSignature<'a> {
+    pub(super) name: &'a str,
+    pub(super) parameters: &'a [Ty],
+    pub(super) type_parameters: &'a [krusty::ir::IrCallableTypeParameter],
+    pub(super) result: &'a Ty,
+    pub(super) suspend: bool,
+}
+
+/// Where a same-module callable is declared, and whether the call reaches its `$default` form.
+#[derive(Clone, Copy)]
+pub(super) struct ModuleCallOwner {
+    /// The callable is a member of a value class.
+    pub(super) value_class_member: bool,
+    /// The callable is a top-level (file) declaration.
+    pub(super) file: bool,
+    pub(super) module_default_call: bool,
+    pub(super) semantic_default: bool,
+}
+
 pub(super) fn module_call_jvm_name(
-    name: &str,
-    parameters: &[Ty],
-    type_parameters: &[krusty::ir::IrCallableTypeParameter],
-    result: &Ty,
-    owner_is_value_class_member: bool,
-    owner_is_file: bool,
-    module_default_call: bool,
-    semantic_default: bool,
+    signature: ModuleCallSignature<'_>,
+    owner: ModuleCallOwner,
     under: &Under,
-    suspend: bool,
 ) -> (String, Vec<(usize, Ty)>) {
+    let ModuleCallSignature {
+        name,
+        parameters,
+        type_parameters,
+        result,
+        suspend,
+    } = signature;
+    let ModuleCallOwner {
+        value_class_member: owner_is_value_class_member,
+        file: owner_is_file,
+        module_default_call,
+        semantic_default,
+    } = owner;
     let base = if module_default_call {
         name.strip_suffix("$default").unwrap_or(name)
     } else {
@@ -323,16 +349,20 @@ mod tests {
         ];
 
         let (_, replacements) = module_call_jvm_name(
-            "accept",
-            &parameters,
-            &type_parameters,
-            &Ty::Unit,
-            false,
-            true,
-            false,
-            false,
+            super::ModuleCallSignature {
+                name: "accept",
+                parameters: &parameters,
+                type_parameters: &type_parameters,
+                result: &Ty::Unit,
+                suspend: false,
+            },
+            super::ModuleCallOwner {
+                value_class_member: false,
+                file: true,
+                module_default_call: false,
+                semantic_default: false,
+            },
             &under,
-            false,
         );
 
         assert_eq!(replacements, vec![(0, Ty::UInt)]);

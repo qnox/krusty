@@ -9,7 +9,7 @@ use super::{ExprId, IrExpr, IrFile, IrTypeOp};
 
 /// Where the `return` a `Unit` body is completed with takes its source line.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum UnitBodyExit {
+pub(crate) enum UnitBodyExit {
     /// A block body falls off its closing `}` on this line (kotlinc's
     /// `setExtraLineNumberForVoidReturningFunction`), marked before the return materializes.
     ClosingBrace(u32),

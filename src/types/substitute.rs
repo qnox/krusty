@@ -170,7 +170,7 @@ pub fn ty_subst(ty: Ty, bindings: &HashMap<String, Ty>) -> Ty {
 /// function parameter/result, the function component consumes the projection and keeps its
 /// underlying semantic type (`typealias F<T> = () -> T; F<*>` returns the star's `Any?` bound).
 /// Projections below a classifier remain written generic arguments and must survive.
-pub fn ty_subst_alias_expansion(ty: Ty, bindings: &HashMap<String, Ty>) -> Ty {
+pub(crate) fn ty_subst_alias_expansion(ty: Ty, bindings: &HashMap<String, Ty>) -> Ty {
     fn normalize(ty: Ty) -> Ty {
         match ty.kind() {
             TyKind::Fun(signature) => Ty::fun_with_shape(
@@ -234,7 +234,7 @@ pub fn ty_subst_alias_expansion(ty: Ty, bindings: &HashMap<String, Ty>) -> Ty {
 /// does. Every other type parameter belongs to a declaration enclosing the call (`T` of the class
 /// whose member is called through `this`); it is in scope at the call site, not a variable of the
 /// call, so it stays as written.
-pub fn ty_subst_formals(ty: Ty, formals: &[String], bindings: &HashMap<String, Ty>) -> Ty {
+pub(crate) fn ty_subst_formals(ty: Ty, formals: &[String], bindings: &HashMap<String, Ty>) -> Ty {
     substitute_type_parameters(
         ty,
         |name| recorded_binding(bindings, name),
@@ -250,7 +250,7 @@ pub fn ty_subst_all(types: &[Ty], bindings: &HashMap<String, Ty>) -> Vec<Ty> {
 /// Replace the inline bounds carried by type-parameter references throughout a type shape. Signature
 /// decoders first discover formal declarations and type uses independently; this single type-model
 /// operation joins them without each decoder growing its own recursive walk.
-pub fn ty_with_param_bounds(ty: Ty, bounds: &HashMap<String, Ty>) -> Ty {
+pub(crate) fn ty_with_param_bounds(ty: Ty, bounds: &HashMap<String, Ty>) -> Ty {
     match ty.kind() {
         TyKind::TyParam(name, current) => Ty::ty_param(
             name.as_str(),
@@ -302,7 +302,7 @@ pub fn ty_with_param_bounds(ty: Ty, bounds: &HashMap<String, Ty>) -> Ty {
 /// hydrating references between formals. A declaration such as `T : U, U : A, B` therefore gives
 /// occurrences of `T` the full transitive proof. Cycles retain their first repeated occurrence and
 /// terminate without inventing a bound.
-pub fn ty_with_transitive_param_bounds(ty: Ty, bounds: &HashMap<String, Ty>) -> Ty {
+pub(crate) fn ty_with_transitive_param_bounds(ty: Ty, bounds: &HashMap<String, Ty>) -> Ty {
     fn hydrate(ty: Ty, bounds: &HashMap<String, Ty>, visiting: &mut Vec<&'static str>) -> Ty {
         match ty.kind() {
             TyKind::TyParam(name, current) => {
@@ -363,7 +363,7 @@ pub fn ty_with_transitive_param_bounds(ty: Ty, bounds: &HashMap<String, Ty>) -> 
 /// Replace declaration-local type-parameter identities throughout a semantic type, including the
 /// inline upper bounds carried by nested `TyParam` nodes. Renaming only the outer occurrence leaves
 /// chains such as `D : B, B : A` partly keyed by source spelling and breaks bound member lookup.
-pub fn ty_rename_params(ty: Ty, identities: &HashMap<&str, &'static str>) -> Ty {
+pub(crate) fn ty_rename_params(ty: Ty, identities: &HashMap<&str, &'static str>) -> Ty {
     match ty.kind() {
         TyKind::TyParam(name, bound) => Ty::ty_param(
             identities
@@ -417,7 +417,7 @@ pub fn ty_rename_params(ty: Ty, identities: &HashMap<&str, &'static str>) -> Ty 
 /// Canonicalize declaration-owned type-parameter identities by their ordinal. This is used for
 /// declaration-shape equality: two independently declared `<T>` parameters have different semantic
 /// identities during inference, but occupy the same slot when comparing callable signatures.
-pub fn ty_canonicalize_params(ty: Ty, formals: &[String]) -> Ty {
+pub(crate) fn ty_canonicalize_params(ty: Ty, formals: &[String]) -> Ty {
     let identities = formals
         .iter()
         .enumerate()
@@ -431,7 +431,7 @@ pub fn ty_canonicalize_params(ty: Ty, formals: &[String]) -> Ty {
     ty_rename_params(ty, &identities)
 }
 
-pub fn ty_subst_keep_unbound(ty: Ty, bindings: &HashMap<String, Ty>) -> Ty {
+pub(crate) fn ty_subst_keep_unbound(ty: Ty, bindings: &HashMap<String, Ty>) -> Ty {
     substitute_type_parameters(
         ty,
         |name| recorded_binding(bindings, name),
@@ -455,7 +455,7 @@ where
 /// declared bound. A template occurrence of a formal that is non-null although the formal's
 /// declaration admits null (`open class B<W> : ColumnType<W & Any>()`) is a written `W & Any`, so
 /// it reads the argument's definitely-non-null form: `B<String?>` is a `ColumnType<String>`.
-pub fn ty_subst_supertype_template<F, D>(ty: Ty, lookup: F, written_non_null: D) -> Ty
+pub(crate) fn ty_subst_supertype_template<F, D>(ty: Ty, lookup: F, written_non_null: D) -> Ty
 where
     F: Fn(&str) -> Option<Ty> + Copy,
     D: Fn(&str) -> bool + Copy,
@@ -474,7 +474,7 @@ where
     )
 }
 
-pub fn ty_subst_applied_arguments(ty: Ty, bindings: &HashMap<String, Ty>) -> Ty {
+pub(crate) fn ty_subst_applied_arguments(ty: Ty, bindings: &HashMap<String, Ty>) -> Ty {
     ty_subst_applied_lookup(ty, |name| recorded_binding(bindings, name))
 }
 

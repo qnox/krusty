@@ -10,6 +10,8 @@ use krusty::ir::{FunId, IrFile};
 use super::UndeterminedDiagnosticType;
 
 type ClashRows = Vec<(Span, String)>;
+/// Local functions clash when they share an owner class, a source name and a lifted signature.
+type LocalFunctionGroupKey<'a> = (Option<usize>, &'a str, String);
 
 pub(super) fn report(
     ir: &IrFile,
@@ -28,7 +30,7 @@ pub(super) fn report(
         .collect::<krusty::fx_hash::HashMap<_, _>>();
     let mut functions = ir.local_function_spans.iter().collect::<Vec<_>>();
     functions.sort_by_key(|(function, span)| (span.lo, **function));
-    let mut groups: Vec<((Option<usize>, &str, String), Vec<(FunId, Span)>)> = Vec::new();
+    let mut groups: Vec<(LocalFunctionGroupKey<'_>, Vec<(FunId, Span)>)> = Vec::new();
     for (&function, &span) in functions {
         let key = (
             owners.get(&function).copied(),

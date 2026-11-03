@@ -63,7 +63,17 @@ impl Emitter<'_> {
             emit_after_frame_close,
             discard_after_frame,
             close_discarded_provider_frame,
-        } = self.emit_open_block(block, stmts, value, terminal_target, entry, true, code);
+        } = self.emit_open_block(
+            OpenBlock {
+                block,
+                stmts,
+                value,
+            },
+            terminal_target,
+            entry,
+            true,
+            code,
+        );
         self.mark_initializer_line(block, true, code);
         let mut anchored = false;
         if !self.ir.callable_scopes.contains(&block) {
@@ -1099,9 +1109,11 @@ impl Emitter<'_> {
     /// pop-backward step removes both.
     pub(super) fn emit_open_block(
         &mut self,
-        block: u32,
-        stmts: Vec<u32>,
-        value: Option<u32>,
+        OpenBlock {
+            block,
+            stmts,
+            value,
+        }: OpenBlock,
         terminal_target: Option<Label>,
         entry: InlineBodyEntry,
         close_statement_lambda: bool,
@@ -1670,6 +1682,13 @@ fn close_slot_scope(
 pub(super) struct SlotScope {
     slots: HashMap<u32, (u16, Ty)>,
     frame: Mark,
+}
+
+/// A block expression to emit without closing its slot scope: its id, statements and value.
+pub(super) struct OpenBlock {
+    pub(super) block: u32,
+    pub(super) stmts: Vec<u32>,
+    pub(super) value: Option<u32>,
 }
 
 /// How a block that may be an external inline expansion enters its inlined body.

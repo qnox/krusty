@@ -112,9 +112,11 @@ impl Emitter<'_> {
                 &self.facade,
                 &planned,
                 reader,
-                class,
-                index,
-                true,
+                super::static_accessors::BackingFieldAccess {
+                    class,
+                    field: index,
+                    write: true,
+                },
             )
         };
         if cross_class_method.is_none()

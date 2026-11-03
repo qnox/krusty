@@ -34,72 +34,6 @@ fn direct_dependency_export<'a>(
 
 use krusty::backend::{DependencyCallShape, DependencyExportCall};
 
-#[cfg(test)]
-fn dependency_export_call(
-    is_top_level_function: bool,
-    is_extension: bool,
-    source_receiver: Option<Ty>,
-    context_count: usize,
-    emitted_params: &[Ty],
-    call_params: &[Ty],
-    extension_receiver_parameter: Option<u32>,
-    has_dispatch_receiver: bool,
-    unread_receiver: Option<Ty>,
-    companion_receiver_position: Option<usize>,
-    member_receiver: Option<Ty>,
-    receiver_is_exact_singleton: bool,
-) -> Result<DependencyExportCall, Unsupported> {
-    DependencyCallShape {
-        is_top_level_function,
-        is_extension,
-        source_receiver,
-        context_count,
-        emitted_params,
-        call_params,
-        extension_receiver_parameter,
-        has_dispatch_receiver,
-        unread_receiver,
-        companion_receiver_position,
-        member_receiver,
-        receiver_is_exact_singleton,
-    }
-    .authenticate()
-    .map_err(Unsupported::from)
-}
-
-/// Unit-test entry for shapes that have no retained ordinary member receiver. Keeping that frozen
-/// ABI fact out of the source-extension slot prevents the two receiver roles from satisfying each
-/// other's validation.
-#[cfg(test)]
-fn dependency_export_call_without_member(
-    is_top_level_function: bool,
-    is_extension: bool,
-    source_receiver: Option<Ty>,
-    context_count: usize,
-    emitted_params: &[Ty],
-    call_params: &[Ty],
-    extension_receiver_parameter: Option<u32>,
-    has_dispatch_receiver: bool,
-    unread_receiver: Option<Ty>,
-    companion_receiver_position: Option<usize>,
-    receiver_is_exact_singleton: bool,
-) -> Result<DependencyExportCall, Unsupported> {
-    dependency_export_call(
-        is_top_level_function,
-        is_extension,
-        source_receiver,
-        context_count,
-        emitted_params,
-        call_params,
-        extension_receiver_parameter,
-        has_dispatch_receiver,
-        unread_receiver,
-        companion_receiver_position,
-        None,
-        receiver_is_exact_singleton,
-    )
-}
-
 impl BodyLowering<'_, '_, '_> {
     /// A top-level function defined in another file of this module: an import of the symbol
     /// `module_function_symbol` and a direct call. The defining file exports that same symbol.
@@ -983,13 +917,14 @@ impl BodyLowering<'_, '_, '_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        dependency_export_call as dependency_export_call_with_member,
-        dependency_export_call_without_member as dependency_export_call, direct_dependency_export,
-        DependencyExportCall,
-    };
+    use super::{direct_dependency_export, DependencyExportCall, Unsupported};
     use crate::codegen::DependencyExport;
+    use krusty::backend::DependencyCallShape;
     use krusty::types::Ty;
+
+    fn authenticated(shape: DependencyCallShape<'_>) -> Result<DependencyExportCall, Unsupported> {
+        shape.authenticate().map_err(Unsupported::from)
+    }
 
     #[test]
     fn an_instantiated_dependency_call_cannot_change_its_parameter_types() {
@@ -998,20 +933,20 @@ mod tests {
             (false, Some(Ty::obj("sample/Owner")), true),
         ] {
             assert_eq!(
-                dependency_export_call_with_member(
-                    top_level,
-                    false,
-                    None,
-                    0,
-                    &[Ty::String],
-                    &[Ty::Int],
-                    None,
-                    dispatch,
-                    None,
-                    None,
-                    member,
-                    false
-                )
+                authenticated(DependencyCallShape {
+                    is_top_level_function: top_level,
+                    is_extension: false,
+                    source_receiver: None,
+                    context_count: 0,
+                    emitted_params: &[Ty::String],
+                    call_params: &[Ty::Int],
+                    extension_receiver_parameter: None,
+                    has_dispatch_receiver: dispatch,
+                    unread_receiver: None,
+                    companion_receiver_position: None,
+                    member_receiver: member,
+                    receiver_is_exact_singleton: false
+                })
                 .expect_err("checked instantiation fixes every operand, not just its carrier")
                 .construct(),
                 "an emitted dependency callable whose checked parameter types changed"
@@ -1072,55 +1007,57 @@ mod tests {
     #[test]
     fn an_authenticated_singleton_member_uses_its_receiver_erased_export() {
         assert_eq!(
-            dependency_export_call(
-                false,
-                false,
-                None,
-                0,
-                &[Ty::Int],
-                &[Ty::Int],
-                None,
-                true,
-                None,
-                None,
-                true,
-            )
+            authenticated(DependencyCallShape {
+                is_top_level_function: false,
+                is_extension: false,
+                source_receiver: None,
+                context_count: 0,
+                emitted_params: &[Ty::Int],
+                call_params: &[Ty::Int],
+                extension_receiver_parameter: None,
+                has_dispatch_receiver: true,
+                unread_receiver: None,
+                companion_receiver_position: None,
+                member_receiver: None,
+                receiver_is_exact_singleton: true
+            })
             .expect("the exact per-call singleton fact authenticates the receiver-erased export"),
             DependencyExportCall::SingletonMember,
         );
         assert_eq!(
-            dependency_export_call(
-                false,
-                false,
-                None,
-                0,
-                &[Ty::Int],
-                &[Ty::Int],
-                None,
-                true,
-                None,
-                None,
-                false,
-            )
+            authenticated(DependencyCallShape {
+                is_top_level_function: false,
+                is_extension: false,
+                source_receiver: None,
+                context_count: 0,
+                emitted_params: &[Ty::Int],
+                call_params: &[Ty::Int],
+                extension_receiver_parameter: None,
+                has_dispatch_receiver: true,
+                unread_receiver: None,
+                companion_receiver_position: None,
+                member_receiver: None,
+                receiver_is_exact_singleton: false
+            })
             .expect_err("a member receiver cannot be erased without the exact per-call fact")
             .construct(),
             "an emitted dependency callable whose checked receiver shape changed",
         );
         assert_eq!(
-            dependency_export_call_with_member(
-                false,
-                false,
-                None,
-                0,
-                &[Ty::Int],
-                &[Ty::Int],
-                None,
-                true,
-                None,
-                None,
-                Some(Ty::obj("demo/Member")),
-                false,
-            )
+            authenticated(DependencyCallShape {
+                is_top_level_function: false,
+                is_extension: false,
+                source_receiver: None,
+                context_count: 0,
+                emitted_params: &[Ty::Int],
+                call_params: &[Ty::Int],
+                extension_receiver_parameter: None,
+                has_dispatch_receiver: true,
+                unread_receiver: None,
+                companion_receiver_position: None,
+                member_receiver: Some(Ty::obj("demo/Member")),
+                receiver_is_exact_singleton: false
+            })
             .expect("an ordinary member requires its independently exported dispatch receiver"),
             DependencyExportCall::Member,
         );
@@ -1131,19 +1068,20 @@ mod tests {
         let emitted = [Ty::String, Ty::Float, Ty::Int];
         let source_call = [Ty::String, Ty::Int];
         assert_eq!(
-            dependency_export_call(
-                false,
-                true,
-                Some(Ty::String),
-                1,
-                &[Ty::Int, Ty::String, Ty::Float],
-                &[Ty::Int, Ty::Float],
-                None,
-                true,
-                Some(Ty::String),
-                None,
-                true,
-            )
+            authenticated(DependencyCallShape {
+                is_top_level_function: false,
+                is_extension: true,
+                source_receiver: Some(Ty::String),
+                context_count: 1,
+                emitted_params: &[Ty::Int, Ty::String, Ty::Float],
+                call_params: &[Ty::Int, Ty::Float],
+                extension_receiver_parameter: None,
+                has_dispatch_receiver: true,
+                unread_receiver: Some(Ty::String),
+                companion_receiver_position: None,
+                member_receiver: None,
+                receiver_is_exact_singleton: true
+            })
             .expect("an exact unread singleton receiver gets an inert ABI slot"),
             DependencyExportCall::SourceSingletonExtension {
                 receiver: Ty::String,
@@ -1151,19 +1089,20 @@ mod tests {
             }
         );
         assert_eq!(
-            dependency_export_call(
-                false,
-                true,
-                Some(Ty::String),
-                1,
-                &[Ty::Int, Ty::String, Ty::Float],
-                &[Ty::Int, Ty::Float],
-                None,
-                true,
-                Some(Ty::Float),
-                None,
-                true,
-            )
+            authenticated(DependencyCallShape {
+                is_top_level_function: false,
+                is_extension: true,
+                source_receiver: Some(Ty::String),
+                context_count: 1,
+                emitted_params: &[Ty::Int, Ty::String, Ty::Float],
+                call_params: &[Ty::Int, Ty::Float],
+                extension_receiver_parameter: None,
+                has_dispatch_receiver: true,
+                unread_receiver: Some(Ty::Float),
+                companion_receiver_position: None,
+                member_receiver: None,
+                receiver_is_exact_singleton: true
+            })
             .expect("a mismatched body effect retains ordinary receiver evaluation"),
             DependencyExportCall::SourceExtension {
                 receiver: Ty::String,
@@ -1171,19 +1110,20 @@ mod tests {
             }
         );
         assert_eq!(
-            dependency_export_call(
-                false,
-                true,
-                Some(Ty::String),
-                1,
-                &[Ty::Int, Ty::String, Ty::Float],
-                &[Ty::Int, Ty::Float],
-                None,
-                true,
-                Some(Ty::String),
-                None,
-                false,
-            )
+            authenticated(DependencyCallShape {
+                is_top_level_function: false,
+                is_extension: true,
+                source_receiver: Some(Ty::String),
+                context_count: 1,
+                emitted_params: &[Ty::Int, Ty::String, Ty::Float],
+                call_params: &[Ty::Int, Ty::Float],
+                extension_receiver_parameter: None,
+                has_dispatch_receiver: true,
+                unread_receiver: Some(Ty::String),
+                companion_receiver_position: None,
+                member_receiver: None,
+                receiver_is_exact_singleton: false
+            })
             .expect("a non-singleton expression retains ordinary receiver evaluation"),
             DependencyExportCall::SourceExtension {
                 receiver: Ty::String,
@@ -1191,19 +1131,20 @@ mod tests {
             }
         );
         assert_eq!(
-            dependency_export_call(
-                false,
-                true,
-                Some(Ty::Float),
-                1,
-                &emitted,
-                &source_call,
-                None,
-                true,
-                None,
-                None,
-                false,
-            )
+            authenticated(DependencyCallShape {
+                is_top_level_function: false,
+                is_extension: true,
+                source_receiver: Some(Ty::Float),
+                context_count: 1,
+                emitted_params: &emitted,
+                call_params: &source_call,
+                extension_receiver_parameter: None,
+                has_dispatch_receiver: true,
+                unread_receiver: None,
+                companion_receiver_position: None,
+                member_receiver: None,
+                receiver_is_exact_singleton: false
+            })
             .expect("source receiver is inserted after its context"),
             DependencyExportCall::SourceExtension {
                 receiver: Ty::Float,
@@ -1211,36 +1152,38 @@ mod tests {
             }
         );
         assert_eq!(
-            dependency_export_call(
-                false,
-                true,
-                Some(Ty::Float),
-                1,
-                &emitted,
-                &emitted,
-                Some(1),
-                false,
-                None,
-                None,
-                false,
-            )
+            authenticated(DependencyCallShape {
+                is_top_level_function: false,
+                is_extension: true,
+                source_receiver: Some(Ty::Float),
+                context_count: 1,
+                emitted_params: &emitted,
+                call_params: &emitted,
+                extension_receiver_parameter: Some(1),
+                has_dispatch_receiver: false,
+                unread_receiver: None,
+                companion_receiver_position: None,
+                member_receiver: None,
+                receiver_is_exact_singleton: false
+            })
             .expect("serialized body already carries the receiver"),
             DependencyExportCall::SerializedExtension,
         );
         assert_eq!(
-            dependency_export_call(
-                false,
-                true,
-                Some(Ty::Float),
-                1,
-                &emitted,
-                &source_call,
-                None,
-                false,
-                None,
-                None,
-                false,
-            )
+            authenticated(DependencyCallShape {
+                is_top_level_function: false,
+                is_extension: true,
+                source_receiver: Some(Ty::Float),
+                context_count: 1,
+                emitted_params: &emitted,
+                call_params: &source_call,
+                extension_receiver_parameter: None,
+                has_dispatch_receiver: false,
+                unread_receiver: None,
+                companion_receiver_position: None,
+                member_receiver: None,
+                receiver_is_exact_singleton: false
+            })
             .expect_err("an extension cannot silently become top-level")
             .construct(),
             "an emitted dependency callable whose checked receiver shape changed",
@@ -1252,20 +1195,20 @@ mod tests {
         let params = [Ty::String, Ty::Int];
 
         assert_eq!(
-            dependency_export_call_with_member(
-                false,
-                false,
-                Some(Ty::String),
-                0,
-                &params,
-                &params,
-                Some(0),
-                true,
-                None,
-                None,
-                Some(Ty::obj("kotlin/Any")),
-                false,
-            )
+            authenticated(DependencyCallShape {
+                is_top_level_function: false,
+                is_extension: false,
+                source_receiver: Some(Ty::String),
+                context_count: 0,
+                emitted_params: &params,
+                call_params: &params,
+                extension_receiver_parameter: Some(0),
+                has_dispatch_receiver: true,
+                unread_receiver: None,
+                companion_receiver_position: None,
+                member_receiver: Some(Ty::obj("kotlin/Any")),
+                receiver_is_exact_singleton: false
+            })
             .expect("the class dispatch receiver and extension receiver stay independent"),
             DependencyExportCall::MemberExtension,
         );
@@ -1275,19 +1218,20 @@ mod tests {
     fn a_classifier_associated_export_requires_both_body_and_target_authority() {
         let source_call = [Ty::Int];
         assert_eq!(
-            dependency_export_call(
-                true,
-                false,
-                None,
-                0,
-                &source_call,
-                &source_call,
-                None,
-                false,
-                Some(Ty::String),
-                Some(0),
-                false,
-            )
+            authenticated(DependencyCallShape {
+                is_top_level_function: true,
+                is_extension: false,
+                source_receiver: None,
+                context_count: 0,
+                emitted_params: &source_call,
+                call_params: &source_call,
+                extension_receiver_parameter: None,
+                has_dispatch_receiver: false,
+                unread_receiver: Some(Ty::String),
+                companion_receiver_position: Some(0),
+                member_receiver: None,
+                receiver_is_exact_singleton: false
+            })
             .expect("the two frozen contracts authorize the retained ABI slot"),
             DependencyExportCall::ClassifierAssociated {
                 receiver: Ty::String,
@@ -1295,37 +1239,39 @@ mod tests {
             }
         );
         assert_eq!(
-            dependency_export_call(
-                true,
-                false,
-                None,
-                0,
-                &source_call,
-                &source_call,
-                None,
-                false,
-                Some(Ty::String),
-                None,
-                false,
-            )
+            authenticated(DependencyCallShape {
+                is_top_level_function: true,
+                is_extension: false,
+                source_receiver: None,
+                context_count: 0,
+                emitted_params: &source_call,
+                call_params: &source_call,
+                extension_receiver_parameter: None,
+                has_dispatch_receiver: false,
+                unread_receiver: Some(Ty::String),
+                companion_receiver_position: None,
+                member_receiver: None,
+                receiver_is_exact_singleton: false
+            })
             .expect_err("an export effect alone cannot change the selected ABI")
             .construct(),
             "a classifier-associated dependency receiver without matching body authority",
         );
         assert_eq!(
-            dependency_export_call(
-                true,
-                false,
-                None,
-                0,
-                &source_call,
-                &source_call,
-                None,
-                false,
-                None,
-                Some(0),
-                false,
-            )
+            authenticated(DependencyCallShape {
+                is_top_level_function: true,
+                is_extension: false,
+                source_receiver: None,
+                context_count: 0,
+                emitted_params: &source_call,
+                call_params: &source_call,
+                extension_receiver_parameter: None,
+                has_dispatch_receiver: false,
+                unread_receiver: None,
+                companion_receiver_position: Some(0),
+                member_receiver: None,
+                receiver_is_exact_singleton: false
+            })
             .expect_err("a body contract alone cannot invent a target ABI effect")
             .construct(),
             "a classifier-associated dependency receiver without matching body authority",
@@ -1337,56 +1283,59 @@ mod tests {
         let source_declaration = [Ty::Int];
         let serialized_call = [Ty::String, Ty::Int];
         assert_eq!(
-            dependency_export_call(
-                true,
-                false,
-                None,
-                0,
-                &source_declaration,
-                &serialized_call,
-                Some(0),
-                false,
-                Some(Ty::String),
-                Some(0),
-                false,
-            )
+            authenticated(DependencyCallShape {
+                is_top_level_function: true,
+                is_extension: false,
+                source_receiver: None,
+                context_count: 0,
+                emitted_params: &source_declaration,
+                call_params: &serialized_call,
+                extension_receiver_parameter: Some(0),
+                has_dispatch_receiver: false,
+                unread_receiver: Some(Ty::String),
+                companion_receiver_position: Some(0),
+                member_receiver: None,
+                receiver_is_exact_singleton: false
+            })
             .expect("the serialized call already supplies the authenticated ABI receiver"),
             DependencyExportCall::SerializedClassifierAssociated {
                 receiver: Ty::String,
             }
         );
         assert_eq!(
-            dependency_export_call(
-                true,
-                false,
-                None,
-                0,
-                &source_declaration,
-                &[Ty::Float, Ty::Int],
-                Some(0),
-                false,
-                Some(Ty::String),
-                Some(0),
-                false,
-            )
+            authenticated(DependencyCallShape {
+                is_top_level_function: true,
+                is_extension: false,
+                source_receiver: None,
+                context_count: 0,
+                emitted_params: &source_declaration,
+                call_params: &[Ty::Float, Ty::Int],
+                extension_receiver_parameter: Some(0),
+                has_dispatch_receiver: false,
+                unread_receiver: Some(Ty::String),
+                companion_receiver_position: Some(0),
+                member_receiver: None,
+                receiver_is_exact_singleton: false
+            })
             .expect_err("a serialized receiver type cannot disagree with its emitted effect")
             .construct(),
             "a classifier-associated dependency receiver whose declaration disagrees",
         );
         assert_eq!(
-            dependency_export_call(
-                true,
-                false,
-                None,
-                0,
-                &source_declaration,
-                &serialized_call,
-                Some(1),
-                false,
-                Some(Ty::String),
-                Some(0),
-                false,
-            )
+            authenticated(DependencyCallShape {
+                is_top_level_function: true,
+                is_extension: false,
+                source_receiver: None,
+                context_count: 0,
+                emitted_params: &source_declaration,
+                call_params: &serialized_call,
+                extension_receiver_parameter: Some(1),
+                has_dispatch_receiver: false,
+                unread_receiver: Some(Ty::String),
+                companion_receiver_position: Some(0),
+                member_receiver: None,
+                receiver_is_exact_singleton: false
+            })
             .expect_err("the serialized receiver coordinate is exact")
             .construct(),
             "a classifier-associated dependency receiver whose declaration disagrees",

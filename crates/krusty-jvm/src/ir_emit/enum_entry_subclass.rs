@@ -58,9 +58,11 @@ pub(super) fn emit_enum_entry_subclass(
             ir,
             &mut cw,
             env,
-            Some(StaticOwner::Class(c.fq_name)),
-            &fq_name,
-            facade,
+            EmitterOwner {
+                static_owner: Some(StaticOwner::Class(c.fq_name)),
+                owner: &fq_name,
+                facade,
+            },
             Ty::Unit,
             c.super_arg_prelude
                 .iter()
@@ -180,11 +182,13 @@ pub(super) fn emit_enum_entry_subclass(
         emit_method(
             ir,
             fid,
-            StaticOwner::Class(c.fq_name),
+            MethodSlot {
+                static_owner: StaticOwner::Class(c.fq_name),
+                instance: !function.is_static,
+            },
             &fq_name,
             facade,
             &mut cw,
-            !function.is_static,
             env,
         );
         if ir.function_reference_access_bridges.contains(&fid) {

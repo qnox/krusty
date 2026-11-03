@@ -251,11 +251,13 @@ fn compile_callee(
     emit_method_inner(
         ir,
         function,
-        StaticOwner::of(declaring_class),
+        MethodSlot {
+            static_owner: StaticOwner::of(declaring_class),
+            instance,
+        },
         &owner,
         facade,
         &mut cw,
-        instance,
         env,
     );
     function_debug::attach_declared_function_debug(

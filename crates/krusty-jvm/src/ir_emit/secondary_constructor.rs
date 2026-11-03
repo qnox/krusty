@@ -188,9 +188,11 @@ impl SecondaryConstructorEmitter<'_, '_, '_> {
                 ir,
                 cw,
                 env,
-                Some(StaticOwner::Class(c.fq_name)),
-                fq_name,
-                facade,
+                super::EmitterOwner {
+                    static_owner: Some(StaticOwner::Class(c.fq_name)),
+                    owner: fq_name,
+                    facade,
+                },
                 Ty::Unit,
                 sc.delegate_prelude
                     .iter()

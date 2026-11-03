@@ -139,12 +139,14 @@ pub(super) fn route(
     build_continuation_class(
         ir,
         &continuation_class,
-        fid,
         &SpillLayout::default(),
         route.outputs.suspended_result_returns,
-        receiver,
-        static_owner,
-        &declared_params,
+        super::continuation_class::ContinuationOwner {
+            function: fid,
+            receiver,
+            static_owner,
+            params: &declared_params,
+        },
     );
     // The continuation belongs to the method that carries the machine, `$completion` included: an
     // overridable member's is the `$suspendImpl` its body moves to, which takes the receiver first.

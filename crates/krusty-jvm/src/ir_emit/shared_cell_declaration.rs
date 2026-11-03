@@ -164,13 +164,10 @@ impl Emitter<'_> {
         ty: Ty,
         code: &CodeBuilder,
     ) -> Option<u64> {
-        let Some(name) = self
+        let name = self
             .record_locals
             .then(|| super::super::debug_local_names::declared_name(self.ir, declaration))
-            .flatten()
-        else {
-            return None;
-        };
+            .flatten()?;
         if code.bytes.len() > u16::MAX as usize {
             return None;
         }

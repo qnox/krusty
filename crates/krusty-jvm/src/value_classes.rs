@@ -139,17 +139,23 @@ type FieldGetters = HashMap<(u32, u32), Ty>;
 /// value-class type to its single field's type, rewrite construction/sole-property access, and insert
 /// box/unbox at the representation boundaries this pass models. The `bool` result is reserved for a
 /// future structural bail; today it always returns `true`.
+/// This module's value classes, as the frontend froze them before Pass 2.
+#[derive(Clone, Copy)]
+pub(crate) struct ModuleValueClasses<'a> {
+    /// Same-module SOURCE value classes (internal name → sole-field underlying), collected from
+    /// the frontend symbols. A value class declared in ANOTHER file of this module is not in
+    /// `ir.classes`; the normalized classifier provider supplies its declaration facts without
+    /// leaking provider origin into representation decisions.
+    pub(crate) underlying: &'a krusty::fx_hash::HashMap<TypeName, Ty>,
+    /// Subset whose stable declaration headers describe a value-class shape supported by metadata
+    /// emission. No sibling body or source coordinate is retained.
+    pub(crate) readable: &'a krusty::fx_hash::HashSet<TypeName>,
+}
+
 pub(crate) fn lower_value_classes(
     ir: &mut IrFile,
     classifiers: &krusty::backend::CheckedBackendClassifiers<'_>,
-    // Same-module SOURCE value classes (internal name → sole-field underlying), collected from the
-    // frontend symbols. A value class declared in ANOTHER file of this module is not in `ir.classes`;
-    // the normalized classifier provider supplies its declaration facts without leaking provider
-    // origin into representation decisions.
-    module_value_classes: &krusty::fx_hash::HashMap<TypeName, Ty>,
-    // Subset whose stable declaration headers describe a value-class shape supported by metadata
-    // emission. This is frozen before Pass 2; no sibling body or source coordinate is retained.
-    module_readable_value_classes: &krusty::fx_hash::HashSet<TypeName>,
+    module: ModuleValueClasses<'_>,
     // The static each of this file's value classes realizes an inherited interface default with.
     inherited_default_statics: &InheritedDefaultStatics,
     bridge_adaptations: &mut crate::bridge_adaptations::BridgeAdaptations,
@@ -159,6 +165,10 @@ pub(crate) fn lower_value_classes(
     // is decided from these recorded facts rather than from the reference's spelling.
     property_reference_realizations: &mut crate::property_references::PropertyReferenceRealizations,
 ) -> bool {
+    let ModuleValueClasses {
+        underlying: module_value_classes,
+        readable: module_readable_value_classes,
+    } = module;
     krusty::trace_compiler!(
         "value_classes",
         "lower start classes={} functions={} expressions={}",
@@ -1168,18 +1178,22 @@ pub(crate) fn lower_value_classes(
                 module_target.and_then(|target| ir.referenced_module_callables.get(&target))
             {
                 let (mangled, value_class_bounds) = member_names::module_call_jvm_name(
-                    name,
-                    &callable.parameters,
-                    &callable.type_parameters,
-                    &callable.result,
-                    callable
-                        .owner
-                        .is_some_and(|owner| module_value_classes.contains_key(&owner)),
-                    callable.owner.is_none(),
-                    module_default_call,
-                    semantic_default,
+                    member_names::ModuleCallSignature {
+                        name,
+                        parameters: &callable.parameters,
+                        type_parameters: &callable.type_parameters,
+                        result: &callable.result,
+                        suspend: callable.flags.has(krusty::fir::DeclarationFlags::SUSPEND),
+                    },
+                    member_names::ModuleCallOwner {
+                        value_class_member: callable
+                            .owner
+                            .is_some_and(|owner| module_value_classes.contains_key(&owner)),
+                        file: callable.owner.is_none(),
+                        module_default_call,
+                        semantic_default,
+                    },
                     &callable_under,
-                    callable.flags.has(krusty::fir::DeclarationFlags::SUSPEND),
                 );
                 *name = mangled;
                 for (parameter, bound) in value_class_bounds {
