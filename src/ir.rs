@@ -59,6 +59,7 @@ pub(crate) use enum_switch_whens::EnumSwitchWhen;
 mod emitted_body_roots;
 mod enums;
 mod expect_actualization;
+mod expression_copy;
 mod expression_provenance;
 pub(crate) use emitted_body_roots::{
     emitted_body_roots, emitted_declaration_roots, EmittedDeclaration,
@@ -1962,10 +1963,11 @@ pub struct IrFile {
     /// for evaluation order. This is provenance, not a storage decision; a backend decides how
     /// that role participates in its own frame or register allocation.
     pub call_operand_bindings: crate::fx_hash::HashSet<ExprId>,
-    /// Call-operand declarations introduced to preserve checked argument evaluation order, rather
-    /// than to bind an expanded callable's parameters or captures. A reused declaration leaves this
-    /// subset when an inline expansion adopts it as its own formal binding. This records purpose;
-    /// each backend still owns storage and lifetime decisions.
+    /// Call-operand declarations a call reordered by its named arguments introduces to evaluate
+    /// them in source order (kotlinc's temporaries), rather than holders that stage an operand or
+    /// bind an expanded callable's parameters or captures. A reused declaration leaves this subset
+    /// when an inline expansion adopts it as its own formal binding. This records purpose; each
+    /// backend still owns storage and lifetime decisions.
     pub(crate) argument_evaluation_bindings: crate::fx_hash::HashSet<ExprId>,
     /// The call-operand holders of one inline lambda invocation, consecutive in its block: the
     /// invocation evaluates every operand before it binds any. A backend chooses the binding order.
