@@ -100,6 +100,12 @@ impl FunctionHeader {
                             _ => IrCapturedDeclaration::Parameter,
                         },
                         capturer,
+                        crossinline_parameter: match original.role {
+                            IrParameterRole::CapturedValue { capture, .. } => {
+                                capture.crossinline_parameter
+                            }
+                            _ => None,
+                        },
                     },
                 )
             }

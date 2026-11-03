@@ -478,9 +478,9 @@ impl SerializeBody<'_> {
                         // pushes nothing, and kotlinc marks no line for it.
                         if !matches!(dc, IrConst::Null) {
                             let line = super::property_default::checked_default(ir, foo_id, field)
-                                .and_then(|source| ir.expr_source_lines.get(&source).copied());
+                                .and_then(|source| ir.source_line(source));
                             if let Some(line) = line {
-                                ir.expr_source_lines.insert(def, line);
+                                ir.set_source_line(def, line);
                             }
                         }
                         def
