@@ -4299,7 +4299,7 @@ fn emit_placed_method(
         });
         let slot = e.arm_transformed_machine(machine, completion);
         if marked {
-            let inlined = crate::jvm::suspend_inline_functions::inlined_invokes(ir, fid, machine);
+            let inlined = placement.inlined_invokes(ir, fid, env, machine);
             e.leave_inlined_invokes_unmarked(inlined);
         }
         (machine, slot)

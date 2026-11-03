@@ -90,8 +90,7 @@ fn non_local_jumps_through_finally_are_byte_identical() {
 /// One literal that both returns from an enclosing inline expansion (`return@outer`) and breaks or
 /// continues the caller's loop: each way out runs the inlined function's `finally`. Compared with
 /// kotlinc's run only: kotlinc parks the returned value below `withLock`'s catch local here, a slot
-/// order krusty does not reproduce inside a same-module inline lambda yet (see
-/// `docs/IMPLEMENTATION_PLAN.md`, 3d).
+/// order krusty does not reproduce inside a same-module inline lambda yet.
 const MIXED: &str = "import java.util.concurrent.locks.ReentrantLock\n\
 import kotlin.concurrent.withLock\n\
 val log = StringBuilder()\n\
