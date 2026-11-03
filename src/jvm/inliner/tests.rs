@@ -757,6 +757,7 @@ fn a_lambda_passed_to_another_call_is_not_inlined() {
             classes: &NoClasses,
             objects: &mut NoObjects,
             enum_entries: &mut crate::jvm::reified_arguments::NoEnumEntriesReads,
+            scopes: None,
         },
     );
     assert_eq!(inlined.err(), Some(InlineError::LambdaParameterAccess));

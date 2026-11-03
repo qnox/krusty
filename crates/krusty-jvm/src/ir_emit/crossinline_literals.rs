@@ -11,17 +11,11 @@ use crate::ir::{ExprId, IrExpr, IrFile};
 use crate::types::InlineParameterModifier;
 
 /// The inline body of each literal an inline call passes to a `crossinline` parameter, whichever
-/// module declares the callee: every realized inline call publishes its operands' modifiers.
+/// module declares the callee: every realized inline call publishes its operands' modifiers, as
+/// the JVM inliner treats them ([`crate::jvm::suspend_coroutine_blocks`]).
 pub(super) fn crossinline_literal_bodies(ir: &IrFile) -> HashSet<ExprId> {
     let mut bodies = HashSet::default();
     for (&call, modifiers) in &ir.call_inline_modifiers {
-        // `suspendCoroutine`'s block is `crossinline` only to forbid non-local returns; kotlinc
-        // inlines it in place (`isCoroutineIntrinsic`).
-        if ir.ordinary_intrinsic_calls.get(&call)
-            == Some(&crate::libraries::CompilerIntrinsic::SuspendCoroutine)
-        {
-            continue;
-        }
         let arguments: Vec<Option<ExprId>> = match ir.expr(call) {
             IrExpr::Call { args, .. } => args.iter().copied().map(Some).collect(),
             IrExpr::MethodCall { args, .. } => args.clone(),

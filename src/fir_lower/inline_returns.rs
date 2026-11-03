@@ -144,7 +144,6 @@ pub(super) fn prepare_inline_template(
     }
 
     let label = format!("$fir_inline_return_{root}");
-    ir.inline_return_frame_bodies.insert(root);
     let result_slot = (value_needed && result != Ty::Unit).then(|| {
         let slot = *next_temporary;
         *next_temporary = (*next_temporary)
@@ -198,6 +197,7 @@ pub(super) fn prepare_inline_template(
         update: None,
         post_test: false,
         label: Some(label.clone()),
+        inline_return_frame: true,
     });
     // A value frame is recorded on its result declaration above. A `Unit` frame has no
     // declaration; record it on the loop so a backend can tell this exit from a source `while`.

@@ -1004,6 +1004,7 @@ impl<'a> Body<'a> {
                 update,
                 post_test,
                 label,
+                inline_return_frame: _,
             } => self.while_(cond, body, update, post_test, label)?,
             IrExpr::Break { label } => {
                 let target = self.find_loop(label.as_deref())?.exit;

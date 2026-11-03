@@ -416,6 +416,10 @@ pub enum IrExpr {
         update: Option<ExprId>,
         post_test: bool,
         label: Option<String>,
+        /// The loop is an inline-return frame: lowering built it around a template whose own
+        /// returns became the loop's exits, and its body evaluates that template first
+        /// ([`IrFile::inline_return_frame_body`]).
+        inline_return_frame: bool,
     },
     /// `break` — exit the innermost enclosing loop, or the loop carrying `label` (`break@outer`).
     Break {
@@ -1745,9 +1749,6 @@ pub struct IrFile {
     /// index; one in a lambda body nested in it writes [`IrExpr::SetFrameResult`], which every
     /// renumbering of either body leaves pointing at the same frame.
     pub inline_return_frames: crate::fx_hash::HashMap<ExprId, String>,
-    /// The bodies an inline-return frame wraps: each template body whose own returns became the
-    /// frame's exits. See [`IrFile::inline_return_frame_body`].
-    pub inline_return_frame_bodies: crate::fx_hash::HashSet<ExprId>,
     /// `try` expressions whose result is the value of a spliced inline lambda protected by the
     /// inline call's cleanup. This is semantic inline-frame provenance: a backend chooses how the
     /// result crosses `finally`; common IR does not prescribe a local slot, reload, or branch.
