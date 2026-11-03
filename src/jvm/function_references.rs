@@ -963,6 +963,7 @@ mod tests {
                 crate::ir::IrValueCapture {
                     declaration: crate::ir::IrCapturedDeclaration::Parameter,
                     capturer: crate::ir::IrCapturingCallable::LocalFunction,
+                    crossinline_parameter: None,
                 },
             )];
             identities.extend(
