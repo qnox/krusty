@@ -445,10 +445,6 @@ mod classpath_overload_trailing_lambda_e2e;
 mod classpath_properties_query_e2e;
 #[path = "classpath_property_mutable_collection_e2e.rs"]
 mod classpath_property_mutable_collection_e2e;
-#[path = "classpath_protected_member_e2e.rs"]
-mod classpath_protected_member_e2e;
-#[path = "classpath_protected_nested_access_e2e.rs"]
-mod classpath_protected_nested_access_e2e;
 #[path = "classpath_provide_delegate_e2e.rs"]
 mod classpath_provide_delegate_e2e;
 #[path = "classpath_qualified_nested_named_ctor_e2e.rs"]
@@ -1141,8 +1137,6 @@ mod generic_vararg_inference_e2e;
 mod getter_return_line_e2e;
 #[path = "hidden_mapped_member_e2e.rs"]
 mod hidden_mapped_member_e2e;
-#[path = "hidden_member_extension_e2e.rs"]
-mod hidden_member_extension_e2e;
 #[path = "hides_members_overload_e2e.rs"]
 mod hides_members_overload_e2e;
 #[path = "iconsapi_byte_residue_e2e.rs"]
@@ -1271,14 +1265,10 @@ mod interface_object_method_e2e;
 mod interface_static_member_refs_e2e;
 #[path = "interface_supertype_members_e2e.rs"]
 mod interface_supertype_members_e2e;
-#[path = "internal_classpath_access_e2e.rs"]
-mod internal_classpath_access_e2e;
 #[path = "internal_component_names_e2e.rs"]
 mod internal_component_names_e2e;
 #[path = "internal_member_names_e2e.rs"]
 mod internal_member_names_e2e;
-#[path = "internal_operator_member_e2e.rs"]
-mod internal_operator_member_e2e;
 #[path = "internal_primary_constructor_metadata_e2e.rs"]
 mod internal_primary_constructor_metadata_e2e;
 #[path = "intersection_reified_type_of_e2e.rs"]
@@ -1548,6 +1538,8 @@ mod map_get_nullable_elvis_e2e;
 mod mapped_collection_scope_e2e;
 #[path = "mapped_string_scope_e2e.rs"]
 mod mapped_string_scope_e2e;
+#[path = "e2e/member_access.rs"]
+mod member_access;
 #[path = "member_array_ctor_inference_e2e.rs"]
 mod member_array_ctor_inference_e2e;
 #[path = "member_ctrl_inference_e2e.rs"]
@@ -2353,10 +2345,6 @@ mod primitive_spread_e2e;
 mod primitive_to_string_e2e;
 #[path = "primitive_type_check_condition_e2e.rs"]
 mod primitive_type_check_condition_e2e;
-#[path = "private_classifier_access_e2e.rs"]
-mod private_classifier_access_e2e;
-#[path = "private_constructor_access_e2e.rs"]
-mod private_constructor_access_e2e;
 mod private_inline_access_e2e;
 mod private_inline_property_access_e2e;
 mod private_property_inline_access_e2e;
@@ -2965,8 +2953,6 @@ mod reified_value_class_splice_e2e;
 mod declared_try_line_e2e;
 #[path = "default_impls_forward_lines_e2e.rs"]
 mod default_impls_forward_lines_e2e;
-#[path = "file_private_extension_scope_e2e.rs"]
-mod file_private_extension_scope_e2e;
 #[path = "finally_gap_ranges_e2e.rs"]
 mod finally_gap_ranges_e2e;
 #[path = "frame_computation_e2e.rs"]
