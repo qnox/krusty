@@ -537,7 +537,7 @@ fn retire_store(
         InPlaceDelegate::Singleton => {
             ir.record_jvm_delegate_evaluation(store);
             if line != 0 {
-                ir.expr_source_lines.insert(store, line);
+                ir.set_source_line(store, line);
             }
         }
         InPlaceDelegate::Constant => {
@@ -558,7 +558,7 @@ fn accessor_line(ir: &IrFile, getter: u32) -> u32 {
     match ir.expr(body) {
         IrExpr::Block { stmts, .. } => stmts
             .iter()
-            .find_map(|statement| ir.expr_source_lines.get(statement).copied())
+            .find_map(|&statement| ir.source_line(statement))
             .unwrap_or(0),
         _ => 0,
     }
@@ -593,8 +593,8 @@ fn add_delegate_method(ir: &mut IrFile, method: DelegateMethod) -> u32 {
     let returned = ir.add_expr(IrExpr::Return(Some(value)));
     if method.line != 0 {
         // The line opens the method: it is stated on the delegate, not on the `areturn`.
-        ir.expr_source_lines.insert(value, method.line);
-        ir.expr_source_lines.insert(returned, method.line);
+        ir.set_source_line(value, method.line);
+        ir.set_source_line(returned, method.line);
     }
     let body = ir.add_expr(IrExpr::Block {
         stmts: vec![returned],
