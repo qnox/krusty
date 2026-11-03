@@ -259,8 +259,6 @@ mod build840_jj1_param_soft_keyword_e2e;
 mod build840_kk1_inline_hof_enclosing_member_e2e;
 #[path = "build840_mm1_safe_call_lambda_ext_e2e.rs"]
 mod build840_mm1_safe_call_lambda_ext_e2e;
-#[path = "build840_nn1_suspend_inline_withlock_e2e.rs"]
-mod build840_nn1_suspend_inline_withlock_e2e;
 #[path = "builder_inference_receivers_e2e.rs"]
 mod builder_inference_receivers_e2e;
 #[path = "builder_nested_lambda_result_e2e.rs"]
@@ -666,8 +664,6 @@ mod cross_file_typealias_e2e;
 mod cross_file_value_param_constructor_e2e;
 #[path = "crossinline_lambda_inlining_e2e.rs"]
 mod crossinline_lambda_inlining_e2e;
-#[path = "crossinline_suspend_object_e2e.rs"]
-mod crossinline_suspend_object_e2e;
 #[path = "ctor_lambda_return_binds_type_param_e2e.rs"]
 mod ctor_lambda_return_binds_type_param_e2e;
 #[path = "ctor_numeric_widening_e2e.rs"]
@@ -1103,8 +1099,6 @@ mod generic_constructor_parameter_scope_e2e;
 mod generic_ctor_lambda_targs_e2e;
 #[path = "generic_ctor_template_prepass_e2e.rs"]
 mod generic_ctor_template_prepass_e2e;
-#[path = "generic_default_forwarder_signature_e2e.rs"]
-mod generic_default_forwarder_signature_e2e;
 #[path = "generic_delegate_e2e.rs"]
 mod generic_delegate_e2e;
 #[path = "generic_fn_e2e.rs"]
@@ -1197,6 +1191,8 @@ mod inferred_property_type_args_e2e;
 mod inheritance_e2e;
 #[path = "inherited_collection_bridge_e2e.rs"]
 mod inherited_collection_bridge_e2e;
+#[path = "e2e/inherited_defaults.rs"]
+mod inherited_defaults;
 #[path = "inherited_interface_default_e2e.rs"]
 mod inherited_interface_default_e2e;
 #[path = "inherited_member_owner_e2e.rs"]
@@ -1213,6 +1209,8 @@ mod initializer_inline_local_scopes_e2e;
 mod inline;
 #[path = "inline_member_super_arguments_e2e.rs"]
 mod inline_member_super_arguments_e2e;
+#[path = "inline_operand_holder_slots_e2e.rs"]
+mod inline_operand_holder_slots_e2e;
 #[path = "inline_scopes_numbers_flag_e2e.rs"]
 mod inline_scopes_numbers_flag_e2e;
 #[path = "inlined_code_inner_classes_e2e.rs"]
@@ -1716,6 +1714,8 @@ mod string_when_switch_e2e;
 mod super_delegation_line_e2e;
 #[path = "e2e/suspend.rs"]
 mod suspend;
+#[path = "e2e/suspend_inlining.rs"]
+mod suspend_inlining;
 #[path = "suspending_concat_operands_e2e.rs"]
 mod suspending_concat_operands_e2e;
 #[path = "type_parameter_nullability_annotations_e2e.rs"]
@@ -1766,14 +1766,8 @@ mod value_class_generic_carrier_e2e;
 mod value_class_generic_slot_read_e2e;
 #[path = "value_class_hidden_constructor_e2e.rs"]
 mod value_class_hidden_constructor_e2e;
-#[path = "value_class_inherited_default_call_e2e.rs"]
-mod value_class_inherited_default_call_e2e;
-#[path = "value_class_inherited_default_names_e2e.rs"]
-mod value_class_inherited_default_names_e2e;
 #[path = "value_class_interface_default_receiver_e2e.rs"]
 mod value_class_interface_default_receiver_e2e;
-#[path = "value_class_interface_defaults_e2e.rs"]
-mod value_class_interface_defaults_e2e;
 #[path = "value_class_interface_entry_e2e.rs"]
 mod value_class_interface_entry_e2e;
 #[path = "value_class_java_generic_constructor_e2e.rs"]
