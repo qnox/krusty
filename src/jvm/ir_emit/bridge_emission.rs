@@ -323,7 +323,12 @@ fn emit_bridge(
             {
                 formatter.method_positions(&b.erased_params, &b.concrete_ret)
             } else {
-                super::method_parameterized_sig(&formatter, &b.erased_params, &b.concrete_ret, None)
+                super::method_signatures::method_parameterized_sig(
+                    &formatter,
+                    &b.erased_params,
+                    &b.concrete_ret,
+                    None,
+                )
             }
         })
         .flatten()
