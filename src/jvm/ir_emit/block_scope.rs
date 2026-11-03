@@ -160,6 +160,7 @@ impl Emitter<'_> {
         }
         self.link_safe_call_chain(block, code);
         let copied_caller = self.copied_function_caller(block, code);
+        let enclosing_operands = self.enter_external_operand_scope(block);
         let enclosing_statement_line = self.statement_line;
         let saved = self.open_slot_scope();
         self.block_depth += 1;
@@ -249,6 +250,7 @@ impl Emitter<'_> {
                             self.restore_slot_scope(saved);
                             self.release_reserved_inline_stack(reserved_inline_stack);
                             self.statement_line = enclosing_statement_line;
+                            self.leave_external_operand_scope(enclosing_operands);
                             self.leave_copied_function_body(copied_caller, false, code);
                             return;
                         }
@@ -340,6 +342,7 @@ impl Emitter<'_> {
         self.restore_slot_scope(saved);
         self.release_reserved_inline_stack(reserved_inline_stack);
         self.statement_line = enclosing_statement_line;
+        self.leave_external_operand_scope(enclosing_operands);
         self.leave_copied_function_body(copied_caller, anchored, code);
     }
 
@@ -890,6 +893,24 @@ impl Emitter<'_> {
         })
     }
 
+    /// Enter a library inline expansion. Its operand bindings are its own: the enclosing statement
+    /// may be a same-module inline call's operand binding whose initializer runs this expansion,
+    /// and that binding still stores without a line once the expansion returns.
+    fn enter_external_operand_scope(&self, block: u32) -> Option<EnclosingOperandBinding> {
+        self.ir
+            .external_inline_expansions
+            .contains(&block)
+            .then_some(EnclosingOperandBinding(self.copied_operand_binding))
+    }
+
+    /// Leave a library inline expansion entered by [`Self::enter_external_operand_scope`],
+    /// restoring the enclosing operand binding on every exit.
+    fn leave_external_operand_scope(&mut self, enclosing: Option<EnclosingOperandBinding>) {
+        if let Some(EnclosingOperandBinding(binding)) = enclosing {
+            self.copied_operand_binding = binding;
+        }
+    }
+
     /// Cross from a same-module inline call's operand bindings into its copied callee body.
     ///
     /// The operands are kotlinc's `genValueAndPut`: each is stored straight into its parameter
@@ -1195,10 +1216,7 @@ impl Emitter<'_> {
         if let Some(index) = discarded_result {
             self.discarded_inline_results.insert(index);
         }
-        // An external expansion's operand bindings are its own. The enclosing statement may be a
-        // copied call's operand binding whose initializer runs this expansion; that binding still
-        // stores without a line once the expansion returns.
-        let enclosing_operand_binding = opening.map(|_| self.copied_operand_binding);
+        let enclosing_operands = self.enter_external_operand_scope(block);
         let optimized_postfix = self.emit_postfix_iinc(block, true, code);
         let mut bound_operands = 0;
         let mut unit_switch_value = false;
@@ -1322,9 +1340,7 @@ impl Emitter<'_> {
         // Once it closes, an instruction consuming the block's value belongs to that enclosing
         // statement, not to the last branch/statement visited inside the block.
         self.statement_line = enclosing_statement_line;
-        if let Some(binding) = enclosing_operand_binding {
-            self.copied_operand_binding = binding;
-        }
+        self.leave_external_operand_scope(enclosing_operands);
         EmittedBlock {
             discard_after_close: discard_after_frame_close,
             retains_postfix_temporary,
@@ -1728,6 +1744,10 @@ pub(super) struct SlotScope {
     slots: HashMap<u32, (u16, Ty)>,
     frame: Mark,
 }
+
+/// The same-module operand binding in effect when a library inline expansion began.
+#[derive(Clone, Copy)]
+struct EnclosingOperandBinding(Option<crate::ir::ExprId>);
 
 /// How a block that may be an external inline expansion enters its inlined body.
 #[derive(Clone, Copy, Default)]
