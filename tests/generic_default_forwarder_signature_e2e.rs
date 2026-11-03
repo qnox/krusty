@@ -142,3 +142,35 @@ fn a_value_class_static_signature_keeps_a_parenthesized_bound_whole() {
     .unwrap_or_else(|diff| panic!("Wrapped differs from kotlinc: {diff}"));
     common::expect_box_ok_with_stdlib(PARENTHESIZED_BOUND, "ParenthesizedBoundForwarder");
 }
+
+/// A type parameter bounded by another one of the member's own (`U : T`) takes the substituted
+/// bound through it: seen through `Source<String>`, `T : E` becomes `T : String` and `U : T`
+/// erases to `String` too, although `U`'s declared bound names no supertype argument.
+const DEPENDENT_BOUND: &str = "\
+interface Source<E> {\n\
+    fun <T : E, U : T> echo(value: U): U = value\n\
+}\n\
+class Applied : Source<String>\n\
+fun box(): String {\n\
+    val result = Applied().echo<String, String>(\"OK\")\n\
+    return if (result == \"OK\") \"OK\" else \"fail: $result\"\n\
+}\n\
+";
+
+#[test]
+fn a_member_formal_bounded_by_another_takes_its_substituted_bound() {
+    assert_eq!(
+        common::kotlinc_box_result(DEPENDENT_BOUND),
+        "OK",
+        "kotlinc's program must succeed"
+    );
+    common::byte_diff_against_kotlinc_cp(
+        "DependentBoundForwarder",
+        DEPENDENT_BOUND,
+        "Applied",
+        &[common::stdlib_jar()],
+    )
+    .expect("reference kotlinc is provisioned")
+    .unwrap_or_else(|diff| panic!("Applied differs from kotlinc: {diff}"));
+    common::expect_box_ok_with_stdlib(DEPENDENT_BOUND, "DependentBoundForwarder");
+}
