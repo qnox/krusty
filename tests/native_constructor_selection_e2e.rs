@@ -1,7 +1,8 @@
 //! PLATFORM-SPECIFIC: Native physical constructor parameters and known-primary IR selections.
 //!
-//! The programs are shared portable box regressions; Native's physical constructor parameters
-//! are why it gets this additional guard. Every expectation is kotlinc's.
+//! Native's physical constructor parameters are why these programs get their own guard. They are
+//! JVM and Native fixtures rather than portable box regressions because the Wasm lanes do not yet
+//! lower a `Unit` string template part or the `kotlin.Unit` object. Every expectation is kotlinc's.
 
 use super::common::{expect_box_ok_with_stdlib, expect_native_box, kotlinc_box_result};
 
@@ -19,7 +20,7 @@ fn every_backend_agrees_with_kotlinc(source: &str, stem: &str) {
 #[test]
 fn known_primary_selection_survives_physical_parameter_normalization() {
     every_backend_agrees_with_kotlinc(
-        include_str!("box_regressions/knownPrimaryConstructorRoles.kt"),
+        include_str!("fixtures/native_constructor_selection/knownPrimaryConstructorRoles.kt"),
         "NativePrimaryConstructorRoles",
     );
 }
@@ -27,7 +28,9 @@ fn known_primary_selection_survives_physical_parameter_normalization() {
 #[test]
 fn ordinary_primary_and_explicit_secondary_selections_keep_their_roles() {
     every_backend_agrees_with_kotlinc(
-        include_str!("box_regressions/ordinaryAndSecondaryConstructorRoles.kt"),
+        include_str!(
+            "fixtures/native_constructor_selection/ordinaryAndSecondaryConstructorRoles.kt"
+        ),
         "NativeOrdinaryConstructorRoles",
     );
 }
