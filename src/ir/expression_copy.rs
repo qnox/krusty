@@ -71,7 +71,6 @@ pub(super) fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: Exp
         postfix_updates,
         negations,
         transparent_loop_bodies,
-        inline_return_frame_bodies,
         for_loop_next_loops,
         written_casts,
         elvis_safe_call_guards,
@@ -123,7 +122,6 @@ pub(super) fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: Exp
         construction_targets,
         static_extension_receivers,
         call_inline_modifiers,
-        ordinary_intrinsic_calls,
         synthesized_accessor_calls,
         private_property_accessor_calls,
 
@@ -357,7 +355,7 @@ pub(super) fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: Exp
         lambda_sam_jvm_signature: _,
     } = ir;
 
-    let inherited: [&mut dyn InheritedFacts; 84] = [
+    let inherited: [&mut dyn InheritedFacts; 82] = [
         module_constructions,
         callable_reference_provenance,
         callable_reference_enclosures,
@@ -388,7 +386,6 @@ pub(super) fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: Exp
         postfix_updates,
         negations,
         transparent_loop_bodies,
-        inline_return_frame_bodies,
         for_loop_next_loops,
         written_casts,
         elvis_safe_call_guards,
@@ -439,7 +436,6 @@ pub(super) fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: Exp
         construction_targets,
         static_extension_receivers,
         call_inline_modifiers,
-        ordinary_intrinsic_calls,
         synthesized_accessor_calls,
         private_property_accessor_calls,
     ];

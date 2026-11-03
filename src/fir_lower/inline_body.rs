@@ -968,6 +968,7 @@ impl BodyLowering<'_> {
             update,
             post_test: false,
             label: Some(loop_label),
+            inline_return_frame: false,
         }));
         let unit = self.ir.add_expr(IrExpr::UnitInstance);
         let expansion = self.ir.add_expr(IrExpr::Block {
@@ -1186,6 +1187,7 @@ impl BodyLowering<'_> {
             update: None,
             post_test: false,
             label: Some(label),
+            inline_return_frame: false,
         });
         let read = self.ir.add_expr(IrExpr::GetValue(result_slot));
         let narrowed = self.ir.add_expr(IrExpr::TypeOp {

@@ -400,6 +400,10 @@ pub enum IrExpr {
         update: Option<ExprId>,
         post_test: bool,
         label: Option<String>,
+        /// The loop is an inline-return frame: lowering built it around a template whose own
+        /// returns became the loop's exits, and its body evaluates that template first
+        /// ([`IrFile::inline_return_frame_body`]).
+        inline_return_frame: bool,
     },
     /// `break` — exit the innermost enclosing loop, or the loop carrying `label` (`break@outer`).
     Break {
@@ -1670,9 +1674,6 @@ pub struct IrFile {
     /// nested in it writes [`IrExpr::SetFrameResult`], which every renumbering of either body
     /// leaves pointing at the same frame.
     pub inline_return_frames: crate::fx_hash::HashMap<ExprId, String>,
-    /// The bodies an inline-return frame wraps: each template body whose own returns became the
-    /// frame's exits. See [`IrFile::inline_return_frame_body`].
-    pub inline_return_frame_bodies: crate::fx_hash::HashSet<ExprId>,
     /// `try` expressions whose result is the value of a spliced inline lambda protected by the
     /// inline call's cleanup. This is semantic inline-frame provenance: a backend chooses how the
     /// result crosses `finally`; common IR does not prescribe a local slot, reload, or branch.
@@ -2445,10 +2446,6 @@ pub struct IrFile {
     /// modifier, published after the physical receiver operands are inserted.
     pub call_inline_modifiers:
         crate::fx_hash::HashMap<u32, Box<[crate::types::InlineParameterModifier]>>,
-    /// Realized call `ExprId` → the compiler role of the dependency declaration it calls, for a
-    /// role whose call stays an ordinary call (`CompilerIntrinsic::SuspendCoroutine`): the backend
-    /// reads the role, not the declaration's name.
-    pub ordinary_intrinsic_calls: crate::fx_hash::HashMap<u32, crate::libraries::CompilerIntrinsic>,
     /// Stable property-operation identity → the declaration's semantic value type before
     /// use-site generic substitution. Resolution knows this fact uniformly for every source owner;
     /// recording it here lets a backend derive the physical accessor boundary without asking whether

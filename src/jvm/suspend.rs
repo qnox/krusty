@@ -872,6 +872,7 @@ fn linearize_finally_returns(ir: &mut IrFile, expression: ExprId, return_ty: &Ty
         update: None,
         post_test: false,
         label: Some(label),
+        inline_return_frame: false,
     });
     let protected_body = ir.add_expr(IrExpr::Block {
         stmts: vec![protected_loop],
@@ -1850,6 +1851,7 @@ fn build_state_machine(
             update: None,
             post_test: false,
             label: None,
+            inline_return_frame: false,
         },
     );
     let mut body_stmts = vec![var_cont, var_suspended];
@@ -2870,6 +2872,7 @@ impl Flat<'_> {
                 update,
                 post_test,
                 label,
+                inline_return_frame: _,
             } = &self.ir.exprs[stmt as usize]
             {
                 if expr_calls_suspend(self.ir, *cond, self.suspend)

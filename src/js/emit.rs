@@ -309,6 +309,7 @@ fn emit_stmt(ir: &IrFile, e: u32, depth: usize, inst: bool, out: &mut String) {
             update,
             post_test,
             label,
+            inline_return_frame: _,
         } => {
             if let Some(l) = label {
                 indent(depth, out);

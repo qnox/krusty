@@ -538,13 +538,20 @@ fn hoist_stmt(
             update,
             post_test,
             label,
+            inline_return_frame,
         } => {
             // The loop CONDITION/update stay for the flattener; but a statement in the loop BODY with a
             // suspension buried in a call argument (`list.addAll(repo.get())` in a `for`) must be hoisted
             // to `val tmp = repo.get(); list.addAll(tmp)` — the flattener models a bound-local suspension,
             // not one in an argument. Recurse into the body block (in place); nested loops recurse too.
-            let (cond, body, update, post_test, label) =
-                (*cond, *body, *update, *post_test, label.clone());
+            let (cond, body, update, post_test, label, inline_return_frame) = (
+                *cond,
+                *body,
+                *update,
+                *post_test,
+                label.clone(),
+                *inline_return_frame,
+            );
             if matches!(ir.exprs[body as usize], IrExpr::Block { .. }) {
                 // A loop body is always a statement region. Inline expansion can leave its final
                 // expression in the block's `value` slot (for example `run { captured += await() }`).
@@ -575,6 +582,7 @@ fn hoist_stmt(
                 update,
                 post_test,
                 label,
+                inline_return_frame,
             };
             out.push(stmt);
             return;

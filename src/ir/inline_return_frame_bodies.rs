@@ -2,7 +2,8 @@
 //!
 //! A template whose body returns from the template itself is prepared as a frame: a labelled loop
 //! whose body evaluates the original body, storing its value as the frame's result, and leaves.
-//! Lowering records each body it wraps so a backend can find the body's own scope again.
+//! Lowering marks the loop itself as a frame (`IrExpr::While::inline_return_frame`), so a copy of
+//! the template carries the mark, and a backend finds the body's own scope again from it.
 
 use super::{ExprId, IrExpr, IrFile};
 
@@ -15,7 +16,7 @@ impl IrFile {
         stmts.iter().find_map(|&statement| {
             let IrExpr::While {
                 body,
-                label: Some(_),
+                inline_return_frame: true,
                 ..
             } = self.expr(statement)
             else {
@@ -24,13 +25,10 @@ impl IrFile {
             let IrExpr::Block { stmts, .. } = self.expr(*body) else {
                 return None;
             };
-            let evaluated = match self.expr(*stmts.first()?) {
+            Some(match self.expr(*stmts.first()?) {
                 IrExpr::SetValue { value, .. } => *value,
                 _ => *stmts.first()?,
-            };
-            self.inline_return_frame_bodies
-                .contains(&evaluated)
-                .then_some(evaluated)
+            })
         })
     }
 }
@@ -40,7 +38,12 @@ mod tests {
     use super::*;
     use crate::ir::IrConst;
 
-    fn frame(ir: &mut IrFile, evaluated: ExprId, stored: bool) -> ExprId {
+    fn frame(
+        ir: &mut IrFile,
+        evaluated: ExprId,
+        stored: bool,
+        inline_return_frame: bool,
+    ) -> ExprId {
         let evaluation = if stored {
             ir.add_expr(IrExpr::SetValue {
                 var: 0,
@@ -63,6 +66,7 @@ mod tests {
             update: None,
             post_test: false,
             label: Some("frame".to_string()),
+            inline_return_frame,
         });
         ir.add_expr(IrExpr::Block {
             stmts: vec![looping],
@@ -78,20 +82,19 @@ mod tests {
                 stmts: Vec::new(),
                 value: None,
             });
-            ir.inline_return_frame_bodies.insert(evaluated);
-            let template = frame(&mut ir, evaluated, stored);
+            let template = frame(&mut ir, evaluated, stored, true);
             assert_eq!(ir.inline_return_frame_body(template), Some(evaluated));
         }
     }
 
     #[test]
-    fn a_labelled_loop_lowering_did_not_record_wraps_no_body() {
+    fn a_labelled_loop_lowering_did_not_mark_wraps_no_body() {
         let mut ir = IrFile::default();
         let evaluated = ir.add_expr(IrExpr::Block {
             stmts: Vec::new(),
             value: None,
         });
-        let template = frame(&mut ir, evaluated, true);
+        let template = frame(&mut ir, evaluated, true, false);
         assert_eq!(ir.inline_return_frame_body(template), None);
         assert_eq!(ir.inline_return_frame_body(evaluated), None);
     }

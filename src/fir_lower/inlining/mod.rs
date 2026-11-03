@@ -1140,6 +1140,7 @@ impl BodyLowering<'_> {
             update: None,
             post_test: false,
             label: Some(label),
+            inline_return_frame: false,
         }));
         let value = match result_slot {
             None => {

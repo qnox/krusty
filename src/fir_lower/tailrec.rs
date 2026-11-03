@@ -108,6 +108,7 @@ pub(super) fn finish_tailrec_body(
             // jumps back to the top.
             post_test: true,
             label: Some(LOOP_LABEL.to_owned()),
+            inline_return_frame: false,
         },
         origin,
     );

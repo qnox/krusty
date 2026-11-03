@@ -529,6 +529,7 @@ impl DeserializeBody<'_> {
                 update: None,
                 post_test: false,
                 label: None,
+                inline_return_frame: false,
             });
             // A decoder that reports SEQUENTIAL decoding promises the elements arrive in
             // declaration order, so their indices need not be asked for at all: decode each in
