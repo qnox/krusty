@@ -8,7 +8,7 @@
 //! `call arity mismatch` bail.
 //!
 //! These are the suspensions whose machine moves to emission, where the spliced body's own locals
-//! exist. See `docs/JVM_INLINE_BEFORE_CPS.md`.
+//! exist.
 //!
 //! Carrying an `inline_body` is NOT by itself proof that the body will run in this frame: the
 //! emitter may decline the splice, in which case the lambda is realized as an ordinary `invoke` and

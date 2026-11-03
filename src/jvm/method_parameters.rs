@@ -88,8 +88,7 @@ pub(super) fn function(
     physical_parameters: &[Ty],
     holder_receiver: Option<TypeName>,
 ) -> Vec<MethodParameter> {
-    let generated = ir.generated_function_publication(function);
-    if ir.synthetic_methods.contains(&function) && generated.is_none() {
+    if ir.synthetic_methods.contains(&function) {
         return Vec::new();
     }
     let Some(identities) = ir
