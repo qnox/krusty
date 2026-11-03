@@ -73,8 +73,8 @@ fn fold(ir: &mut IrFile, equality: ExprId) {
         rhs: right,
     });
     // The comparison keeps the equality's own source position inside the branch.
-    if let Some(line) = ir.expr_source_lines.get(&equality).copied() {
-        ir.expr_source_lines.insert(compared, line);
+    if let Some(line) = ir.source_line(equality) {
+        ir.set_source_line(compared, line);
     }
     if let Some(line) = ir.expr_lines.get(&equality).copied() {
         ir.expr_lines.insert(compared, line);
