@@ -220,9 +220,10 @@ impl Emitter<'_> {
         if code.is_dead() || !result_ty.is_reference() {
             return;
         }
-        let reified = self.ir.logical_types.get(&branch).is_some_and(|&ty| {
-            crate::reified_operations::names_reified_type_parameter(self.ir, ty)
-        });
+        let reified = self
+            .ir
+            .logical_type(branch)
+            .is_some_and(|ty| crate::reified_operations::names_reified_type_parameter(self.ir, ty));
         let class = krusty::jvm::names::instanceof_internal_name(result_ty);
         let branch_class = krusty::jvm::names::instanceof_internal_name(self.uncoerced_ty(branch));
         if reified && class != "java/lang/Object" && class == branch_class {
@@ -239,7 +240,7 @@ impl Emitter<'_> {
                 op: IrTypeOp::ImplicitCoercion,
                 arg,
                 ..
-            } => self.ir.physical_types.get(arg).copied(),
+            } => self.ir.physical_type(*arg),
             _ => None,
         }
         .unwrap_or_else(|| self.value_ty(expression))

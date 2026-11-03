@@ -77,10 +77,9 @@ pub(super) fn realize(ir: &mut IrFile, underlying: &Under) {
             }
             let call = crate::call_result_boundaries::declaration_result_call(ir, expression)?;
             let declared = *ir.call_declared_ret.get(&call)?;
-            let erased =
-                ir.physical_types.get(&expression).copied().or_else(|| {
-                    crate::call_result_boundaries::erased_result_slot(ir, call, declared)
-                });
+            let erased = ir
+                .physical_type(expression)
+                .or_else(|| crate::call_result_boundaries::erased_result_slot(ir, call, declared));
             physical_boundary(declared, erased, target, underlying)
                 .map(|physical| (expression, physical))
         })
@@ -88,9 +87,9 @@ pub(super) fn realize(ir: &mut IrFile, underlying: &Under) {
 
     for (expression, physical) in boundaries {
         if let Some(physical) = physical {
-            ir.physical_types.insert(expression, physical);
+            ir.set_physical_type(expression, physical);
         } else {
-            ir.physical_types.remove(&expression);
+            ir.take_physical_type(expression);
         }
     }
 }

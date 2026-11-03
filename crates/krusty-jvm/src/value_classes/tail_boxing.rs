@@ -123,7 +123,7 @@ pub(super) fn box_ref_tail(ir: &mut IrFile, id: ExprId, x: TypeName, inputs: Rep
     // type (`suspendCoroutineUninterceptedOrReturn<T> { ... }` may end in a `Unit` block). Its exact physical result belongs
     // to the point as a whole; never recurse through that semantic boundary and reinterpret the block
     // tail as the enclosing function's value-class result.
-    if ir.physical_types.get(&id).is_some_and(|ty| {
+    if ir.physical_type(id).is_some_and(|ty| {
         ty.non_null()
             .obj_internal()
             .is_some_and(|classifier| classifier == x)
@@ -241,8 +241,7 @@ pub(super) fn box_nullable_vc_tail(
             // return descriptor — a suspend continuation's `kotlin/Result` resume value) is left untouched.
             if is_tail {
                 let logical_is_x = ir
-                    .logical_types
-                    .get(&id)
+                    .logical_type(id)
                     .and_then(|t| t.non_null().obj_internal())
                     .is_some_and(|n| n == x);
                 let repr_unboxed_x = matches!(

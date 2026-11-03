@@ -104,12 +104,7 @@ impl Emitter<'_> {
 
     fn append(&mut self, concat: u32, expression: u32, code: &mut CodeBuilder) {
         let ty = self.value_ty(expression);
-        let semantic = self
-            .ir
-            .logical_types
-            .get(&expression)
-            .copied()
-            .unwrap_or(ty);
+        let semantic = self.ir.logical_type(expression).unwrap_or(ty);
         if ty == Ty::Unit {
             let unit = Ty::obj("kotlin/Unit");
             self.emit_value_as(expression, unit, code);
@@ -226,8 +221,7 @@ impl Emitter<'_> {
         }
         if parts.iter().any(|part| {
             self.ir
-                .logical_types
-                .get(part)
+                .logical_type(*part)
                 .is_some_and(|ty| !ty.is_nullable() && ty.is_unsigned())
         }) {
             return false;

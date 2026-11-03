@@ -313,7 +313,7 @@ pub(crate) fn lower_body_with_context(
                     arg: value,
                     type_operand: target,
                 });
-                lowering.ir.logical_types.insert(converted, target);
+                lowering.ir.set_logical_type(converted, target);
                 converted
             } else {
                 value

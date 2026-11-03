@@ -113,9 +113,7 @@ impl Emitter<'_> {
     fn unsigned_operand(&self, expr: ExprId) -> Option<UnsignedOperand> {
         let logical = self
             .ir
-            .logical_types
-            .get(&expr)
-            .copied()
+            .logical_type(expr)
             .unwrap_or_else(|| self.value_ty(expr));
         let semantic = logical.non_null().canonical_semantic();
         if !semantic.is_unsigned() {

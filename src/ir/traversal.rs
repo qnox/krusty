@@ -350,7 +350,7 @@ pub fn toplevel_default_stub_safe(ir: &IrFile, fid: u32) -> bool {
             default,
             expression_safe,
             f.params.get(parameter),
-            ir.logical_types.get(default),
+            ir.logical_type(*default),
         );
         expression_safe
     })
@@ -431,12 +431,11 @@ fn default_expr_stub_safe_with_locals(
             // see the same semantic result evidence — a classpath callee carries its mangled JVM
             // name before and after the value-class pass.
             let vc_result = ir
-                .logical_types
-                .get(&e)
+                .logical_type(e)
                 .and_then(|t| t.non_null().obj_internal())
                 .filter(|&n| ir.is_value_class_name(n));
             let exact_physical_result =
-                ir.logical_types.contains_key(&e) && ir.physical_types.contains_key(&e);
+                ir.logical_type(e).is_some() && ir.physical_type(e).is_some();
             if !exact_physical_result && vc_result.is_none() {
                 return false;
             }

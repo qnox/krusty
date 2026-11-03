@@ -112,7 +112,7 @@ impl Emitter<'_> {
                     .collect::<Option<Vec<_>>>()?,
             ),
             SubjectKind::String => Dispatch::String(StringDispatch::new(
-                self.ir.logical_types.get(&subject)?.admits_null(),
+                self.ir.logical_type(subject)?.admits_null(),
                 cases,
             )?),
         };
