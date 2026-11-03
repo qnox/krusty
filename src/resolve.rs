@@ -154,7 +154,7 @@ mod expression_qualifiers;
 mod misfit_callable_references;
 use misfit_callable_references::{MisfitReference, ReferenceCandidateLevels};
 mod nested_type_aliases;
-use explicit_receiver_levels::{FunctionValueLevel, FunctionValueRungs};
+use explicit_receiver_levels::{FunctionValueLevel, ScopeLevelSearch};
 mod expected_expression;
 mod expression_getter;
 mod extension_receiver_uses;
@@ -12025,7 +12025,7 @@ impl<'a> Checker<'a> {
             receiver,
             receiver_ty,
             name,
-            FunctionValueRungs::AlreadyTried,
+            ScopeLevelSearch::already_tried(CallResultConstraint::direct(expected)),
         ) {
             return ClassifierValueCall::Checked(ret);
         }
@@ -16162,7 +16162,7 @@ impl<'a> Checker<'a> {
                     receiver,
                     rt,
                     &name,
-                    FunctionValueRungs::InTower,
+                    ScopeLevelSearch::in_tower(CallResultConstraint::direct(expected)),
                 ) {
                     return ret;
                 }
@@ -19469,6 +19469,7 @@ impl<'a> Checker<'a> {
                         },
                         receiver,
                         &fname,
+                        CallResultConstraint::direct(expected),
                         Some(&postponed_solutions),
                     ) {
                         self.mark_implicit_receiver_selection(call, implicit_receiver);
@@ -54387,6 +54388,7 @@ impl<'a> Checker<'a> {
         name: String,
         args: Option<Vec<ExprId>>,
     ) -> Ty {
+        let safe_search = ScopeLevelSearch::in_tower(CallResultConstraint::safe_lifted(expected));
         let t = {
             let rt = self.expr(scope, receiver);
             if rt == Ty::Error {
@@ -54504,7 +54506,7 @@ impl<'a> Checker<'a> {
                                         receiver,
                                         recv,
                                         &name,
-                                        FunctionValueRungs::InTower,
+                                        safe_search,
                                     )
                                     .or_else(|| {
                                         let call_args = CallArgs {
@@ -54581,7 +54583,7 @@ impl<'a> Checker<'a> {
                                         receiver,
                                         recv,
                                         &name,
-                                        FunctionValueRungs::InTower,
+                                        safe_search,
                                     )
                                     .or_else(|| {
                                         let call_args = CallArgs {
@@ -54657,7 +54659,7 @@ impl<'a> Checker<'a> {
                                 receiver,
                                 recv,
                                 &name,
-                                FunctionValueRungs::InTower,
+                                safe_search,
                             )
                             .or_else(|| {
                                 self.record_extension_call(

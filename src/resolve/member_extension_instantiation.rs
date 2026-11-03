@@ -217,16 +217,6 @@ pub(super) fn instantiate_member_extension_with(
         }
         unify_member_extension_slot(declared, actual, deferred_type_variables, &mut bindings);
     }
-    if let Some(expected) = result_constraint.expected() {
-        let declared_ret = generic.map_or(function.signature.ret, |signature| signature.ret);
-        let declared_ret = result_constraint.declaration_result(declared_ret);
-        unify_member_extension_slot(
-            declared_ret,
-            expected,
-            deferred_type_variables,
-            &mut bindings,
-        );
-    }
     // A formal observable only through another formal's bound (`T` of `E : EntityID<T>` on a
     // `Column<out E?>` receiver) is solved from that formal's applied bound, as for any other
     // generic call, before it can fall back to its own bound.
@@ -249,6 +239,70 @@ pub(super) fn instantiate_member_extension_with(
             |actual, bound| crate::symbol_resolver::resolution_subtype(source, actual, bound),
         ) {
             return None;
+        }
+    }
+    // The expected result is an upper constraint: it fills a formal that the receiver, explicit
+    // type arguments, arguments and their declared bounds left open, but never replaces their
+    // solution or decides applicability. A contradiction is the call's result mismatch, not an
+    // inapplicable candidate. A formal it fills can expose another through that formal's bound.
+    if let Some(expected) = result_constraint.expected() {
+        let declared_ret = generic.map_or(function.signature.ret, |signature| signature.ret);
+        let declared_ret = result_constraint.declaration_result(declared_ret);
+        let mut from_expected = bindings.clone();
+        unify_member_extension_slot(
+            declared_ret,
+            expected,
+            deferred_type_variables,
+            &mut from_expected,
+        );
+        // A formal named by a solved formal's bound (`T` of `E : Entity<T>` once the receiver
+        // fixed `E`) is determined by that relation even where it cannot be read yet, so the
+        // expectation does not choose it.
+        let determined_by_bound = |formal: &String| {
+            generic.is_some_and(|generic| {
+                generic
+                    .formals
+                    .iter()
+                    .zip(&generic.formal_bounds)
+                    .any(|(other, bounds)| {
+                        other != formal
+                            && bindings.contains_key(other)
+                            && bounds.iter().any(|bound| {
+                                crate::types::ty_mentions_param(
+                                    *bound,
+                                    std::slice::from_ref(formal),
+                                )
+                            })
+                    })
+            })
+        };
+        // Only this call's own formals are solved here; the caller's type parameters
+        // (`U` of an enclosing `wrongTable<U>`) are fixed types, never variables of this call.
+        let mut completed = bindings.clone();
+        for (formal, solution) in from_expected {
+            let own_formal = generic.is_some_and(|generic| generic.formals.contains(&formal));
+            if own_formal && !completed.contains_key(&formal) && !determined_by_bound(&formal) {
+                completed.insert(formal, solution);
+            }
+        }
+        if let Some(generic) = generic.filter(|_| completed.len() > bindings.len()) {
+            crate::symbol_resolver::resolve_bound_violating_bindings(
+                Some(source),
+                generic,
+                &mut completed,
+                explicit_type_args,
+            );
+            // An expectation the declared bounds reject (`Table<String>` for `Table<T>` when the
+            // receiver's `E : Entity<T>` is `Entity<U>`) contributes nothing: the call keeps its
+            // own solution and reports the result mismatch.
+            if crate::symbol_resolver::generic_bindings_admit_expected_return_intersection(
+                generic,
+                &completed,
+                None,
+                |actual, bound| crate::symbol_resolver::resolution_subtype(source, actual, bound),
+            ) {
+                bindings = completed;
+            }
         }
     }
     // The call's evidence so far, before any unsolved formal stands for its bound: a lambda
