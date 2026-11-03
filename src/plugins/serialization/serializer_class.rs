@@ -840,6 +840,7 @@ fn declare_type_serializer_constructor(
             default_masks: vec![],
         },
         synthetic: false,
+        platform_visible: false,
         vc_params: false,
     });
 }

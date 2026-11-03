@@ -85,6 +85,7 @@ mod parameter_names;
 mod physical_call_arguments;
 mod physical_type;
 mod placed_lambda_captures;
+mod platform_visible_constructors;
 mod private_static_access;
 pub mod property_annotations;
 mod property_realizations;
