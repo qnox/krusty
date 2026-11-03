@@ -52,6 +52,7 @@ mod type_operation_roles;
 mod unboxing_rewrites;
 mod value_boundaries;
 mod value_members;
+mod when_merges;
 use crate::fx_hash::{HashMap, HashSet};
 use crate::ir::{Callee, ExprId, IrExpr, IrFile};
 use crate::jvm::method_descriptors::jvm_tys;
@@ -1560,14 +1561,7 @@ pub(crate) fn lower_value_classes(
                 IrExpr::Const(crate::ir::IrConst::zero_for_value_type(erased));
         }
     }
-    // The exhaustive `when` result drives the emitter's verifier-visible merge type, not Kotlin type checking.
-    // Once a value class has been realized as its carrier, the merge frame must use that same carrier
-    // (`SampleId?` over a non-null `String` field is `String`, including its null branch). Leaving the
-    // semantic classifier here while branch expressions have been erased produces a StackMapTable that
-    // claims `LSampleId;` above an actual `String`.
-    for result in ir.whens.exhaustive.values_mut() {
-        *result = erase(result, &under);
-    }
+    when_merges::erase_when_merges(ir, &under);
 
     // 4. Rewrite construction / property access. Each body carries its pre-erasure semantic slot types,
     //    so the same representation analysis used by step 5 distinguishes an unboxed carrier from a box.

@@ -77,10 +77,14 @@ impl Emitter<'_> {
         code.athrow();
     }
 
-    /// The JVM value a `when` leaves at its end: the erasure of the result the checker typed it
-    /// at, or that the pass which built it recorded. Emission never joins its branches' values;
-    /// a value `when` without a recorded result is rejected.
+    /// The JVM value a `when` leaves at its end: the JVM type a backend pass realized it with,
+    /// else the erasure of the result the checker typed it at or that the pass which built it
+    /// recorded. Emission never joins its branches' values; a value `when` without a recorded
+    /// result is rejected.
     pub(super) fn when_value_ty(&self, expression: u32) -> Ty {
+        if let Some(realized) = self.ir.physical_types.get(&expression) {
+            return *realized;
+        }
         if let Some(result) = self.ir.when_result_type(expression) {
             return ir_ty_to_jvm(&result);
         }
