@@ -4,7 +4,7 @@
 //!
 //! Also the neighbouring case of a body that is never ENTERED: a loop or `when` branch whose condition
 //! folds to a constant. The emitter must emit no code on the path the folded jump makes unreachable,
-//! and must still frame the merge the live paths converge on (see docs/SPEC.md).
+//! and must still frame the merge the live paths converge on.
 use super::common;
 fn run(src: &str) -> Option<String> {
     common::compile_and_run_with_stdlib(src, "Main")

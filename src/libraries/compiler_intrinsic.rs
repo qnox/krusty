@@ -26,9 +26,10 @@ pub enum ListStorageConstruction {
 /// grants intrinsic behavior from a coincidental source name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CompilerIntrinsic {
-    /// An authenticated platform-stdlib `Throwable()` or `Throwable(String?)` constructor.
-    /// The target owns the object's storage, including the supplied nullable message.
+    /// An authenticated platform-stdlib exception constructor with no arguments or one `String?`.
+    /// The target owns storage for this exact declaring kind, including the nullable message.
     ThrowableConstructor {
+        kind: super::RuntimeExceptionKind,
         message: bool,
     },
     /// The authenticated `Throwable.message: String?` getter, not a same-named user property.
