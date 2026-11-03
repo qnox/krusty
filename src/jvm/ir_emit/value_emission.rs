@@ -993,6 +993,7 @@ impl super::Emitter<'_> {
                     self.guard_private_lateinit_read(e, code);
                 }
                 Callee::Module { .. }
+                | Callee::ModuleDefaultEntry { .. }
                 | Callee::ModuleWithDefaults { .. }
                 | Callee::LocalWithDefaults { .. }
                 | Callee::ClassStaticWithDefaults { .. }
