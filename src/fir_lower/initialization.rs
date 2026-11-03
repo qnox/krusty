@@ -205,7 +205,7 @@ pub(super) fn finalize_enum_entries(ir: &mut IrFile) -> Result<(), FirFileLoweri
                     let placeholder =
                         ir.add_expr(IrExpr::Const(crate::ir::IrConst::zero_for_value_type(ty)));
                     if entry_line != 0 {
-                        ir.expr_source_lines.insert(placeholder, entry_line);
+                        ir.set_source_line(placeholder, entry_line);
                     }
                     placeholder
                 } else {
