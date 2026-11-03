@@ -107,13 +107,13 @@ impl ProductionSignatureSemantics<'_> {
         callable: &crate::libraries::LibraryCallable,
         parameter_by_argument: Box<[Option<u32>]>,
         arguments: &[crate::fir::ResolvedSigCallArgument<'_>],
-        explicit_type_arguments: bool,
+        explicit_type_arguments: &[Ty],
     ) -> CompactSelectedResultPublication {
         CompactSelectedResultPublication::callable(
             callable,
             parameter_by_argument,
             whole_array_arguments(arguments),
-            explicit_type_arguments,
+            explicit_type_arguments.into(),
         )
     }
 
@@ -123,14 +123,14 @@ impl ProductionSignatureSemantics<'_> {
         receiver: Option<Ty>,
         parameter_by_argument: Box<[Option<u32>]>,
         arguments: &[crate::fir::ResolvedSigCallArgument<'_>],
-        explicit_type_arguments: bool,
+        explicit_type_arguments: &[Ty],
     ) -> CompactSelectedResultPublication {
         CompactSelectedResultPublication::member(
             member,
             receiver,
             parameter_by_argument,
             whole_array_arguments(arguments),
-            explicit_type_arguments,
+            explicit_type_arguments.into(),
         )
     }
 
@@ -141,7 +141,7 @@ impl ProductionSignatureSemantics<'_> {
         selected: Ty,
         parameter_by_argument: Box<[Option<u32>]>,
         arguments: &[crate::fir::ResolvedSigCallArgument<'_>],
-        explicit_type_arguments: bool,
+        explicit_type_arguments: &[Ty],
     ) {
         let Some(owner) = selected.non_null().obj_internal() else {
             return;
@@ -172,7 +172,7 @@ impl ProductionSignatureSemantics<'_> {
                 parameter_by_argument,
                 declaration.declaration.call_sig.vararg_index,
                 whole_array_arguments(arguments),
-                explicit_type_arguments,
+                explicit_type_arguments.into(),
             ),
         );
     }

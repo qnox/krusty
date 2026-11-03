@@ -1894,7 +1894,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                     &callable,
                     parameter_by_argument.clone(),
                     arguments,
-                    !resolved_type_arguments.is_empty(),
+                    &resolved_type_arguments,
                 );
                 let contract = callable.contract.clone().or_else(|| {
                     declaration.and_then(|declaration| {
@@ -2046,7 +2046,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                     result.get(),
                     parameter_by_argument,
                     arguments,
-                    !resolved_type_arguments.is_empty(),
+                    &resolved_type_arguments,
                 );
                 Ok(result)
             }
@@ -3801,7 +3801,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                     declared_receiver,
                     parameter_by_argument,
                     arguments,
-                    !type_arguments.is_empty(),
+                    &type_arguments,
                 );
                 return Some((
                     result,
@@ -3820,7 +3820,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 &publication_callable,
                 parameter_by_argument,
                 arguments,
-                !type_arguments.is_empty(),
+                &type_arguments,
             );
             Some((
                 result,
