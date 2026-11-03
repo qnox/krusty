@@ -11,8 +11,9 @@
 
 use super::common;
 
-/// The flow fixture's file annotation and imports. A program that adds an import puts it after
-/// these and before [`flows_declarations`].
+/// The flow fixtures' file annotation and imports. A program that adds an import puts it after
+/// these and before the fixture's declarations ([`flows_declarations`],
+/// [`references_declarations`]).
 macro_rules! flows_header {
     () => {
         r#"
@@ -56,10 +57,11 @@ fun box(): String = runBlocking {
 "#
 );
 
-const REFERENCES: &str = r#"
-@file:OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
-import kotlinx.coroutines.flow.*
-
+/// The callable-reference fixture's declarations: an unbound top-level and a bound member reference
+/// passed to `flatMapLatest`.
+macro_rules! references_declarations {
+    () => {
+        r#"
 class Dao {
     fun entities(ids: Set<String>): Flow<List<String>> = flowOf(ids.sorted())
 }
@@ -69,7 +71,29 @@ fun lookup(ids: Set<String>): Flow<List<String>> = flowOf(ids.sorted())
 fun byReference(f: Flow<Set<String>>): Flow<List<String>> = f.flatMapLatest(::lookup)
 
 fun byBound(dao: Dao, f: Flow<Set<String>>): Flow<List<String>> = f.flatMapLatest(dao::entities)
-"#;
+"#
+    };
+}
+
+const REFERENCES: &str = concat!(flows_header!(), references_declarations!());
+
+/// [`REFERENCES`] with `runBlocking` imported beside its own imports and a `box()` that collects
+/// both flows.
+const REFERENCES_PROGRAM: &str = concat!(
+    flows_header!(),
+    "import kotlinx.coroutines.runBlocking\n",
+    references_declarations!(),
+    r#"
+fun box(): String = runBlocking {
+    val ids = flowOf(setOf("b", "a"))
+    val unbound = byReference(ids).toList()
+    if (unbound != listOf(listOf("a", "b"))) return@runBlocking "FAIL unbound: $unbound"
+    val bound = byBound(Dao(), ids).toList()
+    if (bound != listOf(listOf("a", "b"))) return@runBlocking "FAIL bound: $bound"
+    "OK"
+}
+"#
+);
 
 /// The regenerated suspend lambdas and the calling facade are kotlinc's, byte for byte.
 #[test]
@@ -162,25 +186,33 @@ fn flat_map_latest_regenerates_its_suspend_lambda_over_a_callable_reference_like
         ],
         &[common::coroutines_jar()],
     );
+    let classes = common::classes_against_kotlinc_module_cp(
+        &[("References.kt", REFERENCES)],
+        &[common::coroutines_jar()],
+    );
+    let inventory = [
+        "Dao",
+        "ReferencesKt",
+        "ReferencesKt$byBound$$inlined$flatMapLatest$1",
+        "ReferencesKt$byReference$$inlined$flatMapLatest$1",
+    ];
+    assert_eq!(classes.reference.keys().collect::<Vec<_>>(), inventory);
+    assert_eq!(classes.krusty.keys().collect::<Vec<_>>(), inventory);
+    let differences = classes.differences();
+    assert!(differences.is_empty(), "{}", differences.join("\n\n"));
 }
 
 /// The regenerated lambdas call each referenced function.
 #[test]
 fn flat_map_latest_runs_through_a_callable_reference() {
-    let main = format!(
-        "{REFERENCES}\nimport kotlinx.coroutines.runBlocking\n\n\
-fun box(): String = runBlocking {{\n\
-    val ids = flowOf(setOf(\"b\", \"a\"))\n\
-    val unbound = byReference(ids).toList()\n\
-    if (unbound != listOf(listOf(\"a\", \"b\"))) return@runBlocking \"FAIL unbound: $unbound\"\n\
-    val bound = byBound(Dao(), ids).toList()\n\
-    if (bound != listOf(listOf(\"a\", \"b\"))) return@runBlocking \"FAIL bound: $bound\"\n\
-    \"OK\"\n\
-}}\n"
-    );
     let jdk = common::jdk_modules();
+    assert_eq!(
+        common::kotlinc_box_result_with_classpath(REFERENCES_PROGRAM, &[common::coroutines_jar()]),
+        "OK",
+        "kotlinc's MainKt"
+    );
     let output = common::compile_and_run_box(
-        &main,
+        REFERENCES_PROGRAM,
         "Main",
         &[common::stdlib_jar(), common::coroutines_jar(), jdk.clone()],
         Some(jdk.as_path()),
