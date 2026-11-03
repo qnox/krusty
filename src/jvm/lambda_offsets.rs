@@ -12,6 +12,9 @@
 //! body is a function of its own and has no parent here. A lambda with no enclosing call keeps its
 //! own position, and so do an anonymous function (`fun() { }`) and a lambda converted to a
 //! functional interface, whose instance kotlinc creates at the lambda.
+//!
+//! A lambda's captures are the reads its creation makes, not source expressions: kotlinc
+//! materializes them after this lowering, at the lambda's patched position, so they move with it.
 
 use crate::ir::{ExprId, IrCheckedOperation, IrExpr, IrFile};
 
@@ -36,6 +39,12 @@ pub(crate) fn patch(ir: &mut IrFile) {
         .collect::<Vec<_>>();
     for (lambda, line) in lambdas {
         ir.set_source_line(lambda, line);
+        let IrExpr::Lambda { captures, .. } = ir.expr(lambda) else {
+            unreachable!("selected above as a lambda");
+        };
+        for capture in captures.clone() {
+            ir.set_source_line(capture, line);
+        }
     }
 }
 
@@ -63,17 +72,15 @@ fn enclosing_call(ir: &IrFile, parents: &[Option<ExprId>], lambda: ExprId) -> Op
     }
 }
 
-/// Whether kotlinc realizes `expression` as a function access (`IrCall`, `IrConstructorCall`):
-/// a function, accessor, operator, constructor or function-value invocation.
+/// Whether kotlinc realizes `expression` as an `IrCall`: a function, accessor, operator or
+/// function-value invocation, an array factory (`arrayOf`) included. A constructor call
+/// (`IrConstructorCall`, a delegating one included) is not: a lambda among its arguments looks
+/// past it.
 fn is_call(expression: &IrExpr) -> bool {
     match expression {
-        IrExpr::Checked(operation) => matches!(
-            &**operation,
-            IrCheckedOperation::Call { .. } | IrCheckedOperation::ConstructorDelegation { .. }
-        ),
+        IrExpr::Checked(operation) => matches!(&**operation, IrCheckedOperation::Call { .. }),
         IrExpr::Call { .. }
         | IrExpr::MethodCall { .. }
-        | IrExpr::New { .. }
         | IrExpr::InvokeFunction { .. }
         | IrExpr::PropertyRead { .. }
         | IrExpr::PropertyWrite { .. }
