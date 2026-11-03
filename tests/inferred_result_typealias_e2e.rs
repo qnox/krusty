@@ -4,22 +4,18 @@
 
 use super::common;
 
-const CALLS: &str =
-    include_str!("fixtures/inferred_result_typealias/inferredResultThroughAliasCall.kt");
-const READS: &str =
-    include_str!("fixtures/inferred_result_typealias/inferredResultThroughAliasRead.kt");
+const CALLS: &str = include_str!("box_regressions/multimodule/inferredResultThroughAliasCall.kt");
+const READS: &str = include_str!("box_regressions/multimodule/inferredResultThroughAliasRead.kt");
 const ARGUMENTS: &str =
-    include_str!("fixtures/inferred_result_typealias/inferredResultThroughAliasArguments.kt");
+    include_str!("box_regressions/multimodule/inferredResultThroughAliasArguments.kt");
 const NULLABLE: &str =
-    include_str!("fixtures/inferred_result_typealias/inferredResultThroughNullableAlias.kt");
-const EXPLICIT: &str = include_str!(
-    "fixtures/inferred_result_typealias/inferredResultThroughExplicitAliasArguments.kt"
-);
+    include_str!("box_regressions/multimodule/inferredResultThroughNullableAlias.kt");
+const EXPLICIT: &str =
+    include_str!("box_regressions/multimodule/inferredResultThroughExplicitAliasArguments.kt");
 const MERGED: &str =
-    include_str!("fixtures/inferred_result_typealias/inferredResultThroughMergedAliasArguments.kt");
-const CONTEXT: &str = include_str!(
-    "fixtures/inferred_result_typealias/inferredResultThroughContextAliasArguments.kt"
-);
+    include_str!("box_regressions/multimodule/inferredResultThroughMergedAliasArguments.kt");
+const CONTEXT: &str =
+    include_str!("box_regressions/multimodule/inferredResultThroughContextAliasArguments.kt");
 
 /// The `lib` and `main(lib)` modules of a two-module fixture.
 fn modules(program: &str) -> (&str, &str) {
