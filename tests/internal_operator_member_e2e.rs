@@ -1,15 +1,16 @@
 //! An `internal` member of another module is invisible at the call site, so an applicable
 //! extension takes the operator call, the indexed read and the call, as for a private member.
 //!
-//! The program constructs the dependency class in the main module. kotlinc compiles and runs it
-//! first, and krusty's `box()` result must equal kotlinc's. The KLIB lanes decline constructing a
-//! class another module declares, so the program is a shared fixture rather than a box regression;
-//! `tests/box_regressions/multimodule/internalOperatorMemberThroughFactoryYieldsToExtension.kt`
-//! reaches the same calls through a library function on every lane.
+//! The program is the shared box regression
+//! `tests/box_regressions/multimodule/internalOperatorMemberYieldsToExtension.kt`, which constructs
+//! the dependency class in the main module. This guard runs it on the JVM: kotlinc compiles and
+//! runs it first, and krusty's `box()` result must equal kotlinc's. The factory regression
+//! `internalOperatorMemberThroughFactoryYieldsToExtension.kt` reaches the same calls through a
+//! library function.
 use super::common;
 
 const PROGRAM: &str =
-    include_str!("fixtures/internal_operator_member/InternalOperatorMemberYieldsToExtension.kt");
+    include_str!("box_regressions/multimodule/internalOperatorMemberYieldsToExtension.kt");
 
 #[test]
 fn an_internal_member_of_a_constructed_dependency_class_yields_to_extensions_like_kotlinc() {
