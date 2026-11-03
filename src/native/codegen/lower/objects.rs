@@ -2042,13 +2042,6 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         if declaration.is_abstract || declaration.is_sealed {
             return Err(declined!("construction of the abstract class `{name}`"));
         }
-        // Matching uses the DECLARED list, because that is what the construction node names;
-        // filling the frame uses the physical one, because that is what the constructor declares.
-        let primary_declared: Vec<Ty> = declaration
-            .ctor_args
-            .iter()
-            .map(|argument| argument.ty)
-            .collect();
         let primary_params: Vec<Ty> = declaration
             .ctor_args
             .iter()
@@ -2057,57 +2050,40 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 captures::physical_ty(self.file.ir, class, index as u32, argument.ty)
             })
             .collect();
-        // `ctor_params` names a constructor by its parameter list, and is absent only when the
-        // lowering already knows the call goes to the primary one. It is present for a secondary,
-        // and also for a primary the lowering could not recognize as such — an anonymous object's,
-        // whose constructor is not its class's first declaration. So match the secondaries first,
-        // and fall back to the primary when the list is its own.
-        let (constructor, params) = match selected {
-            Some(selected) => {
-                let ordinal = declaration.secondary_ctors.iter().position(|candidate| {
-                    // Either spelling of the same constructor: the declaration's own parameter
-                    // list, or that list behind the PREFIX an inner class's constructors lead
-                    // with. Which one the call node carries depends on whether the outer instance
-                    // was part of the selection it recorded.
-                    if candidate.params == selected {
-                        return true;
-                    }
-                    let mut physical = candidate.prefix_params.clone();
-                    physical.extend(candidate.params.iter().copied());
-                    !candidate.prefix_params.is_empty() && physical == selected
-                });
-                match ordinal {
-                    Some(ordinal) => {
-                        let secondary = &declaration.secondary_ctors[ordinal];
-                        // A PREFIX is what an inner class's constructors all lead with — the outer
-                        // instance — and the construction supplies it as an ordinary argument, the
-                        // same way the primary's is supplied. So the physical list is the prefix
-                        // and then the declaration's own; the arity check below is what says
-                        // whether the call really carries one.
-                        let mut params = secondary.prefix_params.clone();
-                        params.extend(secondary.params.iter().copied());
-                        (
-                            self.file.classes[class as usize].secondaries[ordinal],
-                            params,
-                        )
-                    }
-                    None if primary_declared == selected => (
-                        self.file.classes[class as usize]
-                            .constructor
-                            .ok_or_else(|| {
-                                format!("a call to a primary constructor `{name}` lacks")
-                            })?,
-                        primary_params,
-                    ),
-                    None => return Err(declined!("a call to an unknown constructor (`{name}`)")),
-                }
+        let primary = |name: &str| {
+            self.file.classes[class as usize]
+                .constructor
+                .ok_or_else(|| format!("a call to a primary constructor `{name}` lacks"))
+        };
+        // The checker recorded which constructor a source construction selected: 0 is the
+        // primary, `n` the `n`th secondary. A construction synthesized without a checked selection
+        // (a lambda or reference carrier, a cross-file construction) reaches a class that declares
+        // only its primary constructor; one that declares secondaries needs the selection.
+        let (constructor, params) = match self.file.ir.construction_target(site) {
+            Some(target) if target.ordinal == 0 => (primary(&name)?, primary_params),
+            Some(target) => {
+                let ordinal = target.ordinal as usize - 1;
+                let secondary = declaration.secondary_ctors.get(ordinal).ok_or_else(|| {
+                    declined!("a construction of `{name}` selects an undeclared constructor")
+                })?;
+                // A PREFIX is what an inner class's constructors all lead with — the outer
+                // instance — and the construction supplies it as an ordinary argument, the same
+                // way the primary's is supplied. So the physical list is the prefix and then the
+                // declaration's own; the arity check below is what says whether the call really
+                // carries one.
+                let mut params = secondary.prefix_params.clone();
+                params.extend(secondary.params.iter().copied());
+                (
+                    self.file.classes[class as usize].secondaries[ordinal],
+                    params,
+                )
             }
-            None => (
-                self.file.classes[class as usize]
-                    .constructor
-                    .ok_or_else(|| format!("a call to a primary constructor `{name}` lacks"))?,
-                primary_params,
-            ),
+            None if declaration.secondary_ctors.is_empty() => (primary(&name)?, primary_params),
+            None => {
+                return Err(declined!(
+                    "a construction of `{name}` records no selected constructor"
+                ))
+            }
         };
         if args.len() != params.len() {
             return Err(declined!(

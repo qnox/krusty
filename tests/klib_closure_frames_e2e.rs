@@ -84,6 +84,49 @@ fn dependency_class_storage_is_independent_of_constructor_parameters() {
     );
 }
 
+// PLATFORM-SPECIFIC: the official producer's generic constructor and callback ABI.
+#[test]
+fn dependency_generic_class_initializers_preserve_declared_carriers() {
+    assert_official_dependency_closures(
+        r#"
+package fixture
+class Generic<T>(seed: T, effect: (T) -> T) {
+    private val stored = effect(seed)
+    init { effect(seed) }
+}
+fun <T> construct(seed: T, effect: (T) -> T): Generic<T> = Generic(seed, effect)
+"#,
+        r#"
+fun box(): String {
+    var intCalls = 0
+    construct(Int.MIN_VALUE) {
+        if (it != Int.MIN_VALUE) throw IllegalStateException("Int carrier")
+        intCalls++
+        it
+    }
+    var longCalls = 0
+    construct(Long.MIN_VALUE) {
+        if (it != Long.MIN_VALUE) throw IllegalStateException("Long carrier")
+        longCalls++
+        it
+    }
+    var text = ""
+    construct("OK") { text += it; it }
+    var nullCalls = 0
+    construct<String?>(null) {
+        if (it != null) throw IllegalStateException("nullable carrier")
+        nullCalls++
+        it
+    }
+    return if (intCalls == 2 && longCalls == 2 && text == "OKOK" && nullCalls == 2)
+        "OK" else "constructor effects"
+}
+"#,
+        "ImportedGenericClassInitialization",
+        DependencyConsumer::Native,
+    );
+}
+
 #[test]
 fn dependency_class_cannot_consume_same_name_source_classifier_facts() {
     let consumer = format!(
