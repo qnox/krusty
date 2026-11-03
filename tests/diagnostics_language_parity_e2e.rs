@@ -321,8 +321,7 @@ fn lambda_arity_comes_from_its_written_parameter_list_like_kotlinc() {
 /// Every contextual one-parameter function type still binds `it`.
 #[test]
 fn implicit_it_with_a_one_parameter_function_type_runs_like_kotlinc() {
-    common::expect_box_ok_with_stdlib(
-        include_str!("box_regressions/implicitItContext.kt"),
-        "ImplicitItContext",
-    );
+    let source = include_str!("fixtures/implicit_it_context.kt");
+    assert_eq!(common::kotlinc_box_result(source), "OK");
+    common::expect_box_ok_with_stdlib(source, "ImplicitItContext");
 }

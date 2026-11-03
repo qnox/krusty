@@ -1,5 +1,3 @@
-// TARGET_BACKEND: JVM_IR
-// WITH_STDLIB
 // Every contextual one-parameter function type binds a lambda's implicit `it`: a typed
 // declaration, a branch of one, a stdlib higher-order argument, a fun interface, a suspend function
 // type, and an explicit type argument.
