@@ -5154,6 +5154,7 @@ regressions/floatingRangeContainsMixedWidths.kt
 regressions/generic.kt
 regressions/hashCodeNPE.kt
 regressions/inlineCallsInInitializerLambda.kt
+regressions/knownPrimaryConstructorRoles.kt
 regressions/kt10143.kt
 regressions/kt15196.kt
 regressions/kt1779.kt
@@ -5201,6 +5202,7 @@ regressions/multimodule/multimoduleDirectCollectionIterator.kt
 regressions/noCapturingForTypesWithTypeVariables.kt
 regressions/objectCaptureOuterConstructorProperty.kt
 regressions/objectInsideDelegation.kt
+regressions/ordinaryAndSecondaryConstructorRoles.kt
 regressions/recursiveDnnTypeInLambda.kt
 regressions/resolvedCallForGetOperator.kt
 reified/arraysReification/jaggedArray.kt
