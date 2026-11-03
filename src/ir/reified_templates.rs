@@ -11,7 +11,7 @@
 //! enclosure of the lambda node or class that declares the code, the specialized copies an
 //! expansion made, and the inline-copy marks on code an expansion copied into its caller.
 
-use super::{ClassId, ExprId, FunId, IrEnclosure, IrExpr, IrFile, IrGenericSig, IrTypeParameter};
+use super::{ClassId, ExprId, FunId, IrEnclosure, IrExpr, IrFile};
 use crate::types::Ty;
 
 /// Where the provenance says a function is declared.
@@ -24,16 +24,6 @@ enum DeclaringScope {
     Declaration,
     /// Created by copied code or by more than one node, or without a recorded scope.
     Unproven,
-}
-
-impl IrGenericSig {
-    /// The type parameters the signed declaration itself declares, without the ones a lifted
-    /// local or anonymous function captures from an enclosing declaration.
-    pub(crate) fn declared_type_parameters(&self) -> impl Iterator<Item = &IrTypeParameter> {
-        self.type_params
-            .iter()
-            .filter(|parameter| !parameter.captured_from_enclosing)
-    }
 }
 
 impl IrFile {
