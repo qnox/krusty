@@ -813,6 +813,21 @@ impl<'a> BodyLowering<'a> {
         temporary
     }
 
+    /// Declare a temporary holding `value`, as fir2ir's `createTemporaryVariable` does: the
+    /// variable is built at its initializer's offsets, so it states the line `value` starts on.
+    fn value_temporary(&mut self, value: ExprId, ty: crate::types::Ty) -> (ExprId, u32) {
+        let temporary = self.allocate_temporary();
+        let declaration = self.ir.add_expr(IrExpr::Variable {
+            index: temporary,
+            ty,
+            init: Some(value),
+            named: false,
+        });
+        self.ir
+            .settle_positions_of(declaration as usize..declaration as usize + 1, value);
+        (declaration, temporary)
+    }
+
     /// Attach a generated static helper to the class that lexically owns this checked FIR body.
     /// The body carries the stable declaration identity; callers never recover ownership from a
     /// generated function name or from the source expression that happens to reference it.

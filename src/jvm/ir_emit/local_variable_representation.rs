@@ -403,8 +403,9 @@ impl Emitter<'_> {
         self.mark_declaration_line(declaration, code);
     }
 
-    /// The declaration's line. A declaration inside an external inline body maps through the class
-    /// source map.
+    /// The declaration's own line, kotlinc's `declaration.markLineNumber(startOffset = true)`: the
+    /// line of its source position, which for a temporary is that of the value it was built for.
+    /// A declaration inside an external inline body maps through the class source map.
     fn mark_declaration_line(&mut self, declaration: ExprId, code: &mut CodeBuilder) {
         match self.ir.external_frame_lines.get(&declaration).cloned() {
             Some(frame) => {
@@ -412,13 +413,7 @@ impl Emitter<'_> {
                 code.mark_line(line);
             }
             None => {
-                // An elvis's temporary marks the line the elvis starts on where it stores the left
-                // value, after a multi-line left side has marked its own.
-                if let Some(line) = self
-                    .ir
-                    .statement_line(declaration)
-                    .or_else(|| self.ir.elvis_temporaries.get(&declaration).copied())
-                {
+                if let Some(line) = self.ir.source_line(declaration) {
                     self.mark_expression_line(declaration, line, code);
                 }
             }

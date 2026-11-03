@@ -135,6 +135,17 @@ impl IrFile {
         }
     }
 
+    /// Settle every node in `nodes` that is not settled yet with the position `value` was settled
+    /// with, as fir2ir builds an implicit conversion of a value, and a temporary holding it, at
+    /// that value's offsets. A value nothing settled yet (an implicit receiver) leaves them for
+    /// the expression that contains it to stamp.
+    pub(crate) fn settle_positions_of(&mut self, nodes: Range<usize>, value: ExprId) {
+        if self.positions.is_settled(value) {
+            let position = self.positions.get(value);
+            self.settle_positions(nodes, position);
+        }
+    }
+
     /// Settle every node of the tree rooted at `root` that is not settled yet with the start,
     /// source and end lines of `position`: code a compiler plugin builds around nodes that keep
     /// their own positions.
@@ -330,5 +341,22 @@ mod tests {
         ir.settle_positions(copy..ir.exprs.len(), position(7));
 
         assert_eq!(ir.position(copy as u32), IrNodePosition::default());
+    }
+
+    #[test]
+    fn nodes_built_for_a_settled_value_take_its_position() {
+        let mut ir = IrFile::default();
+        let value = constant(&mut ir);
+        ir.settle_positions(value..value + 1, position(4));
+        let conversion = constant(&mut ir);
+        let unsettled = constant(&mut ir);
+        let temporary = constant(&mut ir);
+
+        ir.settle_positions_of(conversion..conversion + 1, value as u32);
+        ir.settle_positions_of(temporary..temporary + 1, unsettled as u32);
+        ir.settle_positions(unsettled..ir.exprs.len(), position(9));
+
+        assert_eq!(ir.position(conversion as u32), position(4));
+        assert_eq!(ir.position(temporary as u32), position(9));
     }
 }

@@ -2283,13 +2283,7 @@ impl BodyLowering<'_> {
         ty: Ty,
         statements: &mut Vec<ExprId>,
     ) -> ExprId {
-        let temporary = self.allocate_temporary();
-        let declaration = self.ir.add_expr(IrExpr::Variable {
-            index: temporary,
-            ty,
-            init: Some(value),
-            named: false,
-        });
+        let (declaration, temporary) = self.value_temporary(value, ty);
         self.ir.call_operand_bindings.insert(declaration);
         statements.push(declaration);
         let read = self.ir.add_expr(IrExpr::GetValue(temporary));

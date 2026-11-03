@@ -1088,11 +1088,14 @@ impl BodyLowering<'_> {
                     named: false,
                 });
                 // fir2ir declares the temporary where the elvis starts: for a later link of a
-                // chain, where the chain starts.
+                // chain, where the chain starts. Its store marks that line, after a multi-line left
+                // side has marked its own.
                 let start = chain_start
                     .unwrap_or_else(|| self.body.expression_debug_lines(expression_id).start);
                 if start != 0 {
                     self.ir.elvis_temporaries.insert(variable, start);
+                    self.ir.set_start_line_if_absent(variable, start);
+                    self.ir.set_source_line(variable, start);
                 }
                 let condition_lhs = self.ir.add_expr(IrExpr::GetValue(temporary));
                 let null = self.ir.add_expr(IrExpr::Const(IrConst::Null));
@@ -1704,7 +1707,11 @@ impl BodyLowering<'_> {
             return Ok(lowered);
         }
         let expression = self.expression(value)?;
+        let first_conversion = self.ir.exprs.len();
         let converted = self.lowered_with_conversion(expression, source_type, conversion)?;
+        // fir2ir builds an implicit conversion at the offsets of the value it converts.
+        self.ir
+            .settle_positions_of(first_conversion..self.ir.exprs.len(), expression);
         if conversion.is_some_and(|conversion| {
             matches!(conversion.kind, FirConversionKind::FunctionValue { .. })
         }) {
@@ -2086,13 +2093,7 @@ impl BodyLowering<'_> {
             .ok_or(FirLoweringFailure::MissingExpression(receiver.value))?
             .ty
             .get();
-        let temporary = self.allocate_temporary();
-        let variable = self.ir.add_expr(IrExpr::Variable {
-            index: temporary,
-            ty: receiver_type,
-            init: Some(receiver_value),
-            named: false,
-        });
+        let (variable, temporary) = self.value_temporary(receiver_value, receiver_type);
         // The selector executes only on the non-null branch. Publish that data-flow fact as an
         // explicit conversion so nullable primitive receivers are unboxed before their selected
         // operation; a raw nullable-slot read would put a wrapper into a primitive local.
