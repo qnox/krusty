@@ -1478,21 +1478,15 @@ pub(crate) fn merge_inferred_ty_from_symbols(
     // Two reference lower bounds join at their common supertype, as kotlinc's does: every
     // most-specific classifier both hierarchies share, however far up each one sits, with type
     // arguments joined by declaration variance (`Inv<A>` and `Inv<B>` join at `Inv<out C>`, `C` the
-    // common supertype of `A` and `B`), and
-    // an intersection when several incomparable classifiers remain (`A : Base(), I` and
-    // `B : Base(), J`, `J : I`, join at `Base & I`). The common-supertype solver owns that algebra
-    // for every lower-bound join. A proven join to the top keeps the erased top; a missing or
-    // invalid classifier declaration is `Ty::Error`, which propagates rather than becoming `Any`.
-    let joined =
-        common_supertype::common_super_types(source, &[current.non_null(), actual.non_null()]);
-    if joined.is_erased_top() {
-        return merged;
-    }
-    if current.is_nullable() || actual.is_nullable() {
-        Ty::nullable(joined)
-    } else {
-        joined
-    }
+    // common supertype of `A` and `B`), and an intersection when several incomparable classifiers
+    // remain (`A : Base(), I` and `B : Base(), J`, `J : I`, join at `Base & I`). The one
+    // common-supertype relation owns that algebra for every lower-bound join; it also reads a type
+    // parameter through its bounds and keeps a nullable bound's nullability. A missing or invalid
+    // classifier declaration is `Ty::Error`, which propagates rather than becoming `Any`.
+    common_supertype::common_super_types(
+        source,
+        &[inference_actual(current), inference_actual(actual)],
+    )
 }
 
 /// Collapse a complete set of lower constraints in one operation. Keeping the original bounds is
