@@ -933,6 +933,7 @@ fn recompose_lambda(
     let capture = crate::ir::IrValueCapture {
         declaration: crate::ir::IrCapturedDeclaration::Parameter,
         capturer: crate::ir::IrCapturingCallable::Lambda,
+        crossinline_parameter: None,
     };
     let mut parameter_identities = (0u32..)
         .zip(

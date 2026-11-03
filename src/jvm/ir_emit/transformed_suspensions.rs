@@ -40,6 +40,9 @@ pub(super) struct TransformedSuspensions {
     initializer: Option<ExprId>,
     /// The body is a suspend lambda's placed one, whose calls pass the bare fake continuation.
     placed_lambda: bool,
+    /// The body is kept for an inlining caller: no transformer runs over it, so the markers it
+    /// keeps are written as the `InlineMarker` calls the class file holds.
+    kept_for_inlining: bool,
 }
 
 /// What a suspension point leaves on the stack after its invoke.
@@ -326,6 +329,7 @@ impl Emitter<'_> {
             inlined: HashSet::default(),
             initializer: None,
             placed_lambda: false,
+            kept_for_inlining: false,
         };
         self.suspend_lambda_parameter_reads = machine
             .lambda
@@ -410,6 +414,7 @@ impl Emitter<'_> {
     /// and they are invokes of inline lambda parameters.
     pub(super) fn leave_inlined_invokes_unmarked(&mut self, calls: Vec<ExprId>) {
         self.transformed_suspensions.inlined = calls.into_iter().collect();
+        self.transformed_suspensions.kept_for_inlining = true;
     }
 
     /// Whether suspension point `e` is written between its markers.
@@ -420,7 +425,12 @@ impl Emitter<'_> {
     /// Mark the read of a suspend lambda's parameter from its field, just stored by declaration
     /// `e`, as kotlinc's codegen marks it: the coroutine starts after the last one.
     pub(super) fn mark_suspend_lambda_parameter_read(&mut self, e: ExprId, code: &mut CodeBuilder) {
-        if self.suspend_lambda_parameter_reads.contains(&e) {
+        if !self.suspend_lambda_parameter_reads.contains(&e) {
+            return;
+        }
+        if self.transformed_suspensions.kept_for_inlining {
+            self.written_suspend_marker(SuspendMarker::SuspendLambdaParameter, code);
+        } else {
             code.suspend_marker(SuspendMarker::SuspendLambdaParameter as i32, self.cw);
         }
     }
