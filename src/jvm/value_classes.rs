@@ -1862,11 +1862,10 @@ pub(crate) fn lower_value_classes(
                 internal,
                 args,
                 ctor_params,
-                declared_params: _,
                 ctor_desc: None,
-                external_target: _,
                 defaults,
                 default_prefix_count,
+                ..
             } if under.contains_key(internal) => {
                 let owner = *internal;
                 let u = under
