@@ -122,7 +122,9 @@ fn a_reified_intersection_describes_its_common_supertype() {
 fn a_reified_contravariant_intersection_argument_describes_nothing() {
     // `In<A>` and `In<B>` join at `In<A & B>`, which kotlinc reifies as `In<Nothing>`.
     both(
-        include_str!("box_regressions/typeOfContravariantIntersection.kt"),
+        include_str!(
+            "fixtures/type_of_contravariant_intersection/TypeOfContravariantIntersection.kt"
+        ),
         "TypeOfContravariantIntersection",
     );
 }
