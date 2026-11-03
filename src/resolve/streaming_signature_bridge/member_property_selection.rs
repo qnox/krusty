@@ -57,10 +57,9 @@ impl ProductionSignatureSemantics<'_> {
                 let publication = publication_origin.map(|_| {
                     self.selected_callable_publication(
                         &extension.getter,
-                        crate::resolve::selected_result_publication::SelectedSignature {
-                            signature: extension.getter.generic_sig.as_deref().cloned(),
-                            parameters: extension.semantic_getter_params().into(),
-                        },
+                        crate::resolve::selected_result_publication::SelectedSignature::of_getter(
+                            &extension,
+                        ),
                         Box::new([]),
                         &[],
                         &[],

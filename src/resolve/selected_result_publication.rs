@@ -5,7 +5,9 @@
 
 use super::ResolvedCall;
 use crate::fx_hash::HashMap;
-use crate::libraries::{GenericSig, LibraryCallable, LibraryMember, TypeEnhancement};
+use crate::libraries::{
+    FunctionInfo, GenericSig, LibraryCallable, LibraryMember, PropertyInfo, TypeEnhancement,
+};
 use crate::types::{Ty, TyKind, TypeName};
 
 #[derive(Clone, Copy)]
@@ -86,6 +88,35 @@ pub(super) struct CompactSelectedResultPublication {
 pub(super) struct SelectedSignature {
     pub(super) signature: Option<GenericSig>,
     pub(super) parameters: Box<[Ty]>,
+}
+
+impl SelectedSignature {
+    /// `selected` with the parameters `callable`, its instantiation at this call, gives it.
+    pub(super) fn of_call(selected: &FunctionInfo, callable: &LibraryCallable) -> Self {
+        Self {
+            signature: selected.generic_sig.clone(),
+            parameters: selected.applied_layout(&callable.params).into(),
+        }
+    }
+
+    /// `selected` with the value parameters selection instantiated. The context prefix it
+    /// supplied separately keeps the declaration's own types.
+    pub(super) fn with_supplied_context(selected: &FunctionInfo, values: &[Ty]) -> Self {
+        let declared = selected.semantic_params();
+        let context = &declared[..selected.context_count.min(declared.len())];
+        Self {
+            signature: selected.generic_sig.clone(),
+            parameters: context.iter().chain(values).copied().collect(),
+        }
+    }
+
+    /// The getter of a selected extension property, read with no value arguments.
+    pub(super) fn of_getter(property: &PropertyInfo) -> Self {
+        Self {
+            signature: property.getter.generic_sig.as_deref().cloned(),
+            parameters: property.semantic_getter_params().into(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]

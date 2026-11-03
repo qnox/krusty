@@ -121,6 +121,63 @@ impl ProductionSignatureSemantics<'_> {
         )
     }
 
+    /// A selected top-level declaration's signature with the parameters `callable`, its
+    /// instantiation at this call, gives it.
+    pub(super) fn selected_signature(
+        selected: &crate::libraries::FunctionInfo,
+        callable: &crate::libraries::LibraryCallable,
+    ) -> Box<SelectedSignature> {
+        Box::new(SelectedSignature::of_call(selected, callable))
+    }
+
+    /// The publication of an extension selected through a receiver: `parameters` are the value
+    /// parameters selection instantiated, `result` the result it produced.
+    pub(super) fn selected_extension_publication(
+        &self,
+        selected: &crate::libraries::FunctionInfo,
+        result: Ty,
+        parameters: &[Ty],
+        parameter_by_argument: Box<[Option<u32>]>,
+        arguments: &[crate::fir::ResolvedSigCallArgument<'_>],
+        explicit_type_arguments: &[Ty],
+    ) -> CompactSelectedResultPublication {
+        let mut callable = selected.callable.clone();
+        callable.ret = result;
+        self.selected_callable_publication(
+            &callable,
+            SelectedSignature::with_supplied_context(selected, parameters),
+            parameter_by_argument,
+            arguments,
+            explicit_type_arguments,
+        )
+    }
+
+    /// A member selected through a receiver as the selection instantiated it, with its
+    /// publication: `parameters` are its instantiated value parameters, `result` its result.
+    pub(super) fn selected_member_call_publication(
+        &self,
+        selected: &crate::libraries::FunctionInfo,
+        result: Ty,
+        parameters: Vec<Ty>,
+        parameter_by_argument: Box<[Option<u32>]>,
+        arguments: &[crate::fir::ResolvedSigCallArgument<'_>],
+        explicit_type_arguments: &[Ty],
+    ) -> (
+        crate::libraries::LibraryMember,
+        CompactSelectedResultPublication,
+    ) {
+        let mut member = selected.member_with_return(result);
+        member.params = parameters;
+        let publication = self.selected_member_publication(
+            &member,
+            selected.receiver,
+            parameter_by_argument,
+            arguments,
+            explicit_type_arguments,
+        );
+        (member, publication)
+    }
+
     pub(super) fn selected_member_publication(
         &self,
         member: &crate::libraries::LibraryMember,
