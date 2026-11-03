@@ -1,21 +1,25 @@
 //! An inferred declaration that calls or reads a declaration spelled through a typealias carries
 //! that abbreviation in its own metadata type, whatever the selected declaration's origin.
-// PLATFORM: complete JVM class inventories over a krusty-built dependency.
+// PLATFORM: complete JVM class inventories and Kotlin-first runtime over a krusty-built dependency.
 
 use super::common;
 
-const CALLS: &str = include_str!("box_regressions/multimodule/inferredResultThroughAliasCall.kt");
-const READS: &str = include_str!("box_regressions/multimodule/inferredResultThroughAliasRead.kt");
+const CALLS: &str =
+    include_str!("fixtures/inferred_result_typealias/inferredResultThroughAliasCall.kt");
+const READS: &str =
+    include_str!("fixtures/inferred_result_typealias/inferredResultThroughAliasRead.kt");
 const ARGUMENTS: &str =
-    include_str!("box_regressions/multimodule/inferredResultThroughAliasArguments.kt");
+    include_str!("fixtures/inferred_result_typealias/inferredResultThroughAliasArguments.kt");
 const NULLABLE: &str =
-    include_str!("box_regressions/multimodule/inferredResultThroughNullableAlias.kt");
-const EXPLICIT: &str =
-    include_str!("box_regressions/multimodule/inferredResultThroughExplicitAliasArguments.kt");
+    include_str!("fixtures/inferred_result_typealias/inferredResultThroughNullableAlias.kt");
+const EXPLICIT: &str = include_str!(
+    "fixtures/inferred_result_typealias/inferredResultThroughExplicitAliasArguments.kt"
+);
 const MERGED: &str =
-    include_str!("box_regressions/multimodule/inferredResultThroughMergedAliasArguments.kt");
-const CONTEXT: &str =
-    include_str!("box_regressions/multimodule/inferredResultThroughContextAliasArguments.kt");
+    include_str!("fixtures/inferred_result_typealias/inferredResultThroughMergedAliasArguments.kt");
+const CONTEXT: &str = include_str!(
+    "fixtures/inferred_result_typealias/inferredResultThroughContextAliasArguments.kt"
+);
 
 /// The `lib` and `main(lib)` modules of a two-module fixture.
 fn modules(program: &str) -> (&str, &str) {
@@ -29,9 +33,24 @@ fn modules(program: &str) -> (&str, &str) {
 }
 
 fn assert_complete_program(tag: &str, program: &str) {
-    let (library, main) = modules(program);
-    let library =
-        common::compile_libs(tag, &[("Lib.kt", library)]).expect("krusty builds the library");
+    let (library_source, main) = modules(program);
+    let library = common::compile_libs(tag, &[("Lib.kt", library_source)])
+        .expect("krusty builds the library");
+    let reference_library = common::kotlinc_libraries(&[("Lib.kt", library_source)])
+        .expect("kotlinc builds the library");
+    let reference = common::kotlinc_box_result_with_classpath(main, &[reference_library]);
+    assert_eq!(reference, "OK", "{tag}: kotlinc runs the program");
+    let runtime = [library.clone(), common::stdlib_jar()];
+    assert_eq!(
+        common::expect_box_run(
+            main,
+            "Main",
+            &runtime,
+            Some(common::jdk_modules().as_path())
+        ),
+        reference,
+        "{tag}: krusty and kotlinc box results differ"
+    );
     let classes = common::classes_against_kotlinc_module_cp(&[("Main.kt", main)], &[library]);
     assert_eq!(
         classes.krusty.keys().collect::<Vec<_>>(),
