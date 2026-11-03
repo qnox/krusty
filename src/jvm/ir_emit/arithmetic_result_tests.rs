@@ -1,34 +1,40 @@
 //! The JVM emitter types an arithmetic operator by the result its producer recorded, never by
 //! its operands.
 
-use crate::ir::{IrBinOp, IrConst, IrExpr, IrFile, IrFunction};
+use crate::ir::{IrBinOp, IrExpr, IrFile, IrFunction, IrTypeOp};
 use crate::jvm::ir_emit::invariant_tests::emit_for_test;
 use crate::jvm::ir_emit::EmitRun;
 use crate::types::Ty;
 
-/// `fun box(a: Int, b: Long): Long = a + b`, with the sum's result recorded when `recorded`.
+/// `fun box(a: Int, b: Long): Long = a + b`, with `a` widened to the selected `Long.plus` operand
+/// as checked lowering coerces it, and the sum's result recorded when `recorded`.
 fn mixed_sum(recorded: bool) -> IrFile {
     let mut ir = IrFile::default();
-    let int = ir.add_expr(IrExpr::Const(IrConst::Int(1)));
-    let long = ir.add_expr(IrExpr::Const(IrConst::Long(2)));
+    let int = ir.add_expr(IrExpr::GetValue(0));
+    let widened = ir.add_expr(IrExpr::TypeOp {
+        op: IrTypeOp::ImplicitCoercion,
+        arg: int,
+        type_operand: Ty::Long,
+    });
+    let long = ir.add_expr(IrExpr::GetValue(1));
     let sum = if recorded {
-        ir.add_arithmetic(IrBinOp::Add, int, long, Ty::Long)
+        ir.add_arithmetic(IrBinOp::Add, widened, long, Ty::Long)
     } else {
         ir.add_expr(IrExpr::PrimitiveBinOp {
             op: IrBinOp::Add,
-            lhs: int,
+            lhs: widened,
             rhs: long,
         })
     };
     let returned = ir.add_expr(IrExpr::Return(Some(sum)));
     ir.add_fun(IrFunction {
         name: "box".into(),
-        params: Vec::new(),
+        params: vec![Ty::Int, Ty::Long],
         ret: Ty::Long,
         body: Some(returned),
         is_static: true,
         dispatch_receiver: None,
-        param_checks: Vec::new(),
+        param_checks: vec![None, None],
     });
     ir
 }
@@ -42,9 +48,10 @@ fn an_arithmetic_operator_is_emitted_at_its_recorded_result() {
         .iter()
         .find(|(name, _)| name == "TestKt")
         .expect("facade class");
-    let code = crate::jvm::classreader::read_method_code(bytes, "box", "()J").expect("box code");
-    // The `Long` sum takes two stack words.
-    assert!(code.max_stack >= 2);
+    let code = crate::jvm::classreader::read_method_code(bytes, "box", "(IJ)J").expect("box code");
+    // iload_0; i2l; lload_1; ladd; lreturn
+    assert_eq!(code.code, [0x1a, 0x85, 0x1f, 0x61, 0xad]);
+    assert_eq!(code.max_stack, 4);
 }
 
 #[test]
