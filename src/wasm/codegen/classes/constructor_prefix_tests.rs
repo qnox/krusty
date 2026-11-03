@@ -363,3 +363,220 @@ fn forwarded_ordinals_ignore_preceding_capture_parameters() {
         ))
     );
 }
+
+fn interface_delegate_transport() -> (IrFile, ClassId, u32, u32) {
+    let ir = crate::fir_lower::tests::lower_single_source_with_jvm_stdlib(
+        include_str!("../../../../tests/box_regressions/anonymousInterfaceDelegateOperands.kt"),
+        "AnonymousInterfaceDelegateOperands",
+    );
+    let operands = ir
+        .classes
+        .iter()
+        .enumerate()
+        .flat_map(|(class, declaration)| {
+            declaration
+                .ctor_args
+                .iter()
+                .enumerate()
+                .filter_map(move |(parameter, argument)| match argument.provenance {
+                    IrCtorParameterProvenance::InterfaceDelegate { field, .. } => {
+                        Some((class as ClassId, parameter as u32, field))
+                    }
+                    _ => None,
+                })
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        operands.len(),
+        4,
+        "all four complete anonymous delegate constructions"
+    );
+    for &(class, _, _) in &operands {
+        assert_eq!(check_supported(&ir, class), Ok(()));
+    }
+    let result = operands[0];
+    (ir, result.0, result.1, result.2)
+}
+
+#[test]
+fn declared_interface_operand_matches_its_single_explicit_initializer_and_forwarder() {
+    let (mut ir, class, parameter, field) = interface_delegate_transport();
+    let mut pending = vec![ir.classes[class as usize]
+        .init_body
+        .expect("delegate initializer")];
+    let mut stores = Vec::new();
+    while let Some(expression) = pending.pop() {
+        if let crate::ir::IrExpr::SetField {
+            receiver,
+            class: owner,
+            index,
+            value,
+        } = ir.expr(expression)
+        {
+            if *owner == class && *index == field {
+                assert!(matches!(ir.expr(*receiver), crate::ir::IrExpr::GetValue(0)));
+                assert!(
+                    matches!(ir.expr(*value), crate::ir::IrExpr::GetValue(slot) if *slot == parameter + 1)
+                );
+                stores.push(expression);
+            }
+        }
+        crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+    }
+    assert_eq!(
+        stores.len(),
+        1,
+        "the producer records one exact operand-to-field store"
+    );
+    let mut forwarder_fields = Vec::new();
+    for &method in &ir.classes[class as usize].methods {
+        if !ir.interface_delegation_forwarders.contains(&method) {
+            continue;
+        }
+        let mut pending = vec![ir.functions[method as usize]
+            .body
+            .expect("selected forwarder")];
+        while let Some(expression) = pending.pop() {
+            if let crate::ir::IrExpr::GetField {
+                class: owner,
+                index,
+                ..
+            } = ir.expr(expression)
+            {
+                forwarder_fields.push((*owner, *index));
+            }
+            crate::ir::for_each_child(&ir.exprs, expression, &mut |child| pending.push(child));
+        }
+    }
+    assert_eq!(
+        forwarder_fields,
+        vec![(class, field)],
+        "the complete selected interface member reaches that same delegate"
+    );
+    let IrCtorParameterProvenance::InterfaceDelegate {
+        interface,
+        field: selected_field,
+    } = ir.classes[class as usize].ctor_args[parameter as usize].provenance
+    else {
+        panic!("selected interface operand")
+    };
+    let interface_name = interface
+        .obj_internal()
+        .expect("declared applied interface");
+    let renamed = type_name("RenamedReading");
+    let mut names = crate::fx_hash::HashMap::default();
+    names.insert(interface_name, renamed);
+    ir.remap_classifier_identities(&names);
+    assert_eq!(
+        ir.classes[class as usize].ctor_args[parameter as usize].provenance,
+        IrCtorParameterProvenance::InterfaceDelegate {
+            interface: Ty::obj_name(renamed),
+            field: selected_field
+        }
+    );
+    assert_eq!(
+        check_supported(&ir, class),
+        Ok(()),
+        "the role's interface follows the same typed name remap"
+    );
+}
+
+#[test]
+fn interface_delegate_prefix_requires_positive_role_and_unique_typed_storage() {
+    type Mutation = fn(&mut IrFile, ClassId, u32, u32);
+    let mutations: &[(&str, Mutation)] = &[
+        ("unproven ordinary Value", |ir, class, parameter, _| {
+            ir.classes[class as usize].ctor_args[parameter as usize].provenance =
+                IrCtorParameterProvenance::Value;
+        }),
+        ("unknown target field", |ir, class, parameter, _| {
+            let IrCtorParameterProvenance::InterfaceDelegate { field, .. } =
+                &mut ir.classes[class as usize].ctor_args[parameter as usize].provenance
+            else {
+                panic!("interface operand")
+            };
+            *field = u32::MAX;
+        }),
+        ("unrelated applied interface", |ir, class, parameter, _| {
+            let IrCtorParameterProvenance::InterfaceDelegate { interface, .. } =
+                &mut ir.classes[class as usize].ctor_args[parameter as usize].provenance
+            else {
+                panic!("interface operand")
+            };
+            *interface = Ty::String;
+        }),
+        (
+            "same classifier with different applied arguments",
+            |ir, class, parameter, _| {
+                let IrCtorParameterProvenance::InterfaceDelegate { interface, .. } =
+                    &mut ir.classes[class as usize].ctor_args[parameter as usize].provenance
+                else {
+                    panic!("interface operand")
+                };
+                let name = interface
+                    .obj_internal()
+                    .expect("same declared interface classifier");
+                *interface = Ty::obj_args_name(name, &[Ty::String]);
+                assert!(
+                    ir.classes[class as usize].interfaces.contains_name(name),
+                    "raw classifier membership alone would admit this malformed application"
+                );
+            },
+        ),
+        ("duplicate field owner", |ir, class, parameter, _| {
+            let argument = ir.classes[class as usize].ctor_args[parameter as usize].clone();
+            ir.classes[class as usize].ctor_args.push(argument);
+        }),
+        ("mutable storage", |ir, class, _, field| {
+            ir.classes[class as usize].fields[field as usize].flags = ir.classes[class as usize]
+                .fields[field as usize]
+                .flags
+                .with_is_final(false);
+        }),
+        ("wrong stored type", |ir, class, _, field| {
+            ir.classes[class as usize].fields[field as usize].ty = Ty::Int;
+        }),
+        (
+            "forwarded-super role mixed in",
+            |ir, class, parameter, _| {
+                ir.classes[class as usize].ctor_args[parameter as usize].anonymous_super_forward =
+                    Some(1);
+            },
+        ),
+        ("capture identity mixed in", |ir, class, parameter, _| {
+            let identity = ClassCaptureIdentity::Receiver(0);
+            ir.classes[class as usize].ctor_args[parameter as usize].capture_identity =
+                Some(identity);
+            ir.class_capture_identities
+                .insert((class, parameter), identity);
+        }),
+        (
+            "constructor-property storage mixed in",
+            |ir, class, parameter, field| {
+                let argument = &mut ir.classes[class as usize].ctor_args[parameter as usize];
+                argument.is_field = true;
+                argument.field_index = Some(field);
+            },
+        ),
+        ("second pre-super store", |ir, class, parameter, field| {
+            ir.classes[class as usize]
+                .pre_super_param_fields
+                .push((parameter, field));
+        }),
+        ("shared holder", |ir, class, _, field| {
+            ir.shared_class_capture_fields
+                .insert((class, field), Ty::String);
+        }),
+    ];
+    let (original, class, parameter, field) = interface_delegate_transport();
+    let expected = Err(format!(
+        "a class capturing its surroundings (`{}`)",
+        original.classes[class as usize].fq_name()
+    ));
+    for (label, mutate) in mutations {
+        let mut ir = copy_transport(&original);
+        mutate(&mut ir, class, parameter, field);
+        assert_eq!(check_supported(&ir, class), expected, "{label}");
+    }
+    assert_eq!(check_supported(&original, class), Ok(()));
+}
