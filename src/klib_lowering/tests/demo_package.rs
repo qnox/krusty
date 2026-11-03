@@ -21,7 +21,8 @@ use crate::metadata::id_signature::{
 use crate::metadata::klib_ir::tree::{
     KlibIrArena, KlibIrArguments, KlibIrBody, KlibIrBranch, KlibIrExprId, KlibIrExprKind,
     KlibIrFunction, KlibIrLoop, KlibIrMember, KlibIrMemberAccess, KlibIrNullability,
-    KlibIrParameter, KlibIrStatement, KlibIrType, KlibIrTypeId, KlibIrTypeOperator, KlibIrVariable,
+    KlibIrParameter, KlibIrStatement, KlibIrType, KlibIrTypeArgument, KlibIrTypeId,
+    KlibIrTypeOperator, KlibIrVariable, KlibIrVariance,
 };
 use crate::metadata::klib_ir::{
     KlibIrConstant, KlibIrDeclarationTree, KlibIrModuleTrees, KlibIrSymbol, KlibIrSymbolKind,
@@ -50,6 +51,10 @@ pub(super) enum T {
     NullableString,
     /// `Nothing?`, the type of `null`.
     NullableNothing,
+    /// `List<String>`.
+    ListString,
+    /// `List<Any?>`.
+    ListNullableAny,
 }
 
 impl T {
@@ -70,6 +75,25 @@ impl T {
             T::NullableInt => "Int",
             T::NullableString => "String",
             T::NullableNothing => "Nothing",
+            T::ListString | T::ListNullableAny => "List",
+        }
+    }
+
+    /// The package the class is declared in.
+    fn package(self) -> &'static str {
+        match self {
+            T::DemoBox => "demo",
+            T::ListString | T::ListNullableAny => "kotlin/collections",
+            _ => "kotlin",
+        }
+    }
+
+    /// The type argument of a generic class type.
+    fn argument(self) -> Option<T> {
+        match self {
+            T::ListString => Some(T::String),
+            T::ListNullableAny => Some(T::NullableAny),
+            _ => None,
         }
     }
 
@@ -86,11 +110,8 @@ impl T {
 
     pub(super) fn kotlin(self) -> KotlinType {
         KotlinType::Class {
-            internal: match self {
-                T::DemoBox => "demo/Box".to_owned(),
-                _ => format!("kotlin/{}", self.class()),
-            },
-            args: Vec::new(),
+            internal: format!("{}/{}", self.package(), self.class()),
+            args: self.argument().map(T::kotlin).into_iter().collect(),
             nullable: self.nullable(),
             shape: KotlinFunctionTypeShape::default(),
         }
@@ -101,10 +122,16 @@ impl T {
     }
 
     pub(super) fn klib(self) -> KlibIrType {
-        let package = [match self {
-            T::DemoBox => "demo".to_owned(),
-            _ => "kotlin".to_owned(),
-        }];
+        self.klib_applied(Vec::new())
+    }
+
+    /// The KLIB type of the class applied to `arguments`.
+    fn klib_applied(self, arguments: Vec<KlibIrTypeArgument>) -> KlibIrType {
+        let package = self
+            .package()
+            .split('/')
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
         let signature = metadata_class_signature(
             MetadataContainer {
                 package: &package,
@@ -124,7 +151,7 @@ impl T {
             } else {
                 KlibIrNullability::NotSpecified
             },
-            arguments: Vec::new(),
+            arguments,
             annotations: Vec::new(),
             abbreviation: None,
         }
@@ -278,7 +305,15 @@ impl Body {
         if let Some((_, id)) = self.types.iter().find(|(known, _)| *known == ty) {
             return *id;
         }
-        let id = self.arena.push_type(ty.klib());
+        let arguments = ty
+            .argument()
+            .map(|argument| KlibIrTypeArgument::Type {
+                variance: KlibIrVariance::Invariant,
+                ty: self.ty(argument),
+            })
+            .into_iter()
+            .collect();
+        let id = self.arena.push_type(ty.klib_applied(arguments));
         self.types.push((ty, id));
         id
     }

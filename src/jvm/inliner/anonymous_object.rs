@@ -11,8 +11,7 @@
 //! An object whose constructor is passed one of the call's inline lambdas (a `crossinline` one)
 //! inlines it: the copy keeps the lambda's captured values instead of the lambda, and each of its
 //! methods that called the lambda runs the lambda's body in its place (see `lambda_inlining`).
-//! Objects whose bodies create anonymous objects of their own are a later stage (see "JVM unified
-//! inliner" in `docs/IMPLEMENTATION_PLAN.md`).
+//! Objects whose bodies create anonymous objects of their own are a later stage.
 
 mod constructor;
 use constructor::DeclaredCapture;
@@ -387,11 +386,6 @@ pub(crate) fn regenerate(
     .map_err(RegenerationError::Copy)?;
 
     // The suspend lambda fields the copy inlines.
-    let suspend_fields: Vec<&str> = lambdas
-        .iter()
-        .filter(|lambda| lambda.lambda.suspend)
-        .map(|lambda| lambda.field.as_str())
-        .collect();
     // The continuations of copies that need none, whose `InnerClasses` rows go with them.
     let mut dropped_continuations = Vec::new();
     let mut nested = Vec::new();
@@ -436,20 +430,6 @@ pub(crate) fn regenerate(
         };
         remap_declaration(&mut method, &mut remapper)?;
         if let Some(code) = &method.code {
-            // Only a `$$forInline` copy's machine takes the suspension points a suspend lambda
-            // brings: kotlinc writes one for every suspend method that invokes such a lambda.
-            if machine.is_none()
-                && lambda_inlining::invokes_field_lambda(
-                    code,
-                    old,
-                    &suspend_fields,
-                    regeneration.classes,
-                )?
-            {
-                return Err(RegenerationError::Unsupported(
-                    "a suspend lambda in a method without a $$forInline copy",
-                ));
-            }
             // kotlinc's `MethodInliner` transforms every method of a copy: one that reads an inlined
             // lambda, or names an object the copy regenerates in turn (a reified lambda nested in
             // it), has its objects regenerated as the copy's next ones.
@@ -480,6 +460,7 @@ pub(crate) fn regenerate(
                 let code = lambda_inlining::inline_into(
                     &code,
                     new,
+                    machine.is_some(),
                     &lambdas,
                     &mut lines,
                     regeneration.caller_lines,
@@ -880,60 +861,6 @@ fn references_other_regenerated_class(
         } => name == "INSTANCE" && other(owner),
         _ => false,
     }
-}
-
-/// Whether `original`, constructed through `call_desc` with one of the call's suspend lambdas as
-/// each argument at `suspend_arguments`, invokes one of them from a method that has no `$$forInline`
-/// copy. kotlinc writes that copy of every method of an object in an inline function's scope that
-/// invokes a suspend inline lambda, and a regenerated object's state machine is built over it; a
-/// body written without one cannot be regenerated. A method that only passes the lambda on to the
-/// object's own constructor (a suspend lambda's `invoke` or `create`) invokes nothing. A use the
-/// inliner does not place cannot be shown not to invoke the lambda, so it counts as one.
-pub(crate) fn invokes_suspend_lambda_without_for_inline_copy(
-    original: &ClassNode,
-    call_desc: &str,
-    suspend_arguments: &[usize],
-    classes: &dyn ClassRoles,
-) -> Result<bool, RegenerationError> {
-    let (constructor, methods) = split_constructor(original)?;
-    let code = constructor
-        .code
-        .as_ref()
-        .ok_or(RegenerationError::Unsupported("a constructor without code"))?;
-    let declared: Vec<DeclaredCapture<'_>> = original
-        .fields
-        .iter()
-        .filter(|field| is_captured_field_name(&field.name))
-        .map(|field| DeclaredCapture {
-            name: &field.name,
-            desc: &field.desc,
-        })
-        .collect();
-    let plan = constructor::extract(code, &original.name, &declared, call_desc)?;
-    let slots = constructor::argument_slots(call_desc).ok_or(RegenerationError::Unsupported(
-        "a malformed constructor descriptor",
-    ))?;
-    let fields: Vec<&str> = plan
-        .fields
-        .iter()
-        .filter(|field| {
-            suspend_arguments
-                .iter()
-                .any(|&argument| slots.get(argument) == Some(&field.slot))
-        })
-        .map(|field| field.name.as_str())
-        .collect();
-    let for_inline = suspend_methods::ForInlineCopies::of(&methods);
-    Ok(methods.iter().any(|method| {
-        suspend_methods::for_inline_original(&method.name).is_none()
-            && !for_inline.skips(method)
-            && method.code.as_ref().is_some_and(|code| {
-                !matches!(
-                    lambda_inlining::invokes_field_lambda(code, &original.name, &fields, classes),
-                    Ok(false)
-                )
-            })
-    }))
 }
 
 /// The original's one constructor and its other methods, in order.
