@@ -243,6 +243,8 @@ fn synthesize_components_and_copy(
         .and_then(|primary| super::constructors::module_constructor_target(index, primary))
         .ok_or(FirFileLoweringFailure::MissingCallable(declaration))?;
     ir.construction_targets.insert(constructed, target);
+    // The construction is part of the class's own body, so a private primary stays a direct call.
+    ir.expression_owners.insert(constructed, owner);
     let returned = ir.add_expr(IrExpr::Return(Some(constructed)));
     ir.functions[copy as usize].body = Some(ir.add_expr(IrExpr::Block {
         stmts: vec![returned],
