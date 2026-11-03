@@ -126,14 +126,23 @@ impl BodyLowering<'_> {
                     }
                 }
             }
-            CommonPrimitive::Intrinsic(intrinsic) => self.ir.add_expr(IrExpr::Call {
-                callee: Box::new(Callee::Intrinsic {
-                    operation: intrinsic,
-                    ret: primitive.ret,
-                }),
-                dispatch_receiver: Some(receiver),
-                args: Vec::new(),
-            }),
+            // The ordinary read of the property, as checked FIR lowers a source read of it.
+            CommonPrimitive::PropertyRead(_) => {
+                let target = primitive
+                    .property
+                    .expect("an authenticated property read names its property");
+                self.ir.add_expr(IrExpr::Checked(Box::new(
+                    IrCheckedOperation::ExternalPropertyRead {
+                        target,
+                        dispatch: IrPropertyDispatch::Ordinary,
+                        receiver: Some(receiver),
+                        arguments: Vec::new(),
+                        parameters: Vec::new(),
+                        result: operands.ret,
+                        source_receiver: operands.receiver_type,
+                    },
+                )))
+            }
             // The source range operator over the receiver and the end bound, as checked FIR
             // lowers `start..end` once the provider's declaration fixed the range it builds.
             CommonPrimitive::RangeConstruction(operation) => {
