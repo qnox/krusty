@@ -115,9 +115,7 @@ fn hoist_when_statement_branches(
         stmts: remaining,
         value: None,
     });
-    out.push(ir.add_expr(IrExpr::When {
-        branches: vec![(Some(condition), body), (None, else_body)],
-    }));
+    out.push(ir.add_when(vec![(Some(condition), body), (None, else_body)], Ty::Unit));
     out
 }
 

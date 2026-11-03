@@ -133,7 +133,7 @@ pub(super) fn bind_value_when_to_fresh_local(
             )
         })
         .collect();
-    let conditional = ir.add_expr(IrExpr::When { branches });
+    let conditional = ir.add_when(branches, Ty::Unit);
     let value = ir.add_expr(IrExpr::GetValue(tmp));
     Some((declaration, conditional, value))
 }
@@ -188,7 +188,11 @@ pub(super) fn normalize_value_when(ir: &mut IrFile, expression: ExprId) -> Optio
                     (condition, body)
                 })
                 .collect();
-            Some(ir.add_expr(IrExpr::When { branches }))
+            // The conversion's result is what each converted branch, and so the `when`, yields.
+            let result = ir
+                .named_type(expression)
+                .expect("a type operation names its result");
+            Some(ir.add_when(branches, result))
         }
         _ => None,
     }

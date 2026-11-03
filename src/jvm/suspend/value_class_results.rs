@@ -123,9 +123,10 @@ pub(super) fn resumed_carrier(
         rhs: null,
     });
     let passed = ir.add_expr(IrExpr::Const(IrConst::Null));
-    ir.add_expr(IrExpr::When {
-        branches: vec![(Some(is_null), passed), (None, unboxed)],
-    })
+    ir.add_when(
+        vec![(Some(is_null), passed), (None, unboxed)],
+        Ty::nullable(carrier),
+    )
 }
 
 /// The box of the carrier `value` holds: `X.box-impl`, with the `null` of a nullable carrier
@@ -168,7 +169,8 @@ pub(super) fn boxed_carrier(
         rhs: null,
     });
     let passed = ir.add_expr(IrExpr::Const(IrConst::Null));
-    ir.add_expr(IrExpr::When {
-        branches: vec![(Some(is_null), passed), (None, boxed)],
-    })
+    ir.add_when(
+        vec![(Some(is_null), passed), (None, boxed)],
+        Ty::nullable(Ty::obj_name(classifier)),
+    )
 }

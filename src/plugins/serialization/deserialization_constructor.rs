@@ -593,9 +593,7 @@ pub(super) fn complete_deserialization_constructor(
             stmts: vec![store_argument],
             value: None,
         });
-        let applied = ir.add_expr(IrExpr::When {
-            branches: vec![(Some(absent), defaulted), (None, supplied)],
-        });
+        let applied = ir.add_when(vec![(Some(absent), defaulted), (None, supplied)], Ty::Unit);
         // kotlinc attributes the seen-bit test to the class's start line, as it does the store;
         // after an `init` block that line is no longer current.
         let start_line = ir.classes[class_id as usize].decl_start_line;

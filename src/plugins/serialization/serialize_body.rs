@@ -537,9 +537,10 @@ impl SerializeBody<'_> {
                 // in a temp and combines with `ior`, which is a different method body from
                 // kotlinc's for every defaulted property in the class.
                 let encode_anyway = ir.add_expr(IrExpr::Const(IrConst::Boolean(true)));
-                let cond = ir.add_expr(IrExpr::When {
-                    branches: vec![(Some(should), encode_anyway), (None, neq)],
-                });
+                let cond = ir.add_when(
+                    vec![(Some(should), encode_anyway), (None, neq)],
+                    Ty::Boolean,
+                );
                 let guard = ir.add_expr(IrExpr::When {
                     branches: vec![(Some(cond), enc_stmt)],
                 });
