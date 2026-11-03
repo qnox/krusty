@@ -39,6 +39,37 @@ impl Checker<'_> {
         }
     }
 
+    /// A lambda that selection saw only by its written arity, now bound to a classifier parameter
+    /// that gives it no function shape: it still owes its one analysis, as a standalone literal. A
+    /// type-parameter target stays postponed until inference gives it a shape.
+    pub(super) fn lambda_awaits_unshaped_analysis(&self, expression: ExprId, expected: Ty) -> bool {
+        matches!(self.file.expr(expression), Expr::Lambda { .. })
+            && !matches!(
+                self.expr_lowers.get(&expression),
+                Some(ExprLowering::Lambda(_))
+            )
+            && matches!(
+                self.declared_function_semantic_type(expected)
+                    .non_null()
+                    .kind(),
+                TyKind::Obj(..) | TyKind::Unit | TyKind::Intersection(_)
+            )
+    }
+
+    /// An argument checked once its selected parameter is known to give it no function shape: a
+    /// lambda is then analysed as a standalone literal, so it declares no implicit `it` and has its
+    /// natural function type.
+    pub(super) fn check_unshaped_argument(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        expression: ExprId,
+    ) -> Ty {
+        self.postponed_argument_depth += 1;
+        let ty = self.expr(scope, expression);
+        self.postponed_argument_depth -= 1;
+        ty
+    }
+
     /// Whether a lambda literal's parameter list is written, so it never gets an implicit `it`:
     /// `{ x -> }`, `{ -> }`, or an anonymous function `fun() {}`.
     fn lambda_declares_its_parameters(&self, lambda: ExprId) -> bool {
@@ -943,11 +974,7 @@ impl Checker<'_> {
         name: &str,
         candidates: &[crate::libraries::FunctionInfo],
     ) -> Ty {
-        self.report_callable_ambiguity(call, name, candidates);
-        if let Expr::Call { args, .. } = self.file.expr(call) {
-            let args = args.clone();
-            self.report_unshaped_lambda_diagnostics(scope, &args, Some(name));
-        }
+        self.report_callable_ambiguity(scope, call, name, candidates);
         self.set(call, Ty::Error)
     }
 

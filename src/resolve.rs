@@ -14921,7 +14921,7 @@ impl<'a> Checker<'a> {
                                 );
                             }
                             Some(CallableCandidateSelection::Ambiguous(candidates, _)) => {
-                                self.report_callable_ambiguity(call, &name, &candidates);
+                                self.report_callable_ambiguity(scope, call, &name, &candidates);
                                 return Ty::Error;
                             }
                             None => {}
@@ -35630,23 +35630,27 @@ impl<'a> Checker<'a> {
         })
     }
 
+    /// kotlinc's overload ambiguity for `call`. No candidate shapes the call's lambdas, so each is
+    /// then analysed as a standalone literal and reports its own diagnostics.
     fn report_callable_ambiguity(
         &mut self,
+        scope: &CheckerScope<'_>,
         call: ExprId,
         name: &str,
         candidates: &[crate::libraries::FunctionInfo],
     ) {
-        if let Expr::Call { args, .. } = self.file.expr(call) {
-            if self.call_has_error_argument(args) {
-                return;
-            }
-        }
+        let args = match self.file.expr(call) {
+            Expr::Call { args, .. } if self.call_has_error_argument(args) => return,
+            Expr::Call { args, .. } => args.clone(),
+            _ => Vec::new(),
+        };
         let mut message = "overload resolution ambiguity between candidates:".to_string();
         for candidate in candidates {
             message.push('\n');
             message.push_str(&Self::callable_candidate_display(name, candidate));
         }
         self.diags.error(self.call_callee_name_span(call), message);
+        self.report_unshaped_lambda_diagnostics(scope, &args, Some(name));
     }
 
     fn source_callable_display(&self, function: &crate::libraries::FunctionInfo) -> Option<String> {
@@ -48852,6 +48856,9 @@ impl<'a> Checker<'a> {
         if self.file.collection_literal_calls.contains(&argument.0) {
             return self.expr_expected(scope, argument, expected);
         }
+        if self.lambda_awaits_unshaped_analysis(argument, expected) {
+            return self.check_unshaped_argument(scope, argument);
+        }
         if self.lambda_needs_selected_shape(scope, argument, probed_actual, expected) {
             let has_receiver = call_sig
                 .lambda_receiver_params
@@ -49214,6 +49221,8 @@ impl<'a> Checker<'a> {
             && expected.non_null().is_fun()
         {
             self.check_argument_expected(scope, argument, expected, false, None)
+        } else if self.lambda_awaits_unshaped_analysis(argument, expected) {
+            self.check_unshaped_argument(scope, argument)
         } else if self.lambda_needs_selected_shape(scope, argument, actual, expected) {
             self.check_argument_expected(
                 scope,
@@ -51383,10 +51392,7 @@ impl<'a> Checker<'a> {
         if let Some(probe) = self.lambda_probe_ty(expression) {
             return probe;
         }
-        self.postponed_argument_depth += 1;
-        let ty = self.expr(scope, expression);
-        self.postponed_argument_depth -= 1;
-        ty
+        self.check_unshaped_argument(scope, expression)
     }
 
     /// A lambda argument's expected shape at one parameter position of a semantic-provider

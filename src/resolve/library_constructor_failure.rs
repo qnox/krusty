@@ -208,7 +208,7 @@ impl Checker<'_> {
                 let actual = if actual == Ty::Error
                     && matches!(self.file.expr(argument), Expr::Lambda { .. })
                 {
-                    self.check_postponed_argument(scope, argument)
+                    self.check_unshaped_argument(scope, argument)
                 } else {
                     actual
                 };
