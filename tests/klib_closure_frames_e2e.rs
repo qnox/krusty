@@ -444,20 +444,23 @@ fn assert_official_dependency_closures(
         return;
     };
     // Establish the portable source behavior before executing a Native dependency consumer.
+    // kotlinc compiles the dependency and its consumer as separate modules: the runtime answer
+    // every krusty lane must reproduce.
     let consumer_text = format!("package fixture\n{consumer}");
-    if matches!(purpose, DependencyConsumer::SourceClassifierCollision) {
-        // These are different modules with equal classifier names, not a source redeclaration.
-        let dependency = common::kotlinc_lib_out(&[("Library.kt", library_source)])
-            .expect("reference compiler required for dependency identity oracle");
-        assert_eq!(
-            common::kotlinc_box_files_result_with_classpath(
-                &[("Consumer.kt", &consumer_text)],
-                "fixture.ConsumerKt",
-                &[dependency],
-            ),
-            "OK"
-        );
-    } else {
+    let dependency = common::kotlinc_lib_out(&[("Library.kt", library_source)])
+        .expect("reference compiler required for the dependency consumer oracle");
+    assert_eq!(
+        common::kotlinc_box_files_result_with_classpath(
+            &[("Consumer.kt", &consumer_text)],
+            "fixture.ConsumerKt",
+            &[dependency],
+        ),
+        "OK",
+        "{fixture_name}: unexpected kotlinc result"
+    );
+    // Different modules with equal classifier names are not a source redeclaration, so only the
+    // other consumers also run as one krusty source module.
+    if !matches!(purpose, DependencyConsumer::SourceClassifierCollision) {
         common::expect_box_ok_with_stdlib(
             &format!("{library_source}\n{consumer}"),
             &format!("{fixture_name}Oracle"),
