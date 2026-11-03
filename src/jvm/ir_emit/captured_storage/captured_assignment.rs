@@ -48,7 +48,7 @@ pub(in crate::jvm::ir_emit) fn emit(
         code.forget_line();
         debug_lines::mark_statement(emitter.ir, expression, code);
     }
-    if emitter.ir.expr_source_lines.contains_key(&value) || enters_nested_frame {
+    if emitter.ir.source_line(value).is_some() || enters_nested_frame {
         if let Some(&statement_line) = emitter.ir.expr_lines.get(&expression) {
             emitter.mark_expression_line(expression, statement_line, code);
         }

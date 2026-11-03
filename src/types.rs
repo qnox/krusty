@@ -284,6 +284,13 @@ impl TypeName {
         type_names().nested_owner(self.name_id()).map(TypeName)
     }
 
+    /// Exact declaration nesting, without the backend spelling interpretation of `nested_owner`.
+    pub(crate) fn exact_nested_owner(self) -> Option<TypeName> {
+        type_names()
+            .exact_nested_owner(self.name_id())
+            .map(TypeName)
+    }
+
     /// Backend-oriented candidates for textual JVM nesting, deepest first. Semantic resolution
     /// continues to use the single exact [`Self::nested_owner`] relation.
     pub(crate) fn existing_nested_owners(self) -> Vec<TypeName> {
