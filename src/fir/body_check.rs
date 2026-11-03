@@ -35,6 +35,7 @@ mod destructure_tests;
 mod driver;
 #[cfg(test)]
 mod driver_tests;
+mod enclosing_capture_owners;
 mod enum_entries;
 mod enum_reflection;
 mod failure;

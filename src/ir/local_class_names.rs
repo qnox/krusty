@@ -107,7 +107,7 @@ fn name(name: &mut TypeName, names: &IdentityRemap<'_>) {
 /// A captured enclosing instance names its class by identity, which follows the class's rename.
 fn captured_receiver(receiver: &mut super::IrCapturedReceiver, names: &IdentityRemap<'_>) {
     match receiver {
-        super::IrCapturedReceiver::Enclosing { classifier } => name(classifier, names),
+        super::IrCapturedReceiver::Enclosing { classifier, .. } => name(classifier, names),
         super::IrCapturedReceiver::Context { types, .. } => tys(types, names),
         super::IrCapturedReceiver::Callable { .. } | super::IrCapturedReceiver::Lambda(_) => {}
     }

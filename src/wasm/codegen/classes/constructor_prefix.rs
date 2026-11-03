@@ -1,7 +1,7 @@
 //! Constructor-prefix transport proved by common IR, separately from physical field ordinals.
 
-use crate::fir::ClassCaptureIdentity;
-use crate::ir::{ClassId, IrCtorArg, IrCtorParameterProvenance, IrFile};
+use crate::fir::{ClassCaptureIdentity, EnclosingInstanceKind};
+use crate::ir::{ClassId, IrCapturedReceiver, IrCtorArg, IrCtorParameterProvenance, IrFile};
 use crate::types::TyKind;
 
 pub(super) fn supported(ir: &IrFile, id: ClassId) -> bool {
@@ -63,14 +63,16 @@ pub(super) fn supported(ir: &IrFile, id: ClassId) -> bool {
                 argument
                     .capture
                     .as_ref()
-                    .is_some_and(|capture| capture.receiver.is_none())
-                    && !matches!(
-                        argument.capture_identity,
-                        Some(ClassCaptureIdentity::Receiver(_))
-                    )
+                    .is_some_and(|capture| match capture.receiver.as_ref() {
+                        None => !matches!(
+                            argument.capture_identity,
+                            Some(ClassCaptureIdentity::Receiver(_))
+                        ),
+                        Some(receiver) => enclosing_receiver(ir, argument, receiver),
+                    })
                     && argument.capture_identity
                         == ir.class_capture_identities.get(&(id, parameter)).copied()
-                    && stored_parameter(ir, id, parameter, argument)
+                    && capture_parameter(ir, id, parameter, argument)
             }
             IrCtorParameterProvenance::EnclosingInstance if class.is_inner_class => {
                 argument.capture.is_none()
@@ -81,6 +83,37 @@ pub(super) fn supported(ir: &IrFile, id: ClassId) -> bool {
             _ => false,
         }
     })
+}
+
+// A source enclosing receiver is an ordinary reference only after its selected declaration,
+// semantic classifier and closure identity survived checking together. Other receiver profiles
+// still need their own transport contract; neither a field ordinal nor a type bound proves one.
+fn enclosing_receiver(ir: &IrFile, argument: &IrCtorArg, receiver: &IrCapturedReceiver) -> bool {
+    let IrCapturedReceiver::Enclosing {
+        classifier,
+        owner: Some(owner),
+    } = receiver
+    else {
+        return false;
+    };
+    if owner.kind != EnclosingInstanceKind::Classifier
+        || argument.capture_identity.is_none()
+        || !matches!(argument.ty.kind(), TyKind::Obj(name, _) if name == *classifier)
+    {
+        return false;
+    }
+    let Some(&selected) = ir.checked_classifier_classes.get(&owner.declaration) else {
+        return false;
+    };
+    ir.classes
+        .get(selected as usize)
+        .is_some_and(|class| class.fq_name_id() == *classifier)
+        && ir
+            .checked_classifier_classes
+            .values()
+            .filter(|&&class| class == selected)
+            .count()
+            == 1
 }
 
 // The positive producer-owned role identifies an explicit post-super initializer. Its field
@@ -115,6 +148,22 @@ fn delegate_parameter(
                 || matches!(other.provenance,
                     IrCtorParameterProvenance::InterfaceDelegate { field: target, .. } if target == field)
         }).count() == 1
+}
+
+fn capture_parameter(ir: &IrFile, id: ClassId, parameter: u32, argument: &IrCtorArg) -> bool {
+    match (argument.is_field, argument.field_index) {
+        (true, Some(_)) => stored_parameter(ir, id, parameter, argument),
+        // A constructor-only capture is already an ordinary constructor parameter. It has no
+        // physical field and cannot participate in either stored or forwarded prefix transport.
+        (false, None) => {
+            argument.anonymous_super_forward.is_none()
+                && !ir.classes[id as usize]
+                    .pre_super_param_fields
+                    .iter()
+                    .any(|(source, _)| *source == parameter)
+        }
+        _ => false,
+    }
 }
 
 fn stored_parameter(ir: &IrFile, id: ClassId, parameter: u32, argument: &IrCtorArg) -> bool {
