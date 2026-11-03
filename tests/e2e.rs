@@ -1277,6 +1277,8 @@ mod internal_classpath_access_e2e;
 mod internal_component_names_e2e;
 #[path = "internal_member_names_e2e.rs"]
 mod internal_member_names_e2e;
+#[path = "internal_operator_member_e2e.rs"]
+mod internal_operator_member_e2e;
 #[path = "internal_primary_constructor_metadata_e2e.rs"]
 mod internal_primary_constructor_metadata_e2e;
 #[path = "intersection_reified_type_of_e2e.rs"]

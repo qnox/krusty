@@ -1,5 +1,6 @@
-// An `internal` member of another module is invisible at the call site, so an applicable
-// extension takes the operator call, the indexed read and the call, as for a private member.
+// An `internal` member of another module is invisible at the call site whatever expression
+// produces the receiver: here a library function returns the instance, and an applicable
+// extension still takes the operator call, the indexed read and the call.
 // MODULE: lib
 package lib
 
