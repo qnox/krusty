@@ -50,6 +50,23 @@ impl BodyLowering<'_> {
         parameter_ty: Ty,
         statements: &mut Vec<ExprId>,
     ) -> ExprId {
+        let first = statements.len();
+        let read = self.spill_reordered_value(value, parameter_ty, statements);
+        // These holders, and only these, are kotlinc's argument-order variables, which take their
+        // slots before their values are evaluated. Any other call-operand holder is a staging of
+        // the operand, stored once it is evaluated.
+        for &declaration in &statements[first..] {
+            self.ir.argument_evaluation_bindings.insert(declaration);
+        }
+        read
+    }
+
+    fn spill_reordered_value(
+        &mut self,
+        value: ExprId,
+        parameter_ty: Ty,
+        statements: &mut Vec<ExprId>,
+    ) -> ExprId {
         if let &IrExpr::TypeOp {
             op: IrTypeOp::ImplicitCoercion,
             arg,
@@ -83,8 +100,8 @@ impl BodyLowering<'_> {
     /// Keep the operand's source line on that replay so the next direct operand can restore its own
     /// line, exactly as it would without the evaluation-order temporary.
     fn reordered_operand_replay(&mut self, source: ExprId, replay: ExprId) -> ExprId {
-        if let Some(&line) = self.ir.expr_source_lines.get(&source) {
-            self.ir.expr_source_lines.insert(replay, line);
+        if let Some(line) = self.ir.source_line(source) {
+            self.ir.set_source_line(replay, line);
         }
         replay
     }

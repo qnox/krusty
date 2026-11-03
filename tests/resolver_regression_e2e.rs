@@ -2783,3 +2783,45 @@ fun test(value: Duo<String, Int>) {
 "#;
     assert_rejection_same_as_kotlinc("StructuralArgumentRejectsEachFormal", source);
 }
+
+/// An invariant receiver (`Inv<T>`) fixes a member extension's formal exactly; only a covariant
+/// receiver joins it with an argument's type (`box_regressions/memberExtensionCovariantReceiverJoin.kt`).
+#[test]
+fn an_invariant_member_extension_receiver_keeps_its_exact_binding() {
+    let source = "open class Base\n\
+                  class Sub : Base()\n\
+                  class Inv<T>(val v: T)\n\
+                  class K {\n    \
+                  fun <T : Any> Inv<T>.same(expected: T): Boolean = v == expected\n    \
+                  fun c(i: Inv<Sub>, x: Base): Boolean = i.same(x)\n\
+                  }\n";
+    assert_rejection_same_as_kotlinc("InvariantMemberExtensionReceiver", source);
+}
+
+/// A member extension's formal reached only through another formal's bound is the receiver's own
+/// type argument, so a conflicting expected result is reported against that argument
+/// (`Table<U>`), not against the bound's fallback (`Table<Any>`), as kotlinc reports.
+#[test]
+fn a_member_extension_bound_only_formal_reports_the_receiver_argument_like_kotlinc() {
+    let sources = [(
+        "Tables.kt",
+        r#"class Column<T>(val name: String)
+class Table<T : Any>(val name: String)
+open class Entity<T : Any>(val id: T)
+
+class Tables {
+    fun <T : Any, E : Entity<T>> Column<out E>.table(): Table<T> = Table(name)
+
+    fun <U : Any> wrongTable(column: Column<Entity<U>>): Table<String> = column.table()
+}
+"#,
+    )];
+    let reference_args = common::language_directives::kotlinc_args(sources[0].1);
+    assert_eq!(
+        common::reference_error_blocks(&sources, &reference_args),
+        [
+            "Tables.kt:8:74: return type mismatch: expected 'Table<String>', actual 'Table<U (of fun <U : Any> wrongTable)>'.",
+        ]
+    );
+    common::assert_error_blocks_match_kotlinc(&sources, &reference_args);
+}

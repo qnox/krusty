@@ -93,12 +93,39 @@ pub(super) fn instantiate_member_extension_with(
         extension_receiver,
         &mut lower_inputs,
     );
-    crate::symbol_resolver::unify_ty_from_symbols(
+    let bound_before_receiver = bindings.clone();
+    crate::symbol_resolver::unify_receiver_from_symbols(
         source,
         declared_receiver,
         extension_receiver,
         &mut bindings,
     );
+    // A formal the receiver reaches only covariantly (`Assert<out T>`) gets a lower bound from
+    // it, not an equality: an argument's lower bound joins it at their common supertype, as an
+    // ordinary extension's receiver and arguments do in `merge_call_argument_bindings`.
+    let covariant_receiver_formals = method_type_params
+        .iter()
+        .map(|(_, formal)| *formal)
+        .filter(|formal| {
+            !bound_before_receiver.contains_key(*formal)
+                && bindings.contains_key(*formal)
+                && crate::symbol_resolver::formal_variance_in_type(
+                    source,
+                    declared_receiver,
+                    formal,
+                ) == Some(crate::types::TypeVariance::Out)
+        })
+        .collect::<Vec<_>>();
+    // The receiver is applicable only as the instantiated declaration: `Column<U?>` admits a
+    // caller's `Column<A>` (`A : Any`) structurally, but `U? = A` has no solution.
+    if !crate::symbol_resolver::resolution_subtype(
+        source,
+        extension_receiver,
+        apply_inference_bindings(declared_receiver, &bindings),
+    ) {
+        return None;
+    }
+    let symbols = source;
     let declared_params = generic.map_or(function.signature.params.as_slice(), |signature| {
         signature.params.as_slice()
     });
@@ -177,6 +204,26 @@ pub(super) fn instantiate_member_extension_with(
             actual,
             &mut lower_inputs,
         );
+        let mut evidence = crate::symbol_resolver::GSigBinds::default();
+        crate::symbol_resolver::unify_ty(declared, actual, &mut evidence);
+        for formal in &covariant_receiver_formals {
+            // Only a covariant occurrence is another lower bound; `(T) -> Unit` bounds T above.
+            if crate::symbol_resolver::formal_variance_in_type(symbols, declared, formal)
+                != Some(crate::types::TypeVariance::Out)
+            {
+                continue;
+            }
+            if let (Some(&receiver), Some(&argument)) =
+                (bindings.get(*formal), evidence.get(*formal))
+            {
+                let joined = crate::symbol_resolver::merge_inferred_ty_from_symbols(
+                    Some(symbols),
+                    receiver,
+                    argument,
+                );
+                bindings.insert((*formal).clone(), joined);
+            }
+        }
         unify_member_extension_slot(declared, actual, deferred_type_variables, &mut bindings);
     }
     if let Some(expected) = result_constraint.expected() {
@@ -188,6 +235,30 @@ pub(super) fn instantiate_member_extension_with(
             deferred_type_variables,
             &mut bindings,
         );
+    }
+    // A formal observable only through another formal's bound (`T` of `E : EntityID<T>` on a
+    // `Column<out E?>` receiver) is solved from that formal's applied bound, as for any other
+    // generic call, before it can fall back to its own bound.
+    if let Some(generic) = generic {
+        crate::symbol_resolver::resolve_bound_violating_bindings(
+            Some(source),
+            generic,
+            &mut bindings,
+            explicit_type_args,
+        );
+        // A solved formal must satisfy its declared bounds, as for any other generic call:
+        // `<T : Any, S : T, C : Column<S>> C.references(ref: Column<T>)` does not apply to a
+        // `Column<Int>` receiver with an `EntityID<Int>` reference, since `S = Int` is not a `T`.
+        // A relation through a formal that is still open (`C := Holder<R>` for `C : Sink<R>` in a
+        // recursive call) stays open, as in ordinary generic call selection.
+        if !crate::symbol_resolver::generic_bindings_admit_expected_return_intersection(
+            generic,
+            &bindings,
+            None,
+            |actual, bound| crate::symbol_resolver::resolution_subtype(source, actual, bound),
+        ) {
+            return None;
+        }
     }
     // The call's evidence so far, before any unsolved formal stands for its bound: a lambda
     // argument is shaped from THIS view, so a formal only a lambda can solve stays open for the

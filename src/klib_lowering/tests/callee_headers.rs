@@ -1505,8 +1505,8 @@ fn stdlib_calls_reach_header_declared_callees() {
     // Selected generic roots now pass their own declared headers and can reach unselected
     // generic callees. These exact deeper-decline counts are measured on every manifest release;
     // they are not expected-failure allowances for executable conformance tests. Elvis and safe-call
-    // blocks now reach further declared callees; the same complete inputs were measured on every
-    // release.
+    // blocks, then generic calls and `when` subject blocks, now reach further declared callees;
+    // the same complete inputs were measured on every release.
     let expected =
         if crate::kotlin_version::target() >= crate::kotlin_version::KotlinVersion::V2_4_20 {
             vec![
@@ -1515,7 +1515,7 @@ fn stdlib_calls_reach_header_declared_callees() {
                 ("it calls `kotlin.UInt.<init>`)", 4),
                 ("it converts a value implicitly)", 1),
                 ("it declares a parameter default)", 35),
-                ("it declares type parameters)", 178),
+                ("it declares type parameters)", 182),
                 ("it uses a block of a compiler-introduced form)", 1),
                 ("it uses a call of a member function)", 60),
                 (
@@ -1534,7 +1534,7 @@ fn stdlib_calls_reach_header_declared_callees() {
                 ("it calls `kotlin.UInt.<init>`)", 4),
                 ("it converts a value implicitly)", 1),
                 ("it declares a parameter default)", 28),
-                ("it declares type parameters)", 160),
+                ("it declares type parameters)", 164),
                 ("it uses a block of a compiler-introduced form)", 1),
                 ("it uses a call of a member function)", 60),
                 (

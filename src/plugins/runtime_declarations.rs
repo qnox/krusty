@@ -61,10 +61,12 @@ pub struct PluginClassifier {
     pub is_kotlin: bool,
     /// Neither `open`, `abstract` nor `sealed`.
     pub is_final: bool,
-    /// A value class.
-    pub is_value: bool,
+    /// A value class's declaration: its underlying type over its own type parameters.
+    pub value_class: Option<crate::types::DeclaredValueClass>,
     /// Declared by another file of the current compilation module.
     pub in_module: bool,
+    /// An `inner` class, which captures an instance of its outer class.
+    pub is_inner: bool,
     /// How many type parameters the classifier itself declares.
     pub type_parameters: usize,
     /// Its direct supertypes.

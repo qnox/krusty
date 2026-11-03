@@ -627,18 +627,11 @@ fn the_compose_pass_rejects_what_it_does_not_cover() {
          function from another file yet",
     );
     assert_compose_rejects(
-        "compose-generic-class",
-        "class Box<T>(val value: T)\n",
+        "compose-generic-value-class-field",
+        "@JvmInline value class Id<T>(val raw: T)\nclass User(val id: Id<Int>)\n",
         &[],
-        "3:1: error: krusty's Compose compiler plugin does not support a generic class, whose \
-         stability depends on its type arguments yet",
-    );
-    assert_compose_rejects(
-        "compose-value-class-field",
-        "@JvmInline value class Id(val raw: Int)\nclass User(val id: Id)\n",
-        &[],
-        "4:1: error: krusty's Compose compiler plugin does not support a class with a value-class \
-         field yet",
+        "4:1: error: krusty's Compose compiler plugin does not support a class with a field of a \
+         generic value class yet",
     );
     assert_compose_rejects(
         "compose-reflection-function-field",
@@ -648,18 +641,14 @@ fn the_compose_pass_rejects_what_it_does_not_cover() {
          numbered reflection function type yet",
     );
     assert_compose_rejects(
-        "compose-other-file-class-field",
-        "class Card(val point: Point)\n",
-        &[("Point.kt", "package probe\nclass Point(val x: Int)\n")],
+        "compose-other-file-inner-class-field",
+        "class Card(val inner: Outer.Inner)\n",
+        &[(
+            "Outer.kt",
+            "package probe\nclass Outer { inner class Inner(val x: Int) }\n",
+        )],
         "3:1: error: krusty's Compose compiler plugin does not support a class whose stability \
-         depends on a class of another file or a Compose library yet",
-    );
-    assert_compose_rejects(
-        "compose-library-class-field",
-        "class Clock(val clock: androidx.compose.runtime.BroadcastFrameClock)\n",
-        &[],
-        "3:1: error: krusty's Compose compiler plugin does not support a class whose stability \
-         depends on a class of another file or a Compose library yet",
+         depends on another file's class without `$stable` yet",
     );
 }
 
