@@ -50376,15 +50376,19 @@ impl<'a> Checker<'a> {
             return;
         }
         // A primitive flowing into a reference supertype is checked through its own Kotlin
-        // classifier: the builtin declaration of `kotlin/Int` states that it is a `Number` and a
-        // `Comparable<Int>`.
+        // classifier's applied hierarchy: the builtin `kotlin/Int` is a `Number` and a
+        // `Comparable<Int>`, so it reaches `Comparable<Int>` but not `Comparable<String>`.
         let scalar = actual.is_numeric_or_char() || actual == Ty::Boolean || actual.is_unsigned();
-        if let (true, TyKind::Obj(b, _), TyKind::Obj(e, _)) =
-            (scalar, actual.kind(), expected.kind())
+        if scalar
+            && matches!(expected.kind(), TyKind::Obj(..))
+            && crate::assignable::is_subtype(
+                &crate::assignable::TyCtx::new(),
+                self,
+                actual,
+                expected,
+            )
         {
-            if self.obj_name_is_subtype(b, e) {
-                return;
-            }
+            return;
         }
         // The dedicated `Ty::String` variant and its object form `Obj("kotlin/String")` denote the SAME
         // type (they share an erased key); a value of one flows into the other. A metadata-derived return
