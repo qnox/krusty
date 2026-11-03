@@ -387,7 +387,7 @@ fn remember(ir: &mut IrFile, runtime: &ComposeRuntime, lambda: &ComposableLambda
     // kotlinc builds the call at the lambda's offsets, so the lambda's line begins at its key.
     if lambda.opening_line != 0 {
         for expression in [key, remembered, value] {
-            ir.expr_source_lines.insert(expression, lambda.opening_line);
+            ir.set_source_line(expression, lambda.opening_line);
         }
     }
     let IrExpr::Call { args, .. } = &mut ir.exprs[lambda.call as usize] else {
@@ -792,7 +792,7 @@ fn restart_group(ir: &mut IrFile, runtime: &ComposeRuntime, facts: &RestartableF
     let skip = runtime::call(ir, &runtime.skip_to_group_end, Some(composer), Vec::new());
     // kotlinc skips at the declaration's start offset, the `fun` keyword.
     mark_line(ir, skip, facts.declaration_line);
-    ir.expr_source_lines.insert(skip, facts.declaration_line);
+    ir.set_source_line(skip, facts.declaration_line);
     let skipped = ir.add_expr(IrExpr::Block {
         stmts: vec![skip],
         value: None,

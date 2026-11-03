@@ -1252,8 +1252,8 @@ fn splice_captured_lambda_invocation(
         stmts: Vec::new(),
         value: Some(frame),
     };
-    if let Some(end) = ir.expr_end_lines.get(&lambda).copied() {
-        ir.expr_end_lines.insert(invocation, end);
+    if let Some(end) = ir.end_line(lambda) {
+        ir.set_end_line(invocation, end);
     }
     ir.suspend_calls.remove(&invocation);
     ir.suspend_call_overridden_results.remove(&invocation);
