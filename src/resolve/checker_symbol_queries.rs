@@ -17,6 +17,7 @@ impl Checker<'_> {
             self.access_context_class_names(),
         )
         .with_eager_lambda_results(self.file.eager_lambda_analysis)
+        .with_member_access(self)
     }
 
     pub(super) fn resolver_in_scope<'s>(
@@ -35,6 +36,7 @@ impl Checker<'_> {
             self.file_index,
             self.lexical_source_class_names(),
         )
+        .with_member_access(self)
     }
 
     /// A resolver over this checker's own federation (the module over the platform) shares the
