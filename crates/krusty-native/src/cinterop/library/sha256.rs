@@ -25,10 +25,12 @@ pub(super) fn sha256_hex(data: &[u8]) -> String {
     }
     message.extend_from_slice(&((data.len() as u64) * 8).to_be_bytes());
     let mut state = INITIAL_STATE;
-    for block in message.chunks_exact(64) {
+    let (blocks, _) = message.as_chunks::<64>();
+    for block in blocks {
         let mut schedule = [0u32; 64];
-        for (word, bytes) in schedule.iter_mut().zip(block.chunks_exact(4)) {
-            *word = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+        let (words, _) = block.as_chunks::<4>();
+        for (word, bytes) in schedule.iter_mut().zip(words) {
+            *word = u32::from_be_bytes(*bytes);
         }
         for index in 16..64 {
             let s0 = schedule[index - 15].rotate_right(7)
