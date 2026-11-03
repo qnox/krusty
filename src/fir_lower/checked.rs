@@ -1419,7 +1419,6 @@ pub(super) fn lower_fir_intrinsic(operation: &crate::fir::FirIntrinsic) -> crate
         crate::fir::FirIntrinsic::Assert { mode } => crate::ir::IrIntrinsic::Assert { mode: *mode },
         crate::fir::FirIntrinsic::ArrayGet => crate::ir::IrIntrinsic::ArrayGet,
         crate::fir::FirIntrinsic::ArraySet => crate::ir::IrIntrinsic::ArraySet,
-        crate::fir::FirIntrinsic::ArraySize => crate::ir::IrIntrinsic::ArraySize,
         crate::fir::FirIntrinsic::StringGet => crate::ir::IrIntrinsic::StringGet,
         crate::fir::FirIntrinsic::StringLength => crate::ir::IrIntrinsic::StringLength,
         crate::fir::FirIntrinsic::EnumName => crate::ir::IrIntrinsic::EnumName,

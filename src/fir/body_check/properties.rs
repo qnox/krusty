@@ -1130,9 +1130,6 @@ impl BodyFirChecker<'_> {
                     return Ok(None);
                 };
                 let intrinsic = match compiler_intrinsic {
-                    Some(crate::libraries::CompilerIntrinsic::ArraySize) => {
-                        Some(FirIntrinsic::ArraySize)
-                    }
                     Some(crate::libraries::CompilerIntrinsic::StringLength) => {
                         Some(FirIntrinsic::StringLength)
                     }

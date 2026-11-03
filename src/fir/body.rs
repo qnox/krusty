@@ -254,7 +254,6 @@ pub enum FirIntrinsic {
     },
     ArrayGet,
     ArraySet,
-    ArraySize,
     StringGet,
     StringLength,
     StringPlus,
