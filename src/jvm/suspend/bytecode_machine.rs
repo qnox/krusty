@@ -97,7 +97,7 @@ pub(super) fn route(
         // A generated call that enters its line only where its operands begin (a reference
         // carrier's `invoke`) enters it at the continuation it now reads too.
         if let Some(line) = ir.dispatch_line(suspension.call) {
-            ir.expr_source_lines.insert(continuation, line);
+            ir.set_source_line(continuation, line);
         }
         if !append_continuation(
             ir,
@@ -115,7 +115,7 @@ pub(super) fn route(
     let units = ensure_tail_return(ir, body, unit_return);
     if let Some(&close) = ir.fn_close_lines.get(&fid) {
         for unit in units {
-            ir.expr_source_lines.insert(unit, close);
+            ir.set_source_line(unit, close);
         }
     }
 
