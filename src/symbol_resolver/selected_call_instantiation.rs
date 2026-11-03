@@ -100,31 +100,33 @@ impl<'a> SymbolResolver<'a> {
         callables: &Callables,
         expected_result: Option<Ty>,
     ) -> ReceiverFunctionSelection {
-        let ext = ExtCtx {
-            fn_scope: self.fn_scope,
-            source: &self.src,
-            type_variables: self.type_variables,
-            eager_lambda_results: self.eager_lambda_results,
-        };
         // The selected declaration is applied to its own arguments, in its parameter order.
         let (selection, args) = match arguments {
             FamilyArguments::Shared(args) => (
                 select_receiver_overload_from_functions_tracking(
                     self.lib,
-                    receiver,
-                    name,
-                    args,
-                    type_args,
-                    ext,
+                    OverloadCall {
+                        recv: receiver,
+                        name,
+                        args,
+                        type_args,
+                        indexed: IndexedConvention::Ordinary,
+                    },
+                    self.ext_ctx(),
                     callables.functions(),
-                    IndexedConvention::Ordinary,
                 ),
                 args,
             ),
             FamilyArguments::PerCandidate { calls, source } => {
                 let functions = callables.functions();
                 let selection = select_separately_mapped_receiver_overload(
-                    self.lib, receiver, calls, source, type_args, ext, functions,
+                    self.lib,
+                    receiver,
+                    calls,
+                    source,
+                    type_args,
+                    self.ext_ctx(),
+                    functions,
                 );
                 let args = match &selection {
                     CandidateSelectionWithTies::Selected(index) => calls[*index].args.as_slice(),

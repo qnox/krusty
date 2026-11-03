@@ -452,6 +452,20 @@ pub(super) struct ExtCtx<'a> {
     pub(super) type_variables: &'a [String],
     /// `+EagerLambdaAnalysis`: a lambda's checked result decides applicability.
     pub(super) eager_lambda_results: bool,
+    /// The use site's member visibility, when the caller has a site. Selection ranks a
+    /// visibility error below every resolved candidate with it.
+    pub(super) member_access: Option<&'a dyn super::MemberAccessSite>,
+}
+
+/// One receiver call the overload selector answers: the receiver, the callee spelling, the
+/// supplied value and type arguments, and the indexed convention they are written in.
+#[derive(Clone, Copy)]
+pub(super) struct OverloadCall<'a> {
+    pub(super) recv: Ty,
+    pub(super) name: &'a str,
+    pub(super) args: &'a [CallArgKind],
+    pub(super) type_args: &'a [Ty],
+    pub(super) indexed: IndexedConvention,
 }
 
 /// The single call-overload selector for a receiver call `recv.name(args)`. It is parameterized by
@@ -530,31 +544,22 @@ fn indexed_fixed_parameter_projection(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn select_receiver_overload_from_functions_tracking(
     lib: &dyn SemanticPlatform,
-    recv: Ty,
-    name: &str,
-    args: &[CallArgKind],
-    type_args: &[Ty],
+    call: OverloadCall<'_>,
     ext: ExtCtx<'_>,
     functions: &[FunctionInfo],
-    indexed: IndexedConvention,
 ) -> CandidateSelectionWithTies<FunctionInfo> {
     let mut ambiguous = false;
     let mut ambiguous_candidates = Vec::new();
     let selected = select_overload_tracking_with_functions(
         lib,
-        recv,
-        name,
-        args,
-        type_args,
+        call,
         SelectionMode::Receiver,
         ext,
         Some(functions),
         &mut ambiguous,
         Some(&mut ambiguous_candidates),
-        indexed,
     );
     if ambiguous {
         CandidateSelectionWithTies::Ambiguous(ambiguous_candidates)
@@ -616,6 +621,28 @@ fn ranked_receiver_candidates<'f>(
     ranked
 }
 
+/// Kotlin ranks a visibility error below every resolved candidate, whatever tier either one sits
+/// on: a member the site cannot see is selected only when no accessible candidate applies, and its
+/// access error is then what the caller reports. An applicable extension therefore takes `b + 1`
+/// from an inaccessible `B.plus`, and an accessible overload takes the call from a more specific
+/// inaccessible one. The candidates the site can see, to be tried first, or `None` when the site
+/// restricts nothing in `overloads`.
+fn site_accessible_overloads<'f>(
+    ext: ExtCtx<'_>,
+    recv: Ty,
+    overloads: &[&'f FunctionInfo],
+) -> Option<Vec<&'f FunctionInfo>> {
+    let site = ext.member_access?;
+    let accessible = overloads
+        .iter()
+        .copied()
+        .filter(|overload| {
+            overload.kind != FnKind::Member || site.member_accessible(overload, recv)
+        })
+        .collect::<Vec<_>>();
+    (accessible.len() != overloads.len()).then_some(accessible)
+}
+
 /// Select from a receiver family whose declarations map the source arguments differently, each
 /// under its own mapping ([`CandidateCall`], parallel to `functions`), answering in indices of
 /// `functions`. Candidates compete rank by rank, nearest first, exactly as under a shared mapping;
@@ -629,12 +656,51 @@ pub(super) fn select_separately_mapped_receiver_overload(
     ext: ExtCtx<'_>,
     functions: &[FunctionInfo],
 ) -> CandidateSelectionWithTies<usize> {
-    let src = ext.source;
+    let family = SeparatelyMappedFamily {
+        calls,
+        source,
+        type_args,
+        functions,
+    };
     let overloads = functions.iter().collect::<Vec<_>>();
+    if let Some(accessible) = site_accessible_overloads(ext, recv, &overloads) {
+        match select_separately_mapped_among(lib, recv, family, ext, &accessible) {
+            CandidateSelectionWithTies::None => {}
+            selection => return selection,
+        }
+    }
+    select_separately_mapped_among(lib, recv, family, ext, &overloads)
+}
+
+/// A receiver family's declarations with their own argument mappings, parallel to `functions`.
+#[derive(Clone, Copy)]
+struct SeparatelyMappedFamily<'a> {
+    calls: &'a [CandidateCall],
+    source: &'a [CallArgKind],
+    type_args: &'a [Ty],
+    functions: &'a [FunctionInfo],
+}
+
+/// The tower walk of [`select_separately_mapped_receiver_overload`] over `overloads`, a subset of
+/// the family's declarations.
+fn select_separately_mapped_among(
+    lib: &dyn SemanticPlatform,
+    recv: Ty,
+    family: SeparatelyMappedFamily<'_>,
+    ext: ExtCtx<'_>,
+    overloads: &[&FunctionInfo],
+) -> CandidateSelectionWithTies<usize> {
+    let SeparatelyMappedFamily {
+        calls,
+        source,
+        type_args,
+        functions,
+    } = family;
+    let src = ext.source;
     let mut by_rank: std::collections::BTreeMap<OverloadTowerRank, Vec<(usize, Vec<Ty>)>> =
         std::collections::BTreeMap::new();
     for (tower_rank, binding_receiver, o) in
-        ranked_receiver_candidates(recv, SelectionMode::Receiver, ext, &overloads)
+        ranked_receiver_candidates(recv, SelectionMode::Receiver, ext, overloads)
     {
         let index = functions
             .iter()
@@ -692,38 +758,32 @@ fn select_overload_tracking(
 ) -> Option<FunctionInfo> {
     select_overload_tracking_with_functions(
         lib,
-        recv,
-        name,
-        args,
-        type_args,
+        OverloadCall {
+            recv,
+            name,
+            args,
+            type_args,
+            indexed: IndexedConvention::Ordinary,
+        },
         SelectionMode::Kind(kind),
         ext,
         None,
         ambiguous,
         None,
-        IndexedConvention::Ordinary,
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn select_overload_tracking_with_functions(
     lib: &dyn SemanticPlatform,
-    recv: Ty,
-    name: &str,
-    args: &[CallArgKind],
-    type_args: &[Ty],
+    call: OverloadCall<'_>,
     mode: SelectionMode,
     ext: ExtCtx<'_>,
     provided_functions: Option<&[FunctionInfo]>,
     ambiguous: &mut bool,
     mut ambiguous_candidates: Option<&mut Vec<FunctionInfo>>,
-    indexed: IndexedConvention,
 ) -> Option<FunctionInfo> {
+    let OverloadCall { recv, name, .. } = call;
     let src = ext.source;
-    // Argument assignability and candidate enumeration consume the same federated source. Access
-    // control is checked after selection from the declaration metadata carried by the winner.
-    let assign_src = src;
-    let arg_tys: Vec<Ty> = args.iter().map(|arg| arg.ty()).collect();
     // EXTENSION candidates come from the ONE query — union `resolve_symbols`' function callables over the
     // in-scope packages (scope-pruned, tree-driven), so an unqualified extension binds only when its
     // facade's package is imported. No import scope → the whole-classpath `functions()` fallback
@@ -763,13 +823,61 @@ pub(super) fn select_overload_tracking_with_functions(
             _ => Vec::new(),
         }
     };
+    if let Some(accessible) = site_accessible_overloads(ext, recv, &overloads) {
+        let selected = select_among_overloads(
+            lib,
+            call,
+            mode,
+            ext,
+            &accessible,
+            ambiguous,
+            ambiguous_candidates.as_deref_mut(),
+        );
+        if selected.is_some() || *ambiguous {
+            return selected;
+        }
+    }
+    select_among_overloads(
+        lib,
+        call,
+        mode,
+        ext,
+        &overloads,
+        ambiguous,
+        ambiguous_candidates,
+    )
+}
+
+/// The tier walk over one candidate family: declaration-priority and receiver-distance tiers,
+/// each tried by the ordered applicability passes.
+fn select_among_overloads(
+    lib: &dyn SemanticPlatform,
+    call: OverloadCall<'_>,
+    mode: SelectionMode,
+    ext: ExtCtx<'_>,
+    overloads: &[&FunctionInfo],
+    ambiguous: &mut bool,
+    mut ambiguous_candidates: Option<&mut Vec<FunctionInfo>>,
+) -> Option<FunctionInfo> {
+    let OverloadCall {
+        recv,
+        name,
+        args,
+        type_args,
+        indexed,
+    } = call;
+    let src = ext.source;
+    // Argument assignability and candidate enumeration consume the same federated source. Access
+    // control is checked after selection from the declaration metadata carried by the winner.
+    let assign_src = src;
+    let arg_tys: Vec<Ty> = args.iter().map(|arg| arg.ty()).collect();
     crate::trace_compiler!(
         "resolve",
         "select_overload name={name} recv={recv:?} mode={mode:?} scope={:?} cands={}",
         ext.fn_scope.map(FunctionScopeRef::package_count),
         overloads.len(),
     );
-    for o in &overloads {
+    for o in overloads {
         crate::trace_compiler!(
             "resolve",
             "  raw {name} kind={:?} recv={:?} params={:?} generic={:?} context={} required={} vararg={:?} pub={} rank={} origin={:?} owner={}",
@@ -788,7 +896,7 @@ pub(super) fn select_overload_tracking_with_functions(
     }
     let mut by_rank: std::collections::BTreeMap<OverloadTowerRank, Vec<(&FunctionInfo, Vec<Ty>)>> =
         std::collections::BTreeMap::new();
-    let ranked = ranked_receiver_candidates(recv, mode, ext, &overloads);
+    let ranked = ranked_receiver_candidates(recv, mode, ext, overloads);
     for (tower_rank, binding_receiver, o) in ranked {
         let lp = if indexed != IndexedConvention::Ordinary && o.call_sig.vararg_index.is_some() {
             let Some((params, _, _)) = indexed_call_shape(
