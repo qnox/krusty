@@ -80,6 +80,14 @@ pub(super) struct CompactSelectedResultPublication {
     declaring_owner: Option<TypeName>,
 }
 
+/// A selection's normalized declaration signature together with the parameters selection
+/// instantiated from it, index for index. Both come from the one selected declaration, so a
+/// supplied context prefix or an extension receiver is either absent from both or present in both.
+pub(super) struct SelectedSignature {
+    pub(super) signature: Option<GenericSig>,
+    pub(super) parameters: Box<[Ty]>,
+}
+
 #[derive(Clone, Copy, Debug)]
 struct CompactPublicationArgument {
     parameter: u32,
@@ -143,11 +151,13 @@ impl CompactSelectedResultPublication {
         // The selection's solved substitution comes first: each binding below keeps its first
         // constraint, so an operand's own narrower type never replaces what selection solved.
         if let Some(signature) = &self.signature {
-            if signature.params.len() == self.selected_parameters.len() {
-                for (&declared, &selected) in signature.params.iter().zip(&self.selected_parameters)
-                {
-                    constrain(declared, selected);
-                }
+            // Both sides come from the one selection, in the coordinates it selected in. A
+            // disagreement means they do not, and no binding read across them would be sound.
+            if signature.params.len() != self.selected_parameters.len() {
+                return None;
+            }
+            for (&declared, &selected) in signature.params.iter().zip(&self.selected_parameters) {
+                constrain(declared, selected);
             }
         }
         constrain(self.declared, self.selected);
@@ -222,22 +232,25 @@ impl CompactSelectedResultPublication {
 
     pub(super) fn callable(
         callable: &LibraryCallable,
+        selection: SelectedSignature,
         parameter_by_argument: Box<[Option<u32>]>,
         whole_array_arguments: Box<[bool]>,
         explicit_type_arguments: Box<[Ty]>,
     ) -> Self {
-        let signature = callable.generic_sig.as_deref();
         let (declared, _) = declared_result(
-            signature,
+            selection.signature.as_ref(),
             callable.ret,
             callable.declared_ret,
             &callable.enhanced_result,
         );
         Self {
-            signature: signature.cloned(),
+            receiver: selection
+                .signature
+                .as_ref()
+                .and_then(|signature| signature.receiver),
+            signature: selection.signature,
             declared,
             selected: callable.ret,
-            receiver: signature.and_then(|signature| signature.receiver),
             enhancement: callable.enhanced_result.marks.clone(),
             arguments: publication_arguments(
                 parameter_by_argument.as_ref(),
@@ -246,7 +259,7 @@ impl CompactSelectedResultPublication {
             ),
             explicit_type_arguments,
             result_alias: callable.result_alias,
-            selected_parameters: callable.params.clone().into(),
+            selected_parameters: selection.parameters,
             declaring_owner: Some(callable.owner),
         }
     }

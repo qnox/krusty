@@ -5,7 +5,9 @@
 //! projects the declaration interval without lookup or overload reselection.
 
 use super::ProductionSignatureSemantics;
-use crate::resolve::selected_result_publication::CompactSelectedResultPublication;
+use crate::resolve::selected_result_publication::{
+    CompactSelectedResultPublication, SelectedSignature,
+};
 use crate::types::{Ty, TyKind};
 
 /// What a selection applied its declaration to: the receiver it was selected on and its argument
@@ -105,12 +107,14 @@ impl ProductionSignatureSemantics<'_> {
     pub(super) fn selected_callable_publication(
         &self,
         callable: &crate::libraries::LibraryCallable,
+        selection: SelectedSignature,
         parameter_by_argument: Box<[Option<u32>]>,
         arguments: &[crate::fir::ResolvedSigCallArgument<'_>],
         explicit_type_arguments: &[Ty],
     ) -> CompactSelectedResultPublication {
         CompactSelectedResultPublication::callable(
             callable,
+            selection,
             parameter_by_argument,
             whole_array_arguments(arguments),
             explicit_type_arguments.into(),
