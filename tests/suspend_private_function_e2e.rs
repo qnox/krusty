@@ -1,5 +1,5 @@
-//! A private suspend function takes kotlinc's coroutine transformer like any other named function
-//! (`docs/JVM_INLINE_BEFORE_CPS.md` §1a). Its continuation class re-enters it through the owner's
+//! A private suspend function takes kotlinc's coroutine transformer like any other named function.
+//! Its continuation class re-enters it through the owner's
 //! `access$<name>` bridge. A private `suspend inline` function is not transformed: every call
 //! inlines it, and kotlinc leaves its own method as written.
 //!
