@@ -238,7 +238,7 @@ pub(super) fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, env:
 /// field store. An explicit backing field's `field = …` and a `val x =` whose initializer starts on
 /// the next line both differ from the declaration line; generated storage has only the latter.
 pub(super) fn initializer_line(ir: &IrFile, s: &crate::ir::IrStatic, init: ExprId) -> u32 {
-    ir.expr_source_lines.get(&init).copied().unwrap_or(s.line)
+    ir.source_line(init).unwrap_or(s.line)
 }
 
 /// The HOISTED outer-class static backing a companion property of `c` (a companion class), if any:
@@ -444,12 +444,12 @@ pub(super) fn emit_default_static_accessor(
         g.aconst_null();
     }
     emit_return(jt, &mut g);
-    finish_code_sig::<0x0019>(
-        cw,
+    g.link();
+    cw.add_method_sig(
+        0x0019 | super::method_access::annotated_method_modifiers(annotations),
         &accessor_signature.name,
         &accessor_signature.descriptor,
-        &mut g,
-        0,
+        &g,
         signatures.getter.as_deref(),
     );
     cw.set_method_nullability(
@@ -568,7 +568,15 @@ fn emit_default_static_setter(
     // kotlinc writes the setter's `LocalVariableTable` as it finishes the method, so the
     // `<set-?>` name joins the pool right after the body's constants.
     cw.seed_utf8("<set-?>");
-    finish_code_sig::<0x0019>(cw, name, descriptor, &mut st, words, signature);
+    st.ensure_locals(words);
+    st.link();
+    cw.add_method_sig(
+        0x0019 | super::method_access::annotated_method_modifiers(annotations),
+        name,
+        descriptor,
+        &st,
+        signature,
+    );
     cw.set_method_nullability(name, descriptor, None, &[acc_ann]);
     cw.set_method_param_annotations(name, descriptor, parameter_annotations);
     if let Some(annotations) = annotations {
@@ -583,8 +591,8 @@ fn emit_default_static_setter(
     );
 }
 
-/// Declare class-owned static storage in field-table order: a named object's backing fields first,
-/// then its other statics. A `companion object`'s `const val`s live on the outer class as
+/// Declare class-owned static storage in field-table order: a named object's backing fields and
+/// its other statics interleaved in source order, as kotlinc visits the declarations. A `companion object`'s `const val`s live on the outer class as
 /// `public static final` + `ConstantValue`; source lines and declaration order restore the ordering
 /// that common lowering's separate shape passes cannot retain. This ordering is deliberately not
 /// reused for `<clinit>`: kotlinc gives block initialization its own precedence.
@@ -596,7 +604,9 @@ pub(super) fn declare(
     signature_formatter: &JvmSignatureFormatter<'_>,
     cw: &mut ClassWriter,
 ) {
-    object_static_initialization::declare_fields(ir, run, c, signature_formatter, fq_name, cw);
+    let mut object_fields = object_static_initialization::declared_fields(ir, c)
+        .into_iter()
+        .peekable();
     let mut owner_statics: Vec<(u32, &crate::ir::IrStatic)> = ir
         .statics
         .iter()
@@ -608,69 +618,137 @@ pub(super) fn declare(
         .map(|(index, property)| (index as u32, property))
         .collect();
     owner_statics.sort_by_key(|(index, property)| (property.line, property.source_order, *index));
-    for (static_index, s) in owner_statics {
-        let desc = ir_type_desc(&s.ty);
-        // A `private const val`/`private val` on an object/companion keeps its declared visibility
-        // (kotlinc: PRIVATE static final; const reads are inlined so no cross-class getstatic needs it).
-        // A `var` is reassignable, so it must NOT carry ACC_FINAL — a `putstatic` on a final field
-        // outside `<clinit>` is an IllegalAccessError.
-        let final_flag = if s.is_var { 0x0000 } else { 0x0010 };
-        // A HOISTED companion property's field is PRIVATE regardless of the property's declared
-        // visibility (kotlinc: every access goes through the accessors/bridges, never the field) —
-        // EXCEPT under `@JvmField`, where the PUBLIC field IS the property's whole JVM surface
-        // (kotlinc emits it public even for an `internal` declaration, with no accessors at all).
-        let hoisted = ir.is_jvm_companion_hoisted_static(static_index);
-        let jvm_field = ir.is_jvm_field_static(static_index);
-        let block_storage = companion_blocks::storage_is_private(ir, static_index);
-        let lateinit_visibility = hoisted_lateinit_field_visibility(ir, static_index);
-        let acc = if let Some(visibility) = lateinit_visibility {
-            0x0008 | static_visibility_access(visibility) | final_flag
-        } else if (s.visibility.is_private() || hoisted || block_storage) && !jvm_field {
-            0x000A | final_flag // PRIVATE | STATIC [| FINAL]
-        } else {
-            0x0009 | final_flag // PUBLIC | STATIC [| FINAL]
-        } | annotated_field_modifiers(ir.static_declaration_annotations(static_index));
-        // `ConstantValue` is only meaningful on a FINAL field (JVMS 4.7.2 ignores it otherwise), and a
-        // `var` is initialized by the `<clinit>` store anyway. A HOISTED companion property never
-        // folds either — kotlinc initializes it in `<clinit>` (only `const val` gets the attribute).
-        // LATE adds: kotlinc's field-table visit runs after the methods, so a hoisted static's name
-        // first interns at its `access$…$cp` bridge and a folded const's name + `ConstantValue`
-        // land after the `<clinit>` window.
-        let fold = s.is_const && !s.is_var && !hoisted;
-        let cv = s
-            .init
-            .filter(|_| fold)
-            .and_then(|init| constant_value(ir, init));
-        // Generated storage with no declaration of its own is ACC_SYNTHETIC and unannotated.
-        let synthetic = ir.is_compiler_generated_static(static_index);
-        let acc = if synthetic { acc | 0x1000 } else { acc };
-        // Reference-typed statics, including private hoisted fields, carry nullability annotations,
-        // except a `lateinit` one, which holds null until assigned.
-        let ann = (!synthetic && !s.is_lateinit)
-            .then(|| super::declared_static_annotation(s))
-            .flatten();
-        let signature = signature_formatter
-            .field_signature(&s.ty, None, s.is_var)
-            .filter(|_| !s.property_delegate);
-        cw.add_field_late_sig(
-            acc,
-            ir.static_field_jvm_name(static_index),
-            &desc,
-            signature.as_deref(),
-            cv,
-            ann,
-        );
-        // A field carries its FIELD-targeted annotations as `RuntimeInvisibleAnnotations`, BEFORE
-        // the nullability entry — kotlinc's attribute order.
-        //
-        // They come from wherever the field's DECLARATION lives: every hoisted companion property
-        // records them on the COMPANION, while a static this class owns outright — one a compiler
-        // plugin generated, say — records them on the class itself. `@JvmField` changes the
-        // property's JVM surface, not the ownership of its backing-field annotations.
-        if let Some(annotations) = static_field_annotations(ir, c, static_index) {
-            cw.set_last_late_field_annotations(annotations);
+    // On a named object, generated storage (a `$cachedSerializer$delegate`) follows every declared
+    // field.
+    let (generated, declared): (Vec<_>, Vec<_>) =
+        owner_statics.into_iter().partition(|&(index, _)| {
+            object_fields.peek().is_some() && ir.is_compiler_generated_static(index)
+        });
+    for (static_index, s) in declared {
+        while let Some((_, field_index)) =
+            object_fields.next_if(|&(position, _)| position < s.source_order)
+        {
+            object_static_initialization::add_late_member_field(
+                ir,
+                run,
+                c,
+                signature_formatter,
+                fq_name,
+                cw,
+                field_index,
+            );
         }
+        declare_static(ir, c, signature_formatter, cw, static_index, s);
     }
+    for (_, field_index) in object_fields {
+        object_static_initialization::add_late_member_field(
+            ir,
+            run,
+            c,
+            signature_formatter,
+            fq_name,
+            cw,
+            field_index,
+        );
+    }
+    for (static_index, s) in generated {
+        declare_static(ir, c, signature_formatter, cw, static_index, s);
+    }
+}
+
+/// Declare one class-owned static for the field-table visit.
+fn declare_static(
+    ir: &IrFile,
+    c: &IrClass,
+    signature_formatter: &JvmSignatureFormatter<'_>,
+    cw: &mut ClassWriter,
+    static_index: u32,
+    s: &crate::ir::IrStatic,
+) {
+    let desc = ir_type_desc(&s.ty);
+    // A `private const val`/`private val` on an object/companion keeps its declared visibility
+    // (kotlinc: PRIVATE static final; const reads are inlined so no cross-class getstatic needs it).
+    // A `var` is reassignable, so it must NOT carry ACC_FINAL — a `putstatic` on a final field
+    // outside `<clinit>` is an IllegalAccessError.
+    let final_flag = if s.is_var { 0x0000 } else { 0x0010 };
+    // A HOISTED companion property's field is PRIVATE regardless of the property's declared
+    // visibility (kotlinc: every access goes through the accessors/bridges, never the field) —
+    // EXCEPT under `@JvmField`, where the PUBLIC field IS the property's whole JVM surface
+    // (kotlinc emits it public even for an `internal` declaration, with no accessors at all).
+    let hoisted = ir.is_jvm_companion_hoisted_static(static_index);
+    let jvm_field = ir.is_jvm_field_static(static_index);
+    let block_storage = companion_blocks::storage_is_private(ir, static_index);
+    let lateinit_visibility = hoisted_lateinit_field_visibility(ir, static_index);
+    let acc = if let Some(visibility) = lateinit_visibility {
+        0x0008 | static_visibility_access(visibility) | final_flag
+    } else if (s.visibility.is_private() || hoisted || block_storage) && !jvm_field {
+        0x000A | final_flag // PRIVATE | STATIC [| FINAL]
+    } else {
+        0x0009 | final_flag // PUBLIC | STATIC [| FINAL]
+    } | annotated_field_modifiers(ir.static_declaration_annotations(static_index));
+    // `ConstantValue` is only meaningful on a FINAL field (JVMS 4.7.2 ignores it otherwise), and a
+    // `var` is initialized by the `<clinit>` store anyway. A HOISTED companion property never
+    // folds either — kotlinc initializes it in `<clinit>` (only `const val` gets the attribute).
+    // LATE adds: kotlinc's field-table visit runs after the methods, so a hoisted static's name
+    // first interns at its `access$…$cp` bridge and a folded const's name + `ConstantValue`
+    // land after the `<clinit>` window.
+    let fold = s.is_const && !s.is_var && !hoisted;
+    let cv = s
+        .init
+        .filter(|_| fold)
+        .and_then(|init| constant_value(ir, init));
+    // Generated storage with no declaration of its own is ACC_SYNTHETIC and unannotated.
+    let synthetic = ir.is_compiler_generated_static(static_index);
+    let acc = if synthetic { acc | 0x1000 } else { acc };
+    // Reference-typed statics, including private hoisted fields, carry nullability annotations,
+    // except a `lateinit` one, which holds null until assigned.
+    let ann = (!synthetic && !s.is_lateinit)
+        .then(|| super::declared_static_annotation(s))
+        .flatten();
+    let signature = signature_formatter
+        .field_signature(&s.ty, None, s.is_var)
+        .filter(|_| !s.property_delegate);
+    cw.add_field_late_sig(
+        acc,
+        ir.static_field_jvm_name(static_index),
+        &desc,
+        signature.as_deref(),
+        cv,
+        ann,
+    );
+    // A field carries its FIELD-targeted annotations as `RuntimeInvisibleAnnotations`, BEFORE
+    // the nullability entry — kotlinc's attribute order.
+    //
+    // They come from wherever the field's DECLARATION lives: every hoisted companion property
+    // records them on the COMPANION, while a static this class owns outright — one a compiler
+    // plugin generated, say — records them on the class itself. `@JvmField` changes the
+    // property's JVM surface, not the ownership of its backing-field annotations.
+    if let Some(annotations) = static_field_annotations(ir, c, static_index) {
+        cw.set_last_late_field_annotations(annotations);
+    }
+    // A non-private field that leaks a private companion's property onto the outer class is
+    // deprecated for Java, as kotlinc's companion-field lowering marks it.
+    if acc & crate::jvm::classfile::ACC_PRIVATE == 0
+        && moved_from_private_companion(ir, c, static_index)
+    {
+        cw.deprecate_last_late_field();
+    }
+}
+
+/// Whether static `static_index` of `owner` is the storage of a property its
+/// `private companion object` declares: a `const val` or a hoisted property.
+fn moved_from_private_companion(ir: &IrFile, owner: &IrClass, static_index: u32) -> bool {
+    let Some(companion) = owner.companion_class else {
+        return false;
+    };
+    ir.class_visibilities.get(&companion) == Some(&crate::types::Visibility::Private)
+        && (ir
+            .declared_class_statics
+            .get(&companion)
+            .is_some_and(|statics| statics.contains(&static_index))
+            || ir
+                .jvm_companion_static_declaration(static_index)
+                .is_some_and(|(declaring, _)| declaring.fq_name == companion))
 }
 
 fn static_field_annotations<'a>(
@@ -1207,10 +1285,9 @@ impl Emitter<'_> {
         // another class a plain top-level property is private, so go through `getX()` — kotlinc's
         // cross-file property-access compilation. A public `lateinit` calls `getX()` even from the
         // facade, so the throw lives in the getter. `isInitialized` still `getstatic`s the public
-        // field. A private `lateinit` inlines the guard on the raw read.
-        else if (self.static_owner == Some(StaticOwner::Facade)
-            || is_const
-            || (probe && !is_private))
+        // field. A private `lateinit` inlines the guard on the raw read. A body a caller may splice
+        // into another class reads a non-private property through `getX()` even in the facade.
+        else if (self.facade_field_reachable(i) || is_const || (probe && !is_private))
             && !calls_getter
         {
             let fref = self.cw.fieldref(
@@ -1297,6 +1374,7 @@ impl Emitter<'_> {
             if self.diverges(value) {
                 return;
             }
+            self.coerce_reference_on_stack(self.value_ty(value), jt, code);
             super::debug_lines::restore_initializer_store_line(initializer_line, code);
             let method = self.cw.methodref(
                 &companion_name,
@@ -1310,10 +1388,13 @@ impl Emitter<'_> {
         if self.diverges(value) {
             return;
         }
+        // The value is materialized at the property's type, as an instance field store does: a
+        // lambda singleton is cast to its function type before the field or setter receives it.
+        self.coerce_reference_on_stack(self.value_ty(value), jt, code);
         super::debug_lines::restore_initializer_store_line(initializer_line, code);
         // An inlined value leaves its own line in effect; kotlinc marks the statement's line
         // again at the store, as an instance field store does.
-        if self.ir.expr_source_lines.contains_key(&value) {
+        if self.ir.source_line(value).is_some() {
             if let Some(&statement_line) = self.ir.expr_lines.get(&statement) {
                 self.mark_expression_line(statement, statement_line, code);
             }
@@ -1372,7 +1453,7 @@ impl Emitter<'_> {
                 );
                 code.invokestatic(m, slot_words(jt) as i32, 0);
             }
-        } else if (self.static_owner == Some(StaticOwner::Facade) || is_const)
+        } else if (self.facade_field_reachable(index) || is_const)
             && !self.calls_facade_lateinit_setter(index)
         {
             let fref = self.cw.fieldref(
@@ -1389,6 +1470,18 @@ impl Emitter<'_> {
             );
             code.invokestatic(m, slot_words(jt) as i32, 0);
         }
+    }
+
+    /// Whether the code being emitted may name top-level property `index`'s facade field: it is
+    /// the facade's own code, and not a body a caller may splice into another class. Such a body (a
+    /// non-private inline function, or code copied from one) reaches a non-private property through
+    /// its accessors, as kotlinc does in a public inline scope; a private property has none and
+    /// keeps its field, and a `@JvmField` property's field is public.
+    fn facade_field_reachable(&self, index: u32) -> bool {
+        self.static_owner == Some(StaticOwner::Facade)
+            && (!self.export_private_calls
+                || self.ir.statics[index as usize].visibility.is_private()
+                || self.ir.is_jvm_field_static(index))
     }
 
     /// kotlinc keeps a `lateinit` property's default accessors even inside the facade that owns

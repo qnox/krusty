@@ -100,10 +100,10 @@ impl BodyLowering<'_> {
                                 self.ir.mark_positionless(lowered);
                             }
                             if debug.source != 0 {
-                                self.ir.expr_source_lines.insert(lowered, debug.source);
+                                self.ir.set_source_line(lowered, debug.source);
                             }
                             if debug.end != 0 {
-                                self.ir.expr_end_lines.insert(lowered, debug.end);
+                                self.ir.set_end_line(lowered, debug.end);
                             }
                             Ok(lowered)
                         }
@@ -157,7 +157,11 @@ impl BodyLowering<'_> {
                 let slot = self
                     .implicit_receiver_slot(*current, *depth)
                     .ok_or(FirLoweringFailure::MissingImplicitReceiver { origin })?;
-                self.ir.add_expr(IrExpr::GetValue(slot))
+                let read = self.ir.add_expr(IrExpr::GetValue(slot));
+                self.ir
+                    .binding_read_stability
+                    .insert(read, crate::ir::IrBindingStability::Stable);
+                read
             }
             FirExprKind::EnclosingReceiver { path } => self.enclosing_receiver(path, origin)?,
             FirExprKind::CapturedImplicitReceiver {
@@ -169,7 +173,11 @@ impl BodyLowering<'_> {
                 let slot = self
                     .implicit_receiver_capture_slot(*enclosing_depth, *current, *depth, path)
                     .ok_or(FirLoweringFailure::MissingImplicitReceiver { origin })?;
-                self.ir.add_expr(IrExpr::GetValue(slot))
+                let read = self.ir.add_expr(IrExpr::GetValue(slot));
+                self.ir
+                    .binding_read_stability
+                    .insert(read, crate::ir::IrBindingStability::Stable);
+                read
             }
             FirExprKind::SingletonValue { classifier } => self.checked_singleton(*classifier),
             FirExprKind::EnumEntry {
@@ -193,6 +201,7 @@ impl BodyLowering<'_> {
                     if let Some(stability) = self.binding_stability.get(value).copied() {
                         self.ir.binding_read_stability.insert(read, stability);
                     }
+                    self.record_crossinline_read(read, self.crossinline_parameter_slot(*value));
                     read
                 }
             }
@@ -965,6 +974,8 @@ impl BodyLowering<'_> {
                 });
                 if *suspend {
                     self.ir.suspend_calls.insert(invoke, result.get());
+                } else {
+                    super::inlining::splice_immediate_lambda(self, invoke, origin)?;
                 }
                 invoke
             }
@@ -1513,7 +1524,7 @@ impl BodyLowering<'_> {
             self.ir.mark_positionless(lowered);
         }
         if debug.source != 0 {
-            self.ir.expr_source_lines.insert(lowered, debug.source);
+            self.ir.set_source_line(lowered, debug.source);
             // The builtin call this node realizes, when lowering made a node of its own for it.
             if let Some(call) = builtin_call.filter(|_| lowered as usize >= first_generated) {
                 self.ir.builtin_calls.insert(lowered, call);
@@ -1521,27 +1532,24 @@ impl BodyLowering<'_> {
             // A call whose operands were stored first keeps the call's line on the call itself, which
             // kotlinc marks once those operands are evaluated.
             if let Some(&call) = self.operand_bound_calls.get(&lowered) {
-                self.ir
-                    .expr_source_lines
-                    .entry(call)
-                    .or_insert(debug.source);
+                self.ir.set_source_line_if_absent(call, debug.source);
             }
             for raw in first_generated..self.ir.exprs.len() {
                 let raw = raw as u32;
                 if !self.ir.suspend_calls.contains_key(&raw) {
                     continue;
                 }
-                self.ir.expr_source_lines.entry(raw).or_insert(debug.source);
+                self.ir.set_source_line_if_absent(raw, debug.source);
             }
         }
         if debug.end != 0 {
-            self.ir.expr_end_lines.insert(lowered, debug.end);
+            self.ir.set_end_line(lowered, debug.end);
             for raw in first_generated..self.ir.exprs.len() {
                 let raw = raw as u32;
                 if !self.ir.suspend_calls.contains_key(&raw) {
                     continue;
                 }
-                self.ir.expr_end_lines.entry(raw).or_insert(debug.end);
+                self.ir.set_end_line_if_absent(raw, debug.end);
             }
         }
         self.record_expression_origins(first_generated, lowered, origin);
@@ -1657,12 +1665,9 @@ impl BodyLowering<'_> {
         // The conversion remains the same checked source operation. Keep its position on the
         // original producer and on the selected call inside an operand-evaluation block.
         if source_line != 0 {
-            self.ir.expr_source_lines.entry(call).or_insert(source_line);
+            self.ir.set_source_line_if_absent(call, source_line);
             if let Some(&selected) = self.operand_bound_calls.get(&call) {
-                self.ir
-                    .expr_source_lines
-                    .entry(selected)
-                    .or_insert(source_line);
+                self.ir.set_source_line_if_absent(selected, source_line);
             }
         }
         let coercion = self.ir.add_expr(IrExpr::TypeOp {
@@ -1719,10 +1724,10 @@ impl BodyLowering<'_> {
                 self.ir.mark_positionless(lowered);
             }
             if debug.source != 0 {
-                self.ir.expr_source_lines.insert(lowered, debug.source);
+                self.ir.set_source_line(lowered, debug.source);
             }
             if debug.end != 0 {
-                self.ir.expr_end_lines.insert(lowered, debug.end);
+                self.ir.set_end_line(lowered, debug.end);
             }
             self.record_expression_origins(first_generated, lowered, origin);
             return Ok(lowered);
@@ -1733,8 +1738,8 @@ impl BodyLowering<'_> {
             matches!(conversion.kind, FirConversionKind::FunctionValue { .. })
         }) {
             // The checker named the class a function-value conversion compiles to on its value.
-            if let Some(&line) = self.ir.expr_source_lines.get(&expression) {
-                self.ir.expr_source_lines.insert(converted, line);
+            if let Some(line) = self.ir.source_line(expression) {
+                self.ir.set_source_line(converted, line);
             }
             self.record_generated_class_provenance(value, converted as usize);
         }
@@ -2167,7 +2172,7 @@ impl BodyLowering<'_> {
             let null = self.ir.add_expr(IrExpr::Const(IrConst::Null));
             let line = self.body.expression_debug_lines(safe_call).source;
             if line != 0 {
-                self.ir.expr_source_lines.insert(null, line);
+                self.ir.set_source_line(null, line);
             }
             null
         };
@@ -2218,12 +2223,25 @@ impl BodyLowering<'_> {
             .dispatch_receiver_slot()
             .map(|slot| self.ir.add_expr(IrExpr::GetValue(slot)))
             .ok_or(FirLoweringFailure::MissingLocalClass(owner))?;
+        self.capture_field_read(receiver, class, field)
+    }
+
+    /// Read capture `field` (its identity) of `class` from `receiver`, keeping the capture's
+    /// `crossinline` provenance on the read.
+    fn capture_field_read(
+        &mut self,
+        receiver: ExprId,
+        class: crate::ir::ClassId,
+        field: u32,
+    ) -> Result<ExprId, FirLoweringFailure> {
         let index = self.capture_field_index(class, field)?;
-        Ok(self.ir.add_expr(IrExpr::GetField {
+        let read = self.ir.add_expr(IrExpr::GetField {
             receiver,
             class,
             index,
-        }))
+        });
+        self.record_crossinline_read(read, self.class_field_crossinline_parameter(class, field));
+        Ok(read)
     }
 
     /// The field-table position of capture `field` (its identity) of `class`. A local class stores
@@ -2247,6 +2265,30 @@ impl BodyLowering<'_> {
             }
             _ => Ok(field),
         }
+    }
+
+    /// The `crossinline` parameter capture `field` (its identity) of local class `owner` holds, as
+    /// recorded when the class's captures were prepared.
+    pub(super) fn class_capture_crossinline_parameter(
+        &self,
+        owner: crate::fir::DeclarationId,
+        field: u32,
+    ) -> Result<Option<u32>, FirLoweringFailure> {
+        Ok(self.class_field_crossinline_parameter(self.storage_class(owner)?, field))
+    }
+
+    fn class_field_crossinline_parameter(
+        &self,
+        class: crate::ir::ClassId,
+        field: u32,
+    ) -> Option<u32> {
+        let declaration = &self.ir.classes[class as usize];
+        declaration
+            .ctor_args
+            .get(field as usize)
+            .filter(|_| field < declaration.constructor_prefix_count)
+            .and_then(|argument| argument.capture.as_ref())
+            .and_then(|capture| capture.crossinline_parameter)
     }
 
     pub(super) fn constructor_capture_parameter(
@@ -2281,7 +2323,10 @@ impl BodyLowering<'_> {
                 if !valid_owner || field >= self.class_constructor_capture_count {
                     return Err(FirLoweringFailure::InvalidConstructorCapture { owner, field });
                 }
-                return Ok(self.ir.add_expr(IrExpr::GetValue(field + 1)));
+                let read = self.ir.add_expr(IrExpr::GetValue(field + 1));
+                let parameter = self.class_capture_crossinline_parameter(owner, field)?;
+                self.record_crossinline_read(read, parameter);
+                return Ok(read);
             }
         };
         let capture = self
@@ -2292,7 +2337,9 @@ impl BodyLowering<'_> {
                 enclosing_depth,
                 source,
             })?;
-        Ok(self.ir.add_expr(IrExpr::GetValue(capture.slot)))
+        let read = self.ir.add_expr(IrExpr::GetValue(capture.slot));
+        self.record_crossinline_read(read, capture.crossinline_parameter);
+        Ok(read)
     }
 
     fn constructor_context_parameter(
@@ -2355,12 +2402,7 @@ impl BodyLowering<'_> {
                 ),
             });
         }
-        let index = self.capture_field_index(class, field)?;
-        Ok(self.ir.add_expr(IrExpr::GetField {
-            receiver,
-            class,
-            index,
-        }))
+        self.capture_field_read(receiver, class, field)
     }
 
     pub(super) fn enclosing_class_storage_read(
@@ -2405,12 +2447,7 @@ impl BodyLowering<'_> {
             return Err(FirLoweringFailure::MissingLocalClass(owner));
         }
         let class = self.storage_class(owner)?;
-        let index = self.capture_field_index(class, field)?;
-        Ok(self.ir.add_expr(IrExpr::GetField {
-            receiver,
-            class,
-            index,
-        }))
+        self.capture_field_read(receiver, class, field)
     }
 
     /// Realize the checker-published semantic enclosing-instance path in the current common class

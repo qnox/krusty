@@ -247,10 +247,25 @@ impl BodyFirChecker<'_> {
         let constant = matches!(kind, FirExprKind::Constant(_));
         let expression = self.body.add_expr(FirExpr { origin, ty, kind });
         self.record_generated_class_provenance(source, expression);
-        if constant && self.info.resolved_constants.contains_key(&source) {
-            self.body.record_constant_read(expression);
+        if let Some(constant_source) = constant.then(|| self.constant_source(source)).flatten() {
+            self.body
+                .record_constant_source(expression, constant_source);
         }
         Ok(expression)
+    }
+
+    /// Why `source`, which checked to a constant, is not a literal as source wrote it.
+    fn constant_source(&self, source: ExprId) -> Option<crate::fir::FirConstantSource> {
+        if matches!(
+            self.file.expr(source),
+            crate::ast::Expr::Call { .. } | crate::ast::Expr::SafeCall { .. }
+        ) {
+            Some(crate::fir::FirConstantSource::FoldedCall)
+        } else if self.info.resolved_constants.contains_key(&source) {
+            Some(crate::fir::FirConstantSource::DeclarationRead)
+        } else {
+            None
+        }
     }
 
     pub(super) fn add_expression_with_type(
@@ -265,8 +280,9 @@ impl BodyFirChecker<'_> {
         let constant = matches!(kind, FirExprKind::Constant(_));
         let expression = self.body.add_expr(FirExpr { origin, ty, kind });
         self.record_generated_class_provenance(source, expression);
-        if constant && self.info.resolved_constants.contains_key(&source) {
-            self.body.record_constant_read(expression);
+        if let Some(constant_source) = constant.then(|| self.constant_source(source)).flatten() {
+            self.body
+                .record_constant_source(expression, constant_source);
         }
         Ok(expression)
     }

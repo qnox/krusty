@@ -1043,7 +1043,7 @@ fn suspend_inline_call_keeps_source_extent_and_semantic_inline_region() {
     );
     assert_eq!(ir.suspend_calls.len(), 1);
     let suspension = *ir.suspend_calls.keys().next().unwrap();
-    assert_eq!(ir.expr_source_lines.get(&suspension), Some(&4));
+    assert_eq!(ir.source_line(suspension), Some(4));
     assert!(!ir.inline_call_sites.is_empty());
     assert!(!ir.inline_regions.is_empty());
 }

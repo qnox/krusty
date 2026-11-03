@@ -20,6 +20,18 @@ fun box(): String {
 "#;
 
 #[test]
+fn official_receiver_captures_preserve_values_and_once_only_inputs() {
+    let library = include_str!("fixtures/klib_closure_frames/ReceiverCapture.kt");
+    let consumer = include_str!("fixtures/klib_closure_frames/ReceiverCaptureConsumer.kt");
+    assert_official_dependency_closures(
+        library,
+        consumer,
+        "SerializedReceiverCapture",
+        DependencyConsumer::Native,
+    );
+}
+
+#[test]
 fn official_dependency_closures_preserve_nested_values_and_once_only_operands() {
     assert_official_dependency_closures(
         LIBRARY,

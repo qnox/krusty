@@ -181,6 +181,12 @@ pub(super) struct AnonymousCaptureCandidate {
     pub(super) receiver_role: Option<super::ReceiverDeclarationRole>,
 }
 
+pub(super) struct ReceiverCaptureUses<'a> {
+    pub(super) mark: usize,
+    pub(super) extension: Option<Span>,
+    pub(super) forwarded: &'a super::receiver_uses::ReceiverUseSites,
+}
+
 fn receiver_capture_source(
     class_receiver: bool,
     current: bool,
@@ -243,15 +249,18 @@ impl Checker<'_> {
         declaration: DeclId,
         candidate: &AnonymousCaptureCandidate,
         receiver_identity: (usize, usize),
-        uses_before: usize,
-        extension_use: Option<(Span, usize)>,
+        uses: ReceiverCaptureUses<'_>,
         finalized: &[AnonymousObjectCapture],
     ) -> bool {
-        let semantically_used = self.implicit_receiver_identity_use_count(receiver_identity)
-            > uses_before
-            || extension_use.is_some_and(|(declaration, before)| {
-                self.extension_receiver_use_count(declaration) > before
-            });
+        let semantically_used = self
+            .implicit_receiver_identity_uses
+            .first_use_since_excluding(
+                uses.mark,
+                receiver_identity,
+                uses.extension,
+                uses.forwarded,
+            )
+            != usize::MAX;
         semantically_used
             || self.selected_anonymous_super_outer_candidate(declaration, candidate)
             || finalized

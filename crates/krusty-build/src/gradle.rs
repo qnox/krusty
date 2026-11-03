@@ -1509,29 +1509,20 @@ fun main() {
             "{output}"
         );
 
-        // AGP passes `-Xuse-inline-scopes-numbers` to an application's debug compiles. krusty does
-        // not implement it yet, so the build reports it and kotlinc compiles that variant.
+        // AGP passes `-Xuse-inline-scopes-numbers` to an application's debug compiles, which
+        // krusty compiles with it.
         clear_invocation_log(log);
         clear_invocation_log(&fixture.probes);
-        let output = fixture
+        fixture
             .build()
             .tasks([":app:compileDebugKotlin"])
             .run_output()
             .unwrap_or_else(|error| panic!("{error}"));
-        assert_left_to_kotlinc(
-            &output,
-            ":app:compileDebugKotlin",
-            &[
-                "krusty does not implement the kotlinc argument '-Xuse-inline-scopes-numbers'"
-                    .to_string(),
-            ],
-        );
-        let text = optional_invocation_log(log);
+        let app = single_module_invocation(log, "app");
         assert!(
-            invocations(&text)
-                .iter()
-                .all(|run| !has_pair(run, "-module-name", "app")),
-            "{text}"
+            app.iter()
+                .any(|argument| argument == "-Xuse-inline-scopes-numbers"),
+            "{app:?}"
         );
         assert!(root
             .join("app/build/intermediates/built_in_kotlinc/debug/compileDebugKotlin/classes/sample/app/MainActivity.class")
@@ -1611,6 +1602,11 @@ android {
 
 dependencies {
     testImplementation("junit:junit:4.13.2")
+}
+
+tasks.withType<org.gradle.api.tasks.testing.Test>().configureEach {
+    outputs.upToDateWhen { false }
+    outputs.doNotCacheIf("the integration test must execute the classes compiled by krusty") { true }
 }
 "#,
         );

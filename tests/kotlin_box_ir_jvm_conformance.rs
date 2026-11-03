@@ -483,7 +483,7 @@ fn compile_multifile(
     // sees the emitted classes as an overlay on the shared jar classpath, and they ride along to
     // BoxRunner's loader. When javac-first fails — the Java references Kotlin declarations, so it
     // cannot be ordered first — fall back to the KOTLIN-FIRST pipeline: signature stubs → krusty →
-    // real javac (docs/JAVA_INTEROP.md slice 2).
+    // real javac.
     let mut java_classes: Vec<(String, Vec<u8>)> = Vec::new();
     if !java_blocks.is_empty() {
         match common::javac_compile(&java_blocks, cp_jars) {
@@ -1441,6 +1441,36 @@ fn compose_singleton_lambdas_are_byte_identical_to_kotlinc() {
 #[test]
 fn compose_remembered_lambdas_are_byte_identical_to_kotlinc() {
     assert_compose_fixture_matches_kotlinc("rememberedLambdas");
+}
+
+#[test]
+fn compose_class_stability_is_byte_identical_to_kotlinc() {
+    assert_compose_fixture_matches_kotlinc("classStability");
+}
+
+#[test]
+fn compose_class_stability_keeps_java_origin_apart_from_mapped_builtins() {
+    assert_compose_fixture_matches_kotlinc("classStabilityJavaOrigin");
+}
+
+#[test]
+fn compose_runtime_stability_is_byte_identical_to_kotlinc() {
+    assert_compose_fixture_matches_kotlinc("runtimeStability");
+}
+
+#[test]
+fn compose_generic_stability_is_byte_identical_to_kotlinc() {
+    assert_compose_fixture_matches_kotlinc("genericStability");
+}
+
+#[test]
+fn compose_value_class_stability_is_byte_identical_to_kotlinc() {
+    assert_compose_fixture_matches_kotlinc("valueClassStability");
+}
+
+#[test]
+fn compose_generic_field_stability_is_byte_identical_to_kotlinc() {
+    assert_compose_fixture_matches_kotlinc("genericFieldStability");
 }
 
 fn assert_compose_fixture_matches_kotlinc(stem: &str) {

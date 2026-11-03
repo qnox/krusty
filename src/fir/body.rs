@@ -39,7 +39,9 @@ pub use ranges::{
 };
 mod indexed_iteration;
 pub use indexed_iteration::{FirBuiltinIterableKind, FirCharSequenceIndexing};
+mod constant_sources;
 mod with_index;
+pub use constant_sources::FirConstantSource;
 pub use with_index::{FirIndexedValueComponent, FirWithIndexLoop};
 mod callable_dispatch;
 pub use callable_dispatch::{
@@ -1769,10 +1771,9 @@ pub struct FirBody {
     /// Naming provenance of each expression the reference compiler realizes as a class of its own
     /// (a callable reference). A naming fact, not a lowering decision.
     generated_class_provenance: HashMap<FirExprId, FirGeneratedClassProvenance>,
-    /// Constants that are the selected value of a `const val` or a Java constant field, as opposed
-    /// to a literal. Both are `FirExprKind::Constant`; metadata's constant-initializer rule
-    /// tells them apart.
-    constant_reads: HashSet<FirExprId>,
+    /// Constants that are not a literal as source wrote it. Every one is `FirExprKind::Constant`;
+    /// metadata's constant-initializer rule tells them apart.
+    constant_sources: HashMap<FirExprId, FirConstantSource>,
     /// Local-storage blocks originating from postfix `++`/`--`, whose checked shape snapshots the
     /// old value.
     postfix_updates: HashSet<FirExprId>,
@@ -1800,6 +1801,9 @@ pub struct FirBody {
     /// each parameter is bound. The contract above is in physical order and also lists context
     /// receivers that bind no value, so it does not pair positionally with `parameters`.
     spliced_inline_parameters: Vec<LocalValueId>,
+    /// The bound values of the parameters declared `crossinline`. A capture of one of them is a
+    /// crossinline capture wherever it is moved, which the target's inline ABI depends on.
+    crossinline_parameters: Vec<LocalValueId>,
     parameters: Vec<FirValueParameter>,
     default_values: Vec<FirDefaultValue>,
     captures: Vec<FirCapture>,
@@ -1853,7 +1857,7 @@ impl FirBody {
             destructuring_loop_containers: HashSet::default(),
             debug_lines: Default::default(),
             generated_class_provenance: HashMap::default(),
-            constant_reads: HashSet::default(),
+            constant_sources: HashMap::default(),
             postfix_updates: HashSet::default(),
             inlined_call_conversions: HashSet::default(),
             lifting_site: None,
@@ -1867,6 +1871,7 @@ impl FirBody {
             inline_parameter_modifiers: Vec::new(),
             inline_expansion_modes: Vec::new(),
             spliced_inline_parameters: Vec::new(),
+            crossinline_parameters: Vec::new(),
             parameters: Vec::new(),
             default_values: Vec::new(),
             captures: Vec::new(),
@@ -2134,6 +2139,15 @@ impl FirBody {
     /// The bound values of this body's `Splice`-mode inline parameters.
     pub(crate) fn spliced_inline_parameters(&self) -> &[LocalValueId] {
         &self.spliced_inline_parameters
+    }
+
+    pub(crate) fn add_crossinline_parameter(&mut self, value: LocalValueId) {
+        self.crossinline_parameters.push(value);
+    }
+
+    /// Whether `value` is the bound value of a parameter this body declares `crossinline`.
+    pub(crate) fn is_crossinline_parameter(&self, value: LocalValueId) -> bool {
+        self.crossinline_parameters.contains(&value)
     }
 
     pub fn add_default_value(&mut self, default: FirDefaultValue) {
@@ -2528,15 +2542,6 @@ impl FirBody {
         id
     }
 
-    pub(crate) fn record_constant_read(&mut self, expression: FirExprId) {
-        self.constant_reads.insert(expression);
-    }
-
-    /// Whether this constant is a read of a constant declaration rather than a literal.
-    pub fn is_constant_read(&self, expression: FirExprId) -> bool {
-        self.constant_reads.contains(&expression)
-    }
-
     pub(crate) fn record_postfix_update(&mut self, block: FirExprId) {
         self.postfix_updates.insert(block);
     }
@@ -2797,6 +2802,7 @@ impl FirBody {
             + self.inline_expansion_modes.len()
                 * std::mem::size_of::<crate::types::InlineExpansionMode>()
             + self.spliced_inline_parameters.len() * std::mem::size_of::<LocalValueId>()
+            + self.crossinline_parameters.len() * std::mem::size_of::<LocalValueId>()
             + self
                 .property_delegate
                 .as_ref()
