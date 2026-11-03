@@ -118,6 +118,25 @@ fn callee_path(file: &File, callee: crate::ast::ExprId) -> Option<Vec<String>> {
 }
 
 impl ProductionSignatureSemantics<'_> {
+    /// Publish the contract of a selected call: the dependency declaration's own, or the one this
+    /// module decoded for its source declaration.
+    pub(super) fn record_selected_call_contract(
+        &self,
+        origin: crate::fir::OriginId,
+        callable: &crate::libraries::LibraryCallable,
+        declaration: Option<crate::fir::DeclarationId>,
+        parameter_by_argument: Box<[Option<u32>]>,
+    ) {
+        let contract = callable.contract.clone().or_else(|| {
+            declaration
+                .and_then(|declaration| self.source_contracts.borrow().get(&declaration).cloned())
+        });
+        if let Some(contract) = contract {
+            self.selected_calls
+                .record_contract(origin, contract, parameter_by_argument);
+        }
+    }
+
     pub(super) fn resolve_source_contracts(
         &self,
         candidates: &[SourceContractCandidate],
