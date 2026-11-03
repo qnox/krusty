@@ -10,6 +10,8 @@ const ARGUMENTS: &str =
     include_str!("box_regressions/multimodule/inferredResultThroughAliasArguments.kt");
 const NULLABLE: &str =
     include_str!("box_regressions/multimodule/inferredResultThroughNullableAlias.kt");
+const EXPLICIT: &str =
+    include_str!("box_regressions/multimodule/inferredResultThroughExplicitAliasArguments.kt");
 
 /// The `lib` and `main(lib)` modules of a two-module fixture.
 fn modules(program: &str) -> (&str, &str) {
@@ -61,4 +63,9 @@ fn the_complete_redundant_alias_argument_program_matches_kotlin() {
 #[test]
 fn the_complete_nullable_alias_expansion_program_matches_kotlin() {
     assert_complete_program("inferred_result_nullable_alias", NULLABLE);
+}
+
+#[test]
+fn the_complete_written_alias_argument_program_matches_kotlin() {
+    assert_complete_program("inferred_result_explicit_alias_arguments", EXPLICIT);
 }

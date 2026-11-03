@@ -64,7 +64,9 @@ pub(super) struct CompactSelectedResultPublication {
     receiver: Option<Ty>,
     enhancement: TypeEnhancement,
     arguments: Box<[Option<CompactPublicationArgument>]>,
-    explicit_type_arguments: bool,
+    /// The call's written type arguments, in the selected declaration's formal order (empty when
+    /// the call wrote none). They fix the declaration's substitution as written.
+    explicit_type_arguments: Box<[Ty]>,
     /// The typealias the selected declaration spelled its result through. kotlinc's call result
     /// carries that abbreviation, so an inferred declaration result reached through it records
     /// the alias.
@@ -157,10 +159,19 @@ impl CompactSelectedResultPublication {
                 constrain(parameter, *actual);
             }
         }
-        let bindings = constraints
+        let mut bindings = constraints
             .into_iter()
             .filter_map(|(formal, values)| Some((formal, *values.first()?)))
             .collect::<HashMap<_, _>>();
+        // Written type arguments are the selection's substitution as written: they bind the
+        // declaration's own formals even where nothing else mentions them (`emptyTagged<Int>()`).
+        if let Some(signature) = &self.signature {
+            for (formal, &argument) in signature.formals.iter().zip(&self.explicit_type_arguments) {
+                if argument != Ty::Error {
+                    bindings.insert(formal.clone(), argument);
+                }
+            }
+        }
         let mut mentioned = Vec::new();
         for argument in declared.arguments().iter() {
             collect_type_parameters(*argument, &mut mentioned);
@@ -199,7 +210,7 @@ impl CompactSelectedResultPublication {
         callable: &LibraryCallable,
         parameter_by_argument: Box<[Option<u32>]>,
         whole_array_arguments: Box<[bool]>,
-        explicit_type_arguments: bool,
+        explicit_type_arguments: Box<[Ty]>,
     ) -> Self {
         let signature = callable.generic_sig.as_deref();
         let (declared, _) = declared_result(
@@ -230,7 +241,7 @@ impl CompactSelectedResultPublication {
         receiver: Option<Ty>,
         parameter_by_argument: Box<[Option<u32>]>,
         whole_array_arguments: Box<[bool]>,
-        explicit_type_arguments: bool,
+        explicit_type_arguments: Box<[Ty]>,
     ) -> Self {
         let signature = member.generic_sig.as_ref();
         let (declared, _) = declared_result(
@@ -267,7 +278,7 @@ impl CompactSelectedResultPublication {
         parameter_by_argument: Box<[Option<u32>]>,
         vararg: Option<usize>,
         whole_array_arguments: Box<[bool]>,
-        explicit_type_arguments: bool,
+        explicit_type_arguments: Box<[Ty]>,
     ) -> Self {
         // A constructor yields its classifier's own type, whose arguments are rigid type
         // parameters. Only an inferred argument takes the flexibility of the Java usage it was
@@ -280,7 +291,7 @@ impl CompactSelectedResultPublication {
                     .get(index)
                     .copied()
                     .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
-                let bound = if explicit_type_arguments && bound.is_platform_nullable() {
+                let bound = if !explicit_type_arguments.is_empty() && bound.is_platform_nullable() {
                     Ty::nullable(bound.platform_lower_bound())
                 } else {
                     bound
@@ -326,7 +337,7 @@ impl CompactSelectedResultPublication {
         let mut publication_view =
             |actual, publication: &Ty, owner| view(actual, *publication, owner);
         if let (Some(declared), Some((actual, publication))) = (self.receiver, receiver) {
-            let receiver_constraints = if self.explicit_type_arguments {
+            let receiver_constraints = if !self.explicit_type_arguments.is_empty() {
                 receiver_formals.as_slice()
             } else {
                 formals.as_slice()
@@ -341,7 +352,7 @@ impl CompactSelectedResultPublication {
                 &mut publication_view,
             );
         }
-        if !self.explicit_type_arguments {
+        if self.explicit_type_arguments.is_empty() {
             if let Some(signature) = &self.signature {
                 for (argument, binding) in arguments.iter().zip(&self.arguments) {
                     let Some(binding) = binding else {
@@ -939,7 +950,7 @@ mod tests {
             receiver: Some(Ty::obj_args_name(list, &[variable])),
             enhancement: TypeEnhancement::NONE,
             arguments: Box::new([]),
-            explicit_type_arguments: false,
+            explicit_type_arguments: Box::new([]),
             result_alias: None,
             declaring_owner: None,
         };
@@ -976,7 +987,7 @@ mod tests {
             vec![Some(0)].into_boxed_slice(),
             None,
             vec![false].into_boxed_slice(),
-            false,
+            Box::new([]),
         );
         let published_carrier =
             constructor.publish(None, &[(rigid_list, published_list)], direct_view);
@@ -999,7 +1010,7 @@ mod tests {
             receiver: Some(Ty::obj_args_name(carrier, &[variable])),
             enhancement: TypeEnhancement::NONE,
             arguments: Box::new([]),
-            explicit_type_arguments: false,
+            explicit_type_arguments: Box::new([]),
             result_alias: None,
             declaring_owner: None,
         };
@@ -1032,7 +1043,7 @@ mod tests {
                 vararg_element: false,
             })]
             .into_boxed_slice(),
-            explicit_type_arguments: true,
+            explicit_type_arguments: Box::new([Ty::String]),
             result_alias: None,
             declaring_owner: None,
         };
@@ -1066,7 +1077,7 @@ mod tests {
             receiver: None,
             enhancement: TypeEnhancement::NONE,
             arguments: Box::new([]),
-            explicit_type_arguments: false,
+            explicit_type_arguments: Box::new([]),
             result_alias: None,
             declaring_owner: None,
         };
