@@ -1610,8 +1610,6 @@ mod nested_receiver_lambda_captures_e2e;
 mod nested_type_parameter_bound_e2e;
 #[path = "nothing_type_argument_signature_e2e.rs"]
 mod nothing_type_argument_signature_e2e;
-#[path = "nullable_any_lambda_return_line_e2e.rs"]
-mod nullable_any_lambda_return_line_e2e;
 #[path = "nullable_double_type_param_equality_e2e.rs"]
 mod nullable_double_type_param_equality_e2e;
 #[path = "nullable_uint_property_e2e.rs"]
