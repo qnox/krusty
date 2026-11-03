@@ -200,7 +200,7 @@ impl Emitter<'_> {
         }
         let line = [call, expression]
             .into_iter()
-            .find_map(|node| self.ir.expr_source_lines.get(&node).copied());
+            .find_map(|node| self.ir.source_line(node));
         let Some(line) = line.filter(|&line| line != 0) else {
             return;
         };
