@@ -135,10 +135,6 @@ pub(super) fn score_with_declaration(
         let contextual_name = checker
             .postponed_context_sensitive_name(scope, argument)
             .is_some_and(|name| checker.context_sensitive_name_matches(name, expected));
-        let contextual_empty_reference_array = checker
-            .postponed_empty_reference_array_factory(scope, argument)
-            && expected.non_null().is_reference_array()
-            && expected.non_null().array_elem().is_some();
         crate::trace_compiler!(
                 "expected_call",
                 "score argument={argument:?} parameter={parameter} expected={expected:?} actual={semantic_actual:?} exact={}",
@@ -192,9 +188,6 @@ pub(super) fn score_with_declaration(
             return Some(2);
         }
         if contextual_name {
-            return Some(2);
-        }
-        if contextual_empty_reference_array {
             return Some(2);
         }
         // A lambda/function-shaped value is not nominally assignable to its SAM classifier;

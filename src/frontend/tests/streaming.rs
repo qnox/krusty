@@ -3928,7 +3928,14 @@ fn reparsed_call_parameter_contextualizes_an_empty_reference_array_factory() {
     let mut diagnostics = DiagSink::new();
     let analysis = analyze_source_set_with_features_and_prepare(
         &inputs,
-        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
+        crate::frontend::PlatformProvider::jvm(Box::new(
+            crate::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
+                crate::jvm::classpath::Classpath::new(crate::toolchain::jvm_classpath_jars_for(
+                    "// WITH_STDLIB",
+                )),
+            ))
+            .expect("JVM provider initialization"),
+        )),
         &LangFeatures::new(),
         |_, _| {},
         &mut diagnostics,

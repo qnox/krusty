@@ -208,6 +208,22 @@ impl Checker<'_> {
         }) || self
             .postponed_diagnostics
             .contains_error_in_span(self.file_index, call_span);
+        // A parameter constrains a formal only through an argument the call passes to it. An
+        // empty `vararg` (`arrayOf()`) or an omitted defaulted parameter supplies no evidence. Any
+        // leading context parameters precede the committed value slots.
+        let committed = self.resolved_call_arg_slots.get(&call);
+        let context_parameters = committed.map_or(0, |committed| {
+            signature.params.len().saturating_sub(committed.slots.len())
+        });
+        let parameter_receives_argument = |parameter: usize| {
+            committed.is_none_or(|committed| {
+                parameter < context_parameters
+                    || committed
+                        .argument_bindings
+                        .iter()
+                        .any(|binding| binding.parameter + context_parameters == parameter)
+            })
+        };
         let Some((index, formal)) = signature
             .formals
             .iter()
@@ -232,8 +248,10 @@ impl Checker<'_> {
                         || !signature
                             .params
                             .iter()
-                            .any(|parameter| {
+                            .enumerate()
+                            .any(|(position, parameter)| {
                                 ty_mentions_param(*parameter, std::slice::from_ref(*formal))
+                                    && parameter_receives_argument(position)
                             }))
                     && (open_lambda_result_formals
                         .is_some_and(|formals| formals.contains(formal))

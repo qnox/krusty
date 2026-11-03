@@ -4005,6 +4005,15 @@ fn analyze_source_inputs_for_lsp(
     inputs: &[SourceInput<'_>],
     navigation_relation_limit: usize,
 ) -> Vec<DocumentAnalysis> {
+    let analysis = crate::jvm_analysis::analyze_standalone_source_inputs(inputs);
+    document_analyses_for_source_set(inputs, analysis, navigation_relation_limit)
+}
+
+fn document_analyses_for_source_set(
+    inputs: &[SourceInput<'_>],
+    analysis: crate::compiler_analysis::SourceSetAnalysis,
+    navigation_relation_limit: usize,
+) -> Vec<DocumentAnalysis> {
     let sources = inputs.iter().map(|input| input.text).collect::<Vec<_>>();
     let java_documents = inputs
         .iter()
@@ -4012,7 +4021,6 @@ fn analyze_source_inputs_for_lsp(
         .filter(|(_, input)| input.kind == SourceKind::Java)
         .map(|(index, _)| index as u32)
         .collect::<Vec<_>>();
-    let analysis = crate::jvm_analysis::analyze_standalone_source_inputs(inputs);
     let highlight_symbols = HighlightSymbols::from_source_set(&analysis.files, &analysis.symbols);
     let mut definition_symbols = DefinitionSymbols::from_source_set(
         &sources,
@@ -6168,7 +6176,21 @@ mod tests {
                       fun smart(value: SmartBase) {\n\
                       \u{20}\u{20}if (value is SmartDerived) { val narrowed = value }\n\
                       }\n";
-        let analysis = analyze_for_lsp(&[source]).pop().unwrap();
+        let inputs = [SourceInput::kotlin(source)];
+        let platform = krusty::jvm::jvm_libraries::JvmLibraries::new(std::rc::Rc::new(
+            krusty::toolchain::stdlib_classpath(),
+        ));
+        let analysis = document_analyses_for_source_set(
+            &inputs,
+            crate::compiler_analysis::analyze_source_inputs_with_features(
+                &inputs,
+                PlatformProvider::jvm(platform),
+                &krusty::features::LangFeatures::new(),
+            ),
+            MAX_SOURCE_SET_NAVIGATION_ENTRIES,
+        )
+        .pop()
+        .unwrap();
         assert!(
             analysis.diagnostics.is_empty(),
             "{:?}",

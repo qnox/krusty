@@ -5143,6 +5143,7 @@ reflection/typeOf/typeOfCapturedStar.kt
 regressions/Kt1149.kt
 regressions/Kt1619Test.kt
 regressions/Kt2495Test.kt
+regressions/arrayFactoriesAreOrdinaryCalls.kt
 regressions/arrayLengthNPE.kt
 regressions/collectionSizeInInlineBody.kt
 regressions/collectionSizeOrDefault.kt
