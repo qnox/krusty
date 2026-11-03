@@ -227,6 +227,30 @@ pub(super) fn instantiate_member_extension_with(
             &mut bindings,
         );
     }
+    // A formal observable only through another formal's bound (`T` of `E : EntityID<T>` on a
+    // `Column<out E?>` receiver) is solved from that formal's applied bound, as for any other
+    // generic call, before it can fall back to its own bound.
+    if let Some(generic) = generic {
+        crate::symbol_resolver::resolve_bound_violating_bindings(
+            Some(source),
+            generic,
+            &mut bindings,
+            explicit_type_args,
+        );
+        // A solved formal must satisfy its declared bounds, as for any other generic call:
+        // `<T : Any, S : T, C : Column<S>> C.references(ref: Column<T>)` does not apply to a
+        // `Column<Int>` receiver with an `EntityID<Int>` reference, since `S = Int` is not a `T`.
+        // A relation through a formal that is still open (`C := Holder<R>` for `C : Sink<R>` in a
+        // recursive call) stays open, as in ordinary generic call selection.
+        if !crate::symbol_resolver::generic_bindings_admit_expected_return_intersection(
+            generic,
+            &bindings,
+            None,
+            |actual, bound| crate::symbol_resolver::resolution_subtype(source, actual, bound),
+        ) {
+            return None;
+        }
+    }
     // The call's evidence so far, before any unsolved formal stands for its bound: a lambda
     // argument is shaped from THIS view, so a formal only a lambda can solve stays open for the
     // call's postponed-lambda analysis instead of being fixed to its bound ahead of that lambda.

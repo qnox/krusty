@@ -279,11 +279,6 @@ impl<'a> Checker<'a> {
                     && (candidate.kind != crate::libraries::FnKind::Member
                         || candidate.context_count == 0)
             });
-            self.drop_members_hidden_by_applicable_extensions(
-                receiver,
-                &mut functions.overloads,
-                super::access_control::OperatorCallShape::IndexedSet { args: &arg_kinds },
-            );
             let callables = crate::libraries::Callables::from_parts(functions, properties);
             let indexed = resolver.select_receiver_indexed_set_function_with_params(
                 receiver,
@@ -435,18 +430,13 @@ impl<'a> Checker<'a> {
                 && (candidate.kind != crate::libraries::FnKind::Member
                     || candidate.context_count == 0)
         });
-        self.drop_members_hidden_by_applicable_extensions(
-            receiver,
-            &mut functions.overloads,
-            super::access_control::OperatorCallShape::Call {
-                name,
-                args: &arg_kinds,
-            },
-        );
+        // The member rung resolves only with a member this site can see. One it cannot see stays
+        // in the final selection below, ranked under every accessible candidate.
         let mut members = functions.clone();
-        members
-            .overloads
-            .retain(|candidate| candidate.kind == crate::libraries::FnKind::Member);
+        members.overloads.retain(|candidate| {
+            candidate.kind == crate::libraries::FnKind::Member
+                && self.member_candidate_accessible(candidate, Some(receiver))
+        });
         let members = crate::libraries::Callables::Functions(members);
         let callables = crate::libraries::Callables::from_parts(functions, properties);
         let member_applicable = {
@@ -676,20 +666,6 @@ impl<'a> Checker<'a> {
                 && (candidate.kind != crate::libraries::FnKind::Member
                     || candidate.context_count == 0)
         });
-        self.drop_members_hidden_by_applicable_extensions(
-            receiver,
-            &mut functions.overloads,
-            if name == "set" {
-                super::access_control::OperatorCallShape::IndexedSet {
-                    args: &argument_kinds,
-                }
-            } else {
-                super::access_control::OperatorCallShape::Call {
-                    name,
-                    args: &argument_kinds,
-                }
-            },
-        );
         let callables = crate::libraries::Callables::Functions(functions);
         if name == "set" {
             match resolver.select_receiver_indexed_set_function_with_params(

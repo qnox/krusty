@@ -42,15 +42,19 @@ impl Emitter<'_> {
         }
         self.link_safe_call_chain(block, code);
         let copied_caller = self.copied_function_caller(block, code);
-        let enclosing_statement_line = self.statement_line;
         let saved = self.open_slot_scope();
         let terminal_target = self.terminal_statement_target.take();
         let marked_initializer = self.renders_initializer_boundary(block);
         self.mark_initializer_line(block, false, code);
-        // The optimized safe call still owns an ordinary lexical block. Enter its depth before
-        // asking for the fast path so nested selector emission, local ranges, and frames observe
-        // the same lifecycle as `emit_open_block`.
-        self.block_depth += 1;
+        let entry = InlineBodyEntry {
+            normalize_at_lambda_frame: delays_stack_normalization,
+            stack_height: inline_stack_height,
+            within_inline_lambda,
+            opening: self.external_inline_body_opening(block, &stmts),
+            copied_function: copied_caller.is_some().then_some(block),
+            discarded_frame_result: value
+                .and_then(|value| self.discarded_copied_frame_tail(block, &stmts, value)),
+        };
         let EmittedBlock {
             discard_after_close,
             retains_postfix_temporary,
@@ -59,31 +63,7 @@ impl Emitter<'_> {
             emit_after_frame_close,
             discard_after_frame,
             close_discarded_provider_frame,
-        } = if self.try_emit_duplicated_safe_call(block, &stmts, value, true, code) {
-            self.terminal_statement_target = None;
-            self.statement_line = enclosing_statement_line;
-            EmittedBlock {
-                discard_after_close: None,
-                retains_postfix_temporary: false,
-                reserved_inline_stack: None,
-                close_lambda_before_locals: false,
-                emit_after_frame_close: None,
-                discard_after_frame: None,
-                close_discarded_provider_frame: None,
-            }
-        } else {
-            self.block_depth -= 1;
-            let entry = InlineBodyEntry {
-                normalize_at_lambda_frame: delays_stack_normalization,
-                stack_height: inline_stack_height,
-                within_inline_lambda,
-                opening: self.external_inline_body_opening(block, &stmts),
-                copied_function: copied_caller.is_some().then_some(block),
-                discarded_frame_result: value
-                    .and_then(|value| self.discarded_copied_frame_tail(block, &stmts, value)),
-            };
-            self.emit_open_block(block, stmts, value, terminal_target, entry, true, code)
-        };
+        } = self.emit_open_block(block, stmts, value, terminal_target, entry, true, code);
         self.mark_initializer_line(block, true, code);
         let mut anchored = false;
         if !self.ir.callable_scopes.contains(&block) {
@@ -189,9 +169,7 @@ impl Emitter<'_> {
         let mut deferred_invocation_result = None;
         let mut copied_frame_result = None;
         let optimized_postfix = self.emit_postfix_iinc(block, false, code);
-        if !optimized_postfix
-            && !self.try_emit_duplicated_safe_call(block, stmts, value, false, code)
-        {
+        if !optimized_postfix {
             let mut normalize_at_lambda_frame = delays_stack_normalization;
             let opening = self.external_inline_body_opening(block, stmts);
             let mut bound_operands = 0;
@@ -628,10 +606,8 @@ impl Emitter<'_> {
         }
         let Some(line) = self
             .ir
-            .expr_end_lines
-            .get(&returned)
-            .or_else(|| self.ir.expr_source_lines.get(&returned))
-            .copied()
+            .end_line(returned)
+            .or_else(|| self.ir.source_line(returned))
             .filter(|line| *line != 0)
         else {
             return;
@@ -822,13 +798,7 @@ impl Emitter<'_> {
 
     /// The spliced lambda's closing brace, while its locals are still open.
     fn emit_spliced_lambda_brace(&mut self, block: u32, code: &mut CodeBuilder) {
-        let Some(line) = self
-            .ir
-            .expr_end_lines
-            .get(&block)
-            .copied()
-            .filter(|line| *line != 0)
-        else {
+        let Some(line) = self.ir.end_line(block).filter(|line| *line != 0) else {
             return;
         };
         if self
@@ -846,7 +816,7 @@ impl Emitter<'_> {
     /// Put the inline call's line on the instruction that follows, without a `nop`. The result
     /// load is that instruction; kotlinc's line table records the call there.
     fn anchor_spliced_lambda_result(&mut self, block: u32, code: &mut CodeBuilder) {
-        let Some(&line) = self.ir.expr_source_lines.get(&block) else {
+        let Some(line) = self.ir.source_line(block) else {
             return;
         };
         code.forget_line();
@@ -866,13 +836,7 @@ impl Emitter<'_> {
         {
             return false;
         }
-        let Some(line) = self
-            .ir
-            .expr_source_lines
-            .get(&block)
-            .copied()
-            .filter(|line| *line != 0)
-        else {
+        let Some(line) = self.ir.source_line(block).filter(|line| *line != 0) else {
             return false;
         };
         self.mark_expression_line(block, line, code);
@@ -940,13 +904,7 @@ impl Emitter<'_> {
         if code.is_dead() {
             return;
         }
-        if let Some(line) = self
-            .ir
-            .expr_source_lines
-            .get(&block)
-            .copied()
-            .filter(|l| *l != 0)
-        {
+        if let Some(line) = self.ir.source_line(block).filter(|l| *l != 0) {
             self.mark_expression_line(block, line, code);
             code.nop();
         }
@@ -983,12 +941,7 @@ impl Emitter<'_> {
         if !self.ir.external_inline_expansions.contains(&block) {
             return None;
         }
-        let line = self
-            .ir
-            .expr_source_lines
-            .get(&block)
-            .copied()
-            .filter(|line| *line != 0)?;
+        let line = self.ir.source_line(block).filter(|line| *line != 0)?;
         let marker = stmts.iter().copied().find(|&statement| {
             matches!(
                 self.ir.debug_local_provenance(statement),
@@ -1107,13 +1060,7 @@ impl Emitter<'_> {
             return;
         }
         if brace {
-            if let Some(line) = self
-                .ir
-                .expr_end_lines
-                .get(&block)
-                .copied()
-                .filter(|line| *line != 0)
-            {
+            if let Some(line) = self.ir.end_line(block).filter(|line| *line != 0) {
                 // The brace belongs to the lambda supplied by the inner frame's caller. It is a
                 // raw source line there, but maps through the containing frame when that caller is
                 // itself copied into another inline call.
@@ -1126,11 +1073,11 @@ impl Emitter<'_> {
                 } else {
                     code.mark_line(line);
                 }
-            } else if let Some(line) = self.ir.expr_source_lines.get(&block).copied() {
+            } else if let Some(line) = self.ir.source_line(block) {
                 code.forget_line();
                 self.mark_expression_line(block, line, code);
             }
-        } else if let Some(&line) = self.ir.expr_source_lines.get(&block) {
+        } else if let Some(line) = self.ir.source_line(block) {
             // The spliced body ran under its own lines: kotlinc resets the line in effect after an
             // inlined body, so the frame's closing mark is written even when it names that line.
             code.forget_line();
