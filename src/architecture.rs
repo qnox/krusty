@@ -542,22 +542,22 @@ mod tests {
 
     #[test]
     fn native_facade_has_no_crate_dependencies() {
-        assert_allowed_crate_modules("src/native/mod.rs", &[]);
+        assert_allowed_crate_modules("crates/krusty-native/src/lib.rs", &[]);
     }
 
     #[test]
     fn the_native_runtime_sources_are_target_text_only() {
         // `runtime.rs` carries the runtime's C headers. It has no business knowing what a Kotlin
         // type or a compiler IR is.
-        assert_allowed_crate_modules("src/native/runtime.rs", &[]);
+        assert_allowed_crate_modules("crates/krusty-native/src/runtime.rs", &[]);
     }
 
     #[test]
     fn the_class_model_uses_only_ir_contract_dependencies() {
-        assert_allowed_crate_modules("src/native/intrinsics.rs", &["types"]);
+        assert_allowed_crate_modules("crates/krusty-native/src/intrinsics.rs", &["types"]);
         // `value_classes` is the traversal every backend shares; what this file adds is the policy.
         assert_allowed_crate_modules(
-            "src/native/value_classes.rs",
+            "crates/krusty-native/src/value_classes.rs",
             &["ir", "types", "value_classes"],
         );
     }
@@ -567,18 +567,24 @@ mod tests {
         // The facade receives the closed backend handoff. It neither retains a provider nor reaches
         // back into frontend state while emitting.
         assert_allowed_crate_modules(
-            "src/native/codegen/mod.rs",
+            "crates/krusty-native/src/codegen/mod.rs",
             &["backend", "compilation_target", "diag"],
         );
         // `fir` names only the opaque checked property/callable ids already carried by IR. `backend`
         // supplies their frozen facts; it is not a provider or another lookup surface.
         assert_allowed_crate_modules(
-            "src/native/codegen/lower.rs",
+            "crates/krusty-native/src/codegen/lower.rs",
             &["backend", "fir", "ir", "types"],
         );
-        assert_allowed_crate_modules("src/native/codegen/lower/functions.rs", &["ir", "types"]);
-        assert_allowed_crate_modules("src/native/codegen/lower/arrays.rs", &["types"]);
-        for path in rust_files_under("src/native/codegen") {
+        assert_allowed_crate_modules(
+            "crates/krusty-native/src/codegen/lower/functions.rs",
+            &["ir", "types"],
+        );
+        assert_allowed_crate_modules(
+            "crates/krusty-native/src/codegen/lower/arrays.rs",
+            &["types"],
+        );
+        for path in rust_files_under("crates/krusty-native/src/codegen") {
             let text = fs::read_to_string(&path).expect("read native code generator source");
             for forbidden in [
                 "SemanticPlatform",
@@ -599,29 +605,32 @@ mod tests {
         // The module format, the host boundary and the runtime know nothing about Kotlin's
         // frontend; only the code generator reads checked IR, and only through the backend facts.
         for path in [
-            "src/wasm/mod.rs",
-            "src/wasm/encode.rs",
-            "src/wasm/target.rs",
-            "src/wasm/host.rs",
-            "src/wasm/runtime.rs",
-            "src/wasm/objects.rs",
+            "crates/krusty-wasm/src/lib.rs",
+            "crates/krusty-wasm/src/encode.rs",
+            "crates/krusty-wasm/src/target.rs",
+            "crates/krusty-wasm/src/host.rs",
+            "crates/krusty-wasm/src/runtime.rs",
+            "crates/krusty-wasm/src/objects.rs",
         ] {
             assert_allowed_crate_modules(path, &[]);
         }
         assert_allowed_crate_modules(
-            "src/wasm/codegen.rs",
+            "crates/krusty-wasm/src/codegen.rs",
             &["backend", "compilation_target", "diag", "types"],
         );
         assert_allowed_crate_modules(
-            "src/wasm/codegen/callable_registry.rs",
+            "crates/krusty-wasm/src/codegen/callable_registry.rs",
             &["backend", "fir", "ir"],
         );
-        assert_allowed_crate_modules("src/wasm/codegen/lower.rs", &["backend", "ir", "types"]);
+        assert_allowed_crate_modules(
+            "crates/krusty-wasm/src/codegen/lower.rs",
+            &["backend", "ir", "types"],
+        );
         // A class's WasmGC form is built on the shared class tables (`backend`), whose slot keys
         // name the opaque checked property and callable ids IR carries (`fir`).
         for path in [
-            "src/wasm/codegen/classes.rs",
-            "src/wasm/codegen/lower/objects.rs",
+            "crates/krusty-wasm/src/codegen/classes.rs",
+            "crates/krusty-wasm/src/codegen/lower/objects.rs",
         ] {
             assert_allowed_crate_modules(path, &["backend", "fir", "ir", "types"]);
         }
@@ -631,9 +640,9 @@ mod tests {
     fn the_linker_knows_nothing_about_kotlin() {
         // Objects in, an executable out. A linker that imported the IR or the type system would be
         // a linker that had started making language decisions.
-        assert_allowed_crate_modules("src/native/linker/mod.rs", &[]);
-        assert_allowed_crate_modules("src/native/linker/elf.rs", &[]);
-        assert_allowed_crate_modules("src/native/prebuilt.rs", &[]);
+        assert_allowed_crate_modules("crates/krusty-native/src/linker/mod.rs", &[]);
+        assert_allowed_crate_modules("crates/krusty-native/src/linker/elf.rs", &[]);
+        assert_allowed_crate_modules("crates/krusty-native/src/prebuilt.rs", &[]);
     }
 
     #[test]
@@ -642,7 +651,7 @@ mod tests {
         // reaches it owned by a file facade. Both are artifacts of reading signatures out of a JVM
         // jar, and both are normalized in `intrinsics.rs`. A second file learning to recognize
         // those spellings is how a temporary bridge becomes permanent.
-        for path in rust_files_under("src/native") {
+        for path in rust_files_under("crates/krusty-native/src") {
             if path.ends_with("intrinsics.rs") {
                 continue;
             }

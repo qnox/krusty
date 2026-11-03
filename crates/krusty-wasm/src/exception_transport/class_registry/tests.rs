@@ -157,12 +157,12 @@ fn selected_wasm_stdlibs_publish_the_exception_chain_without_constructor_authori
 
 #[test]
 fn selected_illegal_state_storage_is_a_distinct_subtype_of_its_declared_parent() {
-    use crate::compilation_target::CompilationTarget;
-    use crate::klib_libraries::{KlibLibraries, KlibLibraryInput, KlibStdlibSemantics};
-    use crate::symbol_source::SymbolSource;
+    use krusty::compilation_target::CompilationTarget;
+    use krusty::klib_libraries::{KlibLibraries, KlibLibraryInput, KlibStdlibSemantics};
+    use krusty::symbol_source::SymbolSource;
     for target in [CompilationTarget::WasmJs, CompilationTarget::WasmWasi] {
         let libraries = KlibLibraries::open(&[KlibLibraryInput::platform_stdlib(
-            crate::toolchain::kotlin_stdlib_klib(target)
+            krusty::toolchain::kotlin_stdlib_klib(target)
                 .expect("the exact target stdlib must be provisioned"),
             KlibStdlibSemantics::Wasm,
         )])
@@ -170,14 +170,14 @@ fn selected_illegal_state_storage_is_a_distinct_subtype_of_its_declared_parent()
         let facts = BackendModuleFacts::from_classifiers([], []).unwrap();
         let source = CheckedBackendClassifiers::new(&facts, &libraries);
         let (mut module, mut transport) = runtime();
-        let owner = crate::types::type_name("kotlin/IllegalStateException");
+        let owner = krusty::types::type_name("kotlin/IllegalStateException");
         let declaration = libraries
             .classifier(owner)
             .expect("the selected class exists");
         for (params, message) in [
             (Vec::new(), false),
             (
-                vec![crate::types::Ty::nullable(crate::types::Ty::String)],
+                vec![krusty::types::Ty::nullable(krusty::types::Ty::String)],
                 true,
             ),
         ] {
@@ -189,30 +189,30 @@ fn selected_illegal_state_storage_is_a_distinct_subtype_of_its_declared_parent()
             let [constructor] = selected.as_slice() else {
                 panic!("one exact selected zero-argument or nullable-message constructor")
             };
-            let operation = crate::libraries::CompilerIntrinsic::ThrowableConstructor {
+            let operation = krusty::libraries::CompilerIntrinsic::ThrowableConstructor {
                 kind: RuntimeExceptionKind::IllegalState,
                 message,
             };
             assert_eq!(constructor.owner, Some(owner));
             assert_eq!(
                 constructor.realization,
-                crate::libraries::MemberRealization::Intrinsic(operation)
+                krusty::libraries::MemberRealization::Intrinsic(operation)
             );
             let callable = libraries
                 .external_callable(constructor.external_identity.unwrap())
                 .unwrap();
             assert_eq!(
                 callable.kind,
-                crate::libraries::ExternalCallableKind::Constructor
+                krusty::libraries::ExternalCallableKind::Constructor
             );
             assert_eq!(
                 callable.declaration_owner,
-                Some(crate::types::SemanticCallableOwner::Classifier(owner))
+                Some(krusty::types::SemanticCallableOwner::Classifier(owner))
             );
             assert_eq!(callable.callable.params, params);
             assert_eq!(
                 callable.callable.member_realization,
-                crate::libraries::MemberRealization::Intrinsic(operation)
+                krusty::libraries::MemberRealization::Intrinsic(operation)
             );
         }
         let selected = transport.ensure_class(&mut module, &source, owner).unwrap();

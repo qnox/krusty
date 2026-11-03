@@ -1,7 +1,9 @@
 use super::*;
-use crate::backend::BackendCallableFact;
-use crate::libraries::{ExternalCallableKind, InlineKind, MemberRealization, RuntimeExceptionKind};
-use crate::types::SemanticCallableOwner;
+use krusty::backend::BackendCallableFact;
+use krusty::libraries::{
+    ExternalCallableKind, InlineKind, MemberRealization, RuntimeExceptionKind,
+};
+use krusty::types::SemanticCallableOwner;
 
 fn declaration() -> BackendCallableFact {
     let owner = RuntimeExceptionKind::IllegalState.classifier();
@@ -10,7 +12,7 @@ fn declaration() -> BackendCallableFact {
         physical_name: None,
         reflection_name: None,
         physical_owner: owner,
-        visibility: crate::types::Visibility::Public,
+        visibility: krusty::types::Visibility::Public,
         declaration_owner: Some(SemanticCallableOwner::Classifier(owner)),
         singleton_dispatch: None,
         kind: ExternalCallableKind::Constructor,

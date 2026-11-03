@@ -15,16 +15,16 @@ fn constructor_frame(
     internal: TypeName,
     selected: Option<&[Ty]>,
     argument_count: usize,
-    kind: crate::libraries::RuntimeExceptionKind,
+    kind: krusty::libraries::RuntimeExceptionKind,
     message: bool,
-    declaration: &crate::backend::BackendCallableFact,
+    declaration: &krusty::backend::BackendCallableFact,
 ) -> Result<(), Unsupported> {
     let message_parameter = [Ty::nullable(Ty::String)];
     let parameters = if message { &message_parameter[..] } else { &[] };
     if internal != kind.classifier()
         || declaration.declaration_owner
-            != Some(crate::types::SemanticCallableOwner::Classifier(internal))
-        || declaration.kind != crate::libraries::ExternalCallableKind::Constructor
+            != Some(krusty::types::SemanticCallableOwner::Classifier(internal))
+        || declaration.kind != krusty::libraries::ExternalCallableKind::Constructor
         || declaration.params != parameters
         || selected != Some(parameters)
         || argument_count != parameters.len()

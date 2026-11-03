@@ -2,7 +2,11 @@
 
 use std::path::{Path, PathBuf};
 
+// Rerunning a script does not recompile it. Include checkout identity in this script's dep-info.
+const _: Option<&str> = option_env!("KRUSTY_BUILD_CHECKOUT");
+
 fn main() {
+    println!("cargo:rerun-if-env-changed=KRUSTY_BUILD_CHECKOUT");
     if let Err(error) = generate_diagnostic_names() {
         eprintln!("{error}");
         std::process::exit(1);
