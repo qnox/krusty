@@ -8,6 +8,7 @@ use crate::types::{InlineExpansionMode, InlineParameterModifier};
 const LOCAL_CAPTURE: IrValueCapture = IrValueCapture {
     declaration: IrCapturedDeclaration::Variable,
     capturer: IrCapturingCallable::Lambda,
+    crossinline_parameter: None,
 };
 
 fn captured(name: &str, ordinal: u32) -> IrParameterIdentity {

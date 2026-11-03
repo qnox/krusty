@@ -1113,11 +1113,7 @@ fn synthesize(
     let mut class = IrClass::synthetic(internal);
     class.enclosure = super::function_references::reference_enclosure(ir, expression);
     // The carrier's `get`/`set` bodies are attributed to the reference's line.
-    class.decl_line = ir
-        .expr_source_lines
-        .get(&(expression as u32))
-        .copied()
-        .unwrap_or(0);
+    class.decl_line = ir.source_line(expression as u32).unwrap_or(0);
     class.superclass = type_name(superclass);
     class.prop_ref = Some(property);
     realizations.record(internal, realization);

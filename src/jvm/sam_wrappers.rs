@@ -78,7 +78,7 @@ pub(super) fn realize(
             };
             let public_inline =
                 inline_scope == Some(InlineScope::Published) || foreign_facade.is_some();
-            let source_line = ir.expr_source_lines.get(&node).copied().unwrap_or(0);
+            let source_line = ir.source_line(node).unwrap_or(0);
             Some((
                 node,
                 *value,
@@ -148,7 +148,7 @@ pub(super) fn realize(
             realizations.nullable_constructions.insert(construction);
         }
         // kotlinc gives the construction no line of its own: the line starts at the wrapped value.
-        ir.expr_source_lines.remove(&node);
+        ir.take_source_line(node);
         ir.mark_positionless(node);
         ir.mark_positionless(construction);
     }
