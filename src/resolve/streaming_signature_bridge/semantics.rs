@@ -3222,16 +3222,15 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 return crate::fir::ResolvedTy::new(function).map_err(|_| Self::failure());
             }
 
-            // Only after the member rung has no applicable candidate may extension candidates be
-            // forced. Their inferred returns can legitimately depend on other declarations.
-            candidates.retain(|candidate| candidate.kind == crate::libraries::FnKind::Extension);
-            for candidate in &mut candidates {
-                if let Some(signature) =
-                    self.demanded_source_signature(None, candidate.stable_declaration, demand)?
-                {
-                    candidate.callable.ret = signature.result.get();
-                }
-            }
+            // Only once the member rung has nothing applicable are extension results demanded.
+            return self.select_extension_reference_shape(
+                scope,
+                candidates,
+                receiver,
+                unbound,
+                expected_function,
+                demand,
+            );
         }
         // A natural callable-reference type still obeys the scope tower. Declared members form an
         // earlier rung than extensions, so the presence of both must not be reported as an

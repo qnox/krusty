@@ -450,8 +450,6 @@ pub(super) fn is_compatible(
     }
     let mut result_bindings = crate::symbol_resolver::GSigBinds::default();
     crate::symbol_resolver::unify_inferred_ty(expected.ret, ret, &mut result_bindings);
-    let expected_ret =
-        crate::symbol_resolver::ty_subst_keep_unbound(expected.ret, &result_bindings);
     expected
         .params
         .iter()
@@ -464,7 +462,22 @@ pub(super) fn is_compatible(
                 _ => is_assignable(expected, *actual),
             }
         })
-        && ((allow_unit_coercion && expected.ret == Ty::Unit) || is_assignable(ret, expected_ret))
+        && result_is_compatible(ret, expected, allow_unit_coercion, is_assignable)
+}
+
+/// Whether a declaration's `ret` fits an expected callable shape's result. An open result variable
+/// is bound by that same result first, so only its other occurrences can contradict it.
+pub(super) fn result_is_compatible(
+    ret: Ty,
+    expected: &'static crate::types::FnSig,
+    allow_unit_coercion: bool,
+    mut is_assignable: impl FnMut(Ty, Ty) -> bool,
+) -> bool {
+    let mut result_bindings = crate::symbol_resolver::GSigBinds::default();
+    crate::symbol_resolver::unify_inferred_ty(expected.ret, ret, &mut result_bindings);
+    let expected_ret =
+        crate::symbol_resolver::ty_subst_keep_unbound(expected.ret, &result_bindings);
+    (allow_unit_coercion && expected.ret == Ty::Unit) || is_assignable(ret, expected_ret)
 }
 
 /// Replace provisional type-variable slots in an expected callable shape with the concrete slots
