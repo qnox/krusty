@@ -251,7 +251,6 @@ pub(super) fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: Exp
         specialized_expansion_order: _,
         specialized_anonymous_classes: _,
         reified_anonymous_declarations: _,
-        captured_signature_type_parameters: _,
         runtime_reified_lambda_implementations: _,
         inline_anonymous_lambdas: _,
         class_method_owners: _,

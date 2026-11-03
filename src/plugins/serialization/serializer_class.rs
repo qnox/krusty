@@ -717,6 +717,7 @@ fn add_write_self(
             bounds: vec![(any, false)],
             variance: crate::types::TypeVariance::Invariant,
             reified: false,
+            captured_from_enclosing: false,
         })
         .collect();
     let type_arguments: Vec<Ty> = type_parameters

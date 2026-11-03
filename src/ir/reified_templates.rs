@@ -11,7 +11,7 @@
 //! enclosure of the lambda node or class that declares the code, the specialized copies an
 //! expansion made, and the inline-copy marks on code an expansion copied into its caller.
 
-use super::{ClassId, ExprId, FunId, IrEnclosure, IrExpr, IrFile};
+use super::{ClassId, ExprId, FunId, IrEnclosure, IrExpr, IrFile, IrGenericSig, IrTypeParameter};
 use crate::types::Ty;
 
 /// Where the provenance says a function is declared.
@@ -24,6 +24,16 @@ enum DeclaringScope {
     Declaration,
     /// Created by copied code or by more than one node, or without a recorded scope.
     Unproven,
+}
+
+impl IrGenericSig {
+    /// The type parameters the signed declaration itself declares, without the ones a lifted
+    /// local or anonymous function captures from an enclosing declaration.
+    pub(crate) fn declared_type_parameters(&self) -> impl Iterator<Item = &IrTypeParameter> {
+        self.type_params
+            .iter()
+            .filter(|parameter| !parameter.captured_from_enclosing)
+    }
 }
 
 impl IrFile {
@@ -85,29 +95,14 @@ impl IrFile {
     /// parameters a lifted local or anonymous function's signature captures from an enclosing
     /// declaration are that declaration's, not this function's.
     fn declares_reified_occurrence(&self, function: FunId, tested: Ty) -> bool {
-        self.declared_type_parameters(function).any(|parameter| {
-            parameter.reified
-                && tested
-                    .type_parameter_occurrence_bound(&parameter.semantic_name)
-                    .is_some()
+        self.signatures.get(&function).is_some_and(|signature| {
+            signature.declared_type_parameters().any(|parameter| {
+                parameter.reified
+                    && tested
+                        .type_parameter_occurrence_bound(&parameter.semantic_name)
+                        .is_some()
+            })
         })
-    }
-
-    /// The type parameters `function` itself declares: its generic signature without the leading
-    /// ones a lifted local or anonymous function captures from an enclosing declaration.
-    pub(crate) fn declared_type_parameters(
-        &self,
-        function: FunId,
-    ) -> impl Iterator<Item = &super::IrTypeParameter> {
-        let captured = self
-            .captured_signature_type_parameters
-            .get(&function)
-            .copied()
-            .unwrap_or(0);
-        self.signatures
-            .get(&function)
-            .into_iter()
-            .flat_map(move |signature| signature.type_params.iter().skip(captured))
     }
 
     /// Where `function` is declared: as a member of its class, or by the one lambda node that
@@ -168,6 +163,15 @@ mod tests {
             bounds: Vec::new(),
             variance: crate::types::TypeVariance::Invariant,
             reified: true,
+            captured_from_enclosing: false,
+        }
+    }
+
+    /// The entry a lifted local or anonymous function's signature lists for an outer `parameter`.
+    fn captured(parameter: IrTypeParameter) -> IrTypeParameter {
+        IrTypeParameter {
+            captured_from_enclosing: true,
+            ..parameter
         }
     }
 
@@ -230,13 +234,12 @@ mod tests {
         ir.signatures.insert(
             lambda,
             IrGenericSig {
-                type_params: vec![parameter()],
+                type_params: vec![captured(parameter())],
                 params: Vec::new(),
                 ret: Some(Ty::Boolean),
                 supers: Vec::new(),
             },
         );
-        ir.captured_signature_type_parameters.insert(lambda, 1);
         let scope = IrEnclosure::Function(lambda);
         assert!(ir.is_reified_template_operation(scope, operation, parameter().ty()));
         ir.mark_inline_copy(node);
@@ -248,13 +251,12 @@ mod tests {
         ir.signatures.insert(
             local,
             IrGenericSig {
-                type_params: vec![parameter()],
+                type_params: vec![captured(parameter())],
                 params: Vec::new(),
                 ret: Some(Ty::Boolean),
                 supers: Vec::new(),
             },
         );
-        ir.captured_signature_type_parameters.insert(local, 1);
         assert!(!ir.is_reified_template_operation(
             IrEnclosure::Function(local),
             operation,

@@ -700,7 +700,6 @@ fn copy_function_implementation_facts(
         *result = ty_subst_keep_unbound(*result, bindings);
     }
     copy_map!(signatures);
-    copy_map!(captured_signature_type_parameters);
     if let Some(signature) = ir.signatures.get_mut(&target) {
         for parameter in &mut signature.params {
             *parameter = ty_subst_keep_unbound(*parameter, bindings);
@@ -810,6 +809,7 @@ mod tests {
                 bounds: vec![(Ty::obj("kotlin/Any"), false)],
                 variance: Default::default(),
                 reified: true,
+                captured_from_enclosing: false,
             }],
             params: vec![parameter],
             ret: Some(parameter),
@@ -900,6 +900,7 @@ mod tests {
                 bounds: vec![(parameter, false)],
                 variance: Default::default(),
                 reified: false,
+                captured_from_enclosing: false,
             }],
         );
         ir.record_lambda_type_parameters(source, vec![signature(parameter).type_params[0].clone()]);

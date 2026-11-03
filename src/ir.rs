@@ -1736,10 +1736,6 @@ pub struct IrFile {
     /// Recorded when a call site copies the class. The JVM emits `needClassReification` for these
     /// classes from this set alone.
     pub(crate) reified_anonymous_declarations: crate::fx_hash::HashSet<ClassId>,
-    /// Lifted local or anonymous function → how many leading entries of its generic signature are
-    /// type parameters it captures from an enclosing declaration. Those entries keep the outer
-    /// declaration's identity and reified capability; the function does not declare them.
-    pub(crate) captured_signature_type_parameters: crate::fx_hash::HashMap<FunId, usize>,
     /// Lambda implementations whose bodies execute a runtime reified operation. Every source
     /// implementation, including a nested one, and each specialized call-site copy are recorded
     /// semantically. A backend independently chooses the physical closure representation needed
@@ -2532,6 +2528,10 @@ pub struct IrTypeParameter {
     /// Kotlin declaration capability retained for targets that materialize runtime type operations.
     /// The JVM consumes it when choosing its reified-operation marker representation.
     pub reified: bool,
+    /// This entry is a type parameter a lifted local or anonymous function captures from an
+    /// enclosing declaration, signed ahead of its own. It keeps that declaration's identity and
+    /// reified capability; the function whose signature lists it does not declare it.
+    pub captured_from_enclosing: bool,
 }
 
 impl IrTypeParameter {

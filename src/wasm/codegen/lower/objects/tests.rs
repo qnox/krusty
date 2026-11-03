@@ -12,6 +12,7 @@ fn reified_parameter() -> IrTypeParameter {
         bounds: Vec::new(),
         variance: TypeVariance::Invariant,
         reified: true,
+        captured_from_enclosing: false,
     }
 }
 
@@ -146,13 +147,15 @@ fn captured_signature_file(creation: Creation) -> IrFile {
     ir.signatures.insert(
         template,
         IrGenericSig {
-            type_params: vec![reified_parameter()],
+            type_params: vec![IrTypeParameter {
+                captured_from_enclosing: true,
+                ..reified_parameter()
+            }],
             params: vec![Ty::nullable(Ty::obj("kotlin/Any"))],
             ret: Some(Ty::Boolean),
             supers: Vec::new(),
         },
     );
-    ir.captured_signature_type_parameters.insert(template, 1);
     let node = ir
         .exprs
         .iter()

@@ -176,7 +176,10 @@ impl BodyLowering<'_> {
     ) {
         let mut type_params = captured
             .iter()
-            .map(|&ty| self.captured_type_parameter(ty))
+            .map(|&ty| IrTypeParameter {
+                captured_from_enclosing: true,
+                ..self.captured_type_parameter(ty)
+            })
             .collect::<Vec<_>>();
         type_params.extend(body.type_parameters().iter().map(|parameter| {
             IrTypeParameter {
@@ -189,15 +192,11 @@ impl BodyLowering<'_> {
                     .collect(),
                 variance: crate::types::TypeVariance::Invariant,
                 reified: parameter.reified,
+                captured_from_enclosing: false,
             }
         }));
         if type_params.is_empty() {
             return;
-        }
-        if !captured.is_empty() {
-            self.ir
-                .captured_signature_type_parameters
-                .insert(function, captured.len());
         }
         let signature = &self.ir.functions[function as usize];
         let generic = IrGenericSig {

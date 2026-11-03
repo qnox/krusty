@@ -256,9 +256,11 @@ pub(super) fn lower_file(
                 );
             }
             Err(_reason)
-                if ir
-                    .declared_type_parameters(id as FunId)
-                    .any(|parameter| parameter.reified) =>
+                if ir.signatures.get(&(id as FunId)).is_some_and(|signature| {
+                    signature
+                        .declared_type_parameters()
+                        .any(|parameter| parameter.reified)
+                }) =>
             {
                 // Match Native's boundary: keep a reified declaration that lowers normally, but
                 // replace only an unlowerable standalone template body by a loud trap. Checked
