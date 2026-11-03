@@ -190,6 +190,12 @@ for b in "${bins[@]}"; do
   fi
   run+=("$b")
 done
+# Expose the already-selected e2e executable to the later compiler-plugin test pass in this job.
+# Its ordinary coverage invocation, selection and reporting below remain unchanged.
+if [ -n "${GITHUB_OUTPUT:-}" ]; then
+  printf 'compiler_e2e_binary=%s\n' "$e2e_bin" >> "$GITHUB_OUTPUT"
+fi
+
 echo "coverage: running ${#run[@]} test binaries in parallel (-P $jobs, --test-threads=$test_threads, timeout=${test_timeout}s, e2e-timeout=${e2e_timeout}s), conformance binary excluded" >&2
 
 # Run the binaries in parallel; each writes its own profraw (LLVM_PROFILE_FILE has a %p pid slot).
