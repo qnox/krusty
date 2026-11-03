@@ -1,5 +1,45 @@
 1	crates/krusty-build/src/gradle.rs	you seem to be trying to use `match` for destructuring a single pattern. Consider using `if let`: help: try: `if let Ok(()) = result { panic!("a compiler plugin applied before krusty was ignored") }`
 1	crates/krusty-build/src/gradle.rs	you seem to be trying to use `match` for destructuring a single pattern. Consider using `if let`: help: try: `if let Ok(()) = result { panic!("the assignment plugin applied beside KSP was ignored") }`
+1	crates/krusty-jvm/src/backend.rs	this function has too many arguments (8/7)
+1	crates/krusty-jvm/src/builtin_member_operations.rs	large size difference between variants: the entire enum is at least 216 bytes
+1	crates/krusty-jvm/src/declaration_collisions/local_function_diagnostics.rs	very complex type used. Consider factoring parts into `type` definitions
+1	crates/krusty-jvm/src/external_calls.rs	unnecessary closure used to substitute value for `Option::None`
+1	crates/krusty-jvm/src/in_place_delegates.rs	this loop could be written as a `while let` loop
+1	crates/krusty-jvm/src/ir_emit/access_bridges.rs	usage of `contains_key` followed by `insert` on a `HashMap`
+1	crates/krusty-jvm/src/ir_emit/block_scope.rs	this function has too many arguments (8/7)
+1	crates/krusty-jvm/src/ir_emit/bytecode_inline_call/lambda_node.rs	very complex type used. Consider factoring parts into `type` definitions
+1	crates/krusty-jvm/src/ir_emit/method_defaults.rs	items after a test module
+1	crates/krusty-jvm/src/ir_emit/method_defaults.rs	this `match` can be collapsed into the outer `match`
+1	crates/krusty-jvm/src/ir_emit/property_access.rs	this `map_or` can be simplified
+1	crates/krusty-jvm/src/ir_emit/property_access.rs	this function has too many arguments (8/7)
+1	crates/krusty-jvm/src/ir_emit/shared_cell_declaration.rs	this `let...else` may be rewritten with the `?` operator
+1	crates/krusty-jvm/src/ir_emit/static_accessors.rs	this block may be rewritten with the `?` operator: help: replace it with: `declared.backing_field?;`
+1	crates/krusty-jvm/src/ir_emit/static_accessors.rs	this function has too many arguments (8/7)
+1	crates/krusty-jvm/src/ir_emit/static_accessors.rs	this function has too many arguments (9/7)
+1	crates/krusty-jvm/src/ir_emit/type_operation_emission.rs	this function has too many arguments (8/7)
+1	crates/krusty-jvm/src/ir_emit/type_operation_emission.rs	this function has too many arguments (9/7)
+1	crates/krusty-jvm/src/ir_emit/value_emission.rs	called `map(..).flatten()` on `Option`
+1	crates/krusty-jvm/src/reified_operations.rs	match expression looks like `matches!` macro
+1	crates/krusty-jvm/src/shared_captures.rs	you seem to want to iterate on a map's keys
+1	crates/krusty-jvm/src/suspend.rs	this function has too many arguments (9/7)
+1	crates/krusty-jvm/src/suspend.rs	unneeded `return` statement
+1	crates/krusty-jvm/src/suspend.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try dereferencing it: `*ret_ty`
+1	crates/krusty-jvm/src/suspend.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try dereferencing it: `*target`
+1	crates/krusty-jvm/src/suspend.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try removing the `clone` call: `cont_ty`
+1	crates/krusty-jvm/src/suspend.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try removing the `clone` call: `f.ret`
+1	crates/krusty-jvm/src/suspend.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try removing the `clone` call: `ir.functions[fid as usize].ret`
+1	crates/krusty-jvm/src/suspend.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try removing the `clone` call: `real_params[(idx - this_offset) as usize]`
+1	crates/krusty-jvm/src/suspend/continuation_class.rs	this function has too many arguments (8/7)
+1	crates/krusty-jvm/src/value_classes.rs	this function has too many arguments (8/7)
+1	crates/krusty-jvm/src/value_classes/member_names.rs	this function has too many arguments (10/7)
+1	crates/krusty-native/src/c_abi.rs	redundant guard
+1	crates/krusty-native/src/c_abi.rs	using `contains()` instead of `iter().any()` is more efficient: help: try: `class.methods.contains(&id)`
+1	crates/krusty-native/src/cinterop/library/sha256.rs	using `chunks_exact` with a constant chunk size
+1	crates/krusty-native/src/cinterop/library/sha256.rs	using `chunks_exact` with a constant chunk size: help: consider using `as_chunks` instead: `as_chunks::<64>().0`
+1	crates/krusty-native/src/codegen/lower/calls.rs	this function has too many arguments (11/7)
+1	crates/krusty-native/src/codegen/lower/calls.rs	this function has too many arguments (12/7)
+1	crates/krusty-native/src/intrinsics.rs	match expression looks like `matches!` macro
+1	crates/krusty-wasm/src/codegen/lower.rs	this function has too many arguments (8/7)
 1	src/assignable.rs	this expression creates a reference which is immediately dereferenced by the compiler: help: change this to: `arguments`
 1	src/bin/blockers.rs	consider using `sort_by_key`
 1	src/compiler.rs	the method `accept_inline_bodies` doesn't need a mutable reference
@@ -52,41 +92,19 @@
 1	src/fir_lower/sink.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try removing the `clone` call: `outer_ty`
 1	src/fir_lower/source_calls.rs	very complex type used. Consider factoring parts into `type` definitions
 1	src/fir_lower/tests.rs	the method `accept_inline_bodies` doesn't need a mutable reference
-1	src/fir_lower/tests/single_source_lowering.rs	deref which would be done by auto-deref: help: try: `source`
-1	src/fir_lower/tests/single_source_lowering.rs	deref which would be done by auto-deref: help: try: `stem`
-1	src/fir_lower/tests/single_source_lowering.rs	the method `accept_inline_bodies` doesn't need a mutable reference
 1	src/frontend/inline_preparation.rs	this `let...else` may be rewritten with the `?` operator: help: replace it with: `let selected_bodies = bodies.get_mut(provider.source.raw() as usize)?;`
 1	src/frontend/inline_preparation.rs	this `let...else` may be rewritten with the `?` operator: help: replace it with: `let selected_roots = roots.get_mut(root.source.raw() as usize)?;`
 1	src/frontend/inline_preparation.rs	this function has too many arguments (9/7)
 1	src/frontend/tests/streaming.rs	using `clone` on type `ResolvedCallableHeader` which implements the `Copy` trait: help: try removing the `clone` call: `callable`
 1	src/ir/generated_members.rs	all variants have the same prefix: `Serialization`
 1	src/ir/value_class_constructors.rs	redundant closure: help: replace the closure with the function itself: `&remap_ty`
-1	src/jvm/backend.rs	this function has too many arguments (8/7)
-1	src/jvm/builtin_member_operations.rs	large size difference between variants: the entire enum is at least 216 bytes
 1	src/jvm/bytecode_passes/temporaries/null_check_folds.rs	this `if` can be collapsed into the outer `match`
 1	src/jvm/classfile/control_flow.rs	this function has too many arguments (8/7)
 1	src/jvm/classfile/local_variables.rs	this OR pattern can be rewritten using a range: help: try: `0x15..=0x19`
 1	src/jvm/classfile/stack_maps.rs	very complex type used. Consider factoring parts into `type` definitions
 1	src/jvm/classpath/inline_plan_cache.rs	large size difference between variants: the entire enum is at least 240 bytes
-1	src/jvm/declaration_collisions/local_function_diagnostics.rs	very complex type used. Consider factoring parts into `type` definitions
-1	src/jvm/external_calls.rs	unnecessary closure used to substitute value for `Option::None`
-1	src/jvm/in_place_delegates.rs	this loop could be written as a `while let` loop
 1	src/jvm/inline/invoke_receiver.rs	this OR pattern can be rewritten using a range: help: try: `0xbc..=0xbe`
 1	src/jvm/inliner/default_lambda.rs	type `jvm::reified_arguments::ReifiedArguments` is more private than the item `jvm::inliner::default_lambda::load`: function `jvm::inliner::default_lambda::load` is reachable at visibility `pub(crate)`
-1	src/jvm/ir_emit/access_bridges.rs	usage of `contains_key` followed by `insert` on a `HashMap`
-1	src/jvm/ir_emit/block_scope.rs	this function has too many arguments (8/7)
-1	src/jvm/ir_emit/bytecode_inline_call/lambda_node.rs	very complex type used. Consider factoring parts into `type` definitions
-1	src/jvm/ir_emit/method_defaults.rs	items after a test module
-1	src/jvm/ir_emit/method_defaults.rs	this `match` can be collapsed into the outer `match`
-1	src/jvm/ir_emit/property_access.rs	this `map_or` can be simplified
-1	src/jvm/ir_emit/property_access.rs	this function has too many arguments (8/7)
-1	src/jvm/ir_emit/shared_cell_declaration.rs	this `let...else` may be rewritten with the `?` operator
-1	src/jvm/ir_emit/static_accessors.rs	this block may be rewritten with the `?` operator: help: replace it with: `declared.backing_field?;`
-1	src/jvm/ir_emit/static_accessors.rs	this function has too many arguments (8/7)
-1	src/jvm/ir_emit/static_accessors.rs	this function has too many arguments (9/7)
-1	src/jvm/ir_emit/type_operation_emission.rs	this function has too many arguments (8/7)
-1	src/jvm/ir_emit/type_operation_emission.rs	this function has too many arguments (9/7)
-1	src/jvm/ir_emit/value_emission.rs	called `map(..).flatten()` on `Option`
 1	src/jvm/jvm_libraries.rs	method `unsigned_compare_callable` is never used
 1	src/jvm/jvm_libraries.rs	using `Option.and_then(|x| Some(y))`, which is more succinctly expressed as `map(|x| y)`
 1	src/jvm/jvm_libraries/dependency_registration.rs	using `map` over `inspect`
@@ -95,19 +113,6 @@
 1	src/jvm/method_node/stack_shape.rs	this OR pattern can be rewritten using a range: help: try: `0x59..=0x5b`
 1	src/jvm/method_node/stack_shape.rs	this OR pattern can be rewritten using a range: help: try: `0x5c..=0x5e`
 1	src/jvm/method_node/stack_shape.rs	very complex type used. Consider factoring parts into `type` definitions
-1	src/jvm/reified_operations.rs	match expression looks like `matches!` macro
-1	src/jvm/shared_captures.rs	you seem to want to iterate on a map's keys
-1	src/jvm/suspend.rs	this function has too many arguments (9/7)
-1	src/jvm/suspend.rs	unneeded `return` statement
-1	src/jvm/suspend.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try dereferencing it: `*ret_ty`
-1	src/jvm/suspend.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try dereferencing it: `*target`
-1	src/jvm/suspend.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try removing the `clone` call: `cont_ty`
-1	src/jvm/suspend.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try removing the `clone` call: `f.ret`
-1	src/jvm/suspend.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try removing the `clone` call: `ir.functions[fid as usize].ret`
-1	src/jvm/suspend.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try removing the `clone` call: `real_params[(idx - this_offset) as usize]`
-1	src/jvm/suspend/continuation_class.rs	this function has too many arguments (8/7)
-1	src/jvm/value_classes.rs	this function has too many arguments (8/7)
-1	src/jvm/value_classes/member_names.rs	this function has too many arguments (10/7)
 1	src/klib.rs	the borrowed expression implements the required traits: help: change this to: `bytes`
 1	src/klib/inline_ir.rs	called `expect` on `function.dispatch_receiver` after checking its variant with `is_some`
 1	src/klib_libraries/archives.rs	the `Err`-variant returned from this closure is very large
@@ -127,13 +132,6 @@
 1	src/metadata/class_builder/schema.rs	the loop variable `index` is used to index `func_msgs`
 1	src/metadata/class_builder/schema.rs	the loop variable `index` is used to index `prop_msgs`
 1	src/metadata/semantic/klib/semantic_decoder_tests.rs	unnecessary use of `clone` to create a slice from a reference
-1	crates/krusty-native/src/c_abi.rs	redundant guard
-1	crates/krusty-native/src/c_abi.rs	using `contains()` instead of `iter().any()` is more efficient: help: try: `class.methods.contains(&id)`
-1	crates/krusty-native/src/cinterop/library/sha256.rs	using `chunks_exact` with a constant chunk size
-1	crates/krusty-native/src/cinterop/library/sha256.rs	using `chunks_exact` with a constant chunk size: help: consider using `as_chunks` instead: `as_chunks::<64>().0`
-1	crates/krusty-native/src/codegen/lower/calls.rs	this function has too many arguments (11/7)
-1	crates/krusty-native/src/codegen/lower/calls.rs	this function has too many arguments (12/7)
-1	crates/krusty-native/src/intrinsics.rs	match expression looks like `matches!` macro
 1	src/parser.rs	field assignment outside of initializer for an instance created with Default::default()
 1	src/parser.rs	this manual char comparison can be written more succinctly: help: consider using an array of `char`: `['L', 'l', 'u', 'U']`
 1	src/parser.rs	this method chain can be written more clearly with `if .. else ..`: help: try: `if header_ctor_kw { self.tok().span.lo } else { 0 }`
@@ -210,7 +208,6 @@
 1	src/symbol_resolver/overload_selection.rs	very complex type used. Consider factoring parts into `type` definitions
 1	src/types.rs	redundant guard
 1	src/types/interning.rs	unnecessary use of `to_string`: help: use: `"T"`
-1	crates/krusty-wasm/src/codegen/lower.rs	this function has too many arguments (8/7)
 1	tests/box_lane.rs	this function has too many arguments (8/7)
 1	tests/box_lane.rs	this function has too many arguments (9/7)
 1	tests/box_lane.rs	variant `JvmArtifacts` is never constructed
@@ -244,6 +241,9 @@
 1	tests/serialization_explicit_companion_e2e.rs	for loop over a single element
 12	src/parser.rs	this `map_or` can be simplified
 16	src/resolve.rs	this function has too many arguments (8/7)
+2	crates/krusty-jvm/src/backend.rs	this function has too many arguments (9/7)
+2	crates/krusty-jvm/src/ir_emit/comparison_branches/mod.rs	this function has too many arguments (8/7)
+2	crates/krusty-native/src/interop_libraries.rs	the `Err`-variant returned from this function is very large
 2	src/fir/body_check/references.rs	this function has too many arguments (8/7)
 2	src/fir/header.rs	this function has too many arguments (8/7)
 2	src/fir/module_symbols.rs	this method chain can be written more clearly with `if .. else ..`
@@ -253,11 +253,8 @@
 2	src/fir_lower/inlining/converted_inline_lambda.rs	this expression creates a reference which is immediately dereferenced by the compiler: help: change this to: `index`
 2	src/fir_lower/inlining/converted_inline_lambda.rs	this expression creates a reference which is immediately dereferenced by the compiler: help: change this to: `source`
 2	src/fir_lower/source_calls.rs	this function has too many arguments (8/7)
-2	src/jvm/backend.rs	this function has too many arguments (9/7)
-2	src/jvm/ir_emit/comparison_branches/mod.rs	this function has too many arguments (8/7)
 2	src/jvm/jvm_libraries.rs	using `clone` on type `SingletonDispatch` which implements the `Copy` trait: help: try removing the `clone` call: `singleton`
 2	src/klib_libraries/declaration_bodies.rs	the `Err`-variant returned from this function is very large: the `Err`-variant is at least 136 bytes
-2	crates/krusty-native/src/interop_libraries.rs	the `Err`-variant returned from this function is very large
 2	src/resolve.rs	returning the result of a `let` binding from a block
 2	src/resolve/call_diagnostics.rs	this function has too many arguments (8/7)
 2	src/resolve/intersection_inference.rs	this function has too many arguments (10/7)
@@ -274,19 +271,19 @@
 2	src/resolve/streaming_signature_bridge/semantics.rs	this function has too many arguments (8/7)
 2	tests/private_inline_property_ref_e2e.rs	writing `&PathBuf` instead of `&Path` involves a new object where a slice will do
 2	tests/reified_anonymous_object_e2e.rs	very complex type used. Consider factoring parts into `type` definitions
+3	crates/krusty-jvm/src/shared_captures.rs	very complex type used. Consider factoring parts into `type` definitions
 3	src/fir/body_check/calls.rs	this expression creates a reference which is immediately dereferenced by the compiler: help: change this to: `selected`
 3	src/fir/header.rs	this function has too many arguments (9/7)
 3	src/fir/module_symbols.rs	using `clone` on type `SingletonDispatch` which implements the `Copy` trait: help: try removing the `clone` call: `singleton`
-3	src/jvm/shared_captures.rs	very complex type used. Consider factoring parts into `type` definitions
 3	src/module_symbols.rs	using `clone` on type `SingletonDispatch` which implements the `Copy` trait: help: try removing the `clone` call: `singleton`
 3	src/resolve.rs	unnecessary closure used to substitute value for `Option::None`
 3	src/resolve/streaming_signature_bridge/rejected_member_call.rs	this function has too many arguments (8/7)
 3	src/resolve/streaming_signature_bridge/type_parameter_publication.rs	this function has too many arguments (8/7)
-4	src/jvm/ir_emit.rs	this function has too many arguments (8/7)
+4	crates/krusty-jvm/src/ir_emit.rs	this function has too many arguments (8/7)
 4	src/klib_lowering/body_unit.rs	the borrowed expression implements the required traits: help: change this to: `callee_declined`
 4	src/resolve/delegated_properties.rs	this function has too many arguments (8/7)
 4	tests/classpath_protected_nested_access_e2e.rs	unnecessary use of `clone` to create a slice from a reference: help: try: `std::slice::from_ref(&classes)`
-5	src/jvm/suspend.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try dereferencing it: `*ty`
+5	crates/krusty-jvm/src/suspend.rs	using `clone` on type `Ty` which implements the `Copy` trait: help: try dereferencing it: `*ty`
 5	src/resolve.rs	this function has too many arguments (9/7)
 5	src/resolve.rs	very complex type used. Consider factoring parts into `type` definitions
 5	src/resolve/callable_reference_selection.rs	redundant closure: help: replace the closure with the function itself: `&mut is_assignable`

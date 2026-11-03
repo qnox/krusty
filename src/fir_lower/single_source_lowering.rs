@@ -67,8 +67,7 @@ fn lower_single_source_into(
     let mut sink =
         super::CommonIrBodySink::new(&index, crate::fir::SourceFileId::from_raw(0), &mut ir)
             .unwrap();
-    sink.accept_inline_bodies(&index, &mut inline_bodies)
-        .unwrap();
+    sink.accept_inline_bodies(&index, &inline_bodies).unwrap();
     sink.accept_default_arguments(&index, &inline_bodies, &mut default_arguments)
         .unwrap();
     let source = crate::fir::SourceFileId::from_raw(0);
@@ -137,7 +136,7 @@ pub fn lower_source_from_set(sources: &[(&str, &str)], active_source: usize) -> 
 
     let inputs = sources
         .iter()
-        .map(|(source, stem)| crate::source::SourceInput::kotlin(*source).with_file_stem(*stem))
+        .map(|(source, stem)| crate::source::SourceInput::kotlin(source).with_file_stem(stem))
         .collect::<Vec<_>>();
     let mut diagnostics = crate::diag::DiagSink::new();
     let mut analysis = crate::frontend::analyze_source_set_with_features(
