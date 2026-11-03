@@ -33,6 +33,7 @@ const SUSPEND_LAMBDA: &str = "kotlin/coroutines/jvm/internal/SuspendLambda";
 struct Capture {
     name: String,
     ty: Ty,
+    crossinline: bool,
 }
 
 /// One of the lambda's own parameters.
@@ -165,7 +166,7 @@ pub(super) fn route(
     let units = ensure_tail_return(ir, body, unit_return);
     if let Some(&close) = ir.fn_close_lines.get(&fid) {
         for unit in units {
-            ir.expr_source_lines.insert(unit, close);
+            ir.set_source_line(unit, close);
         }
     }
     let Some((form, explicit_suspend)) = ir
@@ -229,6 +230,7 @@ pub(super) fn route(
                 .map(|(index, capture)| SuspendLambdaCapture {
                     field: index as u32,
                     ty: capture.ty,
+                    crossinline: capture.crossinline,
                 })
                 .collect(),
             member_parameters,
@@ -384,7 +386,15 @@ fn layout(
             Some(element) => crate::jvm::shared_captures::holder_ty(element),
             None => function.params[parameter],
         };
-        captures.push(Capture { name, ty });
+        let crossinline = matches!(
+            identity.role,
+            IrParameterRole::CapturedValue { capture, .. } if capture.crossinline_parameter.is_some()
+        );
+        captures.push(Capture {
+            name,
+            ty,
+            crossinline,
+        });
     }
     let expressions = crate::ir::value_namespace_expressions(ir, body);
     let read = |value: usize| {

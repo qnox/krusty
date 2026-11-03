@@ -16,7 +16,7 @@
 
 use crate::fx_hash::HashSet;
 use crate::ir::{ClassId, ExprId, IrClass, IrExpr, IrFile};
-use crate::jvm::suspend::TransformedMachine;
+use crate::jvm::suspend::{EmitTimeMachines, SuspendLambdaClass, TransformedMachine};
 use crate::types::InlineExpansionMode;
 
 /// Whether `fid` is a `suspend inline` function only ever inlined: a reified one, whose body
@@ -35,6 +35,9 @@ pub(crate) enum ForInlineCopy {
     /// A suspend method that reads a `crossinline` capture of its class: the copy keeps the
     /// method's access and constructs the continuation first.
     CrossinlineCapture,
+    /// A suspend lambda's `invokeSuspend` that reads a `crossinline` capture: the copy keeps the
+    /// method's access, and the lambda is its own continuation.
+    SuspendLambda,
 }
 
 /// Whether `fid` is written as its state machine with its marked body in a `name$$forInline` copy,
@@ -55,6 +58,30 @@ pub(crate) fn constructed_by_method_copy(ir: &IrFile, class: ClassId) -> bool {
         .is_some_and(|&function| {
             for_inline_copy(ir, function) == Some(ForInlineCopy::CrossinlineCapture)
         })
+}
+
+/// Whether the suspend lambda `lambda`, realized as `class`, reads one of its `crossinline`
+/// captures in `invokeSuspend`: kotlinc's `isSuspendCapturingCrossinline` for a suspend lambda, which
+/// keeps the marked body in `invokeSuspend$$forInline` for a call site that inlines the lambda.
+pub(crate) fn suspend_lambda_reads_crossinline_capture(
+    ir: &IrFile,
+    class: ClassId,
+    lambda: &SuspendLambdaClass,
+) -> bool {
+    let fields = suspend_lambda_crossinline_fields(lambda);
+    !fields.is_empty()
+        && ir.functions[lambda.invoke_suspend as usize]
+            .body
+            .is_some_and(|body| reads_own_fields(ir, body, class, &fields))
+}
+
+fn suspend_lambda_crossinline_fields(lambda: &SuspendLambdaClass) -> HashSet<u32> {
+    lambda
+        .captures
+        .iter()
+        .filter(|capture| capture.crossinline)
+        .map(|capture| capture.field)
+        .collect()
 }
 
 /// Whether `fid` is a suspend method that reads one of its class's `crossinline` captures.
@@ -123,7 +150,15 @@ fn is_suspend_inline(ir: &IrFile, fid: u32) -> bool {
 /// The suspension points of `machine` a body kept for inlining leaves unmarked: the invoke the
 /// inlining caller replaces with the lambda's body, of an inline function-typed parameter or of a
 /// method's `crossinline` capture.
-pub(crate) fn inlined_invokes(ir: &IrFile, fid: u32, machine: &TransformedMachine) -> Vec<ExprId> {
+/// `copy` says which `$$forInline` copy the body is written for, and `lambdas` holds the suspend
+/// lambda classes, whose `crossinline` captures are recorded there.
+pub(crate) fn inlined_invokes(
+    ir: &IrFile,
+    fid: u32,
+    copy: Option<ForInlineCopy>,
+    lambdas: &EmitTimeMachines,
+    machine: &TransformedMachine,
+) -> Vec<ExprId> {
     // A member's value 0 is its receiver; the modes cover the parameters after it. They cover the
     // declared parameters only, not the trailing `$completion` the CPS signature added.
     let function = &ir.functions[fid as usize];
@@ -132,16 +167,19 @@ pub(crate) fn inlined_invokes(ir: &IrFile, fid: u32, machine: &TransformedMachin
         .fn_params
         .get(&fid)
         .map_or(&[][..], |info| info.expansion_modes.as_slice());
-    let captures = function
-        .dispatch_receiver
-        .filter(|_| for_inline_copy(ir, fid) == Some(ForInlineCopy::CrossinlineCapture))
-        .and_then(|owner| ir.class_id_by_name(owner))
-        .map(|class| {
-            (
-                class,
-                crossinline_capture_fields(&ir.classes[class as usize]),
-            )
-        });
+    let captures = function.dispatch_receiver.and_then(|owner| {
+        let class = ir.class_id_by_name(owner)?;
+        let fields = match copy? {
+            ForInlineCopy::InlineFunction => return None,
+            ForInlineCopy::CrossinlineCapture => {
+                crossinline_capture_fields(&ir.classes[class as usize])
+            }
+            ForInlineCopy::SuspendLambda => {
+                suspend_lambda_crossinline_fields(lambdas.suspend_lambda(owner)?)
+            }
+        };
+        Some((class, fields))
+    });
     let spliced = |call: ExprId| {
         let IrExpr::InvokeFunction { func, .. } = ir.expr(call) else {
             return false;
