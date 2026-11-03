@@ -21,6 +21,7 @@ mod declaration_bodies;
 mod declaration_modifiers;
 mod declaration_stream;
 mod destructuring;
+mod enum_primary_constructor;
 mod expressions;
 mod file_features;
 mod for_loops;
@@ -1981,7 +1982,6 @@ impl<'a> Parser<'a> {
         // Optional explicit `constructor` keyword and primary constructor:
         // `enum class C constructor(val rgb: Int, …)`.
         let mut ctor_open_offset = 0u32;
-        let mut ctor_close_lo = 0u32;
         // `NL* primaryConstructor`: the `constructor` keyword may also start on a later line.
         if self.primary_constructor_header_follows() {
             self.skip_newlines();
@@ -1990,76 +1990,17 @@ impl<'a> Parser<'a> {
             ctor_open_offset = self.tok().span.lo;
             self.bump();
         }
-        let mut props = Vec::new();
         // `NL* primaryConstructor`: the parameter list may start on a later line.
         self.skip_plain_newlines_before(TokenKind::LParen);
         if ctor_open_offset == 0 && self.at(TokenKind::LParen) {
             ctor_open_offset = self.tok().span.lo;
         }
-        let has_primary_ctor = self.eat(TokenKind::LParen);
-        if has_primary_ctor {
-            self.skip_newlines();
-            while !self.at(TokenKind::RParen) && !self.at(TokenKind::Eof) {
-                let declaration_start = self.tok().span.lo;
-                self.begin_declaration_prefix();
-                let epmods = self.skip_decl_prefix();
-                self.record_declaration_prefix(declaration_start);
-                let is_vararg = epmods.iter().any(|m| m == "vararg");
-                let is_property = self.at(TokenKind::KwVal) || self.at(TokenKind::KwVar);
-                let is_var = self.at(TokenKind::KwVar);
-                if is_property {
-                    self.record_external_property_parameter(&epmods);
-                    self.bump();
-                }
-                let pspan = self.tok().span;
-                let pname = self.ident_or_error("parameter name");
-                self.expect(TokenKind::Colon, "':'");
-                self.skip_newlines(); // a wrapped declaration puts the type on the next line (`val x:\n  T`)
-                let ty = self.parse_vararg_aware_type(is_vararg);
-                // A default value (`enum class C(val x: Int = 1)`) — same as a regular class ctor param;
-                // each enum entry that omits the argument gets it at its construction site.
-                let default = if self.eat(TokenKind::Eq) {
-                    self.skip_newlines();
-                    Some(self.parse_expr())
-                } else {
-                    None
-                };
-                let declaration_end = self.t[self.i.saturating_sub(1)].span.hi;
-                props.push(PropParam {
-                    name: pname,
-                    ty,
-                    span: pspan,
-                    declaration_span: Span::new(declaration_start, declaration_end),
-                    decl_line: 0,
-                    decl_start_line: 0,
-                    is_vararg,
-                    is_var,
-                    is_property,
-                    is_script_parameter: false,
-                    is_actual: epmods.iter().any(|modifier| modifier == "actual"),
-                    is_override: epmods.iter().any(|modifier| modifier == "override"),
-                    has_open_modifier: epmods.iter().any(|modifier| modifier == "open"),
-                    is_final: epmods.iter().any(|modifier| modifier == "final"),
-                    is_open: !epmods.iter().any(|modifier| modifier == "final")
-                        && epmods
-                            .iter()
-                            .any(|modifier| modifier == "open" || modifier == "override"),
-                    visibility: visibility_of(&epmods),
-                    has_visibility_modifier: has_visibility_modifier(&epmods),
-                    default,
-                    annotations: Vec::new(),
-                    annotation_args: Vec::new(),
-                });
-                self.skip_newlines();
-                if !self.eat(TokenKind::Comma) {
-                    break;
-                }
-                self.skip_newlines();
-            }
-            // As for a class, kotlinc maps the primary constructor `$default`'s `return` to `)`.
-            ctor_close_lo = self.tok().span.lo;
-            self.expect(TokenKind::RParen, "')'");
-        }
+        let has_primary_ctor = self.at(TokenKind::LParen);
+        let (props, ctor_close_lo) = if has_primary_ctor {
+            self.parse_enum_primary_constructor_parameters()
+        } else {
+            (Vec::new(), 0)
+        };
         // Optional supertype list (`enum class E : I1, I2`): an enum may implement interfaces; the
         // abstract members are satisfied by the enum's own methods or per-entry overrides. (An enum can't
         // extend a class, so only the interface supertypes are kept.)
