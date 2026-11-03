@@ -1458,7 +1458,7 @@ fn realize_expressions(
         let Callee::Intrinsic { ret, .. } = **callee else {
             continue;
         };
-        if ir.expr_source_lines.contains_key(&expression) {
+        if ir.source_line(expression).is_some() {
             ir.builtin_calls
                 .entry(expression)
                 .or_insert_with(|| crate::ir::IrBuiltinCall {
