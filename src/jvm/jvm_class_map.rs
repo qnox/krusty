@@ -26,7 +26,7 @@ pub fn intrinsic_companion_to_jvm(internal: &str) -> Option<String> {
     intrinsic_companion_jvm_class(crate::types::existing_type_name(internal)?)
 }
 
-pub(super) fn intrinsic_companion_jvm_class(classifier: TypeName) -> Option<String> {
+pub fn intrinsic_companion_jvm_class(classifier: TypeName) -> Option<String> {
     intrinsic_companion_owner(classifier).map(companion_object_internal)
 }
 
@@ -56,7 +56,7 @@ fn companion_object_internal(owner: TypeName) -> String {
 /// kotlinc's table does: no `Boolean.Companion`, numbered `Function`/`KFunction` interfaces only
 /// through 22, no `KSuspendFunction` erasure, and an unmapped classifier (a value class or unsigned
 /// type included) keeps its class id, nested segments joined by `$`.
-pub(super) fn class_mapper_lite_descriptor(classifier: TypeName) -> String {
+pub fn class_mapper_lite_descriptor(classifier: TypeName) -> String {
     let signed_primitive = |ty: Ty| ty.scalar_value_repr() == Some(ty);
     let primitive = Ty::obj_name(classifier);
     if signed_primitive(primitive) {
@@ -90,13 +90,13 @@ pub(super) fn class_mapper_lite_descriptor(classifier: TypeName) -> String {
 }
 
 /// [`class_mapper_lite_descriptor`] of `kotlin.Nothing`, which is a type rather than a classifier.
-pub(super) fn class_mapper_lite_nothing_descriptor() -> String {
+pub fn class_mapper_lite_nothing_descriptor() -> String {
     format!("L{NOTHING_JVM};")
 }
 
 /// [`class_mapper_lite_descriptor`] of a function type's class id, `kotlin.FunctionN` or
 /// `kotlin.coroutines.SuspendFunctionN` for its arity.
-pub(super) fn class_mapper_lite_function_descriptor(arity: usize, suspend: bool) -> String {
+pub fn class_mapper_lite_function_descriptor(arity: usize, suspend: bool) -> String {
     if suspend {
         format!("Lkotlin/coroutines/SuspendFunction{arity};")
     } else if arity <= super::names::MAX_NUMBERED_FUNCTION_ARITY {
@@ -793,7 +793,7 @@ fn builtin_ids() -> &'static BuiltinIds {
 /// The Kotlin collection a classifier names and which face of it, when it is one of the collection
 /// builtins mapped onto a JVM collection interface. Keyed by the Kotlin declaration's identity, so
 /// the platform interface itself (`java/util/List`) is not a collection face.
-pub(crate) fn mapped_collection(internal: TypeName) -> Option<MappedCollection> {
+pub fn mapped_collection(internal: TypeName) -> Option<MappedCollection> {
     builtin_ids().mapped_collection.get(&internal).copied()
 }
 
@@ -906,7 +906,7 @@ pub fn to_jvm_type_name(internal: TypeName) -> TypeName {
 }
 
 /// Whether a semantic classifier is represented by the JVM root reference classifier.
-pub(super) fn is_jvm_erased_top(internal: TypeName) -> bool {
+pub fn is_jvm_erased_top(internal: TypeName) -> bool {
     to_jvm_type_name(internal) == crate::types::wk::java_object()
 }
 
@@ -932,7 +932,7 @@ pub(super) fn erased_top_member_owner(
 /// Physical classifier identity written to a JVM classfile for a semantic classifier. Unlike
 /// [`to_jvm_type_name`], this also covers function-classifier families and intrinsic companions,
 /// whose physical names are computed from semantic facts rather than the fixed erasure table.
-pub(super) fn to_jvm_classfile_type_name(internal: TypeName) -> TypeName {
+pub fn to_jvm_classfile_type_name(internal: TypeName) -> TypeName {
     let physical = if let Some(intrinsic) = intrinsic_companion_jvm_class(internal) {
         crate::types::type_name(&intrinsic)
     } else if let Some(function) = super::function_classifiers::classifier(internal) {
@@ -980,7 +980,7 @@ pub(super) fn maps_to_distinct_jvm_internal(internal: TypeName) -> bool {
 
 /// A signed primitive classifier in either spelling (`kotlin/Int`, `java/lang/Integer`). Unsigned
 /// inline classes are their own wrappers and are not boxed JVM primitives.
-pub(super) fn is_boxed_primitive_classifier(internal: TypeName) -> bool {
+pub fn is_boxed_primitive_classifier(internal: TypeName) -> bool {
     let ids = builtin_ids();
     ids.wrapper_prim.contains_key(&internal)
         || ids

@@ -108,7 +108,7 @@ impl ClassWriter {
 
     /// Run `copy`, which writes instructions copied from a compiled inline function's body, with
     /// every member reference it interns recorded as copied.
-    pub(crate) fn copying<T>(&mut self, copy: impl FnOnce(&mut Self) -> T) -> T {
+    pub fn copying<T>(&mut self, copy: impl FnOnce(&mut Self) -> T) -> T {
         let outer = self.set_copying(true);
         let result = copy(self);
         self.set_copying(outer);
@@ -117,7 +117,7 @@ impl ClassWriter {
 
     /// Record the member references interned from now on as copied (`true`) or as the class's own
     /// (`false`); returns the previous setting so the caller can restore it.
-    pub(crate) fn set_copying(&mut self, copying: bool) -> bool {
+    pub fn set_copying(&mut self, copying: bool) -> bool {
         std::mem::replace(&mut self.members.copying, copying)
     }
 

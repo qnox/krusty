@@ -53,7 +53,7 @@ mod test_support;
 mod value_class_erasure;
 
 use crate::language_version::LanguageVersion;
-pub(crate) use crate::libraries::{
+pub use crate::libraries::{
     ExternalCallableKind, ExternalCallableRealization, ExternalPropertyRealization,
 };
 pub use call_metadata::MetadataCallFacts;

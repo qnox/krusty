@@ -20,7 +20,7 @@ pub(crate) const ANONYMOUS: &str = "<anonymous>";
 pub(crate) const NO_NAME_PROVIDED: &str = "<no name provided>";
 
 /// The metadata name of a source lambda, from the form it was written in.
-pub(crate) fn function_name(form: crate::ir::IrLambdaForm) -> &'static str {
+pub fn function_name(form: crate::ir::IrLambdaForm) -> &'static str {
     match form {
         crate::ir::IrLambdaForm::Literal => ANONYMOUS,
         crate::ir::IrLambdaForm::AnonymousFunction => NO_NAME_PROVIDED,
@@ -31,7 +31,7 @@ pub(crate) fn function_name(form: crate::ir::IrLambdaForm) -> &'static str {
 ///
 /// A suspend lambda class leaves this absent: kotlinc does not put its `invoke` in the map the
 /// serializer reads.
-pub(crate) struct JvmMethod<'a> {
+pub struct JvmMethod<'a> {
     pub name: &'a str,
     /// Set when `ClassMapperLite` cannot rebuild the descriptor from the Kotlin signature.
     pub descriptor: Option<&'a str>,
@@ -44,7 +44,7 @@ const LAMBDA_FLAGS: u64 = 5 << 1;
 
 /// A lambda's function as its class's metadata describes it. kotlinc records no context
 /// parameters for a lambda.
-pub(crate) struct LambdaFunction<'a> {
+pub struct LambdaFunction<'a> {
     /// `<anonymous>` or `<no name provided>`.
     pub function_name: &'a str,
     /// The class's `invoke`, when this is not a suspend lambda class.
@@ -75,7 +75,7 @@ pub(crate) struct LambdaFunction<'a> {
 /// only their bounds name stays the enclosing declaration's: it is numbered after them on first
 /// use and referred to by id. The function's name and result are interned first, then its type
 /// parameters, receiver and value parameters.
-pub(crate) fn build(lambda: &LambdaFunction<'_>) -> Result<(Vec<u8>, Vec<String>), String> {
+pub fn build(lambda: &LambdaFunction<'_>) -> Result<(Vec<u8>, Vec<String>), String> {
     let mut strings = StringTable::with_local_classifiers(
         lambda.local_classifiers,
         lambda.enum_entry_bodies,

@@ -1,0 +1,338 @@
+//! JVM emission of a constructor's DEFAULT-argument realizations.
+//!
+//! A constructor with defaulted parameters gets a synthetic `<init>(…, int mask,
+//! DefaultConstructorMarker)` overload that fills each omitted slot and delegates to the real one,
+//! and a constructor that is private for a representation reason gets a marker accessor. Both are
+//! physical JVM shapes with no Kotlin declaration of their own, so they live here rather than in
+//! the emitter facade.
+
+use super::capture_order;
+use super::frame_map::FrameKey;
+use super::{
+    default_mask_bit, default_mask_count, load, method_descriptor, slot_words, store, ClassWriter,
+    CodeBuilder, EmitEnv, Emitter,
+};
+use crate::private_static_access::StaticOwner;
+use krusty::ir::IrFile;
+use krusty::types::{Ty, TypeName};
+
+/// One constructor declaration's complete default-stub contract. Keeping these facts together
+/// makes the selected declaration explicit at each emission site instead of coupling a long list
+/// of positional arguments.
+pub(super) struct ConstructorDefaultStub<'a> {
+    pub(super) owner: &'a str,
+    pub(super) owner_identity: TypeName,
+    pub(super) facade: &'a str,
+    /// Compiler-supplied parameters before the source declaration's parameters, in identity order.
+    /// Enum constructors contribute `(name, ordinal)` here; captured/local constructors contribute
+    /// their captures, which the stub takes and forwards in the owner's physical capture order.
+    pub(super) prefix: &'a [Ty],
+    /// How much of `prefix` is addressable by checked default expressions.
+    pub(super) logical_prefix_count: usize,
+    pub(super) real_params: &'a [Ty],
+    pub(super) defaults: &'a [Option<u32>],
+    /// A secondary constructor's entry and closing lines for the stub's `LineNumberTable`. `None`
+    /// is the primary constructor's.
+    pub(super) secondary_lines: Option<(u32, u32)>,
+    /// Whether this exact declaration is hidden behind its marker accessor.
+    pub(super) target_uses_marker_accessor: bool,
+    /// Whether the declaration is `@Deprecated`; kotlinc repeats the classic attribute on the stub.
+    pub(super) deprecated: bool,
+    pub(super) access: u16,
+}
+
+/// Emit the synthetic `<init>(params…, int mask, DefaultConstructorMarker)` overload for one
+/// constructor declaration. Unlike a `$default` method this is a constructor: `this` is slot 0,
+/// the real parameters follow, then the mask and marker; masked slots are filled before delegation.
+pub(super) fn emit_ctor_default_stub_with_prefix(
+    ir: &IrFile,
+    stub: ConstructorDefaultStub<'_>,
+    cw: &mut ClassWriter,
+    env: &EmitEnv,
+) {
+    let ConstructorDefaultStub {
+        owner,
+        owner_identity,
+        facade,
+        prefix,
+        logical_prefix_count,
+        real_params,
+        defaults,
+        secondary_lines,
+        target_uses_marker_accessor,
+        deprecated,
+        access,
+    } = stub;
+    debug_assert!(logical_prefix_count <= prefix.len());
+    let n = real_params.len();
+    let marker = Ty::obj("kotlin/jvm/internal/DefaultConstructorMarker");
+    // `prefix_identities[position]` is the prefix entry the stub takes at that physical position.
+    let prefix_identities =
+        capture_order::physical_for(ir, owner_identity, (0..prefix.len()).collect());
+    let physical_params = prefix_identities
+        .iter()
+        .map(|&index| prefix[index])
+        .chain(real_params.iter().copied())
+        .collect::<Vec<_>>();
+    let mut stub_params = physical_params.clone();
+    stub_params.extend(std::iter::repeat_n(Ty::Int, default_mask_count(n)));
+    stub_params.push(marker);
+    let desc = method_descriptor(&stub_params, Ty::Unit);
+    // ASM's `visitMethod` interns the stub's name and descriptor before its body's constants.
+    cw.reserve_method_pool("<init>", &desc, None, &[]);
+    // The FILE facade, not the class. A default initializer is ordinary file-level code that happens
+    // to run inside the constructor; same-file top-level calls still belong to the facade.
+    let mut e = Emitter::new(
+        ir,
+        cw,
+        env,
+        Some(StaticOwner::Class(owner_identity)),
+        owner,
+        facade,
+        Ty::Unit,
+        defaults.iter().flatten().copied(),
+    );
+    e.this_uninitialized = true;
+    // `this` at slot 0 = value-index 0; real params at value-index 1..=n.
+    let receiver = e.frame.enter(FrameKey::Receiver, Ty::obj(owner));
+    e.slots.insert(0, (receiver, Ty::obj(owner)));
+    let mut prefix_slots = Vec::with_capacity(prefix.len());
+    for (position, &index) in prefix_identities.iter().enumerate() {
+        let ty = prefix[index];
+        let key = if index < logical_prefix_count {
+            FrameKey::Value(index as u32 + 1)
+        } else {
+            FrameKey::Parameter(position as u16)
+        };
+        let slot = e.frame.enter(key, ty);
+        prefix_slots.push((slot, ty));
+        if index < logical_prefix_count {
+            e.slots.insert(index as u32 + 1, (slot, ty));
+        }
+    }
+    let mut param_slots: Vec<(u16, Ty)> = Vec::new();
+    for (i, t) in real_params.iter().enumerate() {
+        let value = (logical_prefix_count + i + 1) as u32;
+        let slot = e.frame.enter(FrameKey::Value(value), *t);
+        e.slots.insert(value, (slot, *t));
+        param_slots.push((slot, *t));
+    }
+    let trailing = prefix.len() + real_params.len();
+    let mask_count = default_mask_count(real_params.len());
+    let mask_slots: Vec<u16> = (0..mask_count)
+        .map(|mask| {
+            let s = e
+                .frame
+                .enter(FrameKey::Parameter((trailing + mask) as u16), Ty::Int);
+            // Backend temporaries — see the member stub: typed in frames, named by no value.
+            // Held for the whole stub: nothing releases a mask word before the method ends.
+            let _ = e.lease_temporary(s, Ty::Int);
+            s
+        })
+        .collect();
+    let marker_slot = e
+        .frame
+        .enter(FrameKey::Parameter((trailing + mask_count) as u16), marker);
+    let _ = e.lease_temporary(marker_slot, marker);
+
+    // kotlinc's `$default` ctor LineNumberTable: the stub enters on the constructor's line (the
+    // CLASS declaration's for a primary, the `constructor` keyword's for a secondary), and so does
+    // each mask test and the delegation. A masked fill is generated like any other code: the
+    // default expression marks its own lines, nested calls included. The `return` maps to the
+    // declaration's closing line.
+    let class_decl = ir
+        .classes
+        .iter()
+        .find(|candidate| candidate.fq_name() == owner);
+    let entry_line = secondary_lines
+        .map(|(entry, _)| entry)
+        .unwrap_or_else(|| class_decl.map_or(0, |candidate| candidate.decl_line));
+    let mark_entry = |code: &mut CodeBuilder| {
+        if entry_line != 0 {
+            code.mark_line(entry_line);
+        }
+    };
+    // kotlinc visits the stub's name and descriptor before its body, so the descriptor's constant
+    // precedes the default values and the delegation the body interns.
+    let mut stub_params = physical_params.clone();
+    stub_params.extend(std::iter::repeat_n(
+        Ty::Int,
+        default_mask_count(real_params.len()),
+    ));
+    stub_params.push(marker);
+    let desc = method_descriptor(&stub_params, Ty::Unit);
+    e.cw.reserve_method_name("<init>");
+    e.cw.reserve_descriptor(&desc);
+    let mut code = CodeBuilder::new(e.frame.size());
+    for (i, def) in defaults.iter().enumerate().take(n) {
+        if let Some(def_expr) = def {
+            let (pslot, pty) = param_slots[i];
+            mark_entry(&mut code);
+            code.iload(mask_slots[i / 32]);
+            code.push_int(default_mask_bit(i), e.cw);
+            code.iand();
+            let skip = code.new_label();
+            code.ifeq(skip);
+            super::method_defaults::mark_default_fill(&mut e, *def_expr, &mut code);
+            e.emit_value_as(*def_expr, pty, &mut code);
+            store(pty, pslot, &mut code);
+            code.bind(skip);
+        }
+    }
+    // `invokespecial <owner>.<init>(realparams)V` — delegate to the real primary constructor.
+    mark_entry(&mut code);
+    code.aload(0);
+    for &(prefix_slot, prefix_ty) in &prefix_slots {
+        load(prefix_ty, prefix_slot, &mut code);
+    }
+    for &(pslot, pty) in &param_slots {
+        load(pty, pslot, &mut code);
+    }
+    // A constructor hidden for its value-class parameters is reached through its marker accessor,
+    // as every construction outside the accessor is.
+    let mut target_params = physical_params.clone();
+    if target_uses_marker_accessor {
+        code.aconst_null();
+        target_params.push(marker);
+    }
+    let init_desc = method_descriptor(&target_params, Ty::Unit);
+    let aw: i32 = 1 + target_params
+        .iter()
+        .map(|t| slot_words(*t) as i32)
+        .sum::<i32>();
+    let m = e.cw.methodref(owner, "<init>", &init_desc);
+    code.invokespecial(m, aw, 0);
+    // The `return` maps to the declaration's CLOSING line: the primary constructor's `)` for a
+    // primary's stub, and the secondary's own last line for a secondary's — kotlinc's rule, and the
+    // two are different declarations' lines, so neither may stand in for the other.
+    let close_line = match secondary_lines {
+        Some((_, close)) => (close != 0).then_some(close),
+        None => class_decl
+            .and_then(|candidate| ir.ctor_close_lines.get(&candidate.fq_name_id()))
+            .copied(),
+    };
+    if let Some(close) = close_line.filter(|_| entry_line != 0) {
+        code.mark_line(close);
+    }
+    code.ret_void();
+    code.ensure_locals(e.frame.max());
+    code.link();
+
+    // Once constructor selection recorded that this declaration is reached through a public
+    // marker accessor, its default-argument realization is public as well. This is the same exact
+    // declaration fact used for the delegation above; do not rediscover it from the owner or the
+    // erased descriptor. Ordinary private constructors keep their synthetic-only default stub.
+    let access = if target_uses_marker_accessor {
+        access | 0x0001
+    } else {
+        access
+    };
+    e.cw.add_method(access, "<init>", &desc, &code);
+    // Default expressions can retain source positions even when the generated owner has no
+    // declaration line. Publish exactly the stub's curated marks, including an empty table.
+    let lines = code
+        .line_marks()
+        .iter()
+        .map(|&(pc, line)| (pc, u32::from(line)))
+        .collect::<Vec<_>>();
+    e.cw.set_method_lines("<init>", &desc, &lines);
+    if deprecated {
+        e.cw.mark_method_deprecated("<init>", &desc);
+    }
+}
+
+/// Emit the PUBLIC|SYNTHETIC accessor `<init>(…args, DefaultConstructorMarker)` for a class whose primary
+/// constructor is private (its parameters mention a value class). It delegates straight to the private
+/// `<init>` — `this` at slot 0, the real params, then the marker (unused); `invokespecial` the primary,
+/// return. Straight-line (no branches ⇒ no StackMapTable). Distinct from the default-arg overload, which
+/// carries the extra `int mask` and fills defaults.
+pub(super) fn emit_ctor_marker_accessor(
+    owner: &str,
+    real_params: &[Ty],
+    real_parameter_identities: &[Option<String>],
+    cw: &mut ClassWriter,
+) {
+    assert_eq!(
+        real_parameter_identities.len(),
+        real_params.len(),
+        "marker-accessor identities must match its selected constructor"
+    );
+    let mut slot = 1u16; // slot 0 = `this`
+    let mut param_slots: Vec<(u16, Ty)> = Vec::new();
+    for t in real_params {
+        param_slots.push((slot, *t));
+        slot += slot_words(*t);
+    }
+    let total = slot + 1; // + the marker local
+                          // The accessor's OWN descriptor interns before its body's Methodref — kotlinc visits a method's
+                          // signature before its code, so the private ctor this delegates to must not claim the earlier slot.
+    let marker = Ty::obj("kotlin/jvm/internal/DefaultConstructorMarker");
+    let mut stub_params = real_params.to_vec();
+    stub_params.push(marker);
+    let desc = method_descriptor(&stub_params, Ty::Unit);
+    cw.reserve_descriptor(&desc);
+    let mut code = CodeBuilder::new(total);
+    code.aload(0);
+    for &(pslot, pty) in &param_slots {
+        load(pty, pslot, &mut code);
+    }
+    let init_desc = method_descriptor(real_params, Ty::Unit);
+    let aw: i32 = 1 + real_params
+        .iter()
+        .map(|t| slot_words(*t) as i32)
+        .sum::<i32>();
+    let m = cw.methodref(owner, "<init>", &init_desc);
+    code.invokespecial(m, aw, 0);
+    code.ret_void();
+    code.ensure_locals(total);
+    code.link();
+
+    cw.add_method(0x1001 /* PUBLIC | SYNTHETIC */, "<init>", &desc, &code);
+    let mut locals = vec![("this".to_string(), format!("L{owner};"), 0)];
+    locals.extend(
+        real_parameter_identities
+            .iter()
+            .zip(&param_slots)
+            .filter_map(|(name, &(slot, ty))| {
+                name.clone()
+                    .map(|name| (name, super::type_descriptor(ty), slot))
+            }),
+    );
+    locals.push((
+        "$constructor_marker".to_string(),
+        super::type_descriptor(marker),
+        slot,
+    ));
+    cw.set_method_debug("<init>", &desc, None, &locals);
+}
+
+/// Push the `int` masks of the omitted parameters and the `DefaultConstructorMarker` that select a
+/// constructor's default-argument overload; nothing when no argument is omitted.
+pub(super) fn emit_constructor_default_arguments(
+    omitted: &[u32],
+    parameter_count: usize,
+    code: &mut CodeBuilder,
+    cw: &mut ClassWriter,
+) {
+    if omitted.is_empty() {
+        return;
+    }
+    let masks = constructor_default_masks(omitted, parameter_count);
+    for mask in masks {
+        code.push_int(mask, cw);
+    }
+    code.aconst_null();
+}
+
+/// The `int` masks with a bit set for each omitted parameter.
+pub(super) fn constructor_default_masks(omitted: &[u32], parameter_count: usize) -> Vec<i32> {
+    if omitted.is_empty() {
+        return Vec::new();
+    }
+    let mut masks = vec![0; default_mask_count(parameter_count)];
+    for &parameter in omitted {
+        let parameter = parameter as usize;
+        masks[parameter / 32] |= default_mask_bit(parameter);
+    }
+    masks
+}

@@ -346,7 +346,7 @@ impl FnParamInfo {
         info
     }
 
-    pub(crate) fn prepend_generated(&mut self, identity: IrParameterIdentity) {
+    pub fn prepend_generated(&mut self, identity: IrParameterIdentity) {
         assert_eq!(
             identity.provenance,
             IrParameterProvenance::CompilerGenerated,
@@ -428,10 +428,7 @@ impl IrFile {
     /// but consumers must not branch on that origin. Presence is optional for functions that have
     /// no source/debug parameter surface; when present, the identities are complete and exactly
     /// parallel to the current semantic parameter list.
-    pub(crate) fn function_parameter_identities(
-        &self,
-        function: FunId,
-    ) -> Option<&[IrParameterIdentity]> {
+    pub fn function_parameter_identities(&self, function: FunId) -> Option<&[IrParameterIdentity]> {
         let source = self
             .fn_params
             .get(&function)

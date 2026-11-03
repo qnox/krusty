@@ -39,7 +39,7 @@ pub fn clone_expression_dag(ir: &mut IrFile, root: ExprId) -> (ExprId, HashMap<E
 /// the next identity and the next implementation, class-mode and generated-class ordinals in its
 /// own context, and an implementation that is emitted gets a method of its own beside the
 /// original's.
-pub(crate) fn clone_expression_with_own_lambdas(ir: &mut IrFile, root: ExprId) -> ExprId {
+pub fn clone_expression_with_own_lambdas(ir: &mut IrFile, root: ExprId) -> ExprId {
     let (copy, cloned) = clone_expression_dag(ir, root);
     give_copied_lambdas_their_own_identity(ir, &cloned, &mut CopiedLambdas::default());
     copy
@@ -262,7 +262,7 @@ fn copied_lifting_position(
 
 /// A copy of `source` alone whose direct operands are `map`ped, with its sparse semantic/source
 /// facts: a second use of one checked operation over other operands.
-pub(crate) fn clone_with_operands(
+pub fn clone_with_operands(
     ir: &mut IrFile,
     source: ExprId,
     map: impl FnMut(ExprId) -> ExprId,
@@ -288,7 +288,7 @@ pub(crate) fn make_expression_children_unique(ir: &mut IrFile, root: ExprId) {
 
 /// As [`make_expression_children_unique`], returning every `(source, clone)` identity so backend
 /// side tables can copy their exact per-expression contracts instead of inferring them again.
-pub(crate) fn make_expression_children_unique_tracked(
+pub fn make_expression_children_unique_tracked(
     ir: &mut IrFile,
     root: ExprId,
 ) -> Vec<(ExprId, ExprId)> {
@@ -592,7 +592,7 @@ fn remap_direct_children(expression: &mut IrExpr, mut map: impl FnMut(ExprId) ->
 /// the facade slot, and the inline-declaration sets. Target realization tables stay empty so a
 /// later backend pass records the copy itself. `specialization` is the expansion that created the
 /// copy. Classes that already list `source` are read from [`IrFile::class_method_owners`].
-pub(crate) fn clone_function_implementation(
+pub fn clone_function_implementation(
     ir: &mut IrFile,
     source: FunId,
     shape: IrFunction,
@@ -625,7 +625,7 @@ pub(crate) fn clone_function_implementation(
 
 /// Copy one class method without attaching it to the source class or recording it as a specialized
 /// lambda. The caller publishes it on the class copy.
-pub(crate) fn clone_class_method(
+pub fn clone_class_method(
     ir: &mut IrFile,
     source: FunId,
     shape: IrFunction,

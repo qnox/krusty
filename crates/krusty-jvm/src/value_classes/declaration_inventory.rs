@@ -1,0 +1,224 @@
+//! Inventory of exact value-class declarations referenced by one JVM IR file.
+//!
+//! This boundary combines normalized checked classifier facts with common-IR facts, validates that
+//! duplicate publications agree, and follows declared underlying types transitively. The pass-local
+//! JVM erasure map converts only semantic scalar spellings; boxing, storage, and descriptors remain
+//! owned by their later representation operations.
+
+use super::representation::has_native_carrier;
+use super::Under;
+use krusty::fx_hash::{HashMap, HashSet};
+use krusty::ir::referenced_classifiers::{collect_classifier_names, referenced_classifier_names};
+use krusty::ir::IrFile;
+use krusty::types::TypeName;
+
+/// Publish the value classes this file references into its value-class facts, ahead of JVM passes
+/// that need the declaration kind before the value-class representation pass runs (delegate-method
+/// shape and bridge derivation).
+pub(crate) fn record_referenced(
+    ir: &mut IrFile,
+    classifiers: &dyn krusty::types::ClassifierFactSource,
+) -> bool {
+    let mut declarations = super::representation::declared_underlyings(ir);
+    merge_referenced(ir, classifiers, &mut declarations).is_some()
+}
+
+pub(super) fn merge_referenced(
+    ir: &mut IrFile,
+    classifiers: &dyn krusty::types::ClassifierFactSource,
+    declarations: &mut Under,
+) -> Option<HashMap<TypeName, String>> {
+    let mut underlying_properties = HashMap::default();
+    let mut pending = referenced_classifier_names(ir);
+    let mut probed = HashSet::default();
+    while let Some(classifier) = pending.pop() {
+        if !probed.insert(classifier) {
+            continue;
+        }
+        if let Some(underlying) = declarations.get(&classifier).copied() {
+            collect_classifier_names(underlying, &mut pending);
+            continue;
+        }
+
+        if let Some(property) = classifiers.classifier_value_property(classifier) {
+            krusty::trace_compiler!(
+                "value_classes",
+                "external value class {} underlying property {}",
+                classifier,
+                property
+            );
+            underlying_properties.insert(classifier, property);
+        }
+
+        if let Some(declaration) = classifiers.classifier_value_declaration(classifier) {
+            ir.insert_external_value_class_declaration(classifier, declaration);
+        }
+        let candidates = [
+            ir.external_value_class_name(classifier).copied(),
+            classifiers.classifier_value_underlying(classifier),
+        ];
+        let mut declared = None;
+        for candidate in candidates.into_iter().flatten() {
+            let candidate = candidate.canonical_semantic();
+            if let Some(existing) = declared {
+                assert_eq!(
+                    existing, candidate,
+                    "checked providers disagreed about one value-class declaration"
+                );
+            } else {
+                declared = Some(candidate);
+            }
+        }
+        let Some(mut underlying) = declared else {
+            continue;
+        };
+        // Metadata may stamp an array carrier nullable. The array reference already holds null, so
+        // `UIntArray?` stays that non-null array and boxes only when a consumer asks for the box.
+        if underlying.non_null().is_array() {
+            underlying = underlying.non_null();
+        }
+        ir.insert_external_value_class_name(classifier, underlying);
+        collect_classifier_names(underlying, &mut pending);
+        // A value class the type model carries as a native scalar (the unsigned integers) is still
+        // a checked value-class declaration, but its JVM slot is that scalar: it stays out of the
+        // rewrite map, whose entries box and unbox through the class's own `box-impl`.
+        if has_native_carrier(classifier) {
+            continue;
+        }
+        declarations.insert(
+            classifier,
+            underlying.scalar_value_repr().unwrap_or(underlying),
+        );
+    }
+    krusty::value_classes::declarations_are_acyclic(declarations).then_some(underlying_properties)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use krusty::types::Ty;
+
+    struct UnsignedFacts;
+
+    impl krusty::types::ClassifierFactSource for UnsignedFacts {
+        fn classifier_annotations(
+            &self,
+            _classifier: TypeName,
+        ) -> Option<Vec<krusty::types::ResolvedAnnotation>> {
+            None
+        }
+
+        fn classifier_value_underlying(&self, classifier: TypeName) -> Option<Ty> {
+            classifier.matches("kotlin/UInt").then_some(Ty::Int)
+        }
+    }
+
+    #[test]
+    fn checked_unsigned_declaration_is_semantic_but_not_rewritten() {
+        let uint = krusty::types::type_name("kotlin/UInt");
+        let mut ir = IrFile::default();
+        let mut holder = krusty::plugins::synthetic_class("fixture/Holder");
+        holder.fields.push(krusty::ir::IrField::new(
+            "value".to_string(),
+            Ty::obj_name(uint),
+        ));
+        ir.add_class(holder);
+        let mut declarations = Under::default();
+
+        assert!(merge_referenced(&mut ir, &UnsignedFacts, &mut declarations).is_some());
+        assert_eq!(ir.value_class_underlying_name(uint), Some(Ty::Int));
+        assert!(ir.is_value_class_name(uint));
+        assert!(!super::super::is_boxed_value_class(&ir, uint));
+        assert!(!declarations.contains_key(&uint));
+    }
+
+    struct UnsignedArrayFacts;
+
+    impl krusty::types::ClassifierFactSource for UnsignedArrayFacts {
+        fn classifier_annotations(
+            &self,
+            _classifier: TypeName,
+        ) -> Option<Vec<krusty::types::ResolvedAnnotation>> {
+            None
+        }
+
+        fn classifier_value_underlying(&self, classifier: TypeName) -> Option<Ty> {
+            classifier
+                .matches("kotlin/UByteArray")
+                .then_some(Ty::nullable(Ty::obj("kotlin/ByteArray")))
+        }
+    }
+
+    #[test]
+    fn an_unsigned_array_enters_the_rewrite_map_as_its_primitive_carrier() {
+        let array = krusty::types::type_name("kotlin/UByteArray");
+        let mut ir = IrFile::default();
+        let mut holder = krusty::plugins::synthetic_class("fixture/Holder");
+        holder.fields.push(krusty::ir::IrField::new(
+            "value".to_string(),
+            Ty::obj_name(array),
+        ));
+        ir.add_class(holder);
+        let mut declarations = Under::default();
+
+        assert!(merge_referenced(&mut ir, &UnsignedArrayFacts, &mut declarations).is_some());
+        assert_eq!(
+            ir.value_class_underlying_name(array),
+            Some(Ty::obj("kotlin/ByteArray"))
+        );
+        assert!(ir.is_value_class_name(array));
+        assert!(super::super::is_boxed_value_class(&ir, array));
+        assert_eq!(
+            declarations.get(&array).copied(),
+            Some(Ty::obj("kotlin/ByteArray"))
+        );
+        assert!(!declarations.contains_key(&krusty::types::type_name("kotlin/ByteArray")));
+    }
+
+    #[test]
+    fn a_signed_primitive_array_without_a_value_underlying_stays_out() {
+        let array = krusty::types::type_name("kotlin/ByteArray");
+        let mut ir = IrFile::default();
+        let mut holder = krusty::plugins::synthetic_class("fixture/Holder");
+        holder.fields.push(krusty::ir::IrField::new(
+            "value".to_string(),
+            Ty::obj_name(array),
+        ));
+        ir.add_class(holder);
+        let mut declarations = Under::default();
+
+        assert!(merge_referenced(
+            &mut ir,
+            &krusty::libraries::EmptySymbolSource,
+            &mut declarations
+        )
+        .is_some());
+        assert!(!declarations.contains_key(&array));
+        assert!(!ir.is_value_class_name(array));
+    }
+
+    #[test]
+    fn cyclic_checked_facts_decline_instead_of_selecting_an_edge() {
+        let first = krusty::types::type_name("fixture/First");
+        let second = krusty::types::type_name("fixture/Second");
+        let mut ir = IrFile::default();
+        ir.insert_external_value_class_name(first, Ty::obj_name(second));
+        ir.insert_external_value_class_name(second, Ty::obj_name(first));
+        let mut holder = krusty::plugins::synthetic_class("fixture/Holder");
+        holder.fields.push(krusty::ir::IrField::new(
+            "value".to_string(),
+            Ty::obj_name(first),
+        ));
+        ir.add_class(holder);
+        let mut declarations = Under::default();
+
+        assert_eq!(
+            merge_referenced(
+                &mut ir,
+                &krusty::libraries::EmptySymbolSource,
+                &mut declarations,
+            ),
+            None
+        );
+    }
+}

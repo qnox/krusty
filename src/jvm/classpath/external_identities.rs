@@ -85,7 +85,7 @@ impl Classpath {
         identity
     }
 
-    pub(crate) fn external_callable(
+    pub fn external_callable(
         &self,
         identity: crate::fir::ExternalCallableId,
     ) -> Option<ExternalCallableRealization> {
@@ -127,7 +127,7 @@ impl Classpath {
         identity
     }
 
-    pub(crate) fn external_property(
+    pub fn external_property(
         &self,
         identity: crate::fir::ExternalPropertyId,
     ) -> Option<ExternalPropertyRealization> {

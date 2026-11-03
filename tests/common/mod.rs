@@ -517,7 +517,7 @@ pub(crate) fn compile_in_process_report_with_classpath(
         krusty::jvm::jvm_libraries::JvmLibraries::new(cp.clone())
             .expect("JVM provider initialization"),
     );
-    let backend = krusty::jvm::JvmBackend::new(cp);
+    let backend = krusty_jvm::JvmBackend::new(cp);
     let report = emit_in_process(src, stem, platform, &backend);
     let classes = report
         .artifacts
@@ -537,7 +537,7 @@ pub(crate) fn compile_in_process_report_with_classpath(
 /// Like [`compile_in_process`], but retaining the suspend pass's continuation metadata for emission,
 /// and pinning per-class `@kotlin.Metadata` ON explicitly rather than inheriting the shipping default
 /// — the byte-identity tests must exercise the computed payload whatever
-/// [`krusty::jvm::ir_emit::EmitOptions::emit_class_metadata`] defaults to (and whatever
+/// [`krusty_jvm::ir_emit::EmitOptions::emit_class_metadata`] defaults to (and whatever
 /// `KRUSTY_NO_CLASS_METADATA` is set to in the environment).
 ///
 /// Takes a classpath (for sources referencing the kotlin stdlib or other jars) and stamps the
@@ -608,7 +608,7 @@ pub fn compile_in_process_metadata_cp_module_target(
     let outputs = krusty::compiler::emit_analyzed(
         analysis,
         &stems,
-        &krusty::jvm::JvmBackend::new(cp).with_class_major(class_major),
+        &krusty_jvm::JvmBackend::new(cp).with_class_major(class_major),
         module_name,
         &mut diags,
     );
@@ -2163,7 +2163,7 @@ fn krusty_lib_out(sources: &[(&str, &str)]) -> Result<Option<PathBuf>, String> {
     let outputs = krusty::compiler::emit_analyzed(
         analysis,
         &stems,
-        &krusty::jvm::JvmBackend::new(cp),
+        &krusty_jvm::JvmBackend::new(cp),
         "main",
         &mut diags,
     );

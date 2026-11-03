@@ -28,7 +28,7 @@ const GETSTATIC: u8 = 0xb2;
 const INTRINSICS: &str = "kotlin/jvm/internal/Intrinsics";
 
 /// The class an inlined call site got back from regenerating one anonymous object.
-pub(crate) struct RegeneratedObject {
+pub struct RegeneratedObject {
     pub name: String,
     pub constructor_desc: String,
     /// A method of the copy still calls `reifiedOperationMarker`, so the caller keeps
@@ -38,14 +38,14 @@ pub(crate) struct RegeneratedObject {
 
 /// An inline lambda one of an object's constructor arguments passes, which the copy inlines
 /// (kotlinc's `capturedLambdasToInline`).
-pub(crate) struct ObjectLambda<'a> {
+pub struct ObjectLambda<'a> {
     /// The constructor argument it is passed as, by index.
     pub argument: usize,
     pub lambda: &'a Lambda,
 }
 
 /// Where the objects of one inlined call are regenerated.
-pub(crate) trait AnonymousObjects {
+pub trait AnonymousObjects {
     /// Regenerate `class`, which the body constructs through `constructor_desc` passing `lambdas`:
     /// the copy's name and the descriptor of its constructor. The copy takes each lambda's
     /// captured values, in order, after the arguments that are not lambdas.

@@ -331,13 +331,20 @@ mod tests {
             "value_classes",
             "wide_stack",
         ];
-        for path in rust_files_under("src/jvm") {
+        // The JVM backend crate's own modules are its business; what it may use of the frontend is
+        // the same budget as the class-file layer that stays in this crate.
+        for path in jvm_backend_files() {
+            let check = if path.starts_with(source_path("crates/krusty-jvm")) {
+                assert_allowed_external_crate_modules_in_file
+            } else {
+                assert_allowed_crate_modules_in_file
+            };
             if path.ends_with("java_stub.rs") {
                 let mut allowed = allowed.to_vec();
                 allowed.push("java_source");
-                assert_allowed_crate_modules_in_file(&path, &allowed);
-            } else if path.ends_with("src/jvm/array_casts.rs")
-                || path.ends_with("src/jvm/read_only_collection_stubs.rs")
+                check(&path, &allowed);
+            } else if path.ends_with("crates/krusty-jvm/src/array_casts.rs")
+                || path.ends_with("crates/krusty-jvm/src/read_only_collection_stubs.rs")
             {
                 // Array-cast realization and read-only stub result compatibility reuse the core
                 // subtype relation over checked types and the frozen classifier inventory. Their
@@ -346,9 +353,9 @@ mod tests {
                 // throughout the JVM backend.
                 let mut allowed = allowed.to_vec();
                 allowed.push("assignable");
-                assert_allowed_crate_modules_in_file(&path, &allowed);
+                check(&path, &allowed);
             } else {
-                assert_allowed_crate_modules_in_file(&path, &allowed);
+                check(&path, &allowed);
             }
         }
     }
@@ -357,7 +364,7 @@ mod tests {
     fn method_parameter_identity_has_one_typed_boundary() {
         for path in [
             "src/ir/function_parameters.rs",
-            "src/jvm/method_parameters.rs",
+            "crates/krusty-jvm/src/method_parameters.rs",
             "src/jvm/classfile/method_parameters.rs",
         ] {
             assert!(
@@ -365,8 +372,8 @@ mod tests {
                 "missing ownership module {path}"
             );
         }
-        let emitter =
-            fs::read_to_string(source_path("src/jvm/ir_emit.rs")).expect("read JVM emitter facade");
+        let emitter = fs::read_to_string(source_path("crates/krusty-jvm/src/ir_emit.rs"))
+            .expect("read JVM emitter facade");
         assert!(!emitter.contains("fn declared_method_parameters"));
         assert!(!emitter.contains("fn declared_constructor_parameters"));
         assert!(!emitter.contains("internal.render() == \"kotlin/coroutines/Continuation\""));
@@ -374,7 +381,7 @@ mod tests {
             fs::read_to_string(source_path("src/jvm/classfile.rs")).expect("read classfile facade");
         assert!(!classfile.contains("pub fn set_method_parameters"));
 
-        for path in rust_files_under("src/jvm") {
+        for path in jvm_backend_files() {
             let text = fs::read_to_string(&path).expect("read JVM parameter consumer");
             let mut forbidden = vec![
                 "unwrap_or_else(|| format!(\"p",
@@ -397,8 +404,8 @@ mod tests {
 
     #[test]
     fn jvm_backend_adapter_uses_only_frontend_handoff_and_jvm_dependencies() {
-        assert_allowed_crate_modules(
-            "src/jvm/backend.rs",
+        assert_allowed_external_crate_modules_in_file(
+            &source_path("crates/krusty-jvm/src/backend.rs"),
             &[
                 "ast",
                 "backend",
@@ -419,8 +426,11 @@ mod tests {
 
     #[test]
     fn jvm_passes_do_not_rebuild_the_checked_classifier_hierarchy() {
-        for path in ["src/jvm/backend.rs", "src/jvm/bridges.rs"] {
-            let text = fs::read_to_string(path).expect("read JVM pass");
+        for path in [
+            "crates/krusty-jvm/src/backend.rs",
+            "crates/krusty-jvm/src/bridges.rs",
+        ] {
+            let text = fs::read_to_string(source_path(path)).expect("read JVM pass");
             for forbidden in [".applied_hierarchy(", ".supertype_internal_names_from("] {
                 assert!(
                     !text.contains(forbidden),
@@ -542,7 +552,8 @@ mod tests {
 
     #[test]
     fn native_facade_has_no_crate_dependencies() {
-        assert_allowed_crate_modules("crates/krusty-native/src/lib.rs", &[]);
+        // The facade re-exports the target model, which the frontend owns.
+        assert_allowed_crate_modules("crates/krusty-native/src/lib.rs", &["native_target"]);
     }
 
     #[test]
@@ -728,7 +739,9 @@ mod tests {
     }
 
     fn is_test_module(path: &Path) -> bool {
-        path.file_name().is_some_and(|name| name == "tests.rs")
+        // `single_source_lowering` is the lowering fixture the backend crates' unit tests share.
+        path.file_name()
+            .is_some_and(|name| name == "tests.rs" || name == "single_source_lowering.rs")
             || path
                 .components()
                 .any(|component| component.as_os_str() == "tests")
@@ -889,7 +902,7 @@ mod tests {
             &["conformance", "diag", "frontend", "lexer", "parser"],
         );
         assert_allowed_crate_modules(
-            "src/bin/bytediff.rs",
+            "crates/krusty-jvm/src/bin/bytediff.rs",
             &[
                 "compiler",
                 "conformance",
@@ -901,7 +914,7 @@ mod tests {
             ],
         );
         assert_allowed_crate_modules(
-            "src/bin/survey.rs",
+            "crates/krusty-jvm/src/bin/survey.rs",
             &[
                 "ast",
                 // The frontend census drives the PRODUCTION two-pass pipeline
@@ -1017,8 +1030,14 @@ mod tests {
         );
     }
 
+    /// A file in a backend crate under `crates/` is checked for what it uses of this crate; its
+    /// own crate's modules are that crate's business.
     fn assert_allowed_crate_modules(relative: &str, allowed: &[&str]) {
-        assert_allowed_crate_modules_in_file(&source_path(relative), allowed);
+        if relative.starts_with("crates/") {
+            assert_allowed_external_crate_modules_in_file(&source_path(relative), allowed);
+        } else {
+            assert_allowed_crate_modules_in_file(&source_path(relative), allowed);
+        }
     }
 
     fn assert_allowed_crate_modules_in_tree(relative: &str, allowed: &[&str]) {
@@ -1224,6 +1243,25 @@ mod tests {
                 found
             }
         })
+    }
+
+    /// The JVM backend's sources: the class-file layer in `src/jvm` and the IR emission in the
+    /// `krusty-jvm` crate.
+    fn jvm_backend_files() -> Vec<PathBuf> {
+        let mut files = rust_files_under("src/jvm");
+        // Its command-line tools and the tests that drive the whole pipeline are outside the budget.
+        let tools = source_path("crates/krusty-jvm/src/bin");
+        let pipeline_tests = source_path("crates/krusty-jvm/src/tests");
+        files.extend(
+            rust_files_under("crates/krusty-jvm/src")
+                .into_iter()
+                .filter(|path| {
+                    !path.starts_with(&tools)
+                        && !path.starts_with(&pipeline_tests)
+                        && *path != source_path("crates/krusty-jvm/src/tests.rs")
+                }),
+        );
+        files
     }
 
     fn rust_files_under(relative: &str) -> Vec<PathBuf> {

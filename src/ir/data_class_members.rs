@@ -43,17 +43,13 @@ impl IrFile {
         self.fn_debug_locals.insert(function);
     }
 
-    pub(crate) fn data_class_member(
-        &self,
-        owner: TypeName,
-        role: IrDataClassMemberRole,
-    ) -> Option<FunId> {
+    pub fn data_class_member(&self, owner: TypeName, role: IrDataClassMemberRole) -> Option<FunId> {
         self.synthesized_data_class_members
             .get(&(owner, role))
             .copied()
     }
 
-    pub(crate) fn is_data_class_member(&self, owner: TypeName, function: FunId) -> bool {
+    pub fn is_data_class_member(&self, owner: TypeName, function: FunId) -> bool {
         self.synthesized_data_class_members
             .iter()
             .any(|((registered_owner, _), registered)| {

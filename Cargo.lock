@@ -821,6 +821,7 @@ dependencies = [
  "dhat",
  "flate2",
  "krusty-cli",
+ "krusty-jvm",
  "krusty-native",
  "krusty-plugin-ir",
  "krusty-wasm",
@@ -849,6 +850,7 @@ version = "0.0.1"
 dependencies = [
  "krusty",
  "krusty-build",
+ "krusty-jvm",
  "krusty-native",
  "krusty-wasm",
  "libc",
@@ -856,6 +858,14 @@ dependencies = [
  "serde",
  "serde_json",
  "zip",
+]
+
+[[package]]
+name = "krusty-jvm"
+version = "0.0.1"
+dependencies = [
+ "krusty",
+ "unicode-general-category",
 ]
 
 [[package]]
@@ -893,6 +903,7 @@ name = "krusty-plugin-host"
 version = "0.0.1"
 dependencies = [
  "krusty",
+ "krusty-jvm",
  "krusty-plugin-ir",
  "sha2",
  "zip",

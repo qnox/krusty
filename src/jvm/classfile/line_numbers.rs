@@ -26,7 +26,7 @@ pub(super) struct PendingLines {
 }
 
 /// A call-site line withdrawn by [`CodeBuilder::defer_line_mark`].
-pub(crate) struct DeferredLine {
+pub struct DeferredLine {
     /// Where the entry stood among the method's entries, and where it goes back.
     index: usize,
     pc: u16,
@@ -214,7 +214,7 @@ impl ClassWriter {
 
     /// Write no `LineNumberTable` for `name desc`, whatever lines its emission collects: kotlinc
     /// writes none for a `<clinit>` that fills `$$delegatedProperties`.
-    pub(in crate::jvm) fn omit_method_lines(&mut self, name: &str, desc: &str) {
+    pub fn omit_method_lines(&mut self, name: &str, desc: &str) {
         self.lineless_methods
             .push((name.to_string(), desc.to_string()));
     }
@@ -232,7 +232,7 @@ impl CodeBuilder {
     /// preceding linear path. Exception handlers start a distinct execution path, and kotlinc
     /// retains their entry in the line table rather than deduplicating it against unreachable
     /// fall-through state.
-    pub(crate) fn mark_control_entry_line(&mut self, line: u32) {
+    pub fn mark_control_entry_line(&mut self, line: u32) {
         if self.dead || self.bytes.len() > u16::MAX as usize {
             return;
         }
@@ -384,7 +384,7 @@ impl CodeBuilder {
     /// about to begin there has no source position, as kotlinc builds an implicit context argument,
     /// so the line in effect stays the earlier one until something that has a position marks it.
     /// A retained entry is kept, since it records an inline call site rather than a start.
-    pub(crate) fn withdraw_line(&mut self) {
+    pub fn withdraw_line(&mut self) {
         let pc = self.bytes.len();
         let retained = self.retained_line_mark == Some(self.line_marks.len().wrapping_sub(1));
         if !retained
@@ -402,7 +402,7 @@ impl CodeBuilder {
     /// it: a declaration (`visitVariable`), a `return` (`visitReturn`), or a block statement
     /// (`visitStatementContainer`). The entries at this offset, the
     /// statement's own and those its value marks eagerly where it starts, are not kotlinc's yet.
-    pub(crate) fn mark_value_boundary(&mut self, value: u32) {
+    pub fn mark_value_boundary(&mut self, value: u32) {
         let Ok(pc) = u16::try_from(self.bytes.len()) else {
             return;
         };
@@ -416,7 +416,7 @@ impl CodeBuilder {
 
     /// The first entry at the current offset and the token of the statement value that
     /// [`Self::mark_value_boundary`] recorded here, while no instruction has been written since.
-    pub(crate) fn value_boundary_here(&self) -> Option<(usize, u32)> {
+    pub fn value_boundary_here(&self) -> Option<(usize, u32)> {
         let (pc, index, value) = self.pending_lines.value_boundary?;
         (usize::from(pc) == self.bytes.len() && index <= self.line_marks.len())
             .then_some((index, value))
@@ -431,7 +431,7 @@ impl CodeBuilder {
     /// kotlinc's `IrInlineCodegen` generates those arguments before the call marks its line, and
     /// `InplaceArgumentsMethodTransformer` then moves their code, line labels included, to where
     /// the body loads them. A retained or kept entry is an enclosing expression's own and stays.
-    pub(crate) fn defer_line_mark(&mut self, since: usize) -> Option<DeferredLine> {
+    pub fn defer_line_mark(&mut self, since: usize) -> Option<DeferredLine> {
         let pc = u16::try_from(self.bytes.len()).ok()?;
         let retained = self.retained_line_mark == Some(self.line_marks.len().wrapping_sub(1));
         let &(marked, line) = self.line_marks.last()?;
@@ -457,7 +457,7 @@ impl CodeBuilder {
     /// in-place arguments: deduplicated against the line those arguments left in effect. An
     /// unsigned `x + 1u` therefore has its entry on the literal, which marked the call's line
     /// first, while a call whose in-place arguments mark no line keeps it where the body begins.
-    pub(crate) fn settle_deferred_line(&mut self, deferred: DeferredLine) {
+    pub fn settle_deferred_line(&mut self, deferred: DeferredLine) {
         let index = deferred.index.min(self.line_marks.len());
         let restate = match self.line_marks[index..].last() {
             Some(&(_, argument_line)) => argument_line != deferred.line,
@@ -479,7 +479,7 @@ impl CodeBuilder {
     }
 
     /// How many line entries are recorded so far, for [`Self::withdraw_lines_since`].
-    pub(crate) fn line_entry_count(&self) -> usize {
+    pub fn line_entry_count(&self) -> usize {
         self.line_marks.len()
     }
 
@@ -487,7 +487,7 @@ impl CodeBuilder {
     /// no source position of its own, as kotlinc puts a lambda's captured values on the stack
     /// without one. A retained entry is kept, since it records an inline call site rather than a
     /// start.
-    pub(crate) fn withdraw_lines_since(&mut self, count: usize) {
+    pub fn withdraw_lines_since(&mut self, count: usize) {
         let retained = self.retained_line_mark.and_then(|index| {
             (index >= count
                 && index + 1 == self.line_marks.len()
@@ -512,7 +512,7 @@ impl CodeBuilder {
     /// offset stays: a call such as `toUInt()` has already written its own line there, and a
     /// zero-initializer on the same line is not the literal's to take. A kept mark
     /// ([`Self::mark_line_kept`]) stays too.
-    pub(crate) fn withdraw_operand_line(&mut self, line: u32) {
+    pub fn withdraw_operand_line(&mut self, line: u32) {
         let line = line.min(u16::MAX as u32) as u16;
         let pc = self.bytes.len();
         // A kept mark is an enclosing expression's own, not this boundary's.
@@ -538,7 +538,7 @@ impl CodeBuilder {
     /// A following store on that same line keeps this mark: cleanup removes the `nop` and the
     /// entry lands on the store. Marking the store again would leave the `nop` as the only
     /// instruction of its line, which the cleanup then keeps.
-    pub(crate) fn line_marked_on_trailing_nop(&self) -> bool {
+    pub fn line_marked_on_trailing_nop(&self) -> bool {
         let Some(&(pc, _)) = self.line_marks.last() else {
             return false;
         };
@@ -548,14 +548,14 @@ impl CodeBuilder {
     /// Forget which line is in effect, so the next mark is written even for the same line: kotlinc
     /// resets its last line number after an inlined call (`markLineNumberAfterInlineIfNeeded`),
     /// whose code ran under the callee's lines rather than the caller's.
-    pub(crate) fn forget_line(&mut self) {
+    pub fn forget_line(&mut self) {
         self.pending_lines.forgotten = true;
     }
 
     /// Record an inlined body's line number at the current offset, as ASM copies a
     /// `LineNumberNode`: the entry is written even when the line is already in effect, and a
     /// second entry at one offset follows the first rather than replacing it.
-    pub(crate) fn inlined_line(&mut self, line: u16) {
+    pub fn inlined_line(&mut self, line: u16) {
         if self.dead || self.bytes.len() > u16::MAX as usize {
             return;
         }
@@ -566,7 +566,7 @@ impl CodeBuilder {
     }
 
     /// Line marks whose provenance is an inlined body or its caller-line restoration.
-    pub(crate) fn inlined_line_marks(&self) -> impl Iterator<Item = (u16, u16)> + '_ {
+    pub fn inlined_line_marks(&self) -> impl Iterator<Item = (u16, u16)> + '_ {
         self.inlined_line_marks
             .iter()
             .copied()
@@ -575,7 +575,7 @@ impl CodeBuilder {
 
     /// Whether the line in effect was forgotten after an inlined body ([`Self::forget_line`]), so
     /// the next mark of any line, the same one included, is written.
-    pub(crate) fn line_forgotten(&self) -> bool {
+    pub fn line_forgotten(&self) -> bool {
         self.pending_lines.forgotten
     }
 
@@ -590,7 +590,7 @@ impl CodeBuilder {
     /// a real instruction on the same line immediately afterwards, the optimizer may remove the
     /// anchor as redundant; inserting another line boundary ahead of the real instruction would
     /// instead make the `nop` the sole instruction of its debug range and force it to survive.
-    pub(crate) fn line_is_anchored_by_trailing_nop(&self, line: u32) -> bool {
+    pub fn line_is_anchored_by_trailing_nop(&self, line: u32) -> bool {
         let line = line.min(u16::MAX as u32) as u16;
         self.line_marks.last().is_some_and(|&(pc, marked)| {
             marked == line
@@ -618,7 +618,7 @@ impl CodeBuilder {
     }
 
     /// Whether a kept mark ([`Self::mark_line_kept`]) of `line` stands at the current offset.
-    pub(crate) fn line_kept_here(&self, line: u32) -> bool {
+    pub fn line_kept_here(&self, line: u32) -> bool {
         let line = line.min(u16::MAX as u32) as u16;
         let index = self.line_marks.len().wrapping_sub(1);
         self.retained_line_distinct
@@ -632,7 +632,7 @@ impl CodeBuilder {
     /// Record `line` as kotlinc's `LineNumberMapper` does wherever a mark precedes code that marks
     /// lines of its own: a later mark of another line at this same offset follows the entry
     /// rather than replacing it, while a mark of the same line is the entry already in effect.
-    pub(crate) fn mark_line_kept(&mut self, line: u32) {
+    pub fn mark_line_kept(&mut self, line: u32) {
         self.retained_line_mark = self.record_line(line);
         self.retained_line_distinct = true;
     }

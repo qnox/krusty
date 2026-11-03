@@ -221,7 +221,7 @@ fn slice_cmp(left: &[Ty], right: &[Ty], cmp: fn(Ty, Ty) -> Ordering) -> Ordering
 /// join, invariant arguments become an out-projection of that join, and differing
 /// contravariant arguments become a star. Function types keep a shared shape; a parameter that
 /// differs across components is a star.
-pub(crate) fn declaration_approximation(
+pub fn declaration_approximation(
     ty: Ty,
     variance_at: &mut dyn FnMut(TypeName, usize) -> Option<TypeVariance>,
 ) -> Option<Ty> {

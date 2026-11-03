@@ -11,7 +11,7 @@ pub(crate) const INLINE_MARKER_CLASS: &str = "kotlin/jvm/internal/InlineMarker";
 
 /// A `mark(I)V` id.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum SuspendMarker {
+pub enum SuspendMarker {
     BeforeSuspend = 0,
     AfterSuspend = 1,
     ReturnsUnit = 2,
@@ -90,7 +90,7 @@ pub(crate) fn int_constant(node: &Node) -> Option<i32> {
 
 /// `isInlineMarker(insn, name)`: a static call into `InlineMarker`, of `name` or, with `None`, of
 /// `beforeInlineCall`/`afterInlineCall`.
-pub(crate) fn is_inline_marker(node: &Node, name: Option<&str>) -> bool {
+pub fn is_inline_marker(node: &Node, name: Option<&str>) -> bool {
     match node {
         Node::Insn(Insn::Method {
             op: INVOKESTATIC,
@@ -120,7 +120,7 @@ pub(crate) fn is_inline_marker(node: &Node, name: Option<&str>) -> bool {
     }
 }
 
-pub(crate) fn is_before_inline_marker(node: &Node) -> bool {
+pub fn is_before_inline_marker(node: &Node) -> bool {
     is_inline_marker(node, Some("beforeInlineCall"))
         || is_inline_marker(node, Some("beforeInlineCallWithReservedLocals"))
 }
@@ -130,7 +130,7 @@ pub(crate) fn has_reserved_inline_locals(node: &Node) -> bool {
     is_inline_marker(node, Some("beforeInlineCallWithReservedLocals"))
 }
 
-pub(crate) fn is_after_inline_marker(node: &Node) -> bool {
+pub fn is_after_inline_marker(node: &Node) -> bool {
     is_inline_marker(node, Some("afterInlineCall"))
 }
 

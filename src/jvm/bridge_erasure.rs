@@ -5,7 +5,7 @@ use crate::types::{stored_value_ty, Ty, TyKind};
 
 /// Bridge-signature erasure: a type parameter becomes its bound's storage type, a nullable keeps its
 /// wrapper. This is the shape a descriptor is written from, so it defines when two signatures COLLIDE.
-pub(crate) fn bridge_erasure(ty: Ty) -> Ty {
+pub fn bridge_erasure(ty: Ty) -> Ty {
     bridge_erasure_visiting(ty, &mut crate::fx_hash::HashSet::default())
 }
 

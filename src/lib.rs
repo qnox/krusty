@@ -75,13 +75,9 @@ pub mod trace;
 pub mod type_engine;
 pub mod types;
 pub mod value_classes;
-mod wide_stack;
+pub mod wide_stack;
 
 #[cfg(test)]
 mod architecture;
-#[cfg(test)]
-mod counted_loop_policy_tests;
-#[cfg(test)]
-mod jvm_virtual_target_tests;
 #[cfg(test)]
 mod local_property_accessor_tests;

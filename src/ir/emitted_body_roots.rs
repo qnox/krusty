@@ -20,8 +20,8 @@ pub enum EmittedDeclaration {
 /// One emitted body root and its declaration.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EmittedRoot {
-    pub(crate) declaration: EmittedDeclaration,
-    pub(crate) root: ExprId,
+    pub declaration: EmittedDeclaration,
+    pub root: ExprId,
 }
 
 /// Every emitted body root with its declaration. Defaults are not structural bodies: targets

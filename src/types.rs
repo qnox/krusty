@@ -8,7 +8,7 @@ mod classifier_declarations;
 mod deprecation;
 mod diagnostic_rendering;
 mod intersection;
-pub(crate) use intersection::declaration_approximation;
+pub use intersection::declaration_approximation;
 mod overridden_declaration;
 mod semantic_call_role;
 mod semantic_callable_owner;
@@ -38,7 +38,7 @@ mod substitute;
 mod type_parameter_identity;
 pub use equality_mode::EqualityMode;
 
-pub(crate) use substitute::{
+pub use substitute::{
     ty_canonicalize_params, ty_rename_params, ty_subst, ty_subst_alias_expansion, ty_subst_all,
     ty_subst_applied_arguments, ty_subst_formals, ty_subst_keep_unbound,
     ty_subst_supertype_template, ty_with_param_bounds, ty_with_transitive_param_bounds,
@@ -64,7 +64,7 @@ pub use thin_handles::{TyList, TyParamName};
 pub use ty_kind::TyKind;
 mod type_name_list;
 pub use type_name_list::TypeNameList;
-pub(crate) use type_parameter_identity::{
+pub use type_parameter_identity::{
     call_site_type_variable, constructor_type_parameter, declaration_type_parameter,
     generated_function_type_parameter, hidden_captured_type_parameter, metadata_type_parameter,
     postponed_call_type_variable, type_parameter_source_name,
@@ -293,7 +293,7 @@ impl TypeName {
 
     /// Backend-oriented candidates for textual JVM nesting, deepest first. Semantic resolution
     /// continues to use the single exact [`Self::nested_owner`] relation.
-    pub(crate) fn existing_nested_owners(self) -> Vec<TypeName> {
+    pub fn existing_nested_owners(self) -> Vec<TypeName> {
         type_names()
             .existing_nested_owners(self.name_id())
             .into_iter()
@@ -308,13 +308,13 @@ impl TypeName {
 
     /// Backend boundary split for a nested classifier whose enclosing declaration is external to
     /// the current file. Semantic callers should keep using [`Self::nested_owner`].
-    pub(crate) fn jvm_nested_parts(self) -> Option<(String, String)> {
+    pub fn jvm_nested_parts(self) -> Option<(String, String)> {
         type_names().jvm_nested_parts(self.name_id())
     }
 
     /// JVM classfile spelling of this classifier identity. Source/metadata nesting separators are
     /// converted by the name tree; semantic callers should retain the identity instead.
-    pub(crate) fn jvm_binary_name(self) -> String {
+    pub fn jvm_binary_name(self) -> String {
         type_names().jvm_binary_name(self.name_id())
     }
 
@@ -970,7 +970,7 @@ impl Ty {
     /// contributes `T & Any` ([`Ty::DefinitelyNotNull`]) rather than a copy whose bound was rewritten
     /// to `Any`: that copy is indistinguishable from a parameter declared `T : Any`. A parameter
     /// already bounded by non-null `Any` is contributed unchanged.
-    pub(crate) fn contributed_through_nullable_formal(self) -> Ty {
+    pub fn contributed_through_nullable_formal(self) -> Ty {
         let actual = self.non_null_keeping_mutability();
         match actual.kind() {
             TyKind::TyParam(_, bound) if bound.upper_bound_admits_null() => {
@@ -1457,7 +1457,7 @@ impl Ty {
     /// Render one type among the types named by the same diagnostic. Classifiers normally use their
     /// simple source name; colliding classifiers retain their package so the message distinguishes
     /// them.
-    pub(crate) fn source_name_with_type_parameter_in(
+    pub fn source_name_with_type_parameter_in(
         self,
         context: &[Ty],
         type_parameter: &dyn Fn(&str) -> String,
@@ -1956,7 +1956,7 @@ pub(crate) fn semantic_value_parameter_ty(declared: Ty, is_vararg: bool) -> Ty {
 /// Whether `ty` mentions any of the named type parameters (`T` itself, `List<T>`, `(T) -> T`,
 /// `T?`). A pure `Ty` predicate shared by the checker (generic-shape classification) and lowering
 /// (generic-shape gates).
-pub(crate) fn ty_mentions_param(ty: Ty, names: &[String]) -> bool {
+pub fn ty_mentions_param(ty: Ty, names: &[String]) -> bool {
     match ty.kind() {
         TyKind::TyParam(name, _) => names.iter().any(|parameter| parameter == name),
         TyKind::DefinitelyNotNull(inner) => ty_mentions_param(inner, names),

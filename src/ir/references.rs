@@ -89,7 +89,7 @@ impl IrFile {
     /// Callable-reference lowering published the returned expression directly; this projection
     /// combines it with the reference's ordered captures/bound receiver and adapter signature
     /// without inspecting the adapter body or its reflective target kind.
-    pub(crate) fn callable_reference_inline_template(
+    pub fn callable_reference_inline_template(
         &self,
         expression: ExprId,
     ) -> Option<(FunId, Vec<ExprId>, ExprId, usize)> {

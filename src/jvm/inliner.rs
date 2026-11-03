@@ -51,33 +51,29 @@ use crate::jvm::{
     bytecode_passes::insn_list::EditableMethod,
 };
 
-pub(crate) use anonymous_object::{
+pub use anonymous_object::{
     copy_sam_wrapper, regenerate, CallSite, CallSiteSource, Regeneration, RegenerationError,
 };
-pub(crate) use callee_shape::{
+pub use callee_shape::{
     can_inline_arguments_in_place, constructs_regenerated_object, requires_empty_stack_on_entry,
     unsupported_shape, UnsupportedShape,
 };
-pub(crate) use class_roles::ClassRoles;
-pub(in crate::jvm) use default_lambda::load as load_default_lambda;
-pub(crate) use default_masks::{
-    expand as expand_default_masks, DefaultMasks, ExtractedDefaultLambda,
-};
-pub(crate) use functional_arguments::lambda_placements;
-pub(crate) use inline_scopes::InlineScopes;
-pub(crate) use lambda_expansion::{Lambda, SourceLines};
-pub(crate) use name_generator::ClassNameGenerators;
-pub(crate) use object_regeneration::{AnonymousObjects, ObjectLambda, RegeneratedObject};
-pub(crate) use parameters::{Binding, Parameter, Parameters};
-pub(crate) use preparation::reads_local;
-pub(in crate::jvm) use reified::has_reified_markers;
-pub(crate) use returns::{
-    is_non_local_return_marker, non_local_return_marker, non_local_return_name,
-};
+pub use class_roles::ClassRoles;
+pub use default_lambda::load as load_default_lambda;
+pub use default_masks::{expand as expand_default_masks, DefaultMasks, ExtractedDefaultLambda};
+pub use functional_arguments::lambda_placements;
+pub use inline_scopes::InlineScopes;
+pub use lambda_expansion::{Lambda, SourceLines};
+pub use name_generator::ClassNameGenerators;
+pub use object_regeneration::{AnonymousObjects, ObjectLambda, RegeneratedObject};
+pub use parameters::{Binding, Parameter, Parameters};
+pub use preparation::reads_local;
+pub use reified::has_reified_markers;
+pub use returns::{is_non_local_return_marker, non_local_return_marker, non_local_return_name};
 
 /// Why a body could not be inlined.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum InlineError {
+pub enum InlineError {
     /// The operand stack could not be followed through the body.
     Stack(ShapeError),
     /// The body returns with different return opcodes (not valid bytecode for one method).
@@ -120,7 +116,7 @@ pub(crate) enum InlineError {
 /// What one call's inlining reports to its caller (kotlinc's `InliningContext`): where the body's
 /// lines are mapped, which classes it names are anonymous objects, and where the ones it constructs
 /// are regenerated.
-pub(in crate::jvm) struct InliningContext<'a> {
+pub struct InliningContext<'a> {
     pub lines: &'a mut dyn SourceLines,
     pub classes: &'a dyn ClassRoles,
     pub objects: &'a mut dyn AnonymousObjects,
@@ -137,7 +133,7 @@ pub(in crate::jvm) struct InliningContext<'a> {
 /// sit above `frame_base` plus the temporaries. Each `invoke` of one of `lambdas` is replaced by
 /// that lambda's body. The body's line numbers go through `call.lines`, the lambdas' stay as they
 /// are; an `@InlineOnly` body has no lines of its own, and no local variables either.
-pub(in crate::jvm) fn inline(
+pub fn inline(
     callee: &MethodNode,
     parameters: &Parameters,
     lambdas: &[Lambda],

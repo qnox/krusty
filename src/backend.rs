@@ -3,7 +3,7 @@
 //! A backend consumes checked frontend output and emits target artifacts.
 
 pub mod class_tables;
-pub(crate) mod coroutines;
+pub mod coroutines;
 pub mod counted_loops;
 pub mod default_arguments;
 mod dependency_accessor;

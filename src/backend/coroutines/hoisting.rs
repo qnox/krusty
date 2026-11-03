@@ -167,7 +167,7 @@ fn normalize_when_statement_body(
 /// `ret` is the ENCLOSING function's return type: the only statement in a spliced body it types is
 /// a non-local `return`, which leaves that function. The body's own value is typed by the value
 /// itself (see [`desugar_spliced_value_try`]).
-pub(crate) fn hoist_spliced_inline_bodies(
+pub fn hoist_spliced_inline_bodies(
     ir: &mut IrFile,
     body: ExprId,
     suspend_set: &HashSet<u32>,
@@ -381,7 +381,7 @@ fn hoist_spliced_body(
     }
 }
 
-pub(crate) fn hoist_suspensions(
+pub fn hoist_suspensions(
     ir: &mut IrFile,
     b: ExprId,
     suspend_set: &HashSet<u32>,

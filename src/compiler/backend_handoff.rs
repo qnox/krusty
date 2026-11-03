@@ -15,8 +15,6 @@ use crate::ir::IrFile;
 use crate::resolve::PassTwoSymbols;
 
 mod plugin_handoff;
-#[cfg(test)]
-mod tests;
 
 /// The module-wide facts every file of one emission hands its backend alongside its own IR.
 pub(super) struct ModuleEmission<'a> {

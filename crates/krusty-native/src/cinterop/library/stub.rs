@@ -46,7 +46,7 @@ pub(super) mod flags {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(super) struct Annotation {
+pub struct Annotation {
     pub(super) class: TypeName,
     pub(super) arguments: Vec<(&'static str, Value)>,
 }
@@ -140,7 +140,7 @@ impl Value {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(super) struct Parameter {
+pub struct Parameter {
     pub(super) name: String,
     pub(super) ty: KotlinType,
     pub(super) vararg_element: Option<KotlinType>,

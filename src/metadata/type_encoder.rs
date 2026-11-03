@@ -142,11 +142,11 @@ fn no_inner_classifiers(_: TypeName) -> Result<Option<InnerClassifier>, TypeName
 
 /// Checked type facts supplied by a metadata-emitting target.
 #[derive(Clone)]
-pub(crate) struct MetadataTypeLookups<'a> {
-    pub(crate) intersection_approximation: Option<&'a dyn Fn(Ty) -> Option<Ty>>,
-    pub(crate) inner_classifiers: InnerClassifiers<'a>,
-    pub(crate) local_classifiers: crate::fx_hash::HashSet<TypeName>,
-    pub(crate) enum_entry_bodies: crate::fx_hash::HashSet<TypeName>,
+pub struct MetadataTypeLookups<'a> {
+    pub intersection_approximation: Option<&'a dyn Fn(Ty) -> Option<Ty>>,
+    pub inner_classifiers: InnerClassifiers<'a>,
+    pub local_classifiers: crate::fx_hash::HashSet<TypeName>,
+    pub enum_entry_bodies: crate::fx_hash::HashSet<TypeName>,
 }
 
 impl Default for MetadataTypeLookups<'_> {

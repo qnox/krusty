@@ -607,13 +607,13 @@ pub struct CheckedBackendCallables {
 
 impl CheckedBackendCallables {
     /// Whether native plugins selected `identity` at the handoff for the code they generate.
-    pub(crate) fn is_plugin_runtime_callable(&self, identity: ExternalCallableId) -> bool {
+    pub fn is_plugin_runtime_callable(&self, identity: ExternalCallableId) -> bool {
         self.plugin_runtime.contains_key(&identity)
     }
 
     /// The parameters a native plugin's transform appended to the runtime declaration `identity`,
     /// which its generated calls pass after the declared ones; empty for any other declaration.
-    pub(crate) fn plugin_runtime_appended(&self, identity: ExternalCallableId) -> &[Ty] {
+    pub fn plugin_runtime_appended(&self, identity: ExternalCallableId) -> &[Ty] {
         self.plugin_runtime
             .get(&identity)
             .map_or(&[], |appended| appended)
@@ -663,7 +663,7 @@ impl CheckedBackendCallables {
     }
 
     /// Copy the provider's facts for every dependency identity `ir` references.
-    pub(crate) fn freeze(
+    pub fn freeze(
         ir: &crate::ir::IrFile,
         provider: &dyn SymbolSource,
     ) -> Result<Self, DependencyFactError> {
@@ -749,7 +749,7 @@ impl CheckedBackendCallables {
     /// ordinary file facts were copied. Re-scan that narrow carrier in the now-final IR at this one
     /// boundary; identities already present remain the original frozen records, while each newly
     /// selected identity is copied exactly once before super-call realization consumes it.
-    pub(crate) fn freeze_plugin_super_callables(
+    pub fn freeze_plugin_super_callables(
         &mut self,
         ir: &crate::ir::IrFile,
         provider: impl FnMut(

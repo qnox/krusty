@@ -58,7 +58,7 @@ pub struct SourceSetAnalysis {
     pub types: Vec<Option<FrontendTypeInfo>>,
     parse_errors: Vec<bool>,
     pub(crate) reparse_sources: ReparseSources,
-    pub(crate) streamed: Option<StreamedPassState>,
+    pub streamed: Option<StreamedPassState>,
 }
 
 impl SourceSetAnalysis {
@@ -290,7 +290,7 @@ impl ReparseSource {
 
 /// Connected stable-identity product of Pass 1. It is kept beside the legacy AST result only while
 /// callers migrate; none of its fields can retain syntax or a temporary signature graph.
-pub(crate) struct StreamedPassState {
+pub struct StreamedPassState {
     pub module: crate::fir::FrontendModule,
     pub diagnostic_recovery: bool,
 }

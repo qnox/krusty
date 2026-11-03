@@ -21,7 +21,7 @@ use std::borrow::Cow;
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
 
-use krusty::jvm::ir_emit::JvmDefaultMode;
+use krusty_jvm::ir_emit::JvmDefaultMode;
 
 /// One compilation the worker was asked to perform, in krusty's terms.
 #[derive(Debug, Default, PartialEq, Eq)]

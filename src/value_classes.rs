@@ -85,7 +85,7 @@ pub fn underlying_chain_accepts_null(ty: Ty, declarations: &UnderlyingTypes) -> 
     accepts(ty, declarations, &mut HashSet::default())
 }
 
-pub(crate) fn nullable_value_requires_distinct_null(
+pub fn nullable_value_requires_distinct_null(
     classifier: TypeName,
     declarations: &UnderlyingTypes,
 ) -> bool {

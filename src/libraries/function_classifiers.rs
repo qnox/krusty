@@ -22,24 +22,24 @@ enum FunctionClassKind {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct FunctionClassifier {
+pub struct FunctionClassifier {
     kind: FunctionClassKind,
     arity: usize,
 }
 
 impl FunctionClassifier {
-    pub(crate) fn arity(self) -> usize {
+    pub fn arity(self) -> usize {
         self.arity
     }
 
-    pub(crate) fn is_suspend(self) -> bool {
+    pub fn is_suspend(self) -> bool {
         matches!(
             self.kind,
             FunctionClassKind::SuspendFunction | FunctionClassKind::KSuspendFunction
         )
     }
 
-    pub(crate) fn is_reflective(self) -> bool {
+    pub fn is_reflective(self) -> bool {
         matches!(
             self.kind,
             FunctionClassKind::KFunction | FunctionClassKind::KSuspendFunction
@@ -71,7 +71,7 @@ impl FunctionClassifier {
 }
 
 /// Recognize a declaration identity owned by Kotlin's function-class builtins provider.
-pub(crate) fn classifier(internal: TypeName) -> Option<FunctionClassifier> {
+pub fn classifier(internal: TypeName) -> Option<FunctionClassifier> {
     let package = internal.parent()?;
     let (kind, digits) = if package == wk::kotlin_package() {
         (
@@ -123,7 +123,7 @@ pub(crate) fn classifier_name_in(package: TypeName, name: &str) -> Option<TypeNa
 /// function classifier it is an instance of, applied to its parameters and result
 /// (`kotlin/coroutines/SuspendFunction1<A, R>`), which declares the `invoke` a class declaring
 /// that supertype overrides.
-pub(crate) fn supertype_classifier(supertype: Ty) -> Ty {
+pub fn supertype_classifier(supertype: Ty) -> Ty {
     let TyKind::Fun(signature) = supertype.kind() else {
         return supertype;
     };
@@ -135,7 +135,7 @@ pub(crate) fn supertype_classifier(supertype: Ty) -> Ty {
 
 /// The function classifier a function type of `arity` parameters (an extension receiver and context
 /// parameters included) is an instance of: `kotlin/FunctionN` or `kotlin/coroutines/SuspendFunctionN`.
-pub(crate) fn function_classifier_identity(arity: usize, suspend: bool) -> TypeName {
+pub fn function_classifier_identity(arity: usize, suspend: bool) -> TypeName {
     FunctionClassifier {
         kind: if suspend {
             FunctionClassKind::SuspendFunction
@@ -147,7 +147,7 @@ pub(crate) fn function_classifier_identity(arity: usize, suspend: bool) -> TypeN
     .identity()
 }
 
-pub(crate) fn is_reflective_function_classifier(internal: TypeName) -> bool {
+pub fn is_reflective_function_classifier(internal: TypeName) -> bool {
     classifier(internal).is_some_and(FunctionClassifier::is_reflective)
 }
 

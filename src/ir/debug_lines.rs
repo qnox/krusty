@@ -65,13 +65,13 @@ pub(super) struct GeneratedLineMarks {
 }
 
 impl IrFile {
-    pub(crate) fn mark_implicit_return_end_line(&mut self, returned: ExprId, line: u32) {
+    pub fn mark_implicit_return_end_line(&mut self, returned: ExprId, line: u32) {
         self.generated_lines
             .implicit_return_ends
             .insert(returned, line);
     }
 
-    pub(crate) fn implicit_return_end_line(&self, returned: ExprId) -> Option<u32> {
+    pub fn implicit_return_end_line(&self, returned: ExprId) -> Option<u32> {
         self.generated_lines
             .implicit_return_ends
             .get(&returned)
@@ -84,7 +84,7 @@ impl IrFile {
             .insert(result, line);
     }
 
-    pub(crate) fn evaluated_result_end_line(&self, result: ExprId) -> Option<u32> {
+    pub fn evaluated_result_end_line(&self, result: ExprId) -> Option<u32> {
         self.generated_lines
             .evaluated_result_ends
             .get(&result)
@@ -97,7 +97,7 @@ impl IrFile {
             .insert(returned, line);
     }
 
-    pub(crate) fn fallthrough_return_line(&self, returned: ExprId) -> Option<u32> {
+    pub fn fallthrough_return_line(&self, returned: ExprId) -> Option<u32> {
         self.generated_lines
             .fallthrough_returns
             .get(&returned)
@@ -121,29 +121,29 @@ impl IrFile {
         self.generated_lines.accessor_body_exits.get(&body).copied()
     }
 
-    pub(crate) fn mark_dispatch_line(&mut self, call: ExprId, line: u32) {
+    pub fn mark_dispatch_line(&mut self, call: ExprId, line: u32) {
         self.generated_lines.dispatches.insert(call, line);
     }
 
-    pub(crate) fn dispatch_line(&self, call: ExprId) -> Option<u32> {
+    pub fn dispatch_line(&self, call: ExprId) -> Option<u32> {
         self.generated_lines.dispatches.get(&call).copied()
     }
 
-    pub(crate) fn mark_positionless(&mut self, expression: ExprId) {
+    pub fn mark_positionless(&mut self, expression: ExprId) {
         self.generated_lines.positionless.insert(expression);
     }
 
-    pub(crate) fn is_positionless(&self, expression: ExprId) -> bool {
+    pub fn is_positionless(&self, expression: ExprId) -> bool {
         self.generated_lines.positionless.contains(&expression)
     }
 
-    pub(crate) fn mark_generated_operand_start(&mut self, expression: ExprId) {
+    pub fn mark_generated_operand_start(&mut self, expression: ExprId) {
         self.generated_lines
             .generated_operand_starts
             .insert(expression);
     }
 
-    pub(crate) fn starts_at_generated_operand(&self, expression: ExprId) -> bool {
+    pub fn starts_at_generated_operand(&self, expression: ExprId) -> bool {
         self.generated_lines
             .generated_operand_starts
             .contains(&expression)
@@ -155,7 +155,7 @@ impl IrFile {
             .insert(expression, line);
     }
 
-    pub(crate) fn invocation_result_adaptation_line(&self, expression: ExprId) -> Option<u32> {
+    pub fn invocation_result_adaptation_line(&self, expression: ExprId) -> Option<u32> {
         self.generated_lines
             .invocation_result_adaptations
             .get(&expression)
@@ -205,19 +205,19 @@ impl IrFile {
         }
     }
 
-    pub(crate) fn inline_result_adaptation_restores_early(&self, expression: ExprId) -> bool {
+    pub fn inline_result_adaptation_restores_early(&self, expression: ExprId) -> bool {
         self.generated_lines
             .early_result_adaptations
             .contains(&expression)
     }
 
-    pub(crate) fn inline_result_adaptation_restores_caller(&self, expression: ExprId) -> bool {
+    pub fn inline_result_adaptation_restores_caller(&self, expression: ExprId) -> bool {
         self.generated_lines
             .inline_result_adaptation_boundaries
             .contains(&expression)
     }
 
-    pub(crate) fn move_generated_operand_start(&mut self, source: ExprId, target: ExprId) {
+    pub fn move_generated_operand_start(&mut self, source: ExprId, target: ExprId) {
         if self
             .generated_lines
             .generated_operand_starts

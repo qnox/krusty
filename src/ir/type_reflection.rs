@@ -9,7 +9,7 @@ use crate::types::{Ty, TyKind, TypeName};
 /// Class-strategy reflection writes `@Metadata` only for a source function. A missing function
 /// type or parameter list is not evidence that the class is an adapter.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum LambdaClassProvenance {
+pub enum LambdaClassProvenance {
     SourceFunction,
     SynthesizedAdapter,
 }
@@ -134,23 +134,21 @@ impl IrFile {
             .insert(function, source);
     }
 
-    pub(crate) fn foreign_template_sources(
-        &self,
-    ) -> impl Iterator<Item = (u32, IrModuleSource)> + '_ {
+    pub fn foreign_template_sources(&self) -> impl Iterator<Item = (u32, IrModuleSource)> + '_ {
         self.type_reflection
             .foreign_template_sources
             .iter()
             .map(|(function, source)| (*function, *source))
     }
 
-    pub(crate) fn foreign_template_source(&self, function: u32) -> Option<IrModuleSource> {
+    pub fn foreign_template_source(&self, function: u32) -> Option<IrModuleSource> {
         self.type_reflection
             .foreign_template_sources
             .get(&function)
             .copied()
     }
 
-    pub(crate) fn record_foreign_template_facades(
+    pub fn record_foreign_template_facades(
         &mut self,
         facades: impl IntoIterator<Item = (u32, TypeName)>,
     ) {
@@ -159,14 +157,14 @@ impl IrFile {
             .extend(facades);
     }
 
-    pub(crate) fn foreign_template_facade(&self, function: u32) -> Option<TypeName> {
+    pub fn foreign_template_facade(&self, function: u32) -> Option<TypeName> {
         self.type_reflection
             .foreign_template_facades
             .get(&function)
             .copied()
     }
 
-    pub(crate) fn record_foreign_template_classifier(
+    pub fn record_foreign_template_classifier(
         &mut self,
         classifier: TypeName,
         type_params: Vec<IrTypeParameter>,
@@ -176,7 +174,7 @@ impl IrFile {
             .insert(classifier, type_params);
     }
 
-    pub(crate) fn foreign_template_classifiers(
+    pub fn foreign_template_classifiers(
         &self,
     ) -> impl Iterator<Item = (TypeName, &[IrTypeParameter])> + '_ {
         self.type_reflection
@@ -186,7 +184,7 @@ impl IrFile {
     }
 
     /// Exact formal declarations retained for a referenced inline member's classifier owner.
-    pub(crate) fn foreign_template_classifier_parameters(
+    pub fn foreign_template_classifier_parameters(
         &self,
         classifier: TypeName,
     ) -> Option<&[IrTypeParameter]> {
@@ -240,7 +238,7 @@ impl IrFile {
         self.record_lambda_class_provenance(target, provenance);
     }
 
-    pub(crate) fn lambda_class_provenance(&self, lambda: u32) -> Option<LambdaClassProvenance> {
+    pub fn lambda_class_provenance(&self, lambda: u32) -> Option<LambdaClassProvenance> {
         self.type_reflection
             .lambda_class_provenance
             .get(&lambda)
@@ -278,16 +276,13 @@ impl IrFile {
     }
 
     /// The type parameters `lambda`'s function type names, directly or through their bounds.
-    pub(crate) fn lambda_type_parameters(&self, lambda: u32) -> &[IrTypeParameter] {
+    pub fn lambda_type_parameters(&self, lambda: u32) -> &[IrTypeParameter] {
         self.recorded_lambda_type_parameters(lambda)
             .expect("a lambda records the type parameters its function type names")
     }
 
     /// The type parameters recorded for `lambda`, when lowering published them.
-    pub(crate) fn recorded_lambda_type_parameters(
-        &self,
-        lambda: u32,
-    ) -> Option<&[IrTypeParameter]> {
+    pub fn recorded_lambda_type_parameters(&self, lambda: u32) -> Option<&[IrTypeParameter]> {
         self.type_reflection
             .lambda_type_parameters
             .get(&lambda)
@@ -305,7 +300,7 @@ impl IrFile {
 /// classifier's arguments in order, and a function type as its `FunctionN` arguments (its context
 /// and receiver types, its value parameters, then its result). A parameter's bound is its
 /// declaration's, not a part of `ty`.
-pub(crate) fn type_parameters_named_by(ty: Ty, names: &mut Vec<&'static str>) {
+pub fn type_parameters_named_by(ty: Ty, names: &mut Vec<&'static str>) {
     match ty.kind() {
         TyKind::TyParam(name, _) => {
             if !names.contains(&name.as_str()) {

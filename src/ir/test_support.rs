@@ -3,7 +3,7 @@
 use super::{DeclarationAnnotations, IrClass};
 
 /// A minimal well-formed `IrClass` for tests that build IR by hand and only exercise fields/functions.
-pub(crate) fn blank_class(fq: &str) -> IrClass {
+pub fn blank_class(fq: &str) -> IrClass {
     IrClass {
         fq_name: fq.into(),
         declaration_name: None,
@@ -73,6 +73,7 @@ pub(crate) fn blank_class(fq: &str) -> IrClass {
 
 /// A minimal generated secondary constructor delegating to the primary one, with no parameters,
 /// delegation arguments or body.
+#[cfg(test)]
 pub(crate) fn blank_secondary_ctor() -> super::IrSecondaryCtor {
     super::IrSecondaryCtor {
         annotations: DeclarationAnnotations::default(),

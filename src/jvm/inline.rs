@@ -23,7 +23,7 @@ mod local_compaction;
 mod scalar_adapters;
 mod splice_result;
 use continuation_flow::caller_continuation_reachable;
-pub(super) use frame_layout::{spliced_frame, SplicedFrame};
+pub use frame_layout::{spliced_frame, SplicedFrame};
 use local_compaction::LocalCompaction;
 use scalar_adapters::{boxing_call_primitive, host_unboxing, is_target_boxing, leading_unboxing};
 pub use splice_result::SpliceResult;
@@ -1382,7 +1382,7 @@ fn param_vtypes_full(descriptor: &str, src_cp: &[C]) -> Option<Vec<VType>> {
 
 /// The local slot of each parameter in the original (static) method — `long`/`double` take two. Used to
 /// locate a lambda parameter's `aload <slot>` before relocation/shifting.
-pub(crate) fn param_offsets(descriptor: &str) -> Option<Vec<u16>> {
+pub fn param_offsets(descriptor: &str) -> Option<Vec<u16>> {
     let inner = descriptor.strip_prefix('(')?.split(')').next()?;
     let b = inner.as_bytes();
     let mut i = 0;
@@ -1574,7 +1574,7 @@ fn incremented_local_slot(insn: &Insn) -> Option<u16> {
 /// Relocate one inline body and splice its literal lambda bodies at their checked invoke sites.
 /// Branch relocation, reified operands, and scalar adapter cancellation converge here while the
 /// MethodNode migration still owns inline-lambda substitution.
-pub(super) fn splice_unified(
+pub fn splice_unified(
     body: &MethodCode,
     descriptor: &str,
     base: u16,

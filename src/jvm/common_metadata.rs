@@ -116,7 +116,7 @@ struct CommonPackageFunctionRole {
 }
 
 impl CommonExpectationIndex {
-    pub(super) fn load(path: Option<PathBuf>) -> Result<Arc<Self>, Arc<CommonExpectationError>> {
+    pub fn load(path: Option<PathBuf>) -> Result<Arc<Self>, Arc<CommonExpectationError>> {
         type LoadResult = Result<Arc<CommonExpectationIndex>, Arc<CommonExpectationError>>;
         type SharedIndex = Arc<OnceLock<LoadResult>>;
         static CACHE: OnceLock<Mutex<HashMap<PathBuf, SharedIndex>>> = OnceLock::new();

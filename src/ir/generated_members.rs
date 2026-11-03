@@ -189,7 +189,7 @@ impl IrFile {
 
     /// Whether `function` is a member kotlinc's IR plugin adds to `owner` after its declared
     /// members and constructors.
-    pub(crate) fn follows_declared_constructors(&self, owner: TypeName, function: FunId) -> bool {
+    pub fn follows_declared_constructors(&self, owner: TypeName, function: FunId) -> bool {
         self.generated_functions
             .iter()
             .any(|(&(member_owner, role), &member)| {
@@ -314,7 +314,7 @@ impl IrFile {
         self.generated_member_publications.get(&owner)
     }
 
-    pub(crate) fn generated_function_publication(
+    pub fn generated_function_publication(
         &self,
         function: FunId,
     ) -> Option<&IrGeneratedFunctionPublication> {

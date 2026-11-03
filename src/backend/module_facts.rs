@@ -608,7 +608,7 @@ impl BackendModuleFacts {
 
     /// The checked defaults `classifier` inherits without overriding, independent of which source
     /// file is currently entering Pass 2.
-    pub(crate) fn inherited_defaults(
+    pub fn inherited_defaults(
         &self,
         classifier: TypeName,
     ) -> Option<&[crate::fir::ResolvedInheritedDefault]> {

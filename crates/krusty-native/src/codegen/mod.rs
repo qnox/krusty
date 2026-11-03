@@ -445,7 +445,7 @@ fn report_decline(declined: &lower::Unsupported, file: &CheckedIrFile<'_>, diags
 /// Native keeps the entry test at the top and carries unsigned counters in their own machine
 /// representation. The common backend-boundary realizer therefore needs no JVM-style inline-call
 /// provenance or Java loop shape.
-pub(crate) const COUNTED_LOOPS: krusty::backend::counted_loops::CountedLoopPolicy =
+pub const COUNTED_LOOPS: krusty::backend::counted_loops::CountedLoopPolicy =
     krusty::backend::counted_loops::CountedLoopPolicy {
         style: krusty::backend::counted_loops::CounterLoopStyle::PreTested,
         inlining: krusty::backend::counted_loops::HeaderInlining::None,

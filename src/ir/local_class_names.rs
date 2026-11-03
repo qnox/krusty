@@ -1133,14 +1133,14 @@ impl crate::metadata::class_declarations::ClassifierRenaming for RecordRenaming<
 impl super::IrFile {
     /// Replace semantic classifier identities with target physical identities at a backend boundary.
     /// The map is exact and declaration-produced; this operation performs no spelling lookup.
-    pub(crate) fn remap_classifier_identities(&mut self, names: &HashMap<TypeName, TypeName>) {
+    pub fn remap_classifier_identities(&mut self, names: &HashMap<TypeName, TypeName>) {
         self.remap_identities(&IdentityRemap::classifiers(names));
     }
 
     /// Give every occurrence of each type parameter in `carriers` the bound a target selected for
     /// its physical representation. The occurrence keeps its semantic identity, so generic
     /// signatures and metadata still name the parameter.
-    pub(crate) fn rebind_type_parameter_carriers(&mut self, carriers: &HashMap<String, Ty>) {
+    pub fn rebind_type_parameter_carriers(&mut self, carriers: &HashMap<String, Ty>) {
         self.remap_identities(&IdentityRemap::carriers(carriers));
     }
 

@@ -2677,11 +2677,11 @@ mod tests {
         // not miscompile. `run` here is a non-`@Serializable` no-op, so the marker survives.
         let (mut ir, _mid, _) = placeholder("encodeToString");
         assert!(
-            !crate::jvm::ir_emit::jvm_can_emit(&ir),
+            !crate::jvm::emission_readiness::jvm_can_emit(&ir),
             "a surviving PluginPlaceholder must be declined by jvm_can_emit"
         );
         // After specialization the file is emittable again.
         specialize_expression_placeholders(&mut ir, &PluginContext::default());
-        assert!(crate::jvm::ir_emit::jvm_can_emit(&ir));
+        assert!(crate::jvm::emission_readiness::jvm_can_emit(&ir));
     }
 }

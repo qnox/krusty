@@ -16,3 +16,4 @@ zip = { version = "9", default-features = false, features = ["deflate"] }
 [dev-dependencies]
 # The differential tests build a module's plugin IR with the compiler itself.
 krusty = { path = "../.." }
+krusty-jvm = { path = "../krusty-jvm" }

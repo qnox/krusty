@@ -21,7 +21,7 @@ use super::value_when::value_when;
 /// it here leaves the call with the pre-CPS arity. Returns `None` for a cross-unit suspend call (a
 /// `Callee::Static` to another file / the classpath) — that call has no local `FunId`; its logical
 /// type comes from `ir.suspend_calls` instead.
-pub(crate) fn suspend_call_fid(ir: &IrFile, e: ExprId, suspend_set: &HashSet<u32>) -> Option<u32> {
+pub fn suspend_call_fid(ir: &IrFile, e: ExprId, suspend_set: &HashSet<u32>) -> Option<u32> {
     match &ir.exprs[e as usize] {
         IrExpr::Call {
             callee: call_callee,
@@ -52,7 +52,7 @@ pub(crate) fn suspend_call_fid(ir: &IrFile, e: ExprId, suspend_set: &HashSet<u32
 /// (same-file via [`suspend_call_fid`], or cross-unit via `ir.suspend_calls`) or an inlined intrinsic
 /// expression recorded in `ir.intrinsic_suspension_points`. The latter already contains its
 /// continuation behavior, so [`append_continuation`] deliberately leaves its non-call node unchanged.
-pub(crate) fn is_suspension_point(ir: &IrFile, e: ExprId, suspend_set: &HashSet<u32>) -> bool {
+pub fn is_suspension_point(ir: &IrFile, e: ExprId, suspend_set: &HashSet<u32>) -> bool {
     suspend_call_fid(ir, e, suspend_set).is_some()
         || ir.suspend_calls.contains_key(&e)
         || ir.intrinsic_suspension_points.contains_key(&e)
@@ -61,7 +61,7 @@ pub(crate) fn is_suspension_point(ir: &IrFile, e: ExprId, suspend_set: &HashSet<
 /// The logical source result of a non-local call or intrinsic suspension point. Same-file calls use
 /// `orig_rets` through [`suspend_call_fid`]; the two side maps cover only nodes whose result cannot be
 /// recovered from a local `FunId`.
-pub(crate) fn recorded_suspension_result(ir: &IrFile, e: ExprId) -> Option<Ty> {
+pub fn recorded_suspension_result(ir: &IrFile, e: ExprId) -> Option<Ty> {
     ir.suspend_calls.get(&e).copied().or_else(|| {
         ir.intrinsic_suspension_points
             .get(&e)
@@ -69,7 +69,7 @@ pub(crate) fn recorded_suspension_result(ir: &IrFile, e: ExprId) -> Option<Ty> {
     })
 }
 
-pub(crate) fn value_class_suspension_result(
+pub fn value_class_suspension_result(
     ir: &IrFile,
     e: ExprId,
     suspend_set: &HashSet<u32>,
@@ -102,7 +102,7 @@ pub(super) fn when_has_non_direct_suspending_branch(
 
 /// Whether `e`'s subtree contains any call to a suspend function (used to reject shapes this pass can't
 /// restructure — a suspend call nested in an expression, a branch, a loop, etc.).
-pub(crate) fn expr_calls_suspend(ir: &IrFile, e: ExprId, suspend_set: &HashSet<u32>) -> bool {
+pub fn expr_calls_suspend(ir: &IrFile, e: ExprId, suspend_set: &HashSet<u32>) -> bool {
     if is_suspension_point(ir, e, suspend_set) {
         return true;
     }
@@ -138,7 +138,7 @@ pub(super) fn when_cond_suspends(ir: &IrFile, e: ExprId, suspend_set: &HashSet<u
 }
 
 /// The number of suspend-call nodes in the subtree under `e`.
-pub(crate) fn count_suspensions(ir: &IrFile, e: ExprId, suspend_set: &HashSet<u32>) -> usize {
+pub fn count_suspensions(ir: &IrFile, e: ExprId, suspend_set: &HashSet<u32>) -> usize {
     let mut n = usize::from(is_suspension_point(ir, e, suspend_set));
     for_each_child(&ir.exprs, e, &mut |c| {
         n += count_suspensions(ir, c, suspend_set);

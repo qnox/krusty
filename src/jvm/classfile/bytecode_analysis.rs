@@ -8,8 +8,8 @@ mod control_graph;
 mod frame_computer;
 mod frame_types;
 
-pub(crate) use control_graph::{ControlGraph, Handler};
-pub(crate) use frame_computer::{
+pub use control_graph::{ControlGraph, Handler};
+pub use frame_computer::{
     entry_frame, ComputedFrame, ComputedFrames, Decline, FrameComputation, TypedHandler,
 };
-pub(crate) use frame_types::{FrameTypes, PoolView, VerificationType};
+pub use frame_types::{FrameTypes, PoolView, VerificationType};
