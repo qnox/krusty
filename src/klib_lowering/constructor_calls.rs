@@ -247,6 +247,10 @@ pub(super) fn authenticate_root_header(
 }
 
 impl ConstructorDeclaration {
+    pub(super) fn declared_parameters(&self) -> &[Ty] {
+        &self.params
+    }
+
     pub(super) fn default_allowed(&self, ordinal: usize) -> bool {
         self.defaults.get(ordinal).copied().unwrap_or(false)
     }

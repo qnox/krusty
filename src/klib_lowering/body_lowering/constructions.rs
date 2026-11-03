@@ -132,7 +132,7 @@ impl BodyLowering<'_> {
             internal: linked.declaration.classifier,
             args,
             ctor_params: Some(params),
-            declared_params: None,
+            declared_params: Some(linked.declaration.declared_parameters().into()),
             ctor_desc: None,
             external_target: Some(linked.target),
             defaults: defaults.into_boxed_slice(),

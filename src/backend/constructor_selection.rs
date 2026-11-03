@@ -17,7 +17,7 @@ pub(crate) fn selected_constructor(
     selected: Option<&[Ty]>,
 ) -> Option<u32> {
     let declaration = &ir.classes[class as usize];
-    if let Some(target) = ir.construction_targets.get(&site) {
+    if let Some(target) = ir.construction_target(site) {
         let declared = match target.ordinal {
             0 => declaration.has_primary_ctor,
             ordinal => declaration.secondary_ctors.len() >= ordinal as usize,
