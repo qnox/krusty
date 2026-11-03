@@ -15,6 +15,7 @@ mod classifier_kind;
 mod classifier_role;
 mod compiler_intrinsic;
 mod core_builtins;
+mod core_identities;
 mod declaration_header;
 mod declared_members;
 mod default_value;
@@ -899,12 +900,6 @@ pub enum Origin {
     },
 }
 
-/// Exact declaration identity owned by the compiler's artifact-independent core provider.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum CompilerCoreDeclaration {
-    KotlinAnyEquals,
-}
-
 /// A package-level callable: a top-level function (`listOf`), or an extension (its receiver is the
 /// first parameter). `owner` is the internal name of the facade/declaring container for emit.
 #[derive(Clone, Debug)]
@@ -921,9 +916,6 @@ pub struct LibraryCallable {
     /// a Kotlin property. Explicit calls still use `external_identity`; property reads/writes carry
     /// this distinct identity so the target backend alone chooses field versus accessor realization.
     pub external_property_identity: Option<crate::fir::ExternalPropertyId>,
-    /// Exact artifact-independent declaration supplied by the compiler core provider. This is
-    /// assigned only at that provider boundary and is never reconstructed from name or shape.
-    pub compiler_core_declaration: Option<CompilerCoreDeclaration>,
     /// Exact semantic namespace that declares this callable. This is provider-owned identity, not
     /// the physical JVM facade/class in [`Self::owner`]. Keeping it on the normalized declaration
     /// lets cached inline-body dependencies be re-interned in another classpath without recovering
@@ -2546,17 +2538,66 @@ impl SemanticPlatform for EmptySymbolSource {
 #[cfg(test)]
 mod tests {
 
-    /// A source that publishes no dependency declarations has no identity to realize, so the
-    /// default answers nothing rather than a guess.
+    /// The core provider publishes real declarations, so each one it publishes carries an identity
+    /// that the same provider answers for at the backend boundary, as any dependency provider does.
     #[test]
-    fn a_source_without_dependencies_realizes_no_identity() {
+    fn core_declarations_carry_identities_their_provider_answers() {
         let source: &dyn crate::symbol_source::SymbolSource = &super::EmptySymbolSource;
-        assert!(source
-            .external_callable(crate::fir::ExternalCallableId::from_raw(0))
-            .is_none());
-        assert!(source
-            .external_property(crate::fir::ExternalPropertyId::from_raw(0))
-            .is_none());
+        let array = source
+            .classifier(crate::types::type_name("kotlin/IntArray"))
+            .expect("IntArray is a core classifier");
+        let size = array
+            .declared_callables
+            .get("size")
+            .expect("IntArray declares size")
+            .clone()
+            .into_parts()
+            .1
+            .overloads;
+        let [size] = size.as_slice() else {
+            panic!("IntArray declares one size property");
+        };
+        let property = size
+            .getter
+            .external_property_identity
+            .expect("the core size property is identified");
+        let getter = size
+            .getter
+            .external_identity
+            .expect("the core size getter is identified");
+        let published = source
+            .external_property(property)
+            .expect("the core provider answers for its property identity");
+        assert_eq!(published.name, "size");
+        assert_eq!(published.getter, getter);
+        assert_eq!(published.setter, None);
+        let realization = source
+            .external_callable(getter)
+            .expect("the core provider answers for its getter identity");
+        assert_eq!(realization.kind, super::ExternalCallableKind::Member);
+        assert_eq!(
+            realization.declaration_owner,
+            Some(crate::types::SemanticCallableOwner::Classifier(
+                crate::types::type_name("kotlin/IntArray")
+            ))
+        );
+        assert_eq!(realization.callable.external_identity, Some(getter));
+
+        let again = source
+            .classifier(crate::types::type_name("kotlin/IntArray"))
+            .expect("IntArray is a core classifier");
+        let again = again
+            .declared_callables
+            .get("size")
+            .unwrap()
+            .clone()
+            .into_parts()
+            .1;
+        assert_eq!(
+            again.overloads[0].getter.external_identity,
+            Some(getter),
+            "a declaration keeps its identity across provider queries"
+        );
     }
     use super::{
         map_call_args, AnnotationApplication, AnnotationParameterPolicy,
