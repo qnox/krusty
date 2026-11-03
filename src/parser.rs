@@ -2671,17 +2671,6 @@ impl<'a> Parser<'a> {
             self.lexical_type_parameters = enclosing_type_parameters;
         }
 
-        if is_inner && supports_inner && !enclosing_instance_exists {
-            // An object is a singleton, so it cannot provide the per-instance receiver an `inner
-            // class` requires. Consume the unsupported declaration without publishing a falsely
-            // constructible classifier. The child parse may have tentatively hoisted descendants,
-            // so remove that declaration-list suffix with the unsupported owner as one atomic unit.
-            // Other classifier kinds ignore an inapplicable `inner` modifier rather than acquiring
-            // class-only capture metadata.
-            self.file.decls.truncate(start);
-            return true;
-        }
-
         if matches!(nested.kind, ClassKind::Class | ClassKind::Interface) {
             nested.modality = modality_from_modifiers(modifiers);
             nested.final_modifier = modifiers.iter().any(|modifier| modifier == "final");
@@ -2695,7 +2684,11 @@ impl<'a> Parser<'a> {
                 .any(|modifier| modifier == "inline" || modifier == "value");
             nested.value_modifier_span = value_modifier_span;
         }
-        if is_inner && supports_inner {
+        // An object or an interface cannot provide the per-instance receiver an `inner class`
+        // requires: the frontend rejects the modifier there, so the class stays an ordinary nested
+        // one. Other classifier kinds ignore an inapplicable `inner` modifier rather than acquiring
+        // class-only capture metadata.
+        if is_inner && supports_inner && enclosing_instance_exists {
             nested.inner_of = Some(outer.to_string());
         }
         self.register_hoisted_nested_classifier(outer, start, nested, modifiers);
