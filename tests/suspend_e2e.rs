@@ -1,5 +1,5 @@
 //! `suspend` / coroutines support, built in vertical slices, each proven against the real kotlinc
-//! ABI (see docs/SPEC.md). Slice 1: the suspend *calling convention* — a suspend function lowers to
+//! ABI. Slice 1: the suspend *calling convention* — a suspend function lowers to
 //! a continuation-passing-style (CPS) signature: an extra `kotlin.coroutines.Continuation` parameter
 //! is appended and the return type is erased to `java.lang.Object` (the resume value, boxed). A
 //! "leaf" suspend function (no suspension point in its body) needs no state machine — kotlinc emits
@@ -2092,7 +2092,7 @@ fun box(): String {\n\
 /// `when (false) { … }`. The emitter folds the always-false test to an unconditional `goto <else>`,
 /// but used to lay the never-taken branch down after it: unreachable, unframed, and rejected outright
 /// (`VerifyError: Expecting a stack map frame`). Nothing about the jump's target state was ever wrong
-/// — the dead branch was. See `emit_cond_branch`/`emit_when` in `src/jvm/ir_emit.rs`, docs/SPEC.md.
+/// — the dead branch was. See `emit_cond_branch`/`emit_when` in `src/jvm/ir_emit.rs`.
 ///
 /// This is the corpus `codegen/box/coroutines/controlFlow/doubleBreak.kt` shape; the result matches
 /// kotlinc's.

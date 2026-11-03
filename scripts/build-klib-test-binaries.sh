@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# Build the focused KLIB e2e and library-unit binaries in one Cargo invocation. They are one
-# artifact family consumed by the maximum-version Native conformance row.
+# Build the focused KLIB e2e and library-unit binaries. They are one artifact family consumed by
+# the maximum-version Native conformance row. The two targets compile the whole `krusty` crate
+# twice (once as the library behind klib_e2e, once with cfg(test)); separate Cargo invocations keep
+# those two compiles from running at the same time and adding up their peak memory.
 
 set -euo pipefail
 
@@ -15,22 +17,31 @@ output_dir="$1"
 artifacts=$(mktemp)
 trap 'rm -f "$artifacts"' EXIT
 
-set +e
-cargo test --no-run --profile klib-test -p krusty --lib --test klib_e2e \
-  --features focused-klib-tests \
-  --message-format=json >"$artifacts"
-cargo_status=$?
-jq -r 'select(.reason == "compiler-message") | .message.rendered // empty' \
-  "$artifacts" >&2
-jq_status=$?
-set -e
+build() {
+  local step cargo_status jq_status
+  step=$(mktemp)
+  set +e
+  cargo test --no-run --profile klib-test -p krusty "$@" \
+    --features focused-klib-tests \
+    --message-format=json >"$step"
+  cargo_status=$?
+  jq -r 'select(.reason == "compiler-message") | .message.rendered // empty' \
+    "$step" >&2
+  jq_status=$?
+  set -e
+  cat "$step" >>"$artifacts"
+  rm -f "$step"
 
-if [ "$cargo_status" -ne 0 ]; then
-  exit "$cargo_status"
-fi
-if [ "$jq_status" -ne 0 ]; then
-  exit "$jq_status"
-fi
+  if [ "$cargo_status" -ne 0 ]; then
+    exit "$cargo_status"
+  fi
+  if [ "$jq_status" -ne 0 ]; then
+    exit "$jq_status"
+  fi
+}
+
+build --test klib_e2e
+build --lib
 
 copy_artifact() {
   local target="$1" kind="$2" destination="$3" executable
@@ -43,7 +54,7 @@ copy_artifact() {
       "$artifacts" | tail -1
   )
   if [ -z "$executable" ] || [ ! -x "$executable" ]; then
-    echo "could not locate $kind target $target in the shared Cargo build" >&2
+    echo "could not locate $kind target $target in the Cargo build output" >&2
     exit 1
   fi
   cp "$executable" "$output_dir/$destination"

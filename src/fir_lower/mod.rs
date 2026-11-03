@@ -397,6 +397,10 @@ struct BodyLowering<'a> {
     class_constructor_capture_count: u32,
     class_constructor_context_count: u32,
     capture_slots: HashMap<(u32, crate::fir::FirCaptureSource), CaptureSlot>,
+    /// The reads this body lowered that yield an inline function's `crossinline` parameter, by
+    /// that parameter's slot in the function declaring it. Recorded where each read is produced,
+    /// so an argument keeps its provenance however an inline expansion stages it.
+    crossinline_reads: HashMap<ExprId, u32>,
     implicit_receiver_capture_slots: Vec<(crate::fir::FirImplicitReceiverCapture, u32)>,
     shared_locals: HashMap<crate::fir::LocalValueId, crate::fir::ResolvedTy>,
     /// Checked source-binding reassignment facts, inventoried before expression lowering so every
@@ -630,6 +634,9 @@ struct CaptureSlot {
     shared_cell: bool,
     /// The captured declaration is a `val` or a parameter, which no code can reassign.
     stable: bool,
+    /// When the captured declaration is a `crossinline` parameter: its value slot in the inline
+    /// function that declares it.
+    crossinline_parameter: Option<u32>,
     /// The captured declaration as the callable that supplies this slot named and classified it.
     /// A callable nested deeper captures the same value through this slot, and names it the same.
     declared: CapturedDeclaration,
@@ -715,6 +722,7 @@ impl<'a> BodyLowering<'a> {
             class_constructor_capture_count,
             class_constructor_context_count,
             capture_slots,
+            crossinline_reads: HashMap::default(),
             implicit_receiver_capture_slots,
             shared_locals: directly_shared_locals(body),
             binding_stability: binding_stability::inventory(body),
@@ -1078,7 +1086,7 @@ pub(super) enum UnitReturnLine {
 /// end, while its nested values retain declaration/lambda ends for SMAP. The caller's generated
 /// return belongs to that call expression, so keep the region's end.
 pub(super) fn implicit_return_end(ir: &IrFile, value: ExprId) -> Option<u32> {
-    let mut end = ir.expr_end_lines.get(&value).copied();
+    let mut end = ir.end_line(value);
     let inline_call_end = ir.inline_regions.contains(&value);
     let mut returned = value;
     while let crate::ir::IrExpr::Block {
@@ -1086,7 +1094,7 @@ pub(super) fn implicit_return_end(ir: &IrFile, value: ExprId) -> Option<u32> {
     } = ir.expr(returned)
     {
         returned = *inner;
-        let inner_end = ir.expr_end_lines.get(&returned).copied();
+        let inner_end = ir.end_line(returned);
         end = if inline_call_end {
             end.or(inner_end)
         } else {
@@ -1176,7 +1184,7 @@ fn finish_callable_body(
 /// The end line of a `Unit` expression body's trailing root. A checked `CoerceToUnit` wraps the
 /// expression in `Block { effects, value: UnitInstance }`; its last effect is then the expression.
 pub(super) fn unit_expression_end(ir: &IrFile, trailing: ExprId) -> Option<u32> {
-    ir.expr_end_lines.get(&trailing).copied().or_else(|| {
+    ir.end_line(trailing).or_else(|| {
         let crate::ir::IrExpr::Block {
             stmts,
             value: Some(value),
@@ -1187,7 +1195,7 @@ pub(super) fn unit_expression_end(ir: &IrFile, trailing: ExprId) -> Option<u32> 
         if !matches!(ir.expr(*value), crate::ir::IrExpr::UnitInstance) {
             return None;
         }
-        ir.expr_end_lines.get(stmts.last()?).copied()
+        ir.end_line(*stmts.last()?)
     })
 }
 
