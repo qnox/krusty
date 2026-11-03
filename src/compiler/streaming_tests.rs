@@ -14,6 +14,60 @@ fn initialized_jvm_libraries(
 }
 
 #[test]
+fn local_members_share_their_published_lexical_checker_root() {
+    let inputs = [SourceInput::kotlin(include_str!(
+        "../../tests/fixtures/body_roots/selectedConstructorNamespaces.kt"
+    ))
+    .with_file_stem("CompilerBodyRoots")];
+    let mut diagnostics = DiagSink::new();
+    let mut analysis = crate::frontend::analyze_source_set_with_features(
+        &inputs,
+        crate::frontend::PlatformProvider::jvm(Box::new(EmptySymbolSource)),
+        &LangFeatures::new(),
+        &mut diagnostics,
+    );
+    assert!(diagnostics.diags.is_empty(), "{:?}", diagnostics.diags);
+    let streamed = analysis
+        .streamed
+        .take()
+        .expect("finalized header inventory");
+    let (index, _, _, _) = streamed.module.into_parts();
+    let file = &analysis.files[0];
+    let source = crate::fir::SourceFileId::from_raw(0);
+    let active = crate::fir::ActiveSourceDeclarations::bind_complete_source(file, source, &index)
+        .expect("same-source declaration bindings");
+    let work = active
+        .ordinary_body_work(file, source, &index)
+        .expect("ordinary body inventory");
+    let readers = work
+        .iter()
+        .filter(|unit| {
+            active
+                .function(file, unit.declaration)
+                .is_some_and(|function| function.name == "read")
+        })
+        .map(|unit| unit.declaration)
+        .collect::<Vec<_>>();
+    assert_eq!(readers.len(), 2);
+    let expected = active
+        .stable_declarations()
+        .find(|declaration| {
+            active
+                .function(file, *declaration)
+                .is_some_and(|function| function.name == "selectedInputs")
+        })
+        .expect("the source function owns both local Reader declarations");
+    let groups = active_body_check_groups(work, file, &active, &index);
+    for reader in readers {
+        let group = groups
+            .iter()
+            .find(|group| group.work.iter().any(|unit| unit.declaration == reader))
+            .expect("every Reader method belongs to one checked group");
+        assert_eq!(group.root, expected, "Reader method {reader:?}");
+    }
+}
+
+#[test]
 fn jvm_production_stream_captures_anonymous_receiver_in_accessor_lambda() {
     let inputs = [SourceInput::kotlin(
         r#"fun build(): Int {
