@@ -70,6 +70,7 @@ impl ClassWriter {
             const_value,
             visible_anns,
             invisible_anns,
+            deprecated: false,
         });
         Ok(())
     }

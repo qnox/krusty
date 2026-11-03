@@ -2,7 +2,8 @@
 
 use std::borrow::Cow;
 
-use super::StaticOwner;
+use super::{EmitEnv, StaticOwner};
+use crate::ir::IrFile;
 use crate::jvm::classfile::{ACC_PRIVATE, ACC_PROTECTED, ACC_PUBLIC};
 
 /// Where a method body is written: on its declaring class, or onto an interface's
@@ -36,6 +37,28 @@ pub(super) enum MethodPlacement {
 impl MethodPlacement {
     pub(super) fn is_for_inline_copy(self) -> bool {
         matches!(self, MethodPlacement::ForInlineCopy { .. })
+    }
+
+    /// The suspension points of `fid`'s `machine` this method leaves unmarked for its inlining
+    /// caller to replace (`suspend_inline_functions::inlined_invokes`), as the copy it is reads them.
+    pub(super) fn inlined_invokes(
+        self,
+        ir: &IrFile,
+        fid: u32,
+        env: &EmitEnv,
+        machine: &crate::jvm::suspend::TransformedMachine,
+    ) -> Vec<crate::ir::ExprId> {
+        let copy = match self {
+            MethodPlacement::ForInlineCopy { kind, .. } => Some(kind),
+            _ => None,
+        };
+        crate::jvm::suspend_inline_functions::inlined_invokes(
+            ir,
+            fid,
+            copy,
+            env.emit_time_machines,
+            machine,
+        )
     }
 
     /// The name of the method written for a function declared as `name`.

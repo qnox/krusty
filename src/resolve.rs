@@ -44261,14 +44261,11 @@ impl<'a> Checker<'a> {
             // declared non-null classifier (`String?` + a null proof is still `Nothing?`, never
             // `String & Nothing?`). Classifier type-test proofs continue through the intersection
             // path below.
-            let root_value = match (&path.root, path.segments.is_empty()) {
-                (scope::PathRoot::Value(identity), true) => {
-                    self.visible_flow_value(scope, *identity)
-                }
-                _ => None,
-            };
+            let declared = StablePathRead::new(self).declared_ty(scope, path);
             if ty.non_null() != Ty::Nothing {
-                if let Some(declared) = root_value.map(|(_, local)| local.declared_ty.non_null()) {
+                // A nullable test (`is B?`) still admits null, so the declaration keeps its `?`.
+                let keep_null = ty.is_nullable();
+                if let Some(declared) = declared.map(|d| if keep_null { d } else { d.non_null() }) {
                     let context = crate::assignable::TyCtx::new();
                     let comparable = crate::assignable::is_subtype(&context, self, declared, *ty)
                         || crate::assignable::is_subtype(&context, self, *ty, declared);
@@ -53284,15 +53281,13 @@ impl<'a> Checker<'a> {
                     && (candidate.kind != crate::libraries::FnKind::Member
                         || candidate.context_count == 0)
             });
-            self.drop_members_hidden_by_applicable_extensions(
-                at,
-                &mut functions.overloads,
-                access_control::OperatorCallShape::IndexedGet { args: &index_kinds },
-            );
+            // The member rung resolves only with a member this site can see. One it cannot see
+            // stays in the final selection below, ranked under every accessible candidate.
             let mut members = functions.clone();
-            members
-                .overloads
-                .retain(|candidate| candidate.kind == crate::libraries::FnKind::Member);
+            members.overloads.retain(|candidate| {
+                candidate.kind == crate::libraries::FnKind::Member
+                    && self.member_candidate_accessible(candidate, Some(at))
+            });
             let members = crate::libraries::Callables::Functions(members);
             let callables = crate::libraries::Callables::from_parts(functions, properties);
             let selected_get = match self
@@ -59736,15 +59731,17 @@ impl<'a> Checker<'a> {
         let selected = {
             let resolver = self.resolver();
             let (mut functions, _) = callables.clone().into_parts();
-            self.drop_members_hidden_by_applicable_extensions(
-                recv,
-                &mut functions.overloads,
-                access_control::OperatorCallShape::Call { name, args: &[] },
-            );
+            // The member rung resolves only with a member this site can see. One it cannot see
+            // competes on the last rung, ranked under every accessible candidate there.
             functions.overloads.retain(|candidate| {
-                candidate.kind == kind
-                    && (kind == crate::libraries::FnKind::Member
-                        || self.source_callable_visible(candidate))
+                let member = candidate.kind == crate::libraries::FnKind::Member;
+                match kind {
+                    crate::libraries::FnKind::Member => {
+                        member && self.member_candidate_accessible(candidate, Some(recv))
+                    }
+                    _ if member => !self.member_candidate_accessible(candidate, Some(recv)),
+                    _ => candidate.kind == kind && self.source_callable_visible(candidate),
+                }
             });
             let callables = crate::libraries::Callables::Functions(functions);
             resolver.select_receiver_function_with_params_tracking(

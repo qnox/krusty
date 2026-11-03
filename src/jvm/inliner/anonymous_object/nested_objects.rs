@@ -19,6 +19,9 @@ pub(super) struct NestedObjects<'r, 'a> {
     /// The copy whose method constructs them.
     pub regeneration: &'r Regeneration<'a>,
     pub names: &'r mut NameGenerator,
+    /// The copy's own constructor descriptor, which a construction of the copy in its own method
+    /// calls.
+    pub own_constructor: &'r str,
     /// The method as the copy declares it, which encloses each nested copy.
     pub method: &'r str,
     pub descriptor: &'r str,
@@ -73,6 +76,14 @@ impl AnonymousObjects for NestedObjects<'_, '_> {
         let unsupported =
             |reason| InlineError::Regeneration(RegenerationError::Unsupported(reason));
         let outer = self.regeneration;
+        // The copy constructing itself anew is already regenerated (`isAlreadyRegenerated`).
+        if class == outer.new_class {
+            return Ok(RegeneratedObject {
+                name: class.to_string(),
+                constructor_desc: self.own_constructor.to_string(),
+                reified_parameters_remain: false,
+            });
+        }
         let bytes = outer.classes.class_file(class).ok_or(unsupported(
             "a nested object whose class file is not on the classpath",
         ))?;
