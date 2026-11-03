@@ -78,7 +78,7 @@ jobs:
           key: plugin-host-${{ hashFiles('crates/krusty-plugin-host/src/pins/*.tsv', 'crates/krusty-plugin-host/adapter/*', 'crates/krusty-plugin-host/ksp-adapter/**') }}
       # Outside the default members and the coverage packages, so no other job runs its tests.
       - name: plugin host tests
-        run: cargo test -p krusty-plugin-host -- --include-ignored
+        run: cargo test --profile gate -p krusty-plugin-host -- --include-ignored
 
   ci:
     runs-on: ubuntu-latest
