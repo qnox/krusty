@@ -21,7 +21,8 @@ concurrency:
 
 jobs:
   attribution:
-    runs-on: ubuntu-latest
+    # Fork PRs run on ubuntu-latest: self-hosted runners never take fork PR jobs.
+    runs-on: ${{ (github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "helper-1c-1gb"]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # Read the current title and body rather than the event payload: an integration may append a
