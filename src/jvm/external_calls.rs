@@ -98,11 +98,13 @@ fn realize_expressions(
     let dispatch_classifiers =
         crate::jvm::member_dispatch::CheckedDispatchClassifiers::new(ir, classifiers);
     let expression_count = ir.exprs.len();
+    let mut realized_calls = Vec::new();
     for index in realized.first()..expression_count {
         if !realized.includes(&ir.exprs[index], callables) {
             continue;
         }
         let expression = u32::try_from(index).expect("too many common IR expressions");
+        realized_calls.push(expression);
         let (defaults, default_prefix_count) = match &ir.exprs[index] {
             IrExpr::New {
                 defaults,
@@ -1445,6 +1447,25 @@ fn realize_expressions(
         record_protected_dependency_call(ir, realized_call, &callable);
         if let Some(role) = semantic_role {
             ir.semantic_call_roles.insert(realized_call, role);
+        }
+    }
+    // A dependency call this target realized as a builtin operation is that operation's source
+    // call, so it states its line as kotlinc's intrinsic of the operation does.
+    for expression in realized_calls {
+        let IrExpr::Call { callee, .. } = &ir.exprs[expression as usize] else {
+            continue;
+        };
+        let Callee::Intrinsic { ret, .. } = **callee else {
+            continue;
+        };
+        if ir.expr_source_lines.contains_key(&expression) {
+            ir.builtin_calls
+                .entry(expression)
+                .or_insert_with(|| crate::ir::IrBuiltinCall {
+                    kind: crate::ir::IrBuiltinCallKind::Intrinsic,
+                    result: ret,
+                    operands: Vec::new(),
+                });
         }
     }
     for (owner, target) in &mut ir.external_super_constructors {
