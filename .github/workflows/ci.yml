@@ -496,8 +496,8 @@ jobs:
       # key also hashes the inventory owner, shared case planning, reference server/Javac driver and
       # content-identity implementation. A producer or layout change therefore starts a fresh cache
       # instead of replaying inventories built by code that a hit would otherwise never execute.
+      # Owned Native/Wasm cases require these same JVM oracle inventories.
       - name: restore kotlinc box references (${{ matrix.version }})
-        if: matrix.target == 'jvm'
         id: box-references
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
