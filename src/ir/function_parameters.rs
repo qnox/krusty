@@ -56,6 +56,10 @@ impl IrParameterRole {
 pub struct IrValueCapture {
     pub declaration: IrCapturedDeclaration,
     pub capturer: IrCapturingCallable,
+    /// When the captured declaration is a `crossinline` parameter, captured directly or through
+    /// enclosing callables and classes: its value slot in the inline function that declares it,
+    /// as [`super::IrConstructorCapture::crossinline_parameter`] records it for a class.
+    pub crossinline_parameter: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -545,6 +549,7 @@ mod tests {
     const LOCAL_VARIABLE: IrValueCapture = IrValueCapture {
         declaration: IrCapturedDeclaration::Variable,
         capturer: IrCapturingCallable::LocalFunction,
+        crossinline_parameter: None,
     };
 
     #[test]

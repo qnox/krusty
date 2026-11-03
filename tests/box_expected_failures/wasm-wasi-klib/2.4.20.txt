@@ -923,7 +923,6 @@ compileKotlinAgainstKotlin/privateSuperTypeDefaults2.kt
 compileKotlinAgainstKotlin/propertyReference.kt
 compileKotlinAgainstKotlin/sealedClass.kt
 compileKotlinAgainstKotlin/secondaryConstructors.kt
-compileKotlinAgainstKotlin/simple.kt
 compileKotlinAgainstKotlin/simpleValAnonymousObject.kt
 compileKotlinAgainstKotlin/specialBridgesInDependencies.kt
 compileKotlinAgainstKotlin/starImportEnum.kt
@@ -1112,7 +1111,6 @@ controlStructures/kt769.kt
 controlStructures/kt8148.kt
 controlStructures/kt8148_break.kt
 controlStructures/kt8148_continue.kt
-controlStructures/kt9022Throw.kt
 controlStructures/kt910.kt
 controlStructures/longRange.kt
 controlStructures/quicksort.kt
@@ -1120,7 +1118,6 @@ controlStructures/returnsNothing/inlineMethod.kt
 controlStructures/returnsNothing/tryCatch.kt
 controlStructures/slowDsl/slowHtmlLikeDsl.kt
 controlStructures/tcbInEliminatedCondition.kt
-controlStructures/tryCatchExpression.kt
 controlStructures/tryCatchFinally.kt
 controlStructures/tryCatchFinallyChain.kt
 controlStructures/tryCatchInExpressions/catch.kt
@@ -1152,7 +1149,6 @@ controlStructures/tryCatchInExpressions/tryCatchAfterWhileTrue.kt
 controlStructures/tryCatchInExpressions/tryFinallyOfTypeUnit.kt
 controlStructures/tryCatchInExpressions/tryInsideCatch.kt
 controlStructures/tryCatchInExpressions/tryInsideTry.kt
-controlStructures/tryCatchInExpressions/unmatchedInlineMarkers.kt
 controlStructures/tryFinally.kt
 controlflow/break.kt
 controlflow/break1.kt
@@ -1938,7 +1934,6 @@ destructuringDeclInLambdaParam/lambdaInLambda.kt
 destructuringDeclInLambdaParam/otherParameters.kt
 destructuringDeclInLambdaParam/simple.kt
 destructuringDeclInLambdaParam/stdlibUsages.kt
-destructuringDeclInLambdaParam/underscoreNames.kt
 destructuringDeclInLambdaParam/withIndexed.kt
 devirtualization/anonymousObject.kt
 devirtualization/getter_looking_as_box_function.kt
@@ -3965,7 +3960,6 @@ nameBasedDestructuring/shortFormLoopsAndLambdas.kt
 nonLocalReturns/kt9644let.kt
 nonLocalReturns/returnInsideTwoLambdas.kt
 nonLocalReturns/suspendConversion.kt
-nothingValue/inNestedCall.kt
 nothingValue/nothingValueException.kt
 nothingValue/toStringOnNothing.kt
 nullCheckOptimization/kt22410.kt
@@ -4082,7 +4076,6 @@ operatorConventions/kt14201_2.kt
 operatorConventions/kt20387.kt
 operatorConventions/kt44647.kt
 operatorConventions/kt45022.kt
-operatorConventions/overloadedSet.kt
 operatorConventions/plusAssignWithComplexRHS.kt
 operatorConventions/plusExplicit.kt
 operatorConventions/reassignmentLhsCaching.kt
@@ -5319,10 +5312,8 @@ secondaryConstructors/localClasses.kt
 secondaryConstructors/superCallPrimary.kt
 secondaryConstructors/superCallSecondary.kt
 secondaryConstructors/varargs.kt
-secondaryConstructors/withNonLocalReturn.kt
 secondaryConstructors/withReturnUnit.kt
 serialization/deserializedMembers.kt
-serialization/serializedCatch.kt
 serialization/serializedCharConstant.kt
 serialization/serializedDefaultArgs.kt
 serialization/serializedDoWhile.kt
@@ -5337,7 +5328,6 @@ smartCasts/kt19100.kt
 smartCasts/kt44814.kt
 smartCasts/kt44932.kt
 smartCasts/kt72391.kt
-smartCasts/lambdaArgumentWithoutType.kt
 smartCasts/negativesmartCastAugmentedAssignment.kt
 smartCasts/nullSmartCast.kt
 smartCasts/propertyInitializationAfterSmartCast.kt
@@ -5527,7 +5517,6 @@ typeErasure/twoFunWithTypeParametersInlineFunWithReifiedTypeParameters.kt
 typeErasure/twoFunWithTypeParametersWithUpperBoundsInlineFunWithReifiedTypeParameters.kt
 typeInfo/ifOrWhenSpecialCall.kt
 typeMapping/kt2831.kt
-typeMapping/kt3286.kt
 typeMapping/kt3863.kt
 typeMapping/kt3976.kt
 typeMapping/nullableNothing.kt
@@ -5794,7 +5783,6 @@ when/kt47365.kt
 when/kt5448.kt
 when/kt55993.kt
 when/kt59346.kt
-when/kt60212.kt
 when/kt83740.kt
 when/matchNotNullAgainstNullable.kt
 when/multipleEntries.kt
