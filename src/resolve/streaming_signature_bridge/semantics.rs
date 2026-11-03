@@ -2015,16 +2015,8 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         })?;
         let (selected, selected_argument_types) = selected;
         match selected {
-            // The same report the body checker makes, so recovery keeps one of the two.
             SelectedTopLevelCall::Ambiguous(tied) => {
-                let mut message = "overload resolution ambiguity between candidates:".to_string();
-                for candidate in &tied {
-                    message.push('\n');
-                    message.push_str(&crate::resolve::Checker::callable_candidate_display(
-                        spelling, candidate,
-                    ));
-                }
-                Err(self.record_source_diagnostic(scope.owner, origin, message))
+                Err(self.record_ambiguous_call(scope, origin, spelling, &tied))
             }
             SelectedTopLevelCall::Callable {
                 callable,
@@ -4020,7 +4012,12 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 )
             }
             Err(_) if !ambiguous.borrow().is_empty() => {
-                return Err(self.record_ambiguous_call(scope, origin, spelling, &ambiguous));
+                return Err(self.record_ambiguous_call(
+                    scope,
+                    origin,
+                    spelling,
+                    &ambiguous.borrow(),
+                ));
             }
             Err(_) => {
                 // A member PROPERTY whose value is callable participates in call syntax after
