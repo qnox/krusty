@@ -40,7 +40,7 @@ impl Checker<'_> {
     }
 
     /// A lambda that selection saw only by its written arity, now bound to a classifier parameter
-    /// that gives it no function shape: it still owes its one analysis, as a standalone literal. A
+    /// that gives it no function or SAM shape: it still owes its one analysis, as a standalone literal. A
     /// type-parameter target stays postponed until inference gives it a shape.
     pub(super) fn lambda_awaits_unshaped_analysis(&self, expression: ExprId, expected: Ty) -> bool {
         matches!(self.file.expr(expression), Expr::Lambda { .. })
@@ -54,6 +54,7 @@ impl Checker<'_> {
                     .kind(),
                 TyKind::Obj(..) | TyKind::Unit | TyKind::Intersection(_)
             )
+            && self.semantic_sam_signature(expected.non_null()).is_none()
     }
 
     /// An argument checked once its selected parameter is known to give it no function shape: a
@@ -963,6 +964,29 @@ impl Checker<'_> {
                 .collect());
         }
         Ok(shaped.into_iter().next().map(|(_, shape)| shape))
+    }
+
+    /// kotlinc's overload ambiguity for `call`. No candidate shapes the call's lambdas, so each is
+    /// then analysed as a standalone literal and reports its own diagnostics.
+    pub(super) fn report_callable_ambiguity(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        call: ExprId,
+        name: &str,
+        candidates: &[crate::libraries::FunctionInfo],
+    ) {
+        let args = match self.file.expr(call) {
+            Expr::Call { args, .. } if self.call_has_error_argument(args) => return,
+            Expr::Call { args, .. } => args.clone(),
+            _ => Vec::new(),
+        };
+        let mut message = "overload resolution ambiguity between candidates:".to_string();
+        for candidate in candidates {
+            message.push('\n');
+            message.push_str(&Self::callable_candidate_display(name, candidate));
+        }
+        self.diags.error(self.call_callee_name_span(call), message);
+        self.report_unshaped_lambda_diagnostics(scope, &args, Some(name));
     }
 
     /// Report a call whose untyped lambda the applicable `candidates` would shape differently:

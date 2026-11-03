@@ -35630,29 +35630,6 @@ impl<'a> Checker<'a> {
         })
     }
 
-    /// kotlinc's overload ambiguity for `call`. No candidate shapes the call's lambdas, so each is
-    /// then analysed as a standalone literal and reports its own diagnostics.
-    fn report_callable_ambiguity(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        call: ExprId,
-        name: &str,
-        candidates: &[crate::libraries::FunctionInfo],
-    ) {
-        let args = match self.file.expr(call) {
-            Expr::Call { args, .. } if self.call_has_error_argument(args) => return,
-            Expr::Call { args, .. } => args.clone(),
-            _ => Vec::new(),
-        };
-        let mut message = "overload resolution ambiguity between candidates:".to_string();
-        for candidate in candidates {
-            message.push('\n');
-            message.push_str(&Self::callable_candidate_display(name, candidate));
-        }
-        self.diags.error(self.call_callee_name_span(call), message);
-        self.report_unshaped_lambda_diagnostics(scope, &args, Some(name));
-    }
-
     fn source_callable_display(&self, function: &crate::libraries::FunctionInfo) -> Option<String> {
         let (file_index, declaration) = function.source_key?;
         let (file, declaration) = if file_index == self.file_index {
