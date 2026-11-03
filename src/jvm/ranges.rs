@@ -188,6 +188,7 @@ pub(super) fn realize(
             | IrExpr::Vararg { .. }
             | IrExpr::PluginPlaceholder { .. }
             | IrExpr::CurrentContinuation
+            | IrExpr::AbsentArgument { .. }
             | IrExpr::InlineFrameMarker
             | IrExpr::ForwardedSuperArgument { .. } => {}
         }

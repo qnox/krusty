@@ -20,10 +20,12 @@ use super::BodyLowering;
 mod converted_inline_lambda;
 mod escaping_anonymous;
 mod escaping_lambda;
+mod immediate_lambda;
 mod inline_callee;
 mod lambda_splice_contract;
 mod property_accessors;
 
+pub(super) use immediate_lambda::splice_immediate_lambda;
 pub(super) use inline_callee::InlineCallee;
 pub(super) use lambda_splice_contract::LambdaParameterBinding;
 
@@ -938,6 +940,12 @@ impl BodyLowering<'_> {
         // fallible specialization: both lambda transformations above have already been preflighted,
         // and every operation after it commits without declining the containing expansion.
         if let Some(module_callee) = module_callee {
+            // Provenance belongs to the selected argument, not to the slot staging gave it: a
+            // copied operand's temporary is a fresh slot that reads nothing.
+            let crossinline_operands = operands
+                .iter()
+                .map(|operand| operand.and_then(|operand| self.crossinline_read(operand)))
+                .collect::<Vec<_>>();
             if let Err(failure) = escaping_anonymous::specialize(
                 self.ir,
                 escaping_copies
@@ -953,6 +961,7 @@ impl BodyLowering<'_> {
                     caller_source_name: &caller_source_name,
                     inline_callee: module_callee,
                     inline_callee_source_name: &callee,
+                    crossinline_operands: &crossinline_operands,
                 },
             ) {
                 *malformed_anonymous = Some(failure);
@@ -1619,6 +1628,7 @@ pub(super) fn specialize_typed_expression(
         | IrExpr::PropertyWrite {
             ty: type_operand, ..
         }
+        | IrExpr::AbsentArgument { ty: type_operand }
         | IrExpr::RefNew {
             elem: type_operand, ..
         }
@@ -1850,6 +1860,7 @@ fn specialize_callee(
         }
         Callee::CrossFile { params, ret, .. }
         | Callee::Module { params, ret, .. }
+        | Callee::ModuleDefaultEntry { params, ret, .. }
         | Callee::Super { params, ret, .. } => {
             specialize_tys(params, bindings);
             specialize_ty(ret, bindings);

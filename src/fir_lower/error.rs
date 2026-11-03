@@ -45,6 +45,10 @@ pub enum FirLoweringFailure {
     /// A same-module inline call whose checked template could not be expanded at this call site.
     /// kotlinc always inlines it, so there is no ordinary call to lower instead.
     InlineExpansionDeclined(CallableId),
+    /// A directly invoked synchronous source lambda whose checked template cannot be expanded.
+    ImmediateLambdaExpansionDeclined {
+        origin: OriginId,
+    },
     UnsupportedCallableReference(CallableId),
     UnsupportedExternalCallableReference(crate::fir::ExternalCallableId),
     UnsupportedClassifierCallableReference(crate::types::TypeName),
