@@ -19,8 +19,6 @@ mod nested_signature_argument_layout_e2e;
 mod abstract_serializable_e2e;
 #[path = "annotation_documented_mirror_e2e.rs"]
 mod annotation_documented_mirror_e2e;
-#[path = "array_factory_calls_e2e.rs"]
-mod array_factory_calls_e2e;
 #[path = "assignment_plugin_e2e.rs"]
 mod assignment_plugin_e2e;
 #[path = "backticked_dotted_package_qualifier_e2e.rs"]

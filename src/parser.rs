@@ -10,6 +10,7 @@ use crate::kt_string::{KtString, KtStringBuf};
 use crate::token::{decode_char_literal_content, Token, TokenKind};
 use crate::types::Visibility;
 
+mod annotation_classes;
 mod annotation_values;
 mod anonymous_functions;
 mod class_recovery;
@@ -2762,14 +2763,6 @@ impl<'a> Parser<'a> {
     /// own bounded, stack-grown funnel (one counter with `parse_stmt`, bounding any interleaving).
     /// Past [`EXPR_DEPTH_LIMIT`] the declaration degrades to an error declaration with a
     /// diagnostic and a balanced skip — degrade, never crash.
-    /// `annotation class Name(…)`, after the `annotation` modifier.
-    fn parse_annotation_class(&mut self) -> ClassDecl {
-        self.annotation_class_header = true;
-        let mut declaration = self.parse_class();
-        declaration.kind = ClassKind::Annotation;
-        declaration
-    }
-
     fn parse_class(&mut self) -> ClassDecl {
         self.guarded_class_like(Self::parse_class_inner)
     }
@@ -2913,16 +2906,7 @@ impl<'a> Parser<'a> {
                 self.expect(TokenKind::Colon, "':'");
                 self.skip_newlines(); // a wrapped declaration puts the type on the next line (`val x:\n  T`)
                 let ty = self.parse_vararg_aware_type(is_vararg);
-                let default = if self.eat(TokenKind::Eq) {
-                    self.skip_newlines();
-                    if annotation_parameters {
-                        self.parse_annotation_value()
-                    } else {
-                        Some(self.parse_expr())
-                    }
-                } else {
-                    None
-                };
+                let default = self.primary_parameter_default(annotation_parameters);
                 let declaration_end = self.t[self.i.saturating_sub(1)].span.hi;
                 props.push(PropParam {
                     name: pname,

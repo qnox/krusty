@@ -281,8 +281,8 @@ fn array_factories_without_element_evidence_match_kotlinc_exactly() {
         &[("ArrayFactoryInference.kt", source)],
         &[common::stdlib_jar()],
     );
-    let mut krusty = errors(&result.krusty_stderr);
-    krusty.extend(errors(&result.krusty_stdout));
+    assert_eq!(result.krusty_stdout, "");
+    let krusty = errors(&result.krusty_stderr);
     let reference = errors(&result.reference_stderr);
     let message = "cannot infer type for type parameter 'T'. Specify it explicitly.";
     let expected = [(4, 13), (5, 13), (6, 13), (7, 13)]
