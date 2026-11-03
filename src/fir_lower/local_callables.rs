@@ -1067,8 +1067,17 @@ impl BodyLowering<'_> {
                 );
             }
         }
-        let parameter_identities =
-            local_function_parameter_identities(self.body, &self.capture_slots, body)?;
+        let crossinline = body
+            .captures()
+            .iter()
+            .map(|capture| self.captured_crossinline_parameter(capture))
+            .collect::<Result<Vec<_>, _>>()?;
+        let parameter_identities = local_function_parameter_identities(
+            self.body,
+            &self.capture_slots,
+            body,
+            &crossinline,
+        )?;
         let captured_receivers = body
             .implicit_receiver_captures()
             .iter()
@@ -1622,10 +1631,12 @@ fn captured_declaration(
     })
 }
 
+/// `crossinline` holds, for each of `body`'s captures, the `crossinline` parameter it holds.
 fn local_function_parameter_identities(
     enclosing: &FirBody,
     enclosing_slots: &HashMap<(u32, crate::fir::FirCaptureSource), CaptureSlot>,
     body: &FirBody,
+    crossinline: &[Option<u32>],
 ) -> Result<Vec<crate::ir::IrParameterIdentity>, FirLoweringFailure> {
     let capturer = match body.source_lambda().map(crate::fir::FirSourceLambda::form) {
         None => crate::ir::IrCapturingCallable::LocalFunction,
@@ -1646,6 +1657,7 @@ fn local_function_parameter_identities(
                 crate::ir::IrValueCapture {
                     declaration: declared.declaration,
                     capturer,
+                    crossinline_parameter: crossinline[ordinal],
                 },
             ))
         })
