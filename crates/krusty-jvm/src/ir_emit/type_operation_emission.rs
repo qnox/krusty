@@ -203,7 +203,7 @@ impl Emitter<'_> {
                     krusty::jvm::names::instanceof_internal_name(physical_arg) == internal
                 };
                 if !redundant {
-                    let class = self.cw.class_ref(internal);
+                    let class = self.cast_class_ref(expression, internal);
                     code.checkcast(class);
                 }
             }
@@ -283,7 +283,7 @@ impl Emitter<'_> {
                 }
             },
             None => {
-                let class = self.cw.class_ref(internal);
+                let class = self.cw.type_operand_class_ref(internal);
                 code.instance_of(class);
             }
         }
@@ -322,6 +322,16 @@ impl Emitter<'_> {
     }
 
     /// The `TypeIntrinsics` cast a written `as` of `expression` to `type_operand` needs, if any.
+    /// A cast's class constant: the operand of a written `as`, or a compiler-inserted narrowing
+    /// that kotlinc maps as an implicit cast.
+    fn cast_class_ref(&mut self, expression: ExprId, internal: &str) -> u16 {
+        if self.ir.written_casts.contains(&expression) {
+            self.cw.type_operand_class_ref(internal)
+        } else {
+            self.cw.class_ref(internal)
+        }
+    }
+
     fn written_cast_intrinsic(
         &self,
         expression: ExprId,
@@ -344,7 +354,7 @@ impl Emitter<'_> {
             CastCheck::Call { call, checkcast } => {
                 self.emit_type_intrinsic_call(&call, code);
                 if checkcast {
-                    let class = self.cw.class_ref(internal);
+                    let class = self.cw.type_operand_class_ref(internal);
                     code.checkcast(class);
                 }
             }
@@ -441,7 +451,7 @@ impl Emitter<'_> {
         if let Some(intrinsic) = self.written_cast_intrinsic(expression, type_operand) {
             self.emit_intrinsic_cast(internal, intrinsic, code);
         } else if physical_internal.as_deref() != Some(internal) {
-            let class = self.cw.class_ref(internal);
+            let class = self.cast_class_ref(expression, internal);
             code.checkcast(class);
         }
         // A successful non-null cast to a Kotlin scalar produces its value representation.
