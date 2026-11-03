@@ -259,8 +259,6 @@ mod build840_jj1_param_soft_keyword_e2e;
 mod build840_kk1_inline_hof_enclosing_member_e2e;
 #[path = "build840_mm1_safe_call_lambda_ext_e2e.rs"]
 mod build840_mm1_safe_call_lambda_ext_e2e;
-#[path = "build840_nn1_suspend_inline_withlock_e2e.rs"]
-mod build840_nn1_suspend_inline_withlock_e2e;
 #[path = "builder_inference_receivers_e2e.rs"]
 mod builder_inference_receivers_e2e;
 #[path = "builder_nested_lambda_result_e2e.rs"]
@@ -666,8 +664,6 @@ mod cross_file_typealias_e2e;
 mod cross_file_value_param_constructor_e2e;
 #[path = "crossinline_lambda_inlining_e2e.rs"]
 mod crossinline_lambda_inlining_e2e;
-#[path = "crossinline_suspend_object_e2e.rs"]
-mod crossinline_suspend_object_e2e;
 #[path = "ctor_lambda_return_binds_type_param_e2e.rs"]
 mod ctor_lambda_return_binds_type_param_e2e;
 #[path = "ctor_numeric_widening_e2e.rs"]
@@ -780,24 +776,10 @@ mod deterministic_output_e2e;
 mod diagnostic_duplication_e2e;
 #[path = "diagnostic_markers_e2e.rs"]
 mod diagnostic_markers_e2e;
-#[path = "diagnostics_call_mapping_cases_e2e.rs"]
-mod diagnostics_call_mapping_cases_e2e;
-#[path = "diagnostics_classifier_cast_cases_e2e.rs"]
-mod diagnostics_classifier_cast_cases_e2e;
-#[path = "diagnostics_inference_parity_e2e.rs"]
-mod diagnostics_inference_parity_e2e;
-#[path = "diagnostics_java_access_parity_e2e.rs"]
-mod diagnostics_java_access_parity_e2e;
-#[path = "diagnostics_jvm_and_catch_parity_e2e.rs"]
-mod diagnostics_jvm_and_catch_parity_e2e;
-#[path = "diagnostics_language_parity_e2e.rs"]
-mod diagnostics_language_parity_e2e;
+#[path = "e2e/diagnostics_parity.rs"]
+mod diagnostics_parity;
 #[path = "diagnostics_parity_support.rs"]
 mod diagnostics_parity_support;
-#[path = "diagnostics_receiver_reference_cases_e2e.rs"]
-mod diagnostics_receiver_reference_cases_e2e;
-#[path = "diagnostics_type_inference_cases_e2e.rs"]
-mod diagnostics_type_inference_cases_e2e;
 #[path = "discarded_dependency_result_e2e.rs"]
 mod discarded_dependency_result_e2e;
 #[path = "discarded_generic_result_e2e.rs"]
@@ -1718,6 +1700,8 @@ mod string_when_switch_e2e;
 mod super_delegation_line_e2e;
 #[path = "e2e/suspend.rs"]
 mod suspend;
+#[path = "e2e/suspend_inlining.rs"]
+mod suspend_inlining;
 #[path = "suspending_concat_operands_e2e.rs"]
 mod suspending_concat_operands_e2e;
 #[path = "type_parameter_nullability_annotations_e2e.rs"]
