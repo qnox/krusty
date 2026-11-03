@@ -131,8 +131,10 @@ pub(crate) fn realize(ir: &mut IrFile) -> Result<Vec<RealizedLocalPropertyAccess
             }
             _ => None,
         };
-        if first_operand.is_some_and(|operand| ir.is_positionless(operand)) {
-            ir.mark_generated_operand_start(operation);
+        if let (Some(operand), Some(line)) = (first_operand, ir.source_line(operation)) {
+            if ir.is_positionless(operand) && line != 0 {
+                ir.build_operand_at_operation_start(operand, line);
+            }
         }
         ir.exprs[raw] = replacement;
         realized.push(RealizedLocalPropertyAccess {

@@ -130,7 +130,8 @@ fn realize_expressions(
             if matches!(
                 callable.member_realization,
                 crate::libraries::MemberRealization::Direct {
-                    pass_receiver: false
+                    pass_receiver: false,
+                    ..
                 }
             ) && physical_name != "<init>"
             {
@@ -1240,6 +1241,11 @@ fn realize_expressions(
                     }
                 }
                 crate::libraries::MemberRealization::Direct { pass_receiver } => {
+                    if crate::jvm::jvm_libraries::unsigned_intrinsics::realizes_jdk_unsigned_operation(
+                        &callable,
+                    ) {
+                        default_call_operands.record_intrinsic_call(expression);
+                    }
                     if pass_receiver {
                         args.insert(0, dispatch_receiver.take().ok_or(target)?);
                     } else {
@@ -1415,7 +1421,8 @@ fn realize_expressions(
                 let consumes_dispatch = matches!(
                     member_realization,
                     crate::libraries::MemberRealization::Direct {
-                        pass_receiver: true
+                        pass_receiver: true,
+                        ..
                     }
                 );
                 extension_receiver_at = Some(position + u32::from(consumes_dispatch));
@@ -1748,7 +1755,8 @@ fn publish_declared_call_params(
             || matches!(
                 member_realization,
                 crate::libraries::MemberRealization::Direct {
-                    pass_receiver: true
+                    pass_receiver: true,
+                    ..
                 }
             ));
     if consumes_dispatch {
@@ -1788,7 +1796,8 @@ fn publish_inline_modifiers(
             || matches!(
                 member_realization,
                 crate::libraries::MemberRealization::Direct {
-                    pass_receiver: true
+                    pass_receiver: true,
+                    ..
                 }
             ));
     let extension_receiver = ir

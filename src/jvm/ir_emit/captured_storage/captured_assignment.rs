@@ -23,13 +23,6 @@ pub(in crate::jvm::ir_emit) fn emit(
 
     // A value that cannot carry the operand stack (`msg = try {…} finally {}`) can't run with the
     // holder on it. Spill it first, as shared-cell declaration does.
-    let unsigned = emitter.completes_unsigned_bitwise_value(value);
-    let saved_assignment = emitter.unsigned_assignment_line;
-    if unsigned {
-        // A local assignment keeps the line on the receiver and writes it again at the store. A
-        // captured local is the same assignment once the holder is gone.
-        emitter.unsigned_assignment_line = true;
-    }
     if emitter.spills_operand_prefix(value) {
         let temps = emitter.spill_to_temps(&[value], code);
         emitter.emit_value(holder, code);
@@ -41,15 +34,9 @@ pub(in crate::jvm::ir_emit) fn emit(
         emitter.emit_value(holder, code);
         emitter.emit_element_value(elem, value, code);
     }
-    emitter.unsigned_assignment_line = saved_assignment;
 
-    if unsigned {
-        emitter.mark_expression_start(expression, code);
-        code.forget_line();
-        debug_lines::mark_statement(emitter.ir, expression, code);
-    }
     if emitter.ir.source_line(value).is_some() || enters_nested_frame {
-        if let Some(&statement_line) = emitter.ir.expr_lines.get(&expression) {
+        if let Some(statement_line) = emitter.ir.statement_line(expression) {
             emitter.mark_expression_line(expression, statement_line, code);
         }
     }

@@ -375,9 +375,6 @@ struct MethodInfo {
     /// is producer provenance, not a guess from the final byte stream; explicit returns and throws
     /// leave it absent.
     implicit_void_return_pc: Option<u16>,
-    /// Body emission deliberately left the leading instruction without a source position. This
-    /// suppresses the declared-function fallback that would otherwise fill pc 0.
-    suppress_entry_line: bool,
     /// Emission dropped dead code that named a constant (see `CodeBuilder::dropped_constant`).
     dropped_constant: bool,
     /// What kotlinc's bytecode rewrites need to reshape this method when the class is written.
@@ -739,7 +736,6 @@ impl ClassWriter {
             max_locals: 0,
             code: None,
             implicit_void_return_pc: None,
-            suppress_entry_line: false,
             dropped_constant: false,
             rewrite_source: None,
             exceptions: Vec::new(),
@@ -1160,7 +1156,6 @@ impl ClassWriter {
             max_locals: code.max_locals,
             code: Some(code.bytes.clone()),
             implicit_void_return_pc: code.implicit_void_return_pc,
-            suppress_entry_line: code.suppress_entry_line,
             dropped_constant: code.dropped_constant,
             // kotlinc's bytecode rewrites run when the class is written: several of this method's
             // tables are attached after it is added, and the rewrite depends on them.
@@ -1919,13 +1914,6 @@ pub struct CodeBuilder {
     /// class initializers curate their final table, so they retain this provenance separately from
     /// ordinary nested-expression marks.
     inlined_line_marks: Vec<(u16, u16)>,
-    /// A bytecode offset whose last recorded line mark must be KEPT when another mark lands on the
-    /// same offset: the next one appends after it instead of replacing it. See
-    /// [`CodeBuilder::mark_line_retained`].
-    retained_line_mark: Option<usize>,
-    /// The retained mark keeps only a mark of ANOTHER line after it; the same line dedupes as
-    /// usual. See [`CodeBuilder::mark_line_kept`].
-    retained_line_distinct: bool,
     /// `(start_pc, length, slot, name, descriptor)` entries in scope-close order.
     local_entries: Vec<(u16, Option<u16>, u16, String, String)>,
     /// Semantic inline-frame placement parallel to `local_entries`. This never reaches the class
@@ -1937,9 +1925,6 @@ pub struct CodeBuilder {
     /// Offset of the implicit void return appended by declared-function emission. Ordinary
     /// `ret_void` calls intentionally do not populate it.
     implicit_void_return_pc: Option<u16>,
-    /// The leading instruction intentionally has no source position; declared-function debug
-    /// attachment must not synthesize its declaration line at pc 0.
-    suppress_entry_line: bool,
     /// Whether the instruction stream is currently UNREACHABLE: an unconditional terminator
     /// (`goto`/`athrow`/a `*return`) has been emitted and no label has been bound since. Instructions
     /// appended in that state are dead code the type-checking verifier rejects — it demands a
@@ -1978,8 +1963,8 @@ pub struct CodeBuilder {
     /// stand in, which a bytecode rewrite that inserts an instruction between them needs.
     bind_sequence: Vec<u32>,
     next_bind: u32,
-    /// Pending line-mark obligations (see [`line_numbers::PendingLines`]).
-    pending_lines: line_numbers::PendingLines,
+    /// kotlinc's `LineNumberMapper` state for this body (see [`crate::jvm::line_numbers`]).
+    lines: crate::jvm::line_numbers::LineNumberMapper,
     /// This method expanded an inline body. kotlinc sorts that method's whole exception table by
     /// handler pc, then start pc, only after inlining. A method that was not inlined keeps
     /// emission order (the inner handler of a nested `try` stays ahead of the outer one).
@@ -2000,20 +1985,17 @@ impl CodeBuilder {
             exceptions: Vec::new(),
             line_marks: Vec::new(),
             inlined_line_marks: Vec::new(),
-            retained_line_mark: None,
-            retained_line_distinct: false,
             local_entries: Vec::new(),
             local_entry_placements: Vec::new(),
             inline_scope_frames: Vec::new(),
             implicit_void_return_pc: None,
-            suppress_entry_line: false,
             dead: false,
             kept_for_inlining: false,
             dropped_constant: false,
             dead_bound: Vec::new(),
             bind_sequence: Vec::new(),
             next_bind: 0,
-            pending_lines: Default::default(),
+            lines: Default::default(),
             inlined_bytecode: false,
         }
     }

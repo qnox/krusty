@@ -217,17 +217,14 @@ pub(super) fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, env:
         let Some(init) = stored_clinit_initializer(ir, s) else {
             continue;
         };
-        code.mark_line_retained(initializer_line(ir, s, init));
+        code.mark_line(initializer_line(ir, s, init));
         e.emit_static_initializer_store(facade, index, init, &mut code);
     }
     code.ret_void();
-    let mut clinit_lines: Vec<(u16, u32)> = code.line_marks()[first_mark..]
+    let clinit_lines: Vec<(u16, u32)> = code.line_marks()[first_mark..]
         .iter()
         .map(|&(pc, line)| (pc, u32::from(line)))
         .collect();
-    // The store's own mark is retained so an argument line at the same offset follows it; the
-    // initializer marking that same line again there adds nothing.
-    clinit_lines.dedup();
     finish_code::<0x0008>(e.cw, "<clinit>", "()V", &mut code, e.frame.max());
     if !clinit_lines.is_empty() {
         e.cw.set_method_lines("<clinit>", "()V", &clinit_lines);
@@ -1317,12 +1314,14 @@ impl Emitter<'_> {
         value: crate::ir::ExprId,
         code: &mut CodeBuilder,
     ) {
+        // kotlinc's `visitFieldAccess` marks a static store where it starts.
+        self.mark_expression_start(statement, code);
         let s = &self.ir.statics[index as usize];
         let initializer_line = self
             .ir
             .property_initializer_stores
             .contains(&statement)
-            .then(|| self.ir.expr_lines.get(&statement).copied())
+            .then(|| self.ir.statement_line(statement))
             .flatten();
         let jt = jvm_declared_ty(&s.ty);
         let name = s.name.clone();
@@ -1395,7 +1394,7 @@ impl Emitter<'_> {
         // An inlined value leaves its own line in effect; kotlinc marks the statement's line
         // again at the store, as an instance field store does.
         if self.ir.source_line(value).is_some() {
-            if let Some(&statement_line) = self.ir.expr_lines.get(&statement) {
+            if let Some(statement_line) = self.ir.statement_line(statement) {
                 self.mark_expression_line(statement, statement_line, code);
             }
         }

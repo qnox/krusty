@@ -579,7 +579,11 @@ struct DelegateMethod {
 /// `private [static] Object get<X>$delegate([<this>])`, returning the delegate.
 fn add_delegate_method(ir: &mut IrFile, method: DelegateMethod) -> u32 {
     let result = Ty::nullable(Ty::obj("kotlin/Any"));
+    let first_built = ir.exprs.len();
     let value = ir.add_expr(ir.expr(method.delegate).clone());
+    if ir.source_line(method.delegate).is_some() {
+        ir.copy_position(method.delegate, value);
+    }
     ir.logical_types.insert(value, method.storage_ty);
     let value = if method.storage_ty.is_jvm_scalar() {
         ir.add_expr(IrExpr::TypeOp {
@@ -592,9 +596,17 @@ fn add_delegate_method(ir: &mut IrFile, method: DelegateMethod) -> u32 {
     };
     let returned = ir.add_expr(IrExpr::Return(Some(value)));
     if method.line != 0 {
-        // The line opens the method: it is stated on the delegate, not on the `areturn`.
-        ir.set_source_line(value, method.line);
-        ir.set_source_line(returned, method.line);
+        // kotlinc builds the method at the property's offsets: the line opens the method on the
+        // delegate's first instruction, not on the `areturn`.
+        ir.settle_positions(
+            first_built..ir.exprs.len(),
+            crate::ir::IrNodePosition {
+                start_line: Some(method.line),
+                source_line: Some(method.line),
+                end_line: Some(method.line),
+                statement_line: None,
+            },
+        );
     }
     let body = ir.add_expr(IrExpr::Block {
         stmts: vec![returned],

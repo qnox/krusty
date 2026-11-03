@@ -73,7 +73,7 @@ impl Emitter<'_> {
         // conditions of their own: an enclosing `when` condition's state carries through them.
         if let Some((first, second, kind)) = self.short_circuit_operands(cond) {
             self.short_circuit_operand_line = None;
-            self.mark_kept_start_line(first, code);
+            self.mark_line_before_operands(first, code);
             let decided_by = matches!(kind, crate::ir::IrShortCircuitKind::Or);
             if decided_by == jump_when_true {
                 if self.emit_short_circuit_operand(first, target, jump_when_true, code) {

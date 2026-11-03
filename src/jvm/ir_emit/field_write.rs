@@ -76,6 +76,8 @@ impl Emitter<'_> {
         value: u32,
         code: &mut CodeBuilder,
     ) {
+        // kotlinc's `visitFieldAccess` marks a field store's line before its receiver.
+        self.mark_expression_start(statement, code);
         if self.diverges(receiver) {
             self.emit_value(receiver, code);
             return;
@@ -152,17 +154,12 @@ impl Emitter<'_> {
         // entry of the inlined call's, which the constructor's curated table keeps.
         if self.ir.property_initializer_stores.contains(&statement) {
             super::debug_lines::restore_initializer_store_line(
-                self.ir.expr_lines.get(&statement).copied(),
+                self.ir.statement_line(statement),
                 code,
             );
         }
-        if self.ir.source_line(value).is_some()
-            || super::debug_lines::enters_nested_copied_lambda_frame(self.ir, statement, value)
-        {
-            if let Some(&statement_line) = self.ir.expr_lines.get(&statement) {
-                self.mark_expression_line(statement, statement_line, code);
-            }
-        }
+        // ... and again before the `putfield`, after a value that marked lines of its own.
+        self.mark_expression_start(statement, code);
         if let Some(method) = cross_class_method {
             code.invokestatic(method, (1 + slot_words(field_ty)) as i32, 0);
         } else {
@@ -188,12 +185,10 @@ impl Emitter<'_> {
             self.emit_value(receiver, code);
             code.pop();
         }
-        // An object initializer's store opens on its line and the value starts at that same
-        // offset; a line the value marks there (an argument on a line of its own) follows the
-        // store's entry instead of replacing it, as kotlinc keeps both.
+        // An object initializer's store opens on its line (`visitFieldAccess`), before its value.
         if self.render_initializer_boundaries {
-            if let Some(&line) = self.ir.expr_lines.get(&statement) {
-                code.mark_line_retained(line);
+            if let Some(line) = self.ir.statement_line(statement) {
+                code.mark_line(line);
             }
         }
         self.emit_value(value, code);
@@ -204,7 +199,7 @@ impl Emitter<'_> {
         let field_ref = self.cw.fieldref(owner, name, &type_descriptor(field_ty));
         if self.ir.property_initializer_stores.contains(&statement) {
             super::debug_lines::restore_initializer_store_line(
-                self.ir.expr_lines.get(&statement).copied(),
+                self.ir.statement_line(statement),
                 code,
             );
         }

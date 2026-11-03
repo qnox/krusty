@@ -67,33 +67,23 @@ impl Emitter<'_> {
         code: &mut CodeBuilder,
     ) {
         let (class, _) = ref_class(&elem);
+        // kotlinc's shared-variable lowering declares the holder at the declaration's offsets: its
+        // constructor call marks the declaration's line before the `new`, and the variable marks it
+        // again before the store.
+        self.mark_expression_start(declaration, code);
         self.emit_new_holder(class, code);
-        if let Some(&line) = self.ir.expr_lines.get(&declaration) {
-            self.mark_expression_line(declaration, line, code);
-        }
+        self.mark_expression_start(declaration, code);
         let holder = Ty::obj(class);
         store(holder, slot, code);
         self.mark_suspend_lambda_parameter_read(declaration, code);
         self.open_declared_local(declaration, slot, holder, code);
         if let Some(value) = value {
-            // The element store is the declaration's statement: its value marks its own line,
-            // and the `putfield` returns to the declaration's. An unsigned initializer is the
-            // exception: the line stays on the holder store — unboxing moves it onto the zero
-            // default — and on this `putfield`, not on the literal or the receiver load.
+            // The element store is the declaration's statement (kotlinc's `visitFieldAccess` of
+            // the shared holder's `element`): its value marks its own lines, and the `putfield`
+            // returns to the declaration's.
             load(holder, slot, code);
-            let unsigned = self.completes_unsigned_bitwise_value(value);
-            if !unsigned {
-                self.mark_expression_start(value, code);
-            }
-            let saved_assignment = self.unsigned_assignment_line;
-            if unsigned {
-                self.unsigned_assignment_line = true;
-            }
             self.emit_element_value(elem, value, code);
-            self.unsigned_assignment_line = saved_assignment;
-            if let Some(&line) = self.ir.expr_lines.get(&declaration) {
-                self.mark_expression_line(declaration, line, code);
-            }
+            self.mark_expression_start(declaration, code);
             self.put_element(&elem, code);
         }
     }

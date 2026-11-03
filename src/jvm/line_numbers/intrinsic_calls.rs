@@ -13,22 +13,30 @@
 use crate::fir::{FirBinaryOperation, FirUnaryOperation, SyntheticOriginKind};
 use crate::ir::{
     Callee, ExprId, IrBuiltinCall, IrBuiltinCallKind, IrExpr, IrFile, IrIntrinsic, IrNodeOrigin,
-    IrSafeCallRead,
 };
+use crate::jvm::default_call_operands::DefaultCallOperands;
 use crate::types::Ty;
 
 /// Whether `expression` states its own line before its operands, keeping that entry where an
-/// operand marks another line at the same offset.
-pub(in crate::jvm::ir_emit) fn states_line_before_operands(
+/// operand marks another line at the same offset. `realized` says which calls JVM realization
+/// implemented with one of kotlinc's intrinsic methods.
+pub(crate) fn states_line_before_operands(
     ir: &IrFile,
+    realized: &DefaultCallOperands,
     expression: ExprId,
 ) -> bool {
+    // `typeOf<T>()` is kotlinc's `TypeOf` intrinsic wherever it is realized, a reified body's
+    // included.
+    if is_type_of(ir, expression) {
+        return true;
+    }
     if let Some(call) = ir.builtin_calls.get(&expression) {
         return is_intrinsic_call(ir, expression, call);
     }
     // A safe call states its line where it declares the receiver temporary, before the receiver,
     // unless an elvis folds it (`JvmSafeCallChainFoldingLowering`).
-    ir.safe_calls.contains(&expression) && !is_elvis_operand(ir, expression)
+    realized.is_intrinsic_call(expression)
+        || ir.safe_calls.contains(&expression) && !is_elvis_operand(ir, expression)
 }
 
 /// Whether kotlinc realizes `call` as an intrinsic call of its own.
@@ -74,6 +82,16 @@ fn is_intrinsic_call(ir: &IrFile, expression: ExprId, call: &IrBuiltinCall) -> b
     }
 }
 
+fn is_type_of(ir: &IrFile, expression: ExprId) -> bool {
+    matches!(
+        ir.expr(expression),
+        IrExpr::Call { callee, .. } if matches!(
+            **callee,
+            Callee::Intrinsic { operation: IrIntrinsic::TypeOf { .. }, .. }
+        )
+    )
+}
+
 fn is_unsigned(ty: Ty) -> bool {
     ty.non_null().canonical_semantic().is_unsigned()
 }
@@ -86,20 +104,11 @@ fn is_elvis_operand(ir: &IrFile, value: ExprId) -> bool {
 }
 
 /// The line `inv()`'s intrinsic restates where it pushes the all-bits mask, after its receiver.
-pub(in crate::jvm::ir_emit) fn inversion_mask_line(ir: &IrFile, expression: ExprId) -> Option<u32> {
+pub(crate) fn inversion_mask_line(ir: &IrFile, expression: ExprId) -> Option<u32> {
     let call = ir.builtin_calls.get(&expression)?;
     (call.kind == IrBuiltinCallKind::Unary(FirUnaryOperation::BitwiseNot)
         && is_intrinsic_call(ir, expression, call))
     .then(|| ir.source_line(expression))
     .flatten()
     .filter(|&line| line != 0)
-}
-
-/// The line a read of a safe call's receiver temporary carries: the null test at the safe call's
-/// line, the selector's receiver at the line the receiver starts on.
-pub(super) fn safe_call_read_line(ir: &IrFile, read: ExprId) -> Option<u32> {
-    match ir.safe_call_reads.get(&read)? {
-        IrSafeCallRead::NullCheck { line } => Some(*line),
-        IrSafeCallRead::Receiver { start_line } => Some(*start_line),
-    }
 }

@@ -610,7 +610,7 @@ fn record_generated_origins(
 /// inlined call has reset it. A `for` loop is always a statement, so its line is the one its
 /// statement records.
 fn record_generated_lines(ir: &mut IrFile, source: ExprId, first_generated: usize) {
-    let Some(line) = ir.expr_lines.get(&source).copied() else {
+    let Some(line) = ir.statement_line(source) else {
         return;
     };
     record_generated_line(ir, line, first_generated);

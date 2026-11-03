@@ -16,7 +16,7 @@ use super::BodyLowering;
 fn first_body_line(ir: &crate::ir::IrFile, body: ExprId) -> Option<u32> {
     let mut expression = body;
     loop {
-        if let Some(&line) = ir.expr_lines.get(&expression) {
+        if let Some(line) = ir.statement_line(expression) {
             return (line != 0).then_some(line);
         }
         let IrExpr::Block { stmts, value } = ir.expr(expression) else {
@@ -655,7 +655,7 @@ impl BodyLowering<'_> {
                     // The frame's first body statement marks the body's invocation line, mapped
                     // under the call; the rest of the prelude inherits it until the lambda runs.
                     let line = u32::from(source.invoke_line);
-                    self.ir.expr_lines.insert(iterator_declaration, line);
+                    self.ir.set_statement_line(iterator_declaration, line);
                     self.ir.external_frame_lines.insert(
                         iterator_declaration,
                         external_frame_line(source, line, call_line),
@@ -722,7 +722,7 @@ impl BodyLowering<'_> {
                         // The cursor is the frame's first body statement, as an iterator's
                         // declaration is: it marks the body's invocation line.
                         let line = u32::from(source.invoke_line);
-                        self.ir.expr_lines.insert(cursor_declaration, line);
+                        self.ir.set_statement_line(cursor_declaration, line);
                         self.ir.external_frame_lines.insert(
                             cursor_declaration,
                             external_frame_line(source, line, call_line),
@@ -1538,7 +1538,7 @@ impl BodyLowering<'_> {
             },
         );
         if let Some(line) = call_line {
-            self.ir.expr_lines.insert(marker, line);
+            self.ir.set_statement_line(marker, line);
             if frame.inline_only
                 && (callable_reference || first_body_line(self.ir, template) == Some(line))
             {

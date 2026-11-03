@@ -61,7 +61,7 @@ impl BodyLowering<'_> {
         for &declaration in &statements[first..] {
             self.ir.argument_evaluation_bindings.insert(declaration);
             if let Some(line) = line {
-                self.ir.expr_lines.insert(declaration, line);
+                self.ir.set_source_line(declaration, line);
             }
         }
         read

@@ -226,7 +226,6 @@ impl Emitter<'_> {
         code: &mut CodeBuilder,
     ) -> Result<(), DescriptorArityMismatch> {
         DescriptorArityMismatch::check(None, ops.len(), physical.len())?;
-        self.mark_generated_operand_start(call, ops.first().copied(), code);
         let ops = self.slot_operands(
             ops,
             KeptSmartCasts::CallReceivers {
@@ -341,7 +340,6 @@ impl Emitter<'_> {
         code: &mut CodeBuilder,
     ) -> Result<(), DescriptorArityMismatch> {
         DescriptorArityMismatch::check(None, ops.len(), physical.len())?;
-        self.mark_generated_operand_start(call_expression, ops.first().copied(), code);
         let mut index = 0usize;
         // The call owns any operand a default-argument realization synthesized for it, so its own
         // line goes back into effect at the start of each such run.
@@ -406,7 +404,6 @@ impl Emitter<'_> {
             owner_ty
         });
         physical.extend_from_slice(physical_params);
-        self.mark_generated_operand_start(call_expression, ops.first().copied(), code);
         // An upcast to the member's declaring class over an erased generic result changes nothing
         // the JVM sees; that result narrows once, to the class the call names.
         if let Some(erased) = self.erased_dispatch_receiver(receiver) {

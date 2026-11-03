@@ -117,8 +117,7 @@ pub(super) fn emit(
         if property.line != 0
             && clinit_line_entries.last().map(|&(_, line)| line) != Some(property.line)
         {
-            // Through the builder, so a line the source body left occupied at this offset (an
-            // `init` block's closing `}`) keeps its entry behind a `nop`.
+            // Through the builder's mapper, so a line it marked last writes no second entry.
             clinit.mark_line(property.line);
             clinit_line_entries.push((clinit.bytes.len() as u16, property.line));
         }

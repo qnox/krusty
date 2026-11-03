@@ -1078,7 +1078,7 @@ fn block_trailing_expression_keeps_its_checked_statement_line() {
             (ir.functions[*function as usize].name == "act").then_some(expression as u32)
         })
         .expect("act call");
-    assert_eq!(ir.expr_lines.get(&call), Some(&5));
+    assert_eq!(ir.statement_line(call), Some(5));
 }
 
 #[test]

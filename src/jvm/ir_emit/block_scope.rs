@@ -8,6 +8,21 @@ use super::{ir_ty_to_jvm, CodeBuilder, Emitter, Label, Ty};
 use crate::ir::{IrDebugLocalProvenance, IrExpr};
 
 impl Emitter<'_> {
+    /// Emit a block statement node, marking its start first when kotlinc's rule says a block of
+    /// its kind marks one (an inlined call realized in place).
+    pub(super) fn emit_block_node(
+        &mut self,
+        block: u32,
+        stmts: Vec<u32>,
+        value: Option<u32>,
+        code: &mut CodeBuilder,
+    ) {
+        if crate::jvm::line_numbers::marks_line_at_start(self.ir, block) {
+            self.mark_expression_start(block, code);
+        }
+        self.emit_statement_block(block, stmts, value, code);
+    }
+
     /// Emit a block in statement position within its own lexical slot scope. Restoring the slot
     /// *map* afterwards keeps a local declared here out of a later merge-point frame: its slot must
     /// read as `Top` once out of scope, or a sibling branch that never initialized it fails
@@ -64,7 +79,6 @@ impl Emitter<'_> {
             discard_after_frame,
             close_discarded_provider_frame,
         } = self.emit_open_block(block, stmts, value, terminal_target, entry, true, code);
-        self.mark_initializer_line(block, true, code);
         let mut anchored = false;
         if !self.ir.callable_scopes.contains(&block) {
             self.close_external_inline_frame(block, code);
@@ -85,6 +99,9 @@ impl Emitter<'_> {
                 anchored = self.close_copied_function_inline_frame(block, code);
             }
         }
+        // kotlinc writes an `init` block's locals once its body ends, before the block marks its
+        // closing line.
+        self.mark_initializer_line(block, true, code);
         // kotlinc returns to the call's line once the inlined body ends, before the statement
         // discards its result: the `pop` occupies that line, so the cleanup drops the frame's
         // closing `nop`.
@@ -595,7 +612,7 @@ impl Emitter<'_> {
             returned = match *self.ir.expr(returned) {
                 IrExpr::Block {
                     value: Some(inner), ..
-                } if !self.realizes_inlined_call(returned) => inner,
+                } if !crate::jvm::line_numbers::realizes_inlined_call(self.ir, returned) => inner,
                 IrExpr::TypeOp {
                     op: crate::ir::IrTypeOp::ImplicitCoercion,
                     arg,
@@ -1163,8 +1180,12 @@ impl Emitter<'_> {
             self.mark_statement_line(statement, code);
             // A statement that states its own line before its operands (a safe call, an
             // intrinsic call) keeps that entry where an operand marks another line.
-            if self.keeps_start_line(statement) {
-                self.mark_kept_start_line(statement, code);
+            if crate::jvm::line_numbers::marks_line_before_operands(
+                self.ir,
+                self.default_call_operands,
+                statement,
+            ) {
+                self.mark_line_before_operands(statement, code);
             }
             if normalize_at_lambda_frame
                 && matches!(
@@ -1381,24 +1402,18 @@ impl Emitter<'_> {
     }
 
     pub(super) fn mark_statement_line(&mut self, statement: u32, code: &mut CodeBuilder) {
-        let Some(&line) = self.ir.expr_lines.get(&statement) else {
+        let Some(line) = self.ir.statement_line(statement).filter(|&line| line != 0) else {
             return;
         };
-        // kotlinc's `visitStatementContainer` marks no line for a statement apart from its
-        // expression, so this eager entry is the statement value's own until that value marks it.
-        code.mark_value_boundary(statement);
-        // A dispatch owns the line entry at the physical call, so this writes no second entry
-        // and the statement keeps its source line. Otherwise the marked line is the mapped
-        // output line of an inline copy: a later instruction that returns to this statement
-        // must not write the callee's raw line.
-        let marked = if self.ir.dispatch_line(statement).is_none() {
+        // A line the inliner copies with the callee's code (an external inline body's own line, the
+        // synthetic line of an `@InlineOnly` lambda) stands before the instruction it numbers,
+        // whatever the kind of node that instruction belongs to.
+        let marked = if crate::jvm::line_numbers::is_copied_inline_line(self.ir, statement) {
             self.mark_expression_line(statement, line, code)
         } else {
             line
         };
-        if line != 0 {
-            self.statement_line = Some(marked);
-        }
+        self.statement_line = Some(marked);
     }
 
     /// Close source-local debug ranges declared in the current nested block.
