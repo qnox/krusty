@@ -465,7 +465,7 @@ pub(super) fn plan(
         env.local_delegate_access
             .exported()
             .map(|(function, owner)| Use {
-                line: ir.fn_decl_lines.get(&function).copied().unwrap_or(0),
+                line: ir.function_position(function).decl_line.unwrap_or(0),
                 owner: StaticOwner::of(owner),
                 accessor: StaticAccessor::Function(function),
             }),
@@ -547,7 +547,7 @@ fn synthesized_companion_accessor_lines(ir: &IrFile) -> HashMap<crate::ir::ExprI
             let declared_line = |declared: bool, accessor: Option<u32>| {
                 accessor
                     .filter(|_| declared)
-                    .and_then(|function| ir.fn_decl_lines.get(&function).copied())
+                    .and_then(|function| ir.function_position(function).decl_line)
             };
             let line = [
                 Some(ir.statics[storage as usize].line),

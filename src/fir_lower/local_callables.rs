@@ -1089,12 +1089,12 @@ impl BodyLowering<'_> {
             .or_insert_with(|| crate::ir::FnParamInfo::identities(parameter_identities))
             .captured_receivers = captured_receivers;
         if let Some(line) = local_function_debug_line(body) {
-            self.ir.fn_decl_lines.insert(function, line);
+            self.ir.function_position_mut(function).decl_line = Some(line);
         }
         // A block-bodied local function falls off its closing brace, where kotlinc marks the
         // implicit `return` as it does for a declared one.
         if !body.has_implicit_return() && body.close_line() != 0 {
-            self.ir.fn_close_lines.insert(function, body.close_line());
+            self.ir.function_position_mut(function).close_line = Some(body.close_line());
         }
         if let Some(source_lambda) = body.source_lambda() {
             // An empty enclosing segment is the semantic class-initialization context. Do not put

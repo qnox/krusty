@@ -496,9 +496,9 @@ pub(super) fn apply_property_decl_line(
         (setter, accessor_lines.setter, accessor_lines.setter_end),
     ] {
         if let Some(function) = function {
-            ir.fn_decl_lines.insert(function, own(accessor_line));
+            ir.function_position_mut(function).decl_line = Some(own(accessor_line));
             if end_line != 0 {
-                ir.fn_end_lines.insert(function, end_line);
+                ir.function_position_mut(function).end_line = Some(end_line);
             }
         }
     }
