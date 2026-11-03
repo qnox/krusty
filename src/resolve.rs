@@ -50942,30 +50942,6 @@ impl<'a> Checker<'a> {
             .collect()
     }
 
-    /// A lambda argument's shape before a candidate supplies its function type. Written
-    /// parameters, or an explicit `->` with none, fix the arity. A lambda that omits its parameter
-    /// list has no arity of its own: it fits `() -> R` and, with an implicit `it`, any
-    /// one-parameter function type, so it probes as the error type. Whether the body spells `it`
-    /// does not decide the arity.
-    fn lambda_probe_ty(&self, arg: ExprId) -> Option<Ty> {
-        match self.file.expr(arg) {
-            Expr::Lambda { params, .. }
-                if !params.is_empty() || self.lambda_declares_its_parameters(arg) =>
-            {
-                Some(Ty::fun(vec![Ty::Error; params.len()], Ty::Error))
-            }
-            Expr::Lambda { .. } => Some(Ty::Error),
-            _ => None,
-        }
-    }
-
-    /// Whether a lambda literal's parameter list is written, so it never gets an implicit `it`:
-    /// `{ x -> }`, `{ -> }`, or an anonymous function `fun() {}`.
-    fn lambda_declares_its_parameters(&self, lambda: ExprId) -> bool {
-        self.file.lambda_explicit_arrows.contains(&lambda.0)
-            || self.file.anon_fun_lambdas.contains(&lambda.0)
-    }
-
     /// Project an explicitly declared Kotlin function classifier (`FunctionN<P..., R>`) onto the
     /// exact callable shape published by its semantic provider. Callable objects remain nominal:
     /// only classifiers whose declaration says they represent a function type are normalized.
@@ -51402,6 +51378,11 @@ impl<'a> Checker<'a> {
     /// a result-only type variable is uninferrable. The selected parameter immediately rechecks the
     /// argument and exclusively owns that diagnostic decision.
     fn check_postponed_argument(&mut self, scope: &CheckerScope<'_>, expression: ExprId) -> Ty {
+        // A lambda is analysed only under the shape its selected parameter gives it: before
+        // selection its body has no parameters to bind, so it contributes just its written arity.
+        if let Some(probe) = self.lambda_probe_ty(expression) {
+            return probe;
+        }
         self.postponed_argument_depth += 1;
         let ty = self.expr(scope, expression);
         self.postponed_argument_depth -= 1;

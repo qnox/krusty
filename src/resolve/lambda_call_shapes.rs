@@ -22,6 +22,30 @@ pub(super) struct UntypedLambdaCall<'a> {
 }
 
 impl Checker<'_> {
+    /// A lambda argument's shape before a candidate supplies its function type. Written
+    /// parameters, or an explicit `->` with none, fix the arity. A lambda that omits its parameter
+    /// list has no arity of its own: it fits `() -> R` and, with an implicit `it`, any
+    /// one-parameter function type, so it probes as the error type. Whether the body spells `it`
+    /// does not decide the arity.
+    pub(super) fn lambda_probe_ty(&self, arg: ExprId) -> Option<Ty> {
+        match self.file.expr(arg) {
+            Expr::Lambda { params, .. }
+                if !params.is_empty() || self.lambda_declares_its_parameters(arg) =>
+            {
+                Some(Ty::fun(vec![Ty::Error; params.len()], Ty::Error))
+            }
+            Expr::Lambda { .. } => Some(Ty::Error),
+            _ => None,
+        }
+    }
+
+    /// Whether a lambda literal's parameter list is written, so it never gets an implicit `it`:
+    /// `{ x -> }`, `{ -> }`, or an anonymous function `fun() {}`.
+    fn lambda_declares_its_parameters(&self, lambda: ExprId) -> bool {
+        self.file.lambda_explicit_arrows.contains(&lambda.0)
+            || self.file.anon_fun_lambdas.contains(&lambda.0)
+    }
+
     // Lambda call-SHAPE derivation over the resolver's candidate family. Candidate inventory is
     // intentionally separate from overload selection: the lambda slots do not have types yet, so
     // selecting a callable here would be circular. Final call resolution consumes the checked

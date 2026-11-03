@@ -286,47 +286,43 @@ fn lambda_arity_comes_from_its_written_parameter_list_like_kotlinc() {
                   fun empty() = f { }\n\
                   fun arrow(): Int = f { -> }\n\
                   fun named(): Int = f { x -> }";
+    let sources = [("LambdaArity.kt", source)];
     let stdlib = common::stdlib_jar();
-    let result =
-        common::compiler_diagnostics(&[("LambdaArity.kt", source)], std::slice::from_ref(&stdlib));
-    assert_ne!(result.krusty_code, 0, "krusty silently accepted source");
-    assert_ne!(
-        result.reference_code, 0,
-        "kotlinc unexpectedly accepted source"
-    );
-    let mut krusty_errors = errors(&result.krusty_stderr);
-    krusty_errors.extend(errors(&result.krusty_stdout));
-    assert_eq!(krusty_errors, errors(&result.reference_stderr));
+    let result = common::compiler_diagnostics(&sources, std::slice::from_ref(&stdlib));
     assert_eq!(
-        krusty_errors
-            .iter()
-            .map(|error| (error.line, error.column, error.message.as_str()))
-            .collect::<Vec<_>>(),
+        result.reference_code, 1,
+        "kotlinc: {}",
+        result.reference_stderr
+    );
+    assert_eq!(
+        result.krusty_code, 1,
+        "krusty: {}{}",
+        result.krusty_stdout, result.krusty_stderr
+    );
+    let expected = common::reference_error_blocks(&sources, &[]);
+    assert_eq!(
+        common::krusty_error_blocks_with_args(&sources, &[]),
+        expected
+    );
+    assert_eq!(
+        expected,
         [
-            (3, 17, "overload resolution ambiguity between candidates:"),
-            (3, 21, "unresolved reference 'it'."),
-            (4, 15, "overload resolution ambiguity between candidates:"),
+            "LambdaArity.kt:3:17: overload resolution ambiguity between candidates:",
+            "| fun f(g: () -> Unit): Int",
+            "| fun f(g: (Int) -> Unit): Int",
+            "LambdaArity.kt:3:21: unresolved reference 'it'.",
+            "LambdaArity.kt:4:15: overload resolution ambiguity between candidates:",
+            "| fun f(g: () -> Unit): Int",
+            "| fun f(g: (Int) -> Unit): Int",
         ]
     );
 }
 
-/// Every contextual one-parameter function type still binds `it`: a typed declaration, a branch
-/// of one, a stdlib higher-order argument, a fun interface, a suspend function type, and an
-/// explicit type argument.
+/// Every contextual one-parameter function type still binds `it`.
 #[test]
 fn implicit_it_with_a_one_parameter_function_type_runs_like_kotlinc() {
-    let source = "fun interface IntOp { fun apply(x: Int): Int }\n\
-                  fun <T> id(x: T): T = x\n\
-                  fun take(op: IntOp) = op.apply(2)\n\
-                  fun box(): String {\n\
-                      val f: (Int) -> Int = { it * 2 }\n\
-                      val g: ((Int) -> Int)? = if (f(1) > 0) { { it + 1 } } else null\n\
-                      val h = listOf(1, 2).map { it + 1 }.filter { it > 2 }\n\
-                      val k = IntOp { it + 3 }\n\
-                      val n: suspend (Int) -> Int = { it }\n\
-                      val o = id<(String) -> Int> { it.length }\n\
-                      val all = listOf(f(1), g!!(1), h.single(), k.apply(1), take { it * 5 }, o(\"ab\"))\n\
-                      return if (all == listOf(2, 2, 3, 4, 10, 2) && n != null) \"OK\" else all.toString()\n\
-                  }";
-    common::expect_box_ok_with_stdlib(source, "ImplicitItContext");
+    common::expect_box_ok_with_stdlib(
+        include_str!("box_regressions/implicitItContext.kt"),
+        "ImplicitItContext",
+    );
 }

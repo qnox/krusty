@@ -688,8 +688,34 @@ impl Checker<'_> {
                 continue;
             };
             self.diags.error(self.span(argument), message.clone());
+            // The selected declaration still owns the lambda's shape, with its context, receiver
+            // and value roles: `(T) -> String` gives it an implicit `it`. Only the formal that
+            // could not be inferred is unavailable, and its uses read as `Any`.
+            let erased =
+                crate::fx_hash::HashMap::from_iter([(formal.clone(), Ty::obj("kotlin/Any"))]);
+            let shape = crate::types::ty_subst(*parameter, &erased);
             self.omit_unshaped_any_receiver_type += 1;
-            self.expr_inner_lambda(scope, argument, None, params, body, implicit_lambda_label);
+            match shape.non_null().kind() {
+                TyKind::Fun(function) => {
+                    self.check_lambda_with_function_type_labeled(
+                        scope,
+                        argument,
+                        function,
+                        function.has_receiver,
+                        implicit_lambda_label,
+                    );
+                }
+                _ => {
+                    self.expr_inner_lambda(
+                        scope,
+                        argument,
+                        None,
+                        params,
+                        body,
+                        implicit_lambda_label,
+                    );
+                }
+            }
             self.omit_unshaped_any_receiver_type -= 1;
         }
     }
