@@ -94,7 +94,7 @@ pub(super) fn instantiate_member_extension_with(
         &mut lower_inputs,
     );
     let bound_before_receiver = bindings.clone();
-    crate::symbol_resolver::unify_ty_from_symbols(
+    crate::symbol_resolver::unify_receiver_from_symbols(
         source,
         declared_receiver,
         extension_receiver,
@@ -116,6 +116,15 @@ pub(super) fn instantiate_member_extension_with(
                 ) == Some(crate::types::TypeVariance::Out)
         })
         .collect::<Vec<_>>();
+    // The receiver is applicable only as the instantiated declaration: `Column<U?>` admits a
+    // caller's `Column<A>` (`A : Any`) structurally, but `U? = A` has no solution.
+    if !crate::symbol_resolver::resolution_subtype(
+        source,
+        extension_receiver,
+        apply_inference_bindings(declared_receiver, &bindings),
+    ) {
+        return None;
+    }
     let symbols = source;
     let declared_params = generic.map_or(function.signature.params.as_slice(), |signature| {
         signature.params.as_slice()
@@ -237,6 +246,19 @@ pub(super) fn instantiate_member_extension_with(
             &mut bindings,
             explicit_type_args,
         );
+        // A solved formal must satisfy its declared bounds, as for any other generic call:
+        // `<T : Any, S : T, C : Column<S>> C.references(ref: Column<T>)` does not apply to a
+        // `Column<Int>` receiver with an `EntityID<Int>` reference, since `S = Int` is not a `T`.
+        // A relation through a formal that is still open (`C := Holder<R>` for `C : Sink<R>` in a
+        // recursive call) stays open, as in ordinary generic call selection.
+        if !crate::symbol_resolver::generic_bindings_admit_expected_return_intersection(
+            generic,
+            &bindings,
+            None,
+            |actual, bound| crate::symbol_resolver::resolution_subtype(source, actual, bound),
+        ) {
+            return None;
+        }
     }
     // The call's evidence so far, before any unsolved formal stands for its bound: a lambda
     // argument is shaped from THIS view, so a formal only a lambda can solve stays open for the

@@ -92,8 +92,12 @@ upstream release notes, which can name an assistant that contributed upstream. T
   A shared target must not authenticate a sibling checkout's typed model by source mtimes alone.
   Test checkout switching and unchanged-checkout reuse; do not clean the shared target to mask it.
   Audit: `rg -n 'KRUSTY_BUILD_CHECKOUT|shared_target_rebuilds_plugin_ir' .cargo crates/krusty-plugin-ir`.
-- Record every Kotlin-semantics decision in `docs/SPEC.md` with a test.
-- Keep `docs/SPEC.md`, `docs/IMPLEMENTATION_PLAN.md`, and `docs/METADATA_NOTES.md` current.
+- **kotlinc is the spec; tests are the record.** A Kotlin-semantics decision lands as a test that
+  pins kotlinc's behavior, not as prose. Plans, progress, and per-change notes belong in the pull
+  request and its issue, not in the repository.
+- `docs/` holds only design decisions kotlinc cannot answer (for example `docs/NATIVE.md`), format
+  references (`docs/METADATA_NOTES.md`), and user- or contributor-facing guides. Update one when a
+  change alters what it states; never append a per-change log entry or a status section.
 
 # Compiler implementation and review rules
 
@@ -192,6 +196,10 @@ review explanation tied to an active migration plan.
   the selected getter/setter slot. Matching a function signature alone does not prove membership.
   Positive primitive queries do not preempt function-invocation/builtin priority or replace the
   canonical producer-origin and selected-declaration ambiguity diagnostics.
+- A fact every expression of a kind has, or one a copy of the expression must keep, belongs on
+  the IR node or in its operation's payload, not in a new `IrFile` side table. A table that stays
+  (a backend's own realization fact) is classified in `src/ir/expression_copy.rs`, which does not
+  compile until every `IrFile` field is. See `docs/PHASE_FACTS.md`.
 - Common FIR/IR lowering records debug-local source identity, semantic role, and inline-frame
   provenance. It must not format JVM/kotlinc synthetic local spellings such as `$iv`, `_u24`, or a
   `$lambda$N` implementation name; the JVM debug-info boundary owns those conventions.
@@ -358,4 +366,4 @@ change, not a quiet reset inside yours.
   ceiling. Deadlines must remain configurable for slow systems; timeout output must identify the
   active test/case well enough to diagnose loops.
 
-See also `docs/ARCHITECTURE.md`, `docs/COMPILER_REVIEW.md`, and `docs/TEST_HARNESS.md`.
+See also `docs/ARCHITECTURE.md` and `docs/TEST_HARNESS.md`.

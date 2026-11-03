@@ -142,6 +142,7 @@ mod object_static_initialization;
 mod operand_representation;
 mod operand_stack;
 mod override_result_emission;
+use method_signatures::method_signature;
 use override_result_emission::{declared_method_desc, declared_method_signature};
 mod primary_constructor_parameters;
 mod property_access;
@@ -233,8 +234,8 @@ use member_schedule::{
 };
 pub use metadata_policy::KotlinMetadata;
 use metadata_policy::{
-    finish_local_synthetic_class, is_continuation_class, is_coroutine_state_machine,
-    synthetic_class_xi, SYNTHETIC_LOCAL, SYNTHETIC_PROTECTED, SYNTHETIC_PUBLIC,
+    continuation_class_xi, finish_local_synthetic_class, is_continuation_class,
+    is_coroutine_state_machine, synthetic_class_xi, SYNTHETIC_LOCAL, SYNTHETIC_PUBLIC,
 };
 use method_defaults::{
     emit_default_stub, emit_facade_default_stub, static_default_stub_marker, DefaultStubSource,
@@ -1620,11 +1621,14 @@ fn emit_pass(
     for (class_id, c) in ir.classes.iter().enumerate() {
         let class_id = class_id as ClassId;
         let fq_name = c.fq_name();
-        // A function whose suspension points all turned out to be tail calls has no machine.
+        // A function whose suspension points all turned out to be tail calls has no machine, and
+        // its continuation is written only when a method's `$$forInline` copy constructs it.
         if let Some(crate::jvm::classfile::CoroutineOutcome::TailCalls) =
             env.run.transformed_coroutine(&fq_name)
         {
-            continue;
+            if !crate::jvm::suspend_inline_functions::constructed_by_method_copy(ir, class_id) {
+                continue;
+            }
         }
         if unwritten_continuations.contains(&c.fq_name) {
             continue;
@@ -2303,9 +2307,11 @@ fn emit_class(
     let has_abstract = c.methods.iter().any(|&fid| {
         !standalone_method_is_elided(ir, fid, env) && ir.functions[fid as usize].body.is_none()
     });
-    // A synthesized continuation class is package-private in kotlinc.
+    // A synthesized continuation class is package-private in kotlinc, unless a method's
+    // `$$forInline` copy constructs it.
     let mut access = if is_continuation {
-        0x0020 // SUPER (package-private)
+        let public = crate::jvm::suspend_inline_functions::constructed_by_method_copy(ir, class_id);
+        u16::from(public) | 0x0020 // [PUBLIC |] SUPER
     } else {
         class_public_bit(ir, c) | 0x0020 // [PUBLIC |] SUPER
     };
@@ -2452,7 +2458,13 @@ fn emit_class(
     // declared (`L$0`, `I$0`, …), and kotlinc's pool carries each of those strings once, first visited
     // with the FIELD. Building the annotation earlier interned the subset the array happens to mention
     // ahead of the table and left the rest to the fields, reordering the whole pool.
-    if let Some(metadata) = continuation_metadata {
+    // A machine-less continuation (its function's suspension points all tail calls, written for
+    // a method's `$$forInline` copy) has no states to describe.
+    let tail_calls = matches!(
+        transformed,
+        Some(crate::jvm::classfile::CoroutineOutcome::TailCalls)
+    );
+    if let Some(metadata) = continuation_metadata.filter(|_| !tail_calls) {
         cw.set_debug_metadata(&crate::jvm::bytecode_passes::coroutines::DebugMetadata {
             source_file: opts.source_file.clone().unwrap_or_default(),
             line_numbers: metadata.l.clone(),
@@ -4221,13 +4233,14 @@ fn emit_method_inner(
         },
     };
     emit_placed_method(ir, fid, placement, owner, facade, cw, env);
-    if crate::jvm::suspend_inline_functions::has_for_inline_copy(ir, fid)
-        && env.emit_time_machines.transformed(fid).is_some()
-    {
+    let for_inline = crate::jvm::suspend_inline_functions::for_inline_copy(ir, fid)
+        .filter(|_| env.emit_time_machines.transformed(fid).is_some());
+    if let Some(kind) = for_inline {
         let copy = MethodPlacement::ForInlineCopy {
             static_owner,
             instance: instance && singleton.is_none(),
             singleton,
+            kind,
         };
         emit_placed_method(ir, fid, copy, owner, facade, cw, env);
     }
@@ -4251,6 +4264,7 @@ fn emit_placed_method(
             static_owner,
             instance,
             singleton,
+            ..
         } => (Some(static_owner), instance, None, singleton),
         MethodPlacement::Holder(receiver) => (None, true, Some(receiver), None),
         MethodPlacement::Singleton {
@@ -4308,7 +4322,7 @@ fn emit_placed_method(
         });
         let slot = e.arm_transformed_machine(machine, completion);
         if marked {
-            let inlined = crate::jvm::suspend_inline_functions::inlined_invokes(ir, fid, machine);
+            let inlined = placement.inlined_invokes(ir, fid, env, machine);
             e.leave_inlined_invokes_unmarked(inlined);
         }
         (machine, slot)
@@ -4499,6 +4513,22 @@ fn emit_placed_method(
             store(Ty::Int, slot, &mut code);
             (slot, code.bytes.len() as u16)
         });
+    if placement.constructs_fake_continuation() {
+        let completion = param_tys.len().saturating_sub(1) as u32 + u32::from(receiver_value);
+        let completion = e
+            .slots
+            .get(&completion)
+            .map(|&(slot, _)| slot)
+            .expect("a suspend method's copy has a completion parameter");
+        // The class the machine re-enters, under its final name: a copy's continuation is renamed
+        // with the copy, after coroutine lowering named it.
+        let continuation = env
+            .emit_time_machines
+            .transformed(fid)
+            .map(|machine| machine.continuation_class.clone())
+            .expect("a method's `$$forInline` copy is written beside its transformed machine");
+        e.emit_fake_continuation_construction(&continuation, completion, &mut code);
+    }
     // The marker and the parameter guards carry no line. The method's first entry is the first
     // statement, or the expression body — kotlinc does not also record the signature line there.
     // Building the machine: everything the discovery pass learned is in hand, so the entry,
@@ -4809,160 +4839,6 @@ fn property_jvm_signatures(
     type_parameter: Option<&str>,
 ) -> JvmPropertySignatures {
     formatter.property_signatures(ty, type_parameter)
-}
-
-/// A method's generic `Signature`, from whichever source applies: its own declared type parameters, the
-/// `suspend` CPS shape, or a parameterized concrete parameter/return type. `None` when erasure loses
-/// nothing. Shared by concrete and abstract emission — an abstract method has no body, which is not a
-/// reason to drop its signature.
-/// `Signature` for a member whose SEMANTIC types mention enclosing-class type parameters: each
-/// position is a bare `T<name>;` reference or a plain non-generic descriptor. `None` when any
-/// position needs deeper generic formatting (those flow through the ordinary formatters).
-fn method_signature(
-    formatter: &JvmSignatureFormatter<'_>,
-    ir: &IrFile,
-    fid: u32,
-    f: &crate::ir::IrFunction,
-) -> Option<String> {
-    let signature = method_signature_shape(formatter, ir, fid, f)?;
-    // A `Signature` attribute exists to say what the DESCRIPTOR cannot — a type variable, a type
-    // argument, a wildcard. One that spells the descriptor back carries nothing, and kotlinc omits it:
-    // `fun a(x: Array<String>)` signs `([Ljava/lang/String;)V`, which is already its descriptor, so
-    // the attribute is absent. (Only equality is tested, so a shape whose descriptor is computed
-    // differently — suspend, value-class mangling — simply keeps its attribute.)
-    (signature != ir_method_desc(&f.params, &f.ret)).then_some(signature)
-}
-
-fn method_signature_shape(
-    formatter: &JvmSignatureFormatter<'_>,
-    ir: &IrFile,
-    fid: u32,
-    f: &crate::ir::IrFunction,
-) -> Option<String> {
-    // Pick the semantic signature category first. Formatting returns `None` both when no optional
-    // Signature attribute is needed and when the selected shape is invalid, so chaining formatters
-    // with `or_else` would incorrectly treat an encoding error as permission to try a less complete
-    // shape. `JvmSignatureFormatter` records a precise emit error for the latter case.
-    if let (Some(generic), Some((_, declared_ret))) =
-        (ir.signatures.get(&fid), ir.suspend_declared_sigs.get(&fid))
-    {
-        let ret = generic.ret.as_ref().unwrap_or(declared_ret);
-        return suspend_generic_method_sig(formatter, generic, ret);
-    }
-    if let Some(generic) = ir.jvm_value_class_member_signatures.get(&fid) {
-        return formatter.method_signature(generic, f, None);
-    }
-    if let Some(generic) = ir.signatures.get(&fid) {
-        let generic = value_class_signatures::physical_generic_signature(ir, fid, generic);
-        return formatter.method_signature(&generic, f, vararg_parameter_position(ir, fid));
-    }
-    if let (Some((params, ret)), Some(_)) = (
-        ir.member_semantic_sigs.get(&fid),
-        ir.suspend_declared_sigs.get(&fid),
-    ) {
-        return suspend_method_sig(formatter, params, ret);
-    }
-    if let Some((params, ret)) = value_class_signatures::physical_member_signature(ir, fid) {
-        // A member using ENCLOSING-CLASS type parameters declares none: they belong to the class
-        // header's own signature (`(TT;)TT;`).
-        return formatter.method_positions(&params, &ret);
-    }
-    if let Some((params, declared_ret)) = ir.suspend_declared_sigs.get(&fid) {
-        // A value-class RETURN survives in the continuation's type argument as the value class
-        // itself (`Continuation<? super OrganizationId>`), not its erasure. The VC pass ran
-        // before the suspend pass and already erased `declared_ret` to the underlying, so recover the
-        // declared return from `vc_declared_sigs` when this function had one.
-        let ret = ir
-            .vc_declared_sigs
-            .get(&fid)
-            .map(|(_, _, value_class_ret)| value_class_ret)
-            .unwrap_or(declared_ret);
-        return suspend_method_sig(formatter, params, ret);
-    }
-    if let Some((params, ret)) = value_class_signatures::declared_value_class_signature(ir, fid) {
-        return formatter.method_positions(&params, &ret);
-    }
-    method_parameterized_sig(
-        formatter,
-        &signature_function_params(ir, fid),
-        &f.ret,
-        vararg_parameter_position(ir, fid),
-    )
-}
-
-fn suspend_generic_method_sig(
-    formatter: &JvmSignatureFormatter<'_>,
-    generic: &crate::ir::IrGenericSig,
-    ret: &Ty,
-) -> Option<String> {
-    let mut signature = jvm_type_params(formatter, generic)?;
-    signature.push_str(&suspend_method_sig(formatter, &generic.params, ret)?);
-    Some(signature)
-}
-
-/// The generic `Signature` of a `suspend fun`'s CPS method. The declared return type survives only in
-/// the trailing continuation's type argument — `suspend fun f(a: String)` compiles to
-/// `f(String, Continuation): Object` but signs as
-/// `(Ljava/lang/String;Lkotlin/coroutines/Continuation<-Lkotlin/Unit;>;)Ljava/lang/Object;`, the `-`
-/// being `? super`. Takes the DECLARED parameters and return, not the rewritten ones.
-fn suspend_method_sig(
-    formatter: &JvmSignatureFormatter<'_>,
-    params: &[Ty],
-    ret: &Ty,
-) -> Option<String> {
-    // The suspend return travels as `Continuation<-RET>`, a PARAMETER of the erased method, and
-    // kotlinc wildcards inside it: `suspend fun <U> f(): Cont<U>` signs
-    // `(Lkotlin/coroutines/Continuation<-LCont<+TU;>;>;)Ljava/lang/Object;`.
-    let continuation = formatter.continuation(*ret, Wildcards::Declared)?;
-    let mut s = String::from("(");
-    for p in params {
-        s.push_str(&formatter.parameter_ty(p)?);
-    }
-    s.push_str(&continuation);
-    s.push_str(")Ljava/lang/Object;");
-    Some(s)
-}
-
-/// The position of `fid`'s `vararg` among its lowered parameters. The recorded index counts the
-/// declared context and value parameters; captures and the extension receiver are lowered among
-/// them, so the position is the parameter whose identity is that declared parameter.
-fn vararg_parameter_position(ir: &IrFile, fid: u32) -> Option<usize> {
-    let vararg = ir.fn_varargs.get(&fid)?;
-    ir.fn_params
-        .get(&fid)?
-        .identities
-        .iter()
-        .enumerate()
-        .filter(|(_, identity)| identity.role.is_declared_parameter())
-        .nth(vararg.index)
-        .map(|(position, _)| position)
-}
-
-/// A method's generic `Signature` when a concrete param/return type is parameterized (`getXs()` →
-/// `()Ljava/util/List<Ljava/lang/String;>;`); non-generic positions keep their erased descriptor,
-/// `None` when none are parameterized.
-fn method_parameterized_sig(
-    formatter: &JvmSignatureFormatter<'_>,
-    params: &[Ty],
-    ret: &Ty,
-    vararg_index: Option<usize>,
-) -> Option<String> {
-    // Runs for every emitted method — bail before building any string when no position can carry one.
-    let is_parameterized = |t: &Ty| {
-        let inner = t.non_null();
-        matches!(inner.kind(), TyKind::Fun(_) | TyKind::Intersection(_))
-            || matches!(inner.kind(), TyKind::Obj(_, arguments) if !arguments.is_empty())
-    };
-    if !params
-        .iter()
-        .chain(std::iter::once(ret))
-        .any(is_parameterized)
-    {
-        return None;
-    }
-    // A `Unit` parameter is the `kotlin.Unit` object, not `void`.
-    let s = formatter.method_positions_with_vararg(params, ret, vararg_index)?;
-    (s != ir_method_desc(params, ret)).then_some(s)
 }
 
 fn default_mask_count(param_count: usize) -> usize {
