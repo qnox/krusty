@@ -107,7 +107,7 @@ impl BodyLowering<'_> {
     /// line, exactly as it would without the evaluation-order temporary.
     fn reordered_operand_replay(&mut self, source: ExprId, replay: ExprId) -> ExprId {
         if let Some(line) = self.operand_source_line(source) {
-            self.ir.expr_source_lines.insert(replay, line);
+            self.ir.set_source_line(replay, line);
         }
         replay
     }
@@ -118,7 +118,7 @@ impl BodyLowering<'_> {
     fn operand_source_line(&self, operand: ExprId) -> Option<u32> {
         let mut operand = operand;
         loop {
-            if let Some(&line) = self.ir.expr_source_lines.get(&operand) {
+            if let Some(line) = self.ir.source_line(operand) {
                 return Some(line);
             }
             let &IrExpr::TypeOp {
