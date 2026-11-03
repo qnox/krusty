@@ -124,3 +124,73 @@ fn only_the_declaration_template_traps_at_its_reified_type_test() {
         ))
     );
 }
+
+/// How the anonymous function's implementation is created in [`captured_signature_file`].
+#[derive(Clone, Copy)]
+enum Creation {
+    /// By its one node in the declaration's body.
+    Declared,
+    /// By a node an expansion copied into its caller.
+    CopiedNode,
+    /// By a second node beside the declaration's own.
+    SecondNode,
+}
+
+/// `inline fun <reified T> checks()`, which declares `fun(it: Any?) = it is T`: the anonymous
+/// function's signature captures the outer `T` with its identity and reified capability, as
+/// lifting a local or anonymous function signs it.
+fn captured_signature_file(creation: Creation) -> IrFile {
+    let mut ir = reified_template_file(false);
+    let declaration = 0;
+    let template = 1;
+    ir.signatures.insert(
+        template,
+        IrGenericSig {
+            type_params: vec![reified_parameter()],
+            params: vec![Ty::nullable(Ty::obj("kotlin/Any"))],
+            ret: Some(Ty::Boolean),
+            supers: Vec::new(),
+        },
+    );
+    ir.captured_signature_type_parameters.insert(template, 1);
+    let node = ir
+        .exprs
+        .iter()
+        .position(|expression| matches!(expression, IrExpr::Lambda { impl_fn, .. } if *impl_fn == template))
+        .expect("the declaration creates its anonymous function") as u32;
+    match creation {
+        Creation::Declared => {}
+        Creation::CopiedNode => ir.mark_inline_copy(node),
+        Creation::SecondNode => {
+            let second = ir.add_expr(IrExpr::Lambda {
+                impl_fn: template,
+                arity: 1,
+                captures: Vec::new(),
+                sam: None,
+                inline_body: None,
+            });
+            ir.callable_reference_enclosures
+                .insert(second, IrEnclosure::Function(declaration));
+        }
+    }
+    ir
+}
+
+/// A captured reified parameter in the implementation's own signature does not make it the
+/// declaration: only its one uncopied node leads the walk to the declaration that owns `T`.
+#[test]
+fn a_captured_reified_signature_traps_only_through_its_declaring_node() {
+    assert_eq!(lower(captured_signature_file(Creation::Declared)), Ok(()));
+    let refused = Err(format!(
+        "a type test against `{:?}`",
+        reified_parameter().ty()
+    ));
+    assert_eq!(
+        lower(captured_signature_file(Creation::CopiedNode)),
+        refused
+    );
+    assert_eq!(
+        lower(captured_signature_file(Creation::SecondNode)),
+        refused
+    );
+}

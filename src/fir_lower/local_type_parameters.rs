@@ -194,6 +194,11 @@ impl BodyLowering<'_> {
         if type_params.is_empty() {
             return;
         }
+        if !captured.is_empty() {
+            self.ir
+                .captured_signature_type_parameters
+                .insert(function, captured.len());
+        }
         let signature = &self.ir.functions[function as usize];
         let generic = IrGenericSig {
             type_params,

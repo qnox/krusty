@@ -14,6 +14,18 @@
 use super::{ClassId, ExprId, FunId, IrEnclosure, IrExpr, IrFile};
 use crate::types::Ty;
 
+/// Where the provenance says a function is declared.
+enum DeclaringScope {
+    /// A member of this class.
+    Member(ClassId),
+    /// A lambda or anonymous function created by its one lambda node, written in this scope.
+    LambdaNode(IrEnclosure),
+    /// A function no class or lambda node owns.
+    Declaration,
+    /// Created by copied code or by more than one node, or without a recorded scope.
+    Unproven,
+}
+
 impl IrFile {
     /// Whether the type operation `operation` against `tested`, emitted in `scope`, belongs to the
     /// template of the declaration that declares the reified parameter `tested` names.
@@ -35,10 +47,21 @@ impl IrFile {
                     if self.specialized_functions.contains_key(&function) {
                         return false;
                     }
-                    if self.declares_reified_occurrence(function, tested) {
-                        return true;
+                    match self.declaring_scope(function) {
+                        // A lambda or anonymous function declares no type parameter of its own;
+                        // one its signature captures continues the walk to its declaration.
+                        DeclaringScope::LambdaNode(enclosure) => Some(enclosure),
+                        DeclaringScope::Unproven => return false,
+                        DeclaringScope::Member(class) => {
+                            if self.declares_reified_occurrence(function, tested) {
+                                return true;
+                            }
+                            Some(IrEnclosure::Classifier(class))
+                        }
+                        DeclaringScope::Declaration => {
+                            return self.declares_reified_occurrence(function, tested);
+                        }
                     }
-                    self.declaring_scope(function)
                 }
                 IrEnclosure::Constructor { class, .. }
                 | IrEnclosure::ClassInitializer(class)
@@ -58,28 +81,46 @@ impl IrFile {
         false
     }
 
-    /// Whether `function`'s own signature declares a reified parameter that `tested` names.
+    /// Whether `function` itself declares a reified parameter that `tested` names. The leading
+    /// parameters a lifted local or anonymous function's signature captures from an enclosing
+    /// declaration are that declaration's, not this function's.
     fn declares_reified_occurrence(&self, function: FunId, tested: Ty) -> bool {
-        self.signatures.get(&function).is_some_and(|signature| {
-            signature.type_params.iter().any(|parameter| {
-                parameter.reified
-                    && tested
-                        .type_parameter_occurrence_bound(&parameter.semantic_name)
-                        .is_some()
-            })
+        self.declared_type_parameters(function).any(|parameter| {
+            parameter.reified
+                && tested
+                    .type_parameter_occurrence_bound(&parameter.semantic_name)
+                    .is_some()
         })
     }
 
-    /// The scope that declares `function`: its class for a member, or the scope its one lambda
-    /// node is written in for a lambda implementation. A lambda implementation that an expansion's
-    /// copied code creates, or that more than one node creates, has no single declaring scope.
-    fn declaring_scope(&self, function: FunId) -> Option<IrEnclosure> {
+    /// The type parameters `function` itself declares: its generic signature without the leading
+    /// ones a lifted local or anonymous function captures from an enclosing declaration.
+    pub(crate) fn declared_type_parameters(
+        &self,
+        function: FunId,
+    ) -> impl Iterator<Item = &super::IrTypeParameter> {
+        let captured = self
+            .captured_signature_type_parameters
+            .get(&function)
+            .copied()
+            .unwrap_or(0);
+        self.signatures
+            .get(&function)
+            .into_iter()
+            .flat_map(move |signature| signature.type_params.iter().skip(captured))
+    }
+
+    /// Where `function` is declared: as a member of its class, or by the one lambda node that
+    /// creates it, written in a recorded scope. A function no class or lambda node owns is a
+    /// declaration of its own. A lambda implementation that an expansion's copied code creates,
+    /// or that more than one node creates, has no proven declaring scope.
+    fn declaring_scope(&self, function: FunId) -> DeclaringScope {
         if let Some(class) = self
             .classes
             .iter()
             .position(|class| class.methods.contains(&function))
         {
-            return Some(IrEnclosure::Classifier(class as ClassId));
+            return DeclaringScope::Member(class as ClassId);
         }
         let mut nodes = self
             .exprs
@@ -89,11 +130,16 @@ impl IrFile {
                 matches!(expression, IrExpr::Lambda { impl_fn, .. } if *impl_fn == function)
                     .then_some(node as ExprId)
             });
-        let node = nodes.next()?;
+        let Some(node) = nodes.next() else {
+            return DeclaringScope::Declaration;
+        };
         if nodes.next().is_some() || self.is_inline_copy(node) {
-            return None;
+            return DeclaringScope::Unproven;
         }
-        self.callable_reference_enclosures.get(&node).copied()
+        self.callable_reference_enclosures
+            .get(&node)
+            .copied()
+            .map_or(DeclaringScope::Unproven, DeclaringScope::LambdaNode)
     }
 
     /// Whether `class` is a declaration's own class rather than an expansion's copy of one: no
@@ -176,6 +222,44 @@ mod tests {
         assert!(ir.is_reified_template_operation(scope, operation, parameter().ty()));
         let other = Ty::ty_param("\0tp:other:T", Ty::nullable(Ty::obj("kotlin/Any")));
         assert!(!ir.is_reified_template_operation(scope, operation, other));
+    }
+
+    #[test]
+    fn a_captured_signature_parameter_is_its_enclosing_declarations() {
+        let (mut ir, lambda, node, operation) = template();
+        ir.signatures.insert(
+            lambda,
+            IrGenericSig {
+                type_params: vec![parameter()],
+                params: Vec::new(),
+                ret: Some(Ty::Boolean),
+                supers: Vec::new(),
+            },
+        );
+        ir.captured_signature_type_parameters.insert(lambda, 1);
+        let scope = IrEnclosure::Function(lambda);
+        assert!(ir.is_reified_template_operation(scope, operation, parameter().ty()));
+        ir.mark_inline_copy(node);
+        assert!(!ir.is_reified_template_operation(scope, operation, parameter().ty()));
+
+        // A local function that captures `T` and no node creates is not the declaration either.
+        let (mut ir, _, _, operation) = template();
+        let local = function(&mut ir, "local");
+        ir.signatures.insert(
+            local,
+            IrGenericSig {
+                type_params: vec![parameter()],
+                params: Vec::new(),
+                ret: Some(Ty::Boolean),
+                supers: Vec::new(),
+            },
+        );
+        ir.captured_signature_type_parameters.insert(local, 1);
+        assert!(!ir.is_reified_template_operation(
+            IrEnclosure::Function(local),
+            operation,
+            parameter().ty()
+        ));
     }
 
     #[test]

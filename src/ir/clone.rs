@@ -700,6 +700,7 @@ fn copy_function_implementation_facts(
         *result = ty_subst_keep_unbound(*result, bindings);
     }
     copy_map!(signatures);
+    copy_map!(captured_signature_type_parameters);
     if let Some(signature) = ir.signatures.get_mut(&target) {
         for parameter in &mut signature.params {
             *parameter = ty_subst_keep_unbound(*parameter, bindings);
