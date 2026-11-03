@@ -45,6 +45,7 @@ use super::class_roles::ClassRoles;
 use super::name_generator::NameGenerator;
 use super::{InlineError, ObjectLambda};
 
+pub(super) use lambda_inlining::keeps_passed_lambda_as_value;
 pub(crate) use sam_wrapper::copy_sam_wrapper;
 pub(crate) use suspend_methods::CallSiteSource;
 use suspend_methods::ContinuationMachine;

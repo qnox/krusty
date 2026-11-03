@@ -186,6 +186,20 @@ pub(super) fn rename_field(code: &mut MethodNode, owner: &str, from: &str, to: &
 }
 
 impl Constructor {
+    /// The captured field the constructor, called through `call_desc`, stores its argument at
+    /// `index` in: the field a copy that inlines a lambda passed there reads it from.
+    pub(super) fn field_of_argument(&self, call_desc: &str, index: usize) -> Option<&str> {
+        let slot = 1 + argument_descriptors(call_desc)?
+            .get(..index)?
+            .iter()
+            .map(|argument| descriptor_words(argument))
+            .sum::<u16>();
+        self.fields
+            .iter()
+            .find(|field| field.slot == slot)
+            .map(|field| field.name.as_str())
+    }
+
     /// kotlinc's constructor for a copy that inlines the lambdas passed as the arguments at
     /// `lambda_arguments` of `call_desc`: each lambda's field and parameter go, and the values the
     /// lambdas capture, `recaptured` as `(field, descriptor)`, are taken after the other arguments

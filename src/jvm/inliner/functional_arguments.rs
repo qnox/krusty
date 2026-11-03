@@ -295,17 +295,66 @@ fn analyze(
 /// constructor of an anonymous object regenerated around it. kotlinc's frontend rules such a use
 /// out of its own bodies (a non-inlinable use of an inline parameter), so its `MethodInliner`
 /// never meets one; a body this compiler wrote can still capture the parameter in a lambda it
-/// materialized by `invokedynamic`. The call's route is decided from this fact before anything is
-/// inlined.
+/// materialized by `invokedynamic`, directly or in a method of an anonymous object the lambda is
+/// passed to, whose copy inlines it in turn. The call's route is decided from this fact before
+/// anything is inlined.
 pub(crate) fn keeps_lambda_as_value(
     callee: &MethodNode,
     parameters: &Parameters,
     classes: &dyn ClassRoles,
 ) -> Result<bool, InlineError> {
-    let (_, consumers) = analyze(callee, parameters)?;
-    Ok(keeps_value(callee, &consumers, |class| {
-        classes.is_regenerated(class)
-    }))
+    keeps_lambda_through_objects(callee, parameters, classes, &[])
+}
+
+/// [`keeps_lambda_as_value`] for `node`, a body inlined in the call or a method of one of the
+/// anonymous objects `enclosing` names, outermost first. A construction of one of those is already
+/// regenerated (`isAlreadyRegenerated`): its methods are the ones being analyzed.
+pub(super) fn keeps_lambda_through_objects(
+    node: &MethodNode,
+    parameters: &Parameters,
+    classes: &dyn ClassRoles,
+    enclosing: &[&str],
+) -> Result<bool, InlineError> {
+    let (_, consumers) = analyze(node, parameters)?;
+    let enclosed = |class: &str| enclosing.contains(&class);
+    if keeps_value(node, &consumers, |class| {
+        classes.is_regenerated(class) || enclosed(class)
+    }) {
+        return Ok(true);
+    }
+    // Each anonymous object constructed with some of the lambdas, by its constructor call, and
+    // the arguments that pass them (the operand after the uninitialized receiver).
+    let mut constructions: std::collections::BTreeMap<usize, Vec<usize>> = Default::default();
+    for &(_, at, operand) in &consumers {
+        if let Node::Insn(Insn::Method {
+            op: INVOKESPECIAL,
+            owner,
+            name,
+            ..
+        }) = &node.nodes[at]
+        {
+            if name == "<init>"
+                && operand > 0
+                && !enclosed(owner)
+                && classes.is_anonymous_object(owner)
+            {
+                constructions.entry(at).or_default().push(operand - 1);
+            }
+        }
+    }
+    for (at, mut arguments) in constructions {
+        let Node::Insn(Insn::Method { owner, desc, .. }) = &node.nodes[at] else {
+            unreachable!("a construction is a constructor call")
+        };
+        arguments.sort_unstable();
+        arguments.dedup();
+        if super::anonymous_object::keeps_passed_lambda_as_value(
+            owner, desc, &arguments, classes, enclosing,
+        )? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Whether one of `consumers`, the operations of `node` that take a lambda, keeps it as a value;
