@@ -57,7 +57,13 @@ impl<'a> CommonSupertypeSolver<'a> {
     /// round. Other shared classifiers still compete, and `Any` remains the sound result when no
     /// acyclic candidate exists.
     fn common_at(&mut self, bounds: &[Ty], permit_intersection: bool) -> Option<Ty> {
-        let nullable = bounds.iter().any(|bound| bound.is_nullable());
+        // A type parameter whose upper bound admits `null` may itself be instantiated with a
+        // nullable type, so a join that reaches past it to a shared supertype stays nullable:
+        // `listOf(t, Sub())` for `T : Base?` is `List<Base?>`.
+        let nullable = bounds.iter().any(|bound| {
+            bound.is_nullable()
+                || (matches!(bound.kind(), TyKind::TyParam(..)) && bound.upper_bound_admits_null())
+        });
         let preserve_nullability = |result: Ty| {
             if nullable && result != Ty::Error {
                 Ty::nullable(result)
@@ -452,6 +458,10 @@ fn closure(source: &dyn SymbolSource, root: Ty) -> Vec<Ty> {
             continue;
         }
         types.push(current);
+        // A type parameter's supertypes are its declared upper bounds.
+        if let TyKind::TyParam(_, bound) = current.kind() {
+            queue.push_back(bound.non_null());
+        }
         queue.extend(
             direct_supertypes(source, current)
                 .into_iter()
