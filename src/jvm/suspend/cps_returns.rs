@@ -206,7 +206,7 @@ pub(super) fn return_tail_calls(
             node
         };
         let returned = ir.add_expr(IrExpr::Return(Some(value)));
-        ir.expr_source_lines.insert(returned, close_line);
+        ir.set_source_line(returned, close_line);
         match slot {
             TailSlot::Statement(block, index) => {
                 if let IrExpr::Block { stmts, .. } = &mut ir.exprs[block as usize] {
