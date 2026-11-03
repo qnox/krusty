@@ -1,8 +1,17 @@
 //! A primitive value reaches a reference supertype through its Kotlin classifier's applied
-//! hierarchy, type arguments included, against kotlinc. The positive forms are the shared box
-//! regression `tests/box_regressions/primitiveReferenceSupertypes.kt`.
+//! hierarchy, type arguments included, against kotlinc. The resolver relation is common; the
+//! positive program runs on the JVM and Native, because the Wasm lanes do not yet lower the
+//! `Number`/`Comparable` members it calls.
 
 use super::common;
+
+#[test]
+fn a_primitive_reaches_the_reference_supertypes_its_classifier_declares() {
+    let source = include_str!("fixtures/primitive_reference_supertypes/Main.kt");
+    assert_eq!(common::kotlinc_box_result(source), "OK");
+    common::expect_box_ok_with_stdlib(source, "PrimitiveReferenceSupertypes");
+    common::expect_native_box(source, "PrimitiveReferenceSupertypes", "OK");
+}
 
 #[test]
 fn a_primitive_does_not_reach_a_supertype_application_it_does_not_implement() {
