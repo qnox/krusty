@@ -60,7 +60,7 @@ impl ProductionSignatureSemantics<'_> {
             let selected = match resolver.select_receiver_function_with_params_tracking(
                 receiver,
                 spelling,
-                &kinds,
+                crate::symbol_resolver::FamilyArguments::Shared(&kinds),
                 &resolved_type_arguments,
                 &callables,
                 None,

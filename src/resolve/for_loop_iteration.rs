@@ -623,7 +623,9 @@ impl Checker<'_> {
             .select_receiver_function_with_params_tracking(
                 char_sequence,
                 name,
-                &[crate::symbol_resolver::CallArgKind::Typed(Ty::Int)],
+                crate::symbol_resolver::FamilyArguments::Shared(&[
+                    crate::symbol_resolver::CallArgKind::Typed(Ty::Int),
+                ]),
                 &[],
                 &callables,
                 None,

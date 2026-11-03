@@ -2136,7 +2136,7 @@ impl ProductionSignatureSemantics<'_> {
                 )) = resolver.select_receiver_function_with_params_tracking(
                     receiver,
                     member_spelling,
-                    &selected_arguments,
+                    crate::symbol_resolver::FamilyArguments::Shared(&selected_arguments),
                     type_arguments,
                     &callables,
                     None,
