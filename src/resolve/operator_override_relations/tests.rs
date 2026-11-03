@@ -73,6 +73,10 @@ fn any_equals_relation_is_published_for_every_classifier_placement() {
         Some(crate::types::SemanticCallRole::KotlinAnyEquals)
     );
     assert_eq!(
+        realization.callable.declaration_owner, core.callable.declaration_owner,
+        "the selected and realized Any.equals name the same semantic owner"
+    );
+    assert_eq!(
         core.callable.declaration_owner,
         Some(crate::types::SemanticCallableOwner::Classifier(
             crate::types::wk::any()

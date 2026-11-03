@@ -74,6 +74,7 @@ impl CoreRegistry {
         );
         let mut stored = callable.clone();
         stored.external_identity = Some(identity);
+        stored.declaration_owner = declaration_owner;
         self.callables.push(ExternalCallableRealization {
             callable: stored,
             kind,
@@ -115,6 +116,13 @@ impl CoreRegistry {
             declares_value_class_storage: false,
             compile_time_constant,
         });
+        // The accessors' own realizations name the property they belong to, as the accessors
+        // the provider publishes do.
+        for accessor in std::iter::once(getter).chain(setter) {
+            self.callables[accessor.raw() as usize]
+                .callable
+                .external_property_identity = Some(identity);
+        }
         self.property_ids.insert((getter, setter), identity);
         identity
     }

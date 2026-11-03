@@ -2582,6 +2582,16 @@ mod tests {
             ))
         );
         assert_eq!(realization.callable.external_identity, Some(getter));
+        // The realization the provider answers with is the declaration it published.
+        assert_eq!(
+            realization.callable.declaration_owner,
+            size.getter.declaration_owner
+        );
+        assert_eq!(
+            realization.callable.external_property_identity,
+            Some(property),
+            "the getter's realization names the property it belongs to"
+        );
 
         let again = source
             .classifier(crate::types::type_name("kotlin/IntArray"))
