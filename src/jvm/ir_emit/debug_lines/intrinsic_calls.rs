@@ -90,7 +90,7 @@ pub(in crate::jvm::ir_emit) fn inversion_mask_line(ir: &IrFile, expression: Expr
     let call = ir.builtin_calls.get(&expression)?;
     (call.kind == IrBuiltinCallKind::Unary(FirUnaryOperation::BitwiseNot)
         && is_intrinsic_call(ir, expression, call))
-    .then(|| ir.expr_source_lines.get(&expression).copied())
+    .then(|| ir.source_line(expression))
     .flatten()
     .filter(|&line| line != 0)
 }

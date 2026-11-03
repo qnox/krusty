@@ -67,6 +67,14 @@ family was patched in the 30 days before 1 Nov 2026 (commits touching it under `
 | 4 | Origins and roles | `fir_origins`, the role sets above, `whens` | 47 |
 | 5 | Declaration facts | the `fn_*`, `lambda_*` and `*_fns` tables | — |
 
+Step 1 is split in two. First, `expr_source_lines` and `expr_end_lines` become one
+`IrNodePosition` per node (`src/ir/node_positions.rs`), read and written through `IrFile`
+accessors and copied as part of the node by every copy site. Behavior is unchanged: a node has the
+same lines it had in the maps. Second, lowering gives every node it builds for a FIR expression
+that expression's position, as fir2ir does, and the JVM backend decides by node kind where a line
+begins instead of by which nodes happen to carry a line. That second half changes line tables, so
+it lands together with the JVM line-marking work.
+
 Positions come first although types were patched more often, because positions are what the JVM
 line-number work is waiting on: once every node has offsets, kotlinc's line-marking rule is ported
 once instead of per construct. Each step also deletes its tables from the other hand-written copy

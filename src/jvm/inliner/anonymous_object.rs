@@ -62,6 +62,8 @@ const SOURCE_DEBUG_EXTENSION_DESC: &str = "Lkotlin/jvm/internal/SourceDebugExten
 /// The package of the coroutine base classes (`isCoroutineSuperClass`).
 const COROUTINE_BASE_PACKAGE: &str = "kotlin/coroutines/jvm/internal/";
 const CONTINUATION_IMPL: &str = "kotlin/coroutines/jvm/internal/ContinuationImpl";
+/// The internal-name prefix of the `FunctionN` interfaces, as a field descriptor.
+const FUNCTION_TYPE_PREFIX: &str = "Lkotlin/jvm/functions/Function";
 
 /// Why an anonymous object could not be regenerated.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -138,6 +140,14 @@ pub(crate) struct Regeneration<'a> {
     pub same_module: bool,
 }
 
+/// How a `$$forInline` method of the original becomes its copy's method with a state machine.
+enum MachineRebuild {
+    /// A named suspend method's: its continuation `original` is regenerated as `copy`.
+    Named { original: String, copy: String },
+    /// A suspend lambda's `invokeSuspend`, whose class is its own continuation.
+    Lambda,
+}
+
 /// The regenerated class.
 #[derive(Debug)]
 pub(crate) struct Regenerated {
@@ -185,6 +195,9 @@ pub(crate) fn regenerate(
     // object of its own.
     let mut continuations = Vec::new();
     for method in &methods {
+        if suspend_methods::is_lambda_machine(original, method) {
+            continue;
+        }
         if let (Some(_), Some(code)) = (
             suspend_methods::for_inline_original(&method.name),
             &method.code,
@@ -195,13 +208,28 @@ pub(crate) fn regenerate(
             continuations.push(continuation.to_string());
         }
     }
+    // `newStateMachineForLambda`: a suspend lambda with an `invokeSuspend$$forInline` copy is
+    // its own continuation, its machine rebuilt over that copy.
+    let lambda_machine = methods
+        .iter()
+        .any(|method| suspend_methods::is_lambda_machine(original, method));
     check_supported(
         original,
         regeneration.classes,
         &continuations,
         regeneration.continuation.is_some(),
+        lambda_machine,
         regeneration.lambdas.is_empty(),
     )?;
+    // The spill fields the lambda's class keeps its parameters in (`initialVarsCountByType`), which
+    // its `$$forInline` copy reads back: the rebuilt machine reuses them.
+    let parameter_spill_fields = methods
+        .iter()
+        .filter(|method| suspend_methods::is_lambda_machine(original, method))
+        .filter_map(|method| method.code.as_ref())
+        .map(|code| suspend_methods::parameter_spill_fields(code, old))
+        .next()
+        .unwrap_or_default();
     let mut remapper = TypeRemapper::with_type_arguments(regeneration.type_arguments);
     for (original, copy) in regeneration.prior_classes {
         remapper.add_mapping(original, copy);
@@ -252,7 +280,7 @@ pub(crate) fn regenerate(
                 // The copy's map is written with the class; kotlinc drops the original's.
                 SOURCE_DEBUG_EXTENSION_DESC => {}
                 // So is a continuation's `@DebugMetadata`, which its machine describes.
-                DEBUG_METADATA_DESC if regeneration.continuation.is_some() => {}
+                DEBUG_METADATA_DESC if regeneration.continuation.is_some() || lambda_machine => {}
                 _ => {
                     let mut annotation = annotation.clone();
                     remapper.remap_annotation(&mut annotation)?;
@@ -311,6 +339,9 @@ pub(crate) fn regenerate(
         regeneration.constructor_desc,
     )?;
     let lambdas = plan_lambdas(&mut plan, regeneration)?;
+    if lambda_machine {
+        refuse_uninlined_function_invokes(&methods, original, &declared, &lambdas, regeneration)?;
+    }
     plan.desc = remapper.map_desc(&plan.desc)?;
     for field in &mut plan.fields {
         field.desc = remapper.map_desc(&field.desc)?;
@@ -351,6 +382,7 @@ pub(crate) fn regenerate(
     })
     .map_err(RegenerationError::Copy)?;
 
+    // The suspend lambda fields the copy inlines.
     // The continuations of copies that need none, whose `InnerClasses` rows go with them.
     let mut dropped_continuations = Vec::new();
     let mut nested = Vec::new();
@@ -374,10 +406,13 @@ pub(crate) fn regenerate(
         check_captured_field_accesses(&method, old, &declared)?;
         // The continuation a `$$forInline` copy builds is regenerated as the copy's next object
         // when the inliner meets its construction.
-        let continuation = match (
+        let machine = match (
             suspend_methods::for_inline_original(&method.name),
             &method.code,
         ) {
+            (Some(_), Some(_)) if suspend_methods::is_lambda_machine(original, &method) => {
+                Some(MachineRebuild::Lambda)
+            }
             (Some(_), Some(code)) => {
                 let original = suspend_methods::fake_continuation_class(code)?
                     .ok_or(RegenerationError::Unsupported(
@@ -386,7 +421,7 @@ pub(crate) fn regenerate(
                     .to_string();
                 let copy = names.next_object().class().to_string();
                 remapper.add_mapping(&original, &copy);
-                Some((original, copy))
+                Some(MachineRebuild::Named { original, copy })
             }
             _ => None,
         };
@@ -410,6 +445,7 @@ pub(crate) fn regenerate(
                 let mut objects = NestedObjects {
                     regeneration,
                     names: &mut *names,
+                    own_constructor: &plan.desc,
                     method: suspend_methods::for_inline_original(&method.name)
                         .unwrap_or(&method.name),
                     descriptor: &method.desc,
@@ -421,7 +457,7 @@ pub(crate) fn regenerate(
                 let code = lambda_inlining::inline_into(
                     &code,
                     new,
-                    continuation.is_some(),
+                    machine.is_some(),
                     &lambdas,
                     &mut lines,
                     regeneration.caller_lines,
@@ -439,22 +475,48 @@ pub(crate) fn regenerate(
             };
             method.code = Some(code);
         }
-        let Some((original_continuation, continuation)) = continuation else {
+        let Some(machine) = machine else {
             cw.add_copied_method(&method)
                 .map_err(RegenerationError::Copy)?;
             continue;
         };
-        // `newStateMachineForNamedFunction`: the copy is the method itself, its state machine built
-        // over the inlined body.
+        // The copy is the method itself, its state machine built over the inlined body.
         let name = suspend_methods::for_inline_original(&method.name)
             .unwrap_or_default()
             .to_string();
         let mut body = method
             .code
             .take()
-            .unwrap_or_else(|| unreachable!("a $$forInline copy with a continuation has code"));
+            .unwrap_or_else(|| unreachable!("a $$forInline copy has code"));
         body.name.clone_from(&name);
         method.name = name;
+        let (original_continuation, continuation) = match machine {
+            MachineRebuild::Lambda => {
+                // `newStateMachineForLambda`: the lambda is its own continuation.
+                let (body, machine) = suspend_methods::transform_lambda(
+                    body,
+                    new,
+                    &parameter_spill_fields,
+                    &regeneration.call_site.source,
+                )?;
+                // The transformer runs when the method's writer exists, so its name and
+                // descriptor come first; it declares the spill fields it adds, then writes the
+                // machine's `@DebugMetadata`, before the body is written.
+                cw.seed_utf8(&method.name);
+                cw.seed_utf8(&method.desc);
+                if let Some(signature) = &method.signature {
+                    cw.seed_utf8(signature);
+                }
+                add_spill_fields(&mut cw, original, &machine);
+                cw.set_debug_metadata(&machine.debug_metadata);
+                method.code = Some(body);
+                cw.add_copied_transformed_method(&method)
+                    .map_err(RegenerationError::Copy)?;
+                continue;
+            }
+            MachineRebuild::Named { original, copy } => (original, copy),
+        };
+        // `newStateMachineForNamedFunction`.
         let (body, machine) =
             suspend_methods::transform(body, new, &continuation, &regeneration.call_site.source)?;
         method.code = Some(body);
@@ -554,15 +616,7 @@ pub(crate) fn regenerate(
     // continuation once it built the machine. A spill field the original's own machine declared
     // is already copied.
     if let Some(machine) = regeneration.continuation {
-        for field in &machine.fields {
-            let copied = original
-                .fields
-                .iter()
-                .any(|own| own.name == field.name && own.desc == field.descriptor);
-            if !copied {
-                cw.add_field_sig(0, &field.name, &field.descriptor, None);
-            }
-        }
+        add_spill_fields(&mut cw, original, machine);
         cw.set_debug_metadata(&machine.debug_metadata);
     }
     cw.intern_source_and_map();
@@ -573,6 +627,62 @@ pub(crate) fn regenerate(
         nested,
         sam_wrappers,
     })
+}
+
+/// A suspend lambda's machine is rebuilt over its `invokeSuspend$$forInline`, where an `invoke` of
+/// a captured function value the call does not inline is a suspension point only once kotlinc's
+/// `surroundInvokesWithSuspendMarkersIfNeeded` marks it, which the port does not do yet: such a
+/// copy is refused rather than given a machine that misses the suspension.
+fn refuse_uninlined_function_invokes(
+    methods: &[&ClassMethod],
+    original: &ClassNode,
+    declared: &[DeclaredCapture<'_>],
+    lambdas: &[FieldLambda<'_>],
+    regeneration: &Regeneration<'_>,
+) -> Result<(), RegenerationError> {
+    let functions: Vec<&str> = declared
+        .iter()
+        .filter(|field| field.desc.starts_with(FUNCTION_TYPE_PREFIX))
+        .filter(|field| !lambdas.iter().any(|lambda| lambda.field == field.name))
+        .map(|field| field.name)
+        .collect();
+    if functions.is_empty() {
+        return Ok(());
+    }
+    for method in methods {
+        if !suspend_methods::is_lambda_machine(original, method) {
+            continue;
+        }
+        let Some(code) = &method.code else { continue };
+        if !matches!(
+            lambda_inlining::invokes_field_lambda(
+                code,
+                &original.name,
+                &functions,
+                regeneration.classes
+            ),
+            Ok(false)
+        ) {
+            return Err(RegenerationError::Unsupported(
+                "a suspend lambda that invokes a function value its call does not inline",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Declare the spill fields `machine` needs that the original did not already declare, which the
+/// copy carries over: a suspend lambda's parameters, or the original machine's own.
+fn add_spill_fields(cw: &mut ClassWriter, original: &ClassNode, machine: &ContinuationMachine) {
+    for field in &machine.fields {
+        let copied = original
+            .fields
+            .iter()
+            .any(|own| own.name == field.name && own.desc == field.descriptor);
+        if !copied {
+            cw.add_field_sig(0, &field.name, &field.descriptor, None);
+        }
+    }
 }
 
 /// Specialize `body`'s reified markers. `true` when a marker remains for an enclosing inline
@@ -697,13 +807,16 @@ fn check_supported(
     classes: &dyn ClassRoles,
     continuations: &[String],
     continuation: bool,
+    lambda_machine: bool,
     specialization_only: bool,
 ) -> Result<(), RegenerationError> {
-    // A continuation copied for a suspend method's machine is one coroutine the port regenerates.
-    // A suspend lambda the call passes no lambda to is the other: its copy only specializes its
+    // A continuation copied for a suspend method's machine is one coroutine the port regenerates,
+    // and a suspend lambda whose machine is rebuilt over its `invokeSuspend$$forInline` another.
+    // A suspend lambda the call passes no lambda to is the third: its copy only specializes its
     // reified operations, so its machine and `@DebugMetadata` stay as they are.
     let regenerated_coroutine = (continuation
         && original.super_name.as_deref() == Some(CONTINUATION_IMPL))
+        || lambda_machine
         || (specialization_only
             && !continuation
             && original.super_name.as_deref() == Some(SUSPEND_LAMBDA));
