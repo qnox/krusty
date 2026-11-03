@@ -776,24 +776,10 @@ mod deterministic_output_e2e;
 mod diagnostic_duplication_e2e;
 #[path = "diagnostic_markers_e2e.rs"]
 mod diagnostic_markers_e2e;
-#[path = "diagnostics_call_mapping_cases_e2e.rs"]
-mod diagnostics_call_mapping_cases_e2e;
-#[path = "diagnostics_classifier_cast_cases_e2e.rs"]
-mod diagnostics_classifier_cast_cases_e2e;
-#[path = "diagnostics_inference_parity_e2e.rs"]
-mod diagnostics_inference_parity_e2e;
-#[path = "diagnostics_java_access_parity_e2e.rs"]
-mod diagnostics_java_access_parity_e2e;
-#[path = "diagnostics_jvm_and_catch_parity_e2e.rs"]
-mod diagnostics_jvm_and_catch_parity_e2e;
-#[path = "diagnostics_language_parity_e2e.rs"]
-mod diagnostics_language_parity_e2e;
+#[path = "e2e/diagnostics_parity.rs"]
+mod diagnostics_parity;
 #[path = "diagnostics_parity_support.rs"]
 mod diagnostics_parity_support;
-#[path = "diagnostics_receiver_reference_cases_e2e.rs"]
-mod diagnostics_receiver_reference_cases_e2e;
-#[path = "diagnostics_type_inference_cases_e2e.rs"]
-mod diagnostics_type_inference_cases_e2e;
 #[path = "discarded_dependency_result_e2e.rs"]
 mod discarded_dependency_result_e2e;
 #[path = "discarded_generic_result_e2e.rs"]
