@@ -606,10 +606,8 @@ impl Emitter<'_> {
         }
         let Some(line) = self
             .ir
-            .expr_end_lines
-            .get(&returned)
-            .or_else(|| self.ir.expr_source_lines.get(&returned))
-            .copied()
+            .end_line(returned)
+            .or_else(|| self.ir.source_line(returned))
             .filter(|line| *line != 0)
         else {
             return;
@@ -800,13 +798,7 @@ impl Emitter<'_> {
 
     /// The spliced lambda's closing brace, while its locals are still open.
     fn emit_spliced_lambda_brace(&mut self, block: u32, code: &mut CodeBuilder) {
-        let Some(line) = self
-            .ir
-            .expr_end_lines
-            .get(&block)
-            .copied()
-            .filter(|line| *line != 0)
-        else {
+        let Some(line) = self.ir.end_line(block).filter(|line| *line != 0) else {
             return;
         };
         if self
@@ -824,7 +816,7 @@ impl Emitter<'_> {
     /// Put the inline call's line on the instruction that follows, without a `nop`. The result
     /// load is that instruction; kotlinc's line table records the call there.
     fn anchor_spliced_lambda_result(&mut self, block: u32, code: &mut CodeBuilder) {
-        let Some(&line) = self.ir.expr_source_lines.get(&block) else {
+        let Some(line) = self.ir.source_line(block) else {
             return;
         };
         code.forget_line();
@@ -844,13 +836,7 @@ impl Emitter<'_> {
         {
             return false;
         }
-        let Some(line) = self
-            .ir
-            .expr_source_lines
-            .get(&block)
-            .copied()
-            .filter(|line| *line != 0)
-        else {
+        let Some(line) = self.ir.source_line(block).filter(|line| *line != 0) else {
             return false;
         };
         self.mark_expression_line(block, line, code);
@@ -918,13 +904,7 @@ impl Emitter<'_> {
         if code.is_dead() {
             return;
         }
-        if let Some(line) = self
-            .ir
-            .expr_source_lines
-            .get(&block)
-            .copied()
-            .filter(|l| *l != 0)
-        {
+        if let Some(line) = self.ir.source_line(block).filter(|l| *l != 0) {
             self.mark_expression_line(block, line, code);
             code.nop();
         }
@@ -961,12 +941,7 @@ impl Emitter<'_> {
         if !self.ir.external_inline_expansions.contains(&block) {
             return None;
         }
-        let line = self
-            .ir
-            .expr_source_lines
-            .get(&block)
-            .copied()
-            .filter(|line| *line != 0)?;
+        let line = self.ir.source_line(block).filter(|line| *line != 0)?;
         let marker = stmts.iter().copied().find(|&statement| {
             matches!(
                 self.ir.debug_local_provenance(statement),
@@ -1085,13 +1060,7 @@ impl Emitter<'_> {
             return;
         }
         if brace {
-            if let Some(line) = self
-                .ir
-                .expr_end_lines
-                .get(&block)
-                .copied()
-                .filter(|line| *line != 0)
-            {
+            if let Some(line) = self.ir.end_line(block).filter(|line| *line != 0) {
                 // The brace belongs to the lambda supplied by the inner frame's caller. It is a
                 // raw source line there, but maps through the containing frame when that caller is
                 // itself copied into another inline call.
@@ -1104,11 +1073,11 @@ impl Emitter<'_> {
                 } else {
                     code.mark_line(line);
                 }
-            } else if let Some(line) = self.ir.expr_source_lines.get(&block).copied() {
+            } else if let Some(line) = self.ir.source_line(block) {
                 code.forget_line();
                 self.mark_expression_line(block, line, code);
             }
-        } else if let Some(&line) = self.ir.expr_source_lines.get(&block) {
+        } else if let Some(line) = self.ir.source_line(block) {
             // The spliced body ran under its own lines: kotlinc resets the line in effect after an
             // inlined body, so the frame's closing mark is written even when it names that line.
             code.forget_line();
