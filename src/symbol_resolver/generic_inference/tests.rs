@@ -1234,3 +1234,67 @@ fn a_definitely_non_null_argument_joins_its_own_parameter_to_that_parameter() {
     assert_eq!(inferred.bindings.get("S"), Some(&caller_s));
     assert!(inferred.bound_violations.is_empty());
 }
+
+/// `class Nest<T> : Link<Nest<List<T>>>`: every application reaches `Link` one level deeper.
+struct ExpandingNest;
+
+impl crate::symbol_source::SymbolSource for ExpandingNest {
+    fn symbols(
+        &self,
+        namespace: crate::symbol_source::SymbolNamespace,
+        name: &str,
+    ) -> std::rc::Rc<crate::libraries::ResolvedSymbols> {
+        let identity = namespace.existing_classifier(name);
+        let classifier = identity
+            .filter(|identity| identity.matches("test/Nest"))
+            .map(|_| {
+                let any = Ty::nullable(Ty::obj("kotlin/Any"));
+                let mut classifier = crate::libraries::LibraryType::declaration_header();
+                classifier.type_parameters =
+                    crate::types::TypeParameters::invariant(vec!["T".to_string()], vec![vec![any]]);
+                classifier.own_type_parameter_count = 1;
+                let deeper = Ty::obj_args("kotlin/collections/List", &[Ty::ty_param("T", any)]);
+                classifier.supertype_templates = vec![Ty::obj_args(
+                    "test/Link",
+                    &[Ty::obj_args("test/Nest", &[deeper])],
+                )];
+                std::sync::Arc::new(classifier)
+            });
+        std::rc::Rc::new(crate::libraries::ResolvedSymbols {
+            classifier_name: classifier.as_ref().and(identity),
+            classifier,
+            ..crate::libraries::ResolvedSymbols::default()
+        })
+    }
+}
+
+#[test]
+fn mutually_recursive_classifier_bounds_stop_at_the_incorporation_depth() {
+    // `fun <A : Link<B>, B : Link<A>> f(a: A)` called as `f(Nest<String>())`.
+    let any = Ty::nullable(Ty::obj("kotlin/Any"));
+    let a = Ty::ty_param("callee:A", any);
+    let b = Ty::ty_param("callee:B", any);
+    let a_bound = Ty::obj_args("test/Link", &[b]);
+    let b_bound = Ty::obj_args("test/Link", &[a]);
+    let signature = GenericSig {
+        formals: vec!["callee:A".into(), "callee:B".into()],
+        formal_bounds: vec![vec![a_bound], vec![b_bound]],
+        receiver: None,
+        params: vec![Ty::ty_param("callee:A", a_bound)],
+        ret: Ty::Unit,
+        return_policy: crate::libraries::GenericReturnPolicy::Exact,
+    };
+    let actual = Ty::obj_args("test/Nest", &[Ty::String]);
+    let inferred = infer_generic_call_constraints_from_symbols(
+        &ExpandingNest,
+        &signature,
+        [(0, actual, false)],
+        None,
+    );
+    let list = |element| Ty::obj_args("kotlin/collections/List", &[element]);
+    assert_eq!(inferred.lower_inputs.get("callee:A"), Some(&vec![actual]));
+    assert_eq!(
+        inferred.lower_inputs.get("callee:B"),
+        Some(&vec![Ty::obj_args("test/Nest", &[list(Ty::String)])])
+    );
+}

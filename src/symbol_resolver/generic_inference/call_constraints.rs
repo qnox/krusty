@@ -530,6 +530,20 @@ impl CallInferenceConstraints {
     /// position (`E := EntityID<X>` contributes `X` to `T`). A bound that mentions its own formal
     /// (`T : Comparable<T>`) relates the variable to itself and is left to bound checking.
     fn propagate_declaration_bounds(&mut self, source: &dyn SymbolSource, signature: &GenericSig) {
+        // kotlinc incorporates a derived constraint only while its type is at most one level
+        // deeper than the deepest constraint the call itself supplied. Mutually recursive bounds
+        // over an expanding hierarchy (`A : Link<B>, B : Link<A>` with `Nest<T> :
+        // Link<Nest<List<T>>>`) otherwise derive an ever deeper input on every pass.
+        let depth_limit = self
+            .lower_inputs
+            .values()
+            .flatten()
+            .map(|(actual, _)| *actual)
+            .chain(self.upper.values().flatten().copied())
+            .map(type_depth)
+            .max()
+            .unwrap_or(0)
+            + 1;
         loop {
             let mut changed = false;
             let lower = self.lower_inputs.clone();
@@ -554,6 +568,9 @@ impl CallInferenceConstraints {
                             );
                             for (bound_formal, inputs) in incorporated.lower_inputs {
                                 for (input, origin) in inputs {
+                                    if type_depth(input) > depth_limit {
+                                        continue;
+                                    }
                                     changed |= self.insert(
                                         source,
                                         bound_formal.as_str(),
@@ -565,6 +582,9 @@ impl CallInferenceConstraints {
                             }
                             for (bound_formal, inputs) in incorporated.upper {
                                 for input in inputs {
+                                    if type_depth(input) > depth_limit {
+                                        continue;
+                                    }
                                     changed |= self.insert(
                                         source,
                                         bound_formal.as_str(),
@@ -876,6 +896,37 @@ impl CallInferenceConstraints {
             bound_violation: bound_violations.first().copied(),
             bound_violations,
         }
+    }
+}
+
+/// The nesting depth of a type's arguments, as kotlinc measures it for incorporation: a type with
+/// no arguments is 1, and each level of type arguments, function parameters or result adds one.
+/// Nullability, flexibility, projections and definite non-nullness do not add a level.
+fn type_depth(ty: Ty) -> usize {
+    match ty.kind() {
+        TyKind::Obj(_, arguments) => {
+            1 + arguments.iter().copied().map(type_depth).max().unwrap_or(0)
+        }
+        TyKind::Fun(function) => {
+            1 + function
+                .params
+                .iter()
+                .copied()
+                .chain(std::iter::once(function.ret))
+                .map(type_depth)
+                .max()
+                .unwrap_or(0)
+        }
+        TyKind::Intersection(parts) => parts.iter().copied().map(type_depth).max().unwrap_or(1),
+        TyKind::Nullable(inner)
+        | TyKind::PlatformNullable(inner)
+        | TyKind::MutabilityFlexible(inner)
+        | TyKind::InProjection(inner)
+        | TyKind::OutProjection(inner)
+        | TyKind::StarProjection(inner)
+        | TyKind::RawProjection(inner)
+        | TyKind::DefinitelyNotNull(inner) => type_depth(inner),
+        _ => 1,
     }
 }
 
