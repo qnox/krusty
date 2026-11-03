@@ -41,6 +41,14 @@ gradle.projectsEvaluated { g ->
             "${t.path}\t${root.projectDir.toPath().relativize(t.destinationDirectory.get().asFile.toPath())}\n"
         }.join('')
     }
+    // One line per Kotlin source file of a picked task, the task's path and the file's absolute
+    // path: the warm benchmark (`bench.py`) picks the file its edit loop changes from here.
+    def sources = System.getenv('CORPUS_SOURCES')
+    if (sources != null) {
+        new File(sources).text = picked.collectMany { t ->
+            t.sources.files.findAll { it.name.endsWith('.kt') }.collect { "${t.path}\t${it.absolutePath}\n" }
+        }.join('')
+    }
 }
 
 // Records the plugins each project applies, for the corpus plugin survey: every Gradle plugin by
