@@ -991,16 +991,22 @@ jobs:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: tool-bins
-      # ubuntu-latest has Bazelisk installed as `bazel`; the self-hosted image installs it as
-      # `bazelisk`.
-      - name: put bazelisk on PATH as bazel
+      # Runner images disagree on Bazel: ubuntu-latest ships Bazelisk as `bazel`, and some
+      # self-hosted images carry a mise `bazel` shim with no tool behind it. Install one pinned
+      # Bazelisk ahead of whatever the image has; USE_BAZEL_VERSION picks the Bazel it runs.
+      - name: install Bazelisk as bazel
+        env:
+          BAZELISK_VERSION: v1.30.0
+          BAZELISK_SHA256: a248ae2b2b62b5baebb748f6fba7203bff1a27e5d01b55399a8406744cb539e8
         run: |
           set -euo pipefail
-          if ! command -v bazel >/dev/null; then
-            mkdir -p "$RUNNER_TEMP/bin"
-            ln -s "$(command -v bazelisk)" "$RUNNER_TEMP/bin/bazel"
-            echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
-          fi
+          bin="$RUNNER_TEMP/bazelisk-bin"
+          mkdir -p "$bin"
+          curl -fsSLo "$bin/bazel" \
+            "https://github.com/bazelbuild/bazelisk/releases/download/$BAZELISK_VERSION/bazelisk-linux-amd64"
+          echo "$BAZELISK_SHA256  $bin/bazel" | sha256sum -c -
+          chmod +x "$bin/bazel"
+          echo "$bin" >> "$GITHUB_PATH"
       - name: build the packaged Bazel module with Bazel ${{ matrix.bazel }}
         env:
           USE_BAZEL_VERSION: ${{ matrix.bazel }}
