@@ -253,11 +253,10 @@ impl Body<'_> {
         }
         match default_entry {
             Some(entry) => {
-                for word in 0..abi.len().div_ceil(32) {
-                    let mask = omitted
-                        .iter()
-                        .filter(|&&position| position / 32 == word)
-                        .fold(0_u32, |mask, &position| mask | 1 << (position % 32));
+                for mask in crate::backend::default_arguments::omission_masks(
+                    abi.len(),
+                    omitted.iter().copied(),
+                ) {
                     self.code.i32_const(mask as i32);
                 }
                 self.code.call(entry);
@@ -287,7 +286,7 @@ impl Body<'_> {
             if omitted.contains(&position) {
                 let carrier = carrier(parameter)?
                     .ok_or_else(|| "a defaulted call with a `Unit` parameter".to_string())?;
-                super::default_arguments::push_zero(&mut self.code, carrier);
+                super::absent_arguments::push_zero(&mut self.code, carrier);
             } else {
                 let argument = supplied.next().expect("counted above");
                 self.value(*argument, parameter)?;

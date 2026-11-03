@@ -10,8 +10,6 @@ mod constructor_continuation_e2e;
 mod continuation_spill_order_e2e;
 #[path = "../coroutine_intrinsics_e2e.rs"]
 mod coroutine_intrinsics_e2e;
-#[path = "../crossinline_suspend_object_e2e.rs"]
-mod crossinline_suspend_object_e2e;
 #[path = "../generic_suspend_member_return_e2e.rs"]
 mod generic_suspend_member_return_e2e;
 #[path = "../local_suspend_default_e2e.rs"]

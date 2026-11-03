@@ -261,8 +261,6 @@ mod build840_jj1_param_soft_keyword_e2e;
 mod build840_kk1_inline_hof_enclosing_member_e2e;
 #[path = "build840_mm1_safe_call_lambda_ext_e2e.rs"]
 mod build840_mm1_safe_call_lambda_ext_e2e;
-#[path = "build840_nn1_suspend_inline_withlock_e2e.rs"]
-mod build840_nn1_suspend_inline_withlock_e2e;
 #[path = "builder_inference_receivers_e2e.rs"]
 mod builder_inference_receivers_e2e;
 #[path = "builder_nested_lambda_result_e2e.rs"]
@@ -749,6 +747,8 @@ mod dep_resolution;
 mod dependency_override_signature_e2e;
 #[path = "dependency_property_reference_name_e2e.rs"]
 mod dependency_property_reference_name_e2e;
+#[path = "dependency_value_class_override_e2e.rs"]
+mod dependency_value_class_override_e2e;
 #[path = "descriptor_arity_fails_closed_e2e.rs"]
 mod descriptor_arity_fails_closed_e2e;
 #[path = "descriptor_element_companion_serializer_e2e.rs"]
@@ -771,24 +771,10 @@ mod deterministic_output_e2e;
 mod diagnostic_duplication_e2e;
 #[path = "diagnostic_markers_e2e.rs"]
 mod diagnostic_markers_e2e;
-#[path = "diagnostics_call_mapping_cases_e2e.rs"]
-mod diagnostics_call_mapping_cases_e2e;
-#[path = "diagnostics_classifier_cast_cases_e2e.rs"]
-mod diagnostics_classifier_cast_cases_e2e;
-#[path = "diagnostics_inference_parity_e2e.rs"]
-mod diagnostics_inference_parity_e2e;
-#[path = "diagnostics_java_access_parity_e2e.rs"]
-mod diagnostics_java_access_parity_e2e;
-#[path = "diagnostics_jvm_and_catch_parity_e2e.rs"]
-mod diagnostics_jvm_and_catch_parity_e2e;
-#[path = "diagnostics_language_parity_e2e.rs"]
-mod diagnostics_language_parity_e2e;
+#[path = "e2e/diagnostics_parity.rs"]
+mod diagnostics_parity;
 #[path = "diagnostics_parity_support.rs"]
 mod diagnostics_parity_support;
-#[path = "diagnostics_receiver_reference_cases_e2e.rs"]
-mod diagnostics_receiver_reference_cases_e2e;
-#[path = "diagnostics_type_inference_cases_e2e.rs"]
-mod diagnostics_type_inference_cases_e2e;
 #[path = "discarded_dependency_result_e2e.rs"]
 mod discarded_dependency_result_e2e;
 #[path = "discarded_generic_result_e2e.rs"]
@@ -1202,6 +1188,8 @@ mod initializer_inline_local_scopes_e2e;
 mod inline;
 #[path = "inline_member_super_arguments_e2e.rs"]
 mod inline_member_super_arguments_e2e;
+#[path = "inline_operand_holder_slots_e2e.rs"]
+mod inline_operand_holder_slots_e2e;
 #[path = "inline_scopes_numbers_flag_e2e.rs"]
 mod inline_scopes_numbers_flag_e2e;
 #[path = "inlined_code_inner_classes_e2e.rs"]
@@ -1387,8 +1375,6 @@ mod kotlin_fun_java_sam_param_e2e;
 mod kotlin_native_provisioning_e2e;
 #[path = "kotlin_script_e2e.rs"]
 mod kotlin_script_e2e;
-#[path = "kotlinc_argument_conformance_e2e.rs"]
-mod kotlinc_argument_conformance_e2e;
 #[path = "krusty_dep_dir_e2e.rs"]
 mod krusty_dep_dir_e2e;
 #[path = "krusty_roundtrip_class_metadata_e2e.rs"]
@@ -1705,6 +1691,8 @@ mod string_when_switch_e2e;
 mod super_delegation_line_e2e;
 #[path = "e2e/suspend.rs"]
 mod suspend;
+#[path = "e2e/suspend_inlining.rs"]
+mod suspend_inlining;
 #[path = "type_parameter_nullability_annotations_e2e.rs"]
 mod type_parameter_nullability_annotations_e2e;
 #[path = "e2e/type_resolution.rs"]
@@ -1805,6 +1793,8 @@ mod value_class_signature_e2e;
 mod value_class_super_call_e2e;
 #[path = "value_class_try_value_e2e.rs"]
 mod value_class_try_value_e2e;
+#[path = "vararg_generic_signature_e2e.rs"]
+mod vararg_generic_signature_e2e;
 #[path = "variance_conflicts_e2e.rs"]
 mod variance_conflicts_e2e;
 
@@ -2997,6 +2987,9 @@ mod intersection_bound_metadata_order_e2e;
 mod type_safe_override_call_e2e;
 #[path = "where_bound_arguments_e2e.rs"]
 mod where_bound_arguments_e2e;
+
+#[path = "immediate_lambda_invocation_e2e.rs"]
+mod immediate_lambda_invocation_e2e;
 
 #[path = "facade_local_classifier_metadata_e2e.rs"]
 mod facade_local_classifier_metadata_e2e;

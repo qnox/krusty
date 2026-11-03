@@ -15,6 +15,7 @@ use std::cell::RefCell;
 use super::scalar_coercion::{semantic_scalar_adapter, unbox_prim_from};
 use super::{jvm_declared_ty, EmitRun, Emitter};
 use crate::ir::{ExprId, IrExpr, IrFile, IrTypeOp};
+use crate::jvm::bytecode::CodegenMarker;
 use crate::jvm::bytecode_passes::coroutines::markers::SuspendMarker;
 use crate::jvm::classfile::{
     ClassWriter, CodeBuilder, CoroutineOutcome, CoroutineRequest, TransformedCoroutine,
@@ -39,6 +40,9 @@ pub(super) struct TransformedSuspensions {
     initializer: Option<ExprId>,
     /// The body is a suspend lambda's placed one, whose calls pass the bare fake continuation.
     placed_lambda: bool,
+    /// The body is kept for an inlining caller: no transformer runs over it, so the markers it
+    /// keeps are written as the `InlineMarker` calls the class file holds.
+    kept_for_inlining: bool,
 }
 
 /// What a suspension point leaves on the stack after its invoke.
@@ -250,8 +254,8 @@ impl Emitter<'_> {
         // next line mark is the consumer's own.
         let initializer = self.transformed_suspensions.initializer == Some(e);
         let marked = block || (initializer && code.line_forgotten());
-        match self.ir.expr_source_lines.get(&e) {
-            Some(&line) if marked && !discarded && line != 0 => code.mark_line(line),
+        match self.ir.source_line(e) {
+            Some(line) if marked && !discarded && line != 0 => code.mark_line(line),
             _ => {}
         }
         let target = jvm_declared_ty(&result);
@@ -322,6 +326,7 @@ impl Emitter<'_> {
             inlined: HashSet::default(),
             initializer: None,
             placed_lambda: false,
+            kept_for_inlining: false,
         };
         self.suspend_lambda_parameter_reads = machine
             .lambda
@@ -370,10 +375,43 @@ impl Emitter<'_> {
         self.continuation_slot = continuation;
     }
 
+    /// Construct the method's continuation `continuation` on the receiver and `completion` and drop
+    /// it, between `InlineMarker.mark(4)` and `mark(5)`: kotlinc opens a `$$forInline` copy of a
+    /// method that reads a `crossinline` capture with it, and the transformer that builds the
+    /// copy's machine at an inlining call site replaces it with the machine's own.
+    pub(super) fn emit_fake_continuation_construction(
+        &mut self,
+        continuation: &str,
+        completion: u16,
+        code: &mut CodeBuilder,
+    ) {
+        self.written_suspend_marker(SuspendMarker::BeforeFakeContinuationConstructorCall, code);
+        let class = self.cw.class_ref(continuation);
+        code.new_obj(class);
+        code.dup();
+        super::load(Ty::obj(&self.owner), 0, code);
+        super::load(Ty::obj("kotlin/coroutines/Continuation"), completion, code);
+        let descriptor = format!("(L{};Lkotlin/coroutines/Continuation;)V", self.owner);
+        let constructor = self.cw.methodref(continuation, "<init>", &descriptor);
+        code.invokespecial(constructor, 2, 0);
+        self.written_suspend_marker(SuspendMarker::AfterFakeContinuationConstructorCall, code);
+        code.pop();
+    }
+
+    /// `InlineMarker.mark(marker)` as the call the class file holds: no transformer runs over a
+    /// body kept for inlining, so nothing else writes its markers out.
+    fn written_suspend_marker(&mut self, marker: SuspendMarker, code: &mut CodeBuilder) {
+        let (name, descriptor) = CodegenMarker::Mark.method();
+        let mark = self.cw.methodref(CodegenMarker::OWNER, name, descriptor);
+        code.push_int(marker as i32, self.cw);
+        code.invokestatic(mark, 1, 0);
+    }
+
     /// Leave `calls`, points of the machine just armed, unmarked: the body is kept for inlining
     /// and they are invokes of inline lambda parameters.
     pub(super) fn leave_inlined_invokes_unmarked(&mut self, calls: Vec<ExprId>) {
         self.transformed_suspensions.inlined = calls.into_iter().collect();
+        self.transformed_suspensions.kept_for_inlining = true;
     }
 
     /// Whether suspension point `e` is written between its markers.
@@ -384,7 +422,12 @@ impl Emitter<'_> {
     /// Mark the read of a suspend lambda's parameter from its field, just stored by declaration
     /// `e`, as kotlinc's codegen marks it: the coroutine starts after the last one.
     pub(super) fn mark_suspend_lambda_parameter_read(&mut self, e: ExprId, code: &mut CodeBuilder) {
-        if self.suspend_lambda_parameter_reads.contains(&e) {
+        if !self.suspend_lambda_parameter_reads.contains(&e) {
+            return;
+        }
+        if self.transformed_suspensions.kept_for_inlining {
+            self.written_suspend_marker(SuspendMarker::SuspendLambdaParameter, code);
+        } else {
             code.suspend_marker(SuspendMarker::SuspendLambdaParameter as i32, self.cw);
         }
     }
