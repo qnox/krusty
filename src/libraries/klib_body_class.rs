@@ -29,3 +29,9 @@ pub(crate) struct KlibBodyClassContract {
     /// Exact primary declaration, including a private primary that is not a public candidate.
     pub(crate) primary_constructor: Option<KlibPublicIdSignature>,
 }
+
+impl KlibBodyClassContract {
+    pub(crate) fn self_type(&self) -> Ty {
+        Ty::obj_args_name(self.classifier, &self.parameters.formals)
+    }
+}

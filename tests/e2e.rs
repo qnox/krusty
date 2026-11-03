@@ -1883,6 +1883,8 @@ mod native_compiler_command_e2e;
 mod native_concurrency_e2e;
 #[path = "native_const_reference_e2e.rs"]
 mod native_const_reference_e2e;
+#[path = "native_constructors_e2e.rs"]
+mod native_constructors_e2e;
 #[path = "native_context_parameter_sam_e2e.rs"]
 mod native_context_parameter_sam_e2e;
 #[path = "native_cross_file_dispatch_e2e.rs"]
@@ -1959,8 +1961,6 @@ mod native_not_null_assert_type_e2e;
 mod native_not_null_delegate_e2e;
 #[path = "native_number_subclass_e2e.rs"]
 mod native_number_subclass_e2e;
-#[path = "native_pair_construction_e2e.rs"]
-mod native_pair_construction_e2e;
 #[path = "native_preconditions_e2e.rs"]
 mod native_preconditions_e2e;
 #[path = "native_process_e2e.rs"]
@@ -1987,10 +1987,6 @@ mod native_runtime_cache_e2e;
 mod native_runtime_e2e;
 #[path = "native_sam_e2e.rs"]
 mod native_sam_e2e;
-#[path = "native_secondary_constructor_defaults_e2e.rs"]
-mod native_secondary_constructor_defaults_e2e;
-#[path = "native_secondary_constructors_e2e.rs"]
-mod native_secondary_constructors_e2e;
 #[path = "native_sequence_walks_e2e.rs"]
 mod native_sequence_walks_e2e;
 #[path = "native_sequences_e2e.rs"]
@@ -2019,8 +2015,6 @@ mod native_type_of_e2e;
 mod native_unsigned_e2e;
 #[path = "native_value_classes_e2e.rs"]
 mod native_value_classes_e2e;
-#[path = "native_vararg_constructor_e2e.rs"]
-mod native_vararg_constructor_e2e;
 #[path = "native_virtual_call_result_e2e.rs"]
 mod native_virtual_call_result_e2e;
 #[path = "native_virtual_selection_e2e.rs"]
