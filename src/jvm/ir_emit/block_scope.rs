@@ -1195,6 +1195,10 @@ impl Emitter<'_> {
         if let Some(index) = discarded_result {
             self.discarded_inline_results.insert(index);
         }
+        // An external expansion's operand bindings are its own. The enclosing statement may be a
+        // copied call's operand binding whose initializer runs this expansion; that binding still
+        // stores without a line once the expansion returns.
+        let enclosing_operand_binding = opening.map(|_| self.copied_operand_binding);
         let optimized_postfix = self.emit_postfix_iinc(block, true, code);
         let mut bound_operands = 0;
         let mut unit_switch_value = false;
@@ -1318,6 +1322,9 @@ impl Emitter<'_> {
         // Once it closes, an instruction consuming the block's value belongs to that enclosing
         // statement, not to the last branch/statement visited inside the block.
         self.statement_line = enclosing_statement_line;
+        if let Some(binding) = enclosing_operand_binding {
+            self.copied_operand_binding = binding;
+        }
         EmittedBlock {
             discard_after_close: discard_after_frame_close,
             retains_postfix_temporary,
