@@ -73,7 +73,7 @@ impl BodyLowering<'_> {
         };
         let when = self.ir.add_expr(IrExpr::When { branches });
         self.ir.short_circuits.insert(when, kind);
-        self.ir.logical_types.insert(when, Ty::Boolean);
+        self.ir.set_logical_type(when, Ty::Boolean);
         Ok(when)
     }
 

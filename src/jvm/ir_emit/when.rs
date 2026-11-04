@@ -82,8 +82,8 @@ impl Emitter<'_> {
     /// recorded. Emission never joins its branches' values; a value `when` without a recorded
     /// result is rejected.
     pub(super) fn when_value_ty(&self, expression: u32) -> Ty {
-        if let Some(realized) = self.ir.physical_types.get(&expression) {
-            return *realized;
+        if let Some(realized) = self.ir.physical_type(expression) {
+            return realized;
         }
         if let Some(result) = self.ir.when_result_type(expression) {
             return ir_ty_to_jvm(&result);

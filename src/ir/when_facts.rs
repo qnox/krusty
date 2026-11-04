@@ -61,9 +61,9 @@ impl super::IrFile {
         self.whens
             .exhaustive
             .get(&when)
-            .or_else(|| self.physical_types.get(&when))
-            .or_else(|| self.logical_types.get(&when))
             .copied()
+            .or_else(|| self.physical_type(when))
+            .or_else(|| self.logical_type(when))
     }
 
     /// The first `when` with an `else` whose result type no producer recorded, if any.

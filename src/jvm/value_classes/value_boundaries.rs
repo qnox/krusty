@@ -229,7 +229,7 @@ pub(super) fn when_merge_pairs(
     if !branches.iter().any(|(condition, _)| condition.is_none()) {
         return None;
     }
-    let result = *ir.logical_types.get(&id)?;
+    let result = ir.logical_type(id)?;
     if !is_ref(&result) || !matches!(target(&result, under), Target::Other) {
         return None;
     }

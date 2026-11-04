@@ -56,25 +56,8 @@ fun box(): String = if (read<Int>(Wrapper(1)) == 1) \"OK\" else \"fail\"\n";
 
 #[test]
 fn a_discarded_if_boxes_each_value_class_branch_into_its_sealed_result() {
-    const SRC: &str = "sealed interface ValueType {\n\
-    @JvmInline\n\
-    value class Number(val number: Int) : ValueType\n\
-    @JvmInline\n\
-    value class Other(val subtype: Subtype) : ValueType\n\
-}\n\
-interface Subtype {\n\
-    val id: Int\n\
-    @JvmInline\n\
-    value class Ref(override val id: Int) : Subtype\n\
-}\n\
-fun foo(f: Boolean): Int {\n\
-    val provider: () -> Subtype = { Subtype.Ref(1) }\n\
-    if (f)\n\
-        ValueType.Number(7)\n\
-    else\n\
-        ValueType.Other(provider())\n\
-    return 42\n\
-}\n\
-fun box(): String = if (foo(false) == 42 && foo(true) == 42) \"OK\" else \"fail\"\n";
-    assert_eq!(run(SRC).expect("discarded value-class if"), "OK");
+    common::expect_box_same_as_kotlinc(
+        include_str!("box_regressions/discardedIfOverSealedValueClasses.kt"),
+        "discardedIfOverSealedValueClasses",
+    );
 }

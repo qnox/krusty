@@ -28,14 +28,16 @@ pub(super) fn erase_when_merges(ir: &mut IrFile, under: &Under) {
             };
             if !branches.iter().any(|(condition, _)| condition.is_none())
                 || ir.whens.exhaustive.contains_key(&id)
-                || ir.physical_types.contains_key(&id)
+                || ir.physical_type(id).is_some()
             {
                 return None;
             }
-            let logical = ir.logical_types.get(&id)?;
-            let erased = erase(logical, under);
-            (erased != *logical).then(|| (id, ir_ty_to_jvm(&erased)))
+            let logical = ir.logical_type(id)?;
+            let erased = erase(&logical, under);
+            (erased != logical).then(|| (id, ir_ty_to_jvm(&erased)))
         })
         .collect::<Vec<_>>();
-    ir.physical_types.extend(erased_merges);
+    for (when, merge) in erased_merges {
+        ir.set_physical_type(when, merge);
+    }
 }

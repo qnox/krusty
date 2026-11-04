@@ -96,7 +96,7 @@ pub(super) fn box_wrap_nullable(
     let when = ir.add_expr(IrExpr::When {
         branches: vec![(Some(is_null), null2), (None, boxed)],
     });
-    ir.physical_types.insert(when, Ty::obj_name(x));
+    ir.set_physical_type(when, Ty::obj_name(x));
     ir.null_guards.insert(when);
     ir.jvm_value_class_null_guards.insert(when);
     ir.exprs[id as usize] = IrExpr::Block {
