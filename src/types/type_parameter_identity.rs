@@ -9,6 +9,8 @@ use super::intern;
 static TYPE_PARAMETER_SOURCES: OnceLock<Mutex<HashMap<&'static str, &'static str>>> =
     OnceLock::new();
 static NEXT_METADATA_TYPE_PARAMETER: AtomicU64 = AtomicU64::new(0);
+static NESTED_RESULT_TYPE_VARIABLES: OnceLock<Mutex<crate::fx_hash::HashSet<&'static str>>> =
+    OnceLock::new();
 
 /// Allocate an opaque identity for a type parameter owned by a dependency declaration. The
 /// provider retains the identity beside the exact declaration key it decoded; only the source
@@ -60,6 +62,33 @@ pub(crate) fn call_site_type_variable(declared: &'static str) -> &'static str {
     let source = sources.get(declared).copied().unwrap_or(declared);
     sources.insert(fresh, source);
     fresh
+}
+
+/// The variable an enclosing call solves for a nested call's formal that the nested call's own
+/// inputs left unfixed (`update(column, wrap("x"))` with `fun <T : Any> wrap(label: String)`). The
+/// nested call's provisional result names it in place of the declaration formal, so enclosing
+/// overload selection reads that argument as a result-only producer rather than as a fixed type.
+pub(crate) fn nested_result_type_variable(declared: &'static str) -> &'static str {
+    let fresh = intern(&format!("\0nested-result:{declared}"));
+    let mut sources = TYPE_PARAMETER_SOURCES
+        .get_or_init(|| Mutex::new(HashMap::default()))
+        .lock()
+        .unwrap();
+    let source = sources.get(declared).copied().unwrap_or(declared);
+    sources.insert(fresh, source);
+    NESTED_RESULT_TYPE_VARIABLES
+        .get_or_init(|| Mutex::new(crate::fx_hash::HashSet::default()))
+        .lock()
+        .unwrap()
+        .insert(fresh);
+    fresh
+}
+
+/// Whether `identity` was produced by [`nested_result_type_variable`].
+pub(crate) fn is_nested_result_type_variable(identity: &str) -> bool {
+    NESTED_RESULT_TYPE_VARIABLES
+        .get()
+        .is_some_and(|variables| variables.lock().unwrap().contains(identity))
 }
 
 /// The inference variable owned by one postponed call expression. Unlike

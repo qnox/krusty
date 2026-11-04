@@ -13,6 +13,7 @@ use crate::types::{Ty, TyKind, TypeName};
 use super::{ClassSig, Signature, SymbolTable};
 
 mod bound_local_alias_templates;
+mod call_argument_kinds;
 mod callable_references;
 mod classifier_associated;
 mod classifier_identities;
@@ -22,6 +23,7 @@ mod convention_results;
 mod declaration_aliases;
 mod declaration_conflicts;
 mod declaration_spellings;
+mod declaration_type_parameters;
 mod declaration_type_sites;
 mod deferred_local_headers;
 mod delegates;
@@ -1039,25 +1041,6 @@ impl ProductionSignatureSemantics<'_> {
             }
         })
         .ok()
-    }
-
-    /// The resolver-facing kind for one evaluated signature argument. An integer LITERAL keeps its
-    /// folded value so overload resolution can let it adopt a narrower integer parameter type.
-    fn call_argument_kind(
-        argument: &crate::fir::ResolvedSigCallArgument<'_>,
-    ) -> crate::symbol_resolver::CallArgKind {
-        if argument.spread {
-            return crate::symbol_resolver::CallArgKind::Spread(argument.ty.get());
-        }
-        if argument.lambda {
-            return crate::symbol_resolver::CallArgKind::LambdaLiteral(argument.ty.get());
-        }
-        match argument.integer_literal {
-            Some(constant) => {
-                crate::symbol_resolver::CallArgKind::integer_constant(argument.ty.get(), constant)
-            }
-            None => crate::symbol_resolver::CallArgKind::Typed(argument.ty.get()),
-        }
     }
 
     fn mapped_call_arguments(

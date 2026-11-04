@@ -213,6 +213,23 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
             }))
         }
 
+        /// A nested call argument whose type still carries formals its own inputs did not fix is a
+        /// provisional result; the enclosing call owns those variables.
+        fn with_nested_result_variables<'a, S: SignatureSemantics>(
+            semantics: &S,
+            scope: SignatureScope,
+            nested_call: bool,
+            argument: ResolvedSigCallArgument<'a>,
+        ) -> ResolvedSigCallArgument<'a> {
+            if !nested_call || argument.lambda || !argument.ty.get().mentions_ty_param() {
+                return argument;
+            }
+            ResolvedSigCallArgument {
+                ty: semantics.nested_result_variables(scope, argument.ty),
+                ..argument
+            }
+        }
+
         fn materialize_argument<'a, S: SignatureSemantics>(
             semantics: &S,
             argument: &'a SigCallArgument,
@@ -876,15 +893,23 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
             for (index, argument) in call_arguments.iter().enumerate() {
                 resolved_arguments.push(match materialized[index] {
                     Some(argument) => argument,
-                    None => materialize_argument(
+                    None => with_nested_result_variables(
                         semantics,
-                        argument,
-                        expectations.get(index).copied().flatten(),
-                        graph,
-                        demand,
-                        memo,
-                        computing,
-                    )?,
+                        scope,
+                        matches!(
+                            graph.expr(argument.value),
+                            Some(SigExpr::Call { .. } | SigExpr::MemberCall { .. })
+                        ),
+                        materialize_argument(
+                            semantics,
+                            argument,
+                            expectations.get(index).copied().flatten(),
+                            graph,
+                            demand,
+                            memo,
+                            computing,
+                        )?,
+                    ),
                 });
             }
             semantics.select_call(
@@ -1218,15 +1243,23 @@ impl<S: SignatureSemantics> SignatureConstraintEvaluator
             for (index, argument) in call_arguments.iter().enumerate() {
                 resolved_arguments.push(match materialized[index] {
                     Some(argument) => argument,
-                    None => materialize_argument(
+                    None => with_nested_result_variables(
                         semantics,
-                        argument,
-                        expectations.get(index).copied().flatten(),
-                        graph,
-                        demand,
-                        memo,
-                        computing,
-                    )?,
+                        scope,
+                        matches!(
+                            graph.expr(argument.value),
+                            Some(SigExpr::Call { .. } | SigExpr::MemberCall { .. })
+                        ),
+                        materialize_argument(
+                            semantics,
+                            argument,
+                            expectations.get(index).copied().flatten(),
+                            graph,
+                            demand,
+                            memo,
+                            computing,
+                        )?,
+                    ),
                 });
             }
             let selected = semantics.select_member_call(
