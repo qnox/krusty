@@ -182,7 +182,12 @@ impl Lane for WasmLane {
         modules: &[krusty::conformance::ModuleUnit],
         directive_source: &str,
     ) -> Outcome {
-        let backend = WasmBackend::new(self.target).with_entry(Entry::Box);
+        let Some(entry_module) = modules.last() else {
+            return Outcome::Harness("a module graph has no final source module".to_string());
+        };
+        let backend = WasmBackend::new(self.target)
+            .with_entry(Entry::Box)
+            .with_entry_module(entry_module.name.clone());
         let features = krusty::features::LangFeatures::from_source(directive_source);
         let platform = match self.target {
             WasmTarget::Js => krusty::klib::write::KlibPlatform::WasmJs,
