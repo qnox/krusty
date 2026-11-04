@@ -89,8 +89,7 @@ impl ProductionSignatureSemantics<'_> {
         let mut visible = self.with_signature_type_scope(scope, |lexical| {
             lexical
                 .visible_tparams()
-                .erasure
-                .values()
+                .binding_types()
                 .filter_map(|ty| ty.ty_param_name())
                 .collect::<crate::fx_hash::HashSet<_>>()
         })?;
