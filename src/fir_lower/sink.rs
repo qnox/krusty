@@ -1057,6 +1057,8 @@ impl<'a> CommonIrBodySink<'a> {
                     });
                 if let Some(subclass) = subclass {
                     let mut entry_class = crate::ir::IrClass::synthetic(subclass);
+                    entry_class.declaration_context =
+                        Some(crate::ir::IrClassDeclarationContext::Member);
                     entry_class.declaration_name = subclass_declaration;
                     entry_class.superclass = header.classifier;
                     // The selected enum-entry constructor is executable FIR and may be a secondary
