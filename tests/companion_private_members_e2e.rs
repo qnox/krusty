@@ -235,3 +235,71 @@ open class Guarded {
         &["Holder", "Leaked", "Shared", "Guarded"],
     );
 }
+
+/// An interface's members are public, so kotlinc makes its private companion public in bytecode
+/// (`specialCaseVisibility`): its `InnerClasses` rows are public, and the interface's `Companion`
+/// field is public and synthetic, so it carries no nullability annotation. Each constant the
+/// companion moves onto the interface is deprecated as on a class. A public companion's field is
+/// an ordinary one, on an interface and on an annotation class alike.
+#[test]
+fn an_interfaces_private_companion_is_public_and_synthetic_in_bytecode() {
+    common::assert_classes_identical_to_kotlinc(
+        "InterfacePrivateCompanion",
+        r#"
+interface Keyed {
+    fun all() = LIMIT + label.length + named()
+    private companion object {
+        const val LIMIT = 3
+        val label = "label"
+        fun named() = 1
+    }
+}
+
+interface Open {
+    fun all() = LIMIT
+    companion object {
+        const val LIMIT = 1
+    }
+}
+
+annotation class Tagged {
+    companion object {
+        const val LIMIT = 1
+        const val NAME = "tagged"
+    }
+}
+"#,
+        &[
+            "Keyed",
+            "Keyed$Companion",
+            "Open",
+            "Open$Companion",
+            "Tagged",
+            "Tagged$Companion",
+        ],
+    );
+}
+
+/// The annotation interface and its companion load and verify on the JVM: reading the companion
+/// goes through the annotation's `Companion` field, and the class literal is an annotation type.
+#[test]
+fn an_annotation_class_companion_loads_through_its_field() {
+    common::expect_box_ok_with_stdlib(
+        r#"
+annotation class Tagged {
+    companion object {
+        const val LIMIT = 1
+        fun named() = "tagged"
+    }
+}
+
+fun box(): String {
+    val companion = Tagged
+    if (!Tagged::class.java.isAnnotation) return "fail: not an annotation"
+    if (companion.named() != "tagged") return "fail: companion"
+    return if (Tagged.LIMIT == 1) "OK" else "fail: limit"
+}
+"#,
+        "AnnotationCompanionLoads",
+    );
+}
