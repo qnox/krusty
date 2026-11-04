@@ -20,16 +20,15 @@ fn reified_parameter() -> IrTypeParameter {
 fn type_test_implementation(ir: &mut IrFile, name: &str) -> u32 {
     let tested = reified_parameter().ty();
     let operand = ir.add_expr(IrExpr::GetValue(0));
-    ir.logical_types
-        .insert(operand, Ty::nullable(Ty::obj("kotlin/Any")));
+    ir.set_logical_type(operand, Ty::nullable(Ty::obj("kotlin/Any")));
     let test = ir.add_expr(IrExpr::TypeOp {
         op: crate::ir::IrTypeOp::InstanceOf,
         arg: operand,
         type_operand: tested,
     });
-    ir.logical_types.insert(test, Ty::Boolean);
+    ir.set_logical_type(test, Ty::Boolean);
     let returned = ir.add_expr(IrExpr::Return(Some(test)));
-    ir.logical_types.insert(returned, Ty::Nothing);
+    ir.set_logical_type(returned, Ty::Nothing);
     let body = ir.add_expr(IrExpr::Block {
         stmts: vec![returned],
         value: None,
@@ -51,9 +50,9 @@ fn type_test_implementation(ir: &mut IrFile, name: &str) -> u32 {
 fn reified_template_file(copy: bool) -> IrFile {
     let mut ir = IrFile::default();
     let result = ir.add_expr(IrExpr::Const(crate::ir::IrConst::Boolean(true)));
-    ir.logical_types.insert(result, Ty::Boolean);
+    ir.set_logical_type(result, Ty::Boolean);
     let returned = ir.add_expr(IrExpr::Return(Some(result)));
-    ir.logical_types.insert(returned, Ty::Nothing);
+    ir.set_logical_type(returned, Ty::Nothing);
     let body = ir.add_expr(IrExpr::Block {
         stmts: vec![returned],
         value: None,
