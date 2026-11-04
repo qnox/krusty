@@ -86,8 +86,7 @@ fn literal_facts(ir: &IrFile, lambda: ExprId) -> Result<LiteralFacts, &'static s
         return Err("a placed lambda's method lacks a parameter for each argument");
     };
     let semantic = match ir
-        .logical_types
-        .get(&lambda)
+        .logical_type(lambda)
         .map(|ty| ty.non_null())
         .map(Ty::kind)
     {
@@ -96,7 +95,7 @@ fn literal_facts(ir: &IrFile, lambda: ExprId) -> Result<LiteralFacts, &'static s
     };
     // The body is built in a scratch frame whose argument slots are not installed yet, so its
     // value's type is the checked one, never read back from slots or from the method.
-    let Some(&result) = ir.logical_types.get(inline_body) else {
+    let Some(result) = ir.logical_type(*inline_body) else {
         return Err("a placed lambda's body has no checked result type");
     };
     Ok(LiteralFacts {
@@ -131,11 +130,7 @@ fn callable_reference_facts(ir: &IrFile, lambda: ExprId) -> Result<LiteralFacts,
     let Some(arguments) = physical.get(captures.len()..captures.len() + arity) else {
         return Err("a placed callable reference's method lacks a parameter for each argument");
     };
-    let result = ir
-        .logical_types
-        .get(&returned)
-        .copied()
-        .unwrap_or(signature.ret);
+    let result = ir.logical_type(returned).unwrap_or(signature.ret);
     Ok(LiteralFacts {
         lambda,
         impl_fn: adapter,
@@ -645,9 +640,8 @@ mod tests {
     fn a_plan_reads_every_fact_from_checked_ir_and_the_frame_plan() {
         let mut ir = IrFile::default();
         let (args, lambda, body) = call_with_literal(&mut ir);
-        ir.logical_types
-            .insert(lambda, function_type(vec![Ty::UInt], Ty::UInt));
-        ir.logical_types.insert(body, Ty::UInt);
+        ir.set_logical_type(lambda, function_type(vec![Ty::UInt], Ty::UInt));
+        ir.set_logical_type(body, Ty::UInt);
         let impl_fn = match ir.expr(lambda) {
             IrExpr::Lambda { impl_fn, .. } => *impl_fn,
             _ => unreachable!(),
@@ -678,7 +672,7 @@ mod tests {
     fn a_missing_semantic_function_type_rejects_the_splice() {
         let mut ir = IrFile::default();
         let (args, _, body) = call_with_literal(&mut ir);
-        ir.logical_types.insert(body, Ty::Int);
+        ir.set_logical_type(body, Ty::Int);
         assert_eq!(
             unified_splice_plan(&ir, &args, &[1], Some(&frame(vec![4], vec![1]))),
             Err("a placed lambda has no checked function type with each argument's type")
@@ -689,10 +683,9 @@ mod tests {
     fn a_mis_sized_semantic_function_type_rejects_the_splice() {
         let mut ir = IrFile::default();
         let (args, lambda, body) = call_with_literal(&mut ir);
-        ir.logical_types.insert(body, Ty::Int);
+        ir.set_logical_type(body, Ty::Int);
         for params in [Vec::new(), vec![Ty::Int, Ty::Int]] {
-            ir.logical_types
-                .insert(lambda, function_type(params, Ty::Int));
+            ir.set_logical_type(lambda, function_type(params, Ty::Int));
             assert_eq!(
                 unified_splice_plan(&ir, &args, &[1], Some(&frame(vec![4], vec![1]))),
                 Err("a placed lambda has no checked function type with each argument's type")
@@ -704,8 +697,8 @@ mod tests {
     fn a_non_function_semantic_type_rejects_the_splice() {
         let mut ir = IrFile::default();
         let (args, lambda, body) = call_with_literal(&mut ir);
-        ir.logical_types.insert(body, Ty::Int);
-        ir.logical_types.insert(lambda, Ty::Int);
+        ir.set_logical_type(body, Ty::Int);
+        ir.set_logical_type(lambda, Ty::Int);
         assert_eq!(
             unified_splice_plan(&ir, &args, &[1], Some(&frame(vec![4], vec![1]))),
             Err("a placed lambda has no checked function type with each argument's type")
@@ -716,8 +709,7 @@ mod tests {
     fn a_missing_checked_body_result_rejects_the_splice() {
         let mut ir = IrFile::default();
         let (args, lambda, _) = call_with_literal(&mut ir);
-        ir.logical_types
-            .insert(lambda, function_type(vec![Ty::Int], Ty::Int));
+        ir.set_logical_type(lambda, function_type(vec![Ty::Int], Ty::Int));
         assert_eq!(
             unified_splice_plan(&ir, &args, &[1], Some(&frame(vec![4], vec![1]))),
             Err("a placed lambda's body has no checked result type")
@@ -729,9 +721,8 @@ mod tests {
         let mut ir = IrFile::default();
         let receiver = ir.add_expr(IrExpr::GetValue(2));
         let (lambda, body) = literal(&mut ir, vec![Ty::Long]);
-        ir.logical_types
-            .insert(lambda, function_type(vec![Ty::Int], Ty::Int));
-        ir.logical_types.insert(body, Ty::Int);
+        ir.set_logical_type(lambda, function_type(vec![Ty::Int], Ty::Int));
+        ir.set_logical_type(body, Ty::Int);
         assert_eq!(
             unified_splice_plan(
                 &ir,
@@ -756,9 +747,8 @@ mod tests {
     /// Fully checked facts, for the frame-plan cases.
     fn checked_call(ir: &mut IrFile) -> Vec<ExprId> {
         let (args, lambda, body) = call_with_literal(ir);
-        ir.logical_types
-            .insert(lambda, function_type(vec![Ty::Int], Ty::Int));
-        ir.logical_types.insert(body, Ty::Int);
+        ir.set_logical_type(lambda, function_type(vec![Ty::Int], Ty::Int));
+        ir.set_logical_type(body, Ty::Int);
         args
     }
 
@@ -778,14 +768,13 @@ mod tests {
     fn missing_checked_facts_fail_even_where_the_host_is_unsupported() {
         let mut ir = IrFile::default();
         let (args, lambda, _) = call_with_literal(&mut ir);
-        ir.logical_types
-            .insert(lambda, function_type(vec![Ty::Int], Ty::Int));
+        ir.set_logical_type(lambda, function_type(vec![Ty::Int], Ty::Int));
         assert_eq!(
             unified_splice_plan(&ir, &args, &[1], None),
             Err("a placed lambda's body has no checked result type")
         );
         let (args, _, body) = call_with_literal(&mut ir);
-        ir.logical_types.insert(body, Ty::Int);
+        ir.set_logical_type(body, Ty::Int);
         assert_eq!(
             unified_splice_plan(&ir, &args, &[1], None),
             Err("a placed lambda has no checked function type with each argument's type")
@@ -897,8 +886,8 @@ mod tests {
             inline_body: Some(inline_body),
         });
         let block_type = function_type(Vec::new(), Ty::Unit);
-        ir.logical_types.insert(lambda, block_type);
-        ir.logical_types.insert(inline_body, Ty::Unit);
+        ir.set_logical_type(lambda, block_type);
+        ir.set_logical_type(inline_body, Ty::Unit);
         let call = ir.add_expr(IrExpr::Call {
             callee: Box::new(crate::ir::Callee::Static {
                 owner: crate::types::type_name("lib/HostKt"),
