@@ -10,9 +10,6 @@
 # base which has since dropped entries is not charged with them. The CLI not-applicable lists are
 # not checked here: they record what the reference kotlinc cannot run in this environment, and the
 # required reference run proves every entry instead.
-# A box regression fixture this change adds (`tests/box_regressions/<path>`, absent at the merge
-# base) arrives with the backlog it measures: an expected failure listed for it as
-# `regressions/<path>` is not an addition. A fixture that already existed is charged like any case.
 # The sole approved #2459 migration pins each exact loaded old/new blob and effective release in
 # outcome-list-migrations.tsv. Only a row introduced in this comparison can authorize that reset;
 # the approval is spent once the merge-base or actual target records it. A different blob transition
@@ -22,7 +19,7 @@
 set -euo pipefail
 
 if [ "$#" -ne 2 ]; then
-  sed -n '2,21p' "$0" >&2
+  sed -n '2,14p' "$0" >&2
   exit 2
 fi
 target=$(git rev-parse --verify "$1^{commit}")
@@ -105,13 +102,6 @@ approved_migration() {
   fi
 }
 
-# The box keys of the regression fixtures the head adds.
-fixtures() {
-  git ls-tree -r --name-only "$1" -- tests/box_regressions/ |
-    sed -n 's|^tests/box_regressions/|regressions/|p' | sort -u
-}
-new_fixtures=$(comm -13 <(fixtures "$base") <(fixtures "$head"))
-
 added_total=0
 while read -r lane; do
   base_releases=$(releases "$base" "$lane")
@@ -125,19 +115,10 @@ while read -r lane; do
     else
       added=""
     fi
-    manifest="$lane/$release.txt"
-    [ "$to" = "$release" ] || manifest="$manifest (reads $lane/$to.txt)"
-    if [ -n "$added" ] && [ -n "$new_fixtures" ] && [[ $lane == tests/box_expected_failures/* ]]; then
-      introduced=$(comm -12 <(echo "$added") <(echo "$new_fixtures"))
-      if [ -n "$introduced" ]; then
-        count=$(wc -l <<<"$introduced" | tr -d '[:space:]')
-        echo "outcome-lists: $manifest lists $count fixture$([ "$count" -eq 1 ] || echo s) this change adds:" >&2
-        sed 's/^/    /' <<<"$introduced" >&2
-        added=$(comm -23 <(echo "$added") <(echo "$introduced"))
-      fi
-    fi
     [ -n "$added" ] || continue
     count=$(wc -l <<<"$added" | tr -d '[:space:]')
+    manifest="$lane/$release.txt"
+    [ "$to" = "$release" ] || manifest="$manifest (reads $lane/$to.txt)"
     if approved_migration "$lane" "$release" "$from" "$to"; then
       echo "outcome-lists: authorized #2459 migration for $manifest: $count added entr$([ "$count" -eq 1 ] && echo y || echo ies)" >&2
       continue
