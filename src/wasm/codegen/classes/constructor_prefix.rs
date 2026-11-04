@@ -30,7 +30,7 @@ pub(super) fn supported(ir: &IrFile, id: ClassId) -> bool {
         return false;
     };
     // Preserve the established inner-instance path. Adding a Capture role or payload requires
-    // the complete storage proof below even when the class is also an inner class.
+    // the complete prefix proof below even when the class is also an inner class.
     if class.is_inner_class
         && prefix.iter().all(|argument| {
             !matches!(

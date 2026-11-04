@@ -349,7 +349,9 @@ impl ClassWriter {
     /// The registered rows the finished `InnerClasses` table keeps, in table order.
     ///
     /// Retention is a FIXPOINT, computed WITHOUT interning: a row is kept once its inner class is
-    /// present, and a kept row's outer is what makes an enclosing row present. kotlinc adds every
+    /// present, and a kept row's outer or authenticated declaring owner makes an enclosing row
+    /// present. Anonymous rows omit `outer` in their payload but still have a declaring owner.
+    /// kotlinc adds every
     /// enclosing class of a referenced nested class to the table, so `A$B$C` keeps `A$B` even
     /// when that row sorts first and nothing else names `A$B`.
     ///
@@ -371,7 +373,16 @@ impl ClassWriter {
         let mut seeded: HashSet<&str> = HashSet::default();
         while let Some(row) = pending.pop() {
             let spec = &specs[row];
-            for seed in std::iter::once(spec.inner.as_str()).chain(spec.outer.as_deref()) {
+            let declaring_owner = match &self.inner_class_table {
+                InnerClassTable::Referenced(local) => {
+                    local.declaring.get(&spec.inner).map(String::as_str)
+                }
+                InnerClassTable::Visited => None,
+            };
+            for seed in std::iter::once(spec.inner.as_str())
+                .chain(spec.outer.as_deref())
+                .chain(declaring_owner)
+            {
                 if !seeded.insert(seed) {
                     continue;
                 }

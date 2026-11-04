@@ -82,7 +82,7 @@ pub(crate) use local_signatures::{
 pub(crate) use local_signatures::{
     publish_checked_local_signatures, publish_discovered_local_capture_declarations,
 };
-use postponed_argument_mapping::MappedTopLevelSelection;
+use postponed_argument_mapping::{typed_argument_evidence, MappedTopLevelSelection};
 pub(crate) use source_contracts::{extract_source_contract_candidates, SourceContractCandidate};
 use type_resolution::SelectedTypeSite;
 
@@ -2134,7 +2134,7 @@ impl ProductionSignatureSemantics<'_> {
                 )) = resolver.select_receiver_function_with_params_tracking(
                     receiver,
                     member_spelling,
-                    &selected_arguments,
+                    crate::symbol_resolver::FamilyArguments::Shared(&selected_arguments),
                     type_arguments,
                     &callables,
                     None,

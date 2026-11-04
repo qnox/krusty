@@ -802,6 +802,7 @@ fn ir_type_parameters(
                 .collect(),
             variance: crate::types::TypeVariance::Invariant,
             reified: false,
+            captured_from_enclosing: false,
         })
         .collect()
 }

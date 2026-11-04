@@ -329,7 +329,7 @@ impl SignatureDescriptionBinder<'_, '_> {
                 match resolver.select_receiver_function_with_params_tracking(
                     receiver,
                     name,
-                    &arguments,
+                    crate::symbol_resolver::FamilyArguments::Shared(&arguments),
                     &[],
                     &callables,
                     None,

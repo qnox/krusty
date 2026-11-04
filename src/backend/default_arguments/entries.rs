@@ -123,6 +123,14 @@ fn declares_defaults(ir: &IrFile, function: FunId) -> bool {
         .is_some_and(|defaults| defaults.iter().any(Option::is_some))
 }
 
+/// The entry of `declaration` that callers this file cannot see reach, when it publishes one: the
+/// entry of a top-level declaration with defaults, built whether or not this file calls it.
+pub(crate) fn published_entry(ir: &IrFile, declaration: FunId) -> Option<FunId> {
+    is_published(ir, declaration)
+        .then(|| ir.default_entries.get(&declaration).copied())
+        .flatten()
+}
+
 /// The identities other files of the module call `declaration`'s entry by: the declaration whose
 /// defaults it evaluates. An `actual` declaration's entry is keyed by its `expect`, which is what
 /// the callers selected; one whose defaults come from a dependency has no module identity.
@@ -226,7 +234,7 @@ fn build(
         let guarded = ir.add_expr(IrExpr::When {
             branches: vec![(Some(omitted), fill)],
         });
-        ir.logical_types.insert(guarded, Ty::Unit);
+        ir.set_logical_type(guarded, Ty::Unit);
         fills.push(guarded);
     }
 
@@ -269,11 +277,15 @@ fn build(
         },
     };
     let call = ir.add_expr(call);
-    ir.logical_types.insert(call, result);
-    let body = ir.add_expr(IrExpr::Block {
-        stmts: fills,
-        value: Some(call),
-    });
+    ir.set_logical_type(call, result);
+    // A function body returns its result explicitly; a `Unit` one ends after the call.
+    let last = match result {
+        Ty::Unit => call,
+        _ => ir.add_expr(IrExpr::Return(Some(call))),
+    };
+    let mut stmts = fills;
+    stmts.push(last);
+    let body = ir.add_expr(IrExpr::Block { stmts, value: None });
     let entry = ir.add_fun(IrFunction {
         name,
         params: receiver
@@ -287,12 +299,14 @@ fn build(
         dispatch_receiver: None,
         param_checks: Vec::new(),
     });
+    // Compiler-generated: no source declaration of its own, and no public name.
+    ir.synthetic_methods.insert(entry);
     ir.default_entries.insert(declaration, entry);
     entry
 }
 
 fn read(ir: &mut IrFile, slot: u32, ty: Ty) -> ExprId {
     let read = ir.add_expr(IrExpr::GetValue(slot));
-    ir.logical_types.insert(read, ty);
+    ir.set_logical_type(read, ty);
     read
 }
