@@ -166,6 +166,8 @@ pub enum Callee {
     /// lives in a JVM-default holder are target choices. `jvm::module_calls` realizes this into
     /// [`Callee::Special`].
     Super {
+        /// Original selected qualifier; representation changes to `owner` do not change it.
+        qualifier: TypeName,
         owner: TypeName,
         /// Exact classifier whose instance supplies the nonvirtual dispatch receiver.
         dispatch_owner: TypeName,

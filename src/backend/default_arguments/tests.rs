@@ -646,6 +646,7 @@ fn shapes_this_lowering_cannot_realize_keep_their_checked_form() {
     // A `super` call with an omitted argument.
     let super_call = ir.add_expr(IrExpr::Call {
         callee: Box::new(Callee::Super {
+            qualifier: owner,
             owner,
             dispatch_owner: owner,
             enclosing_dispatch: false,

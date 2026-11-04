@@ -516,12 +516,14 @@ fn callee(callee: &mut Callee, names: &IdentityRemap<'_>) {
             }
         }
         Callee::Super {
+            qualifier,
             owner,
             dispatch_owner,
             params,
             ret,
             ..
         } => {
+            name(qualifier, names);
             name(owner, names);
             name(dispatch_owner, names);
             tys(params, names);

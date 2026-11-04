@@ -88,6 +88,7 @@ pub(crate) struct BackendPassFacts {
     /// Checked property operations realized before representation passes. Companion hoisting
     /// reads it to attach a private accessor to the operation that moves into `<clinit>`.
     property_realizations: crate::property_realizations::PropertyRealizations,
+    super_accessors: crate::module_calls::SuperAccessors,
     /// The `-jvm-default` mode, which decides the forwarders (and their bridges) a class writes for
     /// the interface defaults it inherits.
     jvm_default: crate::ir_emit::JvmDefaultMode,
@@ -248,8 +249,10 @@ fn run_backend_passes_after_plugins(
     // the same JVM boundary as source super calls, never in the plugin itself or the emitter.
     crate::module_calls::realize_super_calls(
         ir,
+        classifiers,
         callables,
         &mut facts.property_realizations,
+        &mut facts.super_accessors,
         facts.jvm_default,
     )
     .map_err(|_| SkipReason::SuperCalls)?;
@@ -481,6 +484,10 @@ fn run_backend_passes_after_plugins(
         facade,
         &facts.property_reference_realizations,
     );
+    facts
+        .super_accessors
+        .finalize(ir)
+        .map_err(|_| SkipReason::SuperCalls)?;
     // A delegated property's reflected signature names its declaration's physical getter. Its
     // exact FunId was retained when the reference was built; consume that identity only after
     // value-class and internal-member naming have fixed the accessor's final JVM ABI.
@@ -1418,6 +1425,7 @@ impl Backend for JvmBackend {
             crate::default_call_operands::DefaultCallOperands::default();
         let mut property_realizations =
             crate::property_realizations::PropertyRealizations::default();
+        let mut super_accessors = crate::module_calls::SuperAccessors::default();
         if let Err(target) =
             crate::local_properties::realize(&mut file.ir, &mut property_realizations)
         {
@@ -1433,6 +1441,7 @@ impl Backend for JvmBackend {
             &file.classifiers,
             &file.callables,
             &mut property_realizations,
+            &mut super_accessors,
             self.jvm_default,
         ) {
             diags.error(
@@ -1459,6 +1468,7 @@ impl Backend for JvmBackend {
             &file_classes,
             property_realizations,
             BackendPassFacts {
+                super_accessors,
                 property_reference_realizations,
                 default_call_operands,
                 local_delegate_access,

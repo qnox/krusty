@@ -928,6 +928,7 @@ fn a_plugin_added_dependency_super_call_is_frozen_once() {
     };
     ir.add_expr(krusty::ir::IrExpr::Call {
         callee: Box::new(krusty::ir::Callee::Super {
+            qualifier: owner,
             owner,
             dispatch_owner: type_name("fixture/Child"),
             enclosing_dispatch: false,
