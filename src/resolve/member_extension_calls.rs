@@ -15,6 +15,7 @@ impl Checker<'_> {
         call_args: CallArgs<'_>,
         extension_receiver: Ty,
         name: &str,
+        result: CallResultConstraint,
         inference_bindings: Option<&crate::symbol_resolver::GSigBinds>,
     ) -> Option<Ty> {
         self.check_member_extension_function_call_mode(
@@ -26,7 +27,7 @@ impl Checker<'_> {
                 kinds: MemberExtensionSelection::All,
                 receivers: None,
                 rejections: RejectedMemberExtensions::YieldToApplicableExtension,
-                result: CallResultConstraint::direct(None),
+                result,
                 inference_bindings,
             },
         )
