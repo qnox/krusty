@@ -175,6 +175,24 @@ impl CallArgKind {
         matches!(self, Self::LambdaLiteral(_))
     }
 
+    /// This argument as overload applicability sees it before any lambda body is analyzed: a
+    /// checked lambda literal keeps its inputs, and its result becomes an open probe.
+    pub(crate) fn with_postponed_lambda_result(&self) -> Self {
+        let Self::LambdaLiteral(ty) = self else {
+            return self.clone();
+        };
+        let TyKind::Fun(signature) = ty.kind() else {
+            return self.clone();
+        };
+        Self::LambdaLiteral(Ty::fun_with_shape(
+            signature.params.clone(),
+            Ty::Error,
+            signature.context_count,
+            signature.has_receiver,
+            signature.suspend,
+        ))
+    }
+
     pub(crate) fn is_integer_literal(&self) -> bool {
         matches!(self, Self::IntegerLiteral { .. })
     }

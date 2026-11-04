@@ -21,7 +21,7 @@ pub(super) fn realize(
             if let Some(ty) = property_declaration_type(&layout) {
                 ir.property_declaration_types.insert(access.operation, ty);
                 if ty.is_ty_param() {
-                    ir.physical_types.insert(access.operation, ty);
+                    ir.set_physical_type(access.operation, ty);
                 }
             }
         }

@@ -90,6 +90,15 @@ pub(super) enum MemberExtensionLambdaShape {
     Selected(crate::symbol_resolver::LambdaCallShape),
 }
 
+impl MemberExtensionLambdaShape {
+    pub(super) fn selected(self) -> Option<crate::symbol_resolver::LambdaCallShape> {
+        match self {
+            Self::Selected(shape) => Some(shape),
+            Self::Absent | Self::Ambiguous => None,
+        }
+    }
+}
+
 pub(super) fn exclude_delegate_convention(
     shape: &MemberExtensionFunctionShape,
     selection: MemberExtensionSelection,

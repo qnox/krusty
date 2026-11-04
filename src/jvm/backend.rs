@@ -56,7 +56,7 @@ pub(crate) struct BackendPassPlugins<'a> {
 pub(crate) struct BackendPassFacts {
     continuation_metadata: crate::jvm::suspend::ContinuationMetadataMap,
     /// Suspend functions whose state machine is built during emission because their only suspension
-    /// lives inside a body the emitter splices. See `docs/JVM_INLINE_BEFORE_CPS.md`.
+    /// lives inside a body the emitter splices.
     emit_time_machines: crate::jvm::suspend::EmitTimeMachines,
     /// Physical returns that preserve `COROUTINE_SUSPENDED` and otherwise answer `Unit`.
     suspended_result_returns: crate::jvm::suspend::SuspendedResultReturns,
@@ -90,6 +90,7 @@ pub(crate) struct BackendPassFacts {
     /// Checked property operations realized before representation passes. Companion hoisting
     /// reads it to attach a private accessor to the operation that moves into `<clinit>`.
     property_realizations: crate::jvm::property_realizations::PropertyRealizations,
+    super_accessors: crate::jvm::module_calls::SuperAccessors,
     /// The `-jvm-default` mode, which decides the forwarders (and their bridges) a class writes for
     /// the interface defaults it inherits.
     jvm_default: crate::jvm::ir_emit::JvmDefaultMode,
@@ -238,8 +239,10 @@ fn run_backend_passes_after_plugins(
     // the same JVM boundary as source super calls, never in the plugin itself or the emitter.
     crate::jvm::module_calls::realize_super_calls(
         ir,
+        classifiers,
         callables,
         &mut facts.property_realizations,
+        &mut facts.super_accessors,
         facts.jvm_default,
     )
     .map_err(|_| SkipReason::SuperCalls)?;
@@ -472,6 +475,10 @@ fn run_backend_passes_after_plugins(
         facade,
         &facts.property_reference_realizations,
     );
+    facts
+        .super_accessors
+        .finalize(ir)
+        .map_err(|_| SkipReason::SuperCalls)?;
     // A delegated property's reflected signature names its declaration's physical getter. Its
     // exact FunId was retained when the reference was built; consume that identity only after
     // value-class and internal-member naming have fixed the accessor's final JVM ABI.
@@ -491,7 +498,15 @@ fn run_backend_passes_after_plugins(
     // on the caller's lifted spelling, which exists only now.
     let closure_names =
         crate::jvm::lambda_classes::rename_specialized_lambda_classes(ir, facade, lambda_modes);
-    crate::jvm::reified_anonymous::rename(ir, facade, lambda_modes);
+    crate::jvm::reified_anonymous::rename(
+        ir,
+        facade,
+        lambda_modes,
+        crate::jvm::reified_anonymous::Continuations {
+            machines: &mut facts.emit_time_machines,
+            metadata: &mut facts.continuation_metadata,
+        },
+    );
     facts
         .property_reference_realizations
         .remap_delegated_owners(&closure_names);
@@ -1469,6 +1484,7 @@ impl Backend for JvmBackend {
             crate::jvm::default_call_operands::DefaultCallOperands::default();
         let mut property_realizations =
             crate::jvm::property_realizations::PropertyRealizations::default();
+        let mut super_accessors = crate::jvm::module_calls::SuperAccessors::default();
         if let Err(target) =
             crate::jvm::local_properties::realize(&mut file.ir, &mut property_realizations)
         {
@@ -1484,6 +1500,7 @@ impl Backend for JvmBackend {
             &file.classifiers,
             &file.callables,
             &mut property_realizations,
+            &mut super_accessors,
             self.jvm_default,
         ) {
             diags.error(
@@ -1510,6 +1527,7 @@ impl Backend for JvmBackend {
             &file_classes,
             property_realizations,
             BackendPassFacts {
+                super_accessors,
                 property_reference_realizations,
                 default_call_operands,
                 local_delegate_access,
@@ -1595,7 +1613,10 @@ pub fn facade_package_metadata_from_ir(
             {
                 physical
                     .map(|function| {
-                        crate::jvm::names::method_descriptor(&function.params, function.ret)
+                        crate::jvm::method_descriptors::ir_method_desc(
+                            &function.params,
+                            &function.ret,
+                        )
                     })
                     .expect("a rewritten package function has its IR realization")
             } else {
@@ -1685,9 +1706,15 @@ pub fn facade_package_metadata_from_ir(
                 .expect("the property type was pushed last");
             let descriptor_parameters = accessor_types
                 .iter()
-                .map(|parameter| crate::jvm::names::type_descriptor(*parameter))
+                .map(|parameter| {
+                    crate::jvm::names::type_descriptor(
+                        crate::jvm::method_descriptors::jvm_value_ty(parameter),
+                    )
+                })
                 .collect::<String>();
-            let ty_descriptor = crate::jvm::names::type_descriptor(erased_ty);
+            let ty_descriptor = crate::jvm::names::type_descriptor(
+                crate::jvm::method_descriptors::jvm_declared_ty(&erased_ty),
+            );
             // A value class is stored as its carrier. The getter kotlinc records, and the field
             // descriptor a reader cannot derive from `S`, both name that carrier.
             let value_descriptor =
@@ -1803,9 +1830,9 @@ fn value_class_accessor_descriptor(
 ) -> Option<String> {
     let accessor = accessor.filter(|accessor| ir.vc_declared_sigs.contains_key(accessor))?;
     let function = &ir.functions[accessor as usize];
-    Some(crate::jvm::names::method_descriptor(
+    Some(crate::jvm::method_descriptors::ir_method_desc(
         &function.params,
-        function.ret,
+        &function.ret,
     ))
 }
 
@@ -1864,26 +1891,13 @@ fn declared_method_descriptor(declaration: &crate::ir::IrPackageFunction) -> Str
     if let Some(receiver) = declaration.receiver.filter(|_| !declaration.companion) {
         physical.insert(declaration.context_count.min(physical.len()), receiver);
     }
-    // Each parameter is a value slot: a `Unit` one is the `kotlin.Unit` reference, not `void`.
-    let mut descriptor = physical
-        .iter()
-        .map(|parameter| {
-            crate::jvm::names::type_descriptor(crate::jvm::method_descriptors::jvm_value_ty(
-                parameter,
-            ))
-        })
-        .collect::<String>();
-    if declaration.suspend {
-        descriptor.push_str("Lkotlin/coroutines/Continuation;");
-    }
-    format!(
-        "({descriptor}){}",
-        if declaration.suspend {
-            "Ljava/lang/Object;".to_owned()
-        } else {
-            crate::jvm::names::type_descriptor(declaration.ret)
-        }
-    )
+    let result = if declaration.suspend {
+        physical.push(Ty::obj("kotlin/coroutines/Continuation"));
+        Ty::obj("java/lang/Object")
+    } else {
+        declaration.ret
+    };
+    crate::jvm::method_descriptors::ir_method_desc(&physical, &result)
 }
 
 fn build_facade_metadata(

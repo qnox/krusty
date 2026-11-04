@@ -39,3 +39,6 @@ impl File {
         self.hoisted_classifier_owners.get(&classifier).copied()
     }
 }
+
+#[cfg(test)]
+mod tests;
