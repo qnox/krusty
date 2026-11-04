@@ -52,43 +52,10 @@ fn declared_projected_varargs_box_nullable_value_classes_and_heterogeneous_value
 
 /// `arrayOf`'s parameter is `vararg elements: T`, so a spread or named whole array is checked
 /// against `Array<out T>`: an out-projected array spreads into it, and an explicit or expected
-/// element type still fixes `T`. The Wasm lanes decline array literals with a spread, so this
-/// stays a JVM case.
+/// element type still fixes `T`.
 #[test]
 fn out_projected_array_spreads_into_array_of() {
-    const SOURCE: &str = r#"
-        class Name(val text: String)
-        class Code(val text: String)
-
-        fun parts(named: Boolean): Array<out Any> =
-            if (named) arrayOf(Name("n")) else arrayOf(Code("c"))
-
-        fun third(vararg items: Any): Any = items[2]
-
-        fun box(): String {
-            val leading = arrayOf<Any>(1, "s")
-            val projected = parts(true)
-            val strings: Array<out String> = arrayOf("x", "y")
-
-            val joined = arrayOf(*leading, *projected, "p")
-            if ((third(*joined) as Name).text != "n") return "joined"
-            if (joined[3] != "p") return "joined tail"
-
-            val tail = arrayOf(*projected, 3)
-            if (tail[1] != 3) return "tail"
-
-            val typed: Array<Any> = arrayOf(*strings, 4)
-            if (typed[0] != "x" || typed[2] != 4) return "typed"
-
-            val explicit = arrayOf<CharSequence>(*strings)
-            if (explicit[1] != "y") return "explicit"
-
-            val named = arrayOf(elements = strings)
-            if (named[1] != "y") return "named"
-
-            return "OK"
-        }
-    "#;
+    const SOURCE: &str = include_str!("box_regressions/spreadOutProjectedArrayIntoArrayOf.kt");
     assert_eq!(common::kotlinc_box_result(SOURCE), "OK");
     assert_eq!(
         common::expect_box_run_with_stdlib(SOURCE, "out_projected_array_of_spread"),
