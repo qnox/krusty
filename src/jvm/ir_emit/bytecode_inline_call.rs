@@ -1005,6 +1005,12 @@ impl Emitter<'_> {
         };
         let claimable = self.claimable_lines();
         let bodies = self.bodies;
+        // The body is numbered from the method's scopes so far, its own scope at the call's line
+        // (`currentCallSiteLineNumber = lastLineNumber`).
+        let mut scopes = self.inline_scopes.take().map(|mut scopes| {
+            scopes.call_site_line = caller_line.map_or(-1, i32::from);
+            scopes
+        });
         let mut lines = CallLines {
             emitter: self,
             body,
@@ -1042,8 +1048,10 @@ impl Emitter<'_> {
                 classes: &bodies,
                 objects: &mut objects,
                 enum_entries: &mut enum_entries,
+                scopes: scopes.as_mut(),
             },
         );
+        self.inline_scopes = scopes;
         let inlined = match inlined {
             Ok(inlined) => inlined,
             Err(error) => {
@@ -1211,9 +1219,7 @@ impl Emitter<'_> {
         let function_typed = |argument: u32| {
             let semantic = self
                 .ir
-                .logical_types
-                .get(&argument)
-                .copied()
+                .logical_type(argument)
                 .unwrap_or_else(|| self.value_ty(argument));
             semantic.non_null().is_fun()
         };

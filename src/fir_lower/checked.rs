@@ -766,6 +766,13 @@ impl BodyLowering<'_> {
                 if *suspend {
                     self.ir.suspend_calls.insert(call, result.get());
                 }
+                // A generic super declaration leaves its physical result on the call; the logical
+                // result is the coercion the caller wraps around it, as at any selected call.
+                if physical_result.get() != result.get() {
+                    self.ir
+                        .call_declared_ret
+                        .insert(call, physical_result.get());
+                }
                 Ok(self.wrap_call_statements(statements, call))
             }
             FirCallTarget::Intrinsic {

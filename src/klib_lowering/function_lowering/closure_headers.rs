@@ -100,6 +100,12 @@ impl FunctionHeader {
                             _ => IrCapturedDeclaration::Parameter,
                         },
                         capturer,
+                        crossinline_parameter: match original.role {
+                            IrParameterRole::CapturedValue { capture, .. } => {
+                                capture.crossinline_parameter
+                            }
+                            _ => None,
+                        },
                     },
                 )
             }
@@ -142,10 +148,7 @@ pub(in super::super) fn closure_header(
                 capture.symbol.clone(),
                 ParameterValue {
                     index: index as u32,
-                    stable_read: !matches!(
-                        capture.identity.role,
-                        IrParameterRole::CapturedReceiver { .. }
-                    ),
+                    stable_read: true,
                     erased: None,
                 },
             )

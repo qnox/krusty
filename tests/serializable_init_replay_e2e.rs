@@ -108,3 +108,34 @@ fn lambdas_in_copied_init_blocks_are_lambdas_of_their_own() {
     let krusty = fixture.krusty("main", &sources, &runtime, &switches);
     assert_same_classes_and_box(&reference, &krusty, &runtime);
 }
+
+const REQUIRE: &str = "import kotlinx.serialization.Serializable\n\
+                       import kotlinx.serialization.json.Json\n\
+                       @Serializable\n\
+                       data class Amount(val value: String, val unit: String = \"abc\") {\n\
+                       \x20   init {\n\
+                       \x20       require(unit.length == 3) { \"unit must have three letters\" }\n\
+                       \x20   }\n\
+                       }\n\
+                       fun box(): String {\n\
+                       \x20   val back = Json.decodeFromString(Amount.serializer(), \"{\\\"value\\\":\\\"1\\\"}\")\n\
+                       \x20   return if (back.unit == \"abc\") \"OK\" else back.unit\n\
+                       }\n";
+
+/// A copied `init` block keeps the line kotlinc restates after an inlined call's lambda, so the
+/// deserialization constructor's line table matches the primary constructor's.
+#[test]
+fn a_copied_init_block_restates_its_line_after_an_inlined_call() {
+    let (plugin, mut runtime) = plugin_and_runtime()
+        .expect("the serialization plugin and runtime must be available to this regression");
+    runtime.push(
+        krusty::toolchain::serialization_json_jar()
+            .expect("kotlinx-serialization-json must be available to this regression"),
+    );
+    let switches = vec![format!("-Xplugin={}", plugin.display())];
+    let fixture = PluginFixture::new("serializable-init-replay-require");
+    let sources = [("Main.kt", REQUIRE)];
+    let reference = fixture.kotlinc("main", &sources, &runtime, &switches);
+    let krusty = fixture.krusty("main", &sources, &runtime, &switches);
+    assert_same_classes_and_box(&reference, &krusty, &runtime);
+}

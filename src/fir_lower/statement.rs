@@ -179,10 +179,7 @@ impl BodyLowering<'_> {
         // source line of its own, so this records one for the lowered write itself.
         let target_line = self.body.statement_target_debug_line(statement_id);
         if target_line != 0 {
-            self.ir
-                .expr_source_lines
-                .entry(lowered)
-                .or_insert(target_line);
+            self.ir.set_source_line_if_absent(lowered, target_line);
         }
         self.set_statement_state(statement_id, LoweringState::Lowered(lowered));
         Ok(lowered)
@@ -385,6 +382,33 @@ impl BodyLowering<'_> {
                     self.ir.add_expr(IrExpr::GetValue(slot))
                 }
             };
+            let crossinline_parameter = match &capture.source {
+                FirLocalClassCaptureSource::Value(source) => {
+                    self.crossinline_parameter_slot(*source)
+                }
+                FirLocalClassCaptureSource::Captured {
+                    enclosing_depth,
+                    source,
+                } => {
+                    let source = crate::fir::FirCaptureSource::Value(*source);
+                    self.capture_slots
+                        .get(&(*enclosing_depth, source))
+                        .ok_or(FirLoweringFailure::MissingCapture {
+                            enclosing_depth: *enclosing_depth,
+                            source,
+                        })?
+                        .crossinline_parameter
+                }
+                FirLocalClassCaptureSource::ClassStorage { owner, field, .. }
+                | FirLocalClassCaptureSource::ConstructorCapture { owner, field, .. }
+                | FirLocalClassCaptureSource::CapturedClassStorage { owner, field, .. } => {
+                    self.class_capture_crossinline_parameter(*owner, *field)?
+                }
+                FirLocalClassCaptureSource::DispatchReceiver
+                | FirLocalClassCaptureSource::EnclosingReceiver { .. }
+                | FirLocalClassCaptureSource::CapturedImplicitReceiver { .. }
+                | FirLocalClassCaptureSource::ImplicitReceiver { .. } => None,
+            };
             values.push((value, capture.ty.get()));
             if let Some(field) = field {
                 fields.push(
@@ -415,6 +439,7 @@ impl BodyLowering<'_> {
                 capture: Some(crate::ir::IrConstructorCapture {
                     source_name: capture.name.clone(),
                     receiver,
+                    crossinline_parameter,
                 }),
                 provenance: crate::ir::IrCtorParameterProvenance::Capture,
                 capture_identity: capture.capture_identity,

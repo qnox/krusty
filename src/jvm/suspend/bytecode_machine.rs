@@ -1,5 +1,5 @@
 //! The suspend functions whose state machine kotlinc's coroutine transformer builds from their
-//! finished bytecode, as kotlinc does (see `docs/JVM_INLINE_BEFORE_CPS.md` §1a).
+//! finished bytecode, as kotlinc does.
 //!
 //! Such a function keeps its body. It only takes the CPS signature: each suspension point passes
 //! the function's own `$completion` on, and the returns box to `Object`. The emitter marks every
@@ -97,7 +97,7 @@ pub(super) fn route(
         // A generated call that enters its line only where its operands begin (a reference
         // carrier's `invoke`) enters it at the continuation it now reads too.
         if let Some(line) = ir.dispatch_line(suspension.call) {
-            ir.expr_source_lines.insert(continuation, line);
+            ir.set_source_line(continuation, line);
         }
         if !append_continuation(
             ir,
@@ -115,7 +115,7 @@ pub(super) fn route(
     let units = ensure_tail_return(ir, body, unit_return);
     if let Some(&close) = ir.fn_close_lines.get(&fid) {
         for unit in units {
-            ir.expr_source_lines.insert(unit, close);
+            ir.set_source_line(unit, close);
         }
     }
 
@@ -150,19 +150,20 @@ pub(super) fn route(
     // overridable member's is the `$suspendImpl` its body moves to, which takes the receiver first.
     let function = &ir.functions[fid as usize];
     let cps_params = super::physical_parameters(ir, fid, &function.params);
-    let (method, method_params) =
+    let (method, method_params, enclosing_function) =
         match receiver.filter(|_| crate::jvm::suspend_impls::moves_to_suspend_impl(ir, fid)) {
             Some(owner) => (
                 crate::jvm::suspend_impls::suspend_impl_name(&name),
                 std::iter::once(Ty::obj_name(owner))
                     .chain(cps_params)
                     .collect(),
+                None,
             ),
-            None => (name, cps_params),
+            None => (name, cps_params, Some(fid)),
         };
     // The arrays the transformer computes replace these when the continuation class is written.
     route.outputs.continuation_metadata.insert(
-        continuation_class.clone(),
+        crate::types::type_name(&continuation_class),
         ContinuationMetadata {
             m: method.clone(),
             c: owner.replace('/', "."),
@@ -173,6 +174,7 @@ pub(super) fn route(
                 &method_params,
                 &function.ret,
             ),
+            enclosing_function,
             ..ContinuationMetadata::default()
         },
     );
@@ -192,7 +194,8 @@ pub(super) fn owned_suspensions(
     // Common IR is a DAG: the CPS rewrites change nodes in place, so this body first owns one node
     // per use, as it does on the IR machine's path.
     for (source, target) in crate::ir::make_expression_children_unique_tracked(ir, body) {
-        let IrExpr::Call { args, .. } = &ir.exprs[target as usize] else {
+        let (IrExpr::Call { args, .. } | IrExpr::New { args, .. }) = &ir.exprs[target as usize]
+        else {
             continue;
         };
         if !route

@@ -6,6 +6,80 @@
 
 use super::common;
 
+const EXPLICIT_RECEIVER: &str = r#"annotation class Explicit(val value: Int)
+fun box(): String = if (Explicit(7).value == 7) "OK" else "bad"
+"#;
+
+#[test]
+fn annotation_instantiation_explicit_receiver_matches_complete_kotlin_artifacts() {
+    assert_complete_artifacts("ExplicitAnnotationReceiver.kt", EXPLICIT_RECEIVER);
+}
+
+fn assert_complete_artifacts(file: &str, source: &str) {
+    let classes = common::classes_against_kotlinc_module(&[(file, source)]);
+    assert_eq!(
+        classes.krusty.keys().collect::<Vec<_>>(),
+        classes.reference.keys().collect::<Vec<_>>(),
+        "the complete emitted class inventory must match"
+    );
+    let differences = classes
+        .reference
+        .iter()
+        .filter_map(|(name, reference)| {
+            let ours = &classes.krusty[name];
+            (reference != ours).then(|| common::exact_class_difference(name, reference, ours))
+        })
+        .collect::<Vec<_>>();
+    assert!(differences.is_empty(), "{}", differences.join("\n\n"));
+}
+
+#[test]
+fn annotation_instantiation_explicit_receiver_runs_like_kotlin() {
+    common::expect_box_same_as_kotlinc(EXPLICIT_RECEIVER, "ExplicitAnnotationReceiver");
+}
+
+const CONSUMPTION_CONTEXTS: &str = r#"annotation class Explicit(val value: Int)
+class Holder(val item: Explicit = Explicit(7))
+fun declaredResult(): Explicit = Explicit(7)
+fun erasedResult(): Any = Explicit(7)
+fun argument(value: Explicit): Int = value.value
+fun box(): String {
+    val inferred = Explicit(7)
+    val declared: Explicit = Explicit(7)
+    val array = arrayOf(Explicit(7))
+    if (inferred.value != 7 || declared.value != 7) return "locals"
+    if (declaredResult().value != 7 || argument(Explicit(7)) != 7) return "calls"
+    if ((erasedResult() as Explicit).value != 7) return "erased"
+    if (array[0].value != 7 || Holder().item.value != 7) return "slots"
+    return "OK"
+}
+"#;
+
+#[test]
+fn annotation_instantiation_consumers_match_complete_kotlin_artifacts() {
+    assert_complete_artifacts("AnnotationConsumerSlots.kt", CONSUMPTION_CONTEXTS);
+}
+
+#[test]
+fn annotation_instantiation_consumers_run_like_kotlin() {
+    common::expect_box_same_as_kotlinc(CONSUMPTION_CONTEXTS, "AnnotationConsumerSlots");
+}
+
+const ORDINARY_RECEIVER: &str = r#"open class Parent { val value: Int = 7 }
+class Child : Parent()
+fun box(): String = if (Child().value == 7) "OK" else "bad"
+"#;
+
+#[test]
+fn annotation_instantiation_leaves_ordinary_receivers_byte_identical_to_kotlin() {
+    assert_complete_artifacts("OrdinaryReceiver.kt", ORDINARY_RECEIVER);
+}
+
+#[test]
+fn annotation_instantiation_ordinary_receiver_runs_like_kotlin() {
+    common::expect_box_same_as_kotlinc(ORDINARY_RECEIVER, "OrdinaryReceiver");
+}
+
 fn run(src: &str) -> String {
     common::expect_box_run_with_stdlib(src, "T")
 }

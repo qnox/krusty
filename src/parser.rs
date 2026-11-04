@@ -21,6 +21,7 @@ mod declaration_bodies;
 mod declaration_modifiers;
 mod declaration_stream;
 mod destructuring;
+mod enum_primary_constructor;
 mod expressions;
 mod file_features;
 mod for_loops;
@@ -1989,74 +1990,17 @@ impl<'a> Parser<'a> {
             ctor_open_offset = self.tok().span.lo;
             self.bump();
         }
-        let mut props = Vec::new();
         // `NL* primaryConstructor`: the parameter list may start on a later line.
         self.skip_plain_newlines_before(TokenKind::LParen);
         if ctor_open_offset == 0 && self.at(TokenKind::LParen) {
             ctor_open_offset = self.tok().span.lo;
         }
-        let has_primary_ctor = self.eat(TokenKind::LParen);
-        if has_primary_ctor {
-            self.skip_newlines();
-            while !self.at(TokenKind::RParen) && !self.at(TokenKind::Eof) {
-                let declaration_start = self.tok().span.lo;
-                self.begin_declaration_prefix();
-                let epmods = self.skip_decl_prefix();
-                self.record_declaration_prefix(declaration_start);
-                let is_vararg = epmods.iter().any(|m| m == "vararg");
-                let is_property = self.at(TokenKind::KwVal) || self.at(TokenKind::KwVar);
-                let is_var = self.at(TokenKind::KwVar);
-                if is_property {
-                    self.record_external_property_parameter(&epmods);
-                    self.bump();
-                }
-                let pspan = self.tok().span;
-                let pname = self.ident_or_error("parameter name");
-                self.expect(TokenKind::Colon, "':'");
-                self.skip_newlines(); // a wrapped declaration puts the type on the next line (`val x:\n  T`)
-                let ty = self.parse_vararg_aware_type(is_vararg);
-                // A default value (`enum class C(val x: Int = 1)`) — same as a regular class ctor param;
-                // each enum entry that omits the argument gets it at its construction site.
-                let default = if self.eat(TokenKind::Eq) {
-                    self.skip_newlines();
-                    Some(self.parse_expr())
-                } else {
-                    None
-                };
-                let declaration_end = self.t[self.i.saturating_sub(1)].span.hi;
-                props.push(PropParam {
-                    name: pname,
-                    ty,
-                    span: pspan,
-                    declaration_span: Span::new(declaration_start, declaration_end),
-                    decl_line: 0,
-                    decl_start_line: 0,
-                    is_vararg,
-                    is_var,
-                    is_property,
-                    is_script_parameter: false,
-                    is_actual: epmods.iter().any(|modifier| modifier == "actual"),
-                    is_override: epmods.iter().any(|modifier| modifier == "override"),
-                    has_open_modifier: epmods.iter().any(|modifier| modifier == "open"),
-                    is_final: epmods.iter().any(|modifier| modifier == "final"),
-                    is_open: !epmods.iter().any(|modifier| modifier == "final")
-                        && epmods
-                            .iter()
-                            .any(|modifier| modifier == "open" || modifier == "override"),
-                    visibility: visibility_of(&epmods),
-                    has_visibility_modifier: has_visibility_modifier(&epmods),
-                    default,
-                    annotations: Vec::new(),
-                    annotation_args: Vec::new(),
-                });
-                self.skip_newlines();
-                if !self.eat(TokenKind::Comma) {
-                    break;
-                }
-                self.skip_newlines();
-            }
-            self.expect(TokenKind::RParen, "')'");
-        }
+        let has_primary_ctor = self.at(TokenKind::LParen);
+        let (props, ctor_close_lo) = if has_primary_ctor {
+            self.parse_enum_primary_constructor_parameters()
+        } else {
+            (Vec::new(), 0)
+        };
         // Optional supertype list (`enum class E : I1, I2`): an enum may implement interfaces; the
         // abstract members are satisfied by the enum's own methods or per-entry overrides. (An enum can't
         // extend a class, so only the interface supertypes are kept.)
@@ -2326,6 +2270,7 @@ impl<'a> Parser<'a> {
             span: Span::new(start.lo, end.hi),
             primary_ctor_lines: PrimaryCtorLines {
                 open_line: ctor_open_offset,
+                close_line: ctor_close_lo,
                 ..PrimaryCtorLines::default()
             },
             companion_block_members: companions.block_members,
@@ -2726,17 +2671,6 @@ impl<'a> Parser<'a> {
             self.lexical_type_parameters = enclosing_type_parameters;
         }
 
-        if is_inner && supports_inner && !enclosing_instance_exists {
-            // An object is a singleton, so it cannot provide the per-instance receiver an `inner
-            // class` requires. Consume the unsupported declaration without publishing a falsely
-            // constructible classifier. The child parse may have tentatively hoisted descendants,
-            // so remove that declaration-list suffix with the unsupported owner as one atomic unit.
-            // Other classifier kinds ignore an inapplicable `inner` modifier rather than acquiring
-            // class-only capture metadata.
-            self.file.decls.truncate(start);
-            return true;
-        }
-
         if matches!(nested.kind, ClassKind::Class | ClassKind::Interface) {
             nested.modality = modality_from_modifiers(modifiers);
             nested.final_modifier = modifiers.iter().any(|modifier| modifier == "final");
@@ -2750,7 +2684,11 @@ impl<'a> Parser<'a> {
                 .any(|modifier| modifier == "inline" || modifier == "value");
             nested.value_modifier_span = value_modifier_span;
         }
-        if is_inner && supports_inner {
+        // An object or an interface cannot provide the per-instance receiver an `inner class`
+        // requires: the frontend rejects the modifier there, so the class stays an ordinary nested
+        // one. Other classifier kinds ignore an inapplicable `inner` modifier rather than acquiring
+        // class-only capture metadata.
+        if is_inner && supports_inner && enclosing_instance_exists {
             nested.inner_of = Some(outer.to_string());
         }
         self.register_hoisted_nested_classifier(outer, start, nested, modifiers);
@@ -3504,6 +3442,7 @@ impl<'a> Parser<'a> {
             base_args,
             interface_delegations,
         ) = self.parse_supertypes();
+        let hoisted_from = self.file.decls.len();
         let (methods, body_props, init_order, type_aliases) = self.parse_object_body(&name);
         let end = self.t[self.i.saturating_sub(1)].span;
         let synth = ClassDecl {
@@ -3561,6 +3500,7 @@ impl<'a> Parser<'a> {
             Span::new(span.lo, end.hi),
         );
         self.file.anonymous_object_classes.insert(construction, did);
+        self.file.adopt_hoisted_classifiers(did, hoisted_from);
         construction
     }
 
@@ -3590,10 +3530,8 @@ impl<'a> Parser<'a> {
             loop {
                 self.skip_newlines();
                 let mods = self.parse_member_decl_prefix();
-                // Named singleton owners use the same classifier-registration invariant as class
-                // owners. The flag only excludes `inner` classes, whose semantics require an
-                // enclosing instance that a singleton cannot supply. Anonymous-object bodies use
-                // `parse_object_body` instead and have no stable owner identity to publish here.
+                // Named singletons exclude `inner` classes, which require an enclosing instance.
+                // Anonymous objects publish their classifier owner after `parse_object_body`.
                 if self.parse_and_register_nested_classifier(&name, &mods, false) {
                     continue;
                 }
@@ -4695,8 +4633,8 @@ mod tests {
         exact_members.sort_unstable();
         assert_eq!(
             exact_members,
-            vec!["`missing name`", "`missing safe`", "missing"],
-            "rebuilt safe calls must each have one live exact-name entry"
+            vec!["`missing name`", "`missing safe`", "missing", "y"],
+            "each rebuilt safe call and `y = 1`'s kept `y.assign(1)` has one exact-name entry"
         );
     }
 

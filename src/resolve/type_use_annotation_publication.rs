@@ -64,15 +64,8 @@ pub(crate) fn publish_checked_type_use_annotations(
             let Some(applied) = info.applied_annotation(annotation) else {
                 continue;
             };
-            let recorded =
-                (applied.retention != crate::types::AnnotationRetention::Source).then(|| {
-                    crate::types::ResolvedAnnotation {
-                        annotation: applied.internal,
-                        arguments: applied.values.clone(),
-                        facts: applied.facts,
-                        written: None,
-                    }
-                });
+            let recorded = (applied.retention != crate::types::AnnotationRetention::Source)
+                .then(|| applied.resolved());
             let occurrence = AnnotationOccurrence {
                 source: file_index,
                 span: annotation.span,
@@ -226,80 +219,6 @@ impl Checker<'_> {
             }
             let arguments = application_arguments(file, &annotation);
             self.check_annotation_application(scope, &annotation, arguments);
-            let key = (annotation.span.lo, annotation.span.hi);
-            if let Some(mut applied) = self.applied_annotations.take_checked(&key) {
-                self.order_as_written(applied.internal, &mut applied.values, arguments, None);
-                self.applied_annotations.record(key, applied);
-            }
-        }
-    }
-
-    /// Put folded argument values in the order the source wrote them, at every nesting depth.
-    ///
-    /// The checker folds an application in DECLARATION order, which is the order kotlinc writes
-    /// a class-file annotation attribute in. `@Metadata` records a type-use application's
-    /// arguments as written instead: `@Moded(kind = Holder::class, mode = Mode.Off)` lists `kind`
-    /// first. An element the source left out (an omitted vararg's `[]`) follows the written ones.
-    fn order_as_written(
-        &self,
-        internal: TypeName,
-        values: &mut [(String, crate::types::AnnotationValue)],
-        arguments: &[ExprId],
-        nested_call: Option<ExprId>,
-    ) {
-        let Some((elements, parameters, _)) = self.annotation_shape(internal) else {
-            return;
-        };
-        let names = self.annotation_argument_names(arguments, nested_call);
-        let Ok(indices) =
-            self.annotation_argument_parameter_indices(&parameters, arguments, &names)
-        else {
-            return;
-        };
-        let mut written = Vec::<&str>::new();
-        for (&argument, &index) in arguments.iter().zip(&indices) {
-            let Some((name, _)) = elements.get(index) else {
-                return;
-            };
-            if !written.contains(&name.as_str()) {
-                written.push(name);
-            }
-            if let Some((_, value)) = values.iter_mut().find(|(element, _)| element == name) {
-                self.order_nested_as_written(value, argument);
-            }
-        }
-        values.sort_by_key(|(name, _)| {
-            written
-                .iter()
-                .position(|written| written == name)
-                .unwrap_or(written.len())
-        });
-    }
-
-    /// [`Self::order_as_written`] inside one argument: a nested annotation, or the nested
-    /// annotations of an array argument.
-    fn order_nested_as_written(&self, value: &mut crate::types::AnnotationValue, argument: ExprId) {
-        use crate::types::AnnotationValue;
-        match (value, self.file.expr(argument)) {
-            (
-                AnnotationValue::Annotation {
-                    internal, values, ..
-                },
-                Expr::Call { args, .. },
-            ) => {
-                let args = args.clone();
-                self.order_as_written(*internal, values, &args, Some(argument));
-            }
-            (AnnotationValue::Array(values), Expr::AnnotationArrayLiteral(elements))
-            | (AnnotationValue::Array(values), Expr::Call { args: elements, .. })
-                if values.len() == elements.len() =>
-            {
-                let elements = elements.clone();
-                for (value, element) in values.iter_mut().zip(elements) {
-                    self.order_nested_as_written(value, element);
-                }
-            }
-            _ => {}
         }
     }
 

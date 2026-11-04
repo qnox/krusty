@@ -478,7 +478,7 @@ fn callee(callee: &mut Callee, names: &IdentityRemap<'_>) {
             tys(params, names);
             *ret = ty(*ret, names);
         }
-        Callee::Module { params, ret, .. } => {
+        Callee::Module { params, ret, .. } | Callee::ModuleDefaultEntry { params, ret, .. } => {
             tys(params, names);
             *ret = ty(*ret, names);
         }
@@ -599,6 +599,7 @@ fn remap_expression(expression: &mut IrExpr, names: &IdentityRemap<'_>) {
             ..
         }
         | IrExpr::Variable { ty: classifier, .. }
+        | IrExpr::AbsentArgument { ty: classifier }
         | IrExpr::PrimitiveNeg { ty: classifier, .. }
         | IrExpr::RefNew {
             elem: classifier, ..
@@ -1348,6 +1349,10 @@ impl super::IrFile {
         for alias in &mut self.package_type_aliases {
             type_alias(alias, names);
         }
+        for applied in self.package_property_annotations.values_mut() {
+            annotations(&mut applied.property, names);
+            annotations(&mut applied.field, names);
+        }
         for properties in self.member_ext_props.values_mut() {
             for property in properties {
                 property.receiver = ty(property.receiver, names);
@@ -1477,16 +1482,11 @@ impl super::IrFile {
         for parameters in self.physical_call_parameters.values_mut() {
             tys(parameters, names);
         }
-        self.logical_types
-            .values_mut()
-            .for_each(|value| *value = ty(*value, names));
+        self.rewrite_types(|value| ty(value, names));
         self.deferred_local_types
             .values_mut()
             .for_each(|value| *value = ty(*value, names));
         self.inline_declared_types_mut()
-            .for_each(|value| *value = ty(*value, names));
-        self.physical_types
-            .values_mut()
             .for_each(|value| *value = ty(*value, names));
         self.whens
             .exhaustive
@@ -1618,13 +1618,13 @@ impl super::IrFile {
 }
 
 fn remap_expression_facts(ir: &mut super::IrFile, expression: ExprId, names: &IdentityRemap<'_>) {
-    if let Some(value) = ir.logical_types.get_mut(&expression) {
+    if let Some(value) = ir.logical_type_mut(expression) {
         *value = ty(*value, names);
     }
     if let Some(value) = ir.deferred_local_types.get_mut(&expression) {
         *value = ty(*value, names);
     }
-    if let Some(value) = ir.physical_types.get_mut(&expression) {
+    if let Some(value) = ir.physical_type_mut(expression) {
         *value = ty(*value, names);
     }
     if let Some(value) = ir.call_declared_ret.get_mut(&expression) {
