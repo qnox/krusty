@@ -188,6 +188,8 @@ mod interface_delegation;
 mod intersection_inference;
 mod intersection_receiver_selection;
 mod invoke_selection;
+mod lexical_value_invoke;
+use lexical_value_invoke::{DeferredLexicalInvoke, LexicalInvokeSite};
 mod lambda_call_shapes;
 mod property_read_selection;
 use lambda_call_shapes::UntypedLambdaCall;
@@ -16518,6 +16520,7 @@ impl<'a> Checker<'a> {
                 // later callable accepts the name; arguments are not contextually checked against
                 // the losing value before that later selection.
                 let mut deferred_function_value_failure = None;
+                let mut deferred_lexical_invoke = None;
                 let local_value = self
                     .lookup(scope, &fname)
                     .map(|local| {
@@ -16574,6 +16577,19 @@ impl<'a> Checker<'a> {
                             Some((*signature, *missing_receiver, missing_context.clone()));
                         // The lexical value is inapplicable, so the next call-tower rung gets the
                         // untouched argument expressions and can supply their actual expectations.
+                    } else if self.lexical_invoke_rejects_arguments(
+                        scope,
+                        call,
+                        receiver_function.map_or(receiver_ty, |(signature, _)| {
+                            Ty::from(TyKind::Fun(signature))
+                        }),
+                        args,
+                        implicit_receiver_function.as_ref(),
+                    ) {
+                        deferred_lexical_invoke = Some(DeferredLexicalInvoke {
+                            receiver_ty,
+                            origin,
+                        });
                     } else {
                         if matches!(
                             origin,
@@ -20235,6 +20251,23 @@ impl<'a> Checker<'a> {
                         );
                         return Ty::Error;
                     }
+                }
+                if let Some(deferred) = deferred_lexical_invoke {
+                    return self.commit_deferred_lexical_invoke(
+                        scope,
+                        CallArgs {
+                            call,
+                            args,
+                            arg_tys: &[],
+                        },
+                        LexicalInvokeSite {
+                            callee,
+                            name: &fname,
+                            span,
+                            expected,
+                        },
+                        deferred,
+                    );
                 }
                 let (message, identity, diagnostic_span) = if had_rejected_callable {
                     (INAPPLICABLE_OVERLOAD_PREFIX.to_string(), None, span)
@@ -41255,76 +41288,6 @@ impl<'a> Checker<'a> {
             self.local_callable_type(scope, name).is_some()
                 || self.value_type_claims_call(scope, local.ty)
         })
-    }
-
-    /// A lambda/callable-reference literal can claim a function-value call rung only when that
-    /// already-declared function shape supplies a callable expectation for the corresponding slot.
-    /// Unlike a generic function declaration, invoking a value `(T) -> R` cannot infer or replace
-    /// its enclosing `T`; when `T` is not itself callable, `value { ... }` is inapplicable and the
-    /// next call-tower rung (for example an implicit-receiver extension) must be considered.
-    fn local_function_value_accepts_literal_arguments(
-        &self,
-        scope: &CheckerScope<'_>,
-        name: &str,
-        arguments: &[ExprId],
-    ) -> bool {
-        let Some(TyKind::Fun(signature)) = self
-            .local_callable_type(scope, name)
-            .map(|(ty, _)| ty.kind())
-        else {
-            // Callable objects perform their own overload applicability selection.
-            return true;
-        };
-        if arguments.iter().all(|&argument| {
-            !matches!(
-                self.file.expr(argument),
-                Expr::Lambda { .. } | Expr::CallableRef { .. }
-            )
-        }) {
-            // Arity and ordinary value-argument mismatches do not make a selected lexical value
-            // disappear from the call tower. Its fixed `invoke` declaration owns the diagnostic.
-            // Only postponed callable literals need this pre-applicability shape check: they can be
-            // typed solely after a competing callable supplies an expectation, so a lexical value
-            // whose corresponding parameter is not callable must let the next rung participate.
-            return true;
-        }
-        let context_count = signature.context_count.min(signature.params.len());
-        let explicit_context = context_count > 0 && arguments.len() == signature.params.len();
-        let mut parameters = if explicit_context {
-            signature.params.as_slice()
-        } else {
-            &signature.params[context_count..]
-        };
-        if signature.has_receiver && parameters.len() != arguments.len() {
-            let Some((&receiver, values)) = parameters.split_first() else {
-                return false;
-            };
-            if values.len() != arguments.len()
-                || self
-                    .receiver_function_implicit_receiver(
-                        scope,
-                        receiver,
-                        values.len(),
-                        arguments.len(),
-                    )
-                    .is_none()
-            {
-                return false;
-            }
-            parameters = values;
-        }
-        if parameters.len() != arguments.len() {
-            return false;
-        }
-        arguments
-            .iter()
-            .zip(parameters)
-            .all(|(&argument, &expected)| match self.file.expr(argument) {
-                Expr::Lambda { .. } | Expr::CallableRef { .. } => {
-                    expected.non_null().is_fun() || self.semantic_sam_signature(expected).is_some()
-                }
-                _ => true,
-            })
     }
 
     /// The call-shaping view of a lexical level must agree with final selection. In particular, a
