@@ -17,5 +17,8 @@ fun box(): String {
     if ("${slot.read()}" != "kotlin.Unit") return "fail Unit template: ${slot.read()}"
     if (Route(42).value != "42") return "fail Int toString"
     if (describe(null) != "null" || describe(7) != "7") return "fail nullable toString"
+    val absent: Int? = null
+    val present: Int? = 7
+    if ("$absent/$present" != "null/7") return "fail nullable template"
     return "OK"
 }

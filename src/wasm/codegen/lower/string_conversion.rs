@@ -31,7 +31,9 @@ impl Body<'_> {
             self.string_constant("null");
             self.code.else_().local_get(value);
             self.unbox(inner)?;
-            self.code.call(function).end();
+            // Both arms are strings; the block's type is the nullable carrier, so the result is
+            // re-asserted non-null for the concatenation that consumes it.
+            self.code.call(function).end().ref_as_non_null();
             return Ok(());
         }
         self.expression(id)?;
