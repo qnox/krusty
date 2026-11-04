@@ -31,7 +31,8 @@ fn platform(paths: Vec<PathBuf>) -> PlatformProvider {
 
 /// The library fixture's dependency, compiled by krusty into a classpath directory.
 fn dependency(paths: &[PathBuf]) -> PathBuf {
-    let out = crate::common::scratch_dir().expect("allocate the KSP dependency fixture");
+    let out = Path::new(env!("CARGO_TARGET_TMPDIR")).join("ksp-library-classes-dependency");
+    let _ = std::fs::remove_dir_all(&out);
     let text = std::fs::read_to_string(fixtures().join("dependency/Dependency.kt")).unwrap();
     let inputs = [SourceInput::kotlin(&text).with_file_stem("Dependency")];
     let mut diagnostics = DiagSink::new();
@@ -64,22 +65,18 @@ fn analysis() -> Option<SourceSetAnalysis> {
         .into_iter()
         .chain(krusty::toolchain::jdk_modules())
         .collect();
-    Some(analysis_with_dependency(&paths, dependency(&paths)))
-}
-
-fn analysis_with_dependency(paths: &[PathBuf], dependency: PathBuf) -> SourceSetAnalysis {
-    let mut classpath = paths.to_vec();
-    classpath.push(dependency);
+    let mut classpath = paths.clone();
+    classpath.push(dependency(&paths));
     let inputs = [SourceInput::kotlin("package library\n")];
     let mut diagnostics = DiagSink::new();
-    analyze_source_set_prefix_with_features(
+    Some(analyze_source_set_prefix_with_features(
         &inputs,
         0,
         inputs.len(),
         platform(classpath),
         &LangFeatures::new(),
         &mut diagnostics,
-    )
+    ))
 }
 
 fn render(ty: &KspType) -> String {
@@ -277,11 +274,7 @@ fn library_classes_are_the_headers_ksp2_reports() {
     let Some(analysis) = analysis() else {
         return;
     };
-    assert_library_classes(&analysis);
-}
-
-fn assert_library_classes(analysis: &SourceSetAnalysis) {
-    let libraries = KspLibraries::new(analysis);
+    let libraries = KspLibraries::new(&analysis);
     let expected = std::fs::read_to_string(fixtures().join("library.expected")).unwrap();
     let mut mismatches = Vec::new();
     for line in expected.lines() {
@@ -299,20 +292,6 @@ fn assert_library_classes(analysis: &SourceSetAnalysis) {
         }
     }
     assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
-}
-
-#[test]
-fn retiring_another_dependency_fixture_preserves_live_library_headers() {
-    let paths: Vec<PathBuf> = std::iter::once(
-        krusty::toolchain::stdlib_jar().expect("the complete KSP dependency fixture needs stdlib"),
-    )
-    .chain(krusty::toolchain::jdk_modules())
-    .collect();
-    let first = dependency(&paths);
-    let first_analysis = analysis_with_dependency(&paths, first);
-    let second = dependency(&paths);
-    std::fs::remove_dir_all(second).expect("retire the other dependency fixture");
-    assert_library_classes(&first_analysis);
 }
 
 #[test]

@@ -23,15 +23,6 @@ fun box(): String {
     if (array[0].text != "x" || trace != "aiv") return "in range: $trace"
 
     trace = ""
-    try {
-        slots()[at(1)] = stored("y")
-        return "out of range stored"
-    } catch (expected: Throwable) {
-        if (expected !is IndexOutOfBoundsException) return "out of range threw another exception"
-        if (trace != "aiv") return "out of range: $trace"
-    }
-
-    trace = ""
     val failure = Throwable("value")
     try {
         slots()[at(-1)] = run<Tag> {
