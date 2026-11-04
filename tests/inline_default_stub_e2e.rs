@@ -155,30 +155,14 @@ fn every_member_inline_default_stub_copies_the_body() {
     );
 }
 
+/// The whole runtime program: every top-level and member shape above, with the catch, finally and
+/// loop bodies, shared with every box lane.
+const RUN: &str = include_str!("box_regressions/inlineDefaultStubRun.kt");
+
 #[test]
 fn an_inline_default_stub_runs_its_copied_body() {
-    let source = format!(
-        "{TOP_LEVEL}{MEMBERS}{}",
-        r#"inline fun caught(result: String = try { error("x") } catch (e: IllegalStateException) { "Y" }): String =
-    result
-fun useHidden(): Int = hidden()
-class D {
-    private inline fun hidden(x: Int = 1): Int = x + 2
-    fun useHidden(): Int = hidden()
-}
-fun box(): String {
-    u()
-    val sum = f() + useHidden() + "ab".ext() + C().g() + D().useHidden() + with(C()) { "a".mext() } +
-        O.h() + O.hs() + K.c() + K.cs() + Op().og() + V(1).plus()
-    if (seen != 1 || isA<String>() || two() != "aab") return "FAIL: shapes"
-    if (guarded() != "a" || log != "af" || loop() != 3 || caught() != "Y") return "FAIL: statements"
-    if (Picker().pick(E.A) != "OK") return "FAIL: pick"
-    return if (sum == 2 + 4 + 3 + 3 + 3 + 2 + 6 + 7 + 8 + 9 + 10 + 2) "OK" else "FAIL: $sum"
-}
-"#
-    );
-    assert_eq!(common::kotlinc_box_result(&source), "OK");
-    common::expect_box_ok_with_stdlib(&source, "InlineDefaultBodyRun");
+    assert_eq!(common::kotlinc_box_result(RUN), "OK");
+    common::expect_box_ok_with_stdlib(RUN, "InlineDefaultBodyRun");
 }
 
 const SUSPEND: &str = r#"class Statement(val url: String) {
@@ -196,4 +180,36 @@ fn a_suspend_inline_default_stub_copies_the_body_its_inliners_take() {
     let classes = common::classes_against_kotlinc_module(&[("Fetch.kt", SUSPEND)]);
     let differences = classes.differences();
     assert!(differences.is_empty(), "{}", differences.join("\n\n"));
+}
+
+/// A `@JvmStatic` member's stub takes no receiver, but common IR still numbers the member's
+/// receiver as value 0: the copied body's guards and reads find the reference parameter after the
+/// scalar one.
+const JVM_STATIC: &str = include_str!("box_regressions/inlineJvmStaticDefaultStub.kt");
+
+/// Every class holding a stub is kotlinc's. `box`'s own inlined calls that omit arguments are a
+/// separate difference: krusty expands them from the function's IR, so their inlined locals are
+/// not named from the stub as kotlinc's are.
+#[test]
+fn a_jvm_static_inline_default_stub_reads_its_parameters_like_kotlinc() {
+    let classes = common::classes_against_kotlinc_module(&[("JvmStaticDefault.kt", JVM_STATIC)]);
+    assert_eq!(
+        classes.krusty.keys().collect::<Vec<_>>(),
+        classes.reference.keys().collect::<Vec<_>>()
+    );
+    for name in ["S", "H", "H$Companion"] {
+        let (reference, krusty) = classes.class_listing(name);
+        assert_eq!(krusty, reference, "{name}");
+    }
+}
+
+#[test]
+fn a_jvm_static_inline_default_stub_runs_like_kotlinc() {
+    let sources = [("JvmStaticDefault.kt", JVM_STATIC)];
+    assert_eq!(
+        common::kotlinc_box_files_result(&sources, "JvmStaticDefaultKt"),
+        "OK",
+        "kotlinc's JvmStaticDefaultKt"
+    );
+    common::expect_box_ok_files_with_stdlib(&sources, "JvmStaticDefaultKt");
 }
