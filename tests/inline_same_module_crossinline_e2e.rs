@@ -3,7 +3,7 @@
 //! it, outside its own class: a property it writes goes through the setter, a private one through a
 //! synthetic accessor, and its captured outer instance is the copy's `this$0`. A local return from
 //! the literal joins its locals' scope at the lambda method's end. A bound reference's receiver is
-//! the regenerated object's `$receiver`, and a lambda class the callee's body declares around the
+//! the regenerated object's `receiver$inlined`, and a lambda class the callee's body declares around the
 //! parameter is regenerated with it.
 
 use super::common;
