@@ -497,7 +497,7 @@ pub(super) fn receiver_hierarchy(source: &dyn SymbolSource, receiver: Ty) -> Vec
 pub(crate) fn classifier_bindings(
     classifier: &crate::libraries::LibraryType,
     receiver: Ty,
-) -> crate::fx_hash::HashMap<String, Ty> {
+) -> crate::types::TyParamBindings {
     let raw_bindings = classifier
         .type_params
         .iter()
@@ -508,7 +508,7 @@ pub(crate) fn classifier_bindings(
     classifier
         .type_params
         .iter()
-        .cloned()
+        .map(crate::types::TyParamName::from)
         .zip(
             receiver
                 .type_args()
@@ -567,7 +567,7 @@ pub(crate) fn classifier_bindings(
 /// non-null occurrence bound.
 pub(super) fn classifier_type_parameter_bounds(
     classifier: &crate::libraries::LibraryType,
-) -> crate::fx_hash::HashMap<String, Ty> {
+) -> crate::types::TyParamBindings {
     classifier
         .type_params
         .iter()
@@ -579,7 +579,7 @@ pub(super) fn classifier_type_parameter_bounds(
                 .and_then(|bounds| bounds.first())
                 .copied()
                 .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
-            (formal.clone(), bound)
+            (crate::types::TyParamName::from(formal), bound)
         })
         .collect()
 }

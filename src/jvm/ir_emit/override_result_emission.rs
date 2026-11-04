@@ -9,13 +9,15 @@
 
 use super::inline_call::parse_descriptor_params;
 use super::scalar_coercion::{box_prim_free, unbox_prim_from};
-use super::signature_formatter::JvmSignatureFormatter;
+use super::signature_formatter::{JvmSignatureFormatter, MethodSignatureParts};
 use super::{
     discard, ir_method_desc, ir_ty_to_jvm, jvm_declared_ty, jvm_is_erased_top, method_descriptor,
     method_signature, type_descriptor, CodeBuilder, Emitter,
 };
 use crate::ir::{ExprId, IrExpr, IrFile, IrTypeOp};
+use crate::jvm::mapped_builtin_declarations::CollectionSignaturePolicy;
 use crate::jvm::override_results::OverrideResults;
+use crate::jvm::read_only_collection_stubs::star_projected;
 use crate::types::Ty;
 
 const NOT_NULL: &str = "Lorg/jetbrains/annotations/NotNull;";
@@ -129,7 +131,7 @@ impl Emitter<'_> {
             return false;
         }
         let arg = *arg;
-        let Some(physical) = self.ir.physical_types.get(&arg).copied() else {
+        let Some(physical) = self.ir.physical_type(arg) else {
             return false;
         };
         let physical_jvm = ir_ty_to_jvm(&physical);
@@ -183,14 +185,68 @@ pub(super) fn declared_method_signature(
     function: u32,
 ) -> Option<String> {
     let declaration = &ir.functions[function as usize];
-    let signature = method_signature(formatter, ir, function, declaration)?;
-    if !override_results.boxes(function) {
-        return Some(signature);
+    // A value class's static replacement (`addAll-impl`) overrides nothing: kotlinc signs it as
+    // any member, its moved receiver first, and the policy shapes only the override it backs.
+    let policy = override_results
+        .collection_signatures
+        .policy(function)
+        .filter(|_| !ir.jvm_value_class_receiver_impls.contains(&function));
+    if let Some(policy) = policy {
+        return collection_override_signature(formatter, ir, function, policy);
     }
-    let primitive = type_descriptor(jvm_declared_ty(&declaration.ret));
-    let parameters = signature
-        .strip_suffix(primitive.as_str())
-        .expect("a boxed override result is signed as its primitive");
-    let wrapper = type_descriptor(jvm_declared_ty(&Ty::nullable(declaration.ret)));
-    Some(format!("{parameters}{wrapper}"))
+    // The unboxed shape decides whether a signature is needed at all; boxing a primitive result
+    // never adds generic structure.
+    method_signature(formatter, ir, function, declaration)?;
+    declared_method_signature_parts(formatter, ir, override_results, function)
+        .map(|parts| parts.render())
+}
+
+/// [`declared_method_signature`]'s shape in its grammar's parts, before any comparison with a
+/// descriptor: the result element is the wrapper where `override_results` boxes it.
+pub(super) fn declared_method_signature_parts(
+    formatter: &JvmSignatureFormatter<'_>,
+    ir: &IrFile,
+    override_results: &OverrideResults,
+    function: u32,
+) -> Option<MethodSignatureParts> {
+    let declaration = &ir.functions[function as usize];
+    let mut parts =
+        super::method_signatures::method_signature_parts(formatter, ir, function, declaration)?;
+    if override_results.boxes(function) {
+        assert_eq!(
+            parts.result,
+            type_descriptor(jvm_declared_ty(&declaration.ret)),
+            "a boxed override result is signed as its primitive"
+        );
+        parts.result = type_descriptor(jvm_declared_ty(&Ty::nullable(declaration.ret)));
+    }
+    Some(parts)
+}
+
+/// kotlinc's signature for an override of a collection declaration with a signature policy: the
+/// declaration's collection parameter star-projected, or every declaration-site variance of the
+/// parameters written. `None` when that spells the descriptor back.
+fn collection_override_signature(
+    formatter: &JvmSignatureFormatter<'_>,
+    ir: &IrFile,
+    function: u32,
+    policy: CollectionSignaturePolicy,
+) -> Option<String> {
+    let declaration = &ir.functions[function as usize];
+    let (mut parameters, result) = ir
+        .member_semantic_sigs
+        .get(&function)
+        .cloned()
+        .unwrap_or_else(|| (declaration.params.clone(), declaration.ret));
+    let signature = match policy {
+        CollectionSignaturePolicy::ErasedCollectionParameter(index) => {
+            let parameter = &mut parameters[usize::from(index)];
+            *parameter = star_projected(*parameter);
+            formatter.method_positions(&parameters, &result)
+        }
+        CollectionSignaturePolicy::DeclarationSiteWildcards => {
+            formatter.method_positions_with_declaration_site_wildcards(&parameters, &result)
+        }
+    }?;
+    (signature != ir_method_desc(&declaration.params, &declaration.ret)).then_some(signature)
 }

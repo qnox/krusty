@@ -38,6 +38,8 @@ pub enum SkipReason {
     InlineParameters,
     /// A read-only collection superclass lacks the exact semantic declaration its stubs need.
     ReadOnlyCollectionStubs(String),
+    /// A collection class's supertype lacks the declaration facts its `toArray` members need.
+    CollectionToArray(String),
     /// A `suspend inline` callee's compiled body does not say where it places a suspend lambda
     /// passed to it: in the caller's frame, or in an object it constructs.
     SuspendLambdaPlacement(String),
@@ -90,6 +92,7 @@ pub(crate) struct BackendPassFacts {
     /// Checked property operations realized before representation passes. Companion hoisting
     /// reads it to attach a private accessor to the operation that moves into `<clinit>`.
     property_realizations: crate::jvm::property_realizations::PropertyRealizations,
+    super_accessors: crate::jvm::module_calls::SuperAccessors,
     /// The `-jvm-default` mode, which decides the forwarders (and their bridges) a class writes for
     /// the interface defaults it inherits.
     jvm_default: crate::jvm::ir_emit::JvmDefaultMode,
@@ -238,8 +241,10 @@ fn run_backend_passes_after_plugins(
     // the same JVM boundary as source super calls, never in the plugin itself or the emitter.
     crate::jvm::module_calls::realize_super_calls(
         ir,
+        classifiers,
         callables,
         &mut facts.property_realizations,
+        &mut facts.super_accessors,
         facts.jvm_default,
     )
     .map_err(|_| SkipReason::SuperCalls)?;
@@ -322,6 +327,8 @@ fn run_backend_passes_after_plugins(
         callables,
         &facts.property_realizations,
     )?;
+    facts.override_results.collection_signatures =
+        crate::jvm::collection_override_signatures::select(ir, classpath);
     crate::jvm::bridges::derive_bridges(
         ir,
         classpath,
@@ -346,6 +353,7 @@ fn run_backend_passes_after_plugins(
             classpath,
             classifiers,
         )?,
+        to_array: crate::jvm::collection_to_array::select(ir, classpath, classifiers)?,
     };
     // The value-class pass reads same-module SOURCE value classes (internal name → sole-field
     // underlying) for its erasure/mangle map from the frontend symbols directly, NOT through the
@@ -472,6 +480,10 @@ fn run_backend_passes_after_plugins(
         facade,
         &facts.property_reference_realizations,
     );
+    facts
+        .super_accessors
+        .finalize(ir)
+        .map_err(|_| SkipReason::SuperCalls)?;
     // A delegated property's reflected signature names its declaration's physical getter. Its
     // exact FunId was retained when the reference was built; consume that identity only after
     // value-class and internal-member naming have fixed the accessor's final JVM ABI.
@@ -1320,6 +1332,13 @@ fn report_backend_pass_failure(reason: SkipReason, diags: &mut DiagSink) {
             );
             return;
         }
+        SkipReason::CollectionToArray(detail) => {
+            diags.error(
+                crate::diag::Span::new(0, 0),
+                format!("krusty: cannot realize collection toArray members: {detail}"),
+            );
+            return;
+        }
         SkipReason::SuspendLambdaPlacement(detail) => {
             diags.error(
                 crate::diag::Span::new(0, 0),
@@ -1349,6 +1368,7 @@ fn report_backend_pass_failure(reason: SkipReason, diags: &mut DiagSink) {
         | SkipReason::CallArguments(_)
         | SkipReason::InlineParameters
         | SkipReason::ReadOnlyCollectionStubs(_)
+        | SkipReason::CollectionToArray(_)
         | SkipReason::SuspendLambdaPlacement(_)
         | SkipReason::MemberDispatch(_) => {
             unreachable!()
@@ -1424,7 +1444,7 @@ impl Backend for JvmBackend {
             &facade,
             &delegate_closures,
             current_source,
-            self.lambda_modes.lambdas,
+            self.lambda_modes,
         ) {
             Ok(methods) => methods,
             Err(()) => {
@@ -1477,6 +1497,7 @@ impl Backend for JvmBackend {
             crate::jvm::default_call_operands::DefaultCallOperands::default();
         let mut property_realizations =
             crate::jvm::property_realizations::PropertyRealizations::default();
+        let mut super_accessors = crate::jvm::module_calls::SuperAccessors::default();
         if let Err(target) =
             crate::jvm::local_properties::realize(&mut file.ir, &mut property_realizations)
         {
@@ -1492,6 +1513,7 @@ impl Backend for JvmBackend {
             &file.classifiers,
             &file.callables,
             &mut property_realizations,
+            &mut super_accessors,
             self.jvm_default,
         ) {
             diags.error(
@@ -1518,6 +1540,7 @@ impl Backend for JvmBackend {
             &file_classes,
             property_realizations,
             BackendPassFacts {
+                super_accessors,
                 property_reference_realizations,
                 default_call_operands,
                 local_delegate_access,

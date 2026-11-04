@@ -1466,7 +1466,7 @@ fn inline_callable_body(
             stmts: roots.to_vec(),
             value,
         });
-        ir.logical_types.insert(block, Ty::Unit);
+        ir.set_logical_type(block, Ty::Unit);
         return block;
     }
     let mut statements = roots.to_vec();
@@ -1480,8 +1480,8 @@ fn inline_callable_body(
         stmts: statements,
         value: Some(value),
     });
-    if let Some(&ty) = ir.logical_types.get(&value) {
-        ir.logical_types.insert(block, ty);
+    if let Some(ty) = ir.logical_type(value) {
+        ir.set_logical_type(block, ty);
     }
     block
 }
@@ -1538,7 +1538,7 @@ fn reshape_cloned_unit_inline_block(ir: &mut crate::ir::IrFile, block: ExprId) {
         stmts,
         value: Some(unit),
     };
-    ir.logical_types.insert(block, Ty::Unit);
+    ir.set_logical_type(block, Ty::Unit);
 }
 
 /// Where a declaration parameter sits among the logical parameters.
@@ -1747,10 +1747,18 @@ fn local_function_debug_line(body: &FirBody) -> Option<u32> {
     if statement_line != 0 {
         return Some(statement_line);
     }
-    let crate::fir::FirStatementKind::Expression(expression) = &body.statement(root)?.kind else {
+    let crate::fir::FirStatementKind::Expression(mut expression) = body.statement(root)?.kind
+    else {
         return None;
     };
-    let source_line = body.expression_debug_lines(*expression).source;
+    // The conversion of the body's result to the callable's result type stands where the value
+    // it converts is yielded; the callable opens on the line of the body it converts.
+    while let Some(crate::fir::FirExprKind::ImplicitConversion { value, .. }) =
+        body.expr(expression).map(|expression| &expression.kind)
+    {
+        expression = *value;
+    }
+    let source_line = body.expression_debug_lines(expression).source;
     (source_line != 0).then_some(source_line)
 }
 

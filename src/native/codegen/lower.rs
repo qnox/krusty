@@ -22,7 +22,6 @@ mod classes_literal;
 mod classifier_shapes;
 mod compiler_intrinsics;
 mod declared_capabilities;
-mod defaults;
 mod dispatch;
 mod entry;
 mod enums;
@@ -40,7 +39,6 @@ mod functions;
 mod implementor_dispatch;
 mod imported_functions;
 mod interface_records;
-pub(super) use defaults::exports_default_entry;
 pub(super) use imported_functions::ImportedAbis;
 mod lists;
 pub(super) use classifier_shapes::represents_dependency_classifier;
@@ -259,6 +257,15 @@ pub fn lower_file(
         module_facts,
     } = input;
     let class_model = model::build(ir, value_classes, slot_plan)?;
+    // Another file calls a default-argument entry by the one symbol its identity names.
+    if let Some(declaration) = ir.default_entries.keys().find(|&&declaration| {
+        crate::backend::default_arguments::published_identities(ir, declaration).len() > 1
+    }) {
+        let name = &ir.functions[*declaration as usize].name;
+        return Err(declined!(
+            "a default-argument entry of `{name}` under two identities"
+        ));
+    }
 
     let isa = isa_for(target, verify)?;
     let builder = ObjectBuilder::new(
@@ -317,9 +324,6 @@ pub fn lower_file(
         statics: Vec::new(),
         lambdas: HashMap::default(),
         local_delegate_helpers: HashMap::default(),
-        default_wrappers: HashMap::default(),
-        module_default_entries: Vec::new(),
-        default_constructors: HashMap::default(),
         enum_entries: HashMap::default(),
         reference_identities: HashMap::default(),
         holders: HashMap::default(),
@@ -348,9 +352,6 @@ pub fn lower_file(
     lowering.declare_statics()?;
     lowering.declare_lambdas()?;
     lowering.declare_local_delegate_helpers()?;
-    lowering.declare_default_wrappers()?;
-    lowering.declare_module_default_entries()?;
-    lowering.declare_default_constructors()?;
     lowering.declare_enum_entries()?;
     // Constructors are bodies too, so property-reference artifacts must exist before classes are
     // defined: a class initializer may itself contain `C::property`.
@@ -358,9 +359,6 @@ pub fn lower_file(
     lowering.declare_local_property_references()?;
     lowering.define_local_delegate_helpers()?;
     lowering.define_classes()?;
-    lowering.define_default_wrappers()?;
-    lowering.define_module_default_entries()?;
-    lowering.define_default_constructors()?;
     lowering.define_enum_entries()?;
     let statics_init = lowering.define_statics_init()?;
     let file_init_linkage = match unit_kind {
@@ -471,13 +469,6 @@ struct FileLowering<'a> {
     lambdas: HashMap<u32, functions::LambdaItems>,
     /// Native-local accessor helper per checked local-delegate plan and accessor side.
     local_delegate_helpers: HashMap<(u32, bool), FuncId>,
-    /// One wrapper per omission shape a call in this file uses.
-    default_wrappers: HashMap<defaults::Omission, FuncId>,
-    /// The entry each top-level function with defaults exports for callers in other files, by IR
-    /// function, in function order.
-    module_default_entries: Vec<(u32, FuncId)>,
-    /// The same, for a construction that leaves arguments out.
-    default_constructors: HashMap<defaults::CtorOmission, FuncId>,
     /// Per enum class, its constants' static slots and getters, in declaration order.
     enum_entries: HashMap<ClassId, enums::EnumItems>,
     /// The holder type for a captured `var` of each carrier, by the carrier's spelling.
@@ -1707,6 +1698,9 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
         match self.file.ir.expr(id).clone() {
             IrExpr::Const(constant) => self.constant(&constant).map(Some),
             IrExpr::UnitInstance => Ok(None),
+            // The default-argument entry overwrites the operand before anything reads it, so the
+            // zero of its carrier serves, a value class's carrier included.
+            IrExpr::AbsentArgument { ty } => Ok(Some(self.zero_of(ty))),
             IrExpr::GetValue(slot) => {
                 if self.unit_values.contains(&slot) {
                     // `Unit` in value position: no machine value, exactly as a `Unit`-returning
@@ -1817,7 +1811,7 @@ impl<'a, 'b, 'c> BodyLowering<'a, 'b, 'c> {
                 index,
                 receiver,
                 args,
-            } => self.method_call(id, class, index, receiver, &args),
+            } => self.method_call(class, index, receiver, &args),
             IrExpr::GetField {
                 receiver,
                 class,

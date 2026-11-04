@@ -13,7 +13,10 @@
 
 use crate::fir::{CallableId, ResolvedFunctionOverrideTarget};
 use crate::fx_hash::HashMap;
-use crate::ir::{Callee, ClassId, ExprId, FunId, IrBinOp, IrConst, IrExpr, IrFile, IrFunction};
+use crate::ir::{
+    Callee, ClassId, ExprId, FunId, IrBinOp, IrConst, IrConstructorTarget, IrExpr, IrFile,
+    IrFunction,
+};
 use crate::types::{Ty, TypeName};
 
 use super::masks::{mask_words, omission_bit};
@@ -47,6 +50,9 @@ pub(super) struct Entries {
     /// Each declaration an entry was asked for, with the entry and the static form it was built
     /// for, or `None` when the declaration has no entry this lowering can build.
     built: HashMap<FunId, Option<(FunId, Option<StaticForm>)>>,
+    /// Each constructor an entry was asked for, by its class and its place among the class's
+    /// constructors, with the target that reaches its entry, or `None` when it has none.
+    constructors: HashMap<(ClassId, u32), Option<IrConstructorTarget>>,
     /// The bodies of the entries built since they were last taken, for their own call sites.
     new_bodies: Vec<ExprId>,
     /// Each checked expression a default was copied from, with its copy in an entry.
@@ -94,6 +100,27 @@ impl Entries {
         built.map(|(entry, _)| entry)
     }
 
+    /// The entry of the constructor of `class` that `target` selects, built on first use, as the
+    /// constructor target that reaches it.
+    pub(super) fn constructor_entry(
+        &mut self,
+        ir: &mut IrFile,
+        class: ClassId,
+        target: IrConstructorTarget,
+    ) -> Option<IrConstructorTarget> {
+        if let Some(&built) = self.constructors.get(&(class, target.ordinal)) {
+            return built;
+        }
+        let built = super::constructor_entries::build(ir, class, target, &mut self.clones).map(
+            |(entry, roots)| {
+                self.new_bodies.extend(roots);
+                entry
+            },
+        );
+        self.constructors.insert((class, target.ordinal), built);
+        built
+    }
+
     pub(super) fn take_new_bodies(&mut self) -> Vec<ExprId> {
         std::mem::take(&mut self.new_bodies)
     }
@@ -121,6 +148,14 @@ fn is_published(ir: &IrFile, function: FunId) -> bool {
 fn declares_defaults(ir: &IrFile, function: FunId) -> bool {
     ir.param_defaults(function)
         .is_some_and(|defaults| defaults.iter().any(Option::is_some))
+}
+
+/// The entry of `declaration` that callers this file cannot see reach, when it publishes one: the
+/// entry of a top-level declaration with defaults, built whether or not this file calls it.
+pub(crate) fn published_entry(ir: &IrFile, declaration: FunId) -> Option<FunId> {
+    is_published(ir, declaration)
+        .then(|| ir.default_entries.get(&declaration).copied())
+        .flatten()
 }
 
 /// The identities other files of the module call `declaration`'s entry by: the declaration whose
@@ -195,40 +230,8 @@ fn build(
         .cloned()
         .expect("an entry is built only for a declaration with defaults");
     let first = usize::from(receiver.is_some());
-    let frame = first + parameters.len();
+    let fills = fills(ir, &defaults, first, parameters.len(), clones);
     let words = mask_words(parameters.len());
-    let frame_end = u32::try_from(frame).expect("too many parameters");
-    let shift = u32::try_from(words).expect("too many mask words");
-
-    let mut fills = Vec::new();
-    for (ordinal, default) in defaults.iter().enumerate() {
-        let Some(default) = *default else { continue };
-        let (value, copied) = crate::ir::clone_expression_dag(ir, default);
-        let mut copied = copied.into_iter().collect::<Vec<_>>();
-        copied.sort_unstable();
-        clones.extend(copied);
-        // The default's own locals move above the mask parameters.
-        crate::ir::shift_value_indices(ir, value, frame_end, shift);
-        let mask_slot = u32::try_from(frame + ordinal / 32).expect("too many parameters");
-        let mask = read(ir, mask_slot, Ty::Int);
-        let bit = ir.add_expr(IrExpr::Const(IrConst::Int(omission_bit(ordinal))));
-        let masked = ir.add_arithmetic(IrBinOp::BitAnd, mask, bit, Ty::Int);
-        let zero = ir.add_expr(IrExpr::Const(IrConst::Int(0)));
-        let omitted = ir.add_expr(IrExpr::PrimitiveBinOp {
-            op: IrBinOp::Ne,
-            lhs: masked,
-            rhs: zero,
-        });
-        let fill = ir.add_expr(IrExpr::SetValue {
-            var: u32::try_from(first + ordinal).expect("too many parameters"),
-            value,
-        });
-        let guarded = ir.add_expr(IrExpr::When {
-            branches: vec![(Some(omitted), fill)],
-        });
-        ir.logical_types.insert(guarded, Ty::Unit);
-        fills.push(guarded);
-    }
 
     let arguments = parameters
         .iter()
@@ -269,11 +272,15 @@ fn build(
         },
     };
     let call = ir.add_expr(call);
-    ir.logical_types.insert(call, result);
-    let body = ir.add_expr(IrExpr::Block {
-        stmts: fills,
-        value: Some(call),
-    });
+    ir.set_logical_type(call, result);
+    // A function body returns its result explicitly; a `Unit` one ends after the call.
+    let last = match result {
+        Ty::Unit => call,
+        _ => ir.add_expr(IrExpr::Return(Some(call))),
+    };
+    let mut stmts = fills;
+    stmts.push(last);
+    let body = ir.add_expr(IrExpr::Block { stmts, value: None });
     let entry = ir.add_fun(IrFunction {
         name,
         params: receiver
@@ -287,12 +294,60 @@ fn build(
         dispatch_receiver: None,
         param_checks: Vec::new(),
     });
+    // Compiler-generated: no source declaration of its own, and no public name.
+    ir.synthetic_methods.insert(entry);
     ir.default_entries.insert(declaration, entry);
     entry
 }
 
-fn read(ir: &mut IrFile, slot: u32, ty: Ty) -> ExprId {
+/// The guarded fill of each of `parameters` parameters that has a default, in declaration order,
+/// for an entry whose frame puts parameter `k` at value `first + k` and its mask words right after
+/// the last parameter. Each fill evaluates a copy of the default, recorded in `clones`, whose own
+/// locals move above the mask words.
+pub(super) fn fills(
+    ir: &mut IrFile,
+    defaults: &[Option<ExprId>],
+    first: usize,
+    parameters: usize,
+    clones: &mut Vec<(ExprId, ExprId)>,
+) -> Vec<ExprId> {
+    let frame = first + parameters;
+    let frame_end = u32::try_from(frame).expect("too many parameters");
+    let shift = u32::try_from(mask_words(parameters)).expect("too many mask words");
+    let mut fills = Vec::new();
+    for (ordinal, default) in defaults.iter().enumerate() {
+        let Some(default) = *default else { continue };
+        let (value, copied) = crate::ir::clone_expression_dag(ir, default);
+        let mut copied = copied.into_iter().collect::<Vec<_>>();
+        copied.sort_unstable();
+        clones.extend(copied);
+        // The default's own locals move above the mask parameters.
+        crate::ir::shift_value_indices(ir, value, frame_end, shift);
+        let mask_slot = u32::try_from(frame + ordinal / 32).expect("too many parameters");
+        let mask = read(ir, mask_slot, Ty::Int);
+        let bit = ir.add_expr(IrExpr::Const(IrConst::Int(omission_bit(ordinal))));
+        let masked = ir.add_arithmetic(IrBinOp::BitAnd, mask, bit, Ty::Int);
+        let zero = ir.add_expr(IrExpr::Const(IrConst::Int(0)));
+        let omitted = ir.add_expr(IrExpr::PrimitiveBinOp {
+            op: IrBinOp::Ne,
+            lhs: masked,
+            rhs: zero,
+        });
+        let fill = ir.add_expr(IrExpr::SetValue {
+            var: u32::try_from(first + ordinal).expect("too many parameters"),
+            value,
+        });
+        let guarded = ir.add_expr(IrExpr::When {
+            branches: vec![(Some(omitted), fill)],
+        });
+        ir.set_logical_type(guarded, Ty::Unit);
+        fills.push(guarded);
+    }
+    fills
+}
+
+pub(super) fn read(ir: &mut IrFile, slot: u32, ty: Ty) -> ExprId {
     let read = ir.add_expr(IrExpr::GetValue(slot));
-    ir.logical_types.insert(read, ty);
+    ir.set_logical_type(read, ty);
     read
 }
