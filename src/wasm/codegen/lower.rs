@@ -1671,6 +1671,17 @@ impl<'a> Body<'a> {
             (Some(ValType::Ref { .. }), Some(ValType::Ref { .. })) => {
                 self.object_equality(lhs, rhs)?
             }
+            // `any == 3`: the primitive side is boxed and the left value's `equals` decides, as
+            // kotlinc's `Intrinsics.areEqual` does. IEEE-754 equality of a nullable floating
+            // value is a different relation and stays unsupported.
+            (Some(ValType::Ref { .. }), Some(scalar))
+            | (Some(scalar), Some(ValType::Ref { .. }))
+                if rank(scalar).is_some()
+                    && matches!(op, IrBinOp::Eq | IrBinOp::Ne)
+                    && mode != EqualityMode::Ieee754 =>
+            {
+                self.object_equality(lhs, rhs)?
+            }
             _ => {
                 return Err("an equality between values of these types".into());
             }

@@ -23,6 +23,8 @@ mod infix_newline_operand_e2e;
 mod inline_only_converted_lambda_line_e2e;
 #[path = "../inline_operand_binding_line_e2e.rs"]
 mod inline_operand_binding_line_e2e;
+#[path = "../lambda_result_conversion_line_e2e.rs"]
+mod lambda_result_conversion_line_e2e;
 #[path = "../multiline_receiver_access_line_e2e.rs"]
 mod multiline_receiver_access_line_e2e;
 #[path = "../newline_method_chain_e2e.rs"]
