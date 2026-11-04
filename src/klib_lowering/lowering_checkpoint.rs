@@ -23,7 +23,7 @@ impl LoweringCheckpoint {
     pub(super) fn restore(self, ir: &mut IrFile) -> FunId {
         let first = ExprId::try_from(self.expressions).expect("an expression id fits u32");
         ir.exprs.truncate(self.expressions);
-        ir.logical_types.retain(|expression, _| *expression < first);
+        ir.truncate_types(first);
         ir.checked_return_depths
             .retain(|expression, _| *expression < first);
         ir.binding_read_stability
