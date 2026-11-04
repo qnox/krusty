@@ -59433,17 +59433,7 @@ impl<'a> Checker<'a> {
             let size_type = self.expr_expected(scope, *size, Ty::Int);
             self.expect_assignable(Ty::Int, size_type, self.span(*size), "array size");
             let elem = element_hint.unwrap_or_else(|| Ty::obj("kotlin/Any"));
-            if elem.is_reference() {
-                return Some(Ty::obj_args("kotlin/Array", &[Ty::nullable(elem)]));
-            }
-            if elem.jvm_boxed_ref().is_some() {
-                return Some(Ty::obj_args("kotlin/Array", &[Ty::nullable(elem)]));
-            }
-            self.diags.error(
-                span,
-                "krusty: arrayOfNulls of this element type is not supported".to_string(),
-            );
-            return Some(Ty::Error);
+            return Some(Ty::obj_args("kotlin/Array", &[Ty::nullable(elem)]));
         }
         None
     }
