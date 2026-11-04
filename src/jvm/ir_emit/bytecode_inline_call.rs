@@ -1219,9 +1219,7 @@ impl Emitter<'_> {
         let function_typed = |argument: u32| {
             let semantic = self
                 .ir
-                .logical_types
-                .get(&argument)
-                .copied()
+                .logical_type(argument)
                 .unwrap_or_else(|| self.value_ty(argument));
             semantic.non_null().is_fun()
         };
