@@ -36,6 +36,8 @@ pub enum SkipReason {
     InlineParameters,
     /// A read-only collection superclass lacks the exact semantic declaration its stubs need.
     ReadOnlyCollectionStubs(String),
+    /// A collection class's supertype lacks the declaration facts its `toArray` members need.
+    CollectionToArray(String),
     /// A `suspend inline` callee's compiled body does not say where it places a suspend lambda
     /// passed to it: in the caller's frame, or in an object it constructs.
     SuspendLambdaPlacement(String),
@@ -355,6 +357,7 @@ fn run_backend_passes_after_plugins(
             &facts.override_results,
         ),
         read_only_stubs: crate::read_only_collection_stubs::select(ir, classpath, classifiers)?,
+        to_array: crate::collection_to_array::select(ir, classpath, classifiers)?,
     };
     // The value-class pass reads same-module SOURCE value classes (internal name → sole-field
     // underlying) for its erasure/mangle map from the frontend symbols directly, NOT through the
@@ -1269,6 +1272,13 @@ fn report_backend_pass_failure(reason: SkipReason, diags: &mut DiagSink) {
             );
             return;
         }
+        SkipReason::CollectionToArray(detail) => {
+            diags.error(
+                krusty::diag::Span::new(0, 0),
+                format!("krusty: cannot realize collection toArray members: {detail}"),
+            );
+            return;
+        }
         SkipReason::SuspendLambdaPlacement(detail) => {
             diags.error(
                 krusty::diag::Span::new(0, 0),
@@ -1298,6 +1308,7 @@ fn report_backend_pass_failure(reason: SkipReason, diags: &mut DiagSink) {
         | SkipReason::CallArguments(_)
         | SkipReason::InlineParameters
         | SkipReason::ReadOnlyCollectionStubs(_)
+        | SkipReason::CollectionToArray(_)
         | SkipReason::SuspendLambdaPlacement(_)
         | SkipReason::MemberDispatch(_) => {
             unreachable!()

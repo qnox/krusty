@@ -191,6 +191,10 @@ pub enum IrCtorParameterProvenance {
     Value,
     /// A closure value carried ahead of the parameters the source wrote.
     Capture,
+    /// An anonymous classifier's constructor operand for one checked `Interface by value`.
+    /// Its explicit constructor initializer stores the operand at `field`; this is neither a
+    /// source property parameter nor a pre-super capture. The containing argument owns its slot.
+    InterfaceDelegate { interface: Ty, field: u32 },
     /// The enclosing instance of an inner class. A backend may format this as `this$0`.
     EnclosingInstance,
     /// The completion parameter of a generated continuation constructor.

@@ -871,7 +871,7 @@ pub fn jvm_collection_to_kotlin_mutable_type_name(internal: TypeName) -> Option<
 /// Whether this exact resolved identity is one of the JVM/Kotlin faces in a mapped collection
 /// erasure group. A class merely declared under either package is not a collection face; the shared
 /// erasure table is the semantic source of truth.
-pub(super) fn is_mapped_collection_face(internal: TypeName) -> bool {
+pub fn is_mapped_collection_face(internal: TypeName) -> bool {
     let jvm = to_jvm_type_name(internal);
     jvm_collection_to_kotlin_type_name(jvm).is_some()
         && jvm_collection_to_kotlin_mutable_type_name(jvm).is_some()

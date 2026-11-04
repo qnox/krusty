@@ -1778,6 +1778,12 @@ fn remove_capture(
     field: u32,
     class_name: TypeName,
 ) -> Result<(), super::super::FirLoweringFailure> {
+    if ir.classes[class as usize].ctor_args.iter().any(|argument| matches!(
+        argument.provenance,
+        crate::ir::IrCtorParameterProvenance::InterfaceDelegate { field: stored, .. } if stored == field
+    )) {
+        return Err(malformed(class_name));
+    }
     shift_capture_reads(ir, class, pending_property_roots, field);
     let declaration = &mut ir.classes[class as usize];
     if field as usize >= declaration.fields.len()
@@ -1792,6 +1798,13 @@ fn remove_capture(
     declaration.ctor_param_count -= 1;
     declaration.constructor_prefix_count -= 1;
     for argument in &mut declaration.ctor_args {
+        if let crate::ir::IrCtorParameterProvenance::InterfaceDelegate { field: stored, .. } =
+            &mut argument.provenance
+        {
+            if *stored > field {
+                *stored -= 1;
+            }
+        }
         if let Some(index) = argument.field_index.as_mut() {
             if *index > field {
                 *index -= 1;
