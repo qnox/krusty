@@ -256,12 +256,12 @@ fn replace(ir: &mut IrFile, site: ExprId, call: IrExpr, result: Ty) {
     match site_type {
         _ if declared == Some(result) => {}
         None => {
-            ir.logical_types.insert(site, result);
+            ir.set_logical_type(site, result);
         }
         Some(site_type) if site_type == result => {}
         Some(site_type) => {
             let call = ir.add_expr(call);
-            ir.logical_types.insert(call, result);
+            ir.set_logical_type(call, result);
             ir.call_declared_ret.remove(&site);
             ir.exprs[site as usize] = IrExpr::TypeOp {
                 op: IrTypeOp::ImplicitCoercion,
