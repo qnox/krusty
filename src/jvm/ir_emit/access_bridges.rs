@@ -261,8 +261,7 @@ fn protected_bridge_owner(
     target_owner: crate::types::TypeName,
 ) -> Option<crate::types::TypeName> {
     let receiver_owner = receiver
-        .and_then(|receiver| ir.logical_types.get(&receiver))
-        .copied()
+        .and_then(|receiver| ir.logical_type(receiver))
         .and_then(crate::types::Ty::kotlin_class_internal);
     receiver_owner
         .filter(|receiver| *receiver != target_owner && ir.class_id_by_name(*receiver).is_some())
@@ -496,8 +495,7 @@ pub(super) fn cross_owner_member_calls(
                 }
                 if visibility == crate::types::Visibility::Protected {
                     let receiver_owner = receiver
-                        .and_then(|receiver| ir.logical_types.get(&receiver))
-                        .copied()
+                        .and_then(|receiver| ir.logical_type(receiver))
                         .and_then(crate::types::Ty::kotlin_class_internal);
                     // Prefer the checked receiver classifier. Generic member selection may have
                     // already coerced that receiver to the declaring superclass; in that case the
