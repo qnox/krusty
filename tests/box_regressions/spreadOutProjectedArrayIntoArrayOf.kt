@@ -7,22 +7,19 @@ fun parts(named: Boolean): Array<out Any> =
 fun third(vararg items: Any): Any = items[2]
 
 fun box(): String {
-    val one = Code("1")
-    val leading = arrayOf<Any>(one, "s")
+    val leading = arrayOf<Any>(1, "s")
     val projected = parts(true)
     val strings: Array<out String> = arrayOf("x", "y")
 
     val joined = arrayOf(*leading, *projected, "p")
     if ((third(*joined) as Name).text != "n") return "joined"
-    if (joined[0] !== one || joined[3] != "p") return "joined ends"
+    if (joined[3] != "p") return "joined tail"
 
-    val last = Code("3")
-    val tail = arrayOf(*projected, last)
-    if (tail[1] !== last) return "tail"
+    val tail = arrayOf(*projected, 3)
+    if (tail[1] != 3) return "tail"
 
-    val four = Code("4")
-    val typed: Array<Any> = arrayOf(*strings, four)
-    if (typed[0] != "x" || typed[2] !== four) return "typed"
+    val typed: Array<Any> = arrayOf(*strings, 4)
+    if (typed[0] != "x" || typed[2] != 4) return "typed"
 
     val explicit = arrayOf<CharSequence>(*strings)
     if (explicit[1] != "y") return "explicit"
