@@ -12,6 +12,8 @@ mod common_supertype;
 pub(crate) use common_supertype::{common_super_types, reified_runtime_type};
 mod conditional_result;
 mod postponed_result;
+mod receiver_constraints;
+pub(crate) use receiver_constraints::unify_receiver_from_symbols;
 
 use bound_relations::complete_dependent_bound_bindings;
 pub(crate) use bound_relations::{
@@ -1473,63 +1475,18 @@ pub(crate) fn merge_inferred_ty_from_symbols(
     if !merged.is_erased_top() || !current.is_reference() || !actual.is_reference() {
         return merged;
     }
-    let same_generic_classifier = match (current.non_null().kind(), actual.non_null().kind()) {
-        (TyKind::Obj(left, left_arguments), TyKind::Obj(right, right_arguments)) => {
-            left == right
-                && !left_arguments.is_empty()
-                && left_arguments.len() == right_arguments.len()
-        }
-        _ => false,
-    };
-    if same_generic_classifier {
-        // Two invariant instantiations (`Inv<A>` and `Inv<B>`) are not a raw classifier and not
-        // `Any`. Their common supertype keeps the classifier and captures the arguments' own common
-        // supertype. Do not apply this structural join to unrelated top-level classifiers: ordinary
-        // inference already has a stable nearest-hierarchy rule, and replacing it changes such
-        // established results as mixed scalar varargs and Java flexible collection expectations.
-        let supertype =
-            common_supertype::common_super_type(source, current.non_null(), actual.non_null());
-        if !supertype.is_erased_top() {
-            return if current.is_nullable() || actual.is_nullable() {
-                Ty::nullable(supertype)
-            } else {
-                supertype
-            };
-        }
-    }
-
-    let left = receiver_hierarchy(source, current.non_null());
-    let right = receiver_hierarchy(source, actual.non_null());
-    let mut common = left
-        .iter()
-        .flat_map(|(left_ty, left_depth)| {
-            right.iter().filter_map(move |(right_ty, right_depth)| {
-                let left_name = left_ty.obj_internal()?;
-                let right_name = right_ty.obj_internal()?;
-                (left_name == right_name).then_some((
-                    left_depth + right_depth,
-                    if left_ty == right_ty {
-                        *left_ty
-                    } else {
-                        common_supertype::common_super_type(source, *left_ty, *right_ty)
-                    },
-                ))
-            })
-        })
-        .collect::<Vec<_>>();
-    let Some(nearest) = common.iter().map(|(distance, _)| *distance).min() else {
-        return merged;
-    };
-    common.retain(|(distance, ty)| *distance == nearest && !ty.is_erased_top());
-    common.dedup_by(|left, right| left.1 == right.1);
-    let [(_, common)] = common.as_slice() else {
-        return merged;
-    };
-    if current.is_nullable() || actual.is_nullable() {
-        Ty::nullable(*common)
-    } else {
-        *common
-    }
+    // Two reference lower bounds join at their common supertype, as kotlinc's does: every
+    // most-specific classifier both hierarchies share, however far up each one sits, with type
+    // arguments joined by declaration variance (`Inv<A>` and `Inv<B>` join at `Inv<out C>`, `C` the
+    // common supertype of `A` and `B`), and an intersection when several incomparable classifiers
+    // remain (`A : Base(), I` and `B : Base(), J`, `J : I`, join at `Base & I`). The one
+    // common-supertype relation owns that algebra for every lower-bound join; it also reads a type
+    // parameter through its bounds and keeps a nullable bound's nullability. A missing or invalid
+    // classifier declaration is `Ty::Error`, which propagates rather than becoming `Any`.
+    common_supertype::common_super_types(
+        source,
+        &[inference_actual(current), inference_actual(actual)],
+    )
 }
 
 /// Collapse a complete set of lower constraints in one operation. Keeping the original bounds is

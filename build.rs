@@ -17,6 +17,9 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+// Rerunning a script does not recompile it. Include checkout identity in this script's dep-info.
+const _: Option<&str> = option_env!("KRUSTY_BUILD_CHECKOUT");
+
 // The supported targets, their triples, ELF machines and runtime flags. The compiler reads the same
 // module, so the targets built here are the targets it names.
 #[path = "src/native/target_contract.rs"]

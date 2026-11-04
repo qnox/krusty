@@ -73,7 +73,7 @@ impl BodyLowering<'_> {
             type_operand,
         } = self.ir.expr(value)
         {
-            if let Some(&operand_ty) = self.ir.logical_types.get(&arg) {
+            if let Some(operand_ty) = self.ir.logical_type(arg) {
                 let boxed = !operand_ty.is_reference() && type_operand.is_reference();
                 if boxed || self.is_reference_value(arg) {
                     let read = self.spill_call_operand(arg, operand_ty, statements);
@@ -87,7 +87,7 @@ impl BodyLowering<'_> {
             }
         }
         if self.is_reference_value(value) {
-            if let Some(&reference_ty) = self.ir.logical_types.get(&value) {
+            if let Some(reference_ty) = self.ir.logical_type(value) {
                 let read = self.spill_call_operand(value, reference_ty, statements);
                 return self.reordered_operand_replay(value, read);
             }
@@ -100,8 +100,8 @@ impl BodyLowering<'_> {
     /// Keep the operand's source line on that replay so the next direct operand can restore its own
     /// line, exactly as it would without the evaluation-order temporary.
     fn reordered_operand_replay(&mut self, source: ExprId, replay: ExprId) -> ExprId {
-        if let Some(&line) = self.ir.expr_source_lines.get(&source) {
-            self.ir.expr_source_lines.insert(replay, line);
+        if let Some(line) = self.ir.source_line(source) {
+            self.ir.set_source_line(replay, line);
         }
         replay
     }
