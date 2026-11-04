@@ -494,8 +494,7 @@ pub(super) fn complete_deserialization_constructor(
             if value_class_underlying(ir, field_ty).is_some() {
                 // The slot carries the nullable value class, which JVM lowering converts at the
                 // erased backing-field store.
-                ir.physical_types
-                    .insert(argument, deserialization_parameter_ty(*field_ty));
+                ir.set_physical_type(argument, deserialization_parameter_ty(*field_ty));
             }
             // An unsigned slot carries its box, unboxed into the field as kotlinc does.
             let argument = if field_ty.is_unsigned() {
@@ -752,7 +751,7 @@ fn store_field_default(
         .copied()
         .filter(|line| *line != 0);
     if let Some(line) = property_line {
-        ir.expr_source_lines.insert(default, line);
+        ir.set_source_line(default, line);
         let start_line = ir.classes[class_id as usize].decl_start_line;
         if start_line != 0 {
             ir.expr_lines.insert(store, start_line);

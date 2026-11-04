@@ -428,7 +428,7 @@ impl BodyLowering<'_> {
         Ok(if signature.ret == ty {
             invocation
         } else {
-            self.ir.logical_types.insert(invocation, signature.ret);
+            self.ir.set_logical_type(invocation, signature.ret);
             let erased = self.coercion(invocation, ty);
             self.erasure_coercions.insert(erased);
             erased
@@ -446,7 +446,7 @@ impl BodyLowering<'_> {
         self.linked_call(linked, access, ty)
     }
 
-    fn linked_call(
+    pub(super) fn linked_call(
         &mut self,
         linked: LinkedCallee,
         access: &KlibIrMemberAccess,
@@ -489,7 +489,7 @@ impl BodyLowering<'_> {
         Ok(match declared_ret {
             Some(declared) if declared != operands.ret => {
                 let coerced = self.coercion(call, operands.ret);
-                self.ir.logical_types.insert(coerced, operands.ret);
+                self.ir.set_logical_type(coerced, operands.ret);
                 coerced
             }
             _ => call,
@@ -617,9 +617,11 @@ impl BodyLowering<'_> {
         // A result read through a projected receiver argument (`Array<out T>.get`) is that
         // projection's read type, as a source call's result is.
         let ret = substitute(callee.ret).projection_read_ty();
-        if ty != ret {
+        let ret = if self.linker.same_type(ret, ty) {
+            ty
+        } else {
             return Err(mismatch("a call is typed apart from its callee's result"));
-        }
+        };
         let params = callee
             .params
             .iter()

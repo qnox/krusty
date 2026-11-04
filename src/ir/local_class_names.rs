@@ -1482,16 +1482,11 @@ impl super::IrFile {
         for parameters in self.physical_call_parameters.values_mut() {
             tys(parameters, names);
         }
-        self.logical_types
-            .values_mut()
-            .for_each(|value| *value = ty(*value, names));
+        self.rewrite_types(|value| ty(value, names));
         self.deferred_local_types
             .values_mut()
             .for_each(|value| *value = ty(*value, names));
         self.inline_declared_types_mut()
-            .for_each(|value| *value = ty(*value, names));
-        self.physical_types
-            .values_mut()
             .for_each(|value| *value = ty(*value, names));
         self.whens
             .exhaustive
@@ -1623,13 +1618,13 @@ impl super::IrFile {
 }
 
 fn remap_expression_facts(ir: &mut super::IrFile, expression: ExprId, names: &IdentityRemap<'_>) {
-    if let Some(value) = ir.logical_types.get_mut(&expression) {
+    if let Some(value) = ir.logical_type_mut(expression) {
         *value = ty(*value, names);
     }
     if let Some(value) = ir.deferred_local_types.get_mut(&expression) {
         *value = ty(*value, names);
     }
-    if let Some(value) = ir.physical_types.get_mut(&expression) {
+    if let Some(value) = ir.physical_type_mut(expression) {
         *value = ty(*value, names);
     }
     if let Some(value) = ir.call_declared_ret.get_mut(&expression) {

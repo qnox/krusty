@@ -231,6 +231,7 @@ impl Folder<'_> {
             classifier,
             members,
             values,
+            arguments: plan.arguments.clone(),
         })
     }
 }

@@ -152,8 +152,7 @@ impl Emitter<'_> {
         let arity = usize::from(arity);
         let (semantic, suspend) = match self
             .ir
-            .logical_types
-            .get(&argument)
+            .logical_type(argument)
             .map(|ty| ty.non_null())
             .map(Ty::kind)
         {
@@ -174,10 +173,9 @@ impl Emitter<'_> {
                 );
             }
         };
-        let result_semantic = *self
+        let result_semantic = self
             .ir
-            .logical_types
-            .get(&inline_body)
+            .logical_type(inline_body)
             .ok_or("a placed lambda's body has no checked result type")?;
         let (parameter_types, parameter_coercions) = physical_parameters
             .iter()
@@ -217,12 +215,7 @@ impl Emitter<'_> {
             return Err("a callable reference adapter does not take its captures and parameters");
         }
         let (capture_types, physical_parameters) = physical.split_at(split);
-        let result_semantic = self
-            .ir
-            .logical_types
-            .get(&inline_body)
-            .copied()
-            .unwrap_or(signature.ret);
+        let result_semantic = self.ir.logical_type(inline_body).unwrap_or(signature.ret);
         let (parameter_types, parameter_coercions) = physical_parameters
             .iter()
             .zip(signature.params.iter())
@@ -526,7 +519,7 @@ impl Emitter<'_> {
         callee: &str,
     ) -> Result<LambdaArgument, &'static str> {
         let reference_line = matches!(self.ir.expr(argument), IrExpr::CallableReference(_))
-            .then(|| self.ir.expr_source_lines.get(&argument).copied())
+            .then(|| self.ir.source_line(argument))
             .flatten();
         let (lambda, _) = self.literal_lambda(argument)?;
         let value_class_parameters = lambda
