@@ -50,14 +50,14 @@ fn the_jvm_non_box_ci_step_owns_its_cold_reference_toolchain_budget() {
 #[test]
 fn plugin_host_tests_run_under_their_compiler_owner() {
     let workflow = include_str!("../.github/workflows/ci.yml");
-    let lint = workflow
-        .split("\n  lint:\n")
+    let host = workflow
+        .split("\n  plugin-host:\n")
         .nth(1)
-        .expect("the lint job exists")
+        .expect("the plugin host job exists")
         .split("\n  ci:\n")
         .next()
         .unwrap();
-    let step = lint
+    let step = host
         .split("      - name: plugin host tests\n")
         .nth(1)
         .expect("the standalone host test step exists")

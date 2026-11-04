@@ -179,7 +179,7 @@ than turning those tests into passing skips. Compiler-dependent plugin and KSP i
 to the root e2e target. After coverage, CI reuses that exact coverage-profile executable for an explicit
 `plugin_host_compiler_e2e:: --include-ignored --test-threads=1` pass under the configurable e2e deadline.
 That pass runs after the coverage report; its counters do not change the measured workload.
-Compiler-independent host tests remain in lint through
+Compiler-independent host tests run in their own `plugin-host` job through
 `cargo test --profile gate -p krusty-plugin-host -- --include-ignored`. Both use the host's pinned
 toolchain and JDK 17 in CI, not JVM matrix opt-in flags. Each row
 uses its target's configurable process-group deadline. The complete JVM non-box CI pass retains

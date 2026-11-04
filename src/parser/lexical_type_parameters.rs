@@ -60,6 +60,35 @@ impl LexicalTypeParameters {
     }
 }
 
+/// The parser's view of the inventory: classifier and callable bodies push their own parameters,
+/// and static classifier boundaries cut the enclosing scope and restore it afterwards.
+impl super::Parser<'_> {
+    pub(super) fn push_lexical_type_params(
+        &mut self,
+        params: &[String],
+        bounds: &[(String, crate::ast::TypeRef)],
+    ) -> usize {
+        self.lexical_type_parameters.push(params, bounds)
+    }
+
+    pub(super) fn pop_lexical_type_params(&mut self, old_len: usize) {
+        self.lexical_type_parameters.pop(old_len);
+    }
+
+    pub(super) fn current_lexical_type_params(&self) -> Vec<String> {
+        self.lexical_type_parameters.names()
+    }
+
+    pub(super) fn cut_lexical_type_parameter_scope(&mut self) -> LexicalTypeParameters {
+        std::mem::take(&mut self.lexical_type_parameters)
+    }
+
+    pub(super) fn restore_lexical_type_parameter_scope(&mut self, scope: LexicalTypeParameters) {
+        debug_assert!(self.lexical_type_parameters.names().is_empty());
+        self.lexical_type_parameters = scope;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::ast::Decl;
@@ -149,5 +178,46 @@ mod tests {
         assert_eq!(class.supertypes.len(), 1);
         assert_eq!(class.supertypes[0].targs.len(), 1);
         assert_eq!(class.supertypes[0].targs[0].name, "T");
+    }
+
+    #[test]
+    fn interface_type_parameters_scope_over_default_method_bodies() {
+        let source = r#"
+            interface Shape<X>
+            interface Adapter<T> {
+                fun shape(): Shape<T> = object : Shape<T> {}
+                class Nested<U> {
+                    val nested = object : Shape<U> {}
+                }
+            }
+        "#;
+        let mut diagnostics = DiagSink::new();
+        let tokens = lex(source, &mut diagnostics);
+        let file = parse(source, &tokens, &mut diagnostics);
+        assert_eq!(
+            diagnostics.diags.len(),
+            0,
+            "{}",
+            diagnostics.render("interface-capture.kt", source)
+        );
+
+        let mut captures = file
+            .anonymous_object_classes
+            .values()
+            .map(|&declaration| match file.decl(declaration) {
+                Decl::Class(class) => {
+                    (class.span.lo, class.lexical_type_parameter_captures.clone())
+                }
+                Decl::Fun(_) | Decl::Property(_) => panic!("anonymous declaration is not a class"),
+            })
+            .collect::<Vec<_>>();
+        captures.sort_by_key(|(start, _)| *start);
+        assert_eq!(
+            captures
+                .into_iter()
+                .map(|(_, parameters)| parameters)
+                .collect::<Vec<_>>(),
+            [vec!["T".to_string()], vec!["U".to_string()]]
+        );
     }
 }

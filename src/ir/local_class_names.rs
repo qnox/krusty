@@ -986,6 +986,11 @@ fn remap_class(class: &mut super::IrClass, names: &IdentityRemap<'_>) {
     for argument in &mut class.ctor_args {
         argument.ty = ty(argument.ty, names);
         argument.declared_ty = argument.declared_ty.map(|value| ty(value, names));
+        if let super::IrCtorParameterProvenance::InterfaceDelegate { interface, .. } =
+            &mut argument.provenance
+        {
+            *interface = ty(*interface, names);
+        }
         if let Some(receiver) = argument
             .capture
             .as_mut()
