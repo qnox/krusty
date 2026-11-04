@@ -868,6 +868,7 @@ impl CallLinker for Linker<'_, '_> {
                 context_count: 0,
                 singleton_dispatch: None,
                 type_parameters: Vec::new(),
+                type_parameter_bounds: Some(Vec::new()),
                 class_type_parameters: self.class_type_parameters(selected)?,
             });
         }
@@ -968,6 +969,9 @@ impl CallLinker for Linker<'_, '_> {
                 type_parameters: selected
                     .and_then(|selected| selected.generic_signature())
                     .map_or_else(Vec::new, |signature| signature.formals.clone()),
+                type_parameter_bounds: selected
+                    .and_then(|selected| selected.generic_signature())
+                    .map(|signature| signature.formal_bounds.clone()),
                 class_type_parameters,
             });
         }
@@ -1004,6 +1008,9 @@ impl CallLinker for Linker<'_, '_> {
             type_parameters: selected
                 .and_then(|selected| selected.generic_signature())
                 .map_or_else(Vec::new, |signature| signature.formals.clone()),
+            type_parameter_bounds: selected
+                .and_then(|selected| selected.generic_signature())
+                .map(|signature| signature.formal_bounds.clone()),
             class_type_parameters: Vec::new(),
         })
     }

@@ -128,3 +128,108 @@ fn corpus_kt9277_named_argument_elvis_return() {
         assert_eq!(out, "OK");
     }
 }
+
+#[test]
+fn a_succeeded_safe_cast_narrows_its_operand() {
+    // `x as? T` is non-null only when the cast succeeded, so a diverging elvis or a `!= null`
+    // check on it proves `x` is `T`, for a parameter and for a stable property path alike.
+    const SRC: &str = "class Box<T>(val value: T)\n\
+@Suppress(\"UNCHECKED_CAST\")\n\
+fun elvisError(x: Any?): String {\n\
+    (x as? Box<String>) ?: error(\"not a box\")\n\
+    return x.value\n\
+}\n\
+fun elvisReturn(x: Any?): String {\n\
+    x as? String ?: return \"none\"\n\
+    return x\n\
+}\n\
+fun condition(x: Any?): String = if (x as? String != null) x else \"none\"\n\
+class Holder(val item: Any?)\n\
+fun property(holder: Holder): String {\n\
+    holder.item as? String ?: return \"none\"\n\
+    return holder.item\n\
+}\n\
+fun box(): String {\n\
+    if (elvisReturn(1) != \"none\" || condition(2) != \"none\" || property(Holder(3)) != \"none\") return \"FAIL\"\n\
+    return elvisError(Box(\"O\")) + elvisReturn(\"K\") + condition(\"\") + property(Holder(\"\"))\n\
+}\n";
+    assert_eq!(
+        common::reference_error_messages("Main", SRC),
+        Vec::<String>::new(),
+        "kotlinc must accept the safe-cast smart casts"
+    );
+    assert_eq!(run(SRC).expect("safe-cast smart casts compile + run"), "OK");
+}
+
+#[test]
+fn a_safe_cast_proves_nothing_without_divergence_or_stability() {
+    // A non-diverging elvis leaves `x` unnarrowed, and a closure-mutated `var` declines the cast
+    // with kotlinc's smart-cast diagnostic.
+    const SRC: &str = "fun fallback(x: Any?): String {\n\
+    x as? String ?: \"fallback\"\n\
+    return x\n\
+}\n\
+fun mutated(): String {\n\
+    var x: Any? = \"a\"\n\
+    val reset = { x = 1 }\n\
+    x as? String ?: return \"none\"\n\
+    reset()\n\
+    return x\n\
+}\n";
+    let sources = [("Main.kt", SRC)];
+    let reference_args = common::language_directives::kotlinc_args(SRC);
+    assert_eq!(
+        common::reference_error_blocks(&sources, &reference_args),
+        [
+            "Main.kt:3:8: return type mismatch: expected 'String', actual 'Any?'.",
+            "Main.kt:10:8: smart cast to 'String' is impossible, because 'x' is a local variable that is mutated in a capturing closure.",
+        ]
+    );
+    common::assert_error_blocks_match_kotlinc(&sources, &reference_args);
+}
+
+#[test]
+fn a_non_null_safe_cast_to_a_nullable_target_narrows_to_its_non_null_form() {
+    // The proof is of a non-null result, so `as? String?` narrows `x` to `String`, not `String?`.
+    const SRC: &str = "fun nullableTarget(x: Any?): Int {\n\
+    (x as? String?) ?: return 0\n\
+    return x.length\n\
+}\n\
+fun box(): String =\n\
+    if (nullableTarget(\"ab\") == 2 && nullableTarget(null) == 0 && nullableTarget(1) == 0) \"OK\" else \"fail\"\n";
+    assert_eq!(
+        common::reference_error_messages("Main", SRC),
+        Vec::<String>::new(),
+        "kotlinc must narrow through a nullable safe-cast target"
+    );
+    assert_eq!(
+        run(SRC).expect("nullable-target smart cast compiles + runs"),
+        "OK"
+    );
+}
+
+#[test]
+fn a_nullable_safe_cast_target_proves_only_its_non_null_form() {
+    // `as? Any?` proves only `Any`, and a closure-mutated `var` declines the non-null target.
+    const SRC: &str = "fun anyTarget(x: Any?): Int {\n\
+    (x as? Any?) ?: return 0\n\
+    return x.length\n\
+}\n\
+fun mutatedNullableTarget(): Int {\n\
+    var x: Any? = \"a\"\n\
+    val reset = { x = 1 }\n\
+    (x as? String?) ?: return 0\n\
+    reset()\n\
+    return x.length\n\
+}\n";
+    let sources = [("Main.kt", SRC)];
+    let reference_args = common::language_directives::kotlinc_args(SRC);
+    assert_eq!(
+        common::reference_error_blocks(&sources, &reference_args),
+        [
+            "Main.kt:3:10: unresolved reference 'length' on receiver of type 'Any'.",
+            "Main.kt:10:8: smart cast to 'String' is impossible, because 'x' is a local variable that is mutated in a capturing closure.",
+        ]
+    );
+    common::assert_error_blocks_match_kotlinc(&sources, &reference_args);
+}
