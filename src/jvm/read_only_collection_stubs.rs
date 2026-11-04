@@ -47,10 +47,12 @@ const FACE_ORDER: [CollectionKind; 8] = [
 
 /// The faces whose stubs are realized. The JDK members of the mutable collections (`removeIf`) and
 /// the `toArray` lowering are not yet realized for any face.
-const REALIZED_FACES: [CollectionKind; 5] = [
+const REALIZED_FACES: [CollectionKind; 7] = [
     CollectionKind::Collection,
     CollectionKind::Set,
     CollectionKind::List,
+    CollectionKind::Map,
+    CollectionKind::MapEntry,
     CollectionKind::Iterator,
     CollectionKind::ListIterator,
 ];
@@ -61,11 +63,13 @@ const ACC_SYNTHETIC: u16 = 0x1000;
 const ACC_ABSTRACT: u16 = 0x0400;
 
 /// The JVM-only collection members of every class: bridges for members inherited from a Java
-/// collection superclass, and throwing stubs for a read-only face's mutable members.
+/// collection superclass, throwing stubs for a read-only face's mutable members, and the JDK's
+/// `toArray` members.
 #[derive(Default)]
 pub(super) struct CollectionMemberPlans {
     pub(super) inherited_bridges: InheritedCollectionBridges,
     pub(super) read_only_stubs: ReadOnlyCollectionStubs,
+    pub(super) to_array: crate::jvm::collection_to_array::CollectionToArray,
 }
 
 #[derive(Default)]
@@ -110,6 +114,9 @@ pub(super) struct ReadOnlyStub {
     /// physical descriptor differs from it, so a `Nothing` member's `Void` result alone also takes
     /// an adapter.
     pub(super) bridge: Option<(Vec<Ty>, Ty)>,
+    /// The declaration is type-safe (`MutableMap.remove(key)`): the stub already takes the erased
+    /// parameters, and kotlinc's bridge for its erased result forwards to it instead of throwing.
+    pub(super) type_safe: bool,
     /// The type-safe declaration's barrier (`MutableCollection.remove`): the bridge to a member
     /// that implements it with a narrower parameter first tests each checked argument.
     pub(super) barrier: Option<StubBarrier>,
@@ -520,6 +527,7 @@ fn face_stubs(classpath: &Classpath, face: Face, applied: Ty) -> Vec<ReadOnlyStu
                 boxed_result,
                 declaration_site_wildcards,
                 bridge,
+                type_safe: type_safe_policy.is_some(),
                 barrier,
             }
         })
@@ -983,7 +991,7 @@ fn superclass_chain(
 /// class from the class up to that superclass shares the class's package. A private member is
 /// never inherited, and a package-private one only along a path that stays in its package; only
 /// an inherited member can implement a stub's member.
-fn inherited_along(visibility: Visibility, same_package_path: bool) -> bool {
+pub(super) fn inherited_along(visibility: Visibility, same_package_path: bool) -> bool {
     match visibility {
         Visibility::Private => false,
         Visibility::PackagePrivate => same_package_path,
