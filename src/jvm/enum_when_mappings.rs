@@ -74,7 +74,9 @@ impl EnumWhenLowering {
         let mut registrations = nested.to_vec();
         registrations.extend(provider.claims.iter().cloned());
         let read = ir.add_expr(IrExpr::GetValue(subject_when.subject));
-        let source_order = ir.when_source_order(subject_when.when);
+        // kotlinc's `MappedEnumWhenLowering` numbers a class's tables, and an enum's keys in them,
+        // as it visits the class's declarations in source order: the source `when`'s start.
+        let source_order = ir.start_offset(subject_when.when);
         let mapped = ir.add_expr(IrExpr::EnumSwitchOrdinal {
             classifier: subject_when.classifier,
             subject: read,

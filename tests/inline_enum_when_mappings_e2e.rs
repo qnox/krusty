@@ -85,6 +85,21 @@ fun pick(e: E, s: String = when (e) {
 fun box(): String = pick(E.A, "OK")
 "#;
 
+/// An enum `when` that only a public inline member's `$default` wrapper evaluates: the default is
+/// code of that inline function's scope, so its class's mappings carry the public-ABI flag.
+const MEMBER_DEFAULT: &str = r#"
+enum class E { A, B }
+
+class Picker {
+    inline fun pick(e: E, s: String = when (e) {
+        E.A -> "OK"
+        E.B -> "FAIL"
+    }): String = s
+}
+
+fun box(): String = Picker().pick(E.A, "OK")
+"#;
+
 const CROSS_DECLARATION: &str = r#"
 enum class Size { S, M, L }
 
@@ -169,4 +184,14 @@ fn a_when_only_a_top_level_default_wrapper_evaluates_is_numbered_like_kotlinc() 
 #[test]
 fn a_when_only_a_top_level_default_wrapper_evaluates_runs() {
     assert_runs_like_kotlinc(&[("Pick.kt", DEFAULT_WRAPPER)], "PickKt");
+}
+
+#[test]
+fn a_when_only_a_public_inline_members_default_wrapper_evaluates_is_numbered_like_kotlinc() {
+    assert_like_kotlinc(&[("Picker.kt", MEMBER_DEFAULT)]);
+}
+
+#[test]
+fn a_when_only_a_public_inline_members_default_wrapper_evaluates_runs() {
+    assert_runs_like_kotlinc(&[("Picker.kt", MEMBER_DEFAULT)], "PickerKt");
 }

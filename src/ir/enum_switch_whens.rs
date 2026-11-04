@@ -91,11 +91,6 @@ impl EnumSwitchWhen {
 }
 
 impl IrFile {
-    /// The order key of the source `when` `when`: where it starts among its file's expressions.
-    pub(crate) fn when_source_order(&self, when: ExprId) -> Option<u32> {
-        self.whens.source_order.get(&when).copied()
-    }
-
     /// `block` as a subject `when` that switches on its enum subject's keys, if it is one.
     pub(crate) fn enum_switch_when(&self, block: ExprId) -> Option<EnumSwitchWhen> {
         let IrExpr::Block {

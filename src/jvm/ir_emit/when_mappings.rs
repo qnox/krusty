@@ -268,8 +268,17 @@ fn code_roots(ir: &IrFile, contexts: &[EmissionContext]) -> Result<Vec<ClassCode
             .ok_or_else(|| {
                 format!("the default-argument wrapper of {declaration:?} has no class")
             })?;
-        if !roots[context].iter().any(|&(known, _)| known == root) {
-            roots[context].push((root, function));
+        // A method's default is also an emission-context root, known there without the function
+        // whose wrapper evaluates it; the wrapper's declaration is that root's owner.
+        match roots[context].iter_mut().find(|(known, _)| *known == root) {
+            None => roots[context].push((root, function)),
+            Some((_, owner @ None)) => *owner = function,
+            Some((_, Some(owner))) if function.is_none_or(|function| function == *owner) => {}
+            Some((_, Some(owner))) => {
+                return Err(format!(
+                    "the default {root} belongs to function {owner} and to {declaration:?}"
+                ));
+            }
         }
     }
     Ok(roots)

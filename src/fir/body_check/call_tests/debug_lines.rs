@@ -36,7 +36,7 @@ fn multiline_member_call_keeps_the_selected_call_source_and_end_lines() {
             start: 5,
             source: 5,
             end: 8,
-            source_order: source
+            start_offset: source
                 .find("recorder.save(")
                 .expect("the call is in the source") as u32,
             positionless: false

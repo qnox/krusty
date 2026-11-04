@@ -157,7 +157,7 @@ impl BodyLowering<'_> {
             self.ir.whens.source_lines.insert(when, line);
         }
         if !lines.positionless {
-            self.ir.whens.source_order.insert(when, lines.source_order);
+            self.ir.set_start_offset(when, lines.start_offset);
         }
         let has_else = branches.iter().any(|branch| branch.conditions.is_empty());
         // Every `when` with an `else`, and one the checker proved exhaustive without it (whatever
