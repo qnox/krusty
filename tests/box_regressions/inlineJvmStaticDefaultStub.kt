@@ -1,3 +1,4 @@
+// TARGET_BACKEND: JVM_IR
 // A `@JvmStatic` inline member's `$default` stub has no receiver parameter. Its copied body still
 // reads each parameter of mixed scalar and reference types from its own slot.
 object S {
