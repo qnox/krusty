@@ -238,7 +238,10 @@ impl Checker<'_> {
             scope,
             &property.annotations,
             &property.annotation_args,
-            include,
+            &|annotation| {
+                include(annotation)
+                    && super::lexical_policies::property_declaration_site(annotation)
+            },
         );
         // The parser hoists a `companion { ... }` property as a classifier-associated extension,
         // but an initialized/lateinit/explicit-field declaration still owns static storage on the

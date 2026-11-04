@@ -125,14 +125,7 @@ impl Checker<'_> {
     ) -> usize {
         let depth = self.active_lexical_policies.len();
         for (annotation, arguments) in annotations.iter().zip(arguments) {
-            // A use-site application (`@get:OptIn(M::class)`) covers only its site, which the
-            // accessor opens; the declaration's own policies are those written for it.
-            if !include(annotation)
-                || !matches!(
-                    annotation.property_site,
-                    None | Some(PropertyAnnotationSite::Property)
-                )
-            {
+            if !include(annotation) {
                 continue;
             }
             let policies = self.application_policies(scope, annotation, arguments);
@@ -140,6 +133,20 @@ impl Checker<'_> {
                 .extend(policies.iter().cloned());
         }
         depth
+    }
+
+    /// Open a property's declaration policies: those of the applications written for the property
+    /// itself. A use-site application (`@get:OptIn(M::class)`) covers only its site, which the
+    /// accessor opens ([`Self::push_accessor_policies`]). Returns the depth to truncate back to.
+    pub(super) fn push_property_declaration_policies(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        annotations: &[AnnotationRef],
+        arguments: &[Vec<ExprId>],
+    ) -> usize {
+        self.push_selected_declaration_policies(scope, annotations, arguments, &|annotation| {
+            property_declaration_site(annotation)
+        })
     }
 
     /// Open the policies of one accessor of `property`: the property's applications written for
@@ -330,4 +337,13 @@ impl Checker<'_> {
         }
         self.active_lexical_policies.truncate(policy_depth);
     }
+}
+
+/// Whether `annotation` is written for the property declaration itself rather than one of its
+/// use-sites.
+pub(super) fn property_declaration_site(annotation: &AnnotationRef) -> bool {
+    matches!(
+        annotation.property_site,
+        None | Some(PropertyAnnotationSite::Property)
+    )
 }

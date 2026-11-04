@@ -45625,7 +45625,7 @@ impl<'a> Checker<'a> {
                     } else {
                         property_scope
                     };
-                    let property_suppression_depth = self.push_declaration_policies(
+                    let property_suppression_depth = self.push_property_declaration_policies(
                         property_scope,
                         &property.annotations,
                         &property.annotation_args,
@@ -47169,8 +47169,11 @@ impl<'a> Checker<'a> {
                         self.check_bodyless_property_bounds(scope, bp, declaration);
                         continue;
                     }
-                    let property_suppression_depth =
-                        self.push_declaration_policies(scope, &bp.annotations, &bp.annotation_args);
+                    let property_suppression_depth = self.push_property_declaration_policies(
+                        scope,
+                        &bp.annotations,
+                        &bp.annotation_args,
+                    );
                     let check_ordinary_property_body = self
                         .selected_body_declarations
                         .as_ref()
