@@ -102,10 +102,14 @@ pub(in super::super::super) fn dependency_constructor_exports(
             identity.clone(),
             super::super::super::DependencyExport {
                 symbol: abi.symbol,
+                // The allocating entry has no function-reference marker and emits
+                // no default-mask bridge.
+                reference_declaration: None,
                 signature: abi.signature,
                 member_receiver: None,
                 singleton_member_receiver: None,
                 singleton_extension_receiver: None,
+                default_entry: None,
             },
         ));
     }
