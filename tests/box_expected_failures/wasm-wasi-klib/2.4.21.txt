@@ -3574,7 +3574,6 @@ interfaceCallsNCasts/interface0.kt
 intrinsics/charToInt.kt
 intrinsics/kt10131.kt
 intrinsics/kt10131a.kt
-intrinsics/kt12125_2.kt
 intrinsics/kt12125_inc.kt
 intrinsics/kt12125_inc_2.kt
 intrinsics/kt52163_doubleCompareToInt.kt
@@ -5307,7 +5306,6 @@ strings/concatGenericWithPrimitiveUpperBound.kt
 strings/concatGenericWithStringUpperBound.kt
 strings/concatNullableGenericWithPrimitiveUpperBound.kt
 strings/constInStringTemplate.kt
-strings/interpolation.kt
 strings/kt13213.kt
 strings/kt13213a.kt
 strings/kt3571.kt
@@ -5477,7 +5475,6 @@ unaryOp/intrinsicNullable.kt
 underscoredTypeArguments/backTicked.kt
 underscoredTypeArguments/lambdaInputType.kt
 underscoredTypeArguments/simple.kt
-unit/UnitValue.kt
 unit/closureReturnsNullableUnit.kt
 unit/kt3634.kt
 unit/kt4212.kt
@@ -5488,7 +5485,6 @@ unit/nullableUnitInWhen1.kt
 unit/nullableUnitInWhen2.kt
 unit/nullableUnitInWhen3.kt
 unit/sillyThings.kt
-unit/unitClassObject.kt
 unit/unitCoercionWithElvis.kt
 unitConversion/basicUnitConversion.kt
 unitConversion/unitConversionForSubtype.kt

@@ -1258,8 +1258,17 @@ impl<'a> Body<'a> {
             IrExpr::SingletonValue { classifier } => self.singleton(classifier)?,
             IrExpr::PropertyRead {
                 receiver: Some(receiver),
+                ty,
                 ..
-            } => self.realized_property_read(id, receiver)?,
+            } => {
+                self.realized_property_read(id, receiver)?;
+                // A property stored as `kotlin.Unit`'s instance and read where the checked use is
+                // `Unit` has no carrier there: the stored reference is discarded, as any value
+                // converted to a type without a carrier is.
+                if carrier(ty)?.is_some() && self.carrier_of(id)?.is_none() {
+                    self.code.drop_();
+                }
+            }
             IrExpr::PropertyWrite {
                 receiver: Some(receiver),
                 value,
@@ -1647,6 +1656,23 @@ impl<'a> Body<'a> {
                 self.code.ref_eq();
             }
             (Some(ValType::Ref { .. }), Some(ValType::Ref { .. })) => {
+                self.object_equality(lhs, rhs)?
+            }
+            // `Unit` has one value, so two `Unit` operands are equal, by identity as well.
+            (None, None) => {
+                self.statement(lhs)?;
+                self.statement(rhs)?;
+                self.code.i32_const(1);
+            }
+            // `Unit` against a reference: its instance, compared as any object is.
+            (None, Some(ValType::Ref { .. })) | (Some(ValType::Ref { .. }), None)
+                if matches!(op, IrBinOp::RefEq | IrBinOp::RefNe) =>
+            {
+                self.value(lhs, objects::any())?;
+                self.value(rhs, objects::any())?;
+                self.code.ref_eq();
+            }
+            (None, Some(ValType::Ref { .. })) | (Some(ValType::Ref { .. }), None) => {
                 self.object_equality(lhs, rhs)?
             }
             _ => {

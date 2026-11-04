@@ -1157,7 +1157,7 @@ struct InterfaceCall {
 }
 
 /// `kotlin.Any`, the type every class value is read as before its class is tested.
-fn any() -> Ty {
+pub(super) fn any() -> Ty {
     Ty::obj_name(crate::types::wk::any())
 }
 
