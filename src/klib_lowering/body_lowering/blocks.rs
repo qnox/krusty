@@ -7,10 +7,10 @@
 //! statement of another type to `Unit`. This module rebuilds the source shape from the statement
 //! forms, so a block lowers to the block checked FIR lowering produces for its source.
 
+use super::super::function_lowering::FunctionHeader;
+use super::super::ir_builtins::IrBuiltinOperators;
 use super::{mismatch, unsupported, BodyLowering, CallLinker, Lowered, LoweredFunction};
 use crate::ir::{ExprId, IrExpr, IrFile};
-use crate::klib_lowering::function_lowering::FunctionHeader;
-use crate::klib_lowering::ir_builtins::IrBuiltinOperators;
 use crate::metadata::klib_ir::tree::{
     KlibIrArena, KlibIrBranch, KlibIrExprId, KlibIrExprKind, KlibIrStatement, KlibIrTypeOperator,
 };
