@@ -5,7 +5,9 @@ use std::path::PathBuf;
 
 mod accessor_calls;
 mod body_forms;
+mod callable_references;
 mod callee_headers;
+mod captured_projections;
 mod closure_frames;
 mod closure_producers;
 mod constructor_calls;
@@ -544,6 +546,7 @@ fn render_node(ir: &IrFile, expression: ExprId) -> String {
             completion,
         } => format!("{completion:?}({})", render(ir, *producer)),
         IrExpr::UnitInstance => "Unit".to_owned(),
+        IrExpr::SingletonValue { classifier } => format!("object {}", classifier.render()),
         IrExpr::Checked(checked) => match checked.as_ref() {
             crate::ir::IrCheckedOperation::RangeContains {
                 operation,
@@ -568,8 +571,8 @@ fn render_node(ir: &IrFile, expression: ExprId) -> String {
         },
         other => panic!("a lowered body holds no {other:?}"),
     };
-    match ir.logical_types.get(&expression) {
-        Some(ty) => format!("{node}: {}", type_name_of(*ty)),
+    match ir.logical_type(expression) {
+        Some(ty) => format!("{node}: {}", type_name_of(ty)),
         None => node,
     }
 }
@@ -1047,7 +1050,7 @@ fn declined(body: impl FnOnce(&Parts, &mut KlibIrArena) -> Option<KlibIrBody>) -
     );
     assert!(unit.ir().exprs.is_empty());
     assert!(unit.ir().functions.is_empty());
-    assert!(unit.ir().logical_types.is_empty());
+    assert_eq!(unit.ir().logical_types().count(), 0);
     assert!(unit.ir().binding_read_stability.is_empty());
     decline.to_string()
 }

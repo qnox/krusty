@@ -1,7 +1,7 @@
 # Kotlin 2.4.10 codegen/box files expected to fail on wasm-js-klib, relative to
-# compiler/testData/codegen/box. Later releases with no file of their own read this one.
 # Owned fixtures use regressions/<path relative to tests/box_regressions>.
 # Regenerate both exact inventories with KRUSTY_BLESS_BOX_EXPECTATIONS=1 on a full local
+# compiler/testData/codegen/box. Later releases with no file of their own read this one.
 # wasm-js-klib run. The lists only shrink.
 annotations/annotationWithDefaultArgInDifferentModule.kt
 annotations/annotations0.kt
@@ -49,7 +49,6 @@ annotations/recursiveAnnotationWithVarargAndWithoutDefaultValue.kt
 annotations/selfReferentialAnnotation.kt
 annotations/spreadOperatorInAnnotationArguments.kt
 annotations/typeAnnotations/checkingNotincorporatedInputTypes.kt
-argumentOrder/arguments.kt
 argumentOrder/captured.kt
 argumentOrder/capturedInExtension.kt
 argumentOrder/extension.kt
@@ -59,7 +58,6 @@ argumentOrder/lambdaMigration.kt
 argumentOrder/lambdaMigrationInClass.kt
 argumentOrder/simple.kt
 argumentOrder/simpleInClass.kt
-argumentOrder/singleSideEffect.kt
 arithmetic/basic_charConversions.kt
 arithmetic/basic_charCornerCases.kt
 arithmetic/basic_compareIntToFloat.kt
@@ -474,7 +472,6 @@ callableReference/bound/equals/nullableReceiverInEquals.kt
 callableReference/bound/equals/receiverInEquals.kt
 callableReference/bound/genericBoundPropertyAsCrossinline.kt
 callableReference/bound/genericValOnLHS.kt
-callableReference/bound/inlineFunctionRefToAnonymousObject.kt
 callableReference/bound/kCallableNameIntrinsic.kt
 callableReference/bound/kt12738.kt
 callableReference/bound/kt15446.kt
@@ -530,7 +527,6 @@ callableReference/function/local/extension.kt
 callableReference/function/local/extensionToLocalClass.kt
 callableReference/function/local/extensionToPrimitive.kt
 callableReference/function/local/extensionWithClosure.kt
-callableReference/function/local/localClassMember.kt
 callableReference/function/local/localFunctionName.kt
 callableReference/function/local/localLocal.kt
 callableReference/function/local/recursiveClosure.kt
@@ -745,15 +741,9 @@ classes/privateOuterProperty.kt
 classes/privateToThis.kt
 closures/anonymousObjectAsLastExpressionInLambda.kt
 closures/captureExtensionReceiver.kt
-closures/captureInSuperConstructorCall/constructorParameterAndLocalCapturedInLambdaInLocalClass.kt
 closures/captureInSuperConstructorCall/kt14148.kt
 closures/captureInSuperConstructorCall/kt4174.kt
 closures/captureInSuperConstructorCall/kt4174a.kt
-closures/captureInSuperConstructorCall/localCapturedInAnonymousObjectInLocalClass.kt
-closures/captureInSuperConstructorCall/localCapturedInAnonymousObjectInLocalClass2.kt
-closures/captureInSuperConstructorCall/localCapturedInLambdaInInnerClassInLocalClass.kt
-closures/captureInSuperConstructorCall/localCapturedInLambdaInLocalClass.kt
-closures/captureInSuperConstructorCall/localFunctionCapturedInLambda.kt
 closures/captureInSuperConstructorCall/outerAndLocalCapturedInLocalClass.kt
 closures/captureInSuperConstructorCall/outerCapturedInLambda2.kt
 closures/captureInSuperConstructorCall/outerCapturedInLocalClass.kt
@@ -765,7 +755,6 @@ closures/captureInSuperConstructorCall/outerCapturedInSecondaryConstructorDefaul
 closures/captureInSuperConstructorCall/outerEnumEntryCapturedInLambdaInInnerClass.kt
 closures/captureInSuperConstructorCall/properValueCapturedByClosure1.kt
 closures/captureInSuperConstructorCall/properValueCapturedByClosure2.kt
-closures/captureInSuperConstructorCall/referenceToCapturedVariablesInMultipleLambdas.kt
 closures/captureOuterProperty/captureFunctionInProperty.kt
 closures/captureOuterProperty/inFunction.kt
 closures/captureOuterProperty/inProperty.kt
@@ -800,7 +789,6 @@ closures/kt3523.kt
 closures/kt4106.kt
 closures/kt47840.kt
 closures/kt47894_inlineFunWithObjectWithNothing.kt
-closures/localClassFunClosure.kt
 closures/localClassLambdaClosure.kt
 closures/localFunInInit.kt
 closures/localFunctionInInitBlock.kt
@@ -892,7 +880,6 @@ compileKotlinAgainstKotlin/privateSuperTypeDefaults2.kt
 compileKotlinAgainstKotlin/propertyReference.kt
 compileKotlinAgainstKotlin/sealedClass.kt
 compileKotlinAgainstKotlin/secondaryConstructors.kt
-compileKotlinAgainstKotlin/simple.kt
 compileKotlinAgainstKotlin/simpleValAnonymousObject.kt
 compileKotlinAgainstKotlin/specialBridgesInDependencies.kt
 compileKotlinAgainstKotlin/starImportEnum.kt
@@ -1077,7 +1064,6 @@ controlStructures/kt769.kt
 controlStructures/kt8148.kt
 controlStructures/kt8148_break.kt
 controlStructures/kt8148_continue.kt
-controlStructures/kt9022Throw.kt
 controlStructures/kt910.kt
 controlStructures/longRange.kt
 controlStructures/quicksort.kt
@@ -1085,7 +1071,6 @@ controlStructures/returnsNothing/inlineMethod.kt
 controlStructures/returnsNothing/tryCatch.kt
 controlStructures/slowDsl/slowHtmlLikeDsl.kt
 controlStructures/tcbInEliminatedCondition.kt
-controlStructures/tryCatchExpression.kt
 controlStructures/tryCatchFinally.kt
 controlStructures/tryCatchFinallyChain.kt
 controlStructures/tryCatchInExpressions/catch.kt
@@ -1117,7 +1102,6 @@ controlStructures/tryCatchInExpressions/tryCatchAfterWhileTrue.kt
 controlStructures/tryCatchInExpressions/tryFinallyOfTypeUnit.kt
 controlStructures/tryCatchInExpressions/tryInsideCatch.kt
 controlStructures/tryCatchInExpressions/tryInsideTry.kt
-controlStructures/tryCatchInExpressions/unmatchedInlineMarkers.kt
 controlStructures/tryFinally.kt
 controlflow/break.kt
 controlflow/break1.kt
@@ -1893,7 +1877,6 @@ destructuringDeclInLambdaParam/lambdaInLambda.kt
 destructuringDeclInLambdaParam/otherParameters.kt
 destructuringDeclInLambdaParam/simple.kt
 destructuringDeclInLambdaParam/stdlibUsages.kt
-destructuringDeclInLambdaParam/underscoreNames.kt
 destructuringDeclInLambdaParam/withIndexed.kt
 devirtualization/anonymousObject.kt
 devirtualization/getter_looking_as_box_function.kt
@@ -1927,7 +1910,6 @@ diagnostics/functions/tailRecursion/tailrecWithExplicitCompanionObjectDispatcher
 diagnostics/functions/tailRecursion/whenWithIs.kt
 diagnostics/vararg/kt4172.kt
 directInvokeOptimization/boundInnerContructorRef.kt
-directInvokeOptimization/capturingLambda.kt
 directInvokeOptimization/contextParameters.kt
 directInvokeOptimization/samConversion.kt
 directInvokeOptimization/unboundInnerContructorRef.kt
@@ -2069,7 +2051,6 @@ evaluate/serialization/annotationWithArray.kt
 evaluate/serialization/annotationWithDefaults.kt
 evaluate/serialization/nestedTypeAnnotation.kt
 evaluate/serialization/typeAnnotation.kt
-evaluate/stdlibConst.kt
 evaluate/stringConcatenationWithObject.kt
 evaluate/thisPlusString.kt
 evaluate/thisPlusStringWithObject.kt
@@ -3514,15 +3495,12 @@ innerNested/superConstructorCall/kt11833_1.kt
 innerNested/superConstructorCall/kt11833_2.kt
 innerNested/superConstructorCall/localClassOuterDiffersFromInnerOuter.kt
 innerNested/superConstructorCall/localExtendsInner.kt
-innerNested/superConstructorCall/localExtendsLocalWithClosure.kt
-innerNested/superConstructorCall/localWithClosureExtendsLocalWithClosure.kt
 innerNested/superConstructorCall/objectExtendsClassDefaultArgument.kt
 innerNested/superConstructorCall/objectExtendsInner.kt
 innerNested/superConstructorCall/objectExtendsInnerDefaultArgument.kt
 innerNested/superConstructorCall/objectExtendsInnerOfLocalVarargAndDefault.kt
 innerNested/superConstructorCall/objectExtendsInnerOfLocalWithCapture.kt
 innerNested/superConstructorCall/objectExtendsInnerWithDelegatingConstructor.kt
-innerNested/superConstructorCall/objectExtendsLocalWithClosure.kt
 innerNested/superConstructorCall/objectOuterDiffersFromInnerOuter.kt
 instructions/swap/swapRefToSharedVarInt.kt
 instructions/swap/swapRefToSharedVarLong.kt
@@ -3641,7 +3619,6 @@ literals/strdedup1.kt
 localClass/innerTakesCapturedFromOuter.kt
 localClass/localFunctionCallFromLocalClass.kt
 localClass/localFunctionInLocalClass.kt
-localClass/localHierarchy.kt
 localClass/objectExpressionInInitializer.kt
 localClass/objectExpressionInProperty.kt
 localClass/signatureConflictHiddenByTypeParameter.kt
@@ -3699,7 +3676,6 @@ mangling/parentheses.kt
 mangling/publicOverrideSuperCall.kt
 mixedNamedPosition/varargs.kt
 mixedNamedPosition/varargsEvaluationOrder.kt
-multiDecl/ValCapturedInObjectLiteral.kt
 multiDecl/VarCapturedInFunctionLiteral.kt
 multiDecl/VarCapturedInLocalFunction.kt
 multiDecl/VarCapturedInObjectLiteral.kt
@@ -3879,7 +3855,6 @@ nameBasedDestructuring/shortFormLoopsAndLambdas.kt
 nonLocalReturns/kt9644let.kt
 nonLocalReturns/returnInsideTwoLambdas.kt
 nonLocalReturns/suspendConversion.kt
-nothingValue/inNestedCall.kt
 nothingValue/nothingValueException.kt
 nothingValue/toStringOnNothing.kt
 nullCheckOptimization/kt22410.kt
@@ -3894,7 +3869,6 @@ object/initialization.kt
 object/initialization1.kt
 object/method_call.kt
 objectExpression/expr1.kt
-objectExpression/expr2.kt
 objectExpression/expr3.kt
 objectIntrinsics/objects.kt
 objects/classCallsProtectedInheritedByCompanion.kt
@@ -3995,7 +3969,6 @@ operatorConventions/kt14201_2.kt
 operatorConventions/kt20387.kt
 operatorConventions/kt44647.kt
 operatorConventions/kt45022.kt
-operatorConventions/overloadedSet.kt
 operatorConventions/plusAssignWithComplexRHS.kt
 operatorConventions/plusExplicit.kt
 operatorConventions/reassignmentLhsCaching.kt
@@ -4116,7 +4089,6 @@ properties/accessorForProtectedPropertyWithPrivateSetterWithIntermediateClass.kt
 properties/augmentedAssignmentsAndIncrements.kt
 properties/backingField/anyPropertyWithValueClassExplicitBackingField.kt
 properties/backingField/anySupertypeValueClassAnyMethodsWithExplicitBackingField.kt
-properties/backingField/backingFieldAndPropertyWithTheSameName.kt
 properties/backingField/backingFieldInitializedInInit.kt
 properties/backingField/backingFieldWithSmartTypeParameters.kt
 properties/backingField/equalsHashCodeWithValueClassExplicitBackingFieldAndSupertype.kt
@@ -5231,10 +5203,8 @@ secondaryConstructors/localClasses.kt
 secondaryConstructors/superCallPrimary.kt
 secondaryConstructors/superCallSecondary.kt
 secondaryConstructors/varargs.kt
-secondaryConstructors/withNonLocalReturn.kt
 secondaryConstructors/withReturnUnit.kt
 serialization/deserializedMembers.kt
-serialization/serializedCatch.kt
 serialization/serializedCharConstant.kt
 serialization/serializedDefaultArgs.kt
 serialization/serializedDoWhile.kt
@@ -5251,7 +5221,6 @@ smartCasts/kt19100.kt
 smartCasts/kt44814.kt
 smartCasts/kt44932.kt
 smartCasts/kt72391.kt
-smartCasts/lambdaArgumentWithoutType.kt
 smartCasts/negativesmartCastAugmentedAssignment.kt
 smartCasts/nullSmartCast.kt
 smartCasts/propertyInitializationAfterSmartCast.kt
@@ -5328,8 +5297,6 @@ super/kt3492ClassFun.kt
 super/kt3492ClassProperty.kt
 super/kt3492TraitFun.kt
 super/kt3492TraitProperty.kt
-super/kt4173.kt
-super/kt4173_2.kt
 super/kt4982.kt
 super/superConstructor/kt17464_arrayOf.kt
 super/superConstructor/kt18356_2.kt
@@ -5439,7 +5406,6 @@ typeErasure/twoFunWithTypeParametersInlineFunWithReifiedTypeParameters.kt
 typeErasure/twoFunWithTypeParametersWithUpperBoundsInlineFunWithReifiedTypeParameters.kt
 typeInfo/ifOrWhenSpecialCall.kt
 typeMapping/kt2831.kt
-typeMapping/kt3286.kt
 typeMapping/kt3863.kt
 typeMapping/kt3976.kt
 typeMapping/nullableNothing.kt
@@ -5700,7 +5666,6 @@ when/kt47365.kt
 when/kt5448.kt
 when/kt55993.kt
 when/kt59346.kt
-when/kt60212.kt
 when/kt83740.kt
 when/matchNotNullAgainstNullable.kt
 when/multipleEntries.kt

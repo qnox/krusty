@@ -103,6 +103,21 @@ pub(super) fn join_lower_bounds(
     });
 }
 
+/// `signature` with the bounds of its formals restated over the evidence already solved. An
+/// expected result checked against `C : MutableCollection<in T>` after the receiver fixed
+/// `T = Sub` must meet `MutableCollection<in Sub>`, not the erased `MutableCollection<in Any?>` that
+/// would reject every expectation other than one admitting `Any?`.
+pub(super) fn solved_bound_signature(
+    signature: &GenericSig,
+    bindings: &crate::symbol_resolver::GSigBinds,
+) -> GenericSig {
+    let mut solved = signature.clone();
+    for bound in solved.formal_bounds.iter_mut().flatten() {
+        *bound = crate::symbol_resolver::ty_subst_keep_unbound(*bound, bindings);
+    }
+    solved
+}
+
 /// The expectation a postponed producer is solved against at outer parameter `declared`. An open outer variable whose
 /// declared bound depends on another, already bound variable (`S : T?` after `T = String`) is not
 /// a rigid type for the producer: the producer may only produce what that bound admits, so the
