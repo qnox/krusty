@@ -471,6 +471,13 @@ impl BodyLowering<'_> {
         let prefix = u32::try_from(captures.len()).expect("too many captured class fields");
         let shifted = u32::try_from(fields.len()).expect("too many captured class fields");
         for argument in &mut class.ctor_args {
+            if let crate::ir::IrCtorParameterProvenance::InterfaceDelegate { field, .. } =
+                &mut argument.provenance
+            {
+                *field = field
+                    .checked_add(shifted)
+                    .expect("captured class field index overflow");
+            }
             if let Some(field) = &mut argument.field_index {
                 *field = field
                     .checked_add(shifted)
