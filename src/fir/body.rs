@@ -103,6 +103,15 @@ pub struct FirSamConversion {
     pub kotlin_interface: bool,
     /// Provider-normalized semantic identities parallel to `declared_parameters`.
     pub parameter_identities: Box<[super::ResolvedParameterIdentity]>,
+    /// The interface's own type parameters in declaration order, which the declared shape names.
+    pub type_parameters: Box<[FirSamTypeParameter]>,
+}
+
+/// One type parameter a functional interface declares, with every declared upper bound.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FirSamTypeParameter {
+    pub name: Box<str>,
+    pub bounds: Box<[super::ResolvedTypeParameterBound]>,
 }
 
 /// The abstract method a SAM conversion implements.
@@ -322,6 +331,8 @@ pub enum FirCallTarget {
     /// express "this declaration, bypassing overriding" — the same source declaration is an ordinary
     /// virtual target at every other call site.
     Super {
+        /// The original selected qualifier, before a target maps the invocation owner.
+        qualifier: crate::types::TypeName,
         owner: crate::types::TypeName,
         /// Classifier whose instance supplies `this` for this selected super dispatch.
         dispatch_owner: crate::types::TypeName,

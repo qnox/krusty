@@ -147,20 +147,22 @@ pub(super) fn select_sam_constructor(
     );
     unify_ty_from_symbols(source, declared_function, inference_actual, &mut bindings);
     for (index, formal) in formals.iter().enumerate() {
-        bindings.entry(formal.clone()).or_insert_with(|| {
-            unconstrained_argument(
-                classifier
-                    .type_param_variances
-                    .get(index)
-                    .copied()
-                    .unwrap_or_default(),
-                classifier
-                    .type_param_bounds
-                    .get(index)
-                    .map(Vec::as_slice)
-                    .unwrap_or_default(),
-            )
-        });
+        bindings
+            .entry(crate::types::TyParamName::new(formal))
+            .or_insert_with(|| {
+                unconstrained_argument(
+                    classifier
+                        .type_param_variances
+                        .get(index)
+                        .copied()
+                        .unwrap_or_default(),
+                    classifier
+                        .type_param_bounds
+                        .get(index)
+                        .map(Vec::as_slice)
+                        .unwrap_or_default(),
+                )
+            });
     }
     let generic = GenericSig {
         formals: formals.clone(),
@@ -185,7 +187,7 @@ pub(super) fn select_sam_constructor(
     signature.ret = ty_subst_keep_unbound(signature.ret, &bindings);
     let arguments = formals
         .iter()
-        .map(|formal| bindings.get(formal).copied())
+        .map(|formal| bindings.get(formal.as_str()).copied())
         .collect::<Option<Vec<_>>>()?;
     Some(SelectedSamConstructor {
         result: Ty::obj_args_name(signature.internal, &arguments),

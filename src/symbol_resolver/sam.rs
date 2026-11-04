@@ -52,6 +52,17 @@ pub struct SamSignature {
     pub(crate) kotlin_interface: bool,
     /// Provider-normalized semantic identities parallel to `declared_params`.
     pub(crate) parameter_identities: Box<[crate::fir::ResolvedParameterIdentity]>,
+    /// The interface's own type parameters, in declaration order, with every declared upper bound
+    /// and whether that bound is an interface type. `declared_params` and `declared_ret` name them.
+    pub(crate) type_parameters: Vec<SamTypeParameter>,
+}
+
+/// One type parameter the functional interface declares.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct SamTypeParameter {
+    pub(crate) name: String,
+    /// Each declared upper bound, and whether it is an interface type.
+    pub(crate) bounds: Vec<(Ty, bool)>,
 }
 
 /// One inherited declaration of an abstract-method candidate.
@@ -74,7 +85,7 @@ type OverrideSlot = ((String, Vec<Ty>), Vec<CollectedDeclaration>);
 struct SamCaptureSpecialization<'a> {
     logical: &'a GSigBinds,
     capture_read: &'a GSigBinds,
-    occurrence_bounds: &'a crate::fx_hash::HashMap<String, Ty>,
+    occurrence_bounds: &'a crate::types::TyParamBindings,
 }
 
 pub(crate) fn semantic_sam_signature(
@@ -103,7 +114,12 @@ pub(crate) fn semantic_sam_signature(
         // `Any?`. Keep that distinction only as provenance; `out` and `*` have no such divergence.
         let capture_read_bindings = logical_bindings
             .iter()
-            .map(|(name, argument)| (name.clone(), contravariant_capture_read(*argument)))
+            .map(|(name, argument)| {
+                (
+                    crate::types::TyParamName::from(name),
+                    contravariant_capture_read(*argument),
+                )
+            })
             .collect::<GSigBinds>();
         for argument in logical_bindings.values_mut() {
             // A SAM method receives/returns values, never use-site projection syntax. Composed
@@ -237,6 +253,29 @@ pub(crate) fn semantic_sam_signature(
     let (sam, params, contravariant_params, ret, declaration, overridden_results, convention) =
         abstract_method?;
     let parameter_identities = sam_parameter_identities(&sam)?;
+    let type_parameters = target_classifier
+        .type_params()
+        .iter()
+        .enumerate()
+        .map(|(ordinal, name)| SamTypeParameter {
+            name: name.clone(),
+            bounds: target_classifier
+                .type_param_bounds()
+                .get(ordinal)
+                .into_iter()
+                .flatten()
+                .map(|&bound| {
+                    let interface =
+                        crate::fir::ResolvedTypeParameterBound::is_interface_type(bound, |owner| {
+                            source
+                                .classifier(owner)
+                                .is_some_and(|classifier| classifier.is_interface())
+                        });
+                    (bound, interface)
+                })
+                .collect(),
+        })
+        .collect();
     // Under the convention the first value parameter (after any context parameters) is the
     // converted function's receiver: the slot an extension method's receiver takes. An abstract
     // method that already declares a receiver keeps its own shape.
@@ -257,6 +296,7 @@ pub(crate) fn semantic_sam_signature(
         overridden_results,
         kotlin_interface,
         parameter_identities,
+        type_parameters,
     })
 }
 
@@ -331,9 +371,9 @@ fn collect_member(
     let mut occurrence_bounds = specialization.occurrence_bounds.clone();
     if let Some(signature) = &member.generic_sig {
         for formal in &signature.formals {
-            logical.remove(formal);
-            capture_read.remove(formal);
-            occurrence_bounds.remove(formal);
+            logical.remove(formal.as_str());
+            capture_read.remove(formal.as_str());
+            occurrence_bounds.remove(formal.as_str());
         }
     }
     let declared_params = member
@@ -396,7 +436,7 @@ fn contravariant_capture_read(mut argument: Ty) -> Ty {
 
 fn sam_substitute(
     declared: Ty,
-    occurrence_bounds: &crate::fx_hash::HashMap<String, Ty>,
+    occurrence_bounds: &crate::types::TyParamBindings,
     bindings: &GSigBinds,
 ) -> Ty {
     let platform_inner = match declared.kind() {

@@ -2,6 +2,7 @@
 
 use crate::fir::ClassCaptureIdentity;
 use crate::ir::{ClassId, IrCtorArg, IrCtorParameterProvenance, IrFile};
+use crate::types::TyKind;
 
 pub(super) fn supported(ir: &IrFile, id: ClassId) -> bool {
     let class = &ir.classes[id as usize];
@@ -29,11 +30,14 @@ pub(super) fn supported(ir: &IrFile, id: ClassId) -> bool {
         return false;
     };
     // Preserve the established inner-instance path. Adding a Capture role or payload requires
-    // the complete storage proof below even when the class is also an inner class.
+    // the complete prefix proof below even when the class is also an inner class.
     if class.is_inner_class
         && prefix.iter().all(|argument| {
-            argument.provenance != IrCtorParameterProvenance::Capture
-                && argument.capture.is_none()
+            !matches!(
+                argument.provenance,
+                IrCtorParameterProvenance::Capture
+                    | IrCtorParameterProvenance::InterfaceDelegate { .. }
+            ) && argument.capture.is_none()
                 && argument.capture_identity.is_none()
         })
     {
@@ -52,6 +56,9 @@ pub(super) fn supported(ir: &IrFile, id: ClassId) -> bool {
                     && !argument.is_field
                     && argument.field_index.is_none()
             }
+            IrCtorParameterProvenance::InterfaceDelegate { interface, field } => {
+                delegate_parameter(ir, id, parameter, argument, interface, field)
+            }
             IrCtorParameterProvenance::Capture => {
                 argument
                     .capture
@@ -63,7 +70,7 @@ pub(super) fn supported(ir: &IrFile, id: ClassId) -> bool {
                     )
                     && argument.capture_identity
                         == ir.class_capture_identities.get(&(id, parameter)).copied()
-                    && stored_parameter(ir, id, parameter, argument)
+                    && capture_parameter(ir, id, parameter, argument)
             }
             IrCtorParameterProvenance::EnclosingInstance if class.is_inner_class => {
                 argument.capture.is_none()
@@ -74,6 +81,56 @@ pub(super) fn supported(ir: &IrFile, id: ClassId) -> bool {
             _ => false,
         }
     })
+}
+
+// The positive producer-owned role identifies an explicit post-super initializer. Its field
+// and applied interface are retained on this exact parameter; arbitrary Value prefixes stay out.
+fn delegate_parameter(
+    ir: &IrFile,
+    id: ClassId,
+    parameter: u32,
+    argument: &IrCtorArg,
+    interface: crate::types::Ty,
+    field: u32,
+) -> bool {
+    let class = &ir.classes[id as usize];
+    let Some(storage) = class.fields.get(field as usize) else {
+        return false;
+    };
+    argument.capture.is_none()
+        && argument.capture_identity.is_none()
+        && !ir.class_capture_identities.contains_key(&(id, parameter))
+        && argument.anonymous_super_forward.is_none()
+        && !argument.is_field
+        && argument.field_index.is_none()
+        && matches!(interface.kind(), TyKind::Obj(name, _) if class.interfaces.contains_name(name))
+        && class.supertypes.contains(&interface)
+        && storage.is_final()
+        && storage.ty == argument.ty
+        && !class.pre_super_param_fields.iter().any(|(source, target)| {
+            *source == parameter || *target == field
+        })
+        && class.ctor_args.iter().filter(|other| {
+            other.field_index == Some(field)
+                || matches!(other.provenance,
+                    IrCtorParameterProvenance::InterfaceDelegate { field: target, .. } if target == field)
+        }).count() == 1
+}
+
+fn capture_parameter(ir: &IrFile, id: ClassId, parameter: u32, argument: &IrCtorArg) -> bool {
+    match (argument.is_field, argument.field_index) {
+        (true, Some(_)) => stored_parameter(ir, id, parameter, argument),
+        // A constructor-only capture is already an ordinary constructor parameter. It has no
+        // physical field and cannot participate in either stored or forwarded prefix transport.
+        (false, None) => {
+            argument.anonymous_super_forward.is_none()
+                && !ir.classes[id as usize]
+                    .pre_super_param_fields
+                    .iter()
+                    .any(|(source, _)| *source == parameter)
+        }
+        _ => false,
+    }
 }
 
 fn stored_parameter(ir: &IrFile, id: ClassId, parameter: u32, argument: &IrCtorArg) -> bool {
