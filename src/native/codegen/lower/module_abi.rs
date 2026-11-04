@@ -11,6 +11,7 @@
 //! for the same reason in both.
 
 mod constructors;
+pub(in super::super) use constructors::dependency_constructor_exports;
 mod properties;
 mod singletons;
 mod value_boxes;

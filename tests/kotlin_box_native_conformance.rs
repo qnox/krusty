@@ -521,3 +521,88 @@ fn native_source_getter_exports_admit_both_forms_of_static_dispatch() {
         .expect("the JVM oracle must establish both static-dispatch results");
     assert_eq!(run_native_abi_case(source, stem), Outcome::Pass);
 }
+
+// PLATFORM-SPECIFIC: the allocating export must preserve declared generic storage and operands.
+#[test]
+fn native_source_constructor_exports_preserve_storage_evaluation_and_file_initialization() {
+    let source = include_str!("box_regressions/multimodule/sourceConstructorStorageAndEffects.kt");
+    let stem = "nativeSourceConstructorStorageAndEffects";
+    super::box_reference_classes::checked_box(source, stem)
+        .expect("the JVM oracle must establish constructor storage and operand effects");
+    assert_eq!(run_native_abi_case(source, stem), Outcome::Pass);
+}
+
+// PLATFORM-SPECIFIC: the exact selected constructor identity owns the allocating entry.
+#[test]
+fn native_source_constructor_exports_select_the_primary_beside_a_secondary() {
+    let source = include_str!("box_regressions/multimodule/sourcePrimaryConstructorIdentity.kt");
+    let stem = "nativeSourcePrimaryConstructorIdentity";
+    super::box_reference_classes::checked_box(source, stem)
+        .expect("the JVM oracle must establish the selected primary constructor");
+    assert_eq!(run_native_abi_case(source, stem), Outcome::Pass);
+}
+
+// PLATFORM-SPECIFIC: an inner constructor's checked enclosing operand leads its export ABI.
+#[test]
+fn native_source_constructor_exports_preserve_an_inner_enclosing_instance() {
+    let source = include_str!("box_regressions/multimodule/sourceInnerConstructorOperands.kt");
+    let stem = "nativeSourceInnerConstructorOperands";
+    super::box_reference_classes::checked_box(source, stem)
+        .expect("the JVM oracle must establish the enclosing constructor operand");
+    assert_eq!(run_native_abi_case(source, stem), Outcome::Pass);
+}
+
+// PLATFORM-SPECIFIC: a primary export cannot realize another selected constructor.
+#[test]
+fn native_source_constructor_exports_do_not_substitute_a_primary_for_a_secondary() {
+    let source = r#"// MODULE: lib
+package fixture
+class Choice(val value: String) { constructor(number: Int) : this("OK") }
+// MODULE: main(lib)
+fun box(): String = fixture.Choice(7).value
+"#;
+    let stem = "nativeSourceSecondaryConstructorIdentity";
+    super::box_reference_classes::checked_box(source, stem)
+        .expect("the JVM oracle must establish the selected secondary constructor");
+    assert_eq!(
+        run_native_abi_case(source, stem),
+        Outcome::Declined(
+            "construction of `fixture/Choice`, which is not declared in this file".into()
+        )
+    );
+}
+
+// PLATFORM-SPECIFIC: an owned allocating entry has no exported default-mask bridge yet.
+#[test]
+fn native_source_constructor_exports_decline_omitted_arguments_without_a_bridge() {
+    let source = r#"// MODULE: lib
+package fixture
+class Defaults(val value: String = "OK")
+// MODULE: main(lib)
+fun box(): String = fixture.Defaults().value
+"#;
+    let stem = "nativeSourceConstructorDefaultBridge";
+    super::box_reference_classes::checked_box(source, stem)
+        .expect("the JVM oracle must establish the constructor default");
+    assert_eq!(
+        run_native_abi_case(source, stem),
+        Outcome::Declined(
+            "a dependency constructor with omitted arguments and no exported default bridge".into()
+        )
+    );
+}
+
+// PLATFORM-SPECIFIC: imported field-layout ABI with the pinned Native module oracle.
+#[test]
+fn native_generic_field_getters_read_the_producers_declared_storage() {
+    let source =
+        include_str!("box_regressions/multimodule/genericFieldGetterExports.kt").to_owned();
+    let stem = "nativeGenericFieldGetters";
+    super::box_reference_classes::checked_box(&source, stem)
+        .expect("the JVM oracle must run the complete field-read module graph");
+    assert_eq!(
+        run_native_abi_case(&source, stem),
+        Outcome::Pass,
+        "Native must read declared generic storage through the exact exported getter ABI",
+    );
+}
