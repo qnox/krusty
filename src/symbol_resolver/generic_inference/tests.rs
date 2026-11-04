@@ -1127,3 +1127,42 @@ fn a_bound_propagation_that_records_nothing_reaches_its_fixed_point() {
 
     assert_eq!(constrained.bindings.get("R"), Some(&Ty::Int));
 }
+
+#[test]
+fn a_definitely_non_null_argument_joins_its_own_parameter_to_that_parameter() {
+    // `class Op<T, S : T>(a: Inv<T>, b: Inv<S>, c: Inv<T & Any>)` called as `Op(t, s, tAny)` with
+    // a caller's `T`, `S : T` and `T & Any`: the formal `T` joins `T` and `T & Any` to `T`, so the
+    // caller's `S` still fits `S : T`.
+    let nullable_any = Ty::nullable(Ty::obj("kotlin/Any"));
+    let caller_t = Ty::ty_param("caller:T", nullable_any);
+    let caller_s = Ty::ty_param("caller:S", caller_t);
+    let formal_t = Ty::ty_param("T", nullable_any);
+    let formal_s = Ty::ty_param("S", formal_t);
+    let inv = |argument: Ty| Ty::obj_args("Inv", &[argument]);
+    let signature = GenericSig {
+        formals: vec!["T".to_string(), "S".to_string()],
+        formal_bounds: vec![vec![nullable_any], vec![formal_t]],
+        receiver: None,
+        params: vec![
+            inv(formal_t),
+            inv(formal_s),
+            inv(formal_t.definitely_non_null()),
+        ],
+        ret: inv(formal_s),
+        return_policy: crate::libraries::GenericReturnPolicy::Exact,
+    };
+    let inferred = infer_generic_call_constraints_from_symbols(
+        &crate::libraries::EmptySymbolSource,
+        &signature,
+        [
+            (0, inv(caller_t), false),
+            (1, inv(caller_s), false),
+            (2, inv(caller_t.definitely_non_null()), false),
+        ],
+        None,
+    );
+
+    assert_eq!(inferred.bindings.get("T"), Some(&caller_t));
+    assert_eq!(inferred.bindings.get("S"), Some(&caller_s));
+    assert!(inferred.bound_violations.is_empty());
+}

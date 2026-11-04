@@ -151,7 +151,7 @@ impl crate::plugins::FrontendCallResolver for Checker<'_> {
             .select_receiver_function_with_params_tracking(
                 receiver,
                 name,
-                &arguments,
+                crate::symbol_resolver::FamilyArguments::Shared(&arguments),
                 &[],
                 &candidates,
                 Some(expected_result),

@@ -318,6 +318,7 @@ pub(super) fn direct_supertypes_from_classifier(
     // leaves an unbound lexical variable alone, without cloning those names into a map on every
     // hierarchy step.
     let formals = classifier.type_params();
+    let bounds = classifier.type_param_bounds();
     let arguments = ty.type_args();
     let any = Ty::obj_name(crate::types::wk::any());
     let applied = classifier
@@ -333,13 +334,29 @@ pub(super) fn direct_supertypes_from_classifier(
         // variable has no nullability), so projecting `HashMap<String, Any?>` onto its `Map<K, V>`
         // template produced `Map<String, Any>` and every member reached through the supertype then
         // rejected a nullable argument.
+        //
+        // A template occurrence that is non-null although its formal's declared bound admits null
+        // is a written `W & Any` (`open class B<W> : ColumnType<W & Any>()`), so it still reads the
+        // argument's definitely-non-null form: `B<String?>` is a `ColumnType<String>`.
         .map(|supertype| {
-            crate::types::ty_subst_applied_lookup(*supertype, |name| {
-                formals
-                    .iter()
-                    .position(|formal| formal == name)
-                    .map(|index| arguments.get(index).copied().unwrap_or(any))
-            })
+            crate::types::ty_subst_supertype_template(
+                *supertype,
+                |name| {
+                    formals
+                        .iter()
+                        .position(|formal| formal == name)
+                        .map(|index| arguments.get(index).copied().unwrap_or(any))
+                },
+                |name| {
+                    formals
+                        .iter()
+                        .position(|formal| formal == name)
+                        .and_then(|index| bounds.get(index))
+                        .is_some_and(|declared| {
+                            declared.iter().all(|bound| bound.upper_bound_admits_null())
+                        })
+                },
+            )
         })
         .collect::<Vec<_>>();
     crate::trace_compiler!(

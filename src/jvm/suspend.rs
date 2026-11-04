@@ -528,7 +528,7 @@ pub(crate) fn lower_suspend(
                 // A generated call that enters its line only where its operands begin (a
                 // reference carrier's `invoke`) enters it at the continuation it now reads too.
                 if let Some(line) = ir.dispatch_line(call) {
-                    ir.expr_source_lines.insert(cont, line);
+                    ir.set_source_line(cont, line);
                 }
                 if !append_continuation(ir, call, cont, outputs.default_call_operands) {
                     return false;
@@ -1655,7 +1655,7 @@ fn build_state_machine(
             ),
             enclosing_function: Some(fid),
         };
-        continuation_metadata.insert(cont_internal.clone(), metadata);
+        continuation_metadata.insert(crate::types::type_name(&cont_internal), metadata);
     }
     let states = std::mem::take(&mut flat.states);
     let state_handlers = std::mem::take(&mut flat.state_handlers);
@@ -1900,8 +1900,8 @@ struct Flat<'a> {
     /// `r_v` (`e = (E) r_v`) once on entry, and it is spilled/restored like any local so it survives the
     /// catch's own suspension (after which `r_v` holds the resume value, no longer the exception).
     catch_spills: crate::fx_hash::HashMap<ExprId, u32>,
-    /// Per-suspension lexical scope lists (kotlinc's positional-spill model, see
-    /// docs/POSITIONAL_SPILLS.md): suspend-call expr id → `params ++ in-scope locals`.
+    /// Per-suspension lexical scope lists (kotlinc's positional-spill model): suspend-call expr id
+    /// → `params ++ in-scope locals`.
     scopes: SuspensionScopes,
     /// The positional field layout (per-kind maxima over every scope list).
     layout: SpillLayout,
@@ -2138,7 +2138,7 @@ impl Flat<'_> {
         // already selected the resume completion from the checked BottomValue wrapper in its exact
         // use context; clear the raw call's logical bottom fact independently of that selection.
         if completion.semantic_bottom {
-            self.ir.logical_types.remove(&point);
+            self.ir.take_logical_type(point);
         }
         let dead = self
             .scopes

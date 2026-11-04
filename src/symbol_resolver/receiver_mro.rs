@@ -3,7 +3,8 @@
 
 use super::{
     classifier_callable_signature, declared_function_type, direct_supertypes,
-    ty_subst_keep_unbound, unify_ty_from_symbols, GSigBinds, SourceOracle,
+    ty_subst_keep_unbound, unify_receiver_from_symbols, unify_ty_from_symbols, GSigBinds,
+    SourceOracle,
 };
 use crate::symbol_source::SymbolSource;
 use crate::types::{Ty, TyKind};
@@ -39,7 +40,7 @@ fn receiver_type_args_match(
     let oracle = SourceOracle(src);
     if decl_recv.mentions_ty_param() {
         let mut bindings = GSigBinds::default();
-        unify_ty_from_symbols(src, decl_recv, recv, &mut bindings);
+        unify_receiver_from_symbols(src, decl_recv, recv, &mut bindings);
         contravariant_formals_read_nothing(decl_recv, recv, &mut bindings);
         let specialized = ty_subst_keep_unbound(decl_recv, &bindings);
         // A callee-owned receiver variable may bind to a still-symbolic variable owned by the

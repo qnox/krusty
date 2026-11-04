@@ -3,6 +3,7 @@
 use crate::types::TypeName;
 
 pub(crate) mod kotlinc_offsets;
+pub mod names;
 
 /// A byte range into the source file. `u32` offsets keep this 8 bytes (data-oriented).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -47,6 +48,24 @@ pub enum CompilerWarningName {
 }
 
 impl CompilerWarningName {
+    pub const ALL: [Self; 15] = [
+        Self::DataClassCopyVisibilityWillBeChanged,
+        Self::DataClassInvisibleCopyUsage,
+        Self::ClassLiteralLhsNotAClass,
+        Self::Deprecation,
+        Self::DeprecationErrorMigrationPeriodWarning,
+        Self::ExplicitTypeArgumentsInPropertyAccess,
+        Self::InapplicableOperatorModifier,
+        Self::ParenthesizedPackageQualifier,
+        Self::TypeIntersectionAsReified,
+        Self::TypeIntersectionAsReifiedDeprecation,
+        Self::TypeParameterAsReifiedDeprecation,
+        Self::TypeArgumentsNotAllowed,
+        Self::TypeArgumentsNotAllowedInPackageQualifier,
+        Self::WrongNumberOfTypeArgumentsInGetClass,
+        Self::ValueClassCannotBeRecursiveViaTypeParameters,
+    ];
+
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::DataClassCopyVisibilityWillBeChanged => {
@@ -127,23 +146,7 @@ mod warning_name_tests {
 
     #[test]
     fn every_compiler_warning_name_round_trips_through_its_wire_spelling() {
-        let names = [
-            CompilerWarningName::DataClassCopyVisibilityWillBeChanged,
-            CompilerWarningName::DataClassInvisibleCopyUsage,
-            CompilerWarningName::ClassLiteralLhsNotAClass,
-            CompilerWarningName::Deprecation,
-            CompilerWarningName::DeprecationErrorMigrationPeriodWarning,
-            CompilerWarningName::ExplicitTypeArgumentsInPropertyAccess,
-            CompilerWarningName::InapplicableOperatorModifier,
-            CompilerWarningName::ParenthesizedPackageQualifier,
-            CompilerWarningName::TypeIntersectionAsReified,
-            CompilerWarningName::TypeIntersectionAsReifiedDeprecation,
-            CompilerWarningName::TypeParameterAsReifiedDeprecation,
-            CompilerWarningName::TypeArgumentsNotAllowed,
-            CompilerWarningName::TypeArgumentsNotAllowedInPackageQualifier,
-            CompilerWarningName::WrongNumberOfTypeArgumentsInGetClass,
-            CompilerWarningName::ValueClassCannotBeRecursiveViaTypeParameters,
-        ];
+        let names = CompilerWarningName::ALL;
         assert_eq!(
             names.map(|name| CompilerWarningName::parse(name.as_str())),
             names.map(Some)

@@ -71,6 +71,9 @@ pub(crate) struct SuspendLambdaCapture {
     pub field: u32,
     /// The captured value's type.
     pub ty: crate::types::Ty,
+    /// Whether the value is a `crossinline` parameter of the inline function the lambda is
+    /// written in (kotlinc's `FIELD_FOR_CROSSINLINE_CAPTURED_VALUE`).
+    pub crossinline: bool,
 }
 
 /// A suspend lambda realized as a class of its own (kotlinc's `SuspendLambdaLowering`), which the
@@ -156,6 +159,13 @@ impl EmitTimeMachines {
         class: crate::types::TypeName,
     ) -> Option<&SuspendLambdaClass> {
         self.suspend_lambdas.get(&class)
+    }
+
+    /// Give `function`'s machine its continuation class's final name.
+    pub(crate) fn rename_continuation(&mut self, function: u32, to: crate::types::TypeName) {
+        if let Some(machine) = self.transformed.get_mut(&function) {
+            machine.continuation_class = to.render();
+        }
     }
 
     pub(crate) fn remap_suspend_lambda_class(
