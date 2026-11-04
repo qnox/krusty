@@ -9,6 +9,12 @@ use crate::types::Ty;
 
 use super::FirFileLoweringFailure;
 
+mod declaration_evaluation;
+
+pub(super) fn normalize_declaration_defaults(ir: &mut IrFile) {
+    declaration_evaluation::normalize(ir);
+}
+
 pub(super) fn finalize_defaults(ir: &mut IrFile) -> Result<(), FirFileLoweringFailure> {
     let declaration_defaults = ir
         .annotation_constructions
@@ -147,6 +153,15 @@ pub(super) fn publish_element_defaults(ir: &mut IrFile) {
 }
 
 fn element_value(ir: &IrFile, expression: ExprId, declared: Ty) -> Option<AnnoValue> {
+    element_value_with_bindings(ir, expression, declared, &[])
+}
+
+fn element_value_with_bindings(
+    ir: &IrFile,
+    expression: ExprId,
+    declared: Ty,
+    bindings: &[(u32, AnnoValue)],
+) -> Option<AnnoValue> {
     Some(match ir.expr(expression) {
         IrExpr::Const(_) => AnnoValue::Const(super::constructors::checked_default_constant(
             ir, expression, declared,
@@ -155,12 +170,17 @@ fn element_value(ir: &IrFile, expression: ExprId, declared: Ty) -> Option<AnnoVa
             op: IrTypeOp::ImplicitCoercion,
             arg,
             ..
-        } => match element_value(ir, *arg, declared)? {
-            AnnoValue::Const(_) => AnnoValue::Const(super::constructors::checked_default_constant(
-                ir, expression, declared,
-            )?),
-            value => value,
-        },
+        } => element_value_with_bindings(ir, *arg, declared, bindings)?,
+        IrExpr::GetValue(index) => bindings
+            .iter()
+            .rev()
+            .find(|(bound, _)| bound == index)?
+            .1
+            .clone(),
+        IrExpr::Block {
+            stmts,
+            value: Some(value),
+        } => operand_bound_value(ir, stmts, *value, declared, bindings)?,
         IrExpr::EnumEntry { classifier, name } => AnnoValue::Enum(*classifier, name.to_string()),
         IrExpr::KClassLiteral {
             classifier: Some(classifier),
@@ -168,37 +188,38 @@ fn element_value(ir: &IrFile, expression: ExprId, declared: Ty) -> Option<AnnoVa
             type_argument: false,
         } => AnnoValue::Class(*classifier),
         IrExpr::Vararg {
-            spreads, elements, ..
-        } if !spreads.contains(&true) => {
+            array_type,
+            spreads,
+            elements,
+        } => {
             let element = declared.non_null().array_read_elem()?;
-            AnnoValue::Array(
-                elements
-                    .iter()
-                    .map(|value| element_value(ir, *value, element))
-                    .collect::<Option<_>>()?,
-            )
-        }
-        IrExpr::New { args, defaults, .. } => {
-            let construction = ir.annotation_constructions.get(&expression)?;
-            let mut supplied = args.iter();
             let mut values = Vec::new();
-            for (ordinal, (name, ty)) in construction.members.iter().enumerate() {
-                let ordinal = u32::try_from(ordinal).ok()?;
-                if defaults.contains(&ordinal) {
-                    if !construction.arguments.omits(ordinal) {
+            for (index, expression) in elements.iter().copied().enumerate() {
+                if spreads.get(index).copied().unwrap_or(false) {
+                    let AnnoValue::Array(spread) =
+                        element_value_with_bindings(ir, expression, *array_type, bindings)?
+                    else {
                         return None;
-                    }
-                    continue;
-                }
-                // A compact default replay supplies every runtime operand, including values whose
-                // declaration defaults stay omitted from metadata. Consume before projecting it.
-                let argument = *supplied.next()?;
-                if !construction.arguments.omits(ordinal) {
-                    values.push((name.clone(), element_value(ir, argument, *ty)?));
+                    };
+                    values.extend(spread);
+                } else {
+                    values.push(element_value_with_bindings(
+                        ir, expression, element, bindings,
+                    )?);
                 }
             }
-            if supplied.next().is_some() {
-                return None;
+            AnnoValue::Array(values)
+        }
+        IrExpr::New { .. } => {
+            let construction = ir.annotation_constructions.get(&expression)?;
+            let mut values = Vec::new();
+            for member in supplied_members(ir, expression)? {
+                // Metadata omission does not remove a supplied runtime operand. Prove that value
+                // closed too, before projecting only the members metadata actually records.
+                let value = element_value_with_bindings(ir, member.value, member.ty, bindings)?;
+                if member.written {
+                    values.push((member.name.to_owned(), value));
+                }
             }
             AnnoValue::Annotation(AppliedAnnotation {
                 written_order: construction
@@ -212,12 +233,141 @@ fn element_value(ir: &IrFile, expression: ExprId, declared: Ty) -> Option<AnnoVa
     })
 }
 
+struct SuppliedMember<'a> {
+    name: &'a str,
+    ty: Ty,
+    value: ExprId,
+    written: bool,
+}
+
+/// Align compact runtime operands with the checked declaration members. Runtime omissions and
+/// metadata omissions are distinct: a replay can supply a member whose metadata remains omitted.
+fn supplied_members(ir: &IrFile, expression: ExprId) -> Option<Vec<SuppliedMember<'_>>> {
+    let IrExpr::New { args, defaults, .. } = ir.expr(expression) else {
+        return None;
+    };
+    let construction = ir.annotation_constructions.get(&expression)?;
+    let _ = construction
+        .arguments
+        .applied_order(construction.members.len())?;
+    let mut omitted = BTreeSet::new();
+    for &ordinal in defaults.iter() {
+        if ordinal as usize >= construction.members.len()
+            || !omitted.insert(ordinal)
+            || !construction.arguments.omits(ordinal)
+        {
+            return None;
+        }
+    }
+    let mut supplied = args.iter();
+    let mut members = Vec::new();
+    for (ordinal, (name, ty)) in construction.members.iter().enumerate() {
+        let ordinal = u32::try_from(ordinal).ok()?;
+        if !omitted.contains(&ordinal) {
+            members.push(SuppliedMember {
+                name,
+                ty: *ty,
+                value: *supplied.next()?,
+                written: !construction.arguments.omits(ordinal),
+            });
+        }
+    }
+    supplied.next().is_none().then_some(members)
+}
+
+/// Named-argument evaluation introduces checked operand holders. Only their closed initializers
+/// participate in declaration defaults; arbitrary runtime locals remain opaque.
+fn operand_bound_value(
+    ir: &IrFile,
+    statements: &[ExprId],
+    result: ExprId,
+    declared: Ty,
+    bindings: &[(u32, AnnoValue)],
+) -> Option<AnnoValue> {
+    let mut scoped = bindings.to_vec();
+    for statement in statements {
+        let IrExpr::Variable {
+            index,
+            ty,
+            init: Some(init),
+            named: false,
+        } = ir.expr(*statement)
+        else {
+            return None;
+        };
+        if !ir.call_operand_bindings.contains(statement) {
+            return None;
+        }
+        let value = element_value_with_bindings(ir, *init, *ty, &scoped)?;
+        scoped.push((*index, value));
+    }
+    element_value_with_bindings(ir, result, declared, &scoped)
+}
+
 #[cfg(test)]
 mod tests {
     mod argument_provenance;
 
     use super::*;
     use crate::types::{type_name, Ty};
+
+    #[test]
+    fn only_closed_call_operand_holders_are_values() {
+        let mut ir = IrFile::default();
+        let constant = ir.add_expr(IrExpr::Const(crate::ir::IrConst::Int(7)));
+        let binding = ir.add_expr(IrExpr::Variable {
+            index: 3,
+            ty: Ty::Int,
+            init: Some(constant),
+            named: false,
+        });
+        let read = ir.add_expr(IrExpr::GetValue(3));
+        let block = ir.add_expr(IrExpr::Block {
+            stmts: vec![binding],
+            value: Some(read),
+        });
+        assert!(element_value(&ir, block, Ty::Int).is_none());
+        ir.call_operand_bindings.insert(binding);
+        assert!(matches!(
+            element_value(&ir, block, Ty::Int),
+            Some(AnnoValue::Const(crate::ir::IrConst::Int(7)))
+        ));
+        assert!(element_value(&ir, read, Ty::Int).is_none());
+        let IrExpr::Variable { named, .. } = &mut ir.exprs[binding as usize] else {
+            panic!("operand binding");
+        };
+        *named = true;
+        assert!(element_value(&ir, block, Ty::Int).is_none());
+    }
+
+    #[test]
+    fn closed_array_spreads_flatten_in_order_without_dropping_unmarked_elements() {
+        let mut ir = IrFile::default();
+        let array = Ty::array(Ty::Int);
+        let elements = (1..=3)
+            .map(|value| ir.add_expr(IrExpr::Const(crate::ir::IrConst::Int(value))))
+            .collect::<Vec<_>>();
+        let middle = ir.add_expr(IrExpr::Vararg {
+            array_type: array,
+            elements: vec![elements[1]],
+            spreads: Vec::new(),
+        });
+        let outer = ir.add_expr(IrExpr::Vararg {
+            array_type: array,
+            elements: vec![elements[0], middle, elements[2]],
+            spreads: vec![false, true, false],
+        });
+        assert_eq!(
+            format!("{:?}", element_value(&ir, outer, array)),
+            "Some(Array([Const(Int(1)), Const(Int(2)), Const(Int(3))]))"
+        );
+        let malformed = ir.add_expr(IrExpr::Vararg {
+            array_type: array,
+            elements: vec![elements[0]],
+            spreads: vec![true],
+        });
+        assert!(element_value(&ir, malformed, array).is_none());
+    }
 
     #[test]
     fn checked_declaration_defaults_replace_an_incomplete_earlier_site() {
