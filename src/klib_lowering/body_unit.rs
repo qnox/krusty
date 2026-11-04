@@ -12,7 +12,8 @@ use crate::fx_hash::HashMap;
 use std::collections::VecDeque;
 
 use super::body_lowering::{
-    BodyLowering, CallLinker, LinkedAccessor, LinkedCallee, LinkedConstructor, LoweredFunction,
+    BodyLowering, CallLinker, LinkedAccessor, LinkedCallableReference, LinkedCallee,
+    LinkedConstructor, LoweredFunction,
 };
 use super::callee_facts::{KlibCalleeFact, KlibCalleeFacts};
 use super::decline::{KlibBodyDecline, KlibBodyDeclineReason};
@@ -49,6 +50,9 @@ enum DependencyExternalRealization {
     EmittedBody,
     TargetIntrinsic(crate::libraries::CompilerIntrinsic),
     Constructor,
+    PropertyGetter,
+    TargetMember,
+    ProviderLeaf,
 }
 
 impl EmittedDependencyCallable {
@@ -86,11 +90,52 @@ impl EmittedDependencyCallable {
         }
     }
 
+    pub(crate) fn property_getter(target: ExternalCallableId) -> Self {
+        Self {
+            realization: DependencyExternalRealization::PropertyGetter,
+            ..Self::new(target, None, None)
+        }
+    }
+
+    /// A member of a classifier whose representation the target owns: the target realizes the
+    /// call at its dispatch receiver, so the KLIB body, written against the library's own class
+    /// layout, is never lowered.
+    pub(crate) fn target_member(target: ExternalCallableId) -> Self {
+        Self {
+            realization: DependencyExternalRealization::TargetMember,
+            ..Self::new(target, None, None)
+        }
+    }
+
+    pub(crate) fn provider_leaf(target: ExternalCallableId) -> Self {
+        Self {
+            realization: DependencyExternalRealization::ProviderLeaf,
+            ..Self::new(target, None, None)
+        }
+    }
+
+    fn realizes_getter(self) -> bool {
+        matches!(
+            self.realization,
+            DependencyExternalRealization::EmittedBody
+                | DependencyExternalRealization::PropertyGetter
+                | DependencyExternalRealization::TargetMember
+                | DependencyExternalRealization::ProviderLeaf
+        )
+    }
+
     fn target_intrinsic(self) -> Option<crate::libraries::CompilerIntrinsic> {
         match self.realization {
             DependencyExternalRealization::TargetIntrinsic(operation) => Some(operation),
             _ => None,
         }
+    }
+
+    fn is_target_member(self) -> bool {
+        matches!(
+            self.realization,
+            DependencyExternalRealization::TargetMember
+        )
     }
 
     fn is_constructor(self) -> bool {
@@ -562,9 +607,33 @@ impl CallLinker for Linker<'_, '_> {
         }))
     }
 
-    fn is_subtype(&self, sub: Ty, sup: Ty) -> bool {
-        // A support unit has no semantic model of the classes its body names.
-        sub == sup
+    fn is_subtype(
+        &self,
+        parameters: &super::klib_types::KlibTypeParameters,
+        sub: Ty,
+        sup: Ty,
+    ) -> bool {
+        self.sources.callees.is_subtype(parameters, sub, sup)
+            || super::callable_references::function_supertype(sub, sup)
+    }
+
+    fn link_reference(
+        &mut self,
+        ir: &mut IrFile,
+        callee: &KlibPublicIdSignature,
+    ) -> Result<LinkedCallableReference, KlibBodyDeclineReason> {
+        let identity = self.callee_identity(callee)?;
+        let (declaration, kind) = self.sources.callees.reference_declaration(&identity)?;
+        let call = self.link(ir, callee)?;
+        Ok(LinkedCallableReference {
+            declaration,
+            kind,
+            call,
+        })
+    }
+
+    fn same_type(&self, left: Ty, right: Ty) -> bool {
+        self.sources.callees.same_type(left, right)
     }
 
     fn link_constructor(
@@ -632,7 +701,12 @@ impl CallLinker for Linker<'_, '_> {
             .constructor_bound(parameters, argument, bound)
     }
 
-    fn singleton(&self, _classifier: TypeName) -> Result<(), KlibBodyDeclineReason> {
+    fn singleton(&self, classifier: TypeName) -> Result<(), KlibBodyDeclineReason> {
+        // The target realizes the value of an object whose representation it owns, as it does for
+        // a source reference of that object. Any other object would need its class materialized.
+        if self.sources.callees.target_represents(classifier) {
+            return Ok(());
+        }
         Err(KlibBodyDeclineReason::UnsupportedOperation(
             "an object value",
         ))
@@ -645,11 +719,51 @@ impl CallLinker for Linker<'_, '_> {
 
     fn link_accessor(
         &mut self,
-        _callee: &KlibAccessorIdSignature,
+        callee: &KlibAccessorIdSignature,
     ) -> Result<LinkedAccessor, KlibBodyDeclineReason> {
-        Err(KlibBodyDeclineReason::UnsupportedOperation(
-            "a call through a property accessor signature",
-        ))
+        let unsupported = || {
+            KlibBodyDeclineReason::UnsupportedOperation(
+                "a call through a property accessor signature",
+            )
+        };
+        let signature = KlibDeclarationSignature::Accessor(callee.clone());
+        let identity = match self
+            .sources
+            .bodies
+            .callee_origin(&self.active_module, &signature)
+        {
+            KlibCalleeOrigin::Exact(identity) => identity,
+            KlibCalleeOrigin::Missing => return Err(unsupported()),
+            KlibCalleeOrigin::Ambiguous => {
+                return Err(KlibBodyDeclineReason::AmbiguousCalleeOrigin(Box::new(
+                    callee.property().clone(),
+                )))
+            }
+        };
+        // A complete retained export or positive target plan owns this edge. Other accessors
+        // retain the explicit unsupported boundary instead of acquiring a header-only body path.
+        if !self
+            .sources
+            .externals
+            .get(&identity)
+            .is_some_and(|external| external.realizes_getter())
+        {
+            return Err(unsupported());
+        }
+        let selected = match self.sources.callees.get(&identity) {
+            Some(KlibCalleeFact::Selected(callables)) => callables[0],
+            Some(KlibCalleeFact::Ambiguous) => {
+                return Err(KlibBodyDeclineReason::SignatureMismatch(
+                    "conflicting provider contracts for a getter declaration".to_owned(),
+                ))
+            }
+            None => return Err(KlibBodyDeclineReason::Unjoined),
+        };
+        super::accessor_calls::authenticate(selected, self.sources.bodies)?.ok_or(
+            KlibBodyDeclineReason::UnsupportedOperation(
+                "a dependency property accessor without a getter contract",
+            ),
+        )
     }
 
     fn requires_declaration(
@@ -726,8 +840,9 @@ impl CallLinker for Linker<'_, '_> {
                 HeaderPurpose::External,
                 arena,
                 declaration,
+                Some(self.sources.bodies),
             )
-            .map_err(&callee_declined)?;
+            .map_err(callee_declined)?;
             self.cross_check_intrinsic(callee, selected, intrinsic)?;
             // A target intrinsic stays an ordinary call of its declaration; only the target's
             // emitter realizes it, through the provider fact frozen on the external handle. The
@@ -753,7 +868,8 @@ impl CallLinker for Linker<'_, '_> {
                 context_count: 0,
                 singleton_dispatch: None,
                 type_parameters: Vec::new(),
-                class_type_parameters: Vec::new(),
+                type_parameter_bounds: Some(Vec::new()),
+                class_type_parameters: self.class_type_parameters(selected)?,
             });
         }
         if let Some(&emitted) = self.sources.externals.get(&identity) {
@@ -775,16 +891,63 @@ impl CallLinker for Linker<'_, '_> {
                     )));
                 }
             }
-            let purpose = if emitted.target_intrinsic().is_some() || declaration.body.is_none() {
+            let purpose = if emitted.target_intrinsic().is_some()
+                || emitted.is_target_member()
+                || declaration.body.is_none()
+            {
                 HeaderPurpose::External
             } else {
                 HeaderPurpose::Body(emitted.singleton_dispatch())
             };
-            let selected =
-                selected_callable_for_header_purpose(selected, purpose, arena, declaration)
-                    .map_err(&callee_declined)?;
-            let header = raw_function_header(selected, purpose, arena, declaration)
-                .map_err(callee_declined)?;
+            let selected = selected_callable_for_header_purpose(
+                selected,
+                purpose,
+                arena,
+                declaration,
+                Some(self.sources.bodies),
+            )
+            .map_err(callee_declined)?;
+            // A member of a generic class realized outside this unit, by the target or by its
+            // provider, is read at its class's type arguments, which the call binds from its
+            // dispatch receiver.
+            let class = match selected {
+                Some(selected)
+                    if matches!(purpose, HeaderPurpose::External)
+                        && selected
+                            .class_contract()
+                            .is_some_and(|class| !class.parameters.formals.is_empty()) =>
+                {
+                    Some(
+                        super::class_headers::authenticate(selected, self.sources.bodies)
+                            .map_err(callee_declined)?,
+                    )
+                }
+                _ => None,
+            };
+            let (header, class_type_parameters) = match class {
+                Some(class) => {
+                    super::class_headers::authenticate_receiver(
+                        class.contract,
+                        class.arena,
+                        class.function,
+                    )
+                    .map_err(callee_declined)?;
+                    let header = super::function_lowering::raw_function_header_with_class(
+                        selected,
+                        purpose,
+                        class.arena,
+                        class.function,
+                        class.types,
+                    )
+                    .map_err(callee_declined)?;
+                    (header, class.formals)
+                }
+                None => (
+                    raw_function_header(selected, purpose, arena, declaration)
+                        .map_err(callee_declined)?,
+                    Vec::new(),
+                ),
+            };
             let (params, ret, context_count, extension_receiver, receiver) =
                 header.linked_signature();
             return Ok(LinkedCallee {
@@ -803,14 +966,13 @@ impl CallLinker for Linker<'_, '_> {
                 ret,
                 context_count,
                 singleton_dispatch: emitted.singleton_classifier(),
-                type_parameters: if emitted.target_intrinsic().is_some() {
-                    selected
-                        .and_then(|selected| selected.generic_signature())
-                        .map_or_else(Vec::new, |signature| signature.formals.clone())
-                } else {
-                    Vec::new()
-                },
-                class_type_parameters: Vec::new(),
+                type_parameters: selected
+                    .and_then(|selected| selected.generic_signature())
+                    .map_or_else(Vec::new, |signature| signature.formals.clone()),
+                type_parameter_bounds: selected
+                    .and_then(|selected| selected.generic_signature())
+                    .map(|signature| signature.formal_bounds.clone()),
+                class_type_parameters,
             });
         }
         if declaration.dispatch_receiver.is_some() {
@@ -820,24 +982,20 @@ impl CallLinker for Linker<'_, '_> {
                 "a call of a member function",
             ));
         }
+        let selected = selected_callable_for_header(selected, None, arena, declaration)
+            .map_err(callee_declined)?;
         let function = match self.functions.get(&identity) {
             Some(function) => {
                 // The function was declared under another lowering's selection, or from its
                 // header alone; this lowering's selection must describe it too.
-                if let Some(selected) =
-                    selected_callable_for_header(selected, None, arena, declaration)
-                        .map_err(&callee_declined)?
-                {
+                if let Some(selected) = selected {
                     function_header(Some(selected), arena, declaration).map_err(callee_declined)?;
                 }
                 *function
             }
-            None => {
-                let selected = selected_callable_for_header(selected, None, arena, declaration)
-                    .map_err(&callee_declined)?;
-                self.declare(ir, &identity, selected, arena, declaration)
-                    .map_err(callee_declined)?
-            }
+            None => self
+                .declare(ir, &identity, selected, arena, declaration)
+                .map_err(callee_declined)?,
         };
         let declaration = &ir.functions[function as usize];
         Ok(LinkedCallee {
@@ -847,13 +1005,36 @@ impl CallLinker for Linker<'_, '_> {
             ret: declaration.ret,
             context_count: ir.fn_context_counts.get(&function).copied().unwrap_or(0),
             singleton_dispatch: None,
-            type_parameters: Vec::new(),
+            type_parameters: selected
+                .and_then(|selected| selected.generic_signature())
+                .map_or_else(Vec::new, |signature| signature.formals.clone()),
+            type_parameter_bounds: selected
+                .and_then(|selected| selected.generic_signature())
+                .map(|signature| signature.formal_bounds.clone()),
             class_type_parameters: Vec::new(),
         })
     }
 }
 
 impl<'s> Linker<'_, 's> {
+    /// The type parameters of the generic class declaring `selected`, which a call of the member
+    /// binds from its dispatch receiver; none for a top-level function or a non-generic class.
+    fn class_type_parameters(
+        &self,
+        selected: Option<KlibBodyCallable<'s>>,
+    ) -> Result<Vec<String>, KlibBodyDeclineReason> {
+        match selected {
+            Some(selected)
+                if selected
+                    .class_contract()
+                    .is_some_and(|class| !class.parameters.formals.is_empty()) =>
+            {
+                Ok(super::class_headers::authenticate(selected, self.sources.bodies)?.formals)
+            }
+            _ => Ok(Vec::new()),
+        }
+    }
+
     fn callee_identity(
         &self,
         callee: &KlibPublicIdSignature,
@@ -969,6 +1150,7 @@ fn selected_callable_for_header<'callable>(
         HeaderPurpose::Body(emitted_singleton_dispatch),
         arena,
         function,
+        None,
     )
 }
 
@@ -977,14 +1159,32 @@ fn selected_callable_for_header_purpose<'callable>(
     purpose: HeaderPurpose,
     arena: &KlibIrArena,
     function: &KlibIrFunction,
+    class_bodies: Option<&KlibDeclarationBodies>,
 ) -> Result<Option<KlibBodyCallable<'callable>>, KlibBodyDeclineReason> {
     let Some(candidates) = candidates else {
         return Ok(None);
     };
     let mut selected = None;
     let mut first_mismatch = None;
+    // A member of a generic class binds its class's type parameters from the class header.
+    let header = |candidate: KlibBodyCallable<'callable>| match class_bodies.filter(|_| {
+        candidate
+            .class_contract()
+            .is_some_and(|class| !class.parameters.formals.is_empty())
+    }) {
+        Some(bodies) => super::class_headers::authenticate(candidate, bodies).and_then(|class| {
+            super::function_lowering::raw_function_header_with_class(
+                Some(candidate),
+                purpose,
+                class.arena,
+                class.function,
+                class.types,
+            )
+        }),
+        None => raw_function_header(Some(candidate), purpose, arena, function),
+    };
     let mut consider = |candidate| {
-        match raw_function_header(Some(candidate), purpose, arena, function) {
+        match header(candidate) {
             Ok(_) if selected.is_none() => selected = Some(candidate),
             Ok(_) => return Some(KlibBodyDeclineReason::SignatureMismatch(
                 "more than one checked call-edge variant agrees with the serialized declaration"

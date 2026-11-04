@@ -40,7 +40,7 @@ fn not_applicable(src: &str) -> Option<&'static str> {
     // "when the native target grows its own frontend semantics (klib ingestion, phase 7)" — which
     // is what the klib provider is.
     if !krusty::conformance::backend_targeted(src, &["NATIVE"]) {
-        return Some("targeted at another backend");
+        return Some(box_lane::TARGETED_AT_ANOTHER_BACKEND);
     }
     // Backend mutes are target-specific. A JVM mute cannot hide a shared-frontend or common-IR
     // failure from the Native lane; that failure belongs in this lane's exact outcome ratchet.
@@ -66,7 +66,7 @@ fn native_applicability_uses_native_directives_not_jvm_mutes() {
     );
     assert_eq!(
         not_applicable("// TARGET_BACKEND: JVM\nfun box() = \"OK\""),
-        Some("targeted at another backend")
+        Some(box_lane::TARGETED_AT_ANOTHER_BACKEND)
     );
     assert_eq!(
         not_applicable("// TARGET_BACKEND: ANY\nfun box() = \"OK\""),
@@ -386,6 +386,39 @@ fn native_module_abi_symbols_keep_same_named_internal_classifiers_distinct() {
     );
 }
 
+// PLATFORM-SPECIFIC: Native object markers join source declarations to their KLIB export records.
+// Both pinned reference compilers run the same module graph before Native linkage is checked.
+#[test]
+fn native_callable_reference_identity_survives_a_source_module_export() {
+    let source = r#"// MODULE: library
+// FILE: Library.kt
+package referenceidentity
+fun step(value: Int): Int = value + 1
+fun different(value: Int): Int = value + 2
+fun fromLibrary(): Any = ::step
+
+// MODULE: main(library)
+// FILE: Box.kt
+import referenceidentity.*
+fun box(): String {
+    val original = fromLibrary()
+    val imported: Any = ::step
+    if (original != imported || imported != original) return "declaration identity"
+    if (original.hashCode() != imported.hashCode()) return "declaration hash"
+    if (original == ::different || ::different == imported) return "different declaration"
+    return "OK"
+}
+"#;
+    let stem = "sourceModuleReferenceIdentity";
+    super::box_reference_classes::checked_box(source, stem)
+        .expect("pinned kotlinc must run the exact reference-identity module graph");
+    assert_eq!(
+        run_native_abi_case(source, stem),
+        Outcome::Pass,
+        "Native reference identity must use the source declaration across its KLIB export"
+    );
+}
+
 #[test]
 fn native_generic_class_members_instantiate_their_declared_dependency_exports() {
     let source = include_str!("box_regressions/multimodule/multimoduleGenericClassMembers.kt");
@@ -404,23 +437,7 @@ fn native_generic_class_members_instantiate_their_declared_dependency_exports() 
 fn native_source_getter_exports_read_declared_generic_storage() {
     // Direct imported construction remains covered by the original graph retained in #2780.
     // This separate getter graph uses the producer's factories and checks every storage form.
-    let source = format!(
-        "// MODULE: lib\n{}\n// MODULE: main(lib)\n{}",
-        include_str!("fixtures/klib_final_field_reads/Library.kt"),
-        r#"
-fun box(): String {
-    if (fixture.makeStringCell("OK").value != "OK") return "String field"
-    if (fixture.makeIntCell(42).value != 42) return "Int field"
-    if (fixture.makeLongCell(Long.MIN_VALUE).value != Long.MIN_VALUE) return "Long field"
-    if (fixture.makeNullableCell(null).value != null) return "nullable field"
-    val readings = fixture.makeReadings("O", "K")
-    if (readings.first != "O") return "val field ordinal"
-    if (readings.second != "K") return "var field ordinal"
-    if (fixture.makeReadings("O", null).second != null) return "nullable var field"
-    return "OK"
-}
-"#,
-    );
+    let source = include_str!("box_regressions/multimodule/sourceGetterExports.kt").to_owned();
     let stem = "nativeSourceGetterExports";
     super::box_reference_classes::checked_box(&source, stem)
         .expect("the JVM oracle must run the complete source-getter graph");
@@ -430,23 +447,7 @@ fun box(): String {
 // PLATFORM-SPECIFIC: a source-module accessor export and its declared Native receiver ABI.
 #[test]
 fn native_explicit_getter_exports_keep_their_declared_receiver() {
-    let source = r#"// MODULE: lib
-package fixture
-class Computed<T>(private val stored: T) {
-    var reads: Int = 0
-    val value: T get() { reads++; return stored }
-}
-fun stringCell(value: String): Computed<String> = Computed(value)
-fun intCell(value: Int): Computed<Int> = Computed(value)
-// MODULE: main(lib)
-fun box(): String {
-    val string = fixture.stringCell("OK")
-    val number = fixture.intCell(42)
-    if (string.value != "OK" || string.reads != 1) return "String getter"
-    if (number.value != 42 || number.reads != 1) return "Int getter"
-    return "OK"
-}
-"#;
+    let source = include_str!("box_regressions/multimodule/explicitGetterExports.kt");
     let stem = "nativeExplicitGetterExports";
     super::box_reference_classes::checked_box(source, stem)
         .expect("the JVM oracle must run the complete explicit-getter graph");
@@ -456,20 +457,7 @@ fun box(): String {
 // PLATFORM-SPECIFIC: a source getter's public ABI differs from its Native backing-field storage.
 #[test]
 fn native_getter_exports_preserve_distinct_backing_field_storage() {
-    let source = r#"// LANGUAGE: +ExplicitBackingFields
-// MODULE: lib
-package fixture
-class Backed {
-    val value: Any?
-        field: String = "OK"
-}
-fun backed(): Backed = Backed()
-// MODULE: main(lib)
-fun box(): String {
-    if (fixture.backed().value != "OK") return "backing storage"
-    return "OK"
-}
-"#;
+    let source = include_str!("box_regressions/multimodule/distinctBackingFieldExport.kt");
     let stem = "nativeDistinctBackingFieldExport";
     super::box_reference_classes::checked_box(source, stem)
         .expect("the JVM oracle must run the complete backing-field graph");
@@ -479,28 +467,7 @@ fun box(): String {
 // PLATFORM-SPECIFIC: explicit accessor entries retain boxed class formals and a void setter ABI.
 #[test]
 fn native_explicit_setter_exports_keep_their_declared_value_parameter() {
-    let source = r#"// MODULE: lib
-package fixture
-class MutableCell<T>(initial: T) {
-    private var stored: T = initial
-    var writes: Int = 0
-    var value: T
-        get() = stored
-        set(value) { stored = value; writes++ }
-}
-fun stringCell(): MutableCell<String> = MutableCell("before")
-fun intCell(): MutableCell<Int> = MutableCell(0)
-// MODULE: main(lib)
-fun box(): String {
-    val string = fixture.stringCell()
-    val number = fixture.intCell()
-    string.value = "OK"
-    number.value = 42
-    if (string.value != "OK" || string.writes != 1) return "String setter"
-    if (number.value != 42 || number.writes != 1) return "Int setter"
-    return "OK"
-}
-"#;
+    let source = include_str!("box_regressions/multimodule/explicitSetterExports.kt");
     let stem = "nativeExplicitSetterExports";
     super::box_reference_classes::checked_box(source, stem)
         .expect("the JVM oracle must run the complete explicit-setter graph");
@@ -548,21 +515,7 @@ fn assert_virtual_getter_export(declarations: &str, stem: &str) {
 // PLATFORM-SPECIFIC: effective finality admits safe entries without requiring every class final.
 #[test]
 fn native_source_getter_exports_admit_both_forms_of_static_dispatch() {
-    let source = r#"// MODULE: lib
-package fixture
-open class FinalProperty { val value: String = "OK" }
-class Inherited : FinalProperty()
-open class VirtualProperty { open val value: String = "base" }
-class FinalOverride : VirtualProperty() { override val value: String = "OK" }
-fun inherited(): FinalProperty = Inherited()
-fun overridden(): FinalOverride = FinalOverride()
-// MODULE: main(lib)
-fun box(): String {
-    if (fixture.inherited().value != "OK") return "final property"
-    if (fixture.overridden().value != "OK") return "final owner"
-    return "OK"
-}
-"#;
+    let source = include_str!("box_regressions/multimodule/staticallyDispatchedGetterExports.kt");
     let stem = "nativeStaticallyDispatchedGetterExports";
     super::box_reference_classes::checked_box(source, stem)
         .expect("the JVM oracle must establish both static-dispatch results");

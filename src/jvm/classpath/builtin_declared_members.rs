@@ -132,6 +132,8 @@ impl Classpath {
                     modality: member.modality,
                     is_operator: member.is_operator,
                     is_infix: member.is_infix,
+                    is_generic: !signature.formals.is_empty(),
+                    is_extension: signature.receiver.is_some(),
                     annotated: !member.annotations.is_empty(),
                 });
             }

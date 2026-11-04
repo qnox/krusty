@@ -41,3 +41,22 @@ class Reader : Feed<String, Reader> {\n\
 fun box(): String = if (Reader().fetch(\"\", 0) == null) \"OK\" else \"fail\"\n";
     common::expect_box_ok_with_stdlib(SRC, "Source");
 }
+
+#[test]
+fn super_call_infers_the_method_type_parameters_like_kotlinc() {
+    // The method's own formals are inferred from the arguments as for any member call, so a
+    // super call types as the selected declaration's specialized result.
+    const SRC: &str = "open class Expr<T>\n\
+open class P { open fun <T : CharSequence> wrap(e: Expr<T>): Expr<T> = e }\n\
+class Q : P() {\n\
+    fun <U : CharSequence> same(e: Expr<U>): Expr<U> = super.wrap(e)\n\
+    fun wrong(): Int = super.wrap(Expr<String>())\n\
+}\n";
+    let sources = [("Main.kt", SRC)];
+    let reference_args = common::language_directives::kotlinc_args(SRC);
+    assert_eq!(
+        common::reference_error_blocks(&sources, &reference_args),
+        ["Main.kt:5:20: return type mismatch: expected 'Int', actual 'Expr<String>'."]
+    );
+    common::assert_error_blocks_match_kotlinc(&sources, &reference_args);
+}

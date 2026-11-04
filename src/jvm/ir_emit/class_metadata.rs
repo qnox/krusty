@@ -78,11 +78,22 @@ pub(super) fn build_class_metadata_with_facts(
         return Some(KotlinMetadata {
             k: 3,
             stamp: opts.metadata_stamp(),
-            xi: synthetic_class_xi(if is_continuation_class(c) {
-                SYNTHETIC_PROTECTED
+            xi: if is_continuation_class(c) {
+                continuation_class_xi(ir, c)
             } else {
-                SYNTHETIC_LOCAL
-            }),
+                synthetic_class_xi(SYNTHETIC_LOCAL)
+            },
+            d1: vec![],
+            d2: vec![],
+        });
+    }
+    // A class a plugin generates with no declaration behind it has a synthetic-class record, whose
+    // `xi` carries no visibility, since no lowering of kotlinc's own made it.
+    if ir.is_declarationless_class(c.fq_name_id()) {
+        return Some(KotlinMetadata {
+            k: 3,
+            stamp: opts.metadata_stamp(),
+            xi: super::metadata_policy::class_xi(ir, c),
             d1: vec![],
             d2: vec![],
         });
@@ -146,16 +157,37 @@ pub(super) fn build_class_metadata_with_facts(
         &secondary_ctors,
         &nested,
     );
-    let declaration = record.declaration(&tail, &enum_entries);
-    let (d1_bytes, d2) = build_class(
-        declaration.name,
+    let classifier = record.classifier();
+    let class_id = if tail.local_classifiers.contains(&classifier) {
+        crate::metadata::class_id::ResolvedClassId::local(classifier)
+    } else {
+        match crate::metadata::class_id::ResolvedClassId::resolve(
+            crate::libraries::ClassifierDeclarationKey::Ordinary(classifier),
+            &|key| signature_symbols.classifier_declaration_name(key),
+        ) {
+            Ok(name) => name,
+            Err(error) => {
+                run.set_emit_error(format!("cannot encode class metadata name: {error}"));
+                return None;
+            }
+        }
+    };
+    let declaration = record.declaration(&class_id, &tail, &enum_entries);
+    let (d1_bytes, d2) = match build_class(
+        declaration.class_id,
         declaration.ctor_params,
         declaration.props,
         declaration.methods,
         declaration.enum_entries,
         declaration.tail,
         &signatures,
-    );
+    ) {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            run.set_emit_error(format!("cannot encode class metadata name: {error}"));
+            return None;
+        }
+    };
     // d1 is the protobuf payload as one `char` per byte, in parts that each fit one `CONSTANT_Utf8`
     // entry (the constant pool writes them as modified UTF-8).
     let d1 = crate::metadata::encoding::bytes_to_strings(&d1_bytes);
@@ -335,9 +367,9 @@ impl<'a> JvmClassRealization<'a> {
         let f = &self.ir.functions[fid as usize];
         // Recorded exactly when a reader cannot rebuild the physical descriptor from the
         // declared types (kotlinc's `requiresFunctionSignature`).
-        let physical = crate::jvm::names::method_descriptor(
+        let physical = crate::jvm::method_descriptors::ir_method_desc(
             &f.params,
-            self.override_results.physical_result(self.ir, fid),
+            &self.override_results.physical_result(self.ir, fid),
         );
         let desc = (super::super::metadata_method_signatures::requires_function_signature(
             record.receiver,

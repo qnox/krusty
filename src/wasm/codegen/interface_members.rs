@@ -10,8 +10,8 @@
 //!
 //! An implementation carrying a reference more narrowly than its member does stands behind a thunk
 //! with the member's signature that casts the operand and calls it; one whose member carries a
-//! value the implementation does not (a primitive behind a type parameter) declines, since this
-//! form has no boxes yet.
+//! value the implementation does not (a primitive behind a type parameter) declines, since that
+//! thunk does not box or unbox yet (see `super::super::boxes`).
 
 use crate::fx_hash::HashMap;
 

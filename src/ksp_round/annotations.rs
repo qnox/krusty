@@ -8,6 +8,7 @@ use super::type_model::{qualified_name, TypeParameterScope};
 use super::{Source, Subject};
 use crate::ast::AnnotationRef;
 use crate::frontend::{FrontendSymbols, SourceSetAnalysis};
+use crate::libraries::DeclarationLanguage;
 use crate::types::{
     stored_value_ty, AnnotationValue, PropertyAnnotationSite, ResolvedAnnotation, Ty, TyKind,
     TypeName,
@@ -210,21 +211,26 @@ impl<'a> Annotations<'a> {
         }
         // A library class has the element defaults its class file records. A Kotlin `vararg val`
         // element declared without one materializes an omitted empty array, and KSP2 lists that
-        // array as its default.
+        // array as its default; it lists an empty array as the default of every array element a
+        // Java annotation declares without one too.
         let library = self.symbols.libraries.classifier(class)?;
+        let java =
+            self.symbols.libraries.declaration_header(class)?.language == DeclarationLanguage::Java;
         let application = library.annotation_application()?;
         let parameters = &application.parameters;
         let defaults = parameters
             .names
             .iter()
+            .zip(&parameters.types)
             .enumerate()
             .filter_map(
-                |(index, name)| match library.annotation_element_default(name) {
+                |(index, (name, ty))| match library.annotation_element_default(name) {
                     Some(default) => {
                         Some(default.value().map(|value| (name.clone(), value.clone())))
                     }
-                    None => (application.policy.materialize_omitted_vararg
+                    None => ((application.policy.materialize_omitted_vararg
                         && parameters.vararg == Some(index))
+                        || (java && ty.array_elem().is_some()))
                     .then(|| Some((name.clone(), AnnotationValue::Array(Vec::new())))),
                 },
             )
@@ -291,6 +297,10 @@ impl<'a> Annotations<'a> {
             AnnotationValue::Byte(value) => KspValue::Byte(*value),
             AnnotationValue::Short(value) => KspValue::Short(*value),
             AnnotationValue::Long(value) => KspValue::Long(*value),
+            AnnotationValue::UByte(value) => KspValue::UByte(*value),
+            AnnotationValue::UShort(value) => KspValue::UShort(*value),
+            AnnotationValue::UInt(value) => KspValue::UInt(*value),
+            AnnotationValue::ULong(value) => KspValue::ULong(*value),
             AnnotationValue::Float(value) => KspValue::Float(value.to_bits()),
             AnnotationValue::Double(value) => KspValue::Double(value.to_bits()),
             AnnotationValue::Boolean(value) => KspValue::Boolean(*value),

@@ -424,6 +424,32 @@ fn jvm_analysis(source: &str, stem: &str) -> SourceSetAnalysis {
     analysis
 }
 
+/// Every unsigned width keeps its semantic identity, including high bits and constant reads.
+#[test]
+fn checked_annotation_arrays_preserve_complete_unsigned_value_inventory() {
+    let source =
+        include_str!("../../../tests/fixtures/unsigned_annotation_values/UnsignedAnnotations.kt");
+    let analysis = jvm_analysis(source, "UnsignedAnnotations");
+    let index = analysis.streamed.as_ref().expect("Pass 1").module.index();
+    let subject = index
+        .classifier_declaration(crate::types::type_name("unsignedannotations/Subject"))
+        .expect("stable annotated subject");
+    let applications = index.declaration_applied_annotations(subject);
+    assert_eq!(applications.len(), 1, "complete application inventory");
+    assert_eq!(
+        applications[0].annotation,
+        crate::types::type_name("unsignedannotations/Bits")
+    );
+    assert_eq!(
+        format!("{:?}", applications[0].arguments),
+        "[(\"b\", Array([UByte(0), UByte(128), UByte(255)])), \
+         (\"s\", Array([UShort(0), UShort(32768), UShort(65535)])), \
+         (\"i\", Array([UInt(0), UInt(2147483648), UInt(4294967295)])), \
+         (\"l\", Array([ULong(0), ULong(9223372036854775808), ULong(18446744073709551615)])), \
+         (\"signed\", Array([Byte(-1)]))]"
+    );
+}
+
 fn written(
     short_name: &str,
     use_site: Option<crate::types::PropertyAnnotationSite>,

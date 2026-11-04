@@ -137,10 +137,10 @@ impl SymbolSource for CheckerModuleSymbols<'_> {
         }
     }
 
-    fn sam_with_receiver_annotations(&self) -> &[TypeName] {
+    fn annotation_conventions(&self) -> &crate::symbol_source::AnnotationConventions {
         match self {
-            Self::Legacy(source) => source.sam_with_receiver_annotations(),
-            Self::Streamed(source) => source.sam_with_receiver_annotations(),
+            Self::Legacy(source) => source.annotation_conventions(),
+            Self::Streamed(source) => source.annotation_conventions(),
         }
     }
 }

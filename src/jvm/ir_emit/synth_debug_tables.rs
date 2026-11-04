@@ -34,9 +34,11 @@ pub(super) fn attach_synth_debug_tables(
         init_locals,
     } = constructor;
     let line = c.decl_line;
-    if line == 0 {
+    // A class with no declaration behind it has no line, but its members still have locals.
+    if line == 0 && !ir.is_declarationless_class(c.fq_name_id()) {
         return;
     }
+    let at = |pc: u16, line: u32| (line != 0).then_some((pc, line));
     let desc = |t: Ty| crate::jvm::names::type_descriptor(t);
     let slot_size = |t: Ty| -> u16 {
         match desc(t).as_str() {
@@ -94,7 +96,7 @@ pub(super) fn attach_synth_debug_tables(
         cw.set_method_debug(
             "<init>",
             ctor_desc,
-            Some((ctor_pc, ctor_start_line)),
+            at(ctor_pc, ctor_start_line),
             &ctor_locals,
         );
         cw.prepend_ranged_locals("<init>", ctor_desc, init_locals);
@@ -185,11 +187,14 @@ pub(super) fn attach_synth_debug_tables(
             cw.set_method_debug(
                 &g,
                 &format!("(){}", desc(getter_result)),
-                Some((0, getter_line)),
+                at(0, getter_line),
                 &this_only,
             );
         }
-        if !f.is_final() && declared_property.is_none_or(|property| property.setter.is_none()) {
+        // A plugin's `val` may keep its field mutable; it still has no setter.
+        if !f.is_final()
+            && declared_property.is_none_or(|property| property.is_var && property.setter.is_none())
+        {
             let pd = desc(accessor_ty);
             // The setter's value param is always slot 1 (`this`=0): guard = `aload_1`(1) + the
             // `<set-?>` String's real ldc width + invokestatic(3).
@@ -201,7 +206,7 @@ pub(super) fn attach_synth_debug_tables(
             cw.set_method_debug(
                 &s,
                 &format!("({pd})V"),
-                Some((set_pc, setter_line)),
+                at(set_pc, setter_line),
                 &[
                     ("this".to_string(), this_desc.clone(), 0),
                     ("<set-?>".to_string(), pd, 1),

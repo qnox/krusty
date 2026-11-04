@@ -5,6 +5,7 @@
 pub(crate) mod class_tables;
 pub(crate) mod coroutines;
 pub(crate) mod counted_loops;
+pub(crate) mod default_arguments;
 mod dependency_accessor;
 mod dependency_call_shape;
 mod dependency_facts;
@@ -15,12 +16,14 @@ pub(crate) mod interface_identity;
 pub(crate) mod local_properties;
 mod module_facts;
 
-pub(crate) use dependency_call_shape::{DependencyCallShape, DependencyExportCall};
+pub(crate) use dependency_call_shape::{
+    DeclaredOperandRoles, DependencyCallShape, DependencyExportCall,
+};
 #[cfg(test)]
 pub(crate) use dependency_facts::referenced_dependencies;
 pub use dependency_facts::{
     BackendCallableFact, BackendCompilerIntrinsic, BackendPropertyFact, BackendSemanticCallRole,
-    CheckedBackendCallables, DependencyFactError,
+    CheckedBackendCallables, DependencyClassifier, DependencyFactError, DependencyGetterSignature,
 };
 pub(crate) use dependency_metadata::DependencyFieldGetter;
 pub(crate) use dependency_metadata::KlibDependencyCallable;
@@ -132,6 +135,20 @@ pub trait Backend {
     /// A positive target implementation of a provider-authenticated declaration. This does not
     /// authorize common folding or replace a retained dependency export.
     fn realizes_dependency_intrinsic(&self, _operation: BackendCompilerIntrinsic) -> bool {
+        false
+    }
+
+    /// A positive target implementation of a complete authenticated getter declaration. This
+    /// never authorizes an ordinary class body or displaces a retained dependency export.
+    fn realizes_dependency_getter(&self, _signature: DependencyGetterSignature<'_>) -> bool {
+        false
+    }
+
+    /// Whether the target, not the library's serialized class body, owns the representation of a
+    /// dependency classifier. A member of such a classifier is realized by the target at its
+    /// dispatch receiver, as a source call of it is; its KLIB body reads a class layout the target
+    /// object does not have and is never lowered.
+    fn represents_dependency_classifier(&self, _classifier: DependencyClassifier) -> bool {
         false
     }
 

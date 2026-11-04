@@ -385,24 +385,16 @@ pub(in crate::resolve) fn source_type_universe(
                 // all see the same Kotlin source spelling. Keep `name` unchanged below as the binding
                 // key because later consumers query `class_names` with the original AST spelling.
                 let source_name = name.replace('/', ".");
+                // Imports share syntax but not namespaces: an explicit import of a callable named
+                // `Metadata` leaves the default-imported classifier `kotlin.Metadata` visible in a
+                // type position (kotlinc 2.4.21). Only an import that names a classifier is a
+                // classifier root.
+                let explicit_classifier = imap
+                    .get(&source_name)
+                    .and_then(|path| Some((path, classifier_path(path, &source, None).ok()?)));
                 let (full, unresolved, classifier_segment) =
-                    if let Some(path) = imap.get(&source_name) {
-                        // An explicit import is the selected root. A missing segment is final: do not
-                        // reopen same-package, star-import, or absolute-package interpretations.
-                        match classifier_path(path, &source, None) {
-                            Ok(classifier) => (Some(classifier), None, Some(0)),
-                            Err(_) => (
-                                None,
-                                Some(
-                                    source_name
-                                        .split('.')
-                                        .next()
-                                        .unwrap_or(&source_name)
-                                        .to_string(),
-                                ),
-                                None,
-                            ),
-                        }
+                    if let Some((_, classifier)) = explicit_classifier {
+                        (Some(classifier), None, Some(0))
                     } else if source_name.contains('.') {
                         let root = source_name.split('.').next().unwrap_or_default();
                         match classifier_from_imports(root, &imap, &levels, &source) {
@@ -463,7 +455,7 @@ pub(in crate::resolve) fn source_type_universe(
                 // fully-qualified spelling names the alias directly, and star/default levels are
                 // consulted in precedence order rather than flattened. Whether the template APPLIES
                 // is decided at the use site, against the classifier that actually resolved.
-                let expansion = if let Some(path) = imap.get(&source_name) {
+                let expansion = if let Some((path, _)) = explicit_classifier {
                     Ok(Some(crate::types::type_name(path))
                         .and_then(|identity| libraries.type_alias_expansion(identity)))
                 } else if source_name.contains('.') {

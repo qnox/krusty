@@ -17,6 +17,7 @@ mod annotations;
 mod backing_field;
 mod declarations;
 mod library;
+mod overridees;
 mod platform_names;
 mod type_model;
 
@@ -71,7 +72,9 @@ pub fn ksp_round(
         };
         files.push(source.file()?);
     }
-    all_members::order(&mut files, ledger, analysis);
+    let ledger = ledger.into_classes();
+    all_members::order(&mut files, &ledger, analysis);
+    overridees::assign(&mut files, &ledger, analysis);
     Ok(KspRound { files })
 }
 
@@ -911,6 +914,24 @@ mod tests {
                 ("entries.Choice.First", false),
                 ("entries.Choice.Second", false),
                 ("entries.Choice.Third", true),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_inline_member_leaves_its_classifiers_members_resolved() {
+        let round = round(&[(
+            "/src/Members.kt",
+            "package members\n\nclass Holder {\n    inline fun twice(x: Int): Int = x * 2\n    fun named(label: String): String = label\n}\n",
+        )])
+        .expect("every declaration is readable");
+        assert_eq!(
+            dumped(&round),
+            [
+                "CLASS members.Holder modifiers= typeParameters= supertypes=kotlin.Any",
+                "  fun twice kind=MEMBER abstract=false modifiers=INLINE typeParameters= receiver=null (x: kotlin.Int vararg=false default=false): kotlin.Int",
+                "  fun named kind=MEMBER abstract=false modifiers= typeParameters= receiver=null (label: kotlin.String vararg=false default=false): kotlin.String",
+                "  fun <init> kind=MEMBER abstract=false modifiers=FINAL,PUBLIC typeParameters= receiver=null (): members.Holder",
             ]
         );
     }
