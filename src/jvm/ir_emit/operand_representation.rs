@@ -109,7 +109,7 @@ impl Emitter<'_> {
         let checked = self.asserted_value(arg);
         self.ir.declaration_result_coercions.contains(&coercion)
             || (matches!(self.ir.expr(checked), IrExpr::Call { .. })
-                && self.ir.physical_types.contains_key(&checked))
+                && self.ir.physical_type(checked).is_some())
     }
 
     /// The value beneath every null assertion over `expression`: the slot those checks read.
@@ -143,10 +143,9 @@ impl Emitter<'_> {
         }
         let recorded = self
             .ir
-            .physical_types
-            .get(&producer)
-            .or_else(|| self.ir.physical_types.get(&checked));
-        if recorded.map(ir_ty_to_jvm) != Some(ir_ty_to_jvm(&slot)) {
+            .physical_type(producer)
+            .or_else(|| self.ir.physical_type(checked));
+        if recorded.map(|ty| ir_ty_to_jvm(&ty)) != Some(ir_ty_to_jvm(&slot)) {
             return false;
         }
         let Some(call) =
@@ -287,9 +286,7 @@ impl Emitter<'_> {
                 // annotation's stored `Class` read as `KClass`) is a representation, not a bound.
                 let slot = self
                     .ir
-                    .physical_types
-                    .get(arg)
-                    .copied()
+                    .physical_type(*arg)
                     .unwrap_or_else(|| self.value_ty(*arg));
                 if !jvm_is_erased_top(ir_ty_to_jvm(&slot))
                     && !inline_producer
@@ -359,7 +356,7 @@ impl Emitter<'_> {
         if self.transformed_result(*arg).is_some() {
             return None;
         }
-        let slot = *self.ir.physical_types.get(arg)?;
+        let slot = self.ir.physical_type(*arg)?;
         (jvm_is_erased_top(ir_ty_to_jvm(&slot)) && ir_ty_to_jvm(type_operand).is_jvm_scalar())
             .then_some((*arg, slot))
     }
@@ -642,12 +639,7 @@ impl Emitter<'_> {
         physical: Ty,
         code: &mut CodeBuilder,
     ) {
-        let semantic = self
-            .ir
-            .logical_types
-            .get(&expression)
-            .copied()
-            .unwrap_or(source);
+        let semantic = self.ir.logical_type(expression).unwrap_or(source);
         self.adapt_physical_operand(source, semantic, None, physical, code);
     }
 
@@ -666,12 +658,7 @@ impl Emitter<'_> {
         {
             return;
         }
-        let semantic = self
-            .ir
-            .logical_types
-            .get(&expression)
-            .copied()
-            .unwrap_or(source);
+        let semantic = self.ir.logical_type(expression).unwrap_or(source);
         let destination_semantic = self
             .ir
             .call_declared_params
@@ -690,12 +677,7 @@ impl Emitter<'_> {
         physical: Ty,
         code: &mut CodeBuilder,
     ) {
-        let semantic = self
-            .ir
-            .logical_types
-            .get(&expression)
-            .copied()
-            .unwrap_or(source);
+        let semantic = self.ir.logical_type(expression).unwrap_or(source);
         let destination_semantic = self
             .ir
             .construction_declared_params

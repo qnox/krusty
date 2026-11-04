@@ -88,7 +88,7 @@ fn plugin_host_tests_run_under_their_compiler_owner() {
             .find(|line| line
                 .trim_start()
                 .starts_with("printf 'compiler_e2e_binary=")),
-        Some("  printf 'compiler_e2e_binary=%s\\n' \"$e2e_bin\" >> \"$GITHUB_OUTPUT\"")
+        Some("  printf 'compiler_e2e_binary=%s\\n' \"$e2e_bin\" >> \"$coverage_github_output\"")
     );
     let step = ci
         .split("      - name: compiler plugin integration tests\n")
