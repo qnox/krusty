@@ -240,11 +240,11 @@ impl Checker<'_> {
         if formals.is_empty() {
             return ty;
         }
-        let mut binds: crate::fx_hash::HashMap<String, Ty> = crate::fx_hash::HashMap::default();
+        let mut binds: crate::types::TyParamBindings = crate::fx_hash::HashMap::default();
         if let Some(targs) = self.selected_call_type_arguments(call) {
             for (name, t) in formals.iter().zip(targs.iter()) {
                 if let Some(t) = t {
-                    binds.insert(name.clone(), *t);
+                    binds.insert(crate::types::TyParamName::new(name), *t);
                 }
             }
         }
@@ -260,13 +260,15 @@ impl Checker<'_> {
                 {
                     for (d, a) in declared_args.iter().zip(actual_args.iter()) {
                         if let Some(name) = d.ty_param_name() {
-                            binds.entry(name.to_string()).or_insert(*a);
+                            binds
+                                .entry(crate::types::TyParamName::new(name))
+                                .or_insert(*a);
                         }
                     }
                 } else if formals.len() == actual_args.len() {
                     // No declared receiver shape: pair the formals positionally (exact count).
                     for (name, t) in formals.iter().zip(actual_args.iter()) {
-                        binds.insert(name.clone(), *t);
+                        binds.insert(crate::types::TyParamName::new(name), *t);
                     }
                 }
             }

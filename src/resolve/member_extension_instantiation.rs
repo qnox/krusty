@@ -67,17 +67,17 @@ pub(super) fn instantiate_member_extension_with(
     let mut bindings = shape.class_bindings.clone();
     let mut lower_inputs = HashMap::default();
     for (_, parameter) in &method_type_params {
-        bindings.remove(*parameter);
+        bindings.remove((*parameter).as_str());
     }
     if let Some(inference_bindings) = inference_bindings {
         for (_, parameter) in &method_type_params {
-            if let Some(actual) = inference_bindings.get(*parameter) {
-                bindings.insert((*parameter).clone(), *actual);
+            if let Some(actual) = inference_bindings.get((*parameter).as_str()) {
+                bindings.insert(crate::types::TyParamName::new(parameter), *actual);
             }
         }
     }
     for ((_, parameter), argument) in method_type_params.iter().zip(explicit_type_args) {
-        bindings.insert((*parameter).clone(), *argument);
+        bindings.insert(crate::types::TyParamName::new(parameter), *argument);
     }
     // Both receiver and parameter inference consume the provider-normalized semantic signature.
     // The same `Ty::TyParam` unifier therefore handles source syntax and decoded metadata; neither
@@ -107,8 +107,8 @@ pub(super) fn instantiate_member_extension_with(
         .iter()
         .map(|(_, formal)| *formal)
         .filter(|formal| {
-            !bound_before_receiver.contains_key(*formal)
-                && bindings.contains_key(*formal)
+            !bound_before_receiver.contains_key((*formal).as_str())
+                && bindings.contains_key((*formal).as_str())
                 && crate::symbol_resolver::formal_variance_in_type(
                     source,
                     declared_receiver,
@@ -213,15 +213,16 @@ pub(super) fn instantiate_member_extension_with(
             {
                 continue;
             }
-            if let (Some(&receiver), Some(&argument)) =
-                (bindings.get(*formal), evidence.get(*formal))
-            {
+            if let (Some(&receiver), Some(&argument)) = (
+                bindings.get((*formal).as_str()),
+                evidence.get((*formal).as_str()),
+            ) {
                 let joined = crate::symbol_resolver::merge_inferred_ty_from_symbols(
                     Some(symbols),
                     receiver,
                     argument,
                 );
-                bindings.insert((*formal).clone(), joined);
+                bindings.insert(crate::types::TyParamName::new(formal), joined);
             }
         }
         unify_member_extension_slot(declared, actual, deferred_type_variables, &mut bindings);
@@ -263,7 +264,7 @@ pub(super) fn instantiate_member_extension_with(
         // result asks for, provided each lower bound is its subtype. The receiver, explicit and
         // contextual bindings and every nested occurrence (`MutableList<T>`) stay equalities.
         let lower_bounded_only = |formal: &String| {
-            !bound_before_receiver.contains_key(formal)
+            !bound_before_receiver.contains_key(formal.as_str())
                 && !crate::types::ty_mentions_param(declared_receiver, std::slice::from_ref(formal))
                 && lower_inputs
                     .get(formal)
@@ -279,7 +280,7 @@ pub(super) fn instantiate_member_extension_with(
                 })
         };
         let mut from_expected = bindings.clone();
-        from_expected.retain(|formal, _| !lower_bounded_only(formal));
+        from_expected.retain(|formal, _| !lower_bounded_only(&formal.to_string()));
         unify_member_extension_slot(
             declared_ret,
             expected,
@@ -297,7 +298,7 @@ pub(super) fn instantiate_member_extension_with(
                     .zip(&generic.formal_bounds)
                     .any(|(other, bounds)| {
                         other != formal
-                            && bindings.contains_key(other)
+                            && bindings.contains_key(other.as_str())
                             && bounds.iter().any(|bound| {
                                 crate::types::ty_mentions_param(
                                     *bound,
@@ -312,16 +313,17 @@ pub(super) fn instantiate_member_extension_with(
         let mut completed = bindings.clone();
         let mut refined = false;
         for (formal, solution) in from_expected {
-            let own_formal = generic.is_some_and(|generic| generic.formals.contains(&formal));
-            if !own_formal || determined_by_bound(&formal) {
+            let name = formal.to_string();
+            let own_formal = generic.is_some_and(|generic| generic.formals.contains(&name));
+            if !own_formal || determined_by_bound(&name) {
                 continue;
             }
             let admitted = match completed.get(&formal) {
                 None => true,
                 Some(&current) => {
                     current != solution
-                        && lower_bounded_only(&formal)
-                        && lower_inputs[&formal].iter().all(|lower| {
+                        && lower_bounded_only(&name)
+                        && lower_inputs[&name].iter().all(|lower| {
                             crate::symbol_resolver::resolution_subtype(source, *lower, solution)
                         })
                 }
@@ -356,7 +358,7 @@ pub(super) fn instantiate_member_extension_with(
     // call's postponed-lambda analysis instead of being fixed to its bound ahead of that lambda.
     let open_formals = method_type_params
         .iter()
-        .filter(|(_, formal)| !bindings.contains_key(*formal))
+        .filter(|(_, formal)| !bindings.contains_key((*formal).as_str()))
         .map(|(_, formal)| (*formal).clone())
         .collect::<Vec<_>>();
     let visible_params_under = |bindings: &crate::symbol_resolver::GSigBinds| {
@@ -387,7 +389,9 @@ pub(super) fn instantiate_member_extension_with(
             .copied()
             .map(|bound| crate::symbol_resolver::unsolved_formal_bound(bound, parameter, &bindings))
             .unwrap_or_else(|| Ty::obj("kotlin/Any"));
-        bindings.entry(parameter.clone()).or_insert(fallback);
+        bindings
+            .entry(crate::types::TyParamName::new(parameter))
+            .or_insert(fallback);
     }
     let (logical_params, visible_params) = visible_params_under(&bindings)?;
     let mut applicability_params = visible_params.clone();
