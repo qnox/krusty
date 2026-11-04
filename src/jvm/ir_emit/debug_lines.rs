@@ -140,7 +140,15 @@ impl Emitter<'_> {
         {
             return None;
         }
-        let line = self.ir.source_line(expression).filter(|&line| line != 0)?;
+        // kotlinc's `visitCall` marks an inline call where its source starts
+        // (`markLineNumber(startOffset = true)`), so a call chained onto a receiver on an earlier
+        // line opens on the receiver's line; the inlined body's opening `nop` marks the call's own.
+        let line = if crate::jvm::line_numbers::realizes_inlined_call(self.ir, expression) {
+            self.ir.start_line(expression)
+        } else {
+            self.ir.source_line(expression)
+        };
+        let line = line.filter(|&line| line != 0)?;
         self.note_inlined_expression(expression, code);
         Some(self.mapped_expression_line(expression, line))
     }

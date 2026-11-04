@@ -213,8 +213,7 @@ fn opens_inline_frame(ir: &IrFile, expression: ExprId) -> bool {
 
 /// Whether `expression`'s checked result is an unsigned integer.
 fn has_unsigned_result(ir: &IrFile, expression: ExprId) -> bool {
-    ir.logical_types
-        .get(&expression)
+    ir.logical_type(expression)
         .is_some_and(|ty| ty.canonical_semantic().non_null().is_unsigned())
 }
 

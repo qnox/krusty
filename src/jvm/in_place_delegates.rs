@@ -584,7 +584,7 @@ fn add_delegate_method(ir: &mut IrFile, method: DelegateMethod) -> u32 {
     if ir.source_line(method.delegate).is_some() {
         ir.copy_position(method.delegate, value);
     }
-    ir.logical_types.insert(value, method.storage_ty);
+    ir.set_logical_type(value, method.storage_ty);
     let value = if method.storage_ty.is_jvm_scalar() {
         ir.add_expr(IrExpr::TypeOp {
             op: IrTypeOp::ImplicitCoercion,

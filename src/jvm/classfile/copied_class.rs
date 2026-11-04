@@ -4,9 +4,8 @@
 
 use std::rc::Rc;
 
-use super::constant_pool_queries::PoolLookup;
 use super::inner_classes::InnerClassTable;
-use super::method_rewrite::{BodyStage, MethodIdentity};
+use super::method_rewrite::BodyStage;
 use super::pool_layout::Unnamed;
 use super::{u2, ClassWriter, FieldInfo, MethodInfo};
 use crate::jvm::bytecode_passes::descriptors;
@@ -168,7 +167,9 @@ impl ClassWriter {
         };
         // kotlinc's optimizing method visitor buffers the body and optimizes it before any of its
         // constants reach the class's pool, so a constant only the original body used is not
-        // interned at all.
+        // interned at all. It optimizes the body once: the passes are not idempotent, and a second
+        // run folds what the first left (an inline-only callee's stored receiver, whose `nop` the
+        // first run's cleanup removed after its store/load analysis).
         let node = &self.optimized_before_writing(method, node, stage);
         let assembled = node.assemble(self).map_err(CopyError::Assemble)?;
         info.lvt = assembled
@@ -191,23 +192,6 @@ impl ClassWriter {
         info.lnt = assembled.line_numbers;
         self.methods.push(info);
         let index = self.methods.len() - 1;
-        let identity = MethodIdentity {
-            access: method.access,
-            name: &method.name,
-            desc: &method.desc,
-        };
-        let mut pool = PoolLookup::new(&self.cp, &self.bootstrap_methods);
-        let optimized = self.optimized(
-            &self.methods[index],
-            identity,
-            node.clone(),
-            None,
-            stage,
-            &mut pool,
-        );
-        if let Some(optimized) = optimized {
-            self.methods[index].take_rewritten(optimized);
-        }
         self.intern_copied_frame_classes(index, &method.name, &method.desc);
         Ok(())
     }

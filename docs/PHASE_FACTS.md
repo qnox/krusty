@@ -82,6 +82,13 @@ when that is none, code an external inline body expands to keeps only the lines 
 gave it, and a node a body builds outside any expression has none. Settling is a lowering-time
 mark on the position column, not a fact a later phase reads.
 
+Step 2 follows the same shape: `logical_types` and `physical_types` become one `IrNodeTypes` per
+node (`src/ir/node_types.rs`). Views that borrow the types beside other parts of the file (the JVM
+value-class representation context) borrow the node type column, and passes that rewrite every
+type (classifier renaming, specialization) go through `IrFile::rewrite_types` and the per-node
+accessors. `deferred_local_types` stays a sparse table: it holds a declaration's type before
+specialization, which only deferred locals have.
+
 Positions come first although types were patched more often, because positions are what the JVM
 line-number work is waiting on: once every node has offsets, kotlinc's line-marking rule is ported
 once instead of per construct. Each step also deletes its tables from the other hand-written copy

@@ -821,7 +821,7 @@ fn at_property_line(ir: &mut IrFile, first_generated: usize, call: ExprId, line:
 /// type the delegate is stored at.
 fn delegate_storage_read(ir: &mut IrFile, read: IrExpr, storage: Ty) -> ExprId {
     let read = ir.add_expr(read);
-    ir.logical_types.insert(read, storage);
+    ir.set_logical_type(read, storage);
     read
 }
 
@@ -1258,7 +1258,7 @@ fn materialize_delegated_result(
         return expression;
     }
     ir.call_declared_ret.insert(expression, declared);
-    ir.physical_types.insert(expression, declared.erased_recv());
+    ir.set_physical_type(expression, declared.erased_recv());
     ir.add_expr(IrExpr::TypeOp {
         op: crate::ir::IrTypeOp::ImplicitCoercion,
         arg: expression,
@@ -1321,8 +1321,8 @@ mod tests {
         };
         assert!(matches!(ir.expr(*call), IrExpr::MethodCall { .. }));
         assert_eq!(
-            ir.physical_types.get(call),
-            Some(&Ty::obj("kotlin/Any")),
+            ir.physical_type(*call),
+            Some(Ty::obj("kotlin/Any")),
             "the declaration returns its erased T slot before the selected Int result"
         );
     }

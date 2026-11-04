@@ -371,12 +371,7 @@ impl Emitter<'_> {
                     self.emit_consumed_operand(initializer, code)
                 }
             };
-        let semantic = self
-            .ir
-            .logical_types
-            .get(&initializer)
-            .copied()
-            .unwrap_or(source);
+        let semantic = self.ir.logical_type(initializer).unwrap_or(source);
         // kotlinc's `visitVariable`: once the value is on the stack it marks the initializer's
         // start, narrows the value to the slot (`checkcast` of an erased result), and marks the
         // declaration before the store. A same-module inline call's operand is stored into its

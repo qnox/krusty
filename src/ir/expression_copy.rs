@@ -57,7 +57,7 @@ pub(super) fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: Exp
         value_names,
         debug_local_provenance,
         inline_expansions,
-        logical_types,
+        types,
         deferred_local_types,
         whens,
         binding_read_stability,
@@ -73,7 +73,6 @@ pub(super) fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: Exp
         written_casts,
         elvis_safe_call_guards,
         jvm_value_class_null_guards,
-        physical_types,
         jvm_erased_primitive_wrapper_values,
         compiled_inline_calls,
         module_inline_calls,
@@ -351,7 +350,7 @@ pub(super) fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: Exp
         lambda_sam_jvm_signature: _,
     } = ir;
 
-    let inherited: [&mut dyn InheritedFacts; 78] = [
+    let inherited: [&mut dyn InheritedFacts; 77] = [
         module_constructions,
         callable_reference_provenance,
         callable_reference_enclosures,
@@ -368,7 +367,7 @@ pub(super) fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: Exp
         value_names,
         debug_local_provenance,
         inline_expansions,
-        logical_types,
+        types,
         deferred_local_types,
         whens,
         binding_read_stability,
@@ -384,7 +383,6 @@ pub(super) fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: Exp
         written_casts,
         elvis_safe_call_guards,
         jvm_value_class_null_guards,
-        physical_types,
         jvm_erased_primitive_wrapper_values,
         compiled_inline_calls,
         module_inline_calls,
