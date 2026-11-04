@@ -1856,6 +1856,11 @@ impl BodyLowering<'_> {
                         nullable: false,
                         kotlin_interface: conversion.kotlin_interface,
                         parameter_identities: conversion.parameter_identities.to_vec(),
+                        type_parameters: conversion
+                            .type_parameters
+                            .iter()
+                            .map(crate::ir::IrSamTypeParameter::lowered)
+                            .collect(),
                     };
                     self.ir.lambda_sam_signature.insert(
                         *impl_fn,

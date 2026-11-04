@@ -648,9 +648,9 @@ impl Emitter<'_> {
             return None;
         }
         let parameters = self.call_parameters(
+            call,
             &supplies,
             &physical,
-            args,
             &lambda_bindings,
             captured,
             &lambdas,
@@ -778,9 +778,9 @@ impl Emitter<'_> {
             }
         }
         let parameters = self.call_parameters(
+            call,
             &supplies,
             &physical,
-            args,
             &lambda_bindings,
             captured,
             &lambdas,
@@ -804,16 +804,24 @@ impl Emitter<'_> {
     }
 
     /// Each parameter's binding: a lambda the callee invokes, a caller local, or a temporary. A
-    /// default bridge call's masks and method handle are none of the body's parameters.
+    /// default bridge call's masks and method handle are none of the body's parameters. A function
+    /// value the call passes for an inline suspend parameter is recorded as such (kotlinc's
+    /// `NonInlineArgumentForInlineSuspendParameter.OTHER`).
     fn call_parameters(
         &self,
+        call: &ClasspathInlineCall<'_, '_>,
         supplies: &[Supply],
         physical: &[Ty],
-        args: &[u32],
         lambda_bindings: &HashMap<usize, usize>,
         captured: Vec<Parameter>,
         lambdas: &[inliner::Lambda],
     ) -> Parameters {
+        let ClasspathInlineCall {
+            call_expression,
+            args,
+            leading_non_argument_operands,
+            ..
+        } = *call;
         let capture_owners = (0..captured.len())
             .map(|capture| {
                 lambdas
@@ -822,31 +830,43 @@ impl Emitter<'_> {
                     .expect("every captured value belongs to a lambda")
             })
             .collect();
+        let mut parameters = Vec::with_capacity(args.len());
+        let mut non_inline_suspend = Vec::new();
+        for (index, ((supply, &ty), &argument)) in
+            supplies.iter().zip(physical).zip(args).enumerate()
+        {
+            let binding = match (lambda_bindings.get(&index), supply) {
+                (_, Supply::MaskOperand) => continue,
+                (Some(&lambda), Supply::Omitted) => Binding::DefaultLambda(lambda),
+                (Some(&lambda), _) => Binding::Lambda(lambda),
+                (None, Supply::CallerLocal) => self.caller_local_binding(argument, ty),
+                (None, Supply::Unread) => Binding::Unread,
+                (None, Supply::Stored | Supply::InPlace | Supply::Omitted) => Binding::Temporary,
+            };
+            let suspend_value = !matches!(binding, Binding::Lambda(_) | Binding::DefaultLambda(_))
+                && index
+                    .checked_sub(leading_non_argument_operands)
+                    .and_then(|parameter| {
+                        crate::jvm::inline_parameters::is_inline_suspend_parameter(
+                            self.ir,
+                            call_expression,
+                            parameter,
+                        )
+                    })
+                    == Some(true);
+            if suspend_value {
+                non_inline_suspend.push(parameters.len());
+            }
+            parameters.push(Parameter {
+                category: Category::of_descriptor(&type_descriptor(ty)),
+                binding,
+            });
+        }
         Parameters {
-            parameters: supplies
-                .iter()
-                .zip(physical)
-                .zip(args)
-                .enumerate()
-                .filter(|(_, ((supply, _), _))| **supply != Supply::MaskOperand)
-                .map(|(index, ((supply, &ty), &argument))| Parameter {
-                    category: Category::of_descriptor(&type_descriptor(ty)),
-                    binding: match (lambda_bindings.get(&index), supply) {
-                        (Some(&lambda), Supply::Omitted) => Binding::DefaultLambda(lambda),
-                        (Some(&lambda), _) => Binding::Lambda(lambda),
-                        (None, Supply::CallerLocal) => self.caller_local_binding(argument, ty),
-                        (None, Supply::Unread) => Binding::Unread,
-                        (None, Supply::Stored | Supply::InPlace | Supply::Omitted) => {
-                            Binding::Temporary
-                        }
-                        (None, Supply::MaskOperand) => {
-                            unreachable!("a mask operand is filtered out above")
-                        }
-                    },
-                })
-                .collect(),
+            parameters,
             captured,
             capture_owners,
+            non_inline_suspend,
         }
     }
 

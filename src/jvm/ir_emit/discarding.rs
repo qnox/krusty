@@ -37,6 +37,7 @@ impl Emitter<'_> {
         {
             self.mark_expression_start(expression, code);
         }
+        self.mark_suspend_call_line(expression, code);
         if self.emit_discarded_safe_call(expression, node, code) {
             return;
         }

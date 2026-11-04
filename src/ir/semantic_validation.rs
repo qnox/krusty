@@ -889,6 +889,7 @@ mod tests {
             nullable: true,
             kotlin_interface: false,
             parameter_identities: Vec::new(),
+            type_parameters: Vec::new(),
         }
     }
 
