@@ -69,14 +69,15 @@ jobs:
           tool: just
       - name: lint
         run: just lint
-      # The ignored tests start real compiler-plugin and KSP hosts from their pinned toolchains
+      # The remaining host tests start real compiler-plugin hosts from their pinned toolchains
       # on the runner's JDK. The toolchains and compiled adapters stay in krusty's cache.
-      - name: cache plugin host runtime
+      - &plugin-host-runtime-cache
+        name: cache plugin host runtime
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/krusty/plugin-host
           key: plugin-host-${{ hashFiles('crates/krusty-plugin-host/src/pins/*.tsv', 'crates/krusty-plugin-host/adapter/*', 'crates/krusty-plugin-host/ksp-adapter/**') }}
-      # Outside the default members and the coverage packages, so no other job runs its tests.
+      # Compiler-independent host tests stay outside the root compiler test target.
       - name: plugin host tests
         run: cargo test --profile gate -p krusty-plugin-host -- --include-ignored
 
@@ -202,6 +203,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y qemu-user lld libc6-dev-arm64-cross libc6-dev-riscv64-cross
       - name: coverage gate
+        id: coverage
         env:
           # The e2e suite is one process. An instrumented run is about seventeen minutes; thirty
           # minutes leaves room for a slow runner and still fails a hung binary.
@@ -233,6 +235,28 @@ jobs:
         with:
           path: target/cache/kotlin-toolchain-oracle
           key: kotlin-toolchain-oracle-${{ github.sha }}
+      # Reuse coverage's exact compiler e2e executable for its ignored plugin/KSP controls.
+      # This pass runs after the coverage report and does not change its measured workload.
+      - *plugin-host-runtime-cache
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: compiler plugin integration tests
+        env:
+          E2E_BINARY: ${{ steps.coverage.outputs.compiler_e2e_binary }}
+          RUST_MIN_STACK: "134217728"
+          LLVM_PROFILE_FILE: ${{ runner.temp }}/plugin-host-compiler-%p-%m.profraw
+        run: |
+          set -euo pipefail
+          source scripts/test-gate-defaults.sh
+          source scripts/test-deadline.sh
+          test -n "$E2E_BINARY" && test -x "$E2E_BINARY"
+          ignored_tests="$("$E2E_BINARY" plugin_host_compiler_e2e:: --ignored --list --format=terse)"
+          printf '%s\n' "$ignored_tests"
+          grep -q ': test$' <<< "$ignored_tests"
+          echo "plugin host compiler tests: $E2E_BINARY plugin_host_compiler_e2e:: --include-ignored --test-threads=1 (timeout=${KRUSTY_E2E_TIMEOUT_SECONDS}s)"
+          run_with_deadline "$KRUSTY_E2E_TIMEOUT_SECONDS" "$E2E_BINARY" plugin_host_compiler_e2e:: --include-ignored --test-threads=1
       - name: select the current master release candidate
         if: github.event_name == 'push' && github.ref == 'refs/heads/master'
         id: release_candidate
@@ -496,8 +520,8 @@ jobs:
       # key also hashes the inventory owner, shared case planning, reference server/Javac driver and
       # content-identity implementation. A producer or layout change therefore starts a fresh cache
       # instead of replaying inventories built by code that a hit would otherwise never execute.
+      # Owned Native/Wasm cases require these same JVM oracle inventories.
       - name: restore kotlinc box references (${{ matrix.version }})
-        if: matrix.target == 'jvm'
         id: box-references
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
