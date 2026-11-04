@@ -1,3 +1,4 @@
+// TARGET_BACKEND: JVM_IR
 var seen = 0
 inline fun f(x: Int = 1): Int = x + 1
 private inline fun hidden(x: Int = 1): Int = x + 3
