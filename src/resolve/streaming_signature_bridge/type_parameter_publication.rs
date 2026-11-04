@@ -187,7 +187,7 @@ fn symbolic_from_resolved_bounds(
 pub(super) fn enclosing(
     index: &crate::fir::ResolvedModuleIndex,
     declaration: crate::fir::DeclarationId,
-) -> crate::fx_hash::HashMap<String, Ty> {
+) -> crate::types::TyParamBindings {
     let mut visible = crate::fx_hash::HashMap::default();
     let mut scope = declaration;
     while let Some(header) = index.declaration_header(scope) {
@@ -216,7 +216,7 @@ pub(super) fn enclosing(
                 |bound| bound.ty.get(),
             );
             visible
-                .entry(name.to_owned())
+                .entry(crate::types::TyParamName::from(name))
                 .or_insert_with(|| Ty::ty_param(semantic, bound));
         }
         scope = current;
