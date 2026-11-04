@@ -183,6 +183,8 @@ use primary_constructor_parameters::{
     primary_ctor_parameter_fields, primary_ctor_source_parameters,
 };
 use try_emission::ProtectedRegion;
+#[cfg(test)]
+mod arithmetic_result_tests;
 mod class_metadata;
 #[cfg(test)]
 mod metadata_name_tests;
@@ -5385,8 +5387,7 @@ impl<'a> Emitter<'a> {
     }
 
     fn emit_value_expression(&mut self, e: u32, code: &mut CodeBuilder) {
-        debug_lines::begin_expression(self.ir, e, code);
-        self.mark_value_expression_start(e, code);
+        self.mark_value_entry_lines(e, code);
         // Mark a machine-owned suspension at its post-splice location.
         let suspension = self.machine_before(e, code);
         self.open_transformed_suspension(e, code);
@@ -6181,7 +6182,7 @@ impl<'a> Emitter<'a> {
                 }
             }
             IrExpr::Equality { .. } => Ty::Boolean,
-            IrExpr::PrimitiveBinOp { op, lhs, .. } => match op {
+            IrExpr::PrimitiveBinOp { op, .. } => match op {
                 IrBinOp::Lt
                 | IrBinOp::Le
                 | IrBinOp::Gt
@@ -6192,20 +6193,19 @@ impl<'a> Emitter<'a> {
                 | IrBinOp::RefNe
                 | IrBinOp::And
                 | IrBinOp::Or => Ty::Boolean,
-                // Arithmetic leaves an unboxed primitive on the stack. Use the lhs carrier even when its
-                // value is boxed (`it + 100` from `Map.get`); otherwise safe-call/elvis boxing may skip
-                // `valueOf` and produce an `int`/`Integer` stackmap mismatch after spill removal.
-                _ => {
-                    let t = self.value_ty(*lhs);
-                    let physical = match boxed_prim_of(t).unwrap_or(t) {
-                        Ty::Byte | Ty::Short | Ty::Char => Ty::Int,
-                        other => other,
-                    };
-                    self.ir
-                        .logical_type(e)
-                        .map(|semantic| ir_ty_to_jvm(&semantic.non_null()))
-                        .unwrap_or(physical)
-                }
+                // Arithmetic leaves the unboxed primitive of the operator the checker selected,
+                // which its producer recorded. It is never re-derived from the operands.
+                _ => match self.ir.logical_type(e) {
+                    Some(result) => ir_ty_to_jvm(&result.non_null()),
+                    None => {
+                        self.run.set_emit_error(
+                            "an arithmetic operator has no recorded result type".to_string(),
+                        );
+                        // The class is refused already; a reference only keeps the rest of this
+                        // method's emission well-formed until the refusal discards it.
+                        Ty::obj_name(crate::types::wk::java_object())
+                    }
+                },
             },
             IrExpr::PrimitiveNeg { ty, .. } => ir_ty_to_jvm(ty),
             IrExpr::When { branches } => self.value_ty_of_when(branches),

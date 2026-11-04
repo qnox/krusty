@@ -927,14 +927,15 @@ mod tests {
         assert_ne!(functions[function as usize], Some(reserved));
         assert_eq!(registry.module_defaults.get(&provider), Some(&reserved));
         assert!(!registry.module_defaults.contains_key(&target));
-        let Some(IrExpr::Block {
-            value: Some(forward),
-            ..
-        }) = declaration.functions[entry as usize]
+        let Some(IrExpr::Block { stmts, value: None }) = declaration.functions[entry as usize]
             .body
             .map(|body| declaration.expr(body))
         else {
             panic!("the entry fills its frame and then calls its declaration");
+        };
+        let Some(IrExpr::Return(Some(forward))) = stmts.last().map(|&last| declaration.expr(last))
+        else {
+            panic!("the entry returns what its declaration answers");
         };
         assert!(matches!(
             declaration.expr(*forward),

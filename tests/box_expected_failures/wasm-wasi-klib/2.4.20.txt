@@ -795,7 +795,6 @@ closures/kt3523.kt
 closures/kt4106.kt
 closures/kt47840.kt
 closures/kt47894_inlineFunWithObjectWithNothing.kt
-closures/localClassLambdaClosure.kt
 closures/localFunInInit.kt
 closures/localFunctionInInitBlock.kt
 closures/subclosuresWithinInitializers.kt
@@ -1913,7 +1912,6 @@ delegatedProperty/valByMapDelegatedProperty.kt
 delegatedProperty/valInInnerClass.kt
 delegatedProperty/varInInnerClass.kt
 delegation/delegatedAnonymousObject_noParametersOnDelegate.kt
-delegation/delegatedAnonymousObject_someParametersOnDelegate.kt
 delegation/delegationDifferentModule.kt
 delegation/delegationDifferentModule2.kt
 delegation/delegationToIntersectionType.kt
@@ -3758,7 +3756,6 @@ localClasses/recaptureVarCapturedInLocalClass1.kt
 localClasses/recaptureVarCapturedInLocalClass2.kt
 localClasses/recaptureVarCapturedInLocalClass3.kt
 localClasses/subclassingExtensionReceiverClass.kt
-localClasses/withclosure.kt
 localEscapeAnalysis/arraysFieldWrite.kt
 lower/forLoopsLowering/arrays.kt
 lower/forLoopsLowering/lists.kt
@@ -3962,7 +3959,6 @@ nonLocalReturns/returnInsideTwoLambdas.kt
 nonLocalReturns/suspendConversion.kt
 nothingValue/nothingValueException.kt
 nothingValue/toStringOnNothing.kt
-nullCheckOptimization/kt22410.kt
 nullCheckOptimization/primitiveCheckWithSideEffect.kt
 nullCheckOptimization/trivialInstanceOf.kt
 object/constructor0.kt
