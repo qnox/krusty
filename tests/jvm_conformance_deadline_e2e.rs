@@ -66,7 +66,7 @@ fn the_plugin_host_lint_step_owns_the_required_ksp_integrations() {
         .unwrap();
     assert_eq!(
         step.trim(),
-        "run: cargo test -p krusty-plugin-host -- --include-ignored",
+        "run: cargo test --profile gate -p krusty-plugin-host -- --include-ignored",
         "real plugin host integrations must remain unconditional and include ignored tests"
     );
 }

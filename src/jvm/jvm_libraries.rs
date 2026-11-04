@@ -1842,7 +1842,7 @@ impl JvmLibraries {
             // Leaving `kotlin/CharSequence` joined is also why whatever `java.lang.CharSequence` declares
             // still reaches `String` one rung up — `charAt` on every JDK, plus `getChars` as of JDK 25,
             // which added it as a `default` method. That is the price of keeping `chars`/`codePoints`,
-            // and it makes the residual leak JDK-DEPENDENT. See docs/SPEC.md.
+            // and it makes the residual leak JDK-DEPENDENT.
             let is_mapped_builtin =
                 super::jvm_class_map::maps_to_distinct_jvm_internal(internal_name);
             let builtin_class_signature = self.cp.builtin_class_signature_name(internal_name);
@@ -3957,7 +3957,7 @@ impl JvmLibraries {
         // Language builtin classifiers exist independently of whether the target classpath contains
         // stdlib. Federate that classifier source with the platform record here; platform metadata wins
         // when present, while callables remain exclusively metadata/platform declarations.
-        let core = EmptySymbolSource.symbols(namespace, name);
+        let core = EmptySymbolSource::declarations(namespace, name);
         let (classifier_name, classifier_declaration, classifier, builtin_classifier) =
             if classifier.is_some() {
                 (

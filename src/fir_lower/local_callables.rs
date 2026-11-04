@@ -136,6 +136,7 @@ impl BodyLowering<'_> {
                 source: crate::fir::FirCaptureSource::Value(source),
             })?;
         let holder = self.ir.add_expr(IrExpr::GetValue(capture.slot));
+        self.record_crossinline_read(holder, capture.crossinline_parameter);
         if capture.shared_cell {
             Ok(self.ir.add_expr(IrExpr::RefGet {
                 elem: capture.ty.get(),
@@ -1066,8 +1067,17 @@ impl BodyLowering<'_> {
                 );
             }
         }
-        let parameter_identities =
-            local_function_parameter_identities(self.body, &self.capture_slots, body)?;
+        let crossinline = body
+            .captures()
+            .iter()
+            .map(|capture| self.captured_crossinline_parameter(capture))
+            .collect::<Result<Vec<_>, _>>()?;
+        let parameter_identities = local_function_parameter_identities(
+            self.body,
+            &self.capture_slots,
+            body,
+            &crossinline,
+        )?;
         let captured_receivers = body
             .implicit_receiver_captures()
             .iter()
@@ -1173,6 +1183,55 @@ impl BodyLowering<'_> {
         }
     }
 
+    /// The `crossinline` parameter `capture` holds, by its slot in the inline function that
+    /// declares it: this body's own, a local class's capture of one, or one an enclosing callable
+    /// captured.
+    fn captured_crossinline_parameter(
+        &self,
+        capture: &crate::fir::FirCapture,
+    ) -> Result<Option<u32>, FirLoweringFailure> {
+        match (capture.enclosing_depth.checked_sub(1), capture.source) {
+            (None, crate::fir::FirCaptureSource::Value(value)) => {
+                Ok(self.crossinline_parameter_slot(value))
+            }
+            (None, crate::fir::FirCaptureSource::ConstructorPrefix { owner, field }) => {
+                self.class_capture_crossinline_parameter(owner, field)
+            }
+            (Some(depth), source) => self
+                .capture_slots
+                .get(&(depth, source))
+                .map(|slot| slot.crossinline_parameter)
+                .ok_or(FirLoweringFailure::MissingCapture {
+                    enclosing_depth: depth,
+                    source,
+                }),
+        }
+    }
+
+    /// The slot of `value` when it is a `crossinline` parameter of this body.
+    pub(super) fn crossinline_parameter_slot(
+        &self,
+        value: crate::fir::LocalValueId,
+    ) -> Option<u32> {
+        self.body
+            .is_crossinline_parameter(value)
+            .then(|| self.value_slot(value))
+    }
+
+    /// Record that `read` yields `parameter`, a `crossinline` parameter by its slot in the inline
+    /// function declaring it.
+    pub(super) fn record_crossinline_read(&mut self, read: ExprId, parameter: Option<u32>) {
+        if let Some(parameter) = parameter {
+            self.crossinline_reads.insert(read, parameter);
+        }
+    }
+
+    /// The `crossinline` parameter an argument expression of this body reads, as recorded where
+    /// the read was produced.
+    pub(super) fn crossinline_read(&self, argument: ExprId) -> Option<u32> {
+        self.crossinline_reads.get(&argument).copied()
+    }
+
     fn lower_nested_function(
         &mut self,
         body: &FirBody,
@@ -1213,18 +1272,19 @@ impl BodyLowering<'_> {
                         "a lifted callable publishes one captured-value identity per capture"
                     ),
                 };
-                (
+                Ok((
                     (capture.enclosing_depth, capture.source),
                     CaptureSlot {
                         slot: body.value_capture_position(slot),
                         ty: capture.ty,
                         shared_cell: capture.shared_cell,
                         stable: self.capture_source_is_stable(capture),
+                        crossinline_parameter: self.captured_crossinline_parameter(capture)?,
                         declared,
                     },
-                )
+                ))
             })
-            .collect::<HashMap<_, _>>();
+            .collect::<Result<HashMap<_, _>, FirLoweringFailure>>()?;
         let inline_parameter_values = self.inline_parameter_values.nested(body);
         if !inline_parameter_values.is_empty() {
             self.callables_reading_inline_parameters.insert(function);
@@ -1406,7 +1466,7 @@ fn inline_callable_body(
             stmts: roots.to_vec(),
             value,
         });
-        ir.logical_types.insert(block, Ty::Unit);
+        ir.set_logical_type(block, Ty::Unit);
         return block;
     }
     let mut statements = roots.to_vec();
@@ -1420,8 +1480,8 @@ fn inline_callable_body(
         stmts: statements,
         value: Some(value),
     });
-    if let Some(&ty) = ir.logical_types.get(&value) {
-        ir.logical_types.insert(block, ty);
+    if let Some(ty) = ir.logical_type(value) {
+        ir.set_logical_type(block, ty);
     }
     block
 }
@@ -1478,7 +1538,7 @@ fn reshape_cloned_unit_inline_block(ir: &mut crate::ir::IrFile, block: ExprId) {
         stmts,
         value: Some(unit),
     };
-    ir.logical_types.insert(block, Ty::Unit);
+    ir.set_logical_type(block, Ty::Unit);
 }
 
 /// Where a declaration parameter sits among the logical parameters.
@@ -1571,10 +1631,12 @@ fn captured_declaration(
     })
 }
 
+/// `crossinline` holds, for each of `body`'s captures, the `crossinline` parameter it holds.
 fn local_function_parameter_identities(
     enclosing: &FirBody,
     enclosing_slots: &HashMap<(u32, crate::fir::FirCaptureSource), CaptureSlot>,
     body: &FirBody,
+    crossinline: &[Option<u32>],
 ) -> Result<Vec<crate::ir::IrParameterIdentity>, FirLoweringFailure> {
     let capturer = match body.source_lambda().map(crate::fir::FirSourceLambda::form) {
         None => crate::ir::IrCapturingCallable::LocalFunction,
@@ -1595,6 +1657,7 @@ fn local_function_parameter_identities(
                 crate::ir::IrValueCapture {
                     declaration: declared.declaration,
                     capturer,
+                    crossinline_parameter: crossinline[ordinal],
                 },
             ))
         })
@@ -1684,10 +1747,18 @@ fn local_function_debug_line(body: &FirBody) -> Option<u32> {
     if statement_line != 0 {
         return Some(statement_line);
     }
-    let crate::fir::FirStatementKind::Expression(expression) = &body.statement(root)?.kind else {
+    let crate::fir::FirStatementKind::Expression(mut expression) = body.statement(root)?.kind
+    else {
         return None;
     };
-    let source_line = body.expression_debug_lines(*expression).source;
+    // The conversion of the body's result to the callable's result type stands where the value
+    // it converts is yielded; the callable opens on the line of the body it converts.
+    while let Some(crate::fir::FirExprKind::ImplicitConversion { value, .. }) =
+        body.expr(expression).map(|expression| &expression.kind)
+    {
+        expression = *value;
+    }
+    let source_line = body.expression_debug_lines(expression).source;
     (source_line != 0).then_some(source_line)
 }
 

@@ -907,16 +907,26 @@ fn ci_starts_jvm_without_waiting_for_focused_klib_binaries() {
     ]
     .concat();
     for needle in [
-        "      - name: restore kotlinc box references (${{ matrix.version }})\n        if: matrix.target == 'jvm'\n",
+        "      - name: restore kotlinc box references (${{ matrix.version }})\n",
         restore_reference_key.as_str(),
         "      - name: save kotlinc box references (${{ matrix.version }})\n        if: matrix.target == 'jvm' && github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.box-references.outputs.cache-hit != 'true'\n",
         save_reference_key.as_str(),
     ] {
         assert!(
             workflow.contains(needle),
-            "each JVM row replays its version's kotlinc box references, and only master saves them ({needle})"
+            "each target row replays its version's kotlinc box references, and only master JVM saves them ({needle})"
         );
     }
+    let restore_reference_step = workflow
+        .split_once("      - name: restore kotlinc box references (${{ matrix.version }})\n")
+        .and_then(|(_, step)| step.split("\n      - name:").next())
+        .expect("workflow has a box-reference restore step");
+    assert!(
+        !restore_reference_step
+            .lines()
+            .any(|line| line.trim_start().starts_with("if:")),
+        "every target must restore its version's JVM oracle inventories without a target condition"
+    );
     let box_step = &workflow[workflow
         .find("      - name: run box conformance ${{ matrix.version }}\n")
         .expect("workflow has a JVM box conformance step")

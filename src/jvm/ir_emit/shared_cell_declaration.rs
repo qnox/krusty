@@ -209,12 +209,14 @@ impl Emitter<'_> {
             .inline_declared_type(declaration)
             .map(|declared| ir_ty_to_jvm(&stored_value_ty(declared)))
             .unwrap_or(ty);
+        let descriptor = local_variable_desc(debug_ty);
+        self.cw.declare_local_type(&descriptor);
         let local = super::block_scope::OpenLocal {
             depth: self.block_depth,
             slot,
             start: code.bytes.len() as u16,
             name,
-            descriptor: local_variable_desc(debug_ty),
+            descriptor,
             inline_operand,
             inline_frame,
             opens_inline_frame: marker,
