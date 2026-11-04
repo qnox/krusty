@@ -559,6 +559,10 @@ impl SemanticPlatform for DependencyPlatform {
         self.platform.diagnostic_target_name()
     }
 
+    fn array_of_nullable_nothing_error(&self) -> Option<&'static str> {
+        self.platform.array_of_nullable_nothing_error()
+    }
+
     fn library_value_form(&self, ty: Ty) -> Ty {
         self.platform.library_value_form(ty)
     }

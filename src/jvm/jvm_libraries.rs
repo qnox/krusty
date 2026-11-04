@@ -3965,6 +3965,12 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
         Some("JVM")
     }
 
+    /// kotlinc's JVM `FirArrayOfNullableNothingExpressionChecker`: a JVM array needs a runtime
+    /// element class, and `Nothing?` has none.
+    fn array_of_nullable_nothing_error(&self) -> Option<&'static str> {
+        Some("'Array<Nothing?>' is not supported on the JVM.")
+    }
+
     fn install_source_module_headers(
         &self,
         sources: &[crate::libraries::PlatformSourceHeaderInput<'_>],
