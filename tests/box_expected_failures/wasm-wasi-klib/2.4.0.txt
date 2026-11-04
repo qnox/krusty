@@ -5092,6 +5092,7 @@ regressions/noCapturingForTypesWithTypeVariables.kt
 regressions/objectCaptureOuterConstructorProperty.kt
 regressions/objectInsideDelegation.kt
 regressions/recursiveDnnTypeInLambda.kt
+regressions/referenceArrayStoreEvaluatesValueBeforeBoundsCheck.kt
 regressions/resolvedCallForGetOperator.kt
 reified/arraysReification/jaggedArray.kt
 reified/arraysReification/jaggedDeep.kt
