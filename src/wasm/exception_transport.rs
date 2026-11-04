@@ -50,12 +50,6 @@ impl ExceptionTransport {
         }
     }
 
-    /// The nullable message is already evaluated into a local. Both supported constructors have
-    /// no cause; retain the null cause slot rather than inventing a different base layout later.
-    pub(super) fn construct(&self, code: &mut Code, message: Option<u32>, string: u32) {
-        self.construct_class(code, self.structure, message, string);
-    }
-
     pub(super) fn ensure_class(
         &mut self,
         module: &mut Module,
@@ -65,6 +59,8 @@ impl ExceptionTransport {
         self.classes.ensure(module, source, identity)
     }
 
+    /// The nullable message is already evaluated into a local. These constructors have no cause;
+    /// preserve the shared cause slot and allocate the authenticated selected subtype.
     pub(super) fn construct_class(
         &self,
         code: &mut Code,

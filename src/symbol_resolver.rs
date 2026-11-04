@@ -15,6 +15,7 @@ use crate::libraries::{
 use crate::symbol_source::{SymbolNamespace, SymbolSource};
 use crate::types::{Ty, TyKind, TyParamName, TypeName, Visibility};
 mod access_site;
+pub(crate) use access_site::MemberAccessSite;
 mod argument_compatibility;
 mod call_argument;
 mod callable_shapes;
@@ -33,11 +34,13 @@ mod extension_specialization;
 mod generic_inference;
 pub(crate) use generic_inference::reified_runtime_type;
 mod hierarchy_projection;
+mod indexed_convention_selection;
 mod lambda_call_shape;
 mod member_hierarchy;
 mod member_property_selection;
 mod member_specialization;
 mod overload_selection;
+mod postponed_lambda_selection;
 mod property_candidates;
 mod qualified_classifiers;
 mod raw_member_view;
@@ -49,12 +52,14 @@ mod resolved_symbol;
 mod sam;
 mod scope_level_callables;
 mod selected_call_instantiation;
+mod separately_mapped_selection;
 pub(crate) use selected_call_instantiation::{
     declaration_default_callable, selected_default_callable,
 };
 pub(crate) mod selected_constructor;
 pub(crate) use selected_constructor::SelectedConstructorDeclaration;
-pub(crate) use top_level_selection::{CandidateCall, TopLevelArguments, TopLevelSelection};
+pub(crate) use separately_mapped_selection::{CandidateCall, FamilyArguments};
+pub(crate) use top_level_selection::TopLevelSelection;
 mod source_view;
 mod statically_known_subtype;
 mod top_level_selection;
@@ -68,7 +73,9 @@ pub(crate) use call_argument::CallArgKind;
 pub(crate) use callable_shapes::{
     classifier_callable_signature, classifier_callable_signatures, declared_function_type,
 };
-pub(crate) use declaration_specificity::retain_most_specific_declarations;
+pub(crate) use declaration_specificity::{
+    declarations_equally_specific, retain_most_specific_declarations,
+};
 use extension_specialization::{
     bind_defaulted_ext_ret, bind_defaulted_ext_ret_slots, bind_ext_ret, bind_ext_ret_tracking,
     extension_bindings_are_determinate, specialized_extension_return,
@@ -90,12 +97,12 @@ pub(crate) use member_hierarchy::{
     bound_inner_classifier_in_source, bound_inner_constructor_candidates,
     declared_member_callables, declared_member_declarations, function_input_shapes_match,
     function_override_input_slots_match, function_result_refines, imported_object_member_symbols,
-    inherited_nested_classifier_name, lexical_enclosing_classifier_names,
-    member_declarations_in_hierarchy, member_is_inheritable, members_in_hierarchy,
-    normalize_inherited_member_functions, override_input_shapes_match,
-    override_parameter_types_match, property_declaration_identity, specialize_member_function,
-    supertype_preorder, BoundInnerConstructorContext, InheritedNestedClassifier,
-    InnerAliasOuterApplication, OverrideInputShape,
+    inherited_nested_classifier_name, inherits_nested_classifiers_through,
+    lexical_enclosing_classifier_names, member_declarations_in_hierarchy, member_is_inheritable,
+    members_in_hierarchy, nested_classifier_supertypes, normalize_inherited_member_functions,
+    override_input_shapes_match, override_parameter_types_match, property_declaration_identity,
+    specialize_member_function, supertype_preorder, BoundInnerConstructorContext,
+    InheritedNestedClassifier, InnerAliasOuterApplication, OverrideInputShape,
 };
 pub(crate) use member_specialization::{
     apply_property_bindings, compose_position as compose_type_position, instantiate_input_slot,
@@ -113,14 +120,16 @@ use member_specialization::{
 #[cfg(test)]
 use overload_selection::fun_return_compatible;
 pub(crate) use overload_selection::{
-    best_by_args, CandidateSelectionWithTies, ReceiverFunctionSelection, SelectedReceiverFunction,
+    best_by_args, extension_tower_rank, CandidateSelectionWithTies, ReceiverFunctionSelection,
+    SelectedReceiverFunction,
 };
 use overload_selection::{
     generic_bounds_admit, generic_bounds_admit_slots, indexed_call_shape, integer_literal_overload,
     integer_literal_overload_with_ties, logical_call_params, logical_value_params, select_overload,
     select_overload_tracking_with_functions, select_receiver_overload_from_functions_tracking,
     semantic_arg_assignable, unique_most_specific, unique_most_specific_with_conflicts,
-    unique_most_specific_with_conflicts_and_ties, ExtCtx, IndexedConvention, SelectionMode,
+    unique_most_specific_with_conflicts_and_ties, ExtCtx, IndexedConvention, OverloadCall,
+    SelectionMode,
 };
 use property_candidates::{
     generic_property_more_specific, source_property_visible, specialize_property,
@@ -706,21 +715,7 @@ fn ranked_extension_candidates<'a>(
     // matters to consumers that walk the list to shape postponed lambdas: a same-file `Any.map`
     // must shape its lambda before the more receiver-specific imported `Result<T>.map`, exactly as
     // final overload selection evaluates applicability one scope-tower rung at a time.
-    out.sort_by_key(|(rank, _, o)| {
-        let hides_members = o
-            .callable
-            .annotations
-            .contains(&crate::types::type_name("kotlin/internal/HidesMembers"));
-        (
-            !hides_members,
-            if hides_members {
-                (0, 0)
-            } else {
-                o.scope_rung.selection_key(o.scope_rank)
-            },
-            *rank,
-        )
-    });
+    out.sort_by_key(|(rank, _, o)| extension_tower_rank(*rank, o));
     out
 }
 
@@ -799,6 +794,10 @@ pub struct SymbolResolver<'a> {
     visibility_suppressed: bool,
     /// Type variables of the enclosing postponed calls; extension receivers match over them.
     type_variables: &'a [TyParamName],
+    /// `+EagerLambdaAnalysis` in the calling file: a lambda's checked result decides applicability.
+    eager_lambda_results: bool,
+    /// The access site's member visibility ([`MemberAccessSite`]), when the caller has a site.
+    member_access: Option<&'a dyn MemberAccessSite>,
 }
 
 /// Which accessor a property selection will execute. Provider-normalized candidate availability
@@ -979,12 +978,7 @@ impl<'a> SymbolResolver<'a> {
         match inherited_nested_classifier_name(
             name,
             vec![owner],
-            |candidate_owner| {
-                direct_supertypes(&self.src, Ty::obj_name(candidate_owner))
-                    .into_iter()
-                    .filter_map(Ty::kotlin_class_internal)
-                    .collect()
-            },
+            |candidate_owner| nested_classifier_supertypes(&self.src, candidate_owner),
             |candidate| self.classifier_accessible(candidate),
         ) {
             InheritedNestedClassifier::Found(classifier) => {
@@ -998,6 +992,16 @@ impl<'a> SymbolResolver<'a> {
     pub(crate) fn with_type_variables(mut self, type_variables: &'a [TyParamName]) -> Self {
         self.type_variables = type_variables;
         self
+    }
+
+    fn ext_ctx(&self) -> ExtCtx<'_> {
+        ExtCtx {
+            fn_scope: self.fn_scope,
+            source: &self.src,
+            type_variables: self.type_variables,
+            eager_lambda_results: self.eager_lambda_results,
+            member_access: self.member_access,
+        }
     }
 
     fn receiver_mro(&self, receiver: Ty) -> ReceiverMro {
@@ -1111,178 +1115,6 @@ impl<'a> SymbolResolver<'a> {
         ErrorReceiverSelection::Absent
     }
 
-    pub(crate) fn select_receiver_indexed_get_function_with_params(
-        &self,
-        receiver: Ty,
-        name: &str,
-        args: &[CallArgKind],
-        type_args: &[Ty],
-        callables: &Callables,
-    ) -> CandidateSelection<(FunctionInfo, Vec<Ty>, Ty, GSigBinds)> {
-        let selected = match select_receiver_overload_from_functions_tracking(
-            self.lib,
-            receiver,
-            name,
-            args,
-            type_args,
-            ExtCtx {
-                fn_scope: self.fn_scope,
-                source: &self.src,
-                type_variables: self.type_variables,
-            },
-            callables.functions(),
-            IndexedConvention::Get,
-        ) {
-            CandidateSelectionWithTies::Selected(selected) => selected,
-            CandidateSelectionWithTies::Ambiguous(_) => return CandidateSelection::Ambiguous,
-            CandidateSelectionWithTies::None => return CandidateSelection::None,
-        };
-        let binding_receiver = selected
-            .semantic_receiver()
-            .and_then(|declared| {
-                self.receiver_mro(receiver)
-                    .binding_receiver(&self.src, declared)
-            })
-            .unwrap_or(receiver);
-        if selected.call_sig.vararg_index.is_none() {
-            let params =
-                logical_call_params(&self.src, &selected, binding_receiver, args, type_args);
-            // The bindings are published with the call; the receiver binds `V` of `Map.get`.
-            let (resolved, bindings) = if selected.generic_sig.is_some() && selected.is_extension()
-            {
-                let arg_tys = args.iter().map(CallArgKind::ty).collect::<Vec<_>>();
-                let semantic = selected.semantic_signature();
-                let (ret, bindings) = bind_ext_ret_tracking(
-                    &self.src,
-                    &semantic,
-                    binding_receiver,
-                    &arg_tys,
-                    type_args,
-                );
-                (
-                    specialized_extension_return(self.lib, &selected, ret),
-                    bindings,
-                )
-            } else if selected.is_extension() {
-                (
-                    selected.ret.apply(selected.callable.ret),
-                    GSigBinds::default(),
-                )
-            } else {
-                let (member, bindings) = resolved_member_from_info_tracking(
-                    self.lib,
-                    &self.src,
-                    receiver,
-                    args,
-                    type_args,
-                    selected.clone(),
-                );
-                (member.ret, bindings)
-            };
-            return CandidateSelection::Selected((selected, params, resolved, bindings));
-        }
-        let Some((params, ret, bindings)) = indexed_call_shape(
-            self.lib,
-            &self.src,
-            &selected,
-            binding_receiver,
-            args,
-            type_args,
-            false,
-        ) else {
-            return CandidateSelection::None;
-        };
-        CandidateSelection::Selected((selected, params, ret, bindings))
-    }
-
-    /// Select the `set` convention used by indexed assignment. The assignment RHS binds the final
-    /// value parameter even when the preceding index parameter is a vararg; ordinary positional
-    /// calls deliberately do not permit that mapping.
-    pub(crate) fn select_receiver_indexed_set_function(
-        &self,
-        receiver: Ty,
-        name: &str,
-        args: &[CallArgKind],
-        type_args: &[Ty],
-        callables: &Callables,
-    ) -> CandidateSelection<FunctionInfo> {
-        select_receiver_overload_from_functions_tracking(
-            self.lib,
-            receiver,
-            name,
-            args,
-            type_args,
-            ExtCtx {
-                fn_scope: self.fn_scope,
-                source: &self.src,
-                type_variables: self.type_variables,
-            },
-            callables.functions(),
-            IndexedConvention::Set,
-        )
-        .collapse()
-    }
-
-    pub(crate) fn select_receiver_indexed_set_function_with_params(
-        &self,
-        receiver: Ty,
-        name: &str,
-        args: &[CallArgKind],
-        type_args: &[Ty],
-        callables: &Callables,
-    ) -> CandidateSelection<(FunctionInfo, Vec<Ty>, Ty)> {
-        let selected = match self
-            .select_receiver_indexed_set_function(receiver, name, args, type_args, callables)
-        {
-            CandidateSelection::Selected(selected) => selected,
-            CandidateSelection::Ambiguous => return CandidateSelection::Ambiguous,
-            CandidateSelection::None => return CandidateSelection::None,
-        };
-        let binding_receiver = selected
-            .semantic_receiver()
-            .and_then(|declared| {
-                self.receiver_mro(receiver)
-                    .binding_receiver(&self.src, declared)
-            })
-            .unwrap_or(receiver);
-        if selected.call_sig.vararg_index.is_none() {
-            let params =
-                logical_call_params(&self.src, &selected, binding_receiver, args, type_args);
-            let arg_tys = args.iter().map(CallArgKind::ty).collect::<Vec<_>>();
-            let inferred_ret = selected
-                .generic_sig
-                .as_ref()
-                .map_or(selected.callable.ret, |sig| {
-                    if selected.is_extension() {
-                        bind_ext_ret(&self.src, sig, binding_receiver, &arg_tys, type_args)
-                    } else {
-                        bind_member_return(
-                            &self.src,
-                            sig,
-                            binding_receiver,
-                            &arg_tys,
-                            type_args,
-                            selected.callable.ret,
-                        )
-                    }
-                });
-            let ret = selected.ret.apply(inferred_ret);
-            return CandidateSelection::Selected((selected, params, ret));
-        }
-        let Some((params, ret, _)) = indexed_call_shape(
-            self.lib,
-            &self.src,
-            &selected,
-            binding_receiver,
-            args,
-            type_args,
-            true,
-        ) else {
-            return CandidateSelection::None;
-        };
-        CandidateSelection::Selected((selected, params, ret))
-    }
-
     /// Select one receiver callable and return the value parameters specialized by the receiver and
     /// the already-known arguments. Syntax owners use this before checking postponed lambdas; overload
     /// selection remains here, while the checker remains responsible for typing expression bodies.
@@ -1295,7 +1127,12 @@ impl<'a> SymbolResolver<'a> {
         callables: &Callables,
     ) -> Option<(FunctionInfo, Vec<Ty>)> {
         match self.select_receiver_function_with_params_tracking(
-            receiver, name, args, type_args, callables, None,
+            receiver,
+            name,
+            FamilyArguments::Shared(args),
+            type_args,
+            callables,
+            None,
         ) {
             CandidateSelection::Selected((selected, params, _)) => Some((selected, params)),
             CandidateSelection::None | CandidateSelection::Ambiguous => None,
@@ -1329,34 +1166,6 @@ impl<'a> SymbolResolver<'a> {
                 (parameters.len() == args.len()).then_some(parameters)
             })
             .collect()
-    }
-
-    /// Tracking form used by synthesized language conventions. It preserves ambiguity and the exact
-    /// specialized return beside the selected declaration so the checker can commit one target and
-    /// lowering never has to repeat receiver or overload resolution.
-    pub(crate) fn select_receiver_function_with_params_tracking(
-        &self,
-        receiver: Ty,
-        name: &str,
-        args: &[CallArgKind],
-        type_args: &[Ty],
-        callables: &Callables,
-        expected_result: Option<Ty>,
-    ) -> CandidateSelection<(FunctionInfo, Vec<Ty>, Ty)> {
-        match self.select_receiver_function_with_applied_receiver_tracking(
-            receiver,
-            name,
-            args,
-            type_args,
-            callables,
-            expected_result,
-        ) {
-            ReceiverFunctionSelection::Selected(selected) => {
-                CandidateSelection::Selected((*selected.function, selected.params, selected.ret))
-            }
-            ReceiverFunctionSelection::None => CandidateSelection::None,
-            ReceiverFunctionSelection::Ambiguous(_) => CandidateSelection::Ambiguous,
-        }
     }
 
     /// Apply a convention constraint expressed on a selected supertype back to a raw concrete
@@ -1716,7 +1525,12 @@ impl<'a> SymbolResolver<'a> {
         );
         let CandidateSelection::Selected((selected, _, result)) = self
             .select_receiver_function_with_params_tracking(
-                receiver, name, args, type_args, &callables, None,
+                receiver,
+                name,
+                FamilyArguments::Shared(args),
+                type_args,
+                &callables,
+                None,
             )
         else {
             return None;
@@ -1824,7 +1638,7 @@ impl<'a> SymbolResolver<'a> {
         match self.select_top_level_candidates(
             name,
             candidates,
-            TopLevelArguments::Shared(args),
+            FamilyArguments::Shared(args),
             type_args,
             expected,
             include_invisible,
@@ -1868,20 +1682,18 @@ impl<'a> SymbolResolver<'a> {
                 let mut call_ambiguous = false;
                 let selected_call = select_overload_tracking_with_functions(
                     self.lib,
-                    ty,
-                    name,
-                    args,
-                    type_args,
-                    SelectionMode::Receiver,
-                    ExtCtx {
-                        fn_scope: self.fn_scope,
-                        source: &self.src,
-                        type_variables: self.type_variables,
+                    OverloadCall {
+                        recv: ty,
+                        name,
+                        args,
+                        type_args,
+                        indexed: IndexedConvention::Ordinary,
                     },
+                    SelectionMode::Receiver,
+                    self.ext_ctx(),
                     Some(callables.functions()),
                     &mut call_ambiguous,
                     None,
-                    IndexedConvention::Ordinary,
                 );
                 let call = selected_call
                     .as_ref()
@@ -2131,7 +1943,7 @@ impl<'a> SymbolResolver<'a> {
         match self.pick_top_level_with_visibility(
             name,
             fs,
-            TopLevelArguments::Shared(args),
+            FamilyArguments::Shared(args),
             type_args,
             expected,
             false,
@@ -3335,6 +3147,8 @@ fn select_instance_info(
             fn_scope: None,
             source,
             type_variables: &[],
+            eager_lambda_results: false,
+            member_access: None,
         },
     )
 }
@@ -5087,8 +4901,9 @@ mod tests {
 
         let int_transform = Ty::fun(vec![Ty::Int], Ty::Int);
         let string_transform = Ty::fun(vec![Ty::Int], Ty::String);
+        // Only a refinable family lets the lambda's result choose between same-input overloads.
         let candidate = |name: &str, transform: Ty| {
-            FunctionInfo::plain(
+            let mut candidate = FunctionInfo::plain(
                 FnKind::TopLevel,
                 None,
                 LibraryCallable::library(
@@ -5099,7 +4914,11 @@ mod tests {
                     Ty::Unit,
                     "(Lkotlin/jvm/functions/Function1;)V",
                 ),
-            )
+            );
+            candidate.callable.annotations = vec![crate::types::type_name(
+                "kotlin/OverloadResolutionByLambdaReturnType",
+            )];
+            candidate
         };
         let int_candidate = candidate("chooseInt", int_transform);
         let string_candidate = candidate("chooseString", string_transform);

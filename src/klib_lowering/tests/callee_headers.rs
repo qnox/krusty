@@ -1323,7 +1323,9 @@ fn a_later_support_unit_selects_the_matching_singleton_edge_variant() {
     };
     assert_eq!(*target, external);
     assert_eq!(
-        unit.ir().logical_types[receiver],
+        unit.ir()
+            .logical_type(*receiver)
+            .expect("the receiver has a checked type"),
         Ty::obj_name(crate::types::type_name("demo/Box"))
     );
     assert_eq!(

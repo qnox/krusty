@@ -9,10 +9,22 @@ use crate::libraries::{
 };
 use crate::types::{type_name, Ty};
 
+struct NoClassifiers;
+
+impl crate::backend::BackendClassifierSource for NoClassifiers {
+    fn classifier(
+        &self,
+        _: crate::types::TypeName,
+    ) -> Option<std::sync::Arc<crate::backend::BackendClassifierFact>> {
+        None
+    }
+}
+
 fn dependency_super_call(ir: &mut IrFile, target: ExternalCallableId) -> crate::ir::ExprId {
     let receiver = ir.add_expr(IrExpr::GetValue(0));
     ir.add_expr(IrExpr::Call {
         callee: Box::new(Callee::Super {
+            qualifier: type_name("fixture/Legacy"),
             owner: type_name("fixture/Legacy"),
             dispatch_owner: type_name("fixture/Child"),
             enclosing_dispatch: false,
@@ -41,8 +53,10 @@ fn a_dependency_super_call_requires_its_frozen_identity() {
     assert_eq!(
         realize_super_calls(
             &mut ir,
+            &NoClassifiers,
             &CheckedBackendCallables::default(),
             &mut PropertyRealizations::default(),
+            &mut super::SuperAccessors::default(),
             crate::jvm::ir_emit::JvmDefaultMode::default(),
         ),
         Err(ModuleRealizationTarget::DependencyCallable(target))
@@ -93,8 +107,10 @@ fn a_dependency_super_call_uses_its_frozen_nonvirtual_target() {
 
     realize_super_calls(
         &mut ir,
+        &NoClassifiers,
         &facts,
         &mut PropertyRealizations::default(),
+        &mut super::SuperAccessors::default(),
         crate::jvm::ir_emit::JvmDefaultMode::default(),
     )
     .expect("the frozen holder realizes the super call");
