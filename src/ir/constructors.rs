@@ -191,6 +191,10 @@ pub enum IrCtorParameterProvenance {
     Value,
     /// A closure value carried ahead of the parameters the source wrote.
     Capture,
+    /// An anonymous classifier's constructor operand for one checked `Interface by value`.
+    /// Its explicit constructor initializer stores the operand at `field`; this is neither a
+    /// source property parameter nor a pre-super capture. The containing argument owns its slot.
+    InterfaceDelegate { interface: Ty, field: u32 },
     /// The enclosing instance of an inner class. A backend may format this as `this$0`.
     EnclosingInstance,
     /// The completion parameter of a generated continuation constructor.
@@ -213,6 +217,12 @@ pub struct IrConstructorCapture {
     pub source_name: Box<str>,
     /// What the capture is when it holds a receiver rather than a value.
     pub receiver: Option<IrCapturedReceiver>,
+    /// When the captured declaration is a `crossinline` parameter, captured here directly or
+    /// through any chain of enclosing callables and classes: that parameter's value slot in the
+    /// inline function that declares it, the operand an expansion of that function binds. Lowering
+    /// records it where the capture is produced, and a call-site copy remaps it through the
+    /// expansion's bindings; a target reads it instead of tracing the constructor operand back.
+    pub crossinline_parameter: Option<u32>,
 }
 
 /// What a captured receiver was in source. kotlinc's LocalDeclarationsLowering names each kind's

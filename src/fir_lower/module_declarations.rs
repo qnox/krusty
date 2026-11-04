@@ -34,6 +34,46 @@ pub(super) fn source(
     })
 }
 
+/// Every declaration `target` overrides, following override edges through module declarations to
+/// the first dependency declaration on each path. Each edge is the one the overriding declaration's
+/// own classifier publishes.
+fn overridden_declarations(
+    index: &ResolvedModuleIndex,
+    target: CallableId,
+) -> Box<[crate::ir::IrOverriddenFunction]> {
+    let mut declarations = Vec::new();
+    let mut pending = vec![target];
+    let mut seen = HashSet::default();
+    while let Some(current) = pending.pop() {
+        if !seen.insert(current) {
+            continue;
+        }
+        let Some(owner) = index
+            .callable(current)
+            .and_then(|callable| index.enclosing_classifier(callable.declaration))
+        else {
+            continue;
+        };
+        for edge in index.function_overrides(owner.declaration) {
+            if edge.implementation != crate::fir::ResolvedFunctionOverrideTarget::Module(current) {
+                continue;
+            }
+            if let crate::fir::ResolvedFunctionOverrideTarget::Module(overridden) = edge.overridden
+            {
+                pending.push(overridden);
+            }
+            declarations.push(crate::ir::IrOverriddenFunction {
+                target: edge.overridden,
+                owner: edge.overridden_owner,
+                name: edge.name.clone(),
+                parameters: edge.declared_parameters.iter().map(|ty| ty.get()).collect(),
+                result: edge.declared_result.get(),
+            });
+        }
+    }
+    declarations.into_boxed_slice()
+}
+
 fn publish_callable(
     index: &ResolvedModuleIndex,
     ir: &mut IrFile,
@@ -164,6 +204,7 @@ fn publish_callable(
                 .into_boxed_slice(),
             placement,
             overridden_results,
+            overridden_declarations: overridden_declarations(index, target),
         },
     );
     // A member of a singleton is realized from its owner's shape (a named object or a
@@ -586,6 +627,13 @@ pub(super) fn publish_referenced(
             callables.insert(target);
         }
     }
+    // An override this file declares, whose calls a target realizes from what it overrides.
+    callables.extend(ir.function_overrides.values().flatten().filter_map(|edge| {
+        match edge.implementation {
+            crate::fir::ResolvedFunctionOverrideTarget::Module(target) => Some(target),
+            crate::fir::ResolvedFunctionOverrideTarget::External(_) => None,
+        }
+    }));
     // A declaration this file's classes override, which a target realizes an override against.
     callables.extend(ir.function_overrides.values().flatten().filter_map(|edge| {
         match edge.overridden {

@@ -218,6 +218,16 @@ fn materialize_delegation(
             {
                 return Err(FirFileLoweringFailure::MissingClassifier(declaration));
             }
+            let argument = &ir.classes[class as usize].ctor_args[parameter_index];
+            if argument.provenance != crate::ir::IrCtorParameterProvenance::Value
+                || argument.capture.is_some()
+                || argument.capture_identity.is_some()
+                || argument.anonymous_super_forward.is_some()
+                || argument.is_field
+                || argument.field_index.is_some()
+            {
+                return Err(FirFileLoweringFailure::MissingClassifier(declaration));
+            }
             ir.classes[class as usize].fields[field as usize].ty =
                 ir.classes[class as usize].ctor_args[parameter_index].ty;
             parameter_stores.push(parameter_initializer(ir, class, field, parameter_index)?);
@@ -551,6 +561,17 @@ fn materialize_delegation(
             }
         }
     }
+    // Only the checked synthetic operand gets this role, after its storage and complete selected
+    // member forwarding contract have materialized. A target does not recover it from an init body.
+    if let ResolvedInterfaceDelegateSource::SyntheticConstructorParameter(parameter) =
+        delegation.source
+    {
+        ir.classes[class as usize].ctor_args[parameter as usize].provenance =
+            crate::ir::IrCtorParameterProvenance::InterfaceDelegate {
+                interface: delegation.interface.get(),
+                field,
+            };
+    }
     stamp_generated(ir, first_generated);
     Ok(())
 }
@@ -781,6 +802,7 @@ fn ir_type_parameters(
                 .collect(),
             variance: crate::types::TypeVariance::Invariant,
             reified: false,
+            captured_from_enclosing: false,
         })
         .collect()
 }

@@ -1,5 +1,5 @@
 //! What a suspend lambda's body declares is lifted into the lambda's own class, as kotlinc lifts
-//! it out of the `invokeSuspend` the body became (`docs/JVM_INLINE_BEFORE_CPS.md` §1a, step 6).
+//! it out of the `invokeSuspend` the body became.
 //!
 //! A lambda the body builds is a private static `invokeSuspend$lambda$N` of the class, numbered
 //! afresh in the class, and a local function is `invokeSuspend$<name>`. They follow the members the

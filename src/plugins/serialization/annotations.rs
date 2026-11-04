@@ -19,6 +19,7 @@ pub(super) fn write_self_annotations() -> DeclarationAnnotations {
     DeclarationAnnotations::new(vec![RetainedAnnotation {
         retention: AnnotationRetention::Runtime,
         annotation: AppliedAnnotation {
+            written_order: None,
             internal: type_name("kotlin/jvm/JvmStatic"),
             values: Vec::new(),
         },
@@ -33,6 +34,7 @@ pub(super) fn jvm_field_annotations() -> DeclarationAnnotations {
     DeclarationAnnotations::new(vec![RetainedAnnotation {
         retention: AnnotationRetention::Binary,
         annotation: AppliedAnnotation {
+            written_order: None,
             internal: type_name("kotlin/jvm/JvmField"),
             values: Vec::new(),
         },
@@ -169,6 +171,7 @@ pub(super) fn generated_serializer_annotations() -> DeclarationAnnotations {
     DeclarationAnnotations::new(vec![RetainedAnnotation {
         retention: AnnotationRetention::Runtime,
         annotation: AppliedAnnotation {
+            written_order: None,
             internal: type_name("kotlin/Deprecated"),
             values: vec![
                 (

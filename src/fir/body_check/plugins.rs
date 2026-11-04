@@ -225,6 +225,7 @@ impl BodyFirChecker<'_> {
                     .collect::<Result<Vec<_>, _>>()?
                     .into_boxed_slice(),
                 semantic_role: selected.member.semantic_role,
+                intrinsic_const: super::calls::is_intrinsic_const(&selected.member.annotations),
                 overridden_declarations: selected.member.overridden_declarations.clone(),
                 suspend: selected.suspend,
                 inline: selected.member.inline,

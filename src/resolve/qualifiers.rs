@@ -223,6 +223,15 @@ pub(super) fn qualifier_path<S: SymbolSource + ?Sized>(
     walk_qualifier(source, prefix, &segments[1..])
 }
 
+impl super::SymbolTable {
+    /// The library classifier an absolute import path names, walked segment by segment as the
+    /// import directive itself is resolved. An import of a callable, or one that names nothing,
+    /// has none.
+    pub fn library_import_classifier(&self, path: &str) -> Option<TypeName> {
+        classifier_path(path, &*self.libraries, None).ok()
+    }
+}
+
 pub(super) fn classifier_path<S: SymbolSource + ?Sized>(
     path: &str,
     source: &S,
@@ -381,6 +390,7 @@ mod tests {
                         classifier_declaration: Some(ClassifierDeclaration::TypeAlias(
                             crate::libraries::AliasExpansion {
                                 identity: crate::types::type_name("fixture/Transform"),
+                                declaration_name: None,
                                 target: crate::types::type_name("fixture/Outer$Nested"),
                                 formals: Vec::new(),
                                 expansion: crate::types::Ty::obj("fixture/Outer$Nested"),
@@ -412,6 +422,7 @@ mod tests {
                 Some(ClassifierDeclaration::TypeAlias(
                     crate::libraries::AliasExpansion {
                         identity: alias,
+                        declaration_name: None,
                         target,
                         formals: Vec::new(),
                         expansion: crate::types::Ty::obj("fixture/Outer$Nested"),

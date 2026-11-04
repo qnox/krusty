@@ -222,6 +222,28 @@ pub(crate) fn realize(ir: &mut IrFile, facade: impl Fn(IrModuleSource) -> TypeNa
     ir.remap_classifier_identities(&identities);
 }
 
+/// Name the class each lambda would compile to that [`realize`] did not see: a compiler plugin
+/// that copies a body after realization gives every lambda in the copy an origin of its own.
+pub(crate) fn realize_copied_lambda_class_names(
+    ir: &mut IrFile,
+    facade: impl Fn(IrModuleSource) -> TypeName,
+) {
+    let mut physical = HashMap::default();
+    let lambdas = ir
+        .lambda_origins
+        .iter()
+        .filter(|(function, _)| !ir.lambda_class_names.contains_key(function))
+        .filter_map(|(&function, origin)| {
+            let provenance = origin.class_provenance.as_ref()?;
+            Some((
+                function,
+                provenance_name(provenance, &facade, ir, &mut physical),
+            ))
+        })
+        .collect::<Vec<_>>();
+    ir.lambda_class_names.extend(lambdas);
+}
+
 /// The class a source callable reference at `expression` compiles to, as [`realize`] named it.
 /// `None` for a reference the naming walk never saw, one lowering synthesized.
 pub(crate) fn callable_reference_name(ir: &IrFile, expression: u32) -> Option<TypeName> {

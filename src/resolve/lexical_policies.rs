@@ -20,7 +20,6 @@ pub(crate) fn publish_file_annotations(
     index: &mut crate::fir::ResolvedModuleIndex,
     diags: &mut DiagSink,
 ) {
-    let unsupported_multifile = crate::types::type_name("kotlin/jvm/JvmMultifileClass");
     for (file_index, file) in files.iter().enumerate() {
         if file.file_annotations.is_empty() {
             continue;
@@ -43,17 +42,6 @@ pub(crate) fn publish_file_annotations(
             .filter_map(|(annotation, _)| {
                 let key = (annotation.span.lo, annotation.span.hi);
                 let applied = checker.applied_annotations.get(&key)?;
-                if target == crate::compilation_target::CompilationTarget::Jvm
-                    && applied.internal == unsupported_multifile
-                {
-                    diags.set_file(file_index as u32);
-                    diags.error(
-                        annotation.span,
-                        "@file:JvmMultifileClass is not supported for JVM compilation yet; its \
-                         part classes and delegating facade require distinct physical owners"
-                            .to_string(),
-                    );
-                }
                 Some(crate::types::ResolvedAnnotation {
                     annotation: applied.internal,
                     arguments: applied.values.clone(),
@@ -61,7 +49,32 @@ pub(crate) fn publish_file_annotations(
                     written: None,
                 })
             })
-            .collect();
+            .collect::<Box<[_]>>();
+        if target == crate::compilation_target::CompilationTarget::Jvm
+            && applications.iter().any(|application| {
+                application.annotation == crate::types::type_name("kotlin/jvm/JvmMultifileClass")
+            })
+        {
+            // A multifile facade forwards to its parts' members, and a field cannot be forwarded.
+            for &declaration in &file.decls {
+                let Decl::Property(property) = file.decl(declaration) else {
+                    continue;
+                };
+                if let Some(annotation) = checker.resolved_annotation_in_scope(
+                    &CheckerScope::root(),
+                    &property.annotations,
+                    "kotlin/jvm/JvmField",
+                ) {
+                    diags.set_file(file_index as u32);
+                    diags.error(
+                        Span::new(annotation.at, annotation.span.hi),
+                        "jvmField cannot be applied to top level property of a file annotated \
+                         with JvmMultifileClass."
+                            .to_string(),
+                    );
+                }
+            }
+        }
         index.publish_file_annotations(
             crate::fir::SourceFileId::from_raw(file_index as u32),
             crate::fir::FileAnnotationFacts {

@@ -31,6 +31,21 @@ fn a_class_constant_only_an_inline_body_names_gives_no_row() {
     common::assert_same_inner_classes("InlineCast", &source, &[], &["Caster"]);
 }
 
+/// A branch after the copied read makes the frame computation name the local's class in a
+/// `StackMapTable` frame. ASM writes frames straight into the pool, never through kotlinc's type
+/// mapper, so `Branching` still lists no `Holder$Item`.
+#[test]
+fn a_class_only_a_stack_map_frame_names_gives_no_row() {
+    let source = format!(
+        "{HOLDER}class Branching {{ fun use(flag: Boolean): Any {{\n\
+         \x20   val item = read()\n\
+         \x20   if (flag) println()\n\
+         \x20   return item\n\
+         }} }}\n"
+    );
+    common::assert_same_inner_classes("FramedInline", &source, &[], &["Branching"]);
+}
+
 /// The same body compiled into a library and inlined from the classpath gives the caller no row
 /// either, while the caller's own read beside it still does.
 #[test]

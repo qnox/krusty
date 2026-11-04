@@ -211,9 +211,21 @@ fn a_foreign_alias_cannot_change_the_stdlib_list_storage_plan() {
     let classpath = std::rc::Rc::new(super::Classpath::new(vec![directory.clone(), stdlib]));
     assert_eq!(
         classpath
+            .paired_stdlib_type_alias_expansion(identity)
+            .expect("the selected stdlib alias")
+            .declaration_name
+            .as_deref()
+            .cloned(),
+        Some(crate::types::ClassifierDeclarationName::TopLevel {
+            package: type_name("kotlin/collections"),
+            name: "ArrayList".into(),
+        })
+    );
+    assert_eq!(
+        classpath
             .type_alias_expansion(identity)
             .expect("ordinary alias lookup")
-            .0,
+            .target,
         foreign
     );
     let libraries = initialized_libraries(classpath);

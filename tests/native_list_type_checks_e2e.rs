@@ -100,14 +100,11 @@ fn a_cast_to_list_fails_on_a_value_that_is_none() {
     every_backend_agrees_with_kotlinc("CastToListFails", source);
 }
 
-/// A file declaring a collection of its OWN keeps declining: its class wears no marker, and
-/// `false` would be a wrong answer for an object that the program can make a list of.
-///
-/// An `Iterable` rather than a full `List`, because the guard asks about the SHAPE a file
-/// implements rather than about the exact interface, and a `List` of one's own declines earlier
-/// for members this generator does not realize — which would test a different rule.
+/// A class of the program's own that implements a collection interface wears the runtime markers
+/// of the interfaces it implements, so a check against another collection interface answers
+/// `false`, as kotlinc does, rather than declining.
 #[test]
-fn a_file_that_declares_its_own_collection_declines_the_check() {
+fn a_class_of_its_own_collection_is_checked_by_its_markers() {
     let source = "class Own : Iterable<Int> {\n\
          \x20   override fun iterator(): Iterator<Int> = listOf(1).iterator()\n\
          }\n\
@@ -115,7 +112,7 @@ fn a_file_that_declares_its_own_collection_declines_the_check() {
          \x20   val x: Any = Own()\n\
          \x20   return if (x is List<*>) \"fail\" else \"OK\"\n\
          }\n";
-    expect_native_decline(source, "OwnCollectionDeclines", "is` check against");
+    every_backend_agrees_with_kotlinc("OwnCollectionMarkers", source);
 }
 
 /// `List::class` names the marker, and the marker is named `kotlin.collections.List`.

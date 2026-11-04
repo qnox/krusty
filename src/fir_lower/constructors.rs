@@ -820,6 +820,7 @@ fn push_no_arg_constructors(index: &ResolvedModuleIndex, ir: &mut IrFile) {
         let deprecated = crate::ir::RetainedAnnotation {
             retention: crate::types::AnnotationRetention::Runtime,
             annotation: crate::ir::AppliedAnnotation {
+                written_order: None,
                 internal: crate::types::type_name("kotlin/Deprecated"),
                 values: vec![
                     (
@@ -846,6 +847,7 @@ fn push_no_arg_constructors(index: &ResolvedModuleIndex, ir: &mut IrFile) {
         let java_deprecated = crate::ir::RetainedAnnotation {
             retention: crate::types::AnnotationRetention::Runtime,
             annotation: crate::ir::AppliedAnnotation {
+                written_order: None,
                 internal: crate::types::type_name("java/lang/Deprecated"),
                 values: Vec::new(),
             },
@@ -1128,7 +1130,7 @@ fn constructor_arguments(
                     crate::ir::IrConst::zero_for_value_type(*parameters.get(parameter)?),
                 ));
                 if let Some(line) = delegation_line {
-                    ir.expr_source_lines.insert(placeholder, line);
+                    ir.set_source_line(placeholder, line);
                 }
                 Some(placeholder)
             }

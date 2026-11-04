@@ -21,6 +21,31 @@ pub(super) enum FunctionValueRungs {
     AlreadyTried,
 }
 
+/// How one explicit-receiver call searches the local and implicit-receiver levels: whether their
+/// function values still compete, and the expected result its member extensions are inferred
+/// against.
+#[derive(Clone, Copy)]
+pub(super) struct ScopeLevelSearch {
+    function_values: FunctionValueRungs,
+    result: CallResultConstraint,
+}
+
+impl ScopeLevelSearch {
+    pub(super) fn in_tower(result: CallResultConstraint) -> Self {
+        Self {
+            function_values: FunctionValueRungs::InTower,
+            result,
+        }
+    }
+
+    pub(super) fn already_tried(result: CallResultConstraint) -> Self {
+        Self {
+            function_values: FunctionValueRungs::AlreadyTried,
+            result,
+        }
+    }
+}
+
 /// The scope-tower level that declared a receiver-function value.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum FunctionValueLevel {
@@ -52,8 +77,12 @@ impl Checker<'_> {
         receiver_expression: ExprId,
         receiver: Ty,
         name: &str,
-        function_values: FunctionValueRungs,
+        search: ScopeLevelSearch,
     ) -> Option<Ty> {
+        let ScopeLevelSearch {
+            function_values,
+            result,
+        } = search;
         if let Some(ret) = self.record_local_level_call(
             scope,
             call_args,
@@ -64,15 +93,9 @@ impl Checker<'_> {
         ) {
             return Some(ret);
         }
-        if let Some(ret) = self.check_member_extension_function_call(
-            scope,
-            call_args.call,
-            receiver,
-            name,
-            call_args.args,
-            call_args.arg_tys,
-            None,
-        ) {
+        if let Some(ret) = self
+            .check_member_extension_function_call(scope, call_args, receiver, name, result, None)
+        {
             return Some(ret);
         }
         if function_values == FunctionValueRungs::AlreadyTried {

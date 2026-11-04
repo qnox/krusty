@@ -131,6 +131,35 @@ pub enum KspMember {
         owner: String,
         declaration: Box<KspDeclaration>,
     },
+    /// The member KSP2 makes for the classifier `owner` (a qualified name) where members of two
+    /// of its supertypes with one signature meet, described here. `file` is the path of the source
+    /// file declaring the member it is made from, which it answers `containingFile` and `location`
+    /// with; `None` when that member is a library's.
+    Intersection {
+        owner: String,
+        file: Option<String>,
+        declaration: Box<KspDeclaration>,
+    },
+    /// The member at `position` of the properties (`property`) or functions the module's own
+    /// classifier `owner` lists: an intersection member made for that classifier, which another
+    /// one inherits.
+    Listed {
+        owner: String,
+        property: bool,
+        position: u32,
+    },
+}
+
+/// What `findOverridee` answers for a function or property.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum KspOverridee {
+    /// The round cannot say, so the host refuses the query.
+    Undescribed,
+    /// It overrides nothing.
+    Nothing,
+    /// The member it overrides: a declaration of another source classifier, or a library member
+    /// described here. Never [`KspMember::Declared`], as a member overrides none of its siblings.
+    Member(KspMember),
 }
 
 /// Where a library classifier was declared, which is what `KSNode.origin` reports.
@@ -210,6 +239,8 @@ pub struct KspFunction {
     pub jvm_signature: Option<String>,
     /// What `Resolver.getJvmName` answers; `None` when the round cannot say.
     pub jvm_name: Option<String>,
+    /// What `findOverridee` answers.
+    pub overridee: KspOverridee,
 }
 
 /// Where a function declares it, which KSP's `FunctionKind` and the constructor queries tell.
@@ -247,6 +278,8 @@ pub struct KspProperty {
     pub has_backing_field: Option<bool>,
     /// What `Resolver.mapToJvmSignature` answers; `None` when the round cannot say.
     pub jvm_signature: Option<String>,
+    /// What `findOverridee` answers.
+    pub overridee: KspOverridee,
 }
 
 /// A property getter or setter as `KSPropertyAccessor` describes it.
@@ -260,6 +293,11 @@ pub struct KspAccessor {
     pub parameter: Option<(String, Vec<KspAnnotation>)>,
     /// What `Resolver.getJvmName` answers; `None` when the round cannot say.
     pub jvm_name: Option<String>,
+    /// Whether `KSPropertyGetter.returnType` is the property's type, as KSP2 serves a source
+    /// getter that writes no return type of its own: a reference of the getter's origin whose
+    /// parent is the getter. False for a setter, a getter that writes its return type and a library
+    /// getter, whose return type the host refuses.
+    pub returns_property_type: bool,
 }
 
 /// A type alias, of which the round describes only the name yet.
@@ -357,6 +395,10 @@ pub enum KspValue {
     Short(i16),
     Int(i32),
     Long(i64),
+    UByte(u8),
+    UShort(u16),
+    UInt(u32),
+    ULong(u64),
     Char(u16),
     /// The value's bits, so that every NaN and `-0.0` survive.
     Float(u32),

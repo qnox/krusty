@@ -37,6 +37,8 @@ pub(super) struct CallableRegistry {
     module: HashMap<CallableId, u32>,
     module_defaults: HashMap<CallableId, u32>,
     dependencies: HashMap<KlibDependencyCallable, u32>,
+    /// The default entry of each published declaration that declares a default.
+    dependency_defaults: HashMap<KlibDependencyCallable, u32>,
     signatures: HashMap<KlibDependencyCallable, DependencyFunctionSignature>,
     member_receivers: HashMap<KlibDependencyCallable, DependencyMemberReceiver>,
     singleton_member_receivers: HashMap<KlibDependencyCallable, SingletonMemberReceiver>,
@@ -48,6 +50,7 @@ pub(super) struct FileCallTargets {
     module: HashMap<CallableId, u32>,
     module_defaults: HashMap<CallableId, u32>,
     external: HashMap<ExternalCallableId, u32>,
+    external_defaults: HashMap<ExternalCallableId, u32>,
     signatures: HashMap<ExternalCallableId, DependencyFunctionSignature>,
     member_receivers: HashMap<ExternalCallableId, DependencyMemberReceiver>,
     singleton_member_receivers: HashMap<ExternalCallableId, SingletonMemberReceiver>,
@@ -68,8 +71,9 @@ impl CallableRegistry {
 
     /// Declare every emitted function defined by `ir`, reusing an index reserved by an earlier
     /// cross-file call. Every checked callable identity that realizes the same `FunId` binds to
-    /// that index. An inline-only function is a cloning template, not a declaration, and therefore
-    /// receives no Wasm index and binds no callable identity.
+    /// that index, and so does every identity a default-argument entry is published under. An
+    /// inline-only function is a cloning template, not a declaration, and therefore receives no
+    /// Wasm index and binds no callable identity.
     pub(super) fn declare_file(
         &mut self,
         ir: &IrFile,
@@ -82,12 +86,20 @@ impl CallableRegistry {
             };
             targets.push(callable);
         }
+        let mut default_identities = vec![Vec::new(); ir.functions.len()];
+        for (&declaration, &entry) in &ir.default_entries {
+            let Some(targets) = default_identities.get_mut(entry as usize) else {
+                return Err("an invalid default-argument entry".to_string());
+            };
+            *targets = crate::backend::default_arguments::published_identities(ir, declaration);
+        }
 
         let mut declared = HashSet::default();
         identities
             .into_iter()
+            .zip(default_identities)
             .enumerate()
-            .map(|(function, targets)| {
+            .map(|(function, (targets, default_targets))| {
                 if ir.inline_only_fns.contains(&(function as crate::ir::FunId)) {
                     if targets.iter().any(|target| {
                         self.module
@@ -102,7 +114,12 @@ impl CallableRegistry {
                 }
                 let mut reserved = targets
                     .iter()
-                    .filter_map(|target| self.module.get(target).copied());
+                    .filter_map(|target| self.module.get(target).copied())
+                    .chain(
+                        default_targets
+                            .iter()
+                            .filter_map(|target| self.module_defaults.get(target).copied()),
+                    );
                 let index = reserved.next().unwrap_or_else(|| wasm.declare());
                 if reserved.any(|other| other != index) {
                     return Err(
@@ -118,45 +135,7 @@ impl CallableRegistry {
                 for target in targets {
                     self.module.insert(target, index);
                 }
-                Ok(Some(index))
-            })
-            .collect()
-    }
-
-    /// Declare the default-argument entry owned by every emitted source function that records a
-    /// default. A sibling file may already have reserved the entry by exact callable identity.
-    pub(super) fn declare_file_defaults(
-        &mut self,
-        ir: &IrFile,
-        wasm: &mut Module,
-    ) -> Result<Vec<Option<u32>>, Unsupported> {
-        let mut identities = vec![Vec::new(); ir.functions.len()];
-        for (&callable, &function) in &ir.checked_callable_functions {
-            let Some(targets) = identities.get_mut(function as usize) else {
-                return Err("an invalid source callable identity".to_string());
-            };
-            targets.push(callable);
-        }
-        identities
-            .into_iter()
-            .enumerate()
-            .map(|(function, targets)| {
-                if !emits_default_entry(ir, function as crate::ir::FunId) {
-                    return Ok(None);
-                }
-                let identities =
-                    default_entry_identities(ir, function as crate::ir::FunId, targets);
-                let mut reserved = identities
-                    .iter()
-                    .filter_map(|target| self.module_defaults.get(target).copied());
-                let index = reserved.next().unwrap_or_else(|| wasm.declare());
-                if reserved.any(|other| other != index) {
-                    return Err(
-                        "two source callable identities reserved different Wasm default entries"
-                            .to_string(),
-                    );
-                }
-                for target in identities {
+                for target in default_targets {
                     self.module_defaults.insert(target, index);
                 }
                 Ok(Some(index))
@@ -177,12 +156,13 @@ impl CallableRegistry {
             module: HashMap::default(),
             module_defaults: HashMap::default(),
             external: HashMap::default(),
+            external_defaults: HashMap::default(),
             signatures: HashMap::default(),
             member_receivers: HashMap::default(),
             singleton_member_receivers: HashMap::default(),
             singleton_extension_unread_receivers: HashMap::default(),
         };
-        for expression in emitted_call_roots(ir)
+        for expression in crate::ir::emitted_body_roots(ir)
             .into_iter()
             .flat_map(|root| crate::ir::value_namespace_expressions(ir, root))
         {
@@ -224,13 +204,7 @@ impl CallableRegistry {
                         .module
                         .insert(*target, self.module_index(*target, wasm));
                 }
-                Callee::ModuleWithDefaults {
-                    target,
-                    default_provider: crate::fir::ResolvedFunctionOverrideTarget::Module(provider),
-                    dispatch_receiver_ty: None,
-                    extension_receiver_parameter: None,
-                    ..
-                } if dispatch_receiver.is_none() => {
+                Callee::ModuleDefaultEntry { provider, .. } if dispatch_receiver.is_none() => {
                     targets
                         .module_defaults
                         .insert(*provider, self.module_default_index(*provider, wasm));
@@ -241,12 +215,22 @@ impl CallableRegistry {
                     defaults,
                     extension_receiver_parameter,
                     ..
-                } if defaults.is_empty() => {
+                } => {
                     let callable = callables.callable(*target).ok_or_else(|| {
                         "a dependency call without frozen callable facts".to_string()
                     })?;
+                    // A call leaving arguments out is realized only through the default entry
+                    // of the declaration's own module.
+                    let default_entry = callable
+                        .dependency_callable
+                        .as_ref()
+                        .and_then(|identity| self.dependency_defaults.get(identity))
+                        .copied();
+                    if !defaults.is_empty() && default_entry.is_none() {
+                        continue;
+                    }
                     if callable
-                        .compiler_intrinsic
+                        .compiler_operation()
                         .is_some_and(super::lower::is_direct_operation)
                         && !callable
                             .dependency_callable
@@ -303,6 +287,9 @@ impl CallableRegistry {
                         "a dependency callable whose target code was not emitted".to_string()
                     })?;
                     targets.external.insert(*target, index);
+                    if let Some(entry) = default_entry {
+                        targets.external_defaults.insert(*target, entry);
+                    }
                     targets.signatures.insert(
                         *target,
                         self.signatures
@@ -343,6 +330,14 @@ impl CallableRegistry {
                 .get(function as usize)
                 .copied()
                 .ok_or_else(|| "an invalid exported callable identity".to_string())?;
+            if let Some(&entry) = ir.default_entries.get(&function) {
+                let entry = functions
+                    .get(entry as usize)
+                    .copied()
+                    .flatten()
+                    .ok_or_else(|| "a default-argument entry without its function".to_string())?;
+                self.dependency_defaults.insert(identity.clone(), entry);
+            }
             let index = emitted
                 .ok_or_else(|| "an inline-only function exported as Wasm code".to_string())?;
             let signature = DependencyFunctionSignature::from_ir(
@@ -424,55 +419,6 @@ impl CallableRegistry {
     }
 }
 
-/// Roots of every expression body this Wasm file physically emits. Constructor expressions are
-/// not `IrFunction` bodies: class lowering emits the primary delegation/initializer and each
-/// secondary delegation/body separately, so call discovery must include those exact roots while
-/// still excluding cloning-only inline templates.
-fn emitted_call_roots(ir: &IrFile) -> Vec<ExprId> {
-    let mut roots = crate::ir::emitted_body_roots(ir);
-    for function in 0..ir.functions.len() {
-        let function = function as crate::ir::FunId;
-        if !emits_default_entry(ir, function) {
-            continue;
-        }
-        roots.extend(
-            ir.param_defaults(function)
-                .into_iter()
-                .flatten()
-                .filter_map(|default| *default),
-        );
-    }
-    roots
-}
-
-/// Whether `function` owns the exact top-level source bridge that this Wasm backend can route.
-pub(super) fn emits_default_entry(ir: &IrFile, function: crate::ir::FunId) -> bool {
-    let declaration = &ir.functions[function as usize];
-    declaration.body.is_some()
-        && declaration.dispatch_receiver.is_none()
-        && !ir.inline_only_fns.contains(&function)
-        && !ir.extension_receiver_fns.contains(&function)
-        && ir
-            .checked_callable_functions
-            .values()
-            .any(|&candidate| candidate == function)
-        && ir
-            .param_defaults(function)
-            .is_some_and(|defaults| defaults.iter().any(Option::is_some))
-}
-
-fn default_entry_identities(
-    ir: &IrFile,
-    function: crate::ir::FunId,
-    declared: Vec<CallableId>,
-) -> Vec<CallableId> {
-    match ir.inherited_param_default_provider(function) {
-        Some(crate::fir::ResolvedFunctionOverrideTarget::Module(provider)) => vec![provider],
-        Some(crate::fir::ResolvedFunctionOverrideTarget::External(_)) => Vec::new(),
-        None => declared,
-    }
-}
-
 impl FileCallTargets {
     pub(super) fn module(&self, target: CallableId) -> Option<u32> {
         self.module.get(&target).copied()
@@ -480,6 +426,11 @@ impl FileCallTargets {
 
     pub(super) fn external(&self, target: ExternalCallableId) -> Option<u32> {
         self.external.get(&target).copied()
+    }
+
+    /// The default entry of the dependency declaration `target`, when its module published one.
+    pub(super) fn external_default(&self, target: ExternalCallableId) -> Option<u32> {
+        self.external_defaults.get(&target).copied()
     }
 
     pub(super) fn signature(
@@ -640,8 +591,10 @@ mod tests {
             klib_body_type_parameters: Box::new([]),
             klib_body_declaration_modifiers: None,
             klib_body_class_contract: None,
+            klib_body_accessor: None,
             klib_body_vararg_index: None,
             klib_body_parameter_defaults: None,
+            annotations: Box::new([]),
         }
     }
 
@@ -927,6 +880,10 @@ mod tests {
             args: Vec::new(),
         });
         caller.add_fun(function("box", Some(call)));
+        crate::backend::default_arguments::realize(
+            &mut caller,
+            &mut crate::backend::CheckedBackendCallables::default(),
+        );
         let calls = registry
             .file_calls(&caller, &CheckedBackendCallables::default(), &mut wasm)
             .expect("the inherited provider reserves its exact entry");
@@ -958,11 +915,32 @@ mod tests {
             Some(crate::fir::ResolvedFunctionOverrideTarget::Module(provider));
         declaration.fn_params.insert(function, parameters);
 
-        let entries = registry
-            .declare_file_defaults(&declaration, &mut wasm)
+        crate::backend::default_arguments::realize(
+            &mut declaration,
+            &mut crate::backend::CheckedBackendCallables::default(),
+        );
+        let entry = declaration.default_entries[&function];
+        let functions = registry
+            .declare_file(&declaration, &mut wasm)
             .expect("the actual declaration realizes the provider-owned entry");
-        assert_eq!(entries[function as usize], Some(reserved));
+        assert_eq!(functions[entry as usize], Some(reserved));
+        assert_ne!(functions[function as usize], Some(reserved));
         assert_eq!(registry.module_defaults.get(&provider), Some(&reserved));
         assert!(!registry.module_defaults.contains_key(&target));
+        let Some(IrExpr::Block { stmts, value: None }) = declaration.functions[entry as usize]
+            .body
+            .map(|body| declaration.expr(body))
+        else {
+            panic!("the entry fills its frame and then calls its declaration");
+        };
+        let Some(IrExpr::Return(Some(forward))) = stmts.last().map(|&last| declaration.expr(last))
+        else {
+            panic!("the entry returns what its declaration answers");
+        };
+        assert!(matches!(
+            declaration.expr(*forward),
+            IrExpr::Call { callee, dispatch_receiver: None, .. }
+                if **callee == Callee::Local(function)
+        ));
     }
 }

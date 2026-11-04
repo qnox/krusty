@@ -40,7 +40,7 @@ impl Emitter<'_> {
                         )
                     }
                     None => (
-                        self.facade.clone(),
+                        self.file_function_owner(function),
                         false,
                         self.static_owner == Some(StaticOwner::Facade),
                     ),
@@ -56,7 +56,7 @@ impl Emitter<'_> {
             self.export_private_calls,
             function,
         ) {
-            format!("access${}", declaration.name)
+            format!("access${}", self.ir.accessor_base_name(function))
         } else {
             declaration.name.clone()
         };
@@ -69,5 +69,15 @@ impl Emitter<'_> {
         let words = parameters.iter().map(|ty| slot_words(*ty) as i32).sum();
         self.mark_call_start(expression, code);
         code.invokestatic(method, words, physical_call_result_words(result));
+    }
+
+    /// The class a static call to the file's own top-level function `function` names. A multifile
+    /// part's non-private function is invoked through its public facade, even from the part
+    /// itself, as kotlinc calls it; a private one belongs to the part alone.
+    pub(super) fn file_function_owner(&self, function: u32) -> String {
+        match &self.multifile_facade {
+            Some(facade) if !self.ir.method_visibility(function).is_private() => facade.clone(),
+            _ => self.facade.clone(),
+        }
     }
 }

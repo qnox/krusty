@@ -536,7 +536,14 @@ pub(super) fn synth_value_members(
     // and the `-impl` statics are all `open` (non-`final`).
     // toString-impl(U v): "X(field=" + v + ")" ; toString(): return toString-impl(this.field)
     {
-        let simple = internal_name.segment_ref().replace('$', ".");
+        // kotlinc names the class by its own declared name, as a data class's `toString` does: a
+        // nested `C.IC1` prints `IC1(s=…)`, and a backticked `Cash$Tag` keeps its `$`.
+        let simple = ir.classes[class_id as usize]
+            .declaration_name
+            .as_ref()
+            .expect("a source value class retains its declaration name")
+            .name()
+            .to_owned();
         if custom_to_string.is_none() {
             let carrier = ir.add_expr(IrExpr::GetValue(0));
             // A non-null nested value class is this slot's carrier. Name it through its own
@@ -873,12 +880,27 @@ pub(super) fn synth_value_members(
                 .iter()
                 .map(|(name, _)| name.as_str())
                 .collect::<Vec<_>>();
-            // Omitted arguments are filled by `constructor-impl$default`, as for the primary.
-            if sc.defaults.iter().any(Option::is_some) {
-                let names = names.iter().map(|name| (*name).to_string()).collect();
-                ir.fn_params.insert(
+            // The static takes the constructor's declared parameters as its own, so it owns their
+            // identities. Omitted arguments are filled by `constructor-impl$default`, as for the
+            // primary.
+            let owned_names = names.iter().map(|name| (*name).to_string()).collect();
+            ir.fn_params.insert(
+                constructor,
+                if sc.defaults.iter().any(Option::is_some) {
+                    crate::ir::FnParamInfo::source_defaults(owned_names, sc.defaults.clone())
+                } else {
+                    crate::ir::FnParamInfo::source_names(owned_names)
+                },
+            );
+            // A `vararg` stays one on the static: Java calls it in element form, and its
+            // `Signature` keeps the element's declaration-site wildcards.
+            if let Some(index) = sc.vararg_index {
+                ir.fn_varargs.insert(
                     constructor,
-                    crate::ir::FnParamInfo::source_defaults(names, sc.defaults.clone()),
+                    crate::ir::IrVarargParameter {
+                        index,
+                        is_last: index + 1 == sc.named_params.len(),
+                    },
                 );
             }
             crate::jvm::method_parameters::record_function(ir, constructor, &names, &[]);
@@ -1145,8 +1167,8 @@ fn nested_value_text(
         dispatch_receiver: None,
         args: vec![value],
     });
-    ir.physical_types.insert(call, Ty::String);
-    ir.logical_types.insert(call, Ty::obj_name(nested));
+    ir.set_physical_type(call, Ty::String);
+    ir.set_logical_type(call, Ty::obj_name(nested));
     rendered_value_class_text.insert(call);
     call
 }

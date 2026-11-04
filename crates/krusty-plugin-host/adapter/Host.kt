@@ -32,7 +32,7 @@ import kotlin.system.exitProcess
  * the real stdout for frames. The protocol is `crates/krusty-plugin-host/src/protocol.rs`; keep the
  * two in step and bump [PROTOCOL] on any change.
  */
-const val PROTOCOL = 4
+const val PROTOCOL = 5
 
 private const val HELLO = 0
 private const val LOAD = 1
@@ -49,6 +49,8 @@ private const val RESOLVE = 11
 private const val RESOLVED = 12
 private const val GENERATE = 13
 private const val GENERATED = 14
+private const val SCRIPT_DEFINITION = 15
+internal const val SCRIPT_DEFINED = 16
 
 /**
  * Serves requests until krusty asks it to stop or closes stdin. Either way the JVM exits at once:
@@ -127,6 +129,12 @@ private fun serve() {
                     generate(request, current?.irGenerationExtensions ?: emptyList())
                     Generated
                 }
+                send(frames) { reply.write(this) }
+            }
+            SCRIPT_DEFINITION -> {
+                val classpath = request.readList { readString() }
+                val template = request.readString()
+                val reply = answer { scriptDefinition(classpath, template) }
                 send(frames) { reply.write(this) }
             }
             SHUTDOWN -> return
@@ -301,15 +309,15 @@ private fun load(entries: List<String>, options: List<String>): Reply {
 
 /**
  * Refuses [entry] unless it is a directory or a jar. A class loader takes any path and finds nothing
- * in one that is neither, so a missing or broken plugin jar would load as no plugin at all.
+ * in one that is neither, so a missing or broken jar would load as nothing at all.
  */
-private fun checkEntry(entry: File) {
+internal fun checkEntry(entry: File, role: String = "plugin") {
     if (entry.isDirectory) return
-    if (!entry.isFile) throw Refused("plugin classpath entry $entry does not exist")
+    if (!entry.isFile) throw Refused("$role classpath entry $entry does not exist")
     try {
         ZipFile(entry).close()
     } catch (error: IOException) {
-        throw Refused("plugin classpath entry $entry is not a jar: ${error.message}")
+        throw Refused("$role classpath entry $entry is not a jar: ${error.message}")
     }
 }
 

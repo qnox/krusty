@@ -233,6 +233,9 @@ pub(super) fn replace_type_parameters_with_erased_bounds(ty: Ty) -> Ty {
         TyKind::PlatformNullable(inner) => {
             Ty::platform_nullable(replace_type_parameters_with_erased_bounds(inner))
         }
+        TyKind::MutabilityFlexible(inner) => {
+            Ty::mutability_flexible(replace_type_parameters_with_erased_bounds(inner))
+        }
         TyKind::InProjection(inner) => {
             Ty::in_projection(replace_type_parameters_with_erased_bounds(inner))
         }
@@ -267,6 +270,7 @@ fn erased_bound(bound: Ty) -> Ty {
         TyKind::TyParam(_, next) => erased_bound(next),
         TyKind::Nullable(inner) => Ty::nullable(erased_bound(inner)),
         TyKind::PlatformNullable(inner) => Ty::platform_nullable(erased_bound(inner)),
+        TyKind::MutabilityFlexible(inner) => Ty::mutability_flexible(erased_bound(inner)),
         TyKind::DefinitelyNotNull(inner) => erased_bound(inner).definitely_non_null(),
         TyKind::Fun(signature) => {
             let classifier = crate::libraries::function_classifiers::function_classifier_identity(
