@@ -154,7 +154,7 @@ mod expression_qualifiers;
 mod misfit_callable_references;
 use misfit_callable_references::{MisfitReference, ReferenceCandidateLevels};
 mod nested_type_aliases;
-use explicit_receiver_levels::{FunctionValueLevel, FunctionValueRungs};
+use explicit_receiver_levels::{FunctionValueLevel, ScopeLevelSearch};
 mod expected_expression;
 mod expression_getter;
 mod extension_receiver_uses;
@@ -12025,7 +12025,7 @@ impl<'a> Checker<'a> {
             receiver,
             receiver_ty,
             name,
-            FunctionValueRungs::AlreadyTried,
+            ScopeLevelSearch::already_tried(CallResultConstraint::direct(expected)),
         ) {
             return ClassifierValueCall::Checked(ret);
         }
@@ -16162,7 +16162,7 @@ impl<'a> Checker<'a> {
                     receiver,
                     rt,
                     &name,
-                    FunctionValueRungs::InTower,
+                    ScopeLevelSearch::in_tower(CallResultConstraint::direct(expected)),
                 ) {
                     return ret;
                 }
@@ -19462,13 +19462,10 @@ impl<'a> Checker<'a> {
                     // receiver-less declaration and are evaluated by the later shared rung.
                     if let Some(ret) = self.check_member_extension_function_call(
                         scope,
-                        CallArgs {
-                            call,
-                            args,
-                            arg_tys: &arg_tys,
-                        },
+                        associated_site.call_args,
                         receiver,
                         &fname,
+                        CallResultConstraint::direct(expected),
                         Some(&postponed_solutions),
                     ) {
                         self.mark_implicit_receiver_selection(call, implicit_receiver);
@@ -44259,14 +44256,11 @@ impl<'a> Checker<'a> {
             // declared non-null classifier (`String?` + a null proof is still `Nothing?`, never
             // `String & Nothing?`). Classifier type-test proofs continue through the intersection
             // path below.
-            let root_value = match (&path.root, path.segments.is_empty()) {
-                (scope::PathRoot::Value(identity), true) => {
-                    self.visible_flow_value(scope, *identity)
-                }
-                _ => None,
-            };
+            let declared = StablePathRead::new(self).declared_ty(scope, path);
             if ty.non_null() != Ty::Nothing {
-                if let Some(declared) = root_value.map(|(_, local)| local.declared_ty.non_null()) {
+                // A nullable test (`is B?`) still admits null, so the declaration keeps its `?`.
+                let keep_null = ty.is_nullable();
+                if let Some(declared) = declared.map(|d| if keep_null { d } else { d.non_null() }) {
                     let context = crate::assignable::TyCtx::new();
                     let comparable = crate::assignable::is_subtype(&context, self, declared, *ty)
                         || crate::assignable::is_subtype(&context, self, *ty, declared);
@@ -53280,15 +53274,13 @@ impl<'a> Checker<'a> {
                     && (candidate.kind != crate::libraries::FnKind::Member
                         || candidate.context_count == 0)
             });
-            self.drop_members_hidden_by_applicable_extensions(
-                at,
-                &mut functions.overloads,
-                access_control::OperatorCallShape::IndexedGet { args: &index_kinds },
-            );
+            // The member rung resolves only with a member this site can see. One it cannot see
+            // stays in the final selection below, ranked under every accessible candidate.
             let mut members = functions.clone();
-            members
-                .overloads
-                .retain(|candidate| candidate.kind == crate::libraries::FnKind::Member);
+            members.overloads.retain(|candidate| {
+                candidate.kind == crate::libraries::FnKind::Member
+                    && self.member_candidate_accessible(candidate, Some(at))
+            });
             let members = crate::libraries::Callables::Functions(members);
             let callables = crate::libraries::Callables::from_parts(functions, properties);
             let selected_get = match self
@@ -54386,6 +54378,7 @@ impl<'a> Checker<'a> {
         name: String,
         args: Option<Vec<ExprId>>,
     ) -> Ty {
+        let safe_search = ScopeLevelSearch::in_tower(CallResultConstraint::safe_lifted(expected));
         let t = {
             let rt = self.expr(scope, receiver);
             if rt == Ty::Error {
@@ -54503,7 +54496,7 @@ impl<'a> Checker<'a> {
                                         receiver,
                                         recv,
                                         &name,
-                                        FunctionValueRungs::InTower,
+                                        safe_search,
                                     )
                                     .or_else(|| {
                                         let call_args = CallArgs {
@@ -54580,7 +54573,7 @@ impl<'a> Checker<'a> {
                                         receiver,
                                         recv,
                                         &name,
-                                        FunctionValueRungs::InTower,
+                                        safe_search,
                                     )
                                     .or_else(|| {
                                         let call_args = CallArgs {
@@ -54656,7 +54649,7 @@ impl<'a> Checker<'a> {
                                 receiver,
                                 recv,
                                 &name,
-                                FunctionValueRungs::InTower,
+                                safe_search,
                             )
                             .or_else(|| {
                                 self.record_extension_call(
@@ -58476,7 +58469,7 @@ impl<'a> Checker<'a> {
                 .select_receiver_function_with_params_tracking(
                     rt,
                     name,
-                    &argument_kinds,
+                    crate::symbol_resolver::FamilyArguments::Shared(&argument_kinds),
                     &[],
                     callables,
                     Some(ret),
@@ -59732,21 +59725,23 @@ impl<'a> Checker<'a> {
         let selected = {
             let resolver = self.resolver();
             let (mut functions, _) = callables.clone().into_parts();
-            self.drop_members_hidden_by_applicable_extensions(
-                recv,
-                &mut functions.overloads,
-                access_control::OperatorCallShape::Call { name, args: &[] },
-            );
+            // The member rung resolves only with a member this site can see. One it cannot see
+            // competes on the last rung, ranked under every accessible candidate there.
             functions.overloads.retain(|candidate| {
-                candidate.kind == kind
-                    && (kind == crate::libraries::FnKind::Member
-                        || self.source_callable_visible(candidate))
+                let member = candidate.kind == crate::libraries::FnKind::Member;
+                match kind {
+                    crate::libraries::FnKind::Member => {
+                        member && self.member_candidate_accessible(candidate, Some(recv))
+                    }
+                    _ if member => !self.member_candidate_accessible(candidate, Some(recv)),
+                    _ => candidate.kind == kind && self.source_callable_visible(candidate),
+                }
             });
             let callables = crate::libraries::Callables::Functions(functions);
             resolver.select_receiver_function_with_params_tracking(
                 recv,
                 name,
-                &[],
+                crate::symbol_resolver::FamilyArguments::Shared(&[]),
                 &[],
                 &callables,
                 None,

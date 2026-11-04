@@ -59,6 +59,7 @@ pub(crate) use enum_switch_whens::EnumSwitchWhen;
 mod emitted_body_roots;
 mod enums;
 mod expect_actualization;
+mod expression_copy;
 mod expression_provenance;
 pub(crate) use emitted_body_roots::{
     emitted_body_roots, emitted_declaration_roots, EmittedDeclaration,
@@ -84,6 +85,11 @@ pub(crate) use local_delegates::{
 mod local_property_references;
 mod module_records;
 mod negations;
+mod node_positions;
+mod node_types;
+pub use node_positions::IrNodePosition;
+pub(crate) use node_types::IrNodeTypeColumn;
+pub use node_types::IrNodeTypes;
 mod null_checks;
 mod operators;
 mod overrides;
@@ -267,6 +273,7 @@ pub enum IrPropertyDispatch {
 pub struct IrAnnotationConstruction {
     pub interface: TypeName,
     pub members: Vec<(String, Ty)>,
+    pub arguments: crate::libraries::AnnotationArgumentProvenance,
     /// Constructor defaults as lowered declarations, not evaluated call operands.
     pub defaults: Vec<Option<ExprId>>,
     /// The lexical scopes this construction is evaluated in; `None` is the file facade. A written
@@ -1705,10 +1712,8 @@ pub struct IrFile {
     /// updates, and the implicit `Unit` return (the block's closing-brace line, kotlinc's mapping).
     /// Absent = no line mark starts at that expression.
     pub expr_lines: crate::fx_hash::HashMap<u32, u32>,
-    /// Source line for every lowered expression whose AST node has a source location.
-    pub expr_source_lines: crate::fx_hash::HashMap<u32, u32>,
-    /// Source end line for every lowered expression whose AST node has a source location.
-    pub expr_end_lines: crate::fx_hash::HashMap<u32, u32>,
+    /// The source position of every expression node; see `node_positions`.
+    positions: node_positions::IrNodePositions,
     /// Lines generated expressions map to at one physical point; see `debug_lines`.
     generated_lines: debug_lines::GeneratedLineMarks,
     /// Source names for `IrExpr::Variable` nodes included in `LocalVariableTable`.
@@ -1745,16 +1750,8 @@ pub struct IrFile {
     pub(crate) inline_anonymous_lambdas: crate::fx_hash::HashSet<FunId>,
     /// Class index of a function already published as that class's method.
     pub(crate) class_method_owners: crate::fx_hash::HashMap<FunId, Vec<u32>>,
-    /// `ExprId` → the expression's LOGICAL (source) type as the checker inferred it, recorded verbatim by
-    /// the lowerer — NOT erased. The value-class pass consults it to recover the representation of a value
-    /// whose IR node alone is ambiguous: a library call returns a physical `Object` descriptor, but its
-    /// logical type may be a value class (`runCatching{…}: Result`), so the pass knows the result is the
-    /// value class's UNBOXED underlying, not an opaque `Object`. Populated for every lowered expression;
-    /// consumed by the value-class pass (the sole owner of value-class knowledge) and by target-neutral
-    /// rewrites that preserve a value in a new temporary. Such a rewrite first consults
-    /// [`Self::physical_types`] when a backend has already changed the representation, then uses this
-    /// checked type when no physical override exists.
-    pub logical_types: crate::fx_hash::HashMap<u32, Ty>,
+    /// The checked types of every expression node; see `node_types`.
+    types: node_types::IrNodeTypeColumn,
     /// Deferred source-local declaration → its declared semantic type before an inline expansion
     /// specializes type parameters. The parser supplies a target-neutral zero expression because
     /// the source omitted an initializer; a backend uses this provenance to choose that target's
@@ -1815,8 +1812,6 @@ pub struct IrFile {
     /// nullable value class (`dup; ifnull; box-impl`). It is laid out like a safe call but is a
     /// conversion of one, so it never folds into a safe-call chain's shared null exit.
     pub(crate) jvm_value_class_null_guards: crate::fx_hash::HashSet<ExprId>,
-    /// Physical type before a semantic read coercion.
-    pub physical_types: crate::fx_hash::HashMap<u32, Ty>,
     /// Values a JVM value-class underlying-property read leaves in an erased generic slot as an
     /// ordinary primitive wrapper (`R<Int>.value`: `Object` containing `Integer`). The JVM
     /// representation pass records the exact expression identity; emission must not infer this
@@ -1959,10 +1954,11 @@ pub struct IrFile {
     /// for evaluation order. This is provenance, not a storage decision; a backend decides how
     /// that role participates in its own frame or register allocation.
     pub call_operand_bindings: crate::fx_hash::HashSet<ExprId>,
-    /// Call-operand declarations introduced to preserve checked argument evaluation order, rather
-    /// than to bind an expanded callable's parameters or captures. A reused declaration leaves this
-    /// subset when an inline expansion adopts it as its own formal binding. This records purpose;
-    /// each backend still owns storage and lifetime decisions.
+    /// Call-operand declarations a call reordered by its named arguments introduces to evaluate
+    /// them in source order (kotlinc's temporaries), rather than holders that stage an operand or
+    /// bind an expanded callable's parameters or captures. A reused declaration leaves this subset
+    /// when an inline expansion adopts it as its own formal binding. This records purpose; each
+    /// backend still owns storage and lifetime decisions.
     pub(crate) argument_evaluation_bindings: crate::fx_hash::HashSet<ExprId>,
     /// The call-operand holders of one inline lambda invocation, consecutive in its block: the
     /// invocation evaluates every operand before it binds any. A backend chooses the binding order.
