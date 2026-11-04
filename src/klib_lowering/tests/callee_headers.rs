@@ -1508,8 +1508,9 @@ fn stdlib_calls_reach_header_declared_callees() {
     // generic callees. These exact deeper-decline counts are measured on every manifest release;
     // they are not expected-failure allowances for executable conformance tests. Elvis and safe-call
     // blocks, then generic calls and `when` subject blocks, now reach further declared callees;
-    // so do callees that declare parameter defaults, which their headers now carry. The same
-    // complete inputs were measured on every release.
+    // so do callees that declare parameter defaults, which their headers now carry, and callees
+    // reached past a call that leaves a parameter to its default. The same complete inputs were
+    // measured on every release.
     let expected =
         if crate::kotlin_version::target() >= crate::kotlin_version::KotlinVersion::V2_4_20 {
             vec![
@@ -1519,7 +1520,7 @@ fn stdlib_calls_reach_header_declared_callees() {
                 ("it converts a value implicitly)", 4),
                 ("it declares type parameters)", 205),
                 ("it uses a block of a compiler-introduced form)", 1),
-                ("it uses a call of a file-private declaration)", 4),
+                ("it uses a call of a file-private declaration)", 6),
                 ("it uses a call of a member function)", 74),
                 (
                     "it uses a call of a member no library serializes, such as a fake override)",
@@ -1528,7 +1529,7 @@ fn stdlib_calls_reach_header_declared_callees() {
                 ("it uses a call through a property accessor signature)", 35),
                 ("it uses a constant of another type than its value's)", 6),
                 ("it uses a loop whose body is not a block)", 2),
-                ("its library serializes none)", 97),
+                ("its library serializes none)", 98),
             ]
         } else {
             vec![
@@ -1538,7 +1539,7 @@ fn stdlib_calls_reach_header_declared_callees() {
                 ("it converts a value implicitly)", 4),
                 ("it declares type parameters)", 187),
                 ("it uses a block of a compiler-introduced form)", 1),
-                ("it uses a call of a file-private declaration)", 2),
+                ("it uses a call of a file-private declaration)", 4),
                 ("it uses a call of a member function)", 71),
                 (
                     "it uses a call of a member no library serializes, such as a fake override)",
@@ -1547,7 +1548,7 @@ fn stdlib_calls_reach_header_declared_callees() {
                 ("it uses a call through a property accessor signature)", 35),
                 ("it uses a constant of another type than its value's)", 6),
                 ("it uses a loop whose body is not a block)", 2),
-                ("its library serializes none)", 97),
+                ("its library serializes none)", 98),
             ]
         };
     assert_eq!(

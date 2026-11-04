@@ -102,6 +102,7 @@ impl BodyLowering<'_> {
                 ret: primitive.ret,
                 context_count: 0,
                 class_type_parameters: &primitive.class_type_parameters,
+                parameter_defaults: &[],
             },
         )?;
         let receiver = operands
@@ -462,6 +463,7 @@ impl BodyLowering<'_> {
                 ret: linked.ret,
                 context_count: linked.context_count,
                 class_type_parameters: &linked.class_type_parameters,
+                parameter_defaults: &linked.parameter_defaults,
             },
         )?;
         let mut callee = linked.callee;
@@ -472,6 +474,18 @@ impl BodyLowering<'_> {
             Callee::Local(function) => Some(self.ir.functions[function as usize].ret),
             _ => None,
         };
+        // Only a function of this unit is linked with defaults, so only it can be left to them:
+        // the call carries its supplied arguments and the omitted parameters, as a source call
+        // of a function of its own file does.
+        if !operands.omitted.is_empty() {
+            let Callee::Local(function) = callee else {
+                unreachable!("only a unit function declares defaults a call may leave to");
+            };
+            callee = Callee::LocalWithDefaults {
+                function,
+                defaults: operands.omitted.into_boxed_slice(),
+            };
+        }
         let (dispatch_receiver, args) = (operands.receiver, operands.args);
         let singleton_dispatch = linked.singleton_dispatch;
         let call = self.ir.add_expr(IrExpr::Call {
@@ -520,6 +534,7 @@ impl BodyLowering<'_> {
             receiver_type: source_receiver,
             params: parameters,
             ret: result,
+            omitted: _,
         } = self.call_operands(
             access,
             ty,
@@ -529,6 +544,8 @@ impl BodyLowering<'_> {
                 ret: linked.ret,
                 context_count: linked.context_count,
                 class_type_parameters: &linked.class_type_parameters,
+                // An accessor declares no default a call may leave to.
+                parameter_defaults: &[],
             },
         )?;
         let LinkedAccessor {
@@ -628,15 +645,23 @@ impl BodyLowering<'_> {
             .map(|&param| substitute(param))
             .collect::<Vec<_>>();
         let mut args = Vec::with_capacity(params.len());
-        for (argument, &parameter) in arguments.zip(&params) {
-            let argument = argument.ok_or(KlibBodyDeclineReason::UnsupportedOperation(
-                "a call that leaves a parameter to its default",
-            ))?;
-            args.push(self.operand(argument, parameter)?);
+        let mut omitted = Vec::new();
+        for (index, (argument, &parameter)) in arguments.zip(&params).enumerate() {
+            match argument {
+                Some(argument) => args.push(self.operand(argument, parameter)?),
+                // A serialized call leaves out exactly the arguments the callee's defaults supply.
+                None if callee.parameter_defaults.get(index).copied() == Some(true) => {
+                    omitted.push(u32::try_from(index).expect("a parameter list fits u32"));
+                }
+                None => {
+                    return unsupported("a call that leaves a parameter to its default");
+                }
+            }
         }
         Ok(CallOperands {
             receiver,
             args,
+            omitted,
             receiver_type,
             params,
             ret,
@@ -933,13 +958,18 @@ struct CalleeShape<'a> {
     ret: Ty,
     context_count: usize,
     class_type_parameters: &'a [String],
+    /// Whether each parameter declares a default a call may leave it to.
+    parameter_defaults: &'a [bool],
 }
 
 /// A call's lowered dispatch receiver and arguments, with the receiver type, parameters and
 /// result they were read at.
 struct CallOperands {
     receiver: Option<ExprId>,
+    /// The supplied arguments, in parameter order.
     args: Vec<ExprId>,
+    /// The parameters the call leaves to their defaults, in order.
+    omitted: Vec<u32>,
     receiver_type: Option<Ty>,
     params: Vec<Ty>,
     ret: Ty,

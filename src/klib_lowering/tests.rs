@@ -299,7 +299,8 @@ pub(super) fn type_name_of(ty: Ty) -> String {
 /// logical type, a return's depth (`@0`), a stable (`!`) or mutable (`~`) binding read, a `when`'s
 /// exhaustiveness (`exhaustive:`), a callable scope (`scope`) and a recorded negation
 /// (`negation`), a short circuit (`and`, `or`) and a written cast (`written`). A call names its
-/// callee by source name, so two units' bodies compare whatever order their functions were
+/// callee by source name, and a call leaving arguments to their defaults the parameters it omits
+/// (`omitting`), so two units' bodies compare whatever order their functions were
 /// declared in, and a loop label by its order of appearance (`@L0`), so two lowerings that name
 /// their loops differently compare.
 pub(super) fn render(ir: &IrFile, expression: ExprId) -> String {
@@ -428,6 +429,21 @@ fn render_node(ir: &IrFile, expression: ExprId) -> String {
                 .collect::<Vec<_>>()
                 .join(", ");
             format!("call {}({args})", ir.fn_source_names[function])
+        }
+        IrExpr::Call {
+            callee: call_callee,
+            dispatch_receiver: None,
+            args,
+        } if let Callee::LocalWithDefaults { function, defaults } = &**call_callee => {
+            let args = args
+                .iter()
+                .map(|argument| render(ir, *argument))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "call {}({args}) omitting {defaults:?}",
+                ir.fn_source_names[function]
+            )
         }
         IrExpr::InvokeFunction { func, args, .. } => {
             let operands = std::iter::once(func)
