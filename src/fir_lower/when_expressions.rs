@@ -172,7 +172,7 @@ impl BodyLowering<'_> {
         } else {
             // The block holding the subject is the checked expression; the `when` inside it yields
             // the same value.
-            self.ir.logical_types.insert(when, result_ty);
+            self.ir.set_logical_type(when, result_ty);
             Ok(self.ir.add_expr(IrExpr::Block {
                 stmts: prefix,
                 value: Some(when),
@@ -200,7 +200,7 @@ impl BodyLowering<'_> {
             .and_then(|subject| self.body.expr(subject))
             .map(|subject| subject.ty.get())
         {
-            self.ir.logical_types.insert(read, subject_ty);
+            self.ir.set_logical_type(read, subject_ty);
         }
         if let Some(stability) = subject_variable
             .and_then(|variable| self.binding_stability.get(&variable))
