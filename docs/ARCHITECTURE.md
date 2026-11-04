@@ -164,8 +164,8 @@ Compiler plugins pass through the adapter as kotlinc receives them: each compile
 `-P plugin:<id>:<key>=<value>`, and the compiler resolves each jar by the registrar it declares.
 Plugin CLI free arguments stay rejected in favour of that structured input. Before the replacement
 runs, a `<task>KrustyCheck` task passes the same compiler arguments and plugin request to
-`krusty refusals`, which prints every kotlinc argument krusty does not implement (such as AGP's
-`-Xuse-inline-scopes-numbers`) and every plugin the compiler's registry refuses (one it neither
+`krusty refusals`, which prints every kotlinc argument krusty does not implement (such as
+`-Xvalidate-bytecode`) and every plugin the compiler's registry refuses (one it neither
 reimplements nor hosts, such as Compose, Parcelize, assignment, or kapt configured by options) and
 exits 1, or exits 0. kapt's stub task (`KaptGenerateStubs`) is a Kotlin compile that writes Java
 stubs, not classes, so it is never replaced; the compile after annotation processing carries only
@@ -457,6 +457,10 @@ to reuse. LLVM is the right tool only for a future **native** backend (as in Kot
 - Representation coercions (box/unbox, erasure) are **explicit IR nodes** (`IrTypeOp::ImplicitCoercion`)
   inserted by backend lowering, not hidden in codegen — so they are visible and testable.
 - Index-based arenas (`u32` ids into `Vec`s), per krusty's no-`Box`/`Rc` invariant.
+- Facts about an expression travel on the node (position, type, origin) or in its operation's
+  payload (the checked selection), not in a side table every copy must remember. Every `IrFile`
+  field is classified for expression copies in `src/ir/expression_copy.rs`; see
+  `docs/PHASE_FACTS.md` for the rule and the migration order.
 
 Pipeline target: `checked AST → common IR → shared semantic passes → per-backend lowering + codegen`.
 Current state: the JVM backend consumes the current IR, but that IR is still partly JVM-lowered: common

@@ -206,6 +206,7 @@ mod tests {
                 crate::ir::RetainedAnnotation {
                     retention: crate::ir::AnnoRetention::Runtime,
                     annotation: crate::ir::AppliedAnnotation {
+                        written_order: None,
                         internal: type_name(internal),
                         values: vec![
                             (

@@ -11,6 +11,7 @@ use crate::jvm::jvm_class_map::type_names_map_to_same_jvm_internal;
 use crate::libraries::{OverriddenCallKind, OverriddenCallRealization};
 use crate::types::TypeName;
 
+use super::mapped_builtin_declarations::{type_safe_override_realization, OverriddenSignature};
 use super::member_dispatch::{CheckedDispatchClassifiers, MissingClassifier};
 
 fn callable_candidates(
@@ -49,15 +50,41 @@ fn function_candidates(
                     target,
                     OverriddenCallKind::Function,
                 ));
+                if let Some(fact) = callables.callable(target) {
+                    candidates.extend(fact.overridden_declarations.iter().filter_map(
+                        |declaration| {
+                            type_safe_override_realization(OverriddenSignature {
+                                owner: declaration.owner,
+                                name: &declaration.name,
+                                receiver: declaration.receiver,
+                                parameters: &declaration.params,
+                                result: declaration.ret,
+                            })
+                        },
+                    ));
+                }
             }
-            ResolvedFunctionOverrideTarget::Module(_) => {
-                pending.extend(
-                    ir.function_overrides
-                        .values()
-                        .flatten()
-                        .filter(|edge| edge.implementation == current)
-                        .map(|edge| edge.overridden),
-                );
+            // The module declaration's record lists everything it overrides, through other module
+            // overrides, wherever in the module either is declared.
+            ResolvedFunctionOverrideTarget::Module(target) => {
+                let overridden = ir
+                    .referenced_module_callables
+                    .get(&target)
+                    .map_or(&[][..], |callable| &callable.overridden_declarations);
+                for declaration in overridden {
+                    if let ResolvedFunctionOverrideTarget::External(_) = declaration.target {
+                        pending.push(declaration.target);
+                    }
+                    // A module record keeps any extension receiver among its parameters, so the
+                    // policy signature never matches one.
+                    candidates.extend(type_safe_override_realization(OverriddenSignature {
+                        owner: declaration.owner,
+                        name: &declaration.name,
+                        receiver: None,
+                        parameters: &declaration.parameters,
+                        result: declaration.result,
+                    }));
+                }
             }
         }
     }
@@ -238,6 +265,7 @@ mod tests {
             declaration_name: None,
             access: ClassifierAccess::Public,
             is_kotlin: true,
+            mapped_builtin: false,
             source: true,
             outer_instance: None,
             kind: crate::libraries::TypeKind::Class,

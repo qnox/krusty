@@ -235,7 +235,7 @@ impl ProductionSignatureSemantics<'_> {
                 expected,
             ) {
                 RejectedCandidateResult::Fixed(ty) => {
-                    let ty = if candidate.bound_inner_constructor.is_some() {
+                    let ty = if candidate.constructor.is_some() {
                         self.named_construction_result(
                             scope,
                             origin,

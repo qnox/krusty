@@ -309,12 +309,25 @@ impl CallLinker for TemplateCalls<'_> {
         )
     }
 
-    fn is_subtype(&self, sub: Ty, sup: Ty) -> bool {
-        crate::assignable::is_subtype(
-            &crate::assignable::TyCtx::new(),
-            &crate::symbol_resolver::SourceOracle(self.callees.source),
+    fn is_subtype(
+        &self,
+        parameters: &super::klib_types::KlibTypeParameters,
+        sub: Ty,
+        sup: Ty,
+    ) -> bool {
+        super::type_evidence::ordinary_subtype(
+            Some(&crate::symbol_resolver::SourceOracle(self.callees.source)),
+            parameters,
             sub,
             sup,
+        )
+    }
+
+    fn same_type(&self, left: Ty, right: Ty) -> bool {
+        super::type_evidence::same_type(
+            Some(&crate::symbol_resolver::SourceOracle(self.callees.source)),
+            left,
+            right,
         )
     }
 
@@ -358,7 +371,7 @@ impl CallLinker for TemplateCalls<'_> {
 
     fn constructor_bound(&self, parameters: &KlibTypeParameters, argument: Ty, bound: Ty) -> bool {
         let oracle = crate::symbol_resolver::SourceOracle(self.callees.source);
-        super::constructor_bounds::satisfies(Some(&oracle), parameters, argument, bound)
+        super::type_evidence::satisfies(Some(&oracle), parameters, argument, bound)
     }
 
     fn link_accessor(
@@ -508,6 +521,7 @@ impl CallLinker for TemplateCalls<'_> {
             context_count,
             singleton_dispatch: None,
             type_parameters: Vec::new(),
+            type_parameter_bounds: Some(Vec::new()),
             class_type_parameters: Vec::new(),
         })
     }
@@ -594,6 +608,11 @@ fn generic_call(
         context_count,
         singleton_dispatch: None,
         type_parameters: formals,
+        type_parameter_bounds: realization
+            .callable
+            .generic_sig
+            .as_ref()
+            .map(|signature| signature.formal_bounds.clone()),
         class_type_parameters: Vec::new(),
     })
 }
@@ -681,6 +700,7 @@ fn member_call(
         context_count: realization.callable.context_count,
         singleton_dispatch: None,
         type_parameters: Vec::new(),
+        type_parameter_bounds: Some(Vec::new()),
         class_type_parameters,
     })
 }

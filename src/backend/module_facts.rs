@@ -61,6 +61,9 @@ pub struct BackendClassifierFact {
     pub declaration_name: Option<crate::types::ClassifierDeclarationName>,
     pub access: crate::libraries::ClassifierAccess,
     pub is_kotlin: bool,
+    /// A Kotlin builtin the platform realizes by a distinct class, as its provider published it
+    /// ([`crate::libraries::LibraryType::mapped_builtin`]).
+    pub mapped_builtin: bool,
     pub source: bool,
     pub outer_instance: Option<TypeName>,
     pub kind: crate::libraries::TypeKind,
@@ -134,6 +137,7 @@ impl BackendClassifierFact {
             declaration_name: shape.declaration_name.clone(),
             access: shape.access,
             is_kotlin: shape.is_kotlin,
+            mapped_builtin: shape.mapped_builtin,
             source: shape.source_file.is_some(),
             outer_instance: shape.outer_instance,
             kind: shape.kind,
@@ -318,6 +322,13 @@ impl BackendModuleFacts {
                     ),
                     "a generated classifier identity may be published only once"
                 );
+                declaration_names.insert(
+                    crate::libraries::ClassifierDeclarationKey::Ordinary(generated.classifier),
+                    Some(crate::types::ClassifierDeclarationName::Nested {
+                        owner: generated.lexical_owner,
+                        name: generated.source_name.clone(),
+                    }),
+                );
                 generated_classifiers.push(generated.clone());
             }
             let flags = declaration_header.flags;
@@ -413,6 +424,7 @@ impl BackendModuleFacts {
                 declaration_name: classifier.declaration_name.clone(),
                 access: declaration_header.visibility.into(),
                 is_kotlin: true,
+                mapped_builtin: false,
                 source: true,
                 outer_instance,
                 kind,

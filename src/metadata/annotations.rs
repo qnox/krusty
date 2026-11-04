@@ -8,7 +8,7 @@ use crate::ir::{AppliedAnnotation, DeclarationAnnotations};
 ///
 /// The flag is the frontend's fact that the source declaration declares metadata annotations. It
 /// travels explicitly and is never reconstructed from the records: an `@OptionalExpectation`
-/// application this platform erased leaves no record yet still sets the flag. Suppressed SOURCE
+/// application this platform erased leaves no record yet still sets the flag. SOURCE
 /// provenance may retain a target carrier, but does not set this metadata flag.
 #[derive(Clone, Debug, Default)]
 pub struct MetadataAnnotations {
@@ -23,9 +23,19 @@ pub static NO_ANNOTATIONS: MetadataAnnotations = MetadataAnnotations {
 };
 
 impl MetadataAnnotations {
+    /// Retain an independently checked owner flag when its prefix applications select several
+    /// sites but this metadata field records only one site's payload.
+    pub(crate) fn with_declaration_flag(mut self, declared: bool) -> Self {
+        self.declared = declared;
+        self
+    }
+
     /// A declaration's checked annotations, recorded in declaration order.
     pub fn of(annotations: &DeclarationAnnotations) -> Self {
-        Self::with_records(annotations, annotations.applications().cloned().collect())
+        Self::with_records(
+            annotations,
+            annotations.checked_applications().cloned().collect(),
+        )
     }
 
     /// [`Self::of`] for a declaration that may carry no annotation table at all.
@@ -35,12 +45,12 @@ impl MetadataAnnotations {
 
     /// A declaration's checked annotations with the records in the order the backend writes them
     /// (the class-file order of a primary constructor's attributes, for example). `records` holds
-    /// exactly the retained applications of `annotations`.
+    /// exactly the checked applications of `annotations`.
     pub fn with_records(
         annotations: &DeclarationAnnotations,
         records: Vec<AppliedAnnotation>,
     ) -> Self {
-        debug_assert_eq!(records.len(), annotations.applications().count());
+        debug_assert_eq!(records.len(), annotations.checked_applications().count());
         Self {
             declared: annotations.declares_metadata_annotations(),
             records,

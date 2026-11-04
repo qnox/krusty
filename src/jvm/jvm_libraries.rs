@@ -79,7 +79,7 @@ use crate::jvm::names::type_descriptor;
 use crate::libraries::{
     CallSig, EmptySymbolSource, FnFlags, FnKind, FunctionInfo, FunctionSet, GenericReturnPolicy,
     GenericSig, InlineKind, LibraryCallable, LibraryConst, LibraryMember, LibraryType, PropKind,
-    PropertyInfo, PropertyProducer, PropertySet, ReturnInfo, SemanticPlatform, Visibility,
+    PropertyInfo, PropertyProducer, PropertySet, ReturnInfo, Visibility,
 };
 use crate::runtime::{PlatformRangeCtor, RangeConstruction};
 use crate::symbol_resolver::{ty_subst, ty_subst_all, ty_subst_keep_unbound};
@@ -1842,7 +1842,7 @@ impl JvmLibraries {
             // Leaving `kotlin/CharSequence` joined is also why whatever `java.lang.CharSequence` declares
             // still reaches `String` one rung up — `charAt` on every JDK, plus `getChars` as of JDK 25,
             // which added it as a `default` method. That is the price of keeping `chars`/`codePoints`,
-            // and it makes the residual leak JDK-DEPENDENT. See docs/SPEC.md.
+            // and it makes the residual leak JDK-DEPENDENT.
             let is_mapped_builtin =
                 super::jvm_class_map::maps_to_distinct_jvm_internal(internal_name);
             let builtin_class_signature = self.cp.builtin_class_signature_name(internal_name);
@@ -2486,6 +2486,7 @@ impl JvmLibraries {
                 annotation_targets: (kind == crate::libraries::TypeKind::Annotation)
                     .then(|| classpath_annotation_targets(&ci)),
                 mapped_collection: None,
+                mapped_builtin: is_mapped_builtin,
                 annotation_element_defaults: annotation_element_defaults(&ci),
                 deprecation,
             })
@@ -3329,17 +3330,7 @@ impl JvmLibraries {
                         .member_functions_with_renames(recv, &setter_name, function_renames)
                         .overloads
                         .into_iter()
-                        .find(|setter| {
-                            // Java synthetic-property pairing is declaration-shape matching, not
-                            // call overload selection. A `setX` is the setter when its single
-                            // value parameter is the getter's exact semantic storage type. The
-                            // method's return type is not part of that shape: a fluent or
-                            // otherwise non-void Java setter is still a `var`, and the assignment
-                            // discards the result. Core assignability belongs above this boundary.
-                            setter.callable.params.len() == 1
-                                && self.library_value_form(ty)
-                                    == self.library_value_form(setter.callable.params[0])
-                        });
+                        .find(|setter| self.pairs_java_setter(ty, &setter.semantic_params()));
                     let setter_visibility = setter
                         .as_ref()
                         .map_or(visibility, |setter| setter.visibility);
@@ -3951,17 +3942,7 @@ impl JvmLibraries {
             SymbolNamespace::Classifier(owner) => self.static_field_name(owner, name),
         };
         if let (SymbolNamespace::Package(_), Some(field)) = (namespace, static_field.as_ref()) {
-            if let Some(metadata) =
-                self.metadata_property_for_field(field.owner, &field.name, &field.descriptor)
-            {
-                super::top_level_properties::merge_metadata_const(
-                    name,
-                    &metadata,
-                    field,
-                    field.deprecated_hidden,
-                    &mut props,
-                );
-            }
+            self.merge_top_level_field_property(name, field, &mut props);
         }
         let hidden = self.withhold_hidden_declarations(package, name, &mut props);
         let platform_callables = match (overloads.is_empty(), props.is_empty()) {
@@ -3976,7 +3957,7 @@ impl JvmLibraries {
         // Language builtin classifiers exist independently of whether the target classpath contains
         // stdlib. Federate that classifier source with the platform record here; platform metadata wins
         // when present, while callables remain exclusively metadata/platform declarations.
-        let core = EmptySymbolSource.symbols(namespace, name);
+        let core = EmptySymbolSource::declarations(namespace, name);
         let (classifier_name, classifier_declaration, classifier, builtin_classifier) =
             if classifier.is_some() {
                 (
@@ -4909,13 +4890,7 @@ impl crate::libraries::SemanticPlatform for JvmLibraries {
                 let setter = setter_callables
                     .functions()
                     .iter()
-                    .find(|setter| {
-                        // Same pairing as a setter declared on the receiver: one value parameter
-                        // of the getter's storage type. The Java method may return anything.
-                        setter.semantic_params().len() == 1
-                            && self.library_value_form(ty)
-                                == self.library_value_form(setter.semantic_params()[0])
-                    })
+                    .find(|setter| self.pairs_java_setter(ty, &setter.semantic_params()))
                     .cloned();
                 let getter_declaration = function.stable_declaration;
                 let setter_declaration =

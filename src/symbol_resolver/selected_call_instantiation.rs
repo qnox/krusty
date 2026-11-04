@@ -11,6 +11,7 @@
 //!
 //! Extracted from the resolver root, which is migration debt that may not grow.
 
+use super::overload_selection::select_separately_mapped_receiver_overload;
 use super::*;
 use crate::types::TyKind;
 
@@ -39,7 +40,52 @@ pub(crate) fn selected_default_callable(base: &FunctionInfo) -> Option<LibraryCa
     Some(callable)
 }
 
+/// The selected declaration itself, when it fills its own omitted defaults and its body is not
+/// spliced at the call: the call keeps its identity and the target realizes the omission.
+pub(crate) fn declaration_default_callable(base: &FunctionInfo) -> Option<LibraryCallable> {
+    if !base.callable.defaults_from_declaration || base.flags.inline.can_inline() {
+        return None;
+    }
+    let mut callable = base.callable.clone();
+    callable.default_call = true;
+    Some(callable)
+}
+
 impl<'a> SymbolResolver<'a> {
+    /// Let a lambda's checked result decide applicability, as `+EagerLambdaAnalysis` does.
+    pub(crate) fn with_eager_lambda_results(mut self, eager: bool) -> Self {
+        self.eager_lambda_results = eager;
+        self
+    }
+
+    /// Tracking form used by synthesized language conventions. It preserves ambiguity and the exact
+    /// specialized return beside the selected declaration so the checker can commit one target and
+    /// lowering never has to repeat receiver or overload resolution.
+    pub(crate) fn select_receiver_function_with_params_tracking(
+        &self,
+        receiver: Ty,
+        name: &str,
+        arguments: FamilyArguments<'_>,
+        type_args: &[Ty],
+        callables: &Callables,
+        expected_result: Option<Ty>,
+    ) -> CandidateSelection<(FunctionInfo, Vec<Ty>, Ty)> {
+        match self.select_receiver_function_with_applied_receiver_tracking(
+            receiver,
+            name,
+            arguments,
+            type_args,
+            callables,
+            expected_result,
+        ) {
+            ReceiverFunctionSelection::Selected(selected) => {
+                CandidateSelection::Selected((*selected.function, selected.params, selected.ret))
+            }
+            ReceiverFunctionSelection::None => CandidateSelection::None,
+            ReceiverFunctionSelection::Ambiguous(_) => CandidateSelection::Ambiguous,
+        }
+    }
+
     /// Delegate conventions additionally need the receiver application inferred by their ordinary
     /// value arguments. For example, `D("K")` may initially have the raw type `D<>`, while
     /// `getValue(thisRef: R, ...)` fixes the owning `D<R>` to `D<String>`. Keep that application
@@ -49,25 +95,47 @@ impl<'a> SymbolResolver<'a> {
         &self,
         receiver: Ty,
         name: &str,
-        args: &[CallArgKind],
+        arguments: FamilyArguments<'_>,
         type_args: &[Ty],
         callables: &Callables,
         expected_result: Option<Ty>,
     ) -> ReceiverFunctionSelection {
-        let selected = match select_receiver_overload_from_functions_tracking(
-            self.lib,
-            receiver,
-            name,
-            args,
-            type_args,
-            ExtCtx {
-                fn_scope: self.fn_scope,
-                source: &self.src,
-                type_variables: self.type_variables,
-            },
-            callables.functions(),
-            IndexedConvention::Ordinary,
-        ) {
+        // The selected declaration is applied to its own arguments, in its parameter order.
+        let (selection, args) = match arguments {
+            FamilyArguments::Shared(args) => (
+                select_receiver_overload_from_functions_tracking(
+                    self.lib,
+                    OverloadCall {
+                        recv: receiver,
+                        name,
+                        args,
+                        type_args,
+                        indexed: IndexedConvention::Ordinary,
+                    },
+                    self.ext_ctx(),
+                    callables.functions(),
+                ),
+                args,
+            ),
+            FamilyArguments::PerCandidate { calls, source } => {
+                let functions = callables.functions();
+                let selection = select_separately_mapped_receiver_overload(
+                    self.lib,
+                    receiver,
+                    calls,
+                    source,
+                    type_args,
+                    self.ext_ctx(),
+                    functions,
+                );
+                let args = match &selection {
+                    CandidateSelectionWithTies::Selected(index) => calls[*index].args.as_slice(),
+                    _ => source,
+                };
+                (selection.map(|index| functions[index].clone()), args)
+            }
+        };
+        let selected = match selection {
             CandidateSelectionWithTies::Selected(selected) => selected,
             CandidateSelectionWithTies::None => return ReceiverFunctionSelection::None,
             CandidateSelectionWithTies::Ambiguous(candidates) => {

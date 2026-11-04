@@ -22,8 +22,25 @@ pub(super) struct LibraryConstructorMappingFailure {
     class_name: String,
 }
 
+/// A postponed function argument belongs to the rejected constructor's constraint system even
+/// when substituting its fixed type arguments gives the same displayed function type. References
+/// retain their selected declaration's diagnostic; lambdas retain their assignability diagnostic.
+pub(super) struct RejectedConstructorFunctionArgument {
+    argument: ExprId,
+    expected: Ty,
+    actual: Ty,
+    diagnostic: RejectedFunctionArgumentDiagnostic,
+}
+
+enum RejectedFunctionArgumentDiagnostic {
+    Lambda,
+    Reference(callable_reference_publication::SelectedReferenceDiagnostic),
+}
+
 pub(super) enum LibraryConstructorFailure {
     Mapping(Box<LibraryConstructorMappingFailure>),
+    /// The constructor's constraint system rejected these arguments.
+    ArgumentContradictions(Box<super::generic_argument_bounds::ArgumentContradictions>),
     TypeMismatch {
         source_argument: usize,
         expected: Ty,
@@ -42,6 +59,7 @@ pub(super) enum LibraryConstructorFailure {
         /// kotlinc's rendering of the first constructor rejected by the bound.
         constructor: String,
         bound_constructor: Option<Box<BoundConstructorDiagnostic>>,
+        postponed_arguments: Vec<RejectedConstructorFunctionArgument>,
     },
 }
 
@@ -63,12 +81,56 @@ impl LibraryConstructorFailure {
     pub(super) fn result_type(&self) -> Option<Ty> {
         match self {
             Self::TypeMismatch { result, .. } => *result,
-            Self::Mapping(_) | Self::TypeArgumentMismatch { .. } => None,
+            Self::Mapping(_)
+            | Self::ArgumentContradictions(_)
+            | Self::TypeArgumentMismatch { .. } => None,
         }
     }
 }
 
 impl Checker<'_> {
+    pub(super) fn rejected_constructor_function_arguments(
+        &self,
+        args: &[ExprId],
+        argument_slots: &[usize],
+        signature: &crate::libraries::GenericSig,
+        explicit: &[Ty],
+    ) -> Vec<RejectedConstructorFunctionArgument> {
+        let bindings = crate::symbol_resolver::seeded_gsig_binds(signature, explicit);
+        args.iter()
+            .zip(argument_slots)
+            .filter_map(|(&argument, &parameter)| {
+                let (actual, diagnostic) = match self.file.expr(argument) {
+                    Expr::Lambda { .. } => (
+                        self.expr_types[argument.0 as usize],
+                        RejectedFunctionArgumentDiagnostic::Lambda,
+                    ),
+                    Expr::CallableRef { .. } => (
+                        *self.callable_reference_types.get(&argument)?,
+                        RejectedFunctionArgumentDiagnostic::Reference(
+                            self.selected_callable_reference_diagnostics
+                                .get(&argument)?
+                                .clone(),
+                        ),
+                    ),
+                    _ => return None,
+                };
+                let declared = *signature.params.get(parameter)?;
+                let expected = crate::types::ty_subst_keep_unbound(declared, &bindings);
+                (expected.non_null().is_fun()
+                    && actual.non_null().is_fun()
+                    && !actual.mentions_error()
+                    && !actual.mentions_pending())
+                .then_some(RejectedConstructorFunctionArgument {
+                    argument,
+                    expected,
+                    actual,
+                    diagnostic,
+                })
+            })
+            .collect()
+    }
+
     /// The bound and argument of the first of a constructor's explicit type arguments `explicit`
     /// outside its bound, when every one of the classifier's `formals` is given explicitly.
     pub(super) fn explicit_constructor_bound_violation(
@@ -125,6 +187,9 @@ impl Checker<'_> {
                     self.report_call_arg_mapping_error(call, args, failure);
                 }
             }
+            LibraryConstructorFailure::ArgumentContradictions(contradictions) => {
+                self.report_argument_contradictions(call, *contradictions);
+            }
             LibraryConstructorFailure::TypeMismatch {
                 source_argument,
                 expected,
@@ -156,23 +221,53 @@ impl Checker<'_> {
                 explicit,
                 constructor,
                 bound_constructor,
+                postponed_arguments,
             } => {
+                let has_postponed_lambda = postponed_arguments.iter().any(|argument| {
+                    matches!(
+                        argument.diagnostic,
+                        RejectedFunctionArgumentDiagnostic::Lambda
+                    )
+                });
                 let reported_bound = bound_constructor.is_some_and(|bound| {
                     let display = format!("{}.{}", bound.outer.source_name(), constructor);
                     self.report_bound_inner_constructor_type_arguments(
-                        call, &explicit, &bound, &display,
+                        call,
+                        &explicit,
+                        &bound,
+                        &display,
+                        !has_postponed_lambda,
                     )
                 });
                 if !reported_bound
                     && !self.report_explicit_constructor_type_argument_bounds(
                         call,
                         classifier,
-                        !args.is_empty(),
+                        !args.is_empty() && !has_postponed_lambda,
                         &explicit,
                         &constructor,
                     )
                 {
                     self.expect_assignable(expected, actual, self.span(call), "type argument");
+                }
+                for constraint in postponed_arguments {
+                    // The failed declaration bound is already proof that this postponed
+                    // constraint cannot complete. An assignability probe would discard it
+                    // merely because both substituted types happen to display alike.
+                    match constraint.diagnostic {
+                        RejectedFunctionArgumentDiagnostic::Lambda => {
+                            self.report_assignability_error(
+                                constraint.expected,
+                                constraint.actual,
+                                self.span(constraint.argument),
+                                "argument",
+                            );
+                        }
+                        RejectedFunctionArgumentDiagnostic::Reference(declaration) => {
+                            self.diags
+                                .error(declaration.span, declaration.into_message());
+                        }
+                    }
                 }
                 for &argument in args {
                     self.report_unbound_call_result_type_parameter(scope, argument);

@@ -1,0 +1,20 @@
+# What KSP2 2.3.12 (KSPJvmMain) logs with Members.kt over aliases/: every declaration with its
+# modifiers, type parameters, supertypes and types, a type that names a type alias resolving to it.
+w: [ksp] ANNOTATION_CLASS aliases.Kept modifiers=ANNOTATION typeParameters= supertypes=kotlin.Annotation
+w: [ksp]   fun <init> kind=MEMBER abstract=false modifiers=FINAL,PUBLIC typeParameters= receiver=null (): aliases.Kept
+w: [ksp] KSTypeAlias Plain
+w: [ksp] KSTypeAlias KeptString
+w: [ksp] KSTypeAlias MaybeText
+w: [ksp] KSTypeAlias Names
+w: [ksp] KSTypeAlias Callback
+w: [ksp] CLASS aliases.Aliases modifiers= typeParameters= supertypes=kotlin.Any
+w: [ksp]   property plain mutable=false backingField=true modifiers=: aliases.Plain
+w: [ksp]   property nullablePlain mutable=false backingField=true modifiers=: aliases.Plain?
+w: [ksp]   property kept mutable=false backingField=true modifiers=: aliases.KeptString
+w: [ksp]   property maybe mutable=false backingField=true modifiers=: aliases.MaybeText
+w: [ksp]   property names mutable=false backingField=true modifiers=: aliases.Names
+w: [ksp]   property callback mutable=false backingField=true modifiers=: aliases.Callback
+w: [ksp]   property nested mutable=false backingField=true modifiers=: kotlin.collections.List<aliases.KeptString>
+w: [ksp]   property mapped mutable=false backingField=true modifiers=: kotlin.collections.Map<aliases.Plain, aliases.Names>
+w: [ksp]   fun convert kind=MEMBER abstract=false modifiers= typeParameters= receiver=null (input: aliases.Plain vararg=false default=false, callback: aliases.Callback vararg=false default=false): aliases.Names
+w: [ksp]   fun <init> kind=MEMBER abstract=false modifiers=FINAL typeParameters= receiver=null (plain: aliases.Plain vararg=false default=false, nullablePlain: aliases.Plain? vararg=false default=false, kept: aliases.KeptString vararg=false default=false, maybe: aliases.MaybeText vararg=false default=false, names: aliases.Names vararg=false default=false, callback: aliases.Callback vararg=false default=false, nested: kotlin.collections.List<aliases.KeptString> vararg=false default=false, mapped: kotlin.collections.Map<aliases.Plain, aliases.Names> vararg=false default=false): aliases.Aliases

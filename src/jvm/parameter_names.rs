@@ -93,6 +93,8 @@ pub(super) fn local_variable(
             }
             IrGeneratedParameterRole::LocalDelegateDispatch => Some("this$0".to_string()),
             IrGeneratedParameterRole::DelegateMethodReceiver => Some("<this>".to_string()),
+            // kotlinc writes no local-variable row for a mask parameter.
+            IrGeneratedParameterRole::DefaultMask => None,
         },
     }
 }
@@ -1340,6 +1342,7 @@ mod suspend_lambda_member_tests {
             IrValueCapture {
                 declaration: IrCapturedDeclaration::Variable,
                 capturer: IrCapturingCallable::Lambda,
+                crossinline_parameter: None,
             },
         );
         let lambda = SuspendLambdaParameters::new(

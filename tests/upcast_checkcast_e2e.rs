@@ -60,6 +60,47 @@ fn a_value_widened_to_its_consumers_type_is_cast_like_kotlincs() {
     }
 }
 
+/// A non-null value committed to a NULLABLE supertype is the same upcast. It is cast to a declared
+/// `Base?` parameter or local exactly as to a `Base` one, and not at all to a generic parameter
+/// whose type argument is inferred as `Base?`: that parameter is an `Object` slot. krusty recorded
+/// the nullable target as a nullability widening and cast every such value to the target's class.
+#[test]
+fn a_value_widened_to_a_nullable_supertype_is_cast_like_kotlincs() {
+    const NULLABLE: &str = "open class Base\n\
+        class Derived : Base()\n\
+        fun baseNullable(value: Base?): Int = 1\n\
+        fun toBaseNullable(value: Derived): Int = baseNullable(value)\n\
+        fun widenedNullable(value: String): CharSequence? = value\n\
+        fun <T> same(first: T, second: T): Int = 6\n\
+        fun toGenericNullable(base: Base?): Int = same(Derived(), base)\n\
+        fun storedNullable(value: Derived): Int { val held: Base? = value; return baseNullable(held) }\n";
+    let Some(built) = compare_with_kotlinc_plugin(
+        "NullableUpcast",
+        NULLABLE,
+        "NullableUpcastKt",
+        &[common::stdlib_jar()],
+        "25",
+        &[],
+    ) else {
+        eprintln!("skipping: reference kotlinc or javap unavailable");
+        return;
+    };
+    for member in [
+        "int toBaseNullable(",
+        "java.lang.CharSequence widenedNullable(",
+        "int toGenericNullable(",
+        "int storedNullable(",
+    ] {
+        let reference = method_instructions(&built.reference, member);
+        assert!(!reference.is_empty(), "{member} not found");
+        assert_eq!(
+            method_instructions(&built.krusty, member),
+            reference,
+            "{member}"
+        );
+    }
+}
+
 /// The general consumption coercion must retain kotlinc's explicit no-cast cases. These source
 /// forms pin null, a diverging value, and JVM array covariance independently from ordinary class
 /// upcasts.

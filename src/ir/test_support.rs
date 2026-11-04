@@ -5,6 +5,7 @@ use super::{DeclarationAnnotations, IrClass};
 /// A minimal well-formed `IrClass` for tests that build IR by hand and only exercise fields/functions.
 pub(crate) fn blank_class(fq: &str) -> IrClass {
     IrClass {
+        declaration_context: None,
         fq_name: fq.into(),
         declaration_name: None,
         is_source_declared: false,
