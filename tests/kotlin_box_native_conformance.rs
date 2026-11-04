@@ -525,24 +525,7 @@ fn native_source_getter_exports_admit_both_forms_of_static_dispatch() {
 // PLATFORM-SPECIFIC: the allocating export must preserve declared generic storage and operands.
 #[test]
 fn native_source_constructor_exports_preserve_storage_evaluation_and_file_initialization() {
-    let source = r#"// MODULE: lib
-package fixture
-var events: String = "I"
-class Cell<T>(val value: T) { init { events += "C" } }
-class Pair<T>(val first: T, val second: T?) { init { events += "P" } }
-fun event(value: String): String { events += value; return value }
-fun observed(): String = events
-// MODULE: main(lib)
-fun box(): String {
-    if (fixture.Cell(42).value != 42) return "Int storage"
-    if (fixture.observed() != "IC") return "initialization"
-    val pair = fixture.Pair(second = fixture.event("K"), first = fixture.event("O"))
-    if (pair.first != "O" || pair.second != "K") return "named arguments"
-    if (fixture.Cell(Long.MIN_VALUE).value != Long.MIN_VALUE) return "Long storage"
-    if (fixture.Cell<String?>(null).value != null) return "nullable storage"
-    return if (fixture.observed() == "ICKOPCC") "OK" else "evaluation order"
-}
-"#;
+    let source = include_str!("box_regressions/multimodule/sourceConstructorStorageAndEffects.kt");
     let stem = "nativeSourceConstructorStorageAndEffects";
     super::box_reference_classes::checked_box(source, stem)
         .expect("the JVM oracle must establish constructor storage and operand effects");
@@ -552,12 +535,7 @@ fun box(): String {
 // PLATFORM-SPECIFIC: the exact selected constructor identity owns the allocating entry.
 #[test]
 fn native_source_constructor_exports_select_the_primary_beside_a_secondary() {
-    let source = r#"// MODULE: lib
-package fixture
-class Choice(val value: String) { constructor(number: Int) : this("secondary") }
-// MODULE: main(lib)
-fun box(): String = fixture.Choice("OK").value
-"#;
+    let source = include_str!("box_regressions/multimodule/sourcePrimaryConstructorIdentity.kt");
     let stem = "nativeSourcePrimaryConstructorIdentity";
     super::box_reference_classes::checked_box(source, stem)
         .expect("the JVM oracle must establish the selected primary constructor");
@@ -567,14 +545,7 @@ fun box(): String = fixture.Choice("OK").value
 // PLATFORM-SPECIFIC: an inner constructor's checked enclosing operand leads its export ABI.
 #[test]
 fn native_source_constructor_exports_preserve_an_inner_enclosing_instance() {
-    let source = r#"// MODULE: lib
-package fixture
-class Envelope(val prefix: String) {
-    inner class Part(val suffix: String) { fun result(): String = prefix + suffix }
-}
-// MODULE: main(lib)
-fun box(): String = fixture.Envelope("O").Part("K").result()
-"#;
+    let source = include_str!("box_regressions/multimodule/sourceInnerConstructorOperands.kt");
     let stem = "nativeSourceInnerConstructorOperands";
     super::box_reference_classes::checked_box(source, stem)
         .expect("the JVM oracle must establish the enclosing constructor operand");
@@ -624,20 +595,8 @@ fun box(): String = fixture.Defaults().value
 // PLATFORM-SPECIFIC: imported field-layout ABI with the pinned Native module oracle.
 #[test]
 fn native_generic_field_getters_read_the_producers_declared_storage() {
-    let source = format!(
-        "// MODULE: lib\n{}\n// MODULE: main(lib)\n{}",
-        include_str!("fixtures/klib_final_field_reads/Library.kt"),
-        r#"
-fun box(): String {
-    if (fixture.makeStringCell("OK").value != "OK") return "String field"
-    if (fixture.makeIntCell(42).value != 42) return "Int field"
-    val readings = fixture.Readings("O", "K")
-    if (readings.first != "O") return "val field ordinal"
-    if (readings.second != "K") return "var field ordinal"
-    return "OK"
-}
-"#,
-    );
+    let source =
+        include_str!("box_regressions/multimodule/genericFieldGetterExports.kt").to_owned();
     let stem = "nativeGenericFieldGetters";
     super::box_reference_classes::checked_box(&source, stem)
         .expect("the JVM oracle must run the complete field-read module graph");
