@@ -931,12 +931,17 @@ mod tests {
                 "diagnostic_wording",
                 "features",
                 "frontend",
+                // Compiler plugins consume this public projection of the module's checked FIR.
+                "hosted_plugin_ir",
                 "ir",
                 "js",
                 "jvm",
                 "klib",
                 "klib_libraries",
                 "kotlin_version",
+                // A KSP driver reads resolved declaration headers through the public round
+                // projection, before asking the compiler to check source bodies.
+                "ksp_round",
                 "language_settings",
                 "language_version",
                 "lexer",
@@ -1027,9 +1032,14 @@ mod tests {
     fn assert_allowed_crate_modules_in_file(path: &Path, allowed: &[&str]) {
         let text = fs::read_to_string(path)
             .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
-        // `fx_hash` is the standard hash map and set with a fixed hasher: using one is no more a
-        // dependency on another compiler layer than using `std::collections` is.
-        let allowed: BTreeSet<_> = allowed.iter().copied().chain(["fx_hash"]).collect();
+        // `fx_hash` is the standard hash map and set with a fixed hasher, and `archive` opens a zip
+        // file: using either is no more a dependency on another compiler layer than using
+        // `std::collections` or the `zip` crate is.
+        let allowed: BTreeSet<_> = allowed
+            .iter()
+            .copied()
+            .chain(["fx_hash", "archive"])
+            .collect();
         let actual = crate_modules(&text);
         let offenders: Vec<_> = actual
             .iter()
@@ -1047,7 +1057,12 @@ mod tests {
     fn assert_allowed_external_crate_modules_in_file(path: &Path, allowed: &[&str]) {
         let text = fs::read_to_string(path)
             .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
-        let allowed: BTreeSet<_> = allowed.iter().copied().chain(["fx_hash"]).collect();
+        // As in `assert_allowed_crate_modules_in_file`: `fx_hash` and `archive` are leaf modules.
+        let allowed: BTreeSet<_> = allowed
+            .iter()
+            .copied()
+            .chain(["fx_hash", "archive"])
+            .collect();
         let actual = external_crate_modules(&text);
         let offenders: Vec<_> = actual
             .iter()

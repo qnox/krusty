@@ -4,10 +4,75 @@
 //! type-alias constructor references against the same constructor/SAM declarations and callable
 //! adaptation plan used by checked bodies, then returns only the contextual function type.
 
+use super::super::extension_reference_selection::{
+    select_extension_reference, ExtensionReferenceChoice, ExtensionReferenceRules,
+};
 use super::*;
 use crate::types::TyKind;
 
 impl ProductionSignatureSemantics<'_> {
+    /// Select, against the expected function type, the extension among `candidates` that a reference
+    /// on `receiver` names, through the same extension-reference selection as checked bodies. Each
+    /// extension's inferred result is demanded first; it can legitimately depend on other
+    /// declarations. No applicable or several equally specific extensions fail.
+    pub(super) fn select_extension_reference_shape(
+        &self,
+        scope: crate::fir::SignatureScope,
+        mut candidates: Vec<crate::libraries::FunctionInfo>,
+        receiver: crate::fir::ResolvedTy,
+        unbound: bool,
+        expected: &'static crate::types::FnSig,
+        demand: &mut dyn FnMut(
+            crate::fir::DeclarationId,
+        )
+            -> Result<crate::fir::ResolvedSignature, crate::fir::DiagnosticId>,
+    ) -> Result<crate::fir::ResolvedTy, crate::fir::DiagnosticId> {
+        candidates.retain(|candidate| candidate.kind == crate::libraries::FnKind::Extension);
+        for candidate in &mut candidates {
+            if let Some(signature) =
+                self.demanded_source_signature(None, candidate.stable_declaration, demand)?
+            {
+                let result = signature.result.get();
+                match candidate.generic_sig.as_mut() {
+                    Some(generic) => generic.ret = result,
+                    None => candidate.callable.ret = result,
+                }
+            }
+        }
+        let module = crate::module_symbols::ModuleSymbols::for_file(self.table, scope.source.raw());
+        let source = crate::symbol_source::CompositeSource::new(vec![
+            &module as &dyn crate::symbol_source::SymbolSource,
+            &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
+        ]);
+        let rules = SignatureReferenceRules {
+            oracle: crate::symbol_resolver::SourceOracle(&source),
+            context: crate::assignable::TyCtx::new(),
+        };
+        let ExtensionReferenceChoice::Selected(selected) = select_extension_reference(
+            &source,
+            &candidates,
+            receiver.get(),
+            unbound,
+            Some(expected),
+            &rules,
+        ) else {
+            return Err(Self::failure());
+        };
+        let (function, plan, _) = *selected;
+        let mut parameters = function.semantic_params().into_owned();
+        if unbound {
+            let context_count = function.context_count.min(parameters.len());
+            parameters.insert(context_count, receiver.get());
+        }
+        let shape = super::super::callable_reference_selection::realize_expected_shape(
+            expected,
+            &parameters,
+            function.callable.ret,
+            &plan,
+        );
+        crate::fir::ResolvedTy::new(shape).map_err(|_| Self::failure())
+    }
+
     /// Select, against the expected function type, the receiver-less function a callable reference
     /// names among a caller-collected receiver-less candidate family, each with its finalized
     /// signature. More than one distinct applicable shape is a failure.
@@ -170,7 +235,7 @@ impl ProductionSignatureSemantics<'_> {
         let Some(alias) = alias else {
             return crate::fir::ResolvedTy::new(constructed).map_err(|_| Self::failure());
         };
-        self.record_alias_constructor_result(
+        let result = self.record_alias_constructor_result(
             origin,
             self.apply_source_alias_constructor_result(
                 scope,
@@ -179,7 +244,17 @@ impl ProductionSignatureSemantics<'_> {
                 argument,
                 expected.map(crate::fir::ResolvedTy::get),
             ),
-        )
+        )?;
+        if alias.explicit_arguments.is_empty() {
+            self.selected_calls.record_inferred_abbreviation(
+                origin,
+                super::selected_call_facts::InferredAbbreviation {
+                    formals: alias.formals.into_boxed_slice(),
+                    expansion: alias.expansion,
+                },
+            );
+        }
+        Ok(result)
     }
 
     /// The type a constructor call through `alias` produces, with the abbreviation it carries:
@@ -686,5 +761,33 @@ impl ProductionSignatureSemantics<'_> {
                 .record_abbreviation(origin, abbreviation);
         }
         Ok(result)
+    }
+}
+
+/// The signature graph's assignability oracle, the relation checked bodies use. Its candidates are already filtered for access, and it
+/// holds no postponed-call evidence beyond the expected shape.
+struct SignatureReferenceRules<'s> {
+    oracle: crate::symbol_resolver::SourceOracle<'s>,
+    context: crate::assignable::TyCtx,
+}
+
+impl ExtensionReferenceRules for SignatureReferenceRules<'_> {
+    fn bound_admits(&self, actual: Ty, bound: Ty) -> bool {
+        self.assignable(actual, bound)
+    }
+
+    fn assignable(&self, actual: Ty, target: Ty) -> bool {
+        crate::assignable::is_assignable(&self.context, &self.oracle, actual, target)
+    }
+
+    fn accessible(&self, _function: &crate::libraries::FunctionInfo) -> bool {
+        true
+    }
+
+    fn at_least_as_specific(&self, left: &[Ty], right: &[Ty]) -> bool {
+        left.len() == right.len()
+            && left.iter().zip(right).all(|(left, right)| {
+                crate::assignable::is_subtype(&self.context, &self.oracle, *left, *right)
+            })
     }
 }

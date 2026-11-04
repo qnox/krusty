@@ -275,11 +275,13 @@ fn published_chain(libraries: &JvmLibraries, classifier: TypeName) -> Option<Pub
                 .iter()
                 .find(|property| property.name.as_str() == &**name)
                 .filter(|property| stored(property))?;
-            // Annotations inside the element's type (a serializer of its own for a type argument)
-            // change its wire shape, and this record carries none.
-            if element.annotated_type {
-                return None;
-            }
+            // The annotations inside the element's type (a serializer of its own for a type
+            // argument) choose its serializers; a type this provider cannot spell fully, or one
+            // whose annotations ask for a serializer the record cannot state, declines.
+            let type_spelling = element
+                .type_spelling
+                .clone()
+                .filter(type_use_serializers_stated)?;
             let annotations = match &property.annotation_method {
                 Some(method) => element_annotations(libraries, classifier, method)?,
                 None => ElementAnnotations::default(),
@@ -315,6 +317,7 @@ fn published_chain(libraries: &JvmLibraries, classifier: TypeName) -> Option<Pub
                 serial_name: annotations.serial_name,
                 serializer: annotations.serializer,
                 contextual: annotations.contextual,
+                type_spelling,
             })
         })
         .collect::<Option<Box<[_]>>>()?;
@@ -411,6 +414,34 @@ fn element_annotations(
         }
     }
     Some(annotations)
+}
+
+/// Whether every serialization annotation inside `spelled` is a `@Serializable(with = …)`, the
+/// one type-use serializer choice the element record states. A type-use `@Contextual` or
+/// `@Polymorphic` wraps the element's serializer, and the subclass would otherwise fall back to
+/// the type's ordinary serializer.
+fn type_use_serializers_stated(spelled: &crate::spelling::Spelled) -> bool {
+    use crate::spelling::TypeUseAnnotation;
+    let serializable = type_name("kotlinx/serialization/Serializable");
+    spelled
+        .annotations
+        .iter()
+        .chain(&spelled.expansion_annotations)
+        .all(|annotation| match annotation {
+            TypeUseAnnotation::Checked(annotation) => {
+                !annotation
+                    .annotation
+                    .package_matches("kotlinx/serialization")
+                    || annotation.annotation == serializable
+                        && annotation.arguments.iter().any(|(name, _)| name == "with")
+            }
+            TypeUseAnnotation::Bound(_) => false,
+        })
+        && spelled.args.iter().all(type_use_serializers_stated)
+        && spelled
+            .alias_args
+            .iter()
+            .all(|(_, argument)| type_use_serializers_stated(argument))
 }
 
 /// `@Serializable` without its own `with` serializer: the plugin generates the serializer.

@@ -5,12 +5,33 @@ use super::{ExprId, IrClass, IrFile, IrGenericSig, IrTypeParameter};
 use crate::types::{Ty, TypeName};
 
 impl IrFile {
+    pub(crate) fn record_declared_class_self_type(&mut self, classifier: TypeName, self_type: Ty) {
+        assert_eq!(self_type.kotlin_class_internal(), Some(classifier));
+        let previous = self.declared_class_self_types.insert(classifier, self_type);
+        assert!(
+            previous.is_none_or(|previous| previous == self_type),
+            "a class declaration cannot change its checked self application"
+        );
+    }
+
+    pub(crate) fn declared_class_self_type(&self, classifier: TypeName) -> Option<Ty> {
+        self.declared_class_self_types.get(&classifier).copied()
+    }
+
     pub fn mark_synthetic_class(&mut self, internal: TypeName) {
         self.synthetic_classes.insert(internal);
     }
 
     pub fn is_synthetic_class(&self, internal: TypeName) -> bool {
         self.synthetic_classes.contains(&internal)
+    }
+
+    pub(crate) fn mark_declarationless_class(&mut self, internal: TypeName) {
+        self.declarationless_classes.insert(internal);
+    }
+
+    pub(crate) fn is_declarationless_class(&self, internal: TypeName) -> bool {
+        self.declarationless_classes.contains(&internal)
     }
 
     pub fn mark_deprecated_class(&mut self, internal: TypeName) {

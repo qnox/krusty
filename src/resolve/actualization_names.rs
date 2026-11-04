@@ -12,6 +12,18 @@ struct HeaderModuleClassifiers<'a> {
 }
 
 impl SymbolSource for HeaderModuleClassifiers<'_> {
+    fn classifier_declaration_name(
+        &self,
+        declaration: crate::libraries::ClassifierDeclarationKey,
+    ) -> Option<Option<crate::types::ClassifierDeclarationName>> {
+        match declaration {
+            crate::libraries::ClassifierDeclarationKey::Ordinary(identity) => {
+                self.declarations.contains(&identity).then_some(None)
+            }
+            crate::libraries::ClassifierDeclarationKey::TypeAlias(_) => None,
+        }
+    }
+
     fn symbols(
         &self,
         namespace: crate::symbol_source::SymbolNamespace,

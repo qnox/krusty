@@ -26,11 +26,15 @@ fn nested_class_library() -> std::path::PathBuf {
         .0
 }
 
-/// Compile `source` with kotlinc and krusty against the Java library, and require `class` to be
+/// Compile `source` with kotlinc and krusty against the Java library, and require its facade to be
 /// byte-identical and to list exactly `rows` (inner names, in table order) in `InnerClasses`.
 fn assert_identical_with_rows(stem: &str, source: &str, rows: &[&str]) {
+    assert_class_identical_with_rows(stem, source, &format!("{stem}Kt"), rows);
+}
+
+/// [`assert_identical_with_rows`] for any one `class` the file writes.
+fn assert_class_identical_with_rows(stem: &str, source: &str, class: &str, rows: &[&str]) {
     let library = nested_class_library();
-    let class = format!("{stem}Kt");
     let dir = common::scratch_dir().expect("scratch directory");
     let reference = dir.join("ref");
     std::fs::create_dir_all(&reference).expect("reference output directory");
@@ -59,7 +63,7 @@ fn assert_identical_with_rows(stem: &str, source: &str, rows: &[&str]) {
         });
     let (_, actual) = classes
         .iter()
-        .find(|(name, _)| *name == class)
+        .find(|(name, _)| name == class)
         .unwrap_or_else(|| panic!("{stem}: krusty did not emit {class}"));
 
     let listed = |bytes: &[u8]| {
@@ -110,6 +114,29 @@ fn a_type_argument_in_a_signature_gets_its_row() {
         "SignatureNested",
         "import jlib.Api\nfun generic(items: List<Api.Item>?): Int = 1\n",
         &["jlib/Api$Item"],
+    );
+}
+
+/// An anonymous object names `Api.Key` only in its `EnclosingMethod` descriptor: the enclosing
+/// function's parameter. kotlinc maps that descriptor too, so the object lists the row.
+#[test]
+fn an_enclosing_method_descriptor_gets_its_row_in_an_object() {
+    assert_class_identical_with_rows(
+        "EnclosingObject",
+        "import jlib.Api\nfun made(key: Api.Key?): Any = object {}\n",
+        "EnclosingObjectKt$made$1",
+        &["EnclosingObjectKt$made$1", "jlib/Api$Key"],
+    );
+}
+
+/// A suspend lambda's class names `Api.Key` only in its `EnclosingMethod` descriptor.
+#[test]
+fn an_enclosing_method_descriptor_gets_its_row_in_a_suspend_lambda() {
+    assert_class_identical_with_rows(
+        "EnclosingLambda",
+        "import jlib.Api\nfun made(key: Api.Key?): suspend () -> Int = { 1 }\n",
+        "EnclosingLambdaKt$made$1",
+        &["EnclosingLambdaKt$made$1", "jlib/Api$Key"],
     );
 }
 

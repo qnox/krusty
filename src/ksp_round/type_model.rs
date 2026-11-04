@@ -166,9 +166,10 @@ impl TypeParameterScope {
 /// its own and inherits none, and the same of each argument whose spelling is the matching
 /// written argument. An argument the spelling does not write keeps its annotations undescribed.
 ///
-/// `None` when the type, or any type argument within it, names a type alias: KSP resolves such a
-/// type to the alias, with the alias's own arguments and annotations, which the round does not
-/// describe yet, so it leaves the type undescribed rather than report the expansion.
+/// KSP resolves a type that names a type alias to the alias: nullable only where the use site
+/// writes `?`, without the annotations the alias's right-hand side states. `None` when the round
+/// cannot say so: an alias applied to type arguments, or one named by an argument the spelling
+/// does not write.
 pub(super) fn as_written(
     file: &File,
     spelling: &TypeRef,
@@ -176,20 +177,20 @@ pub(super) fn as_written(
     mut ty: KspType,
 ) -> Option<KspType> {
     if let Some(spelled) = spelled {
-        if names_alias(spelled) {
-            return None;
-        }
-        mark_unannotated(file, spelling, spelled, &mut ty);
+        abbreviate(file, spelling, spelled, &mut ty, true)?;
     }
     Some(ty)
 }
 
-/// Whether `spelled`, or any argument within it, names a type alias.
-fn names_alias(spelled: &Spelled) -> bool {
-    spelled.alias.is_some() || spelled.args.iter().any(names_alias)
-}
-
-fn mark_unannotated(file: &File, spelling: &TypeRef, spelled: &Spelled, ty: &mut KspType) {
+/// Marks `ty` as [`as_written`] describes, putting each alias it names in place of its expansion.
+/// `mark` says whether the enclosing type leaves annotations to be described here at all.
+fn abbreviate(
+    file: &File,
+    spelling: &TypeRef,
+    spelled: &Spelled,
+    ty: &mut KspType,
+    mark: bool,
+) -> Option<()> {
     let inside = |span: crate::diag::Span, offset: u32| span.lo <= offset && offset < span.hi;
     let own_annotation = file.type_annotations.keys().any(|&offset| {
         inside(spelling.span, offset)
@@ -197,16 +198,28 @@ fn mark_unannotated(file: &File, spelling: &TypeRef, spelled: &Spelled, ty: &mut
                 .targs
                 .iter()
                 .any(|argument| inside(argument.span, offset))
-    });
-    if own_annotation
-        || !spelled.annotations.is_empty()
-        || !spelled.expansion_annotations.is_empty()
-    {
-        return;
+    }) || !spelled.annotations.is_empty();
+    if let Some(alias) = spelled.alias {
+        if !spelled.alias_args.is_empty() {
+            return None;
+        }
+        *ty = KspType {
+            declaration: KspTypeDeclaration::TypeAlias {
+                qualified_name: qualified_name(alias),
+                package_name: alias.package().replace('/', "."),
+            },
+            nullable: spelling.nullable(),
+            arguments: Vec::new(),
+            unannotated: mark && !own_annotation,
+        };
+        return Some(());
     }
-    ty.unannotated = true;
+    let mark = mark && !own_annotation && spelled.expansion_annotations.is_empty();
+    if mark {
+        ty.unannotated = true;
+    }
     if spelling.targs.len() != ty.arguments.len() {
-        return;
+        return (!spelled.args.iter().any(names_alias)).then_some(());
     }
     for (index, (written, argument)) in spelling.targs.iter().zip(&mut ty.arguments).enumerate() {
         match argument {
@@ -214,10 +227,16 @@ fn mark_unannotated(file: &File, spelling: &TypeRef, spelled: &Spelled, ty: &mut
             KspTypeArgument::Invariant(argument)
             | KspTypeArgument::Out(argument)
             | KspTypeArgument::In(argument) => {
-                mark_unannotated(file, written, spelled.arg(index), argument)
+                abbreviate(file, written, spelled.arg(index), argument, mark)?
             }
         }
     }
+    Some(())
+}
+
+/// Whether `spelled`, or any argument within it, names a type alias.
+fn names_alias(spelled: &Spelled) -> bool {
+    spelled.alias.is_some() || spelled.args.iter().any(names_alias)
 }
 
 pub(super) fn class_type(qualified_name: &str) -> KspType {

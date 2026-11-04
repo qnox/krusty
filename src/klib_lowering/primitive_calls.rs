@@ -11,8 +11,6 @@ use crate::klib_libraries::KlibDeclarationBodies;
 use crate::libraries::{
     CompilerIntrinsic, KlibBodyCallable, KlibDeclarationSignature, PrimitiveUnaryIntrinsic,
 };
-use crate::metadata::klib_ir::tree::{KlibIrNullability, KlibIrType};
-use crate::metadata::klib_ir::{KlibIrSignature, KlibIrSymbolKind};
 use crate::types::Ty;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -140,20 +138,7 @@ fn authenticated_header(
         formals,
         ..
     } = super::class_headers::authenticate(selected, bodies)?;
-    let parameters = &class.parameters;
-    let dispatch = function
-        .dispatch_receiver
-        .as_ref()
-        .ok_or_else(|| mismatch("a common primitive has no serialized dispatch receiver"))?;
-    // Type conversion interns class paths, not signature masks. Authenticate the complete raw
-    // receiver before converting it through the class's exact formal binder.
-    if !matches!(arena.ty(dispatch.ty), KlibIrType::Simple { classifier, nullability: KlibIrNullability::NotSpecified | KlibIrNullability::DefinitelyNotNull, .. }
-        if classifier.kind == KlibIrSymbolKind::Class && classifier.signature == KlibIrSignature::Public(class.signature.clone()))
-    {
-        return Err(mismatch(
-            "the serialized primitive receiver names a different class identity",
-        ));
-    }
+    super::class_headers::authenticate_receiver(class, arena, function)?;
     let header = raw_function_header_with_class(
         Some(selected),
         HeaderPurpose::External,
@@ -162,12 +147,7 @@ fn authenticated_header(
         types,
     )?;
     let (params, _, contexts, extension, receiver) = header.linked_signature();
-    let expected_receiver = if parameters.formals.is_empty() {
-        crate::types::builtin_semantic(class.classifier)
-            .unwrap_or_else(|| Ty::obj_name(class.classifier))
-    } else {
-        Ty::obj_args_name(class.classifier, &parameters.formals)
-    };
+    let expected_receiver = super::class_headers::declared_receiver(class);
     if receiver != Some(expected_receiver) || params.len() != arity || contexts != 0 || extension {
         return Err(mismatch(
             "the serialized primitive receiver or arguments disagree with its class contract",

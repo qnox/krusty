@@ -15,7 +15,9 @@ pub use compiler_arguments::{
     case_kotlinc_arguments, reference_only_kotlinc_arguments, unit_compiler_configuration,
     unit_kotlinc_arguments, UnitCompilerConfiguration,
 };
-pub use reference_jvm::{reference_jvm_acceptance, ReferenceJvmAcceptance};
+pub use reference_jvm::{
+    reference_jvm_acceptance, reference_jvm_properties, ReferenceJvmAcceptance,
+};
 
 /// Recursively collect Kotlin sources in deterministic path order. A source file is also accepted as
 /// the root, which keeps focused survey/debug invocations on the same discovery path as corpus runs.
@@ -522,6 +524,9 @@ pub struct ExtraLibs {
     pub reflect: bool,
     pub stdlib_jdk8: bool,
     pub coroutines: bool,
+    /// `// WITH_COMPOSE`: the Compose runtime, which the case compiles with the Compose compiler
+    /// plugin (see [`compiler_arguments::case_kotlinc_arguments`]).
+    pub compose: bool,
 }
 
 pub fn extra_libs(src: &str) -> ExtraLibs {
@@ -529,6 +534,7 @@ pub fn extra_libs(src: &str) -> ExtraLibs {
         reflect: directive(src, "WITH_REFLECT"),
         stdlib_jdk8: directive(src, "STDLIB_JDK8"),
         coroutines: directive(src, "WITH_COROUTINES"),
+        compose: directive(src, "WITH_COMPOSE"),
     }
 }
 

@@ -1328,6 +1328,35 @@ fn primary_constructor_parameter_precedes_peer_inherited_nested_classifiers() {
     run_mixed(&java, kotlin);
 }
 
+/// A Java interface's nested class reaches neither a Kotlin sub-interface nor an implementing
+/// class by its simple name, exactly as for a Kotlin interface.
+#[test]
+fn java_interface_nested_class_is_not_inherited_by_sub_interface_or_implementer() {
+    let java = [(
+        "fixtures/Outer.java",
+        "package fixtures; public interface Outer { class Nested {} }",
+    )];
+    let kotlin = "package fixtures\n\
+                  \n\
+                  interface Sub : Outer {\n\
+                  \x20   fun make(): Nested = Nested()\n\
+                  }\n\
+                  \n\
+                  abstract class Impl : Outer {\n\
+                  \x20   fun make(): Nested = Nested()\n\
+                  }\n";
+    let Some((javadir, _)) = compile_java(&java) else {
+        eprintln!("skipping: JDK unavailable");
+        return;
+    };
+    let result = common::compiler_diagnostics(
+        &[("JavaInterfaceNestedScope.kt", kotlin)],
+        std::slice::from_ref(&javadir),
+    );
+    cleanup(&javadir);
+    common::expect_identical_rejection(&result, "java_interface_nested_classifier_scope");
+}
+
 #[test]
 fn private_nested_classifier_from_java_base_does_not_shadow_source_type() {
     run_mixed(

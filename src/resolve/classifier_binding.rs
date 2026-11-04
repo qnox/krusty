@@ -16,6 +16,23 @@ pub(super) struct SelectedTypeAlias {
     pub(super) expansion_spelling: crate::spelling::Spelled,
 }
 
+/// The classifier header being checked, and which part of it.
+#[derive(Clone, Copy)]
+pub(super) struct ClassifierHeader {
+    pub(super) owner: TypeName,
+    part: ClassifierHeaderPart,
+}
+
+/// Both parts see the owner's own and enclosing nested classifiers and the classifiers inherited by
+/// enclosing classes, whose bodies surround the header. Only primary-constructor parameters see the
+/// owner's body scope, and with it the classifiers the owner itself inherits; type-parameter bounds
+/// stay outside that body.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ClassifierHeaderPart {
+    TypeParameterBounds,
+    PrimaryConstructor,
+}
+
 type SelectedAliasProvenance = Result<Option<SelectedTypeAlias>, InvalidAliasProvenance>;
 
 #[derive(Clone, Copy)]
@@ -216,7 +233,11 @@ impl Checker<'_> {
                 return binding;
             }
         }
-        match self.inherited_nested_type_name(root_name) {
+        let inherited = match self.inherited_nested_type_name(root_name) {
+            InheritedNestedClassifier::NotFound => self.classifier_header_inherited_type(root_name),
+            inherited => inherited,
+        };
+        match inherited {
             InheritedNestedClassifier::Found(internal) => {
                 if let Some(binding) = offer(internal, None) {
                     return binding;
@@ -363,26 +384,6 @@ impl Checker<'_> {
                 }
                 CandidateSelectionWithTies::None => {}
             }
-        }
-        match self
-            .classifier_header_owner
-            .map_or(InheritedNestedClassifier::NotFound, |owner| {
-                self.inherited_nested_type_for_owner(root_name, owner)
-            }) {
-            InheritedNestedClassifier::Found(internal) => {
-                if let Some(binding) = offer(internal, None) {
-                    return binding;
-                }
-            }
-            InheritedNestedClassifier::Ambiguous => {
-                return nearest_miss.take().unwrap_or((
-                    InheritedNestedClassifier::Ambiguous,
-                    Some(ClassifierMiss::Unresolved(root_name.clone())),
-                    None,
-                    None,
-                ));
-            }
-            InheritedNestedClassifier::NotFound => {}
         }
         if let Some(miss) = nearest_miss.take() {
             return miss;
@@ -601,7 +602,7 @@ impl Checker<'_> {
     /// owned by enclosing lexical classifiers. Supertype-list resolution does not install this
     /// context; primary-constructor parameter declarations do.
     fn classifier_header_lexical_type_name(&self, name: &str) -> Option<TypeName> {
-        let owner = self.classifier_header_owner?;
+        let owner = self.classifier_header?.owner;
         if owner.nested_segment_ref() == name {
             return Some(owner);
         }
@@ -619,6 +620,43 @@ impl Checker<'_> {
             enclosing = candidate_owner.nested_owner();
         }
         None
+    }
+
+    /// Enters `owner`'s classifier header at its primary constructor, returning the header to
+    /// restore once the header has been checked.
+    pub(super) fn enter_classifier_header(
+        &mut self,
+        owner: Option<TypeName>,
+    ) -> Option<ClassifierHeader> {
+        let part = ClassifierHeaderPart::PrimaryConstructor;
+        std::mem::replace(
+            &mut self.classifier_header,
+            owner.map(|owner| ClassifierHeader { owner, part }),
+        )
+    }
+
+    /// Moves the current classifier header on to its type-parameter bounds.
+    pub(super) fn enter_classifier_type_parameter_bounds(&mut self) {
+        if let Some(header) = &mut self.classifier_header {
+            header.part = ClassifierHeaderPart::TypeParameterBounds;
+        }
+    }
+
+    /// Inherited nested classifiers visible in the current classifier header part (see
+    /// [`ClassifierHeaderPart`]). They rank with the lexical class rungs, ahead of the file and imports.
+    fn classifier_header_inherited_type(&self, name: &str) -> InheritedNestedClassifier {
+        let mut owner = self.classifier_header.and_then(|header| match header.part {
+            ClassifierHeaderPart::PrimaryConstructor => Some(header.owner),
+            ClassifierHeaderPart::TypeParameterBounds => header.owner.nested_owner(),
+        });
+        while let Some(candidate_owner) = owner {
+            match self.inherited_nested_type_for_owner(name, candidate_owner) {
+                InheritedNestedClassifier::NotFound => {}
+                found => return found,
+            }
+            owner = candidate_owner.nested_owner();
+        }
+        InheritedNestedClassifier::NotFound
     }
 
     fn invalid_alias_selection(
@@ -807,6 +845,7 @@ mod tests {
             target,
             Some(crate::libraries::AliasExpansion {
                 identity: alias,
+                declaration_name: None,
                 target: other,
                 formals: vec!["T".to_string()],
                 expansion: Ty::obj_name(other),

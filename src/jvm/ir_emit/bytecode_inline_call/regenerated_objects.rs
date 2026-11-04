@@ -15,6 +15,7 @@ use crate::jvm::inliner::{
     copy_sam_wrapper, regenerate, AnonymousObjects, CallSite, CallSiteSource, ClassNameGenerators,
     InlineError, ObjectLambda, RegeneratedObject, Regeneration, RegenerationError,
 };
+use crate::jvm::ir_emit::signature_formatter::Wildcards;
 use crate::jvm::ir_emit::JvmSignatureFormatter;
 use crate::jvm::reified_arguments::ReifiedArguments;
 use crate::jvm::source_map::SourceMap;
@@ -264,9 +265,7 @@ impl RegeneratedObjectNames {
     }
 }
 
-/// The objects of one call to `callee`. The first inlining of a body only settles whether the port
-/// covers it (`commit == false`): it names and writes each copy without keeping either, so the
-/// inlining that is written numbers its copies from the same point.
+/// The objects of one call to `callee`: each copy is named and kept as the inlining writes it.
 pub(super) struct CallObjects<'a> {
     ir: &'a IrFile,
     bodies: &'a dyn MethodBodies,
@@ -279,7 +278,6 @@ pub(super) struct CallObjects<'a> {
     /// kotlinc's `AnonymousObjectTransformer` rewrites the copied class's annotation with them.
     metadata_stamp: crate::jvm::classfile::MetadataStamp,
     callee: String,
-    commit: bool,
     /// The caller's source map as the call's lambdas left it: their lines are lines of it.
     caller_lines: SourceMap,
     value_classes: Rc<ValueClassDescriptors>,
@@ -299,7 +297,6 @@ impl<'a> Emitter<'a> {
         &self,
         call_expression: u32,
         callee: &str,
-        commit: bool,
         caller_lines: SourceMap,
     ) -> CallObjects<'a> {
         let reified = crate::jvm::reified_operations::splice_arguments(
@@ -319,7 +316,6 @@ impl<'a> Emitter<'a> {
             major: self.cw.major(),
             metadata_stamp: self.metadata_stamp,
             callee: callee.to_string(),
-            commit,
             caller_lines,
             value_classes: self.cw.value_classes(),
             reified,
@@ -327,16 +323,17 @@ impl<'a> Emitter<'a> {
             source_file: self.cw.source_file_name(),
             call_line: self
                 .ir
-                .expr_source_lines
-                .get(&call_expression)
-                .and_then(|&line| u16::try_from(line.checked_sub(1)?).ok()),
+                .source_line(call_expression)
+                .and_then(|line| u16::try_from(line.checked_sub(1)?).ok()),
         }
     }
 }
 
 impl CallObjects<'_> {
     /// Each of the callee's type parameters with its argument at this call, as the signature
-    /// kotlinc's `TypeParameterMappings` writes for it (`mapTypeParameter`).
+    /// kotlinc's `TypeParameterMappings` writes for it (`mapTypeParameter`, in its
+    /// `GENERIC_ARGUMENT` mode: `List<String>` signs `List<+String>`, the declaration-site wildcard
+    /// a parameter position would drop over a final class kept).
     fn type_arguments(&self, site: &RegenerationSite<'_>) -> Option<Vec<(String, String)>> {
         let formatter = JvmSignatureFormatter::with_symbols(self.ir, site.symbols, self.run);
         let Some(arguments) = self
@@ -348,7 +345,7 @@ impl CallObjects<'_> {
         };
         arguments
             .iter()
-            .map(|(name, ty)| Some((name.clone(), formatter.ty(ty)?)))
+            .map(|(name, ty)| Some((name.clone(), formatter.ty_at(ty, Wildcards::Generic)?)))
             .collect()
     }
 }
@@ -363,6 +360,7 @@ impl AnonymousObjects for CallObjects<'_> {
         class: &str,
         constructor_desc: &str,
         lambdas: &[ObjectLambda<'_>],
+        suspend_values: &[usize],
         prior_classes: &[(String, String)],
     ) -> Result<RegeneratedObject, InlineError> {
         let unsupported =
@@ -384,13 +382,6 @@ impl AnonymousObjects for CallObjects<'_> {
             .map_err(|_| unsupported("an object class that does not read"))?;
         let mut names = self.run.regenerated_object_names.0.borrow_mut();
         let generators = names.entry(owner.clone()).or_default();
-        let mut scratch;
-        let generators = if self.commit {
-            generators
-        } else {
-            scratch = generators.clone();
-            &mut scratch
-        };
         // A SAM wrapper is copied, not regenerated: kotlinc replays it under the calling class's
         // name once and shares the copy among that class's inline calls.
         let wrapper = sam_wrapper_copy_name(self.bodies, generators, &owner, class)
@@ -398,7 +389,7 @@ impl AnonymousObjects for CallObjects<'_> {
         if let Some((new_class, first)) = wrapper {
             let bytes = copy_sam_wrapper(&original, &new_class, self.major)
                 .map_err(InlineError::Regeneration)?;
-            if self.commit && first {
+            if first {
                 self.run
                     .machine_classes
                     .borrow_mut()
@@ -437,6 +428,7 @@ impl AnonymousObjects for CallObjects<'_> {
                 major: self.major,
                 metadata_stamp: self.metadata_stamp,
                 lambdas,
+                suspend_values,
                 caller_lines: &self.caller_lines,
                 classes: &self.bodies,
                 value_classes: &self.value_classes,
@@ -457,12 +449,10 @@ impl AnonymousObjects for CallObjects<'_> {
                 shared_wrappers.push((wrapper.name, wrapper.bytes));
             }
         }
-        if self.commit {
-            let mut classes = self.run.machine_classes.borrow_mut();
-            classes.push((new_class.clone(), regenerated.bytes));
-            classes.extend(regenerated.nested);
-            classes.extend(shared_wrappers);
-        }
+        let mut classes = self.run.machine_classes.borrow_mut();
+        classes.push((new_class.clone(), regenerated.bytes));
+        classes.extend(regenerated.nested);
+        classes.extend(shared_wrappers);
         Ok(RegeneratedObject {
             name: new_class,
             constructor_desc: regenerated.constructor_desc,
@@ -493,7 +483,7 @@ impl AnonymousObjects for CallObjects<'_> {
             return Err(unsupported("more than one constructor"));
         }
         let descriptor = constructor.desc.clone();
-        self.regenerate(class, &descriptor, &[], prior_classes)
+        self.regenerate(class, &descriptor, &[], &[], prior_classes)
     }
 }
 

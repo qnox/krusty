@@ -75,13 +75,29 @@ abstract class SourceAccessor implements KSPropertyAccessor {
     }
 
     static final class Getter extends SourceAccessor implements KSPropertyGetter {
+        // Whether the return type is the property's, as KSP2 serves a source getter that writes
+        // none of its own; otherwise the query is refused.
+        boolean returnsPropertyType;
+        private SourceTypeReference returnType;
+
         Getter(SourceProperty property) {
             super(property);
         }
 
+        // A reference of its own, of the getter's origin and with the getter as its parent, to the
+        // property's type, as KSP2 serves it.
         @Override
         public KSTypeReference getReturnType() {
-            throw Nodes.notImplemented("KSPropertyGetter.returnType");
+            if (!returnsPropertyType) {
+                throw Nodes.notImplemented("KSPropertyGetter.returnType");
+            }
+            if (returnType == null) {
+                SourceTypeReference type = (SourceTypeReference) property.getType();
+                returnType = new SourceTypeReference(this);
+                returnType.origin = origin;
+                returnType.type = type.type;
+            }
+            return returnType;
         }
 
         @Override

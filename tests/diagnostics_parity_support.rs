@@ -41,6 +41,39 @@ pub(super) fn errors(output: &str) -> Vec<ObservedError> {
         .collect()
 }
 
+/// Every error with its complete message, continuation lines included: an ambiguity lists its
+/// candidates on the lines after its header. kotlinc follows each diagnostic with the source line
+/// and a caret line, which `echoes_source` drops.
+pub(super) fn complete_errors(output: &str, echoes_source: bool) -> Vec<ObservedError> {
+    let mut blocks: Vec<(Option<ObservedError>, Vec<&str>)> = Vec::new();
+    for line in output.lines() {
+        if line.starts_with("krusty: ") {
+            continue;
+        }
+        if let Some(error) = errors(line).pop() {
+            blocks.push((Some(error), Vec::new()));
+        } else if line.contains(": warning: ") {
+            blocks.push((None, Vec::new()));
+        } else if let Some((_, continuation)) = blocks.last_mut() {
+            continuation.push(line);
+        }
+    }
+    blocks
+        .into_iter()
+        .filter_map(|(error, mut continuation)| {
+            let mut error = error?;
+            if echoes_source {
+                continuation.truncate(continuation.len().saturating_sub(2));
+            }
+            for line in continuation {
+                error.message.push('\n');
+                error.message.push_str(line);
+            }
+            Some(error)
+        })
+        .collect()
+}
+
 pub(super) fn first_error(output: &str) -> Option<ObservedError> {
     errors(output).into_iter().next()
 }

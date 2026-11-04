@@ -52,6 +52,17 @@ pub struct SamSignature {
     pub(crate) kotlin_interface: bool,
     /// Provider-normalized semantic identities parallel to `declared_params`.
     pub(crate) parameter_identities: Box<[crate::fir::ResolvedParameterIdentity]>,
+    /// The interface's own type parameters, in declaration order, with every declared upper bound
+    /// and whether that bound is an interface type. `declared_params` and `declared_ret` name them.
+    pub(crate) type_parameters: Vec<SamTypeParameter>,
+}
+
+/// One type parameter the functional interface declares.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct SamTypeParameter {
+    pub(crate) name: String,
+    /// Each declared upper bound, and whether it is an interface type.
+    pub(crate) bounds: Vec<(Ty, bool)>,
 }
 
 /// One inherited declaration of an abstract-method candidate.
@@ -88,7 +99,7 @@ pub(crate) fn semantic_sam_signature(
         return None;
     }
     let kotlin_interface = target_classifier.is_kotlin;
-    let receiver_annotations = source.sam_with_receiver_annotations();
+    let receiver_annotations = &source.annotation_conventions().sam_with_receiver;
 
     let mut declarations: Vec<OverrideSlot> = Vec::new();
     for (applied, depth) in receiver_hierarchy(source, target) {
@@ -237,6 +248,29 @@ pub(crate) fn semantic_sam_signature(
     let (sam, params, contravariant_params, ret, declaration, overridden_results, convention) =
         abstract_method?;
     let parameter_identities = sam_parameter_identities(&sam)?;
+    let type_parameters = target_classifier
+        .type_params()
+        .iter()
+        .enumerate()
+        .map(|(ordinal, name)| SamTypeParameter {
+            name: name.clone(),
+            bounds: target_classifier
+                .type_param_bounds()
+                .get(ordinal)
+                .into_iter()
+                .flatten()
+                .map(|&bound| {
+                    let interface =
+                        crate::fir::ResolvedTypeParameterBound::is_interface_type(bound, |owner| {
+                            source
+                                .classifier(owner)
+                                .is_some_and(|classifier| classifier.is_interface())
+                        });
+                    (bound, interface)
+                })
+                .collect(),
+        })
+        .collect();
     // Under the convention the first value parameter (after any context parameters) is the
     // converted function's receiver: the slot an extension method's receiver takes. An abstract
     // method that already declares a receiver keeps its own shape.
@@ -257,6 +291,7 @@ pub(crate) fn semantic_sam_signature(
         overridden_results,
         kotlin_interface,
         parameter_identities,
+        type_parameters,
     })
 }
 

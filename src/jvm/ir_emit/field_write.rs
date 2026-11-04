@@ -156,7 +156,7 @@ impl Emitter<'_> {
                 code,
             );
         }
-        if self.ir.expr_source_lines.contains_key(&value)
+        if self.ir.source_line(value).is_some()
             || super::debug_lines::enters_nested_copied_lambda_frame(self.ir, statement, value)
         {
             if let Some(&statement_line) = self.ir.expr_lines.get(&statement) {
@@ -282,6 +282,10 @@ mod tests {
     fn an_effectful_receiver_runs_before_a_value_that_spills() {
         let mut ir = IrFile::default();
         let mut node = blank_class("demo/Node");
+        node.declaration_name = Some(crate::types::ClassifierDeclarationName::TopLevel {
+            package: type_name("demo"),
+            name: "Node".into(),
+        });
         node.fields.push(IrField::new("count".into(), Ty::Int));
         let class = ir.add_class(node);
         let node_ty = Ty::obj("demo/Node");

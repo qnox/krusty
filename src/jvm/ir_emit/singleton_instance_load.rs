@@ -26,7 +26,7 @@ pub(super) fn published_singleton(
         return Some(if let Some(owner) = declaration.companion_owner {
             PublishedSingleton {
                 owner,
-                field: classifier.nested_segment_ref().to_owned(),
+                field: crate::jvm::companion_storage::field_name(owner, classifier).to_owned(),
             }
         } else {
             PublishedSingleton {
@@ -41,9 +41,10 @@ pub(super) fn published_singleton(
         .find(|class| class.fq_name == classifier && class.is_singleton())
     {
         return Some(if class.is_companion {
+            let owner = crate::jvm::companion_storage::holder(ir, classifier)?;
             PublishedSingleton {
-                owner: classifier.nested_owner()?,
-                field: classifier.nested_segment_ref().to_owned(),
+                owner,
+                field: crate::jvm::companion_storage::field_name(owner, classifier).to_owned(),
             }
         } else {
             PublishedSingleton {

@@ -162,3 +162,44 @@ fn companion_delegate_field_is_in_the_companion_metadata() {
 fn companion_delegates_run() {
     common::expect_box_ok_with_stdlib(LAZY_DELEGATES, "CompanionLazyDelegateMetadata");
 }
+
+/// The line tables around a hoisted companion delegate, against kotlinc.
+///
+/// The outer `<clinit>` stores each companion `x$delegate` on its property's declaration line, as
+/// it stores an ordinary hoisted property; krusty looked the line up by the field's spelling, which
+/// names no property, and wrote no entry. A getter returning a value class through `lazy` returns
+/// to its line at the `ireturn`, after the inlined `getValue` and the `unbox-impl` that adapts its
+/// result; krusty marked the line at the adaptation instead.
+const LAZY_VALUE_DELEGATES: &str = r#"@JvmInline
+value class Id(val raw: Int) {
+    companion object {
+        val x by lazy { Id(1) }
+        val label by lazy { "one" }
+    }
+}
+
+class Holder {
+    companion object {
+        val y by lazy { Id(2) }
+        val lazyTwo by lazy { "two" }
+    }
+}
+
+fun box(): String =
+    if (Id.x.raw == 1 && Holder.y.raw == 2 && Id.label == "one" && Holder.lazyTwo == "two") "OK"
+    else "fail"
+"#;
+
+#[test]
+fn hoisted_companion_delegates_keep_their_lines() {
+    common::assert_classes_identical_to_kotlinc(
+        "CompanionLazyValueDelegates",
+        LAZY_VALUE_DELEGATES,
+        &["Id", "Id$Companion", "Holder", "Holder$Companion"],
+    );
+}
+
+#[test]
+fn hoisted_companion_value_delegates_run() {
+    common::expect_box_ok_with_stdlib(LAZY_VALUE_DELEGATES, "CompanionLazyValueDelegates");
+}

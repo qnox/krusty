@@ -4,6 +4,7 @@ use std::borrow::Cow;
 
 use crate::types::TypeName;
 
+pub(crate) mod kotlinc_offsets;
 pub mod names;
 
 pub use names::DiagnosticName;
@@ -154,6 +155,10 @@ pub struct DiagSink {
     /// Diagnostics about the compilation's configuration rather than a source position, such as
     /// an unresolved `-opt-in` marker. Each message is kept once, in first-report order.
     pub module_diagnostics: Vec<ModuleDiagnostic>,
+    /// Errors about the module as a whole rather than a source position, such as two files of one
+    /// JVM multifile class declaring the same method. They render last, unlocated, as kotlinc
+    /// reports its backend's module-wide errors.
+    pub module_errors: Vec<String>,
 }
 
 impl DiagSink {
@@ -163,6 +168,7 @@ impl DiagSink {
             current_file: 0,
             authoritative_ranges: None,
             module_diagnostics: Vec::new(),
+            module_errors: Vec::new(),
         }
     }
 
@@ -176,6 +182,25 @@ impl DiagSink {
         if !self.module_diagnostics.contains(&warning) {
             self.module_diagnostics.push(warning);
         }
+    }
+
+    /// Report an error about the module as a whole, in report order.
+    pub fn module_error(&mut self, message: impl Into<String>) {
+        self.module_errors.push(message.into());
+    }
+
+    /// How many errors the module reports, located and unlocated.
+    pub fn error_count(&self) -> usize {
+        self.diags
+            .iter()
+            .filter(|diagnostic| diagnostic.severity == Severity::Error)
+            .count()
+            + self
+                .module_diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.severity == Severity::Error)
+                .count()
+            + self.module_errors.len()
     }
 
     fn accepts(&self, span: Span) -> bool {
@@ -406,7 +431,8 @@ impl DiagSink {
     }
 
     pub fn has_errors(&self) -> bool {
-        self.diags.iter().any(|d| d.severity == Severity::Error)
+        !self.module_errors.is_empty()
+            || self.diags.iter().any(|d| d.severity == Severity::Error)
             || self
                 .module_diagnostics
                 .iter()
@@ -419,6 +445,11 @@ impl DiagSink {
         let mut out = String::new();
         for d in &self.diags {
             out.push_str(&render_one(d, path, src, DiagnosticNames::Hidden));
+        }
+        for error in &self.module_errors {
+            out.push_str("error: ");
+            out.push_str(error);
+            out.push('\n');
         }
         out
     }
@@ -441,6 +472,11 @@ impl DiagSink {
                 .or_else(|| files.first().copied())
                 .unwrap_or(("<unknown>", ""));
             out.push_str(&render_one(d, path, src, names));
+        }
+        for error in &self.module_errors {
+            out.push_str("error: ");
+            out.push_str(error);
+            out.push('\n');
         }
         out
     }

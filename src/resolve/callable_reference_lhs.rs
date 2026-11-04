@@ -357,6 +357,50 @@ impl Checker<'_> {
         )
     }
 
+    /// The applied type of a classifier callable-reference LHS for a read-only applicability probe:
+    /// `Op<Boolean>::and` is resolved against `Op<Boolean>`, not the raw `Op`, so an extension
+    /// declared on `Expr<Boolean>` stays applicable. The authoritative check walks the same
+    /// segment through [`Self::callable_ref_lhs_classifier_type`]; an inner classifier whose
+    /// captures need that walk keeps its raw type here.
+    pub(super) fn callable_ref_lhs_probe_type(
+        &self,
+        scope: &CheckerScope<'_>,
+        segment: ExprId,
+        classifier: TypeName,
+    ) -> Ty {
+        let raw = Ty::obj_name(classifier);
+        let Some(syntax) = self.file.call_type_args.get(&segment.0) else {
+            return raw;
+        };
+        let Some(declaration) = self.fed_source().classifier(classifier) else {
+            return raw;
+        };
+        if syntax.arguments.is_empty()
+            || declaration.own_type_parameter_count != declaration.type_params().len()
+        {
+            return raw;
+        }
+        let arguments = syntax
+            .arguments
+            .iter()
+            .enumerate()
+            .map(|(index, argument)| {
+                let upper_bound = declaration
+                    .type_param_bounds
+                    .get(index)
+                    .and_then(|bounds| bounds.first())
+                    .copied()
+                    .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
+                projected_typeref_argument(
+                    argument,
+                    self.type_ref_ty_silent(scope, argument),
+                    upper_bound,
+                )
+            })
+            .collect::<Vec<_>>();
+        Ty::obj_args_name(classifier, &arguments)
+    }
+
     pub(super) fn has_type_arguments(&self, expression: ExprId) -> bool {
         self.file
             .call_type_args

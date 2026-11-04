@@ -123,7 +123,7 @@ impl KlibIrArena {
         if let Some(KlibIrBody::Block(statements)) = &function.body {
             push_statement_expressions(self, statements, &mut pending);
         }
-        self.callable_symbols_from(pending)
+        self.callable_symbols_from(pending, false)
     }
 
     /// Calls and constructions in a prepared body's executable graph, including defaults.
@@ -144,12 +144,13 @@ impl KlibIrArena {
                 .chain(&function.regular_parameters)
                 .filter_map(|parameter| parameter.default_value),
         );
-        self.callable_symbols_from(pending)
+        self.callable_symbols_from(pending, true)
     }
 
     fn callable_symbols_from(
         &self,
         mut pending: Vec<KlibIrExprId>,
+        include_references: bool,
     ) -> impl Iterator<Item = &KlibIrSymbol> {
         let mut calls = Vec::new();
         while let Some(id) = pending.pop() {
@@ -160,6 +161,13 @@ impl KlibIrArena {
                 | KlibIrExprKind::ConstructorCall { access, .. }
                 | KlibIrExprKind::DelegatingConstructorCall(access)
                 | KlibIrExprKind::EnumConstructorCall(access) => calls.push(&access.symbol),
+                KlibIrExprKind::FunctionReference { access, .. } if include_references => {
+                    calls.push(&access.symbol);
+                }
+                KlibIrExprKind::RichFunctionReference {
+                    reflection_target: Some(target),
+                    ..
+                } if include_references => calls.push(target),
                 _ => {}
             }
         }

@@ -874,6 +874,17 @@ impl ClassSets {
         )
     }
 
+    /// The `javap -v -p` block of each method `class` declares, from kotlinc and from krusty, keyed
+    /// by its declaration line (`public boolean add(java.lang.String);`): its descriptor, flags,
+    /// code, debug tables and attributes, pool indices erased as in [`Self::class_listing`].
+    pub fn method_blocks(&self, class: &str) -> (MethodBlocks, MethodBlocks) {
+        let (reference, krusty) = self.class_listing(class);
+        (
+            verbose_method_blocks(&reference),
+            verbose_method_blocks(&krusty),
+        )
+    }
+
     /// The `javap -c -p -l` block of the method `class` declares as `declaration` (javap's spelling,
     /// such as `public static final int f();`), from kotlinc and from krusty, with constant-pool
     /// indices erased as in [`Self::code_differences`].
@@ -1079,6 +1090,28 @@ fn declared_methods(listing: &str) -> Vec<String> {
         .collect()
 }
 
+/// Each method's `javap -v -p` block, keyed by its declaration line.
+pub type MethodBlocks = Vec<(String, String)>;
+
+/// The member blocks of a `javap -v -p` listing that declare a method. A blank line ends each
+/// member's block.
+fn verbose_method_blocks(listing: &str) -> MethodBlocks {
+    let mut blocks: MethodBlocks = Vec::new();
+    let mut current: Option<(String, Vec<&str>)> = None;
+    for line in listing.lines().map(str::trim) {
+        if line.is_empty() || line == "}" {
+            if let Some((declaration, body)) = current.take() {
+                blocks.push((declaration, body.join("\n")));
+            }
+        } else if let Some((_, body)) = current.as_mut() {
+            body.push(line);
+        } else if line.contains('(') && line.ends_with(';') {
+            current = Some((line.to_string(), Vec::new()));
+        }
+    }
+    blocks
+}
+
 /// `javap -c -p -l` of a class with every `#N` pool index erased.
 fn code_listing(name: &str, bytes: &[u8]) -> String {
     disassemble_with(name, bytes, &["-p", "-c", "-l"])
@@ -1231,7 +1264,7 @@ pub fn assert_classes_identical_to_kotlinc_against(
     classes: &[&str],
     libraries: &[std::path::PathBuf],
 ) {
-    assert_classes_identical_to_kotlinc_full(stem, src, classes, libraries, false);
+    assert_classes_identical_to_kotlinc_full(stem, src, classes, libraries, libraries, false);
 }
 
 /// [`assert_classes_identical_to_kotlinc_against`] with the JDK modules on krusty's classpath.
@@ -1243,7 +1276,28 @@ pub fn assert_classes_identical_to_kotlinc_against_jdk(
     classes: &[&str],
     libraries: &[std::path::PathBuf],
 ) {
-    assert_classes_identical_to_kotlinc_full(stem, src, classes, libraries, true);
+    assert_classes_identical_to_kotlinc_full(stem, src, classes, libraries, libraries, true);
+}
+
+/// [`assert_classes_identical_to_kotlinc_against_jdk`] over a dependency each compiler built
+/// itself: kotlinc compiles `src` against `reference_libraries`, krusty against
+/// `krusty_libraries`. A consumer is then compared with what kotlinc writes over its own build of
+/// the dependency, not over krusty's.
+pub fn assert_classes_identical_to_kotlinc_over_own_libraries(
+    stem: &str,
+    src: &str,
+    classes: &[&str],
+    reference_libraries: &[std::path::PathBuf],
+    krusty_libraries: &[std::path::PathBuf],
+) {
+    assert_classes_identical_to_kotlinc_full(
+        stem,
+        src,
+        classes,
+        reference_libraries,
+        krusty_libraries,
+        true,
+    );
 }
 
 /// [`assert_classes_identical_to_kotlinc`] with the JDK modules beside the stdlib on the KRUSTY
@@ -1251,7 +1305,7 @@ pub fn assert_classes_identical_to_kotlinc_against_jdk(
 /// type (the `StringBuilder` typealias) does not resolve for krusty without them, while the
 /// reference kotlinc always has its own JDK.
 pub fn assert_classes_identical_to_kotlinc_jdk(stem: &str, src: &str, classes: &[&str]) {
-    assert_classes_identical_to_kotlinc_full(stem, src, classes, &[], true);
+    assert_classes_identical_to_kotlinc_full(stem, src, classes, &[], &[], true);
 }
 
 fn assert_classes_identical_to_kotlinc_full(
@@ -1259,6 +1313,7 @@ fn assert_classes_identical_to_kotlinc_full(
     src: &str,
     classes: &[&str],
     libraries: &[std::path::PathBuf],
+    krusty_libraries: &[std::path::PathBuf],
     jdk_modules: bool,
 ) {
     let dir = super::common_core::scratch_dir().expect("scratch directory");
@@ -1280,7 +1335,7 @@ fn assert_classes_identical_to_kotlinc_full(
         super::common_core::kotlinc_compile(&arguments).expect("reference kotlinc is provisioned");
     assert_eq!(code, 0, "kotlinc failed: {stderr}");
     let mut classpath = vec![super::common_core::stdlib_jar()];
-    classpath.extend_from_slice(libraries);
+    classpath.extend_from_slice(krusty_libraries);
     if jdk_modules {
         classpath.push(super::common_core::jdk_modules());
     }

@@ -165,7 +165,10 @@ fn copy_type(source: &KlibIrArena, target: &mut KlibIrArena, ty: KlibIrTypeId) -
     target.push_type(copied)
 }
 
-fn target_tree(source: &KlibIrArena, function: &KlibIrFunction) -> KlibIrDeclarationTree {
+pub(super) fn target_tree(
+    source: &KlibIrArena,
+    function: &KlibIrFunction,
+) -> KlibIrDeclarationTree {
     let mut arena = KlibIrArena::default();
     let mut function = function.clone();
     for formal in &mut function.type_parameters {

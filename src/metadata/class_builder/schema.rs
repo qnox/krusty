@@ -342,6 +342,7 @@ fn enum_entry_pb(
 /// Everything one `Class` record is built from.
 pub(crate) struct ClassDeclaration<'a> {
     pub(crate) name: TypeName,
+    pub(crate) class_id: &'a crate::metadata::class_id::ResolvedClassId,
     pub(crate) ctor_params: &'a [(String, Ty)],
     pub(crate) props: &'a [PropMeta],
     pub(crate) methods: &'a [FnMeta],
@@ -354,9 +355,10 @@ pub(crate) fn class_message(
     st: &mut StringTable<'_>,
     declaration: &ClassDeclaration<'_>,
     carrier: &dyn ClassCarrier,
-) -> Pb {
+) -> Result<Pb, crate::metadata::class_id::ClassIdError> {
     let &ClassDeclaration {
         name: class_internal,
+        class_id,
         ctor_params,
         props,
         methods,
@@ -377,7 +379,7 @@ pub(crate) fn class_message(
     // first (interning), then assemble the `Class` message.
 
     // f3 = fq_name: the resolved class identity encoded directly into the metadata string table.
-    let fq = st.class_id(class_internal);
+    let fq = st.declaration_class_id(class_id)?;
 
     // f5 = typeParameter: `{ id, name }` per declared parameter, in order. kotlinc interns the names
     // right after the fq_name, before any member signature.
@@ -1247,7 +1249,7 @@ pub(crate) fn class_message(
     let trailer = carrier.class_trailer(st);
     class.append(&trailer);
 
-    class.canonical()
+    Ok(class.canonical())
 }
 
 /// Build the `(d1, d2)` payload for an ANONYMOUS class (`object : P2 {}` inside a function):

@@ -74,6 +74,29 @@ impl Wildcards {
     }
 }
 
+/// A method's generic `Signature` in its grammar's parts: the type-parameter declaration section,
+/// each parameter's element and the result's, as the formatter wrote them. A realization whose frame
+/// leads with a parameter the declaration does not have (a value class's carrier) adds or drops that
+/// element here, never by searching the rendered text.
+pub(super) struct MethodSignatureParts {
+    pub(super) type_parameters: String,
+    pub(super) parameters: Vec<String>,
+    pub(super) result: String,
+}
+
+impl MethodSignatureParts {
+    pub(super) fn render(&self) -> String {
+        let mut signature = self.type_parameters.clone();
+        signature.push('(');
+        self.parameters
+            .iter()
+            .for_each(|parameter| signature.push_str(parameter));
+        signature.push(')');
+        signature.push_str(&self.result);
+        signature
+    }
+}
+
 /// Format backend-agnostic semantic types into JVM generic-signature elements. The ordinary JVM
 /// descriptor and the optional generic `Signature` attribute are separate classfile declarations: the
 /// former supplies runtime calling types, while this formatter preserves type parameters, type
@@ -93,37 +116,88 @@ struct ClassifierSignatureSegment {
 }
 
 impl<'a> JvmSignatureFormatter<'a> {
-    pub(super) fn method_signature(
+    /// A generic member's signature: its type parameters, then its parameters and result.
+    pub(super) fn method_signature_parts(
         &self,
         generic: &crate::ir::IrGenericSig,
         function: &crate::ir::IrFunction,
         vararg_index: Option<usize>,
-    ) -> Option<String> {
-        let mut signature = super::jvm_type_params(self, generic)?;
-        signature.push('(');
-        for (index, parameter) in generic.params.iter().enumerate() {
-            // A vararg element is a value parameter. `Array<In<E>>` suppresses the element's
-            // declaration-site wildcard; `vararg x: In<E>` keeps `In<? super E>`.
-            let rendered = if vararg_index == Some(index) {
-                self.vararg_element_ty(parameter, Wildcards::Declared)?
-            } else {
-                self.parameter_ty(parameter)?
-            };
-            signature.push_str(&rendered);
-        }
-        signature.push(')');
-        signature.push_str(&self.method_ty(
-            generic.ret.as_ref().unwrap_or(&function.ret),
-            Wildcards::Suppressed,
-        )?);
-        Some(signature)
+    ) -> Option<MethodSignatureParts> {
+        let type_parameters = super::jvm_type_params(self, generic)?;
+        Some(MethodSignatureParts {
+            type_parameters,
+            ..self.method_positions_parts(
+                &generic.params,
+                generic.ret.as_ref().unwrap_or(&function.ret),
+                vararg_index,
+            )?
+        })
     }
 
     /// `(params)result` in a method's parameter and return modes, declaring no type parameter.
     pub(super) fn method_positions(&self, params: &[Ty], ret: &Ty) -> Option<String> {
+        self.method_positions_with_vararg(params, ret, None)
+    }
+
+    /// [`Self::method_positions`] where the parameter at `vararg_index` is a `vararg`: its element
+    /// is a value parameter, so it keeps its declaration-site wildcards, as in
+    /// [`Self::method_signature`].
+    pub(super) fn method_positions_with_vararg(
+        &self,
+        params: &[Ty],
+        ret: &Ty,
+        vararg_index: Option<usize>,
+    ) -> Option<String> {
+        self.method_positions_parts(params, ret, vararg_index)
+            .map(|parts| parts.render())
+    }
+
+    /// [`Self::method_positions_with_vararg`] in its grammar's parts. A vararg element is a value
+    /// parameter: `Array<In<E>>` suppresses the element's declaration-site wildcard, while
+    /// `vararg x: In<E>` keeps `In<? super E>`.
+    pub(super) fn method_positions_parts(
+        &self,
+        params: &[Ty],
+        ret: &Ty,
+        vararg_index: Option<usize>,
+    ) -> Option<MethodSignatureParts> {
+        Some(MethodSignatureParts {
+            type_parameters: String::new(),
+            parameters: self.parameter_parts(params, vararg_index)?,
+            result: self.method_ty(ret, Wildcards::Suppressed)?,
+        })
+    }
+
+    /// Each parameter's signature element, the vararg one (if any) as a vararg element.
+    pub(super) fn parameter_parts(
+        &self,
+        params: &[Ty],
+        vararg_index: Option<usize>,
+    ) -> Option<Vec<String>> {
+        params
+            .iter()
+            .enumerate()
+            .map(|(index, parameter)| {
+                if vararg_index == Some(index) {
+                    self.vararg_element_ty(parameter, Wildcards::Declared)
+                } else {
+                    self.parameter_ty(parameter)
+                }
+            })
+            .collect()
+    }
+
+    /// [`Self::method_positions`] with every declaration-site variance of the parameters written,
+    /// redundant or not: kotlinc's `METHODS_WITH_DECLARATION_SITE_WILDCARDS` realizations, such as
+    /// `addAll(Collection<? extends String>)`.
+    pub(super) fn method_positions_with_declaration_site_wildcards(
+        &self,
+        params: &[Ty],
+        ret: &Ty,
+    ) -> Option<String> {
         let mut signature = String::from("(");
         for parameter in params {
-            signature.push_str(&self.parameter_ty(parameter)?);
+            signature.push_str(&self.method_ty(parameter, Wildcards::Generic)?);
         }
         signature.push(')');
         signature.push_str(&self.method_ty(ret, Wildcards::Suppressed)?);
@@ -311,12 +385,18 @@ impl<'a> JvmSignatureFormatter<'a> {
         crate::metadata::inner_classifiers::inner_classifier(self.ir, self.symbols, classifier)
     }
 
+    /// kotlinc's `isFinalClass`: a final classifier that is not an enum class. An enum is never
+    /// closed here, even one whose entries have no bodies, so `List<SomeEnum>` keeps its
+    /// `? extends` wildcard.
     fn classifier_is_closed(&self, owner: TypeName) -> Option<bool> {
         if let Some(classifier) = self.current_class(owner) {
             return Some(
                 classifier.is_object
                     || classifier.is_annotation
-                    || (!classifier.is_interface && !classifier.is_abstract && !classifier.is_open),
+                    || (!classifier.is_enum
+                        && !classifier.is_interface
+                        && !classifier.is_abstract
+                        && !classifier.is_open),
             );
         }
         let Some(classifier) = self.symbols.classifier(owner) else {
@@ -331,16 +411,12 @@ impl<'a> JvmSignatureFormatter<'a> {
             crate::libraries::TypeKind::Class => {
                 !classifier.is_abstract && !classifier.is_extensible
             }
-            crate::libraries::TypeKind::Enum => !classifier.is_extensible,
-            crate::libraries::TypeKind::Interface => false,
+            crate::libraries::TypeKind::Enum | crate::libraries::TypeKind::Interface => false,
         })
     }
 
     fn can_have_subtypes_ignoring_nullability(&self, ty: Ty) -> Option<bool> {
-        let ty = match ty.kind() {
-            TyKind::Nullable(inner) | TyKind::PlatformNullable(inner) => inner,
-            _ => ty,
-        };
+        let ty = ty.non_null();
         if ty == Ty::Nothing {
             return Some(false);
         }
@@ -504,10 +580,7 @@ impl<'a> JvmSignatureFormatter<'a> {
     /// variance stays (`vararg x: In<E>` is `[LIn<-TE;>;`). A non-vararg `Array<In<E>>` parameter
     /// suppresses that wildcard and must keep going through [`Self::method_ty`].
     pub(super) fn vararg_element_ty(&self, ty: &Ty, wildcards: Wildcards) -> Option<String> {
-        let semantic = match ty.kind() {
-            TyKind::Nullable(inner) | TyKind::PlatformNullable(inner) => inner,
-            _ => *ty,
-        };
+        let semantic = ty.non_null();
         let TyKind::Obj(owner, arguments) = semantic.kind() else {
             return self.method_ty(ty, wildcards);
         };
@@ -533,10 +606,7 @@ impl<'a> JvmSignatureFormatter<'a> {
         if let Some((expanded, wildcards)) = self.value_class_position(*ty, wildcards) {
             return self.method_ty(&expanded, wildcards);
         }
-        let semantic = match ty.kind() {
-            TyKind::Nullable(inner) | TyKind::PlatformNullable(inner) => inner,
-            _ => *ty,
-        };
+        let semantic = ty.non_null();
         match semantic.kind() {
             TyKind::TyParam(..) | TyKind::Fun(_) => self.ty_at(ty, wildcards),
             TyKind::Intersection(_) => {
@@ -558,15 +628,6 @@ impl<'a> JvmSignatureFormatter<'a> {
         }
     }
 
-    /// Translate one semantic Kotlin type into a JVM generic-signature element. Kotlin declaration-
-    /// site variance has no classfile equivalent, so the JVM backend realizes it as a wildcard on
-    /// each otherwise-unprojected use-site argument. Explicit Kotlin `in`/`out` projections already
-    /// carry their own direction and take precedence.
-    /// A type in a PARAMETER position (declaration-site variance becomes a wildcard).
-    pub(super) fn ty(&self, ty: &Ty) -> Option<String> {
-        self.ty_at(ty, Wildcards::Declared)
-    }
-
     /// A class header's supertype. A function-type supertype is written as its runtime function
     /// interface (`FunctionN<R>` past 22 parameters, a continuation-taking `Function{N+1}` for a
     /// suspend one), exactly as the same function type is in any other position.
@@ -577,8 +638,16 @@ impl<'a> JvmSignatureFormatter<'a> {
         self.ty_at(ty, Wildcards::Supertype)
     }
 
+    /// Translate one semantic Kotlin type into a JVM generic-signature element at a position whose
+    /// `wildcards` mode decides how declaration-site variance is written: Kotlin's has no classfile
+    /// equivalent, so the JVM backend realizes it as a wildcard on each otherwise-unprojected
+    /// use-site argument. Explicit Kotlin `in`/`out` projections already carry their own direction
+    /// and take precedence.
     pub(super) fn ty_at(&self, ty: &Ty, wildcards: Wildcards) -> Option<String> {
-        if let TyKind::Nullable(inner) | TyKind::PlatformNullable(inner) = ty.kind() {
+        if let TyKind::Nullable(inner)
+        | TyKind::PlatformNullable(inner)
+        | TyKind::MutabilityFlexible(inner) = ty.kind()
+        {
             return self.ty_at(&inner, wildcards);
         }
         if let TyKind::TyParam(name, _) = ty.kind() {
@@ -593,7 +662,7 @@ impl<'a> JvmSignatureFormatter<'a> {
         match ty.kind() {
             TyKind::STRING => Some("Ljava/lang/String;".to_string()),
             TyKind::Unit => Some("Lkotlin/Unit;".to_string()),
-            TyKind::Nothing => Some("Lkotlin/Nothing;".to_string()),
+            TyKind::Nothing => Some(ir_type_desc(ty)),
             TyKind::InProjection(inner) => Some(format!("-{}", self.ty_at(&inner, wildcards)?)),
             TyKind::OutProjection(inner) => Some(format!("+{}", self.ty_at(&inner, wildcards)?)),
             TyKind::Fun(signature) => self.function_ty(signature, wildcards),
