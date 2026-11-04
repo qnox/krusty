@@ -380,13 +380,17 @@ impl Backend for CraneliftBackend {
                 symbol: symbol.clone(),
                 signature: getter.signature().clone(),
                 member_receiver: Some(getter.receiver()),
+                default_entry: None,
             };
             let export = DependencyExport {
                 symbol,
+                // Field-backed getters publish no callable-reference marker declaration.
+                reference_declaration: None,
                 signature: definition.signature.clone(),
                 member_receiver: definition.member_receiver,
                 singleton_member_receiver: None,
                 singleton_extension_receiver: None,
+                default_entry: None,
             };
             if state
                 .dependency_symbols
