@@ -2450,7 +2450,6 @@ inference/pcla/pclaRootIsTrySyntheticCallWithDelegate.kt
 inference/pcla/posptonedPCLACallInsideStringInterpolation.kt
 inference/pcla/propagateInferenceSessionIntoDeclarationAnalyzers.kt
 inference/pcla/propertyInvokeInsidePCLALambda.kt
-inference/pcla/receiverUsesOuterTVButReturnTypeIsProper.kt
 inference/pcla/specialCallsWithCallableReferencesDontRewriteAtSlice.kt
 inference/pcla/specialCallsWithLambdas.kt
 inference/pcla/substituteStubTypeIntoCR.kt
@@ -3535,7 +3534,6 @@ ir/enumClass2.kt
 ir/enumClass3.kt
 ir/fileClassInitializers.kt
 ir/genericCompanion.kt
-ir/hashCodeOnGenericSubstitutedWithPrimitive.kt
 ir/kt40083.kt
 ir/kt41765.kt
 ir/kt52677.kt
