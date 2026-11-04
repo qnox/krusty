@@ -160,6 +160,7 @@ impl Emitter<'_> {
         }
         self.link_safe_call_chain(block, code);
         let copied_caller = self.copied_function_caller(block, code);
+        let enclosing_operands = self.enter_external_operand_scope(block);
         let enclosing_statement_line = self.statement_line;
         let saved = self.open_slot_scope();
         self.block_depth += 1;
@@ -178,7 +179,7 @@ impl Emitter<'_> {
                     bound_operands -= 1;
                     continue;
                 }
-                self.open_external_inline_body(opening, statement, code);
+                self.open_external_inline_body(opening, index, statement, code);
                 self.enter_copied_function_frame(
                     copied_caller.is_some().then_some(block),
                     statement,
@@ -249,6 +250,7 @@ impl Emitter<'_> {
                             self.restore_slot_scope(saved);
                             self.release_reserved_inline_stack(reserved_inline_stack);
                             self.statement_line = enclosing_statement_line;
+                            self.leave_external_operand_scope(enclosing_operands);
                             self.leave_copied_function_body(copied_caller, false, code);
                             return;
                         }
@@ -340,6 +342,7 @@ impl Emitter<'_> {
         self.restore_slot_scope(saved);
         self.release_reserved_inline_stack(reserved_inline_stack);
         self.statement_line = enclosing_statement_line;
+        self.leave_external_operand_scope(enclosing_operands);
         self.leave_copied_function_body(copied_caller, anchored, code);
     }
 
@@ -876,6 +879,24 @@ impl Emitter<'_> {
         })
     }
 
+    /// Enter a library inline expansion. Its operand bindings are its own: the enclosing statement
+    /// may be a same-module inline call's operand binding whose initializer runs this expansion,
+    /// and that binding still stores without a line once the expansion returns.
+    fn enter_external_operand_scope(&self, block: u32) -> Option<EnclosingOperandBinding> {
+        self.ir
+            .external_inline_expansions
+            .contains(&block)
+            .then_some(EnclosingOperandBinding(self.copied_operand_binding))
+    }
+
+    /// Leave a library inline expansion entered by [`Self::enter_external_operand_scope`],
+    /// restoring the enclosing operand binding on every exit.
+    fn leave_external_operand_scope(&mut self, enclosing: Option<EnclosingOperandBinding>) {
+        if let Some(EnclosingOperandBinding(binding)) = enclosing {
+            self.copied_operand_binding = binding;
+        }
+    }
+
     /// Cross from a same-module inline call's operand bindings into its copied callee body.
     ///
     /// The operands are kotlinc's `genValueAndPut`: each is stored straight into its parameter
@@ -941,8 +962,8 @@ impl Emitter<'_> {
         if !self.ir.external_inline_expansions.contains(&block) {
             return None;
         }
-        let line = self.ir.source_line(block).filter(|line| *line != 0)?;
-        let marker = stmts.iter().copied().find(|&statement| {
+        let line = self.ir.source_line(block).filter(|line| *line != 0);
+        let marker_index = stmts.iter().position(|&statement| {
             matches!(
                 self.ir.debug_local_provenance(statement),
                 Some(
@@ -951,27 +972,46 @@ impl Emitter<'_> {
                 )
             )
         })?;
+        let binds_operands = matches!(
+            self.ir.debug_local_provenance(stmts[marker_index]),
+            Some(IrDebugLocalProvenance::FunctionFrameMarker)
+        );
         Some(InlineBodyOpening {
             block,
-            marker,
+            marker_index,
+            binds_operands,
             line,
         })
     }
 
+    /// The inline callable's parameters bound before an external expansion's first frame marker hold
+    /// the call's operands. kotlinc's `genValueAndPut` stores each straight into its parameter
+    /// slot, with no line of its own, as a same-module call's operands are bound
+    /// ([`Self::enter_copied_function_frame`]). A spliced lambda's own parameter is stored inside
+    /// the body, after the opening, and keeps the call's line.
     fn open_external_inline_body(
         &mut self,
         opening: Option<InlineBodyOpening>,
+        index: usize,
         statement: u32,
         code: &mut CodeBuilder,
     ) {
-        let Some(opening) = opening.filter(|opening| opening.marker == statement) else {
+        let Some(opening) = opening else {
             return;
         };
-        if code.is_dead() {
+        if index < opening.marker_index {
+            if opening.binds_operands {
+                self.copied_operand_binding = Some(statement);
+            }
             return;
         }
-        self.mark_expression_line(opening.block, opening.line, code);
-        code.nop();
+        if index != opening.marker_index || code.is_dead() {
+            return;
+        }
+        if let Some(line) = opening.line {
+            self.mark_expression_line(opening.block, line, code);
+            code.nop();
+        }
     }
 
     fn opens_spliced_lambda_frame(&self, stmts: &[u32]) -> bool {
@@ -1145,6 +1185,7 @@ impl Emitter<'_> {
         if let Some(index) = discarded_result {
             self.discarded_inline_results.insert(index);
         }
+        let enclosing_operands = self.enter_external_operand_scope(block);
         let optimized_postfix = self.emit_postfix_iinc(block, true, code);
         let mut bound_operands = 0;
         let mut unit_switch_value = false;
@@ -1156,7 +1197,7 @@ impl Emitter<'_> {
                 bound_operands -= 1;
                 continue;
             }
-            self.open_external_inline_body(opening, statement, code);
+            self.open_external_inline_body(opening, index, statement, code);
             self.enter_copied_function_frame(copied_function, statement, code);
             // FixStack replaces the opening marker with the saved caller stack. Keep that
             // generated store inside the lambda frame's mapped line interval.
@@ -1268,6 +1309,7 @@ impl Emitter<'_> {
         // Once it closes, an instruction consuming the block's value belongs to that enclosing
         // statement, not to the last branch/statement visited inside the block.
         self.statement_line = enclosing_statement_line;
+        self.leave_external_operand_scope(enclosing_operands);
         EmittedBlock {
             discard_after_close: discard_after_frame_close,
             retains_postfix_temporary,
@@ -1375,7 +1417,14 @@ impl Emitter<'_> {
         close_inline_stack(saved, code);
         self.release_reserved_inline_stack(pending.reserved);
         if pending.closes_spliced_frame {
+            // kotlinc closes the frame inside the inlined call and only then resets the line in
+            // effect (`markLineNumberAfterInlineIfNeeded`). Deferring the close past that reset
+            // must not spend it: the next mark of the frame's line is still written.
+            let reset = code.line_forgotten();
             self.close_spliced_lambda_frame(pending.block, false, code);
+            if reset {
+                code.forget_line();
+            }
         }
         true
     }
@@ -1672,6 +1721,10 @@ pub(super) struct SlotScope {
     frame: Mark,
 }
 
+/// The same-module operand binding in effect when a library inline expansion began.
+#[derive(Clone, Copy)]
+struct EnclosingOperandBinding(Option<crate::ir::ExprId>);
+
 /// How a block that may be an external inline expansion enters its inlined body.
 #[derive(Clone, Copy, Default)]
 pub(super) struct InlineBodyEntry {
@@ -1690,13 +1743,16 @@ pub(super) struct InlineBodyEntry {
     discarded_frame_result: Option<CopiedFrameTail>,
 }
 
-/// The first frame marker of an external inline expansion and the call line its opening `nop`
-/// carries.
+/// The position of an external inline expansion's first frame marker, after the bindings of the
+/// call's operands, and the call line its opening `nop` carries.
 #[derive(Clone, Copy)]
 struct InlineBodyOpening {
     block: u32,
-    marker: u32,
-    line: u32,
+    marker_index: usize,
+    /// The expansion opens its own function frame, so the statements before it bind the inline
+    /// callable's parameters.
+    binds_operands: bool,
+    line: Option<u32>,
 }
 
 #[derive(Clone, Copy)]
