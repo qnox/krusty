@@ -12,6 +12,8 @@ mod common_supertype;
 pub(crate) use common_supertype::{common_super_types, reified_runtime_type};
 mod conditional_result;
 mod postponed_result;
+mod receiver_constraints;
+pub(crate) use receiver_constraints::unify_receiver_from_symbols;
 
 use bound_relations::complete_dependent_bound_bindings;
 pub(crate) use bound_relations::{
@@ -1473,9 +1475,18 @@ pub(crate) fn merge_inferred_ty_from_symbols(
     if !merged.is_erased_top() || !current.is_reference() || !actual.is_reference() {
         return merged;
     }
-    // Two unrelated references join at their common supertype, the one relation that also
-    // reads a type parameter through its bounds and keeps a nullable bound's nullability.
-    common_supertype::common_super_type(source, inference_actual(current), inference_actual(actual))
+    // Two reference lower bounds join at their common supertype, as kotlinc's does: every
+    // most-specific classifier both hierarchies share, however far up each one sits, with type
+    // arguments joined by declaration variance (`Inv<A>` and `Inv<B>` join at `Inv<out C>`, `C` the
+    // common supertype of `A` and `B`), and an intersection when several incomparable classifiers
+    // remain (`A : Base(), I` and `B : Base(), J`, `J : I`, join at `Base & I`). The one
+    // common-supertype relation owns that algebra for every lower-bound join; it also reads a type
+    // parameter through its bounds and keeps a nullable bound's nullability. A missing or invalid
+    // classifier declaration is `Ty::Error`, which propagates rather than becoming `Any`.
+    common_supertype::common_super_types(
+        source,
+        &[inference_actual(current), inference_actual(actual)],
+    )
 }
 
 /// Collapse a complete set of lower constraints in one operation. Keeping the original bounds is
