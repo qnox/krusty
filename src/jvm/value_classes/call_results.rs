@@ -22,7 +22,7 @@ use crate::types::{Ty, TypeName};
 /// branch value is adapted to before the join, whatever the branch produced.
 #[derive(Clone, Copy)]
 pub(super) struct CallTypes<'a> {
-    logical: &'a HashMap<u32, Ty>,
+    logical: &'a crate::ir::IrNodeTypeColumn,
     declared: &'a HashMap<u32, Ty>,
     property_declarations: &'a HashMap<u32, Ty>,
     statics: &'a [crate::ir::IrStatic],
@@ -32,7 +32,7 @@ pub(super) struct CallTypes<'a> {
 impl<'a> CallTypes<'a> {
     pub(super) fn of(ir: &'a IrFile) -> Self {
         CallTypes {
-            logical: &ir.logical_types,
+            logical: ir.node_types(),
             declared: &ir.call_declared_ret,
             property_declarations: &ir.property_declaration_types,
             statics: &ir.statics,
@@ -65,8 +65,8 @@ impl<'a> CallTypes<'a> {
             .obj_internal()
     }
 
-    pub(super) fn get(&self, id: &u32) -> Option<&Ty> {
-        self.logical.get(id)
+    pub(super) fn get(&self, id: &u32) -> Option<Ty> {
+        self.logical.logical(*id)
     }
 
     /// The value class this call returns BY DECLARATION — so its physical result is already the erased
@@ -94,7 +94,7 @@ pub(super) fn representation(
     callee: &Callee,
     under: &Under,
     types: CallTypes<'_>,
-    physical: &HashMap<u32, Ty>,
+    physical: &crate::ir::IrNodeTypeColumn,
 ) -> Repr {
     // A callee that returns a value class BY DECLARATION hands back its erased CARRIER: that is the
     // whole classpath value-class return ABI (`fun make(): K` -> `make-<hash>(): String`), whatever
@@ -119,7 +119,7 @@ pub(super) fn representation(
     // has been excluded above, that generic slot holds the BOX. Its descriptor may equal the
     // carrier's descriptor, so this recorded representation fact decides before comparison.
     if physical
-        .get(&id)
+        .physical(id)
         .is_some_and(|physical| physical.is_erased_top())
     {
         return Repr::Boxed(value_class);
@@ -140,14 +140,14 @@ pub(super) fn representation(
     // missing descriptor does not select the carrier: the result stays the box.
     if physical_descriptor.is_none()
         && physical
-            .get(&id)
+            .physical(id)
             .is_some_and(|recorded| recorded.non_null() == under[&value_class].non_null())
     {
-        return repr_of_ty(logical, under);
+        return repr_of_ty(&logical, under);
     }
     let carrier_descriptor = desc(&erase(&under[&value_class], under));
     if physical_descriptor.as_deref() == Some(carrier_descriptor.as_str()) {
-        repr_of_ty(logical, under)
+        repr_of_ty(&logical, under)
     } else {
         Repr::Boxed(value_class)
     }
@@ -164,29 +164,29 @@ mod tests {
         let carrier = Ty::obj("kotlin/IntArray");
         let mut under = Under::default();
         under.insert(value_class, carrier);
-        let mut logical = HashMap::default();
-        logical.insert(0, Ty::obj_name(value_class));
+        let mut logical = crate::ir::IrFile::default();
+        logical.set_logical_type(0, Ty::obj_name(value_class));
         let declared = HashMap::default();
         let callee = Callee::Intrinsic {
             operation: IrIntrinsic::PrimitiveArrayNew { element: Ty::UInt },
             ret: Ty::obj_name(value_class),
         };
         let types = CallTypes {
-            logical: &logical,
+            logical: logical.node_types(),
             declared: &declared,
             property_declarations: &declared,
             statics: &[],
             joins: &declared,
         };
-        let absent = HashMap::default();
+        let absent = crate::ir::IrFile::default();
         assert!(matches!(
-            representation(0, &callee, &under, types, &absent),
+            representation(0, &callee, &under, types, absent.node_types()),
             Repr::Boxed(classifier) if classifier == value_class
         ));
-        let mut recorded = HashMap::default();
-        recorded.insert(0, carrier);
+        let mut recorded = crate::ir::IrFile::default();
+        recorded.set_physical_type(0, carrier);
         assert!(matches!(
-            representation(0, &callee, &under, types, &recorded),
+            representation(0, &callee, &under, types, recorded.node_types()),
             Repr::Unboxed(classifier) if classifier == value_class
         ));
     }

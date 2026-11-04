@@ -12,6 +12,8 @@ mod destination_producer_result_e2e;
 mod enclosing_formal_signatures_e2e;
 #[path = "inferred_alias_constructor_abbreviation_e2e.rs"]
 mod inferred_alias_constructor_abbreviation_e2e;
+#[path = "inlined_lambda_extension_receiver_e2e.rs"]
+mod inlined_lambda_extension_receiver_e2e;
 #[path = "nested_signature_argument_layout_e2e.rs"]
 mod nested_signature_argument_layout_e2e;
 
@@ -393,8 +395,6 @@ mod classpath_fun_typed_property_lambda_e2e;
 mod classpath_function_reference_e2e;
 #[path = "classpath_hidden_deprecated_e2e.rs"]
 mod classpath_hidden_deprecated_e2e;
-#[path = "classpath_inner_classes_e2e.rs"]
-mod classpath_inner_classes_e2e;
 #[path = "classpath_is_smartcast_e2e.rs"]
 mod classpath_is_smartcast_e2e;
 #[path = "classpath_jdk_static_e2e.rs"]
@@ -473,8 +473,6 @@ mod classpath_subtype_ctor_arg_e2e;
 mod classpath_super_call_e2e;
 #[path = "classpath_super_ctor_args_e2e.rs"]
 mod classpath_super_ctor_args_e2e;
-#[path = "classpath_suspend_receiver_lambda_e2e.rs"]
-mod classpath_suspend_receiver_lambda_e2e;
 #[path = "classpath_synthetic_ctor_e2e.rs"]
 mod classpath_synthetic_ctor_e2e;
 #[path = "classpath_synthetic_setter_e2e.rs"]
@@ -593,7 +591,6 @@ mod construction_argument_labels_e2e;
 mod construction_default_arg_e2e;
 #[path = "constructor_argument_specificity_e2e.rs"]
 mod constructor_argument_specificity_e2e;
-mod constructor_continuation_e2e;
 #[path = "constructor_default_expression_lines_e2e.rs"]
 mod constructor_default_expression_lines_e2e;
 #[path = "constructor_initialization_order_e2e.rs"]
@@ -616,8 +613,6 @@ mod context_parameter_signature_order_e2e;
 mod context_parameters_e2e;
 #[path = "contextual_lambda_expected_return_e2e.rs"]
 mod contextual_lambda_expected_return_e2e;
-#[path = "continuation_spill_order_e2e.rs"]
-mod continuation_spill_order_e2e;
 #[path = "contract_calls_in_place_e2e.rs"]
 mod contract_calls_in_place_e2e;
 #[path = "contract_conjunct_null_checks_e2e.rs"]
@@ -636,8 +631,6 @@ mod contract_smartcast_e2e;
 mod contract_user_e2e;
 #[path = "contravariant_sam_adapter_e2e.rs"]
 mod contravariant_sam_adapter_e2e;
-#[path = "coroutine_intrinsics_e2e.rs"]
-mod coroutine_intrinsics_e2e;
 #[path = "e2e/counted_loops.rs"]
 mod counted_loops;
 #[path = "cross_file_companion_fun_e2e.rs"]
@@ -650,8 +643,6 @@ mod cross_file_inline_call_e2e;
 mod cross_file_inline_source_map_e2e;
 #[path = "cross_file_operator_e2e.rs"]
 mod cross_file_operator_e2e;
-#[path = "cross_file_serializer_inner_classes_e2e.rs"]
-mod cross_file_serializer_inner_classes_e2e;
 #[path = "cross_file_typealias_e2e.rs"]
 mod cross_file_typealias_e2e;
 #[path = "cross_file_value_param_constructor_e2e.rs"]
@@ -754,8 +745,6 @@ mod descriptor_arity_fails_closed_e2e;
 mod descriptor_element_companion_serializer_e2e;
 #[path = "descriptor_element_specialization_e2e.rs"]
 mod descriptor_element_specialization_e2e;
-#[path = "descriptor_inner_classes_e2e.rs"]
-mod descriptor_inner_classes_e2e;
 #[path = "deserialize_dispatch_shape_e2e.rs"]
 mod deserialize_dispatch_shape_e2e;
 #[path = "destructure_component_extension_e2e.rs"]
@@ -1097,8 +1086,6 @@ mod generic_signature_e2e;
 mod generic_static_field_e2e;
 #[path = "generic_super_call_e2e.rs"]
 mod generic_super_call_e2e;
-#[path = "generic_suspend_member_return_e2e.rs"]
-mod generic_suspend_member_return_e2e;
 #[path = "generic_value_class_result_e2e.rs"]
 mod generic_value_class_result_e2e;
 #[path = "generic_vararg_inference_e2e.rs"]
@@ -1149,14 +1136,8 @@ mod indy_lambda_fallback_parity_e2e;
 mod indy_lambda_parity_e2e;
 #[path = "inert_kotlinc_arguments_e2e.rs"]
 mod inert_kotlinc_arguments_e2e;
-#[path = "inferred_alias_abbreviation_e2e.rs"]
-mod inferred_alias_abbreviation_e2e;
-#[path = "inferred_computed_prop_e2e.rs"]
-mod inferred_computed_prop_e2e;
-#[path = "inferred_constructor_argument_overload_e2e.rs"]
-mod inferred_constructor_argument_overload_e2e;
-#[path = "inferred_property_type_args_e2e.rs"]
-mod inferred_property_type_args_e2e;
+#[path = "e2e/inferred_types.rs"]
+mod inferred_types;
 #[path = "inheritance_e2e.rs"]
 mod inheritance_e2e;
 #[path = "inherited_collection_bridge_e2e.rs"]
@@ -1181,8 +1162,6 @@ mod inline_member_super_arguments_e2e;
 mod inline_operand_holder_slots_e2e;
 #[path = "inline_scopes_numbers_flag_e2e.rs"]
 mod inline_scopes_numbers_flag_e2e;
-#[path = "inlined_code_inner_classes_e2e.rs"]
-mod inlined_code_inner_classes_e2e;
 #[path = "inlined_lambda_stack_spill_e2e.rs"]
 mod inlined_lambda_stack_spill_e2e;
 #[path = "inlined_property_initializer_line_e2e.rs"]
@@ -1199,6 +1178,8 @@ mod inner_class_declaration_order_e2e;
 mod inner_class_name_pool_order_e2e;
 #[path = "inner_class_outer_tparam_e2e.rs"]
 mod inner_class_outer_tparam_e2e;
+#[path = "e2e/inner_class_rows.rs"]
+mod inner_class_rows;
 #[path = "inner_constructor_bounds_e2e.rs"]
 mod inner_constructor_bounds_e2e;
 #[path = "inner_secondary_constructor_line_e2e.rs"]
@@ -1478,8 +1459,6 @@ mod local_override_boxed_result_e2e;
 mod local_shadows_receiver_member_e2e;
 #[path = "local_superclass_capture_e2e.rs"]
 mod local_superclass_capture_e2e;
-#[path = "local_suspend_default_e2e.rs"]
-mod local_suspend_default_e2e;
 #[path = "loop_jump_shape_e2e.rs"]
 mod loop_jump_shape_e2e;
 #[path = "lower_bail_reason_e2e.rs"]
@@ -1674,8 +1653,6 @@ mod super_delegation_line_e2e;
 mod suspend;
 #[path = "e2e/suspend_inlining.rs"]
 mod suspend_inlining;
-#[path = "suspending_concat_operands_e2e.rs"]
-mod suspending_concat_operands_e2e;
 #[path = "type_parameter_nullability_annotations_e2e.rs"]
 mod type_parameter_nullability_annotations_e2e;
 #[path = "e2e/type_resolution.rs"]
@@ -1772,12 +1749,6 @@ mod value_class_secondary_constructor_return_e2e;
 mod value_class_signature_e2e;
 #[path = "value_class_super_call_e2e.rs"]
 mod value_class_super_call_e2e;
-#[path = "value_class_suspend_member_reentry_e2e.rs"]
-mod value_class_suspend_member_reentry_e2e;
-#[path = "value_class_suspend_override_e2e.rs"]
-mod value_class_suspend_override_e2e;
-#[path = "value_class_suspend_resume_e2e.rs"]
-mod value_class_suspend_resume_e2e;
 #[path = "value_class_try_value_e2e.rs"]
 mod value_class_try_value_e2e;
 #[path = "vararg_generic_signature_e2e.rs"]
@@ -2191,8 +2162,6 @@ mod temporary_elimination_e2e;
 mod try_debug_lines_e2e;
 #[path = "try_primitive_nullable_join_e2e.rs"]
 mod try_primitive_nullable_join_e2e;
-#[path = "uncast_continuation_operand_e2e.rs"]
-mod uncast_continuation_operand_e2e;
 #[path = "unmatched_null_check_temporaries_e2e.rs"]
 mod unmatched_null_check_temporaries_e2e;
 #[path = "upcast_checkcast_e2e.rs"]

@@ -122,7 +122,7 @@ impl ProductionSignatureSemantics<'_> {
             match resolver.select_receiver_function_with_params_tracking(
                 receiver.get(),
                 spelling,
-                &argument_kinds,
+                crate::symbol_resolver::FamilyArguments::Shared(&argument_kinds),
                 &[],
                 &callables,
                 None,
