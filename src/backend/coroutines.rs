@@ -12,12 +12,16 @@
 //! * [`hoisting`] lifts a suspension nested in an operand into a preceding temporary, in source
 //!   evaluation order.
 //!
+//! [`continuation_parameters`] is the first step of the coroutine lowering itself, for the targets
+//! that realize it on common IR rather than in their own pass (the JVM keeps its own).
+//!
 //! They preserve checked Kotlin meaning and choose no representation. A temporary takes the type
 //! recorded for the value it holds, never one these passes derive; the constant a fresh temporary
 //! starts from is the target's, asked through [`CoroutineRepresentation`].
 
 mod block_splicing;
 mod bottom_completion;
+mod continuation_parameters;
 mod control_flow;
 mod hoisting;
 mod statement_normalization;
@@ -30,6 +34,7 @@ pub(crate) use block_splicing::{diverging_control_core, splice_return_blocks};
 pub(crate) use bottom_completion::{
     suspension_completion, unwrap_suspend_cast, SuspensionCompletion,
 };
+pub(crate) use continuation_parameters::add_continuation_parameters;
 pub(crate) use control_flow::{expr_contains_owned_loop_jump, expr_has_return, stmt_diverges};
 pub(crate) use hoisting::{hoist_spliced_inline_bodies, hoist_suspensions};
 pub(crate) use statement_normalization::{

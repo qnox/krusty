@@ -850,6 +850,7 @@ coroutines/suspendInTheMiddleOfObjectConstruction.kt
 coroutines/suspendInTheMiddleOfObjectConstructionEvaluationOrder.kt
 coroutines/suspendInTheMiddleOfObjectConstructionWithJumpOut.kt
 coroutines/suspendInlineReference.kt
+coroutines/suspendLambdaInInterface.kt
 coroutines/suspendLambdaWithArgumentRearrangement.kt
 coroutines/suspendTwoProblematicExpressionsInOneCoroutine.kt
 coroutines/suspendWhileBreakContinueInsideElvis.kt
@@ -883,12 +884,15 @@ coroutines/varCaptuedInCoroutineIntrinsic.kt
 coroutines/varSpilling/fakeInlinerVariables.kt
 coroutines/varSpilling/kt19475.kt
 coroutines/varSpilling/kt38925.kt
+coroutines/varSpilling/kt49834.kt
 coroutines/varSpilling/kt64139.kt
 coroutines/varSpilling/kt75926.kt
 coroutines/varSpilling/kt79276.kt
+coroutines/varSpilling/kt83372.kt
 coroutines/varSpilling/kt85203.kt
 coroutines/varSpilling/kt85203_2.kt
 coroutines/varSpilling/nullSpilling.kt
+coroutines/varSpilling/refinedIntTypesAnalysis.kt
 coroutines/varSpilling/safeCallElvis.kt
 coroutines/varValueConflictsWithTable.kt
 coroutines/varValueConflictsWithTableSameSort.kt
@@ -912,7 +916,6 @@ defaultArguments/defaultArgumentsInFunctionWithExpressionAsBody.kt
 defaultArguments/function/defaultLambdaInline.kt
 defaultArguments/kt48391.kt
 defaultArguments/protected.kt
-defaultArguments/suspendLambdaInTailrecDefault.kt
 delegatedProperty/DelegationByFunctionWithEnumUpperBound.kt
 delegatedProperty/callableReferenceAsSecondArgumentOfDelegate.kt
 delegatedProperty/correctFieldsOrder.kt
@@ -1126,12 +1129,8 @@ ieee754/explicitEqualsCall.kt
 ieee754/safeCall.kt
 increment/augmentedAssignmentWithComplexRhs.kt
 inference/builderInferenceLeakingVariable.kt
-inference/eagerLambdaAnalysisSuspendAndNotSuspend.kt
-inference/eagerLambdaAnalysisSuspendAndSam.kt
 inference/integerLiteralTypeInLamdaReturnType.kt
-inference/kt35684.kt
 inference/kt39824.kt
-inference/kt49838.kt
 inference/overrideDefaultProperty.kt
 inference/overrideGenericDefaultMethod.kt
 inference/pcla/builderCallAsReturnTypeInLocalClass.kt
@@ -1139,7 +1138,6 @@ inference/pcla/callableReferenceAndCoercionToUnit.kt
 inference/pcla/callableReferencesProperCompletion.kt
 inference/pcla/issues/kt42139.kt
 inference/pcla/issues/kt47052.kt
-inference/pcla/issues/kt47744.kt
 inference/pcla/issues/kt48633.kt
 inference/pcla/issues/kt49887.kt
 inference/pcla/issues/kt54767a.kt
@@ -1151,10 +1149,7 @@ inference/pcla/issues/kt74819e.kt
 inference/pcla/issues/kt76171.kt
 inference/pcla/memberScope.kt
 inference/pcla/nestedNonExhaustiveIf.kt
-inference/pcla/oneParameter/oneTypeVariable/oneTypeInfoOrigin/targetTypes/SuspendingFunction.kt
 inference/pcla/pclaRootIsTrySyntheticCallWithDelegate.kt
-inference/pcla/specialCallsWithCallableReferencesDontRewriteAtSlice.kt
-inference/pcla/specialCallsWithLambdas.kt
 inference/pcla/substituteStubTypeIntoCR.kt
 inference/pcla/substitutelambdaExtensionReceiverType.kt
 inference/pcla/topDownCompletionBreakedByNonBuilderInferenceSession.kt
@@ -2498,7 +2493,6 @@ reified/method.kt
 reified/multipleTypeParameters.kt
 reified/noValueParameters.kt
 reified/parameterSwap.kt
-reified/reifiedIntersectionType.kt
 reified/reifiedIntersectionTypeArgumentCrossModule.kt
 reified/safecast.kt
 reified/spreads.kt
@@ -2572,7 +2566,6 @@ suspendConversion/basicSuspendConversionDefault.kt
 suspendConversion/chainedFunSuspendConversionForSimpleExpression.kt
 suspendConversion/conversionOfInterfaceInheritingFunctionN.kt
 suspendConversion/kt50949_suspendConversionForExtensionFunction.kt
-suspendConversion/overloadResolutionBySuspendModifier.kt
 suspendConversion/severalConversionsInOneCall.kt
 suspendConversion/suspendAndFunConversionInDisabledMode.kt
 suspendConversion/suspendConversionOfAliasedType.kt
@@ -2638,7 +2631,6 @@ typeErasure/twoFunWithTypeParametersWithUpperBoundsInlineFunWithReifiedTypeParam
 typealias/abbreviationWithCapturedType.kt
 typealias/deserializedAbbreviationWithRedundantArgument.kt
 typealias/importNestedTypealiasFromAnotherModule.kt
-typealias/incorrectTypeOfTypealiasForSuspendFTMM.kt
 typealias/localTypeAliases.kt
 typealias/privateInKlib.kt
 typealias/typeAliasAsBareType.kt
