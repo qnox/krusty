@@ -35,7 +35,12 @@ fn declaration_kind(
     }
 }
 
-fn selected_kind(ir: &IrFile, receiver: ExprId, fact: &BackendCallableFact) -> Option<ValueHash> {
+fn selected_kind(
+    ir: &IrFile,
+    receiver: ExprId,
+    fact: &BackendCallableFact,
+    call_role: Option<SemanticCallRole>,
+) -> Option<ValueHash> {
     if !fact.is_member_function() || !fact.params.is_empty() || fact.ret != Ty::Int {
         return None;
     }
@@ -43,7 +48,7 @@ fn selected_kind(ir: &IrFile, receiver: ExprId, fact: &BackendCallableFact) -> O
     // receiver from its syntax, current value, physical owner, or a similarly named declaration.
     declaration_kind(
         fact.compiler_operation(),
-        fact.semantic_role,
+        call_role,
         ir.checked_type(receiver)?,
     )
 }
@@ -75,8 +80,16 @@ pub(in crate::wasm::codegen) fn call_kind(
     if !params.is_empty() || !args.is_empty() || !defaults.is_empty() || *ret != Ty::Int {
         return None;
     }
+    // Selection decorates this call edge with inherited builtin identity. The frozen declaration
+    // may be String's override rather than Any's declaration, so its undecorated role is not the
+    // authority for this operation.
     Some((
-        selected_kind(ir, *receiver, callables.callable(*target)?)?,
+        selected_kind(
+            ir,
+            *receiver,
+            callables.callable(*target)?,
+            ir.semantic_call_roles.get(&expression).copied(),
+        )?,
         *receiver,
     ))
 }
