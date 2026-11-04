@@ -15,6 +15,7 @@ mod call_arguments;
 mod call_result_boundaries;
 mod call_results;
 mod class_annotations;
+pub(crate) mod collection_stub_replacements;
 mod constructor_arguments;
 mod constructor_bodies;
 mod declaration_inventory;
@@ -41,7 +42,6 @@ mod property_annotation_markers;
 mod property_references;
 mod reference_returns;
 mod representation;
-use representation::is_ref;
 mod result_tail_boxing;
 mod return_unboxing;
 mod sam_names;
@@ -75,11 +75,11 @@ pub(crate) use member_names::{member_signature_is_mangled, suspend_lambda_invoke
 use member_names::{vc_mangle, vc_mangle_once, vc_member_entry_name, vc_member_impl_name};
 pub(crate) use module_members::*;
 use operand_nullness::{operand_nonnull, operand_null_only};
-use representation::erase;
 pub(crate) use representation::{
     boxed_value_class_carrier, boxed_value_class_names, boxed_value_class_underlying,
     instance_representation, is_boxed_value_class, type_operation_internal_name,
 };
+use representation::{erase, is_ref};
 use result_tail_boxing::box_vc_tail;
 use suspend_results::{record_suspend_results, suspend_result_representation};
 use unboxing_rewrites::{narrow_wrap, unbox_call, unbox_wrap, unbox_wrap_nullable};

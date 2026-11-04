@@ -24,6 +24,9 @@ pub struct DecodedBuiltinMember {
     pub kind: MappedBuiltinMemberKind,
     pub generic_sig: GenericSig,
     pub parameter_names: Vec<String>,
+    /// The declaration is `@PlatformDependent`: a JVM member of the mapped JDK class that Kotlin
+    /// sees only where that JDK declares it (`MutableMap.remove(key, value)`).
+    pub platform_dependent: bool,
 }
 
 impl Classpath {
@@ -62,6 +65,9 @@ impl Classpath {
                     kind,
                     generic_sig: member.generic_sig.clone(),
                     parameter_names: member.param_names.clone(),
+                    platform_dependent: member
+                        .annotations
+                        .contains(&crate::types::wk::platform_dependent()),
                 }
             })
             .collect()

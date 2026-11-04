@@ -479,7 +479,7 @@ impl Checker<'_> {
             let resolved = signature
                 .formals
                 .iter()
-                .map(|formal| bindings.get(formal).copied())
+                .map(|formal| bindings.get(formal.as_str()).copied())
                 .collect::<Vec<_>>();
             self.replace_selected_generic_call(expression, signature, &selected.call_sig, resolved);
         } else {

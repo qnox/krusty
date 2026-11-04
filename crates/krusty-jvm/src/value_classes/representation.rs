@@ -77,6 +77,14 @@ pub(crate) fn boxed_value_class_carrier(ir: &IrFile, classifier: TypeName) -> Op
     if has_native_carrier(classifier) {
         return None;
     }
+    let declarations = known_underlyings(ir);
+    let underlying = *declarations.get(&classifier)?;
+    Some(super::erase(&underlying, &declarations))
+}
+
+/// The declared underlying of every value class this IR knows: the file's own as
+/// [`declared_underlyings`] reads them, then each external one as its checked facts declare it.
+pub(super) fn known_underlyings(ir: &IrFile) -> krusty::value_classes::UnderlyingTypes {
     let mut declarations = declared_underlyings(ir);
     for name in ir.value_class_names() {
         if let (std::collections::hash_map::Entry::Vacant(entry), Some(declared)) = (
@@ -86,8 +94,7 @@ pub(crate) fn boxed_value_class_carrier(ir: &IrFile, classifier: TypeName) -> Op
             entry.insert(declared);
         }
     }
-    let underlying = *declarations.get(&classifier)?;
-    Some(super::erase(&underlying, &declarations))
+    declarations
 }
 
 /// Every value class this IR knows that the JVM boxes through its own `box-impl`.
