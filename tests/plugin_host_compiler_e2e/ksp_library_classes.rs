@@ -31,8 +31,7 @@ fn platform(paths: Vec<PathBuf>) -> PlatformProvider {
 
 /// The library fixture's dependency, compiled by krusty into a classpath directory.
 fn dependency(paths: &[PathBuf]) -> PathBuf {
-    let out = Path::new(env!("CARGO_TARGET_TMPDIR")).join("ksp-library-classes-dependency");
-    let _ = std::fs::remove_dir_all(&out);
+    let out = crate::common::scratch_dir().expect("allocate the KSP dependency fixture");
     let text = std::fs::read_to_string(fixtures().join("dependency/Dependency.kt")).unwrap();
     let inputs = [SourceInput::kotlin(&text).with_file_stem("Dependency")];
     let mut diagnostics = DiagSink::new();
