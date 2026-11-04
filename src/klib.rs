@@ -35,7 +35,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::io::{Read as _, Seek as _};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 /// A klib's root directory tree, below which every entry path in this module is relative.
 const ARCHIVE_COMPONENT: &str = "default";
@@ -84,9 +84,16 @@ pub struct KlibArchive {
     entries: Vec<String>,
     /// Immutable bytes of every selected channel this compiler consumes: declarations and bodies,
     /// plus Native import facts when Native input assembly opened it. The fingerprint and every
-    /// decoder read this same snapshot, so replacing an unpacked KLIB in place cannot authenticate
-    /// one generation while publishing declarations or link facts from another.
-    semantic_entries: BTreeMap<String, Vec<u8>>,
+    /// decoder read this same snapshot, so replacing a KLIB in place cannot authenticate one
+    /// generation while publishing declarations or link facts from another.
+    ///
+    /// An unpacked KLIB has no record of its contents to check a later read against, so its
+    /// channels are read when it is opened. A zip KLIB's channels are read on first use instead:
+    /// every read goes through the archive handle opened with the central directory, and each
+    /// entry's CRC-32 is checked against that directory, so a later read yields the opened
+    /// generation's bytes or fails. A caller that consults a few packages of a large library then
+    /// inflates only those entries.
+    semantic_entries: BTreeMap<String, OnceLock<Vec<u8>>>,
     /// Native input assembly widens the selected snapshot with its target import facts. Other
     /// KLIB consumers do not let a Native-only entry perturb their semantic/body generation.
     native_imports_frozen: bool,
@@ -321,6 +328,7 @@ impl KlibArchive {
                 semantic_entries: BTreeMap::new(),
                 native_imports_frozen,
             };
+            archive.select_semantic_entries();
             archive.freeze_semantic_entries()?;
             return Ok(archive);
         }
@@ -402,7 +410,7 @@ impl KlibArchive {
             semantic_entries: BTreeMap::new(),
             native_imports_frozen,
         };
-        archive.freeze_semantic_entries()?;
+        archive.select_semantic_entries();
         Ok(archive)
     }
 
@@ -428,7 +436,8 @@ impl KlibArchive {
         use sha2::{Digest as _, Sha256};
 
         let mut digest = Sha256::new();
-        for (entry, bytes) in &self.semantic_entries {
+        for entry in self.semantic_entries.keys() {
+            let bytes = self.read(entry)?;
             digest.update((entry.len() as u64).to_le_bytes());
             digest.update(entry.as_bytes());
             digest.update((bytes.len() as u64).to_le_bytes());
@@ -456,24 +465,35 @@ impl KlibArchive {
                 entry: entry.to_string(),
             });
         }
-        if let Some(bytes) = self.semantic_entries.get(entry) {
+        let Some(frozen) = self.semantic_entries.get(entry) else {
+            return self.read_source(entry);
+        };
+        if let Some(bytes) = frozen.get() {
             return Ok(bytes.clone());
         }
-        self.read_source(entry)
+        // Two readers may race to the first read; both read the same checked generation.
+        let bytes = self.read_source(entry)?;
+        Ok(frozen.get_or_init(|| bytes).clone())
     }
 
-    fn freeze_semantic_entries(&mut self) -> Result<(), KlibError> {
-        let entries = self
+    /// Record which entries belong to the selected channels, without reading them.
+    fn select_semantic_entries(&mut self) {
+        self.semantic_entries = self
             .entries
             .iter()
             .filter(|entry| {
                 semantic_entry(entry) || (self.native_imports_frozen && native_import_entry(entry))
             })
-            .cloned()
-            .collect::<Vec<_>>();
-        for entry in entries {
-            self.semantic_entries
-                .insert(entry.clone(), self.read_source(&entry)?);
+            .map(|entry| (entry.clone(), OnceLock::new()))
+            .collect();
+    }
+
+    /// Read every selected channel now. An unpacked KLIB is frozen when it is opened, because no
+    /// later read could prove it came from the opened generation.
+    fn freeze_semantic_entries(&self) -> Result<(), KlibError> {
+        for (entry, frozen) in &self.semantic_entries {
+            let bytes = self.read_source(entry)?;
+            let _ = frozen.set(bytes);
         }
         Ok(())
     }
@@ -1512,6 +1532,90 @@ mod tests {
     }
 
     #[test]
+    fn zip_entries_read_on_first_use_belong_to_the_opened_generation() {
+        let root = temp_dir("klib-zip-generations");
+        let generation = |module: &[u8]| -> Vec<(&'static str, Vec<u8>)> {
+            vec![
+                ("default/manifest", b"unique_name=fixture\n".to_vec()),
+                ("default/linkdata/module", module.to_vec()),
+            ]
+        };
+        let write_generation = |name: &str, module: &[u8]| {
+            let entries = generation(module);
+            let borrowed = entries
+                .iter()
+                .map(|(entry, bytes)| (*entry, bytes.as_slice()))
+                .collect::<Vec<_>>();
+            write_stored_zip(&root, name, &borrowed)
+        };
+
+        // Replaced by a rename after open: the cached entry and the entry first read after the
+        // replacement both come from the opened generation, and publication sees the change.
+        let path = write_generation("replaced.klib", b"first");
+        let first_fingerprint = KlibArchive::open(&path)
+            .and_then(|first| first.content_fingerprint())
+            .expect("fingerprint the first generation");
+        let opened = KlibArchive::open(&path).expect("open the first generation");
+        assert_eq!(
+            opened.manifest().expect("read the manifest").unique_name(),
+            Some("fixture")
+        );
+        let replacement = write_generation("replacement.klib", b"second");
+        std::fs::rename(&replacement, &path).expect("replace the KLIB path");
+        assert_eq!(
+            opened
+                .read("default/linkdata/module")
+                .expect("first read after replacement"),
+            b"first"
+        );
+        let opened_fingerprint = opened
+            .content_fingerprint()
+            .expect("fingerprint the opened");
+        assert_eq!(opened_fingerprint, first_fingerprint);
+        let current = opened.reopen_selected(&path).expect("open the replacement");
+        assert_ne!(
+            current
+                .content_fingerprint()
+                .expect("fingerprint the replacement"),
+            opened_fingerprint
+        );
+
+        // Rewritten in place with the same layout: an entry first read afterwards fails its
+        // CRC-32 against the central directory read at open instead of yielding new bytes.
+        let path = write_generation("rewritten.klib", b"first");
+        let opened = KlibArchive::open(&path).expect("open before the rewrite");
+        let rewritten = write_generation("rewritten-bytes.klib", b"fresh");
+        std::fs::write(&path, std::fs::read(&rewritten).expect("read the rewrite"))
+            .expect("rewrite the KLIB in place");
+        match opened.read("default/linkdata/module") {
+            Err(KlibError::Io {
+                operation,
+                path: entry,
+                source,
+            }) => {
+                assert_eq!(operation, "read");
+                assert_eq!(entry, path.join("default/linkdata/module"));
+                assert_eq!(source.to_string(), "Invalid checksum");
+            }
+            Err(error) => panic!("unexpected in-place rewrite error: {error}"),
+            Ok(bytes) => panic!("read {bytes:?} from a rewritten generation"),
+        }
+
+        // The fingerprint reads every selected entry, so it reports a corrupt one nothing read.
+        let corrupt = write_raw_zip(&root, "corrupt-unread.klib", CORRUPT_CRC_ZIP);
+        let opened = KlibArchive::open(&corrupt).expect("the central directory is intact");
+        match opened.content_fingerprint() {
+            Err(KlibError::Io { source, .. }) => {
+                assert_eq!(source.to_string(), "Invalid checksum");
+            }
+            Err(error) => panic!("unexpected corrupt-fingerprint error: {error}"),
+            Ok(_) => panic!("fingerprinted a corrupt selected entry"),
+        }
+
+        std::fs::remove_dir_all(root).expect("remove zip generation fixtures");
+    }
+
+    #[test]
     fn raw_zip_failures_preserve_the_exact_container_error() {
         let root = temp_dir("klib-raw-zip-errors");
 
@@ -1535,8 +1639,11 @@ mod tests {
             Ok(_) => panic!("duplicate-entry raw ZIP opened"),
         }
 
+        // A zip KLIB's entries are read on first use, each checked against the CRC-32 that the
+        // central directory read at open records for it.
         let corrupt_crc = write_raw_zip(&root, "corrupt-crc.klib", CORRUPT_CRC_ZIP);
-        match KlibArchive::open(&corrupt_crc) {
+        let opened = KlibArchive::open(&corrupt_crc).expect("the central directory is intact");
+        match opened.manifest() {
             Err(KlibError::Io {
                 operation,
                 path,
@@ -1548,7 +1655,7 @@ mod tests {
                 assert_eq!(source.to_string(), "Invalid checksum");
             }
             Err(error) => panic!("unexpected corrupt-CRC error: {error}"),
-            Ok(_) => panic!("corrupt-CRC archive opened"),
+            Ok(_) => panic!("corrupt-CRC entry read"),
         }
 
         let corrupt_central =
