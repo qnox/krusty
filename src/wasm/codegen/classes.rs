@@ -207,11 +207,15 @@ fn check_supported(ir: &IrFile, id: ClassId) -> Result<(), Unsupported> {
     Err(format!("{construct} (`{name}`)"))
 }
 
-/// Whether any expression of `ir` constructs the class named `name`.
+/// Whether a body `ir` emits constructs the class named `name`. Orphan expressions and
+/// cloning-only inline templates are not emitted, so a construction there is no obligation.
 fn constructs(ir: &IrFile, name: TypeName) -> bool {
-    ir.exprs
-        .iter()
-        .any(|expr| matches!(expr, IrExpr::New { internal, .. } if *internal == name))
+    crate::ir::emitted_body_roots(ir)
+        .into_iter()
+        .flat_map(|root| crate::ir::value_namespace_expressions(ir, root))
+        .any(|expression| {
+            matches!(ir.expr(expression), IrExpr::New { internal, .. } if *internal == name)
+        })
 }
 
 /// Lay out every class of `ir` in `module`: types, constructors' and accessors' indices, and the
