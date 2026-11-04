@@ -15,6 +15,8 @@ mod companion_static_initializer_line_e2e;
 mod decl_body_on_next_line_e2e;
 #[path = "../elvis_newline_continuation_e2e.rs"]
 mod elvis_newline_continuation_e2e;
+#[path = "../enum_entry_argument_lines_e2e.rs"]
+mod enum_entry_argument_lines_e2e;
 #[path = "../infix_newline_operand_e2e.rs"]
 mod infix_newline_operand_e2e;
 #[path = "../inline_only_converted_lambda_line_e2e.rs"]
@@ -37,5 +39,7 @@ mod primary_constructor_newline_e2e;
 mod property_initializer_newline_e2e;
 #[path = "../receiver_type_line_break_e2e.rs"]
 mod receiver_type_line_break_e2e;
+#[path = "../safe_call_inline_null_path_line_e2e.rs"]
+mod safe_call_inline_null_path_line_e2e;
 #[path = "../type_annotation_newline_e2e.rs"]
 mod type_annotation_newline_e2e;

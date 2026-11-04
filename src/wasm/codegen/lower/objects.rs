@@ -32,6 +32,9 @@ use super::{carrier, Body, FileContext, Unsupported, STRING};
 /// The heap type of the runtime's `String`, type 1 (see `STRING`).
 const STRING_HEAP: HeapType = HeapType::Concrete(1);
 
+#[cfg(test)]
+mod tests;
+
 impl Body<'_> {
     fn file_classes(&self) -> Result<&FileClasses, Unsupported> {
         self.classes
@@ -943,10 +946,23 @@ impl Body<'_> {
     /// `is`, `!is` and `as?`.
     pub(super) fn type_test(
         &mut self,
+        operation: u32,
         op: IrTypeOp,
         arg: u32,
         target: Ty,
     ) -> Result<(), Unsupported> {
+        if self
+            .ir
+            .is_reified_template_operation(self.scope, operation, target)
+        {
+            // Only a reified declaration's own template tests its unsubstituted parameter; every
+            // executed expansion tests the call's type argument instead. The template keeps the
+            // operand's effects and then traps, as the declaration's own unlowerable body does.
+            // Copied or otherwise executable code that still names the parameter is refused below.
+            self.statement(arg)?;
+            self.code.unreachable();
+            return Ok(());
+        }
         if !matches!(self.carrier_of(arg)?, Some(ValType::Ref { .. }) | None) {
             return Err(format!(
                 "a type test of a `{}` value",
@@ -1171,6 +1187,10 @@ pub(super) fn define_class_functions(
                 declared.extend(ir.declared_value_slot_types(root));
             }
             let mut body = Body::new(context, module, runtime, &parameters, declared, Ty::Unit);
+            body.scope = crate::ir::IrEnclosure::Constructor {
+                class: id,
+                ordinal: 0,
+            };
             body.primary_constructor(id)?;
             let lowered = body.finish();
             define(module, constructor, &parameters, lowered)?;
@@ -1190,6 +1210,10 @@ pub(super) fn define_class_functions(
                 declared.extend(ir.declared_value_slot_types(root));
             }
             let mut body = Body::new(context, module, runtime, &parameters, declared, Ty::Unit);
+            body.scope = crate::ir::IrEnclosure::Constructor {
+                class: id,
+                ordinal: ordinal as u32 + 1,
+            };
             body.secondary_constructor(id, ordinal)?;
             let lowered = body.finish();
             define(module, constructor, &parameters, lowered)?;

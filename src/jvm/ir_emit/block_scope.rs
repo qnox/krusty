@@ -1455,7 +1455,14 @@ impl Emitter<'_> {
         close_inline_stack(saved, code);
         self.release_reserved_inline_stack(pending.reserved);
         if pending.closes_spliced_frame {
+            // kotlinc closes the frame inside the inlined call and only then resets the line in
+            // effect (`markLineNumberAfterInlineIfNeeded`). Deferring the close past that reset
+            // must not spend it: the next mark of the frame's line is still written.
+            let reset = code.line_forgotten();
             self.close_spliced_lambda_frame(pending.block, false, code);
+            if reset {
+                code.forget_line();
+            }
         }
         true
     }
