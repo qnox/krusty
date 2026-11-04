@@ -5,7 +5,7 @@
 //!
 //! Inferring a type parameter FROM a projected receiver is a separate gap and is not fixed here:
 //! `c.map { it.startOffset }` still fails, because `T` does not bind from `List<out Range>` and the
-//! lambda body is then checked against an inapplicable candidate. See `docs/SPEC.md`.
+//! lambda body is then checked against an inapplicable candidate.
 
 use super::common;
 

@@ -1603,6 +1603,11 @@ android {
 dependencies {
     testImplementation("junit:junit:4.13.2")
 }
+
+tasks.withType<org.gradle.api.tasks.testing.Test>().configureEach {
+    outputs.upToDateWhen { false }
+    outputs.doNotCacheIf("the integration test must execute the classes compiled by krusty") { true }
+}
 "#,
         );
         write(

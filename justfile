@@ -259,9 +259,9 @@ kotlinc VERSION=`just max-version`:
     chmod +x "$bin"
     echo "$bin"
 
-# Regenerate krusty's copy of one kotlinc release's argument table and language feature table from
-# that release's compiler jar (crates/krusty-cli/src/kotlinc_arguments/releases/<ver>.tsv and
-# src/features/releases/<ver>.{features,language-versions}.tsv). The conformance e2e test fails
+# Regenerate krusty's copy of one kotlinc release's argument table, language feature table and
+# diagnostic names from that release's distribution (crates/krusty-cli/src/kotlinc_arguments/releases/<ver>.tsv,
+# src/features/releases/<ver>.{features,language-versions}.tsv and src/diag/releases/<ver>.diagnostics.tsv). The conformance e2e test fails
 # until the table each release reads equals what the provisioned compiler declares. A release keeps a
 # file only where it differs from the newest recorded release below it, which it otherwise reads.
 kotlinc-arguments VERSION=`just max-version`:
@@ -285,6 +285,7 @@ kotlinc-arguments VERSION=`just max-version`:
     dump DumpKotlincArguments crates/krusty-cli/src/kotlinc_arguments/releases .tsv
     dump DumpLanguageFeatures src/features/releases .features.tsv
     dump DumpLanguageVersions src/features/releases .language-versions.tsv
+    dump DumpDiagnosticNames src/diag/releases .diagnostics.tsv
 
 # Provision the Kotlin/Native distribution whose stdlib KLIB supplies the real metadata format.
 # The extracted root is versioned and cached beside the JVM compiler distribution.

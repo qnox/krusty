@@ -585,24 +585,15 @@ fn active_body_check_groups(
     index: &crate::fir::ResolvedModuleIndex,
 ) -> Vec<BodyCheckGroup> {
     fn ordinary_root(
-        mut declaration: crate::fir::DeclarationId,
+        declaration: crate::fir::DeclarationId,
         index: &crate::fir::ResolvedModuleIndex,
     ) -> crate::fir::DeclarationId {
-        loop {
-            let Some(anchor) = index.declaration_anchor(declaration) else {
-                return declaration;
-            };
-            let local_classifier = anchor.kind == crate::fir::DeclarationKind::Classifier
-                && index.declaration_header(declaration).is_some_and(|header| {
-                    header.flags.has(crate::fir::DeclarationFlags::LOCAL_CLASS)
-                });
-            if (anchor.kind == crate::fir::DeclarationKind::Classifier && !local_classifier)
-                || anchor.owner.is_none()
-            {
-                return declaration;
-            }
-            declaration = anchor.owner.expect("a non-root declaration has an owner");
-        }
+        crate::fir::checker_root(
+            index,
+            declaration,
+            |declaration| index.declaration_anchor(declaration),
+            |declaration| index.local_classifier_lexical_root(declaration),
+        )
     }
 
     // Parser hoisting may enumerate a local classifier before the executable declaration that

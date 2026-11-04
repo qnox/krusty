@@ -28,6 +28,19 @@ pub(crate) struct FunctionClassifier {
 }
 
 impl FunctionClassifier {
+    /// The language declaration that owns this family's invocation, including the invocation
+    /// inherited by a reflective function classifier.
+    pub(crate) fn invocation_classifier(self) -> Self {
+        Self {
+            kind: match self.kind {
+                FunctionClassKind::KFunction => FunctionClassKind::Function,
+                FunctionClassKind::KSuspendFunction => FunctionClassKind::SuspendFunction,
+                kind => kind,
+            },
+            arity: self.arity,
+        }
+    }
+
     pub(crate) fn arity(self) -> usize {
         self.arity
     }
