@@ -469,3 +469,37 @@ fn constructor_calls_this_lowering_cannot_realize_keep_their_checked_form() {
         vec![0]
     );
 }
+
+#[test]
+fn a_default_calling_with_an_omission_calls_the_entry_from_the_constructor_entry() {
+    let mut ir = IrFile::default();
+    let seven = int(&mut ir, 7);
+    let body = ir.add_expr(IrExpr::GetValue(0));
+    let function = declare(&mut ir, "f", vec![Ty::Int], Ty::Int, Some(body), None);
+    with_defaults(&mut ir, function, vec![Some(seven)]);
+    let default = ir.add_expr(IrExpr::Call {
+        callee: Box::new(Callee::LocalWithDefaults {
+            function,
+            defaults: Box::new([0]),
+        }),
+        dispatch_receiver: None,
+        args: Vec::new(),
+    });
+    let class = class_with_primary(
+        &mut ir,
+        "demo/C",
+        Vec::new(),
+        vec![Ty::Int],
+        vec![Some(default)],
+    );
+    construction(&mut ir, "demo/C", Vec::new(), None, &[0], 0, Some(0));
+
+    realize(&mut ir, &mut CheckedBackendCallables::default());
+
+    let function_entry = ir.default_entries[&function];
+    let constructor_entry = &ir.classes[class as usize].secondary_ctors[0];
+    assert_eq!(
+        render_all(&ir, &constructor_entry.delegate_prelude),
+        fill(2, 1, 1, &format!("fun{function_entry}(absent Int, 1)"))
+    );
+}
