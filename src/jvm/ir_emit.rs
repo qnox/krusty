@@ -5387,8 +5387,7 @@ impl<'a> Emitter<'a> {
     }
 
     fn emit_value_expression(&mut self, e: u32, code: &mut CodeBuilder) {
-        debug_lines::begin_expression(self.ir, e, code);
-        self.mark_value_expression_start(e, code);
+        self.mark_value_entry_lines(e, code);
         // Mark a machine-owned suspension at its post-splice location.
         let suspension = self.machine_before(e, code);
         self.open_transformed_suspension(e, code);

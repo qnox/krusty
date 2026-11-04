@@ -25,6 +25,7 @@ fn temporaries(categories: &[Category]) -> Parameters {
             .collect(),
         captured: Vec::new(),
         capture_owners: Vec::new(),
+        non_inline_suspend: Vec::new(),
     }
 }
 
@@ -37,6 +38,7 @@ impl AnonymousObjects for NoObjects {
         _class: &str,
         _desc: &str,
         _lambdas: &[ObjectLambda<'_>],
+        _suspend_values: &[usize],
         _prior_classes: &[(String, String)],
     ) -> Result<RegeneratedObject, InlineError> {
         panic!("a body without anonymous objects regenerates none")
@@ -249,6 +251,7 @@ fn a_parameter_bound_to_a_caller_local_reads_it_and_keeps_no_entry() {
         }],
         captured: Vec::new(),
         capture_owners: Vec::new(),
+        non_inline_suspend: Vec::new(),
     };
     let inlined =
         inline_plain(&plus_one(), &parameters, false, 5, &Default::default()).expect("inlines");
@@ -283,6 +286,7 @@ fn an_own_local_follows_zero_temporaries_at_frame_zero() {
         }],
         captured: Vec::new(),
         capture_owners: Vec::new(),
+        non_inline_suspend: Vec::new(),
     };
     let inlined =
         inline_plain(&plus_one(), &parameters, false, 0, &Default::default()).expect("inlines");
@@ -622,6 +626,7 @@ fn an_invoke_of_an_inline_lambda_becomes_the_lambdas_body() {
             },
         }],
         capture_owners: vec![0],
+        non_inline_suspend: Vec::new(),
     };
     let inlined = inline(
         &apply_to_one(),
@@ -738,6 +743,7 @@ fn a_lambda_invoked_over_a_stacked_value_is_bracketed_for_fix_stack() {
             },
         }],
         capture_owners: vec![0],
+        non_inline_suspend: Vec::new(),
     };
     let inlined = inline(
         &ten_plus_apply_to_one(),
@@ -841,6 +847,7 @@ impl AnonymousObjects for NumberingObjects {
         class: &str,
         desc: &str,
         _lambdas: &[ObjectLambda<'_>],
+        _suspend_values: &[usize],
         _prior_classes: &[(String, String)],
     ) -> Result<RegeneratedObject, InlineError> {
         self.asked.push((class.to_string(), desc.to_string()));
