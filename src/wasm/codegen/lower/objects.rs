@@ -1046,7 +1046,11 @@ impl Body<'_> {
 
     /// Whether a call through `member`'s slot on a value statically of `class` could reach
     /// `kotlin.Any`'s own member, which this module has no body for.
-    fn reaches_any_default(&self, class: ClassId, member: AnyMember) -> Result<bool, Unsupported> {
+    pub(super) fn reaches_any_default(
+        &self,
+        class: ClassId,
+        member: AnyMember,
+    ) -> Result<bool, Unsupported> {
         let classes = self.file_classes()?;
         Ok(self.ir.classes.iter().enumerate().any(|(id, candidate)| {
             let id = id as ClassId;

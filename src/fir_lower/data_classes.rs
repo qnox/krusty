@@ -567,13 +567,18 @@ fn synthesize_equals(
 fn return_guard(ir: &mut IrFile, condition: u32, value: bool) -> u32 {
     let value = ir.add_expr(IrExpr::Const(crate::ir::IrConst::Boolean(value)));
     let returned = ir.add_expr(IrExpr::Return(Some(value)));
+    ir.set_logical_type(returned, Ty::Nothing);
     let branch = ir.add_expr(IrExpr::Block {
         stmts: vec![returned],
         value: None,
     });
-    ir.add_expr(IrExpr::When {
+    ir.set_logical_type(branch, Ty::Unit);
+    // An `if` without an `else` is a `Unit` statement, as the checker types the source form.
+    let guard = ir.add_expr(IrExpr::When {
         branches: vec![(Some(condition), branch)],
-    })
+    });
+    ir.set_logical_type(guard, Ty::Unit);
+    guard
 }
 
 fn has_method(ir: &IrFile, class: ClassId, name: &str, parameter_count: usize) -> bool {

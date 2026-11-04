@@ -24,6 +24,7 @@ mod boxing;
 mod dependency_exports;
 mod exceptions;
 mod function_values;
+mod generated_members;
 mod intrinsic_operations;
 mod objects;
 mod scalar_instructions;

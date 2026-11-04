@@ -24,6 +24,7 @@ use super::encode::{
 };
 use super::exception_transport::ExceptionTransport;
 use super::function_values::FunctionShapes;
+use super::hashing::Hashing;
 use super::host::Host;
 use super::objects::ObjectRoot;
 
@@ -53,6 +54,8 @@ pub(super) struct Runtime {
     pub(super) i64_div: u32,
     /// The object model's root types and `kotlin.Any`'s members.
     pub(super) objects: ObjectRoot,
+    /// Kotlin's `hashCode()` rules.
+    pub(super) hashing: Hashing,
     pub(super) exceptions: ExceptionTransport,
     /// The box types of the primitives this module carries as references.
     pub(super) boxes: Boxes,
@@ -116,6 +119,7 @@ impl Runtime {
             i32_div: module.declare(),
             i64_div: module.declare(),
             objects,
+            hashing: Hashing::declare(module),
             exceptions,
             boxes: Boxes::default(),
             functions: FunctionShapes::default(),
@@ -130,6 +134,9 @@ impl Runtime {
         runtime.define_string_or_null(module);
         runtime.define_write_string(module, host);
         runtime.define_division(module);
+        runtime
+            .hashing
+            .define(module, &runtime.objects, runtime.string, runtime.chars);
         runtime
     }
 
