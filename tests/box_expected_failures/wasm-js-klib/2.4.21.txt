@@ -2100,7 +2100,6 @@ extensionFunctions/classMethodCallExtensionSuper.kt
 extensionFunctions/defaultMethodInterfaceCallExtensionSuper.kt
 extensionFunctions/delegatedPropertyWithExtensionType.kt
 extensionFunctions/executionOrder.kt
-extensionFunctions/extensionFunctionAndSpreadOperator.kt
 extensionFunctions/extensionFunctionAsASupertypeOfValueClass.kt
 extensionFunctions/extensionFunctionAsATypeLocal.kt
 extensionFunctions/extensionFunctionAsAnExpression.kt
@@ -4101,7 +4100,6 @@ primitiveTypes/kt79977.kt
 primitiveTypes/kt79977_withIncrementalCompilation.kt
 primitiveTypes/kt887.kt
 primitiveTypes/nullAsNullableIntIsNull.kt
-primitiveTypes/nullableAsIndex.kt
 primitiveTypes/nullableCharBoolean.kt
 primitiveTypes/numberEqualsHashCodeToString.kt
 primitiveTypes/numberToChar/abstractMethodInSuperinterface.kt
