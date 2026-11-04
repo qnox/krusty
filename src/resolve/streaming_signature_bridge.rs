@@ -84,7 +84,7 @@ pub(crate) use local_signatures::{
 pub(crate) use local_signatures::{
     publish_checked_local_signatures, publish_discovered_local_capture_declarations,
 };
-use postponed_argument_mapping::MappedTopLevelSelection;
+use postponed_argument_mapping::{typed_argument_evidence, MappedTopLevelSelection};
 pub(crate) use source_contracts::{extract_source_contract_candidates, SourceContractCandidate};
 use type_resolution::SelectedTypeSite;
 
@@ -1763,7 +1763,7 @@ impl ProductionSignatureSemantics<'_> {
         let mut bindings = class.type_parameter_bindings(applied);
         if let Some(signature) = generic_signature {
             for formal in &signature.formals {
-                bindings.remove(formal);
+                bindings.remove(formal.as_str());
             }
         }
         let specialized = crate::symbol_resolver::ty_subst_keep_unbound(result, &bindings);
@@ -1824,7 +1824,7 @@ impl ProductionSignatureSemantics<'_> {
                 generic
                     .formals
                     .iter()
-                    .cloned()
+                    .map(crate::types::TyParamName::from)
                     .zip(explicit_type_arguments.iter().copied()),
             );
         }

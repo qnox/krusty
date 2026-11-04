@@ -20,6 +20,8 @@ pub mod classfile;
 pub mod classpath;
 pub mod classreader;
 mod collection_barriers;
+mod collection_override_signatures;
+mod collection_to_array;
 mod common_metadata;
 pub mod companion;
 mod companion_storage;

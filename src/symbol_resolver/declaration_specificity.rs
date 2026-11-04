@@ -100,7 +100,7 @@ pub(crate) fn declarations_equally_specific(
         .chain(right)
         .copied()
         .collect::<Vec<_>>();
-    let open = crate::fx_hash::HashMap::default();
+    let open = crate::types::TyParamBindings::default();
     let at_least_as_specific = |specific: Ty, general: Ty| {
         specific == general
             || super::resolution_subtype(src, specific, crate::types::ty_subst(general, &open))

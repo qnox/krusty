@@ -12,16 +12,17 @@ use krusty_plugin_host::{
     ParameterIr, SessionRequest, Span, StatementIr, TypeIdentity, ValueId, VariableIr, Visibility,
 };
 
+#[path = "../../crates/krusty-plugin-host/tests/support/mod.rs"]
 mod support;
 use support::{kotlinc, runtime, start};
 
 const CALLS: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/tests/fixtures/module_ir/Calls.kt"
+    "/crates/krusty-plugin-host/tests/fixtures/module_ir/Calls.kt"
 );
 const SAMPLE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/tests/fixtures/module_ir/Sample.kt"
+    "/crates/krusty-plugin-host/tests/fixtures/module_ir/Sample.kt"
 );
 
 fn stdlib(runtime: &HostRuntime) -> PathBuf {
@@ -45,7 +46,10 @@ fn dump_plugin(runtime: &HostRuntime) -> PathBuf {
         .get_or_init(|| {
             let plugin = temporary("dump-plugin");
             let _ = std::fs::remove_dir_all(&plugin);
-            let source = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/dump/DumpIr.kt");
+            let source = concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/crates/krusty-plugin-host/tests/fixtures/dump/DumpIr.kt"
+            );
             kotlinc(
                 runtime,
                 &runtime.compiler_classpath,

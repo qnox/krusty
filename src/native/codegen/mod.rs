@@ -216,6 +216,7 @@ impl Backend for CraneliftBackend {
             }
         };
         crate::backend::counted_loops::realize(&mut file.ir, COUNTED_LOOPS);
+        crate::backend::default_arguments::realize(&mut file.ir, &mut file.callables);
         // A local or anonymous classifier arrives with an opaque identity; this target names it
         // from its provenance as Kotlin/Native does. There is no facade class here, so a
         // classifier local to a top-level function starts in the package: `box$MyLocalObject`,
@@ -248,8 +249,8 @@ impl Backend for CraneliftBackend {
         }
         let runtime_symbols = state.runtime_symbols.as_ref().expect("read just above");
         // Which classifiers are value classes, read from the checked declarations: a file's own
-        // and its dependencies' alike. See `native::value_classes`.
-        let value_classes = match super::value_classes::NativeValueClasses::inventory(
+        // and its dependencies' alike. See `crate::backend::value_classes`.
+        let value_classes = match crate::backend::value_classes::ValueClassInventory::inventory(
             &file.ir,
             &file.classifiers,
         ) {
@@ -274,7 +275,7 @@ impl Backend for CraneliftBackend {
             .is_none_or(|(module, _)| module != file.module_name)
         {
             let classes = file.classifiers.module().classes();
-            let plan = match super::value_classes::NativeValueClasses::of_module_classes(
+            let plan = match crate::backend::value_classes::ValueClassInventory::of_module_classes(
                 classes.iter().map(|(name, _)| name),
                 classes.carried_types(),
                 &file.classifiers,
@@ -315,8 +316,9 @@ impl Backend for CraneliftBackend {
             state.next_dependency_symbol += 1;
             // A later module calling this declaration with arguments left out reaches the
             // declaring file's default entry through an export of its own.
-            let default_entry = lower::exports_default_entry(&file.ir, callable)
-                .then(|| format!("{symbol}__defaults"));
+            let default_entry =
+                crate::backend::default_arguments::published_entry(&file.ir, callable)
+                    .map(|_| format!("{symbol}__defaults"));
             let reference_declaration = match file.kind {
                 crate::backend::CheckedIrUnitKind::Source => {
                     match ReferenceDeclaration::source_export(&file.ir, file.module_name, callable)
