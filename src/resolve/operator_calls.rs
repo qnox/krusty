@@ -676,6 +676,8 @@ impl<'a> Checker<'a> {
                 && (candidate.kind != crate::libraries::FnKind::Member
                     || candidate.context_count == 0)
         });
+        let argument_kinds =
+            self.postponed_collection_literal_kinds(args, argument_kinds, &functions.overloads);
         self.drop_members_hidden_by_applicable_extensions(
             receiver,
             &mut functions.overloads,
