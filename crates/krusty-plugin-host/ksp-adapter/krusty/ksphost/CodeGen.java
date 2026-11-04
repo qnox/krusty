@@ -76,30 +76,11 @@ final class CodeGen implements CodeGenerator {
         return extensionName.isEmpty() ? "" : "." + extensionName;
     }
 
-    private static boolean isValidPackageName(String packageName) {
-        if (packageName.isEmpty()) {
-            return true;
-        }
-        for (String part : packageName.split("\\.", -1)) {
-            if (part.isEmpty() || !Character.isJavaIdentifierStart(part.charAt(0))) {
-                return false;
-            }
-            for (int i = 1; i < part.length(); i++) {
-                if (!Character.isJavaIdentifierPart(part.charAt(i))) {
-                    return false;
-                }
-            }
-        }
-        return true;
-    }
-
     @Override
     public OutputStream createNewFile(
             Dependencies dependencies, String packageName, String fileName, String extensionName) {
-        if (!isValidPackageName(packageName)) {
-            throw new IllegalArgumentException(
-                    "Error: " + packageName + " is not a valid package name.");
-        }
+        // KSP2 turns the package's dots into directories without checking that it is a Kotlin
+        // package, since a resource such as a service descriptor lives under `META-INF`.
         String packageDirs =
                 packageName.isEmpty()
                         ? ""

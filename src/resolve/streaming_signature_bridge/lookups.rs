@@ -684,6 +684,9 @@ impl ProductionSignatureSemantics<'_> {
                     }
                 }
             }
+            // Inherited nested classifiers of the lexical owners. A primary-constructor header sees
+            // its class's body scope, and every enclosing owner's body surrounds the header, so all
+            // of them rank before the file and imports, as in a body.
             let inherited = || {
                 for &owner in &lexical_owners {
                     match resolver.nested_classifier(Ty::obj_name(owner), first) {
@@ -700,7 +703,7 @@ impl ProductionSignatureSemantics<'_> {
                 }
                 crate::symbol_resolver::CandidateSelection::None
             };
-            if current.is_none() && !header_scope {
+            if current.is_none() {
                 match inherited() {
                     crate::symbol_resolver::CandidateSelection::Selected(classifier) => {
                         current = Some(classifier);
@@ -724,17 +727,6 @@ impl ProductionSignatureSemantics<'_> {
                     crate::symbol_resolver::CandidateSelection::None => {
                         return Some((None, failed_segment));
                     }
-                }
-            }
-            if current.is_none() && header_scope {
-                match inherited() {
-                    crate::symbol_resolver::CandidateSelection::Selected(classifier) => {
-                        current = Some(classifier);
-                    }
-                    crate::symbol_resolver::CandidateSelection::Ambiguous => {
-                        return Some((None, Some(first.to_string())));
-                    }
-                    crate::symbol_resolver::CandidateSelection::None => {}
                 }
             }
             let mut current = match current {
@@ -840,6 +832,8 @@ impl ProductionSignatureSemantics<'_> {
                     }
                 }
             }
+            // As in `qualified_scoped_classifier_binding`, every lexical owner's inherited
+            // classifiers rank before the file and imports.
             let inherited = || {
                 for &owner in &lexical_owners {
                     match resolver.nested_classifier(Ty::obj_name(owner), first) {
@@ -860,28 +854,26 @@ impl ProductionSignatureSemantics<'_> {
                 }
                 crate::symbol_resolver::CandidateSelection::None
             };
-            if !header_scope {
-                match inherited() {
-                    crate::symbol_resolver::CandidateSelection::Selected(classifier) => {
-                        return Some((
-                            Some(
-                                crate::symbol_resolver::CompletedClassifierPath::ordinary_root(
-                                    classifier,
-                                ),
+            match inherited() {
+                crate::symbol_resolver::CandidateSelection::Selected(classifier) => {
+                    return Some((
+                        Some(
+                            crate::symbol_resolver::CompletedClassifierPath::ordinary_root(
+                                classifier,
                             ),
-                            None,
-                        ));
-                    }
-                    crate::symbol_resolver::CandidateSelection::Ambiguous => {
-                        return Some((
-                            None,
-                            Some(crate::symbol_resolver::ClassifierMiss::Unresolved(
-                                first.to_string(),
-                            )),
-                        ));
-                    }
-                    crate::symbol_resolver::CandidateSelection::None => {}
+                        ),
+                        None,
+                    ));
                 }
+                crate::symbol_resolver::CandidateSelection::Ambiguous => {
+                    return Some((
+                        None,
+                        Some(crate::symbol_resolver::ClassifierMiss::Unresolved(
+                            first.to_string(),
+                        )),
+                    ));
+                }
+                crate::symbol_resolver::CandidateSelection::None => {}
             }
             let (selection, failed_segment) =
                 resolver.qualified_type_classifier_binding_in_scope(spelling);
@@ -904,29 +896,6 @@ impl ProductionSignatureSemantics<'_> {
                     if failure.is_none() && failed_segment.is_some() {
                         failure = failed_segment;
                     }
-                }
-            }
-            if header_scope {
-                match inherited() {
-                    crate::symbol_resolver::CandidateSelection::Selected(classifier) => {
-                        return Some((
-                            Some(
-                                crate::symbol_resolver::CompletedClassifierPath::ordinary_root(
-                                    classifier,
-                                ),
-                            ),
-                            None,
-                        ));
-                    }
-                    crate::symbol_resolver::CandidateSelection::Ambiguous => {
-                        return Some((
-                            None,
-                            Some(crate::symbol_resolver::ClassifierMiss::Unresolved(
-                                first.to_string(),
-                            )),
-                        ));
-                    }
-                    crate::symbol_resolver::CandidateSelection::None => {}
                 }
             }
             Some((
@@ -1220,6 +1189,7 @@ impl ProductionSignatureSemantics<'_> {
                             !call_sig.vararg,
                         ),
                         sam_signatures: Vec::new(),
+                        lambda_result_fits: true,
                     })
                 },
             },
@@ -1790,19 +1760,19 @@ impl ProductionSignatureSemantics<'_> {
             &module as &dyn crate::symbol_source::SymbolSource,
             &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
         ]);
-        let roots = crate::symbol_resolver::direct_supertypes(&source, Ty::obj_name(owner))
-            .into_iter()
-            .filter_map(Ty::obj_internal)
-            .collect::<Vec<_>>();
+        let inheriting_supertypes = |owner: crate::types::TypeName| {
+            crate::symbol_resolver::direct_supertypes(&source, Ty::obj_name(owner))
+                .into_iter()
+                .filter_map(Ty::obj_internal)
+                .filter(|&supertype| {
+                    crate::symbol_resolver::inherits_nested_classifiers_through(&source, supertype)
+                })
+                .collect::<Vec<_>>()
+        };
         match crate::symbol_resolver::inherited_nested_classifier_name(
             spelling,
-            roots,
-            |candidate| {
-                crate::symbol_resolver::direct_supertypes(&source, Ty::obj_name(candidate))
-                    .into_iter()
-                    .filter_map(Ty::obj_internal)
-                    .collect()
-            },
+            inheriting_supertypes(owner),
+            inheriting_supertypes,
             |candidate| {
                 crate::symbol_resolver::inherited_classifier_shape(&source, candidate, owner)
                     .is_some()

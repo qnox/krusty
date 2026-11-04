@@ -622,6 +622,72 @@ fn a_defaulted_construction_maps_its_lines_like_kotlinc() {
     );
 }
 
+/// A dependency's defaulted constructor takes the same rule: its placeholders, masks and marker
+/// are realized as the construction's operands, and the construction's line returns at the first.
+#[test]
+fn a_defaulted_dependency_construction_maps_its_lines_like_kotlinc() {
+    let lib = common::compile_lib(
+        "DefaultedDependencyConstruction",
+        "class Q(val a: String, val b: Int = 1, val c: String, val d: String? = null)\n",
+    )
+    .expect("the dependency compiles");
+    let built = common::compare_with_kotlinc_plugin_jdk_cp(
+        "DefaultedDependencyConstructionCaller",
+        "fun run(x: String): Q = Q(\n\
+         \x20   a = x,\n\
+         \x20   c = x.trim(),\n\
+         )\n",
+        "DefaultedDependencyConstructionCallerKt",
+        &[lib],
+        "17",
+        &[],
+    )
+    .expect("reference kotlinc is provisioned");
+    assert!(
+        built.krusty_bytes == built.reference_bytes,
+        "the dependency construction differs from kotlinc:\nkotlinc:\n{}\nkrusty:\n{}",
+        built.reference,
+        built.krusty
+    );
+}
+
+/// The same construction inside a suspending body, before a later suspension, is copied when the
+/// coroutine lowering unshares the expressions around a suspension point. The copy keeps the
+/// recorded operand plan, so the whole output (the function and its continuation) matches kotlinc.
+#[test]
+fn a_defaulted_dependency_construction_in_a_suspending_body_maps_its_lines_like_kotlinc() {
+    let lib = common::compile_lib(
+        "SuspendingDefaultedDependencyConstruction",
+        "class Q(val a: String, val b: Int = 1, val c: String, val d: String? = null)\n",
+    )
+    .expect("the dependency compiles");
+    let caller = "import kotlinx.coroutines.yield\n\
+        suspend fun next(x: String): String {\n\
+        \x20   yield()\n\
+        \x20   return x\n\
+        }\n\
+        suspend fun built(x: String): Q {\n\
+        \x20   val q = Q(\n\
+        \x20       a = x,\n\
+        \x20       c = next(x),\n\
+        \x20   )\n\
+        \x20   return q\n\
+        }\n\
+        suspend fun beside(x: String): List<Q> = listOf(\n\
+        \x20   Q(\n\
+        \x20       a = x,\n\
+        \x20       c = x.trim(),\n\
+        \x20   ),\n\
+        \x20   Q(a = next(x), c = x),\n\
+        )\n";
+    let classes = common::classes_against_kotlinc_module_cp(
+        &[("SuspendingCaller.kt", caller)],
+        &[lib, common::coroutines_jar()],
+    );
+    assert!(classes.krusty.len() > 1, "the continuations are written");
+    assert_eq!(classes.differences(), Vec::<String>::new());
+}
+
 /// A primitive `compareTo` is lowered to `Intrinsics.compare`, which is still a real dispatch and
 /// still returns to the call's line.
 #[test]

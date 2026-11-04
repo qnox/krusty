@@ -318,6 +318,7 @@ pub(super) fn direct_supertypes_from_classifier(
     // leaves an unbound lexical variable alone, without cloning those names into a map on every
     // hierarchy step.
     let formals = classifier.type_params();
+    let bounds = classifier.type_param_bounds();
     let arguments = ty.type_args();
     let any = Ty::obj_name(crate::types::wk::any());
     let applied = classifier
@@ -333,13 +334,29 @@ pub(super) fn direct_supertypes_from_classifier(
         // variable has no nullability), so projecting `HashMap<String, Any?>` onto its `Map<K, V>`
         // template produced `Map<String, Any>` and every member reached through the supertype then
         // rejected a nullable argument.
+        //
+        // A template occurrence that is non-null although its formal's declared bound admits null
+        // is a written `W & Any` (`open class B<W> : ColumnType<W & Any>()`), so it still reads the
+        // argument's definitely-non-null form: `B<String?>` is a `ColumnType<String>`.
         .map(|supertype| {
-            crate::types::ty_subst_applied_lookup(*supertype, |name| {
-                formals
-                    .iter()
-                    .position(|formal| formal == name)
-                    .map(|index| arguments.get(index).copied().unwrap_or(any))
-            })
+            crate::types::ty_subst_supertype_template(
+                *supertype,
+                |name| {
+                    formals
+                        .iter()
+                        .position(|formal| formal == name)
+                        .map(|index| arguments.get(index).copied().unwrap_or(any))
+                },
+                |name| {
+                    formals
+                        .iter()
+                        .position(|formal| formal == name)
+                        .and_then(|index| bounds.get(index))
+                        .is_some_and(|declared| {
+                            declared.iter().all(|bound| bound.upper_bound_admits_null())
+                        })
+                },
+            )
         })
         .collect::<Vec<_>>();
     crate::trace_compiler!(
@@ -431,6 +448,25 @@ pub(super) fn supertype_with_classifier(
         .flat_map(|root| receiver_hierarchy(source, root))
         .map(|(ty, _)| ty)
         .find(|ty| ty.obj_internal() == Some(owner))
+}
+
+impl super::SymbolResolver<'_> {
+    /// Whether kotlinc's assignment plugin turns an assignment to a `val` of type `ty` into a call
+    /// of `assign`: the class of `ty`, or one of its supertypes, carries one of the compilation's
+    /// assignment annotations.
+    pub(crate) fn supports_assignment_overloading(&self, ty: Ty) -> bool {
+        let annotations = &self.src.annotation_conventions().assignment;
+        !annotations.is_empty()
+            && receiver_hierarchy(&self.src, ty.non_null())
+                .into_iter()
+                .filter_map(|(applied, _)| self.src.classifier(applied.obj_internal()?))
+                .any(|classifier| {
+                    classifier
+                        .annotations
+                        .iter()
+                        .any(|annotation| annotations.contains(&annotation.annotation))
+                })
+    }
 }
 
 pub(super) fn receiver_hierarchy(source: &dyn SymbolSource, receiver: Ty) -> Vec<(Ty, u32)> {
@@ -555,7 +591,7 @@ mod tests {
     use crate::libraries::{function_classifiers, Callables, LibraryType, ResolvedSymbols};
     use crate::symbol_resolver::SourceOracle;
     use crate::symbol_source::{SymbolNamespace, SymbolSource};
-    use crate::types::TypeParameters;
+    use crate::types::{type_name, TypeParameters};
     use std::cell::Cell;
     use std::rc::Rc;
     use std::sync::Arc;
@@ -706,6 +742,23 @@ mod tests {
         fn symbols(&self, namespace: SymbolNamespace, name: &str) -> std::rc::Rc<ResolvedSymbols> {
             let identity = namespace.existing_classifier(name);
             let classifier = identity.and_then(|identity| {
+                if identity == type_name("sample/IndirectCallable") {
+                    let mut declaration = LibraryType::declaration_header();
+                    declaration.supertypes = vec![type_name("sample/DeclaredCallable")].into();
+                    return Some(Arc::new(declaration));
+                }
+                if identity == type_name("sample/DeclaredCallable") {
+                    let mut declaration = LibraryType::declaration_header();
+                    declaration.supertypes = vec![type_name("kotlin/Function1")].into();
+                    declaration.supertype_templates =
+                        vec![Ty::obj_args("kotlin/Function1", &[Ty::Int, Ty::Int])];
+                    return Some(Arc::new(declaration));
+                }
+                if identity == type_name("sample/Sam") {
+                    let mut declaration = LibraryType::declaration_header();
+                    declaration.callable_signature = Some(Ty::fun(vec![Ty::Int], Ty::Int));
+                    return Some(Arc::new(declaration));
+                }
                 function_classifiers::classifier(identity).map(function_classifiers::synthetic)
             });
             std::rc::Rc::new(ResolvedSymbols {
@@ -781,6 +834,76 @@ mod tests {
         assert!(admits(
             value,
             Ty::obj_args("kotlin/Function", &[Ty::String])
+        ));
+    }
+
+    #[test]
+    fn nominal_function_values_reach_their_declared_function_type() {
+        assert!(admits(
+            Ty::obj_args("kotlin/Function1", &[Ty::String, Ty::Int]),
+            Ty::fun(vec![Ty::String], Ty::Int),
+        ));
+        assert!(admits(
+            Ty::obj_args("kotlin/reflect/KFunction1", &[Ty::Int, Ty::String]),
+            Ty::fun(vec![Ty::Int], Ty::String),
+        ));
+        assert!(admits(
+            Ty::obj_args("kotlin/reflect/KFunction0", &[Ty::String]),
+            Ty::fun(Vec::new(), Ty::String),
+        ));
+        assert!(admits(
+            Ty::obj("sample/IndirectCallable"),
+            Ty::fun(vec![Ty::Int], Ty::Int),
+        ));
+    }
+
+    #[test]
+    fn nominal_function_subtyping_retains_declared_parameter_and_result_variance() {
+        let any = Ty::obj("kotlin/Any");
+        assert!(admits(
+            Ty::obj_args("kotlin/reflect/KFunction1", &[any, Ty::Int]),
+            Ty::fun(vec![Ty::String], Ty::Int),
+        ));
+        assert!(!admits(
+            Ty::obj_args("kotlin/reflect/KFunction1", &[Ty::String, Ty::Int]),
+            Ty::fun(vec![any], Ty::Int),
+        ));
+        assert!(admits(
+            Ty::obj_args("kotlin/reflect/KFunction1", &[Ty::Int, Ty::String]),
+            Ty::fun(vec![Ty::Int], any),
+        ));
+        assert!(!admits(
+            Ty::obj_args("kotlin/reflect/KFunction1", &[Ty::Int, any]),
+            Ty::fun(vec![Ty::Int], Ty::String),
+        ));
+    }
+
+    #[test]
+    fn nominal_function_subtyping_preserves_arity_nullability_and_suspend_kind() {
+        let reference = Ty::obj_args("kotlin/reflect/KFunction1", &[Ty::Int, Ty::String]);
+        let function = Ty::fun(vec![Ty::Int], Ty::String);
+        assert!(!admits(reference, Ty::fun(Vec::new(), Ty::String)));
+        assert!(!admits(Ty::nullable(reference), function));
+        assert!(admits(Ty::nullable(reference), Ty::nullable(function)));
+        assert!(!admits(
+            reference,
+            Ty::fun_suspend(vec![Ty::Int], Ty::String)
+        ));
+        let suspended = Ty::obj_args("kotlin/reflect/KSuspendFunction1", &[Ty::Int, Ty::String]);
+        assert!(!admits(suspended, function));
+        assert!(admits(
+            suspended,
+            Ty::fun_suspend(vec![Ty::Int], Ty::String),
+        ));
+    }
+
+    #[test]
+    fn nominal_function_subtyping_requires_declared_function_inheritance() {
+        let function = Ty::fun(vec![Ty::Int], Ty::Int);
+        assert!(!admits(Ty::obj("sample/Sam"), function));
+        assert!(!admits(
+            Ty::obj_args("sample/Function1", &[Ty::Int, Ty::Int]),
+            function,
         ));
     }
 }

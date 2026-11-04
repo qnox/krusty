@@ -16,8 +16,6 @@ const NEW: u8 = 0xbb;
 /// A body shape the ported stages do not inline yet.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum UnsupportedShape {
-    /// An anonymous object could not be regenerated for the call site.
-    AnonymousObject,
     /// It reads a `$WhenMappings` table, which kotlinc regenerates for the call site.
     WhenMappings,
     /// It reads `$assertionsDisabled`, a field kotlinc moves to the calling class.
@@ -200,38 +198,6 @@ pub(crate) fn can_inline_arguments_in_place(callee: &MethodNode) -> bool {
         matches!(entry, Node::Insn(Insn::Var { op: 0x15..=0x19 | 0x36..=0x3a, slot } | Insn::Iinc { slot, .. })
             if *slot < argument_end)
     })
-}
-
-/// Whether the first bytecode the prepared inline body retains is its first parameter load.
-///
-/// Parameter null checks are removed before the body enters its caller, so they do not count as a
-/// prefix. A real instruction before the load does: kotlinc leaves the call-site line off that
-/// generated prefix and starts it where the in-place source argument is evaluated.
-pub(crate) fn in_place_arguments_begin_at_entry(callee: &MethodNode) -> bool {
-    let first_slot = if callee.access & ACC_STATIC == 0 {
-        1
-    } else {
-        0
-    };
-    let mut at = 0usize;
-    while at < callee.nodes.len() {
-        match &callee.nodes[at] {
-            Node::Label(_) | Node::Line { .. } => at += 1,
-            Node::Insn(Insn::Op(0x00)) => at += 1,
-            Node::Insn(Insn::Var {
-                op: 0x15..=0x19,
-                slot,
-            }) if *slot == first_slot => {
-                if is_parameter_null_check(&callee.nodes, at) {
-                    at += 3;
-                } else {
-                    return true;
-                }
-            }
-            Node::Insn(_) => return false,
-        }
-    }
-    false
 }
 
 /// `aload x; ldc "…"; invokestatic Intrinsics.check…` starting at `at` (ASM's `next` steps over

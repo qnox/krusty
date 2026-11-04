@@ -6,7 +6,7 @@
 //! primitive. No frontend phase records an intrinsic name or makes a JVM representation decision.
 
 use crate::fx_hash::HashSet;
-use crate::ir::{FunId, IrFile, IrLambdaForm, IrParameterRole};
+use crate::ir::{FunId, IrFile, IrLambdaForm, IrParameterProvenance, IrParameterRole};
 use crate::types::Ty;
 
 /// kotlinc guards a parameter whose type is non-null and whose JVM type is not primitive, which
@@ -62,9 +62,10 @@ fn realize_function(ir: &mut IrFile, function: FunId) {
 /// kotlinc's `generateNonNullAssertions` skips a private function unless it is the local function
 /// of a lambda literal (`LOCAL_FUNCTION_FOR_LAMBDA`): that one guards its own receiver, the
 /// anonymous context parameters of the function type it is checked against, and its value
-/// parameters, a bare `_` or destructuring pattern included, but not the values it captures. An
-/// anonymous function (`fun(…) {}`) lowers to an ordinary private local function and guards
-/// nothing, and a suspend lambda becomes a class whose resumption arguments are null.
+/// parameters, a bare `_` or destructuring pattern included, but not the values it captures or the
+/// ones a compiler plugin adds (Compose's `$composer`). An anonymous function (`fun(…) {}`) lowers
+/// to an ordinary private local function and guards nothing, and a suspend lambda becomes a class
+/// whose resumption arguments are null.
 fn realize_lambda(ir: &mut IrFile, function: FunId) {
     if ir.suspend_funs.contains(&function) {
         return;
@@ -85,7 +86,7 @@ fn realize_lambda(ir: &mut IrFile, function: FunId) {
                     identity.source_name.is_some(),
                     "a lambda's value parameter carries its source identity"
                 );
-                true
+                identity.provenance == IrParameterProvenance::SourceDeclared
             }
             _ => false,
         })

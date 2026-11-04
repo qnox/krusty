@@ -111,6 +111,14 @@ pub(super) fn start_inline_body_source_map(
     }
 }
 
+/// Whether `class` is declared in an `inline` function's scope, however deeply (kotlinc's
+/// `inInlineFunctionScope`, which makes such a local class public). Inlining copies the class's
+/// construction into each call site, which may live in another package; the class itself stays in
+/// the function's package.
+pub(in crate::jvm) fn in_inline_function_scope(ir: &IrFile, class: &crate::ir::IrClass) -> bool {
+    enclosing_functions(ir, class.enclosure).any(|(function, _)| ir.inline_fns.contains(&function))
+}
+
 /// The functions whose bodies `enclosure` lies in, innermost first, each with the class it is a
 /// member of. A lambda, constructor, initializer or classifier passes through to the scope it is
 /// written in; a class member continues with its class's own enclosure. The walk ends at the file,

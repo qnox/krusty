@@ -8,8 +8,11 @@ use super::super::string_table::{resolve_class_name, resolve_string, Rec};
 use crate::metadata::decode::{AnnotationArgumentValue, TypeAnnotation};
 use crate::types::{type_name, wk, AnnotationValue, ResolvedAnnotation, Ty};
 
+#[cfg(test)]
+mod tests;
+
 /// Bind one decoded application. `None` when an id does not resolve or the value has a shape the
-/// common contract cannot carry (an unsigned argument); the caller treats that as undecodable
+/// common contract cannot carry; the caller treats that as undecodable
 /// metadata rather than dropping the application.
 pub(super) fn bind_type_annotation(
     annotation: &TypeAnnotation,
@@ -50,11 +53,20 @@ fn bind_value(
     records: &[Rec],
     d2: &[String],
 ) -> Option<AnnotationValue> {
-    // `Value.flags` bit 0 is IS_UNSIGNED, which the common contract has no slot for.
-    if value.flags != 0 {
+    // `Value.flags` bit 0 is IS_UNSIGNED; every other flag is unmodelled.
+    if value.flags & !1 != 0 {
         return None;
     }
     let integer = || value.integer;
+    if value.flags == 1 {
+        return Some(match value.kind {
+            0 => AnnotationValue::UByte(i8::try_from(integer()?).ok()? as u8),
+            2 => AnnotationValue::UShort(i16::try_from(integer()?).ok()? as u16),
+            3 => AnnotationValue::UInt(i32::try_from(integer()?).ok()? as u32),
+            4 => AnnotationValue::ULong(integer()? as u64),
+            _ => return None,
+        });
+    }
     Some(match value.kind {
         0 => AnnotationValue::Byte(i8::try_from(integer()?).ok()?),
         1 => AnnotationValue::Char(u16::try_from(integer()?).ok()?),

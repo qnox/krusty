@@ -19,6 +19,21 @@ pub(super) struct PendingLines {
     /// restatement, a control-flow entry, or an inlined body's copied line. A later mark that
     /// replaces it keeps its own entry even when it names the line in effect before it.
     restated_pc: Option<u16>,
+    /// The entry at this pc is a statement's eager boundary that kotlinc marks only after the
+    /// statement's value: the pc, the entry's index, and the value's token (see
+    /// [`CodeBuilder::mark_value_boundary`]).
+    value_boundary: Option<(u16, usize, u32)>,
+}
+
+/// A call-site line withdrawn by [`CodeBuilder::defer_line_mark`].
+pub(crate) struct DeferredLine {
+    /// Where the entry stood among the method's entries, and where it goes back.
+    index: usize,
+    pc: u16,
+    line: u16,
+    /// The line in effect had been forgotten before the call marked its own, so the mark was due
+    /// even for that same line.
+    forgotten: bool,
 }
 
 impl ClassWriter {
@@ -323,6 +338,15 @@ impl CodeBuilder {
             _ => {
                 if forgotten {
                     self.pending_lines.restated_pc = Some(pc);
+                    // The caller's line written again after an inlined body is that body's
+                    // restoration, which a debug-table curation keeps beside an equal entry.
+                    if self
+                        .line_marks
+                        .last()
+                        .is_some_and(|&(_, previous)| previous == line)
+                    {
+                        self.inlined_line_marks.push((pc, line));
+                    }
                 }
                 self.line_marks.push((pc, line));
                 Some(self.line_marks.len() - 1)
@@ -370,6 +394,87 @@ impl CodeBuilder {
                 .is_some_and(|(lpc, _)| *lpc as usize == pc)
         {
             self.line_marks.pop();
+        }
+    }
+
+    /// The current offset begins a statement whose value, named by the opaque token `value`, comes
+    /// next and that kotlinc marks only once that value is on the stack, or not at all apart from
+    /// it: a declaration (`visitVariable`), a `return` (`visitReturn`), or a block statement
+    /// (`visitStatementContainer`). The entries at this offset, the
+    /// statement's own and those its value marks eagerly where it starts, are not kotlinc's yet.
+    pub(crate) fn mark_value_boundary(&mut self, value: u32) {
+        let Ok(pc) = u16::try_from(self.bytes.len()) else {
+            return;
+        };
+        let first = self
+            .line_marks
+            .iter()
+            .rposition(|&(marked, _)| marked != pc)
+            .map_or(0, |before| before + 1);
+        self.pending_lines.value_boundary = Some((pc, first, value));
+    }
+
+    /// The first entry at the current offset and the token of the statement value that
+    /// [`Self::mark_value_boundary`] recorded here, while no instruction has been written since.
+    pub(crate) fn value_boundary_here(&self) -> Option<(usize, u32)> {
+        let (pc, index, value) = self.pending_lines.value_boundary?;
+        (usize::from(pc) == self.bytes.len() && index <= self.line_marks.len())
+            .then_some((index, value))
+    }
+
+    /// Withdraw the call-site line in effect at the current offset, until the arguments an
+    /// `@InlineOnly` body reads in place have been written. `since` is the first entry the
+    /// withdrawal may take: the call's own, or [`Self::value_boundary_here`] when the call is the
+    /// value of a statement kotlinc marks afterwards. Returns the withdrawn line for
+    /// [`Self::settle_deferred_line`], or `None` when no such entry sits here.
+    ///
+    /// kotlinc's `IrInlineCodegen` generates those arguments before the call marks its line, and
+    /// `InplaceArgumentsMethodTransformer` then moves their code, line labels included, to where
+    /// the body loads them. A retained or kept entry is an enclosing expression's own and stays.
+    pub(crate) fn defer_line_mark(&mut self, since: usize) -> Option<DeferredLine> {
+        let pc = u16::try_from(self.bytes.len()).ok()?;
+        let retained = self.retained_line_mark == Some(self.line_marks.len().wrapping_sub(1));
+        let &(marked, line) = self.line_marks.last()?;
+        if retained || self.dead || marked != pc || self.line_marks.len() <= since {
+            return None;
+        }
+        let forgotten = self.pending_lines.forgotten || self.pending_lines.restated_pc == Some(pc);
+        while self.line_marks.len() > since && self.line_marks.last().is_some_and(|m| m.0 == pc) {
+            self.line_marks.pop();
+        }
+        // The method's declaration line is not to stand in for the withdrawn entry at its start.
+        self.suppress_entry_line |= pc == 0;
+        self.pending_lines.forgotten = forgotten;
+        Some(DeferredLine {
+            index: self.line_marks.len(),
+            pc,
+            line,
+            forgotten,
+        })
+    }
+
+    /// Restore a call-site line [`Self::defer_line_mark`] withdrew, as kotlinc marks it after the
+    /// in-place arguments: deduplicated against the line those arguments left in effect. An
+    /// unsigned `x + 1u` therefore has its entry on the literal, which marked the call's line
+    /// first, while a call whose in-place arguments mark no line keeps it where the body begins.
+    pub(crate) fn settle_deferred_line(&mut self, deferred: DeferredLine) {
+        let index = deferred.index.min(self.line_marks.len());
+        let restate = match self.line_marks[index..].last() {
+            Some(&(_, argument_line)) => argument_line != deferred.line,
+            None => {
+                let consumed =
+                    deferred.forgotten && std::mem::take(&mut self.pending_lines.forgotten);
+                consumed || self.current_line() != Some(deferred.line)
+            }
+        };
+        if !restate {
+            return;
+        }
+        self.line_marks.insert(index, (deferred.pc, deferred.line));
+        if let Some(retained) = self.retained_line_mark.as_mut() {
+            if *retained >= index {
+                *retained += 1;
+            }
         }
     }
 

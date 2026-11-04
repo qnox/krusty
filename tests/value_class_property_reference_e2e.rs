@@ -98,9 +98,10 @@ fn a_reference_to_an_extension_on_a_value_class_resolves() {
     );
 }
 
-/// The value class's own UNDERLYING property is the exception: reading it is the unbox, and its
-/// accessor stays an ordinary instance getter on the box (`Z.getX()I`). A reference to it must not
-/// be rewritten — doing so named `Z.getX-impl(I)I`, which does not exist.
+/// The value class's own UNDERLYING property is the exception: reading it is the unbox. Like
+/// kotlinc's, a reference to it reads the box with `unbox-impl` (and reports `getX()I` to
+/// reflection); it is never a static realization — that named `Z.getX-impl(I)I`, which does not
+/// exist.
 ///
 /// Which property that is, is the DECLARATION's storage position — a value class's sole field —
 /// and not a spelling: `x` here names the underlying property of `Z` and of `S`, and would equally
@@ -140,18 +141,18 @@ fn a_reference_to_a_value_classs_underlying_property_resolves() {
         vec![
             "aload_1".to_string(),
             "checkcast class Z".to_string(),
-            "invokevirtual Method Z.getX:()I".to_string(),
+            "invokevirtual Method Z.\"unbox-impl\":()I".to_string(),
             "invokestatic Method java/lang/Integer.valueOf:(I)Ljava/lang/Integer;".to_string(),
             "areturn".to_string(),
         ],
-        "`Z::x` reads the box's own instance getter, never a static `getX-impl`",
+        "`Z::x` unboxes the box, never calls a static `getX-impl`",
     );
     assert_eq!(
         reference_get(&dump, "ValueClassUnderlyingRefDumpKt$box$2"),
         vec![
             "aload_1".to_string(),
             "checkcast class S".to_string(),
-            "invokevirtual Method S.getX:()Ljava/lang/String;".to_string(),
+            "invokevirtual Method S.\"unbox-impl\":()Ljava/lang/String;".to_string(),
             "areturn".to_string(),
         ],
         "the same for a REFERENCE carrier, whose box needs no valueOf",
@@ -163,7 +164,7 @@ fn a_reference_to_a_value_classs_underlying_property_resolves() {
             // kotlinc names the inherited field through the carrier itself.
             "getfield Field receiver:Ljava/lang/Object;".to_string(),
             "checkcast class Z".to_string(),
-            "invokevirtual Method Z.getX:()I".to_string(),
+            "invokevirtual Method Z.\"unbox-impl\":()I".to_string(),
             "invokestatic Method java/lang/Integer.valueOf:(I)Ljava/lang/Integer;".to_string(),
             "areturn".to_string(),
         ],
@@ -716,4 +717,57 @@ fn a_nullable_value_class_property_is_realized_like_kotlincs() {
         ),
         "OK"
     );
+}
+
+/// A reference to a value class's underlying property, against kotlinc.
+///
+/// The underlying property is the carrier, so kotlinc's reference reads it from the box with
+/// `unbox-impl`, whatever the property's visibility, and reports the property's own getter
+/// (`getX()I`) to reflection. krusty called the box's `getX()` for a public property and, for a
+/// private one, gave the value class an `access$getX$p` bridge and called that.
+const STORAGE_REFERENCES: &str = r#"@JvmInline
+value class Z(val x: Int) {
+    companion object {
+        val xref = Z::x
+    }
+}
+
+@JvmInline
+value class S(private val s: String) {
+    companion object {
+        val sref = S::s
+    }
+}
+
+@JvmInline
+value class P(private val y: Long) {
+    fun yref() = P::y
+}
+
+fun box(): String {
+    val ok = Z.xref.get(Z(4)) == 4 && S.sref.get(S("s")) == "s" && S.sref.invoke(S("t")) == "t" &&
+        P(1L).yref().get(P(2L)) == 2L && Z.xref.name == "x" && S.sref.name == "s"
+    return if (ok) "OK" else "fail"
+}
+"#;
+
+#[test]
+fn underlying_property_references_read_through_unbox_impl() {
+    common::assert_classes_identical_to_kotlinc(
+        "ValueClassStorageReference",
+        STORAGE_REFERENCES,
+        &[
+            "Z",
+            "S",
+            "P",
+            "Z$Companion$xref$1",
+            "S$Companion$sref$1",
+            "P$yref$1",
+        ],
+    );
+}
+
+#[test]
+fn underlying_property_references_run() {
+    common::expect_box_ok_with_stdlib(STORAGE_REFERENCES, "ValueClassStorageReference");
 }

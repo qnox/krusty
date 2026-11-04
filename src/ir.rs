@@ -53,17 +53,21 @@ pub use compiled_inline_calls::{CompiledInlineOperands, SameModuleInlining};
 mod constants;
 mod constructors;
 mod default_arguments;
-pub(crate) use default_arguments::module_override_callable;
 mod enum_switch_whens;
 pub(crate) use enum_switch_whens::EnumSwitchWhen;
 mod emitted_body_roots;
 mod enums;
 mod expect_actualization;
+mod expression_copy;
 mod expression_provenance;
-pub(crate) use emitted_body_roots::emitted_body_roots;
+pub(crate) use emitted_body_roots::{
+    emitted_body_roots, emitted_declaration_roots, EmittedDeclaration,
+};
 mod field_flags;
 mod fields;
 mod function_scope;
+mod generic_signature;
+pub use generic_signature::{IrGenericSig, IrTypeParameter};
 mod inline_copies;
 mod suspension_points;
 pub use suspension_points::{IrIntrinsicSuspensionPoint, IrValueClassSuspendResult};
@@ -82,6 +86,11 @@ pub(crate) use local_delegates::{
 mod local_property_references;
 mod module_records;
 mod negations;
+mod node_positions;
+mod node_types;
+pub use node_positions::IrNodePosition;
+pub(crate) use node_types::IrNodeTypeColumn;
+pub use node_types::IrNodeTypes;
 mod null_checks;
 mod operators;
 mod overrides;
@@ -92,11 +101,13 @@ mod property_layouts;
 pub(crate) mod referenced_classifiers;
 mod references;
 mod reified_markers;
+mod reified_templates;
 mod sam_target;
 mod source_debug;
 pub(crate) use source_debug::SourceDebug;
 mod static_properties;
 mod type_check_role;
+mod type_parameter_declarations;
 pub(crate) mod type_reflection;
 mod value_class_constructors;
 mod value_class_facts;
@@ -105,8 +116,10 @@ mod when_facts;
 pub use crate::enclosing_declarations::EnclosingDeclaration;
 /// A declared type's checked source spelling, which the IR carries per declaration
 /// ([`IrFile::prop_declared_spellings`]) as part of its contract with backends and plugins.
-pub use crate::spelling::Spelled;
+pub use crate::fir::{CallableId, ExternalCallableId, SourceFileId};
+pub use crate::spelling::{Spelled, TypeUseAnnotation};
 pub use crate::types::EqualityMode;
+pub(crate) use annotations::PackagePropertyAnnotations;
 pub use annotations::{
     AccessorAnnotations, AnnoRetention, AnnoValue, AppliedAnnotation, DeclarationAnnotations,
     FieldAnnotations, PropertyAnnotations, RetainedAnnotation,
@@ -136,19 +149,23 @@ pub use constructors::{
     IrCustomSerializerConstructorTarget,
 };
 pub use enums::{EnumSwitchRegistration, IrCheckedEnumEntryBody, IrEnumEntry};
-pub use expression_provenance::{EnumValueOfDeclaration, IrShortCircuitKind};
+pub use expression_provenance::{
+    EnumValueOfDeclaration, IrBuiltinCall, IrBuiltinCallKind, IrSafeCallRead, IrShortCircuitKind,
+};
 pub use field_flags::IrfFlags;
 pub use fields::IrField;
 pub use function_scope::IrFunctionScope;
 pub use intrinsic::IrIntrinsic;
 pub use lambda_classes::{IrInvokeBridge, IrLambdaCapture, IrLambdaClass, IrSamWrapperClass};
 pub(crate) use lifting_sequences::{IrLiftingEntry, IrLiftingRoot, IrLiftingSequence};
-pub(crate) use local_class_names::{IrLocalClassNameProvenance, IrLocalClassOwner};
+pub(crate) use local_class_names::{
+    IrClassDeclarationContext, IrLocalClassNameProvenance, IrLocalClassOwner,
+};
 pub use local_property_references::IrLocalPropertyReference;
 pub use module_records::{
     IrCallableTypeParameter, IrClassifierKind, IrHeaderAnnotation, IrModuleCallable,
     IrModuleClassifier, IrModuleConstructions, IrModuleConstructor, IrModuleMemberAccess,
-    IrModuleSource,
+    IrModuleSource, IrOverriddenFunction,
 };
 pub use null_checks::NullCheck;
 pub use operators::{IrBinOp, IrTypeOp};
@@ -167,7 +184,7 @@ pub use references::{
     FuncRef, IrCallableReference, IrCallableReferenceTarget, IrClassifierCallable, PropRef,
     ReflectedCallable,
 };
-pub use sam_target::{IrSamMethod, IrSamTarget};
+pub use sam_target::{IrSamMethod, IrSamTarget, IrSamTypeParameter};
 pub use static_properties::{IrStatic, IrStaticAccessor, IrStaticAccessors};
 pub use type_check_role::TypeCheckRole;
 pub use type_reflection::IrGenericTopLevelProperty;
@@ -188,6 +205,9 @@ pub enum IrCheckedArgument {
         parameter: u32,
         array_type: Ty,
         elements: Vec<(ExprId, bool)>,
+        /// The source line the argument begins on: its first element's (kotlinc's `IrVararg`
+        /// offsets). `0` for an argument the compiler generated, which has no position.
+        source_line: u32,
     },
 }
 
@@ -238,6 +258,9 @@ pub struct IrCheckedConstructorBody {
 pub struct IrCheckedClassInitializer {
     pub declaration: crate::fir::DeclarationId,
     pub initialization_order: u32,
+    /// The declaration's source position, the key properties (`IrStatic::source_order`,
+    /// `IrCheckedProperty::source_order`) and functions (`IrFile::fn_source_order`) order by.
+    pub source_order: u32,
     pub class: ClassId,
     pub body: ExprId,
 }
@@ -254,6 +277,7 @@ pub enum IrPropertyDispatch {
 pub struct IrAnnotationConstruction {
     pub interface: TypeName,
     pub members: Vec<(String, Ty)>,
+    pub arguments: crate::libraries::AnnotationArgumentProvenance,
     /// Constructor defaults as lowered declarations, not evaluated call operands.
     pub defaults: Vec<Option<ExprId>>,
     /// The lexical scopes this construction is evaluated in; `None` is the file facade. A written
@@ -662,6 +686,13 @@ pub enum IrExpr {
     /// role in `debug_local_provenance`. A backend that emits debug locals materializes the slot,
     /// the zero store, and the name.
     InlineFrameMarker,
+    /// The operand of a parameter a call leaves to its callee's default, in the full parameter
+    /// frame a default-argument entry takes. The entry overwrites it before any code reads it, so
+    /// it carries no value: each backend realizes it as the zero of `ty`'s carrier. It is a node
+    /// of its own because a null constant cannot stand for every carrier, such as a value class.
+    AbsentArgument {
+        ty: Ty,
+    },
     /// Invoke a function value (`f(args)` where `f: (A,…) -> R`) via the `FunctionN.invoke` interface
     /// method. Arguments are boxed to `Object`; the `Object` result is cast/unboxed to `ret`.
     /// `params` retains the semantic Kotlin parameter types through backend carrier lowering so an
@@ -854,6 +885,8 @@ pub enum IrEnclosure {
 /// constructor's `val`/`var` parameters (in order); the constructor stores each.
 #[derive(Clone, Debug)]
 pub struct IrClass {
+    /// Original checked source context; absent for a class with no source declaration.
+    pub(crate) declaration_context: Option<IrClassDeclarationContext>,
     /// Non-local lexical declaration name retained independently from the class's physical name.
     pub declaration_name: Option<crate::types::ClassifierDeclarationName>,
     pub fq_name: TypeName,
@@ -1270,6 +1303,10 @@ pub struct IrSpecializedAnonymousClass {
     pub caller_source_name: String,
     pub inline_callee: crate::fir::CallableId,
     pub inline_callee_source_name: String,
+    /// For each of the callee's operands, by its value slot: the caller's `crossinline` parameter
+    /// the expansion binds it to, when it is one. A copy remaps its captures' provenance through
+    /// it, and so does an object nested in the copy that is specialized later.
+    pub crossinline_operands: Vec<Option<u32>>,
     /// Source function → the function on this copy. Accessor functions materialized after the
     /// copy are added here before bridges and metadata read the copy.
     pub method_clones: crate::fx_hash::HashMap<FunId, FunId>,
@@ -1347,9 +1384,15 @@ pub struct IrFile {
     /// these identities; they must not recover either one from the generated `$suspendImpl`
     /// spelling.
     pub(crate) jvm_suspend_impl_bodies: crate::fx_hash::HashMap<FunId, (TypeName, FunId)>,
+    /// JVM continuation classes, keyed by class id, with the suspend function each one re-enters.
+    /// The class's access and ABI scope are that function's facts.
+    pub(crate) jvm_continuation_functions: crate::fx_hash::HashMap<ClassId, FunId>,
     /// Exact generated function metadata/debug contracts, keyed by semantic owning classifier.
     /// Producers publish once; backends consume function identities without name/descriptor scans.
     generated_member_publications: crate::fx_hash::HashMap<TypeName, IrGeneratedMemberPublication>,
+    /// Debug-only contracts of generated top-level functions, which the file facade owns. They
+    /// have no Kotlin `Function` record.
+    generated_facade_functions: Vec<IrGeneratedFunctionPublication>,
     /// Exact common-IR functions bound to compiler-synthesized data-class roles. The common
     /// producer records these before any backend rename; metadata and target realization consume
     /// the identities without scanning method spellings.
@@ -1536,6 +1579,9 @@ pub struct IrFile {
     /// constructor/value-class markers; a target also uses the owner to re-enter a suspend local
     /// without scanning classes or recovering ownership from its generated name.
     pub(crate) class_static_local_functions: crate::fx_hash::HashMap<FunId, TypeName>,
+    /// A multifile part's private functions, which the JVM names `<name>$<Part>`, by the name
+    /// they had before: a synthetic accessor of one is still named from it (`access$<name>`).
+    pub(crate) multifile_private_names: crate::fx_hash::HashMap<FunId, String>,
     pub classes: Vec<IrClass>,
     /// Exact generated-class identities keyed by their semantic role within a source owner.
     generated_classes: crate::fx_hash::HashMap<(TypeName, IrGeneratedClassRole), ClassId>,
@@ -1595,11 +1641,25 @@ pub struct IrFile {
     /// index is stable within its declaring class; backend consumers must not recover this edge by
     /// matching the property's spelling against a static field name.
     jvm_companion_property_statics: crate::fx_hash::HashMap<(TypeName, u32), u32>,
+    /// Exact delegated companion property declaration → the outer-class static holding its
+    /// `x$delegate`. Kept apart from `jvm_companion_property_statics`: the delegate is storage the
+    /// property's accessors read, not the property itself.
+    jvm_companion_delegate_statics: crate::fx_hash::HashMap<(TypeName, u32), u32>,
     /// User annotations applied to FUNCTIONS (top-level and members share the `functions` arena),
     /// by function id, retaining the resolved semantic retention. A side table rather than a field on [`IrFunction`], for the
     /// same reason [`IrClass::field_annotations`] is one: the overwhelming majority of functions
     /// carry none, and every synthesized function stays constructible without naming them.
     pub function_annotations: crate::fx_hash::HashMap<u32, DeclarationAnnotations>,
+    /// The classifiers of the SOURCE-retained annotations a source function applies, by function
+    /// id. Nothing emits them; they are checked facts a compiler plugin reads (Compose's
+    /// `@NonSkippableComposable`).
+    pub function_source_annotations: crate::fx_hash::HashMap<u32, Vec<TypeName>>,
+    /// What the Compose plugin recorded from this file's source at the handoff, for its body
+    /// transform. `None` unless the plugin is active and the file declares a composable function.
+    pub compose: Option<Box<crate::plugins::compose::ComposeFileFacts>>,
+    /// Package functions a compiler plugin gave physical parameters their declaration does not
+    /// have (Compose's `$composer` and `$changed`). Metadata records their realized signature.
+    pub(crate) plugin_extended_signatures: crate::fx_hash::HashSet<FunId>,
     /// `(class, property source order)` → the synthetic `get<Name>$annotations()` marker method that carries
     /// that property's annotations. The property's `JvmPropertySignature` names the marker, so
     /// emission reads its FINAL name from here (the value-class pass may have mangled it).
@@ -1629,6 +1689,10 @@ pub struct IrFile {
     /// keeps one generic construction node; a backend consumes this semantic annotation tag when it
     /// must realize annotation instances through a platform-specific implementation class.
     pub annotation_constructions: crate::fx_hash::HashMap<ExprId, IrAnnotationConstruction>,
+    /// The annotation implementation classes created for a construction in a non-private inline
+    /// function's body, which kotlinc marks part of the public ABI (`isInPublicInlineScope`): a
+    /// caller in another module regenerates them.
+    pub public_abi_annotation_implementations: crate::fx_hash::HashSet<TypeName>,
     /// Each annotation class this file declares → the closed declaration default of each element
     /// that has one, by element name. A backend records them with the annotation's declaration.
     pub annotation_element_defaults: crate::fx_hash::HashMap<TypeName, Vec<(String, AnnoValue)>>,
@@ -1654,10 +1718,8 @@ pub struct IrFile {
     /// updates, and the implicit `Unit` return (the block's closing-brace line, kotlinc's mapping).
     /// Absent = no line mark starts at that expression.
     pub expr_lines: crate::fx_hash::HashMap<u32, u32>,
-    /// Source line for every lowered expression whose AST node has a source location.
-    pub expr_source_lines: crate::fx_hash::HashMap<u32, u32>,
-    /// Source end line for every lowered expression whose AST node has a source location.
-    pub expr_end_lines: crate::fx_hash::HashMap<u32, u32>,
+    /// The source position of every expression node; see `node_positions`.
+    positions: node_positions::IrNodePositions,
     /// Lines generated expressions map to at one physical point; see `debug_lines`.
     generated_lines: debug_lines::GeneratedLineMarks,
     /// Source names for `IrExpr::Variable` nodes included in `LocalVariableTable`.
@@ -1694,16 +1756,8 @@ pub struct IrFile {
     pub(crate) inline_anonymous_lambdas: crate::fx_hash::HashSet<FunId>,
     /// Class index of a function already published as that class's method.
     pub(crate) class_method_owners: crate::fx_hash::HashMap<FunId, Vec<u32>>,
-    /// `ExprId` → the expression's LOGICAL (source) type as the checker inferred it, recorded verbatim by
-    /// the lowerer — NOT erased. The value-class pass consults it to recover the representation of a value
-    /// whose IR node alone is ambiguous: a library call returns a physical `Object` descriptor, but its
-    /// logical type may be a value class (`runCatching{…}: Result`), so the pass knows the result is the
-    /// value class's UNBOXED underlying, not an opaque `Object`. Populated for every lowered expression;
-    /// consumed by the value-class pass (the sole owner of value-class knowledge) and by target-neutral
-    /// rewrites that preserve a value in a new temporary. Such a rewrite first consults
-    /// [`Self::physical_types`] when a backend has already changed the representation, then uses this
-    /// checked type when no physical override exists.
-    pub logical_types: crate::fx_hash::HashMap<u32, Ty>,
+    /// The checked types of every expression node; see `node_types`.
+    types: node_types::IrNodeTypeColumn,
     /// Deferred source-local declaration → its declared semantic type before an inline expansion
     /// specializes type parameters. The parser supplies a target-neutral zero expression because
     /// the source omitted an initializer; a backend uses this provenance to choose that target's
@@ -1720,6 +1774,10 @@ pub struct IrFile {
     /// left value). Recorded where they are lowered, so a backend lays the guard out as its platform
     /// compiler does without recognizing the shape again.
     pub null_guards: crate::fx_hash::HashSet<ExprId>,
+    /// The temporary `value as? T` evaluates its operand into, keyed by its `Variable`. Only the
+    /// `is T` test and the matching branch's cast read it, so a backend may store the operand's
+    /// physical value without first converting it to the operand's semantic type.
+    pub safe_cast_temporaries: crate::fx_hash::HashSet<ExprId>,
     /// `::prop.isInitialized`, recorded when lowering `LateinitFieldRead`. The probe compares the
     /// property with null and does not throw. A backend chooses the raw field, getter, or bridge.
     pub lateinit_initialization_probes: crate::fx_hash::HashSet<ExprId>,
@@ -1760,8 +1818,6 @@ pub struct IrFile {
     /// nullable value class (`dup; ifnull; box-impl`). It is laid out like a safe call but is a
     /// conversion of one, so it never folds into a safe-call chain's shared null exit.
     pub(crate) jvm_value_class_null_guards: crate::fx_hash::HashSet<ExprId>,
-    /// Physical type before a semantic read coercion.
-    pub physical_types: crate::fx_hash::HashMap<u32, Ty>,
     /// Values a JVM value-class underlying-property read leaves in an erased generic slot as an
     /// ordinary primitive wrapper (`R<Int>.value`: `Object` containing `Integer`). The JVM
     /// representation pass records the exact expression identity; emission must not infer this
@@ -1775,6 +1831,9 @@ pub struct IrFile {
     /// adaptation boundary records this edge when it creates the call; later representation
     /// analysis consumes the identity and never recognizes an unbox operation by its spelling.
     pub(crate) value_class_unbox_type_operation_edges: crate::fx_hash::HashMap<ExprId, ExprId>,
+    /// Each declaration's default-argument entry, by the declaration's `FunId`, once a target's
+    /// shared default-argument lowering has realized it as an ordinary function of this file.
+    pub(crate) default_entries: crate::fx_hash::HashMap<FunId, FunId>,
     /// `FunId` → source parameter names and, when present, default-value expressions.
     pub fn_params: crate::fx_hash::HashMap<u32, FnParamInfo>,
     /// Per declared method/function, whether each SOURCE parameter was declared nullable (`a: String?`).
@@ -1886,11 +1945,27 @@ pub struct IrFile {
     /// offset, as kotlinc's line table does. A serializable property's default copied into a
     /// generated method starts with a property read the plugin attributes to the class's line.
     pub kept_start_lines: crate::fx_hash::HashSet<ExprId>,
+    /// Source operator, conversion, indexing and member calls realized as builtin operations, on
+    /// the node that realizes each.
+    pub builtin_calls: crate::fx_hash::HashMap<ExprId, IrBuiltinCall>,
+    /// Blocks that realize a source safe call `receiver?.selector`: a receiver temporary and a
+    /// null-guarded selector.
+    pub safe_calls: crate::fx_hash::HashSet<ExprId>,
+    /// Reads of a safe call's receiver temporary, by their role and source line.
+    pub safe_call_reads: crate::fx_hash::HashMap<ExprId, IrSafeCallRead>,
+    /// Temporaries that hold an elvis's left value, by the line the elvis starts on.
+    pub elvis_temporaries: crate::fx_hash::HashMap<ExprId, u32>,
     /// Compiler-generated `Variable` declarations whose semantic role is holding a call operand:
     /// an inline expansion's parameter (argument, receiver, or capture), or an argument preserved
     /// for evaluation order. This is provenance, not a storage decision; a backend decides how
     /// that role participates in its own frame or register allocation.
     pub call_operand_bindings: crate::fx_hash::HashSet<ExprId>,
+    /// Call-operand declarations a call reordered by its named arguments introduces to evaluate
+    /// them in source order (kotlinc's temporaries), rather than holders that stage an operand or
+    /// bind an expanded callable's parameters or captures. A reused declaration leaves this subset
+    /// when an inline expansion adopts it as its own formal binding. This records purpose; each
+    /// backend still owns storage and lifetime decisions.
+    pub(crate) argument_evaluation_bindings: crate::fx_hash::HashSet<ExprId>,
     /// The call-operand holders of one inline lambda invocation, consecutive in its block: the
     /// invocation evaluates every operand before it binds any. A backend chooses the binding order.
     pub(crate) invocation_operand_bindings: crate::fx_hash::HashSet<ExprId>,
@@ -1931,6 +2006,10 @@ pub struct IrFile {
     /// Annotations written on a source property's accessors, by property. A declared accessor's
     /// also land in [`Self::function_annotations`]; a default one exists only in a backend.
     pub accessor_annotations: crate::fx_hash::HashMap<crate::fir::PropertyId, AccessorAnnotations>,
+    /// Checked PROPERTY-targeted applications on package declarations, including retention and
+    /// erased/suppressed provenance. Storage and accessor identities do not own these payloads.
+    pub(crate) package_property_annotations:
+        crate::fx_hash::HashMap<crate::fir::PropertyId, PackagePropertyAnnotations>,
     /// FIELD-targeted applications on parser-hoisted `companion { ... }` properties. Metadata
     /// handoff publishes them under stable property identity before common lowering realizes the
     /// exact static storage that will own them.
@@ -2024,6 +2103,10 @@ pub struct IrFile {
     /// Internal names of classes kotlinc marks `ACC_SYNTHETIC` (0x1000) on the class itself — e.g. a
     /// `@Serializable` class's generated `$$serializer` object.
     synthetic_classes: crate::fx_hash::HashSet<TypeName>,
+    /// Internal names of classes a compiler plugin generates with no Kotlin declaration behind
+    /// them, such as Compose's `ComposableSingletons$<File>Kt`. No declaration record describes
+    /// them, and kotlinc writes them a synthetic-class `@Metadata`.
+    declarationless_classes: crate::fx_hash::HashSet<TypeName>,
     /// Provenance and initialization placement for statics generated without a Kotlin declaration.
     generated_static_facts: crate::fx_hash::HashMap<u32, generated_members::GeneratedStaticFacts>,
     /// `FunId`s of methods carrying a `Deprecated` classfile attribute (from `@Deprecated`) — e.g. a
@@ -2094,6 +2177,11 @@ pub struct IrFile {
     /// `-impl`, a constructor's `constructor-impl`). Only that pass writes it; kotlinc names the
     /// callables it lifts out of such a function after this name.
     pub(crate) value_class_renamed_functions: crate::fx_hash::HashSet<FunId>,
+    /// The `-<hash>` suffix the value-class pass appended to a function that is not a value class's
+    /// own member. kotlinc's inline-class lowering renames that IR function to its source name plus
+    /// this suffix, whatever `@JvmName` later makes of the JVM method, and names an extension
+    /// receiver after that IR name.
+    pub(crate) value_class_mangle_suffixes: crate::fx_hash::HashMap<FunId, String>,
     /// Top-level source declaration id → its exact IR function id. Metadata emission uses this
     /// checked declaration handoff to find a value-class-rewritten physical realization; it must
     /// never reconstruct an overload by matching source names and arity.
@@ -2159,17 +2247,13 @@ pub struct IrFile {
     pub secondary_ctor_lines:
         crate::fx_hash::HashMap<crate::fir::DeclarationId, IrSecondaryCtorLines>,
     /// Declared PRIMARY-constructor visibility per class (`class C protected constructor(…)`);
-    /// absent = public. It sets `@Metadata` `Constructor.flags` and the JVM access.
+    /// absent = public, or private for a singleton, whose constructor only a generated singleton
+    /// records as public. It sets `@Metadata` `Constructor.flags` and the JVM access.
     pub ctor_visibilities: crate::fx_hash::HashMap<TypeName, crate::types::Visibility>,
     /// A declared function's `vararg` parameter — class `@Metadata` must emit
     /// `ValueParameter.vararg_element_type` (f4) or a consumer demands one literal array (`too many
     /// arguments`).
     pub fn_varargs: crate::fx_hash::HashMap<u32, IrVarargParameter>,
-    /// Synthesized classes (function-reference/suspend-conversion adapters) that must be PUBLIC:
-    /// they are referenced from a PUBLIC INLINE function's body, whose splice copies the reference
-    /// into arbitrary other packages/modules (kotlinc marks such synthetics public for the same
-    /// reason). Package-private would be an IllegalAccessError at every cross-package splice site.
-    pub public_synthetics: crate::fx_hash::HashSet<TypeName>,
     /// Declaring class to indices in `statics` for class properties whose JVM field is static.
     pub declared_class_statics: crate::fx_hash::HashMap<TypeName, Vec<u32>>,
     /// (class internal name, property name) → 1-based source line of a BODY property's declaration.
@@ -2218,6 +2302,9 @@ pub struct IrFile {
     /// Class fq-internal-name → its generic-signature SHAPE (type parameters + bounds), for a generic
     /// class. The JVM backend formats it into the class `Signature` attribute.
     class_signatures: crate::fx_hash::HashMap<TypeName, IrGenericSig>,
+    /// Declared self applications in the checker's complete own-and-captured parameter order.
+    /// Source method exports consume these facts before target realization.
+    declared_class_self_types: crate::fx_hash::HashMap<TypeName, Ty>,
     /// A generated class's signature after its plugin's IR lowering, where that differs from the
     /// declaration in [`Self::class_signatures`] that metadata records. The classfile is written
     /// from the lowered one.
@@ -2316,11 +2403,15 @@ pub struct IrFile {
     /// classifying as a value class. Only NON-NULL declared returns are recorded: a nullable value
     /// class really is boxed.
     pub call_declared_ret: crate::fx_hash::HashMap<u32, Ty>,
-    /// The `ImplicitCoercion`s FIR lowering places between a call's declared result and its
-    /// call-site substitution (`fun <T> f(): T` read as `Int`). Which coercion a node is comes from
+    /// The `ImplicitCoercion`s FIR lowering places between a call's or property read's declared
+    /// result and its use-site substitution (`fun <T> f(): T` read as `Int`). Which coercion a node is comes from
     /// where it was lowered, not from its shape: an adaptation or widening over the same call is
     /// another coercion. A target decides whether the conversion crosses a physical result slot.
     pub declaration_result_coercions: crate::fx_hash::HashSet<ExprId>,
+    /// The `ImplicitCoercion` JVM dependency-call realization places between a provider's physical
+    /// result and the checked semantic result, keyed by that coercion. Like
+    /// `declaration_result_coercions`, the mark comes from where the boundary was made.
+    pub jvm_external_result_coercions: crate::fx_hash::HashSet<ExprId>,
     /// Call-owned supplied-argument edges whose declaration parameters mention type parameters.
     /// A target may adapt only these exact edges, and only when its own carrier rules select them.
     pub declaration_argument_boundaries:
@@ -2406,52 +2497,6 @@ pub struct IrFile {
     pub lambda_sam_jvm_signature: crate::fx_hash::HashMap<u32, (Vec<Ty>, Ty)>,
 }
 
-/// Backend-agnostic generic-signature shape of a declaration (the data a JVM `Signature` / a future
-/// platform's equivalent needs). NO target descriptors here — each backend formats its own.
-#[derive(Clone, Debug)]
-pub struct IrGenericSig {
-    /// Each declared type parameter with its complete semantic bound shape. Whether that bound is an
-    /// interface is declaration metadata, not something a backend may infer from a physical name.
-    pub type_params: Vec<IrTypeParameter>,
-    /// Complete semantic callable parameters for a function signature. An extension receiver occupies
-    /// its physical context-boundary slot so a backend signature retains its declared generic type;
-    /// declaration metadata separates that slot back into a receiver. Empty for a class signature.
-    pub params: Vec<Ty>,
-    /// Complete semantic return type for a function signature. `None` for a class signature.
-    pub ret: Option<Ty>,
-    /// For a CLASS signature with a PARAMETERIZED supertype: the superclass + superinterfaces as
-    /// platform-agnostic `Ty`s carrying their type arguments (`[Any, Operation<Result<Int>>]`), so a
-    /// cross-module reader recovers a member's concrete generic return. The backend formats these into the
-    /// JVM `Signature` string. Empty ⇒ no parameterized supertype (backend emits the default `Object`
-    /// superclass). Empty for a function signature.
-    pub supers: Vec<Ty>,
-}
-
-#[derive(Clone, Debug)]
-pub struct IrTypeParameter {
-    pub name: String,
-    pub semantic_name: String,
-    pub bounds: Vec<(Ty, bool)>,
-    pub variance: crate::types::TypeVariance,
-    /// Kotlin declaration capability retained for targets that materialize runtime type operations.
-    /// The JVM consumes it when choosing its reified-operation marker representation.
-    pub reified: bool,
-}
-
-impl IrTypeParameter {
-    /// A use of this parameter as a type.
-    pub(crate) fn ty(&self) -> Ty {
-        Ty::ty_param(&self.semantic_name, self.upper_bound())
-    }
-
-    /// The representative upper bound: the first declared bound, else `Any?`.
-    pub(crate) fn upper_bound(&self) -> Ty {
-        self.bounds
-            .first()
-            .map_or(Ty::nullable(Ty::obj("kotlin/Any")), |(bound, _)| *bound)
-    }
-}
-
 #[derive(Clone, Debug, PartialEq)]
 pub struct IrTypeAliasFormal {
     /// Name written by the source declaration and emitted in Kotlin metadata.
@@ -2489,6 +2534,25 @@ impl IrFile {
         self.fir_origins
             .get(&expression)
             .map(|origin| origin.fir_origin())
+    }
+
+    /// The name of `function` that its inline marker is named from: its own, or the name a
+    /// multifile part's private function had before the part suffixed it.
+    pub(crate) fn name_before_part_suffix(&self, function: FunId) -> &str {
+        self.multifile_private_names
+            .get(&function)
+            .map_or(&self.functions[function as usize].name, |name| name)
+    }
+
+    /// The name of `function` that its synthetic accessor is named from. kotlinc names a multifile
+    /// part's private function's accessor after its Kotlin name, except a suspend function's,
+    /// which follows the suffixed JVM name of the method its state machine is built on.
+    pub(crate) fn accessor_base_name(&self, function: FunId) -> &str {
+        if self.suspend_funs.contains(&function) {
+            &self.functions[function as usize].name
+        } else {
+            self.name_before_part_suffix(function)
+        }
     }
 
     /// A method's Kotlin declaration visibility. Public is the compact default for generated and
@@ -2746,8 +2810,8 @@ pub use clone::clone_expression_dag;
 #[cfg(test)]
 pub(crate) use clone::make_expression_children_unique;
 pub(crate) use clone::{
-    clone_class_method, clone_function_implementation, clone_with_operands,
-    make_expression_children_unique_tracked,
+    clone_class_method, clone_expression_with_own_lambdas, clone_function_implementation,
+    clone_with_operands, make_expression_children_unique_tracked,
 };
 mod semantic_validation;
 pub use semantic_validation::{

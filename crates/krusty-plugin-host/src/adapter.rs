@@ -14,9 +14,13 @@ use crate::install;
 use crate::provision::{HostRuntime, COMPILER_MIN_JAVA};
 
 /// The adapter's sources every compiler builds, by file name.
-const SOURCES: [(&str, &str); 4] = [
+const SOURCES: [(&str, &str); 5] = [
     ("Host.kt", include_str!("../adapter/Host.kt")),
     ("ModuleIr.kt", include_str!("../adapter/ModuleIr.kt")),
+    (
+        "ScriptDefinitions.kt",
+        include_str!("../adapter/ScriptDefinitions.kt"),
+    ),
     ("Session.kt", include_str!("../adapter/Session.kt")),
     ("Wire.kt", include_str!("../adapter/Wire.kt")),
 ];
@@ -229,6 +233,7 @@ mod tests {
                 [
                     "Host.kt",
                     "ModuleIr.kt",
+                    "ScriptDefinitions.kt",
                     "Session.kt",
                     "Wire.kt",
                     "IrFiles.kt"
