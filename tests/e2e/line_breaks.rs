@@ -5,6 +5,8 @@ use super::common;
 
 #[path = "../cast_line_break_e2e.rs"]
 mod cast_line_break_e2e;
+#[path = "../child_serializers_companion_line_e2e.rs"]
+mod child_serializers_companion_line_e2e;
 #[path = "../class_header_newline_e2e.rs"]
 mod class_header_newline_e2e;
 #[path = "../companion_static_initializer_line_e2e.rs"]
@@ -17,6 +19,8 @@ mod elvis_newline_continuation_e2e;
 mod infix_newline_operand_e2e;
 #[path = "../inline_only_converted_lambda_line_e2e.rs"]
 mod inline_only_converted_lambda_line_e2e;
+#[path = "../inline_operand_binding_line_e2e.rs"]
+mod inline_operand_binding_line_e2e;
 #[path = "../multiline_receiver_access_line_e2e.rs"]
 mod multiline_receiver_access_line_e2e;
 #[path = "../newline_method_chain_e2e.rs"]
