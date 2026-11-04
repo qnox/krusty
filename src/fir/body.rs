@@ -322,6 +322,8 @@ pub enum FirCallTarget {
     /// express "this declaration, bypassing overriding" — the same source declaration is an ordinary
     /// virtual target at every other call site.
     Super {
+        /// The original selected qualifier, before a target maps the invocation owner.
+        qualifier: crate::types::TypeName,
         owner: crate::types::TypeName,
         /// Classifier whose instance supplies `this` for this selected super dispatch.
         dispatch_owner: crate::types::TypeName,
