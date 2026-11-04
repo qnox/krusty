@@ -660,7 +660,7 @@ impl ProductionSignatureSemantics<'_> {
             let selected = match resolver.select_receiver_function_with_params_tracking(
                 receiver,
                 spelling,
-                &kinds,
+                crate::symbol_resolver::FamilyArguments::Shared(&kinds),
                 &resolved_type_arguments,
                 &callables,
                 None,
@@ -1455,18 +1455,17 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                     .receiver_member_level_with_context_status(scope, resolver, receiver, spelling)
                     .ok()?;
                 let callables = level.callables;
-                let (selected_arguments, selected_argument_types) =
-                    Self::mapped_call_arguments(callables.functions(), arguments, trailing_lambda)?;
+                let mapped = Self::family_arguments(&callables, arguments, trailing_lambda)?;
                 let projected = self.project_postponed_callables(
                     scope,
                     receiver,
                     callables,
-                    &selected_arguments,
+                    mapped.family(&mapped.kinds),
                 );
                 let selection = resolver.select_receiver_function_with_params_tracking(
                     receiver,
                     spelling,
-                    projected.arguments(),
+                    mapped.family(projected.arguments()),
                     &resolved_type_arguments,
                     projected.callables(),
                     None,
@@ -1489,6 +1488,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                     return None;
                 };
                 let postponed_bindings = projected.selected_bindings(&selected);
+                let selected_argument_types = mapped.selected_types(&selected);
                 selected_constructor.set(selected.constructor.is_some());
                 if selected_constructor.get() {
                     *selected_alias.borrow_mut() = selected.constructor_alias().cloned();
@@ -1870,11 +1870,11 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 spelling,
                 candidates.clone(),
                 match &calls {
-                    Some(calls) => crate::symbol_resolver::TopLevelArguments::PerCandidate {
+                    Some(calls) => crate::symbol_resolver::FamilyArguments::PerCandidate {
                         calls,
                         source: &argument_kinds,
                     },
-                    None => crate::symbol_resolver::TopLevelArguments::Shared(&selected_arguments),
+                    None => crate::symbol_resolver::FamilyArguments::Shared(&selected_arguments),
                 },
                 &resolved_type_arguments,
                 expected.map(crate::fir::ResolvedTy::get),
@@ -2015,16 +2015,8 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
         })?;
         let (selected, selected_argument_types) = selected;
         match selected {
-            // The same report the body checker makes, so recovery keeps one of the two.
             SelectedTopLevelCall::Ambiguous(tied) => {
-                let mut message = "overload resolution ambiguity between candidates:".to_string();
-                for candidate in &tied {
-                    message.push('\n');
-                    message.push_str(&crate::resolve::Checker::callable_candidate_display(
-                        spelling, candidate,
-                    ));
-                }
-                Err(self.record_source_diagnostic(scope.owner, origin, message))
+                Err(self.record_ambiguous_call(scope, origin, spelling, &tied))
             }
             SelectedTopLevelCall::Callable {
                 callable,
@@ -2325,18 +2317,12 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                         generic,
                         &resolved_type_arguments,
                     );
+                    let beside_reference = arguments.iter().any(|argument| {
+                        matches!(argument, crate::fir::SigCallArgumentProbe::PostponedCallableReference { .. })
+                    });
                     let inferred = crate::symbol_resolver::infer_generic_call_bindings(
                         generic,
-                        kinds.iter().enumerate().filter_map(|(parameter, argument)| {
-                            let actual = argument.ty();
-                            (actual != Ty::Error && !argument.is_omitted_default()).then_some((
-                                parameter,
-                                argument.type_for(
-                                    generic.params.get(parameter).copied().unwrap_or(Ty::Error),
-                                ),
-                                argument.is_spread(),
-                            ))
-                        }),
+                        typed_argument_evidence(&kinds, generic, beside_reference),
                         selected.call_sig.vararg_index,
                     );
                     for (parameter, actual) in inferred {
@@ -3230,16 +3216,15 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 return crate::fir::ResolvedTy::new(function).map_err(|_| Self::failure());
             }
 
-            // Only after the member rung has no applicable candidate may extension candidates be
-            // forced. Their inferred returns can legitimately depend on other declarations.
-            candidates.retain(|candidate| candidate.kind == crate::libraries::FnKind::Extension);
-            for candidate in &mut candidates {
-                if let Some(signature) =
-                    self.demanded_source_signature(None, candidate.stable_declaration, demand)?
-                {
-                    candidate.callable.ret = signature.result.get();
-                }
-            }
+            // Only once the member rung has nothing applicable are extension results demanded.
+            return self.select_extension_reference_shape(
+                scope,
+                candidates,
+                receiver,
+                unbound,
+                expected_function,
+                demand,
+            );
         }
         // A natural callable-reference type still obeys the scope tower. Declared members form an
         // earlier rung than extensions, so the presence of both must not be reported as an
@@ -3870,19 +3855,18 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 trailing_lambda,
             );
             let callables = crate::libraries::Callables::from_parts(functions, properties);
-            let (argument_kinds, argument_types) =
-                Self::mapped_call_arguments(callables.functions(), arguments, trailing_lambda)?;
+            let mapped = Self::family_arguments(&callables, arguments, trailing_lambda)?;
             let projected = self.project_postponed_callables(
                 scope,
                 receiver.get(),
                 callables,
-                &argument_kinds,
+                mapped.family(&mapped.kinds),
             );
             use crate::symbol_resolver::ReceiverFunctionSelection as Selection;
             let selection = resolver.select_receiver_function_with_applied_receiver_tracking(
                 receiver.get(),
                 spelling,
-                projected.arguments(),
+                mapped.family(projected.arguments()),
                 &type_arguments,
                 projected.callables(),
                 None,
@@ -3911,6 +3895,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 selected.source_key,
             );
             let postponed_bindings = projected.selected_bindings(&selected);
+            let argument_types = mapped.selected_types(&selected);
             let parameter_by_argument = Self::selected_argument_parameters(
                 &selected,
                 arguments,
@@ -4020,7 +4005,12 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                 )
             }
             Err(_) if !ambiguous.borrow().is_empty() => {
-                return Err(self.record_ambiguous_call(scope, origin, spelling, &ambiguous));
+                return Err(self.record_ambiguous_call(
+                    scope,
+                    origin,
+                    spelling,
+                    &ambiguous.borrow(),
+                ));
             }
             Err(_) => {
                 // A member PROPERTY whose value is callable participates in call syntax after
@@ -4382,7 +4372,7 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
             )) = resolver.select_receiver_function_with_params_tracking(
                 callee.get(),
                 "invoke",
-                &argument_kinds,
+                crate::symbol_resolver::FamilyArguments::Shared(&argument_kinds),
                 &[],
                 &callables,
                 None,

@@ -98,7 +98,7 @@ impl BodyLowering<'_> {
             branches: vec![(Some(condition), null_result), (None, selector)],
         });
         self.ir.whens.exhaustive.insert(guarded, ty);
-        self.ir.logical_types.insert(guarded, ty);
+        self.ir.set_logical_type(guarded, ty);
         self.ir.null_guards.insert(guarded);
         let block = self.ir.add_expr(IrExpr::Block {
             stmts: vec![variable],

@@ -14,7 +14,7 @@ use crate::jvm::bytecode_passes::analysis::{
     PlainFrames, Value,
 };
 use crate::jvm::bytecode_passes::descriptors;
-use crate::jvm::method_node::{Constant, Insn, MethodNode, Node};
+use crate::jvm::method_node::{Insn, MethodNode, Node};
 
 use super::anonymous_object::{MalformedType, TypeRemapper};
 use super::class_roles::ClassRoles;
@@ -110,20 +110,16 @@ pub(super) fn regenerate_objects(
     let mut prior_classes = Vec::new();
     // `new` / `getstatic INSTANCE` sites whose copy still uses a reified parameter.
     let mut reemit_markers = Vec::new();
-    // The copies those markers ask the caller to specialize in turn.
-    let mut still_reified = Vec::new();
     let marker_sites = need_class_reification_sites(node);
-    // kotlinc's `awaitClassReification`: a `needClassReification` marker asks the next object
-    // to be specialized for this call.
-    let mut await_reification = false;
+    // The object event each marker asks to be specialized for this call. A marker whose object
+    // is not one the class roles authenticate is refused before anything is regenerated.
+    let marker_targets = reification_targets(node, &marker_sites, &constructions, classes)?;
     // The `new`s of objects a same-module body constructs that this call reuses unchanged.
     let mut reused = BTreeSet::new();
     for at in 0..node.nodes.len() {
-        if marker_sites.contains(&at) {
-            await_reification = true;
-        }
+        let specialize = marker_targets.contains(&at);
         if let Some(owner) = anonymous_singleton_owner(node, at, classes) {
-            if objects.same_module() && !std::mem::take(&mut await_reification) {
+            if objects.same_module() && !specialize {
                 continue;
             }
             let copy = objects.regenerate_singleton(&owner, &prior_classes)?;
@@ -137,7 +133,6 @@ pub(super) fn regenerate_objects(
             prior_classes.push((owner, copy.name.clone()));
             if copy.reified_parameters_remain {
                 reemit_markers.push(at);
-                still_reified.push(copy.name.clone());
             }
             let Node::Insn(insn) = &mut node.nodes[at] else {
                 unreachable!("a singleton load is a field instruction")
@@ -153,7 +148,6 @@ pub(super) fn regenerate_objects(
                 unreachable!("a construction starts at a `new`")
             };
             let passed = &constructions.lambdas[&constructor];
-            let specialize = std::mem::take(&mut await_reification);
             // kotlinc's `shouldRegenerate(sameModule)`: an object that takes none of the call's
             // lambdas, needs no reification, and captures no object regenerated here is reused.
             if objects.same_module()
@@ -189,7 +183,6 @@ pub(super) fn regenerate_objects(
             }
             if copy.reified_parameters_remain {
                 reemit_markers.push(at);
-                still_reified.push(copy.name.clone());
             }
             remapper.add_mapping(class, &copy.name);
             prior_classes.push((class.clone(), copy.name.clone()));
@@ -219,9 +212,6 @@ pub(super) fn regenerate_objects(
     }
     for local in &mut node.local_variables {
         local.desc = remapper.map_desc(&local.desc).map_err(malformed)?;
-    }
-    if !marker_sites.is_empty() && names_unreified_class(node, classes, &still_reified) {
-        return Err(InlineError::UnreifiedClass);
     }
     remove_nodes(node, &marker_sites);
     insert_reification_markers(node, &marker_sites, &reemit_markers);
@@ -277,62 +267,45 @@ pub(super) fn is_need_class_reification(insn: &Insn) -> bool {
         if !*interface && owner == INTRINSICS && name == "needClassReification" && desc == "()V")
 }
 
-/// Whether `node` still names a class whose methods call `reifiedOperationMarker`, other than the
-/// `still_reified` copies whose loads keep their marker for the caller.
-fn names_unreified_class(
+/// The object event each `needClassReification` marker asks to be specialized (kotlinc's
+/// `awaitClassReification`): the next anonymous object construction or anonymous singleton load,
+/// as the class roles authenticate them, which are the events regeneration consumes the marker at.
+/// The marker stays pending through every other instruction, an ordinary allocation or singleton
+/// load among them. A marker no such event follows names an object this call cannot regenerate:
+/// its reified operations would stay unspecialized, so the inline is refused.
+fn reification_targets(
     node: &MethodNode,
+    marker_sites: &[usize],
+    constructions: &Constructions,
     classes: &dyn ClassRoles,
-    still_reified: &[String],
+) -> Result<Vec<usize>, InlineError> {
+    marker_sites
+        .iter()
+        .map(|&site| {
+            (site + 1..node.nodes.len())
+                .find(|&at| is_anonymous_object_event(node, at, constructions, classes))
+                .ok_or_else(|| {
+                    crate::trace_compiler!("splice", "unresolved reification marker at {site}");
+                    InlineError::UnreifiedClass
+                })
+        })
+        .collect()
+}
+
+/// Whether instruction `at` constructs an anonymous object (a `new` paired with its constructor
+/// call) or loads an anonymous singleton, by the class roles: the events regeneration handles.
+fn is_anonymous_object_event(
+    node: &MethodNode,
+    at: usize,
+    constructions: &Constructions,
+    classes: &dyn ClassRoles,
 ) -> bool {
-    let mut named = Vec::new();
-    for insn in node.instructions() {
-        note_classes(insn, &mut named);
+    if anonymous_singleton_owner(node, at, classes).is_some() {
+        return true;
     }
-    for block in &node.try_catch_blocks {
-        if let Some(class) = &block.catch_type {
-            named.push(class.clone());
-        }
-    }
-    for local in &node.local_variables {
-        internal_names(&local.desc, &mut named);
-    }
-    named.iter().any(|class| {
-        let marked = !still_reified.contains(class) && classes.contains_reified_marker(class);
-        if marked {
-            crate::trace_compiler!("splice", "unreified class {class}");
-        }
-        marked
-    })
-}
-
-fn note_classes(insn: &Insn, named: &mut Vec<String>) {
-    match insn {
-        Insn::Type { class, .. } => named.push(class.clone()),
-        Insn::Field { owner, desc, .. } | Insn::Method { owner, desc, .. } => {
-            named.push(owner.clone());
-            internal_names(desc, named);
-        }
-        Insn::Ldc(Constant::Class(class)) => named.push(class.clone()),
-        Insn::MultiANewArray { desc, .. } => internal_names(desc, named),
-        Insn::InvokeDynamic { desc, .. } => internal_names(desc, named),
-        _ => {}
-    }
-}
-
-/// Every `L…;` internal name in `desc`.
-fn internal_names(desc: &str, named: &mut Vec<String>) {
-    let bytes = desc.as_bytes();
-    let mut at = 0;
-    while at < bytes.len() {
-        if bytes[at] == b'L' {
-            if let Some(end) = desc[at + 1..].find(';') {
-                named.push(desc[at + 1..at + 1 + end].to_string());
-                at += end + 2;
-                continue;
-            }
-        }
-        at += 1;
-    }
+    constructions.by_new.contains_key(&at)
+        && matches!(&node.nodes[at], Node::Insn(Insn::Type { class, .. })
+            if classes.is_anonymous_object(class))
 }
 
 fn remove_nodes(node: &mut MethodNode, indices: &[usize]) {

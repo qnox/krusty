@@ -35,6 +35,16 @@ pub(crate) enum IrLocalClassOwner {
     External(TypeName),
 }
 
+/// A source classifier's original declaration context, retained when an inline copy changes its
+/// current executable enclosure. Targets decide how these source roles affect representation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum IrClassDeclarationContext {
+    TopLevel,
+    Member,
+    Executable,
+    ClassInitializer { owner: TypeName },
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct IrLocalClassNameProvenance {
     /// Source file whose facade roots the name when there is no lexical owner. An inline payload
@@ -516,12 +526,14 @@ fn callee(callee: &mut Callee, names: &IdentityRemap<'_>) {
             }
         }
         Callee::Super {
+            qualifier,
             owner,
             dispatch_owner,
             params,
             ret,
             ..
         } => {
+            name(qualifier, names);
             name(owner, names);
             name(dispatch_owner, names);
             tys(params, names);
@@ -928,6 +940,11 @@ fn declaration_argument_boundaries(
 
 fn remap_class(class: &mut super::IrClass, names: &IdentityRemap<'_>) {
     name(&mut class.fq_name, names);
+    if let Some(IrClassDeclarationContext::ClassInitializer { owner }) =
+        &mut class.declaration_context
+    {
+        name(owner, names);
+    }
     for (_, bound) in &mut class.type_param_bounds {
         *bound = ty(*bound, names);
     }
@@ -1482,16 +1499,11 @@ impl super::IrFile {
         for parameters in self.physical_call_parameters.values_mut() {
             tys(parameters, names);
         }
-        self.logical_types
-            .values_mut()
-            .for_each(|value| *value = ty(*value, names));
+        self.rewrite_types(|value| ty(value, names));
         self.deferred_local_types
             .values_mut()
             .for_each(|value| *value = ty(*value, names));
         self.inline_declared_types_mut()
-            .for_each(|value| *value = ty(*value, names));
-        self.physical_types
-            .values_mut()
             .for_each(|value| *value = ty(*value, names));
         self.whens
             .exhaustive
@@ -1623,13 +1635,13 @@ impl super::IrFile {
 }
 
 fn remap_expression_facts(ir: &mut super::IrFile, expression: ExprId, names: &IdentityRemap<'_>) {
-    if let Some(value) = ir.logical_types.get_mut(&expression) {
+    if let Some(value) = ir.logical_type_mut(expression) {
         *value = ty(*value, names);
     }
     if let Some(value) = ir.deferred_local_types.get_mut(&expression) {
         *value = ty(*value, names);
     }
-    if let Some(value) = ir.physical_types.get_mut(&expression) {
+    if let Some(value) = ir.physical_type_mut(expression) {
         *value = ty(*value, names);
     }
     if let Some(value) = ir.call_declared_ret.get_mut(&expression) {
@@ -1836,6 +1848,44 @@ mod tests {
             ),
             Ty::obj_name(terminal)
         );
+    }
+
+    #[test]
+    fn class_copy_retains_original_context_when_its_current_enclosure_changes() {
+        let mut ir = crate::ir::IrFile::default();
+        let source_owner = crate::types::type_name("sample/SourceOwner");
+        let target_owner = crate::types::type_name("sample/TargetOwner");
+        let owner = ir.add_class(crate::ir::IrClass::synthetic(source_owner));
+        let mut original = crate::ir::IrClass::synthetic(source_owner.nested_child("Original"));
+        original.declaration_context = Some(IrClassDeclarationContext::ClassInitializer {
+            owner: source_owner,
+        });
+        original.enclosure = Some(crate::ir::IrEnclosure::ClassInitializer(owner));
+        let mut copy = original.clone();
+        copy.enclosure = Some(crate::ir::IrEnclosure::File);
+        copy.fq_name = source_owner.nested_child("Copy");
+        let original = ir.add_class(original);
+        let copy = ir.add_class(copy);
+
+        ir.remap_classifier_identities(&HashMap::from_iter([(source_owner, target_owner)]));
+
+        for class in [original, copy] {
+            assert_eq!(
+                ir.classes[class as usize].declaration_context,
+                Some(IrClassDeclarationContext::ClassInitializer {
+                    owner: target_owner
+                })
+            );
+        }
+        assert_eq!(
+            ir.classes[original as usize].enclosure,
+            Some(crate::ir::IrEnclosure::ClassInitializer(owner))
+        );
+        assert_eq!(
+            ir.classes[copy as usize].enclosure,
+            Some(crate::ir::IrEnclosure::File)
+        );
+        assert_eq!(ir.classes[owner as usize].fq_name, target_owner);
     }
 
     #[test]
