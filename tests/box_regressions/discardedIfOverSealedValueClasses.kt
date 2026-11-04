@@ -1,15 +1,15 @@
 // WITH_STDLIB
 
 sealed interface ValueType {
-    @JvmInline
+    OPTIONAL_JVM_INLINE_ANNOTATION
     value class Number(val number: Int) : ValueType
-    @JvmInline
+    OPTIONAL_JVM_INLINE_ANNOTATION
     value class Other(val subtype: Subtype) : ValueType
 }
 
 interface Subtype {
     val id: Int
-    @JvmInline
+    OPTIONAL_JVM_INLINE_ANNOTATION
     value class Ref(override val id: Int) : Subtype
 }
 

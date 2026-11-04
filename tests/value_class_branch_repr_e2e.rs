@@ -56,8 +56,9 @@ fun box(): String = if (read<Int>(Wrapper(1)) == 1) \"OK\" else \"fail\"\n";
 
 #[test]
 fn a_discarded_if_boxes_each_value_class_branch_into_its_sealed_result() {
-    common::expect_box_same_as_kotlinc(
+    let source = krusty::conformance::prepare_test_source(
         include_str!("box_regressions/discardedIfOverSealedValueClasses.kt"),
-        "discardedIfOverSealedValueClasses",
+        krusty::conformance::TestTarget::Jvm,
     );
+    common::expect_box_same_as_kotlinc(&source, "discardedIfOverSealedValueClasses");
 }
