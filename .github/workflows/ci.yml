@@ -23,6 +23,31 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
 
 jobs:
+  # Asks the runner controller where this run's jobs should run (.github/actions/route). In shadow
+  # mode the answer is only logged and recorded beside where each job really ran; every job keeps
+  # its own runs-on. No job waits for this one. Fork PRs get no OIDC token and do not ask.
+  route:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
+        with:
+          tool: just
+      # The same value build-tool-bins publishes as its matrix output.
+      - name: select supported Kotlin versions
+        id: versions
+        run: echo "matrix=$(just matrix-json)" >> "$GITHUB_OUTPUT"
+      - uses: ./.github/actions/route
+        with:
+          workflow: .github/workflows/ci.yml
+          asking: route
+          outputs: build-tool-bins.matrix=${{ steps.versions.outputs.matrix }}
+
   # Lint and coverage are independent merge gates. Give each its own runner so the clean Clippy
   # build does not sit on the coverage critical path. Conformance and Gradle run prebuilt artifact
   # families from their independent producer jobs below; neither matrix compiles krusty again.
