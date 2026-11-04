@@ -5,7 +5,9 @@
 
 use super::ResolvedCall;
 use crate::fx_hash::HashMap;
-use crate::libraries::{GenericSig, LibraryCallable, LibraryMember, TypeEnhancement};
+use crate::libraries::{
+    FunctionInfo, GenericSig, LibraryCallable, LibraryMember, PropertyInfo, TypeEnhancement,
+};
 use crate::types::{Ty, TyKind, TypeName};
 
 #[derive(Clone, Copy)]
@@ -64,7 +66,57 @@ pub(super) struct CompactSelectedResultPublication {
     receiver: Option<Ty>,
     enhancement: TypeEnhancement,
     arguments: Box<[Option<CompactPublicationArgument>]>,
-    explicit_type_arguments: bool,
+    /// The call's written type arguments, in the selected declaration's formal order (empty when
+    /// the call wrote none). They fix the declaration's substitution as written.
+    explicit_type_arguments: Box<[Ty]>,
+    /// The typealias the selected declaration spelled its result through. kotlinc's call result
+    /// carries that abbreviation, so an inferred declaration result reached through it records
+    /// the alias.
+    result_alias: Option<crate::libraries::DeclaredResultAlias>,
+    /// The selected declaration's value parameters under the selection's solved substitution,
+    /// position for position with `signature.params`. They carry the solved type arguments even
+    /// where no operand's own type does (`tagged(Child(), Base())` solves `T := Base`).
+    selected_parameters: Box<[Ty]>,
+    /// The classifier declaring the selected member, whose type parameters a result alias may
+    /// mention (`fun taggedOf(): Tagged<T>` in `class Store<T>`).
+    declaring_owner: Option<TypeName>,
+}
+
+/// A selection's normalized declaration signature together with the parameters selection
+/// instantiated from it, index for index. Both come from the one selected declaration, so a
+/// supplied context prefix or an extension receiver is either absent from both or present in both.
+pub(super) struct SelectedSignature {
+    pub(super) signature: Option<GenericSig>,
+    pub(super) parameters: Box<[Ty]>,
+}
+
+impl SelectedSignature {
+    /// `selected` with the parameters `callable`, its instantiation at this call, gives it.
+    pub(super) fn of_call(selected: &FunctionInfo, callable: &LibraryCallable) -> Self {
+        Self {
+            signature: selected.generic_sig.clone(),
+            parameters: selected.semantic_params_of(&callable.params).into(),
+        }
+    }
+
+    /// `selected` with the value parameters selection instantiated. The context prefix it
+    /// supplied separately keeps the declaration's own types.
+    pub(super) fn with_supplied_context(selected: &FunctionInfo, values: &[Ty]) -> Self {
+        let declared = selected.semantic_params();
+        let context = &declared[..selected.context_count.min(declared.len())];
+        Self {
+            signature: selected.generic_sig.clone(),
+            parameters: context.iter().chain(values).copied().collect(),
+        }
+    }
+
+    /// The getter of a selected extension property, read with no value arguments.
+    pub(super) fn of_getter(property: &PropertyInfo) -> Self {
+        Self {
+            signature: property.getter.generic_sig.as_deref().cloned(),
+            parameters: property.semantic_getter_params().into(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -79,24 +131,157 @@ impl CompactSelectedResultPublication {
         self
     }
 
+    /// The selection with the typealias application its source declaration's published signature
+    /// spells the result through, when the candidate itself carried none.
+    pub(super) fn with_result_alias(
+        mut self,
+        alias: Option<crate::libraries::DeclaredResultAlias>,
+    ) -> Self {
+        self.result_alias = self.result_alias.or(alias);
+        self
+    }
+
+    /// The declaration's result alias application with the declaration's type parameters bound
+    /// the way this selection bound them: through the `receiver`, the `arguments` in source
+    /// order, and the result it produced. `None` when the declaration spelled no alias, or a
+    /// parameter the alias mentions stays unbound.
+    pub(super) fn applied_result_alias(
+        &self,
+        receiver: Option<Ty>,
+        arguments: &[Ty],
+        declaring_self: impl FnOnce(TypeName) -> Option<Ty>,
+        mut view: impl FnMut(Ty, TypeName) -> Option<(Ty, Vec<Ty>)>,
+    ) -> Option<crate::libraries::DeclaredResultAlias> {
+        let declared = self.result_alias?;
+        let (mut formals, _) = self.formals();
+        // A member's result may mention its declaring classifier's parameters even where the
+        // selection carries the receiver already applied: bind them through that classifier.
+        let declaring_self = self.declaring_owner.and_then(declaring_self);
+        if let Some(declaring_self) = declaring_self {
+            let mut declaring_formals = Vec::new();
+            collect_type_parameters(declaring_self, &mut declaring_formals);
+            for formal in declaring_formals {
+                if !formals.contains(&formal) {
+                    formals.push(formal);
+                }
+            }
+        }
+        let mut constraints: HashMap<String, Vec<Ty>> = HashMap::default();
+        let mut view = |actual, _: &Ty, owner| view(actual, owner);
+        let mut constrain = |declared: Ty, actual: Ty| {
+            constrain_parameters(
+                &formals,
+                declared,
+                actual,
+                &actual,
+                &mut constraints,
+                StarProjectionPolicy::Descend,
+                &mut view,
+            );
+        };
+        // The selection's solved substitution comes first: each binding below keeps its first
+        // constraint, so an operand's own narrower type never replaces what selection solved.
+        if let Some(signature) = &self.signature {
+            // Both sides come from the one selection, in the coordinates it selected in. A
+            // disagreement means they do not, and no binding read across them would be sound.
+            if signature.params.len() != self.selected_parameters.len() {
+                return None;
+            }
+            for (&declared, &selected) in signature.params.iter().zip(&self.selected_parameters) {
+                constrain(declared, selected);
+            }
+        }
+        constrain(self.declared, self.selected);
+        if let (Some(declared), Some(actual)) = (self.receiver, receiver) {
+            constrain(declared, actual);
+        }
+        if let (Some(declared), Some(actual)) = (declaring_self, receiver) {
+            constrain(declared, actual);
+        }
+        if let Some(signature) = &self.signature {
+            for (actual, binding) in arguments.iter().zip(&self.arguments) {
+                let Some(binding) = binding else {
+                    continue;
+                };
+                let Some(&parameter) = signature.params.get(binding.parameter as usize) else {
+                    continue;
+                };
+                let parameter = if binding.vararg_element {
+                    parameter.array_read_elem().unwrap_or(parameter)
+                } else {
+                    parameter
+                };
+                constrain(parameter, *actual);
+            }
+        }
+        let mut bindings = constraints
+            .into_iter()
+            .filter_map(|(formal, values)| Some((formal, *values.first()?)))
+            .collect::<HashMap<_, _>>();
+        // Written type arguments are the selection's substitution as written: they bind the
+        // declaration's own formals even where nothing else mentions them (`emptyTagged<Int>()`).
+        if let Some(signature) = &self.signature {
+            for (formal, &argument) in signature.formals.iter().zip(&self.explicit_type_arguments) {
+                if argument != Ty::Error {
+                    bindings.insert(formal.clone(), argument);
+                }
+            }
+        }
+        let mut mentioned = Vec::new();
+        for argument in declared.arguments().iter() {
+            collect_type_parameters(*argument, &mut mentioned);
+        }
+        let unbound = mentioned
+            .iter()
+            .any(|parameter| formals.contains(parameter) && !bindings.contains_key(parameter));
+        (!unbound).then(|| {
+            declared.substituted(|application| crate::types::ty_subst(application, &bindings))
+        })
+    }
+
+    /// The type parameters selection binds: the callable's own, then those of its declared
+    /// receiver that the callable does not declare.
+    fn formals(&self) -> (Vec<String>, Vec<String>) {
+        let callable_formals = self
+            .signature
+            .as_ref()
+            .map(|signature| signature.formals.clone())
+            .unwrap_or_default();
+        let mut receiver_formals = Vec::new();
+        if let Some(receiver) = self.receiver {
+            collect_type_parameters(receiver, &mut receiver_formals);
+        }
+        receiver_formals.retain(|formal| !callable_formals.contains(formal));
+        let mut formals = callable_formals;
+        for formal in &receiver_formals {
+            if !formals.contains(formal) {
+                formals.push(formal.clone());
+            }
+        }
+        (formals, receiver_formals)
+    }
+
     pub(super) fn callable(
         callable: &LibraryCallable,
+        selection: SelectedSignature,
         parameter_by_argument: Box<[Option<u32>]>,
         whole_array_arguments: Box<[bool]>,
-        explicit_type_arguments: bool,
+        explicit_type_arguments: Box<[Ty]>,
     ) -> Self {
-        let signature = callable.generic_sig.as_deref();
         let (declared, _) = declared_result(
-            signature,
+            selection.signature.as_ref(),
             callable.ret,
             callable.declared_ret,
             &callable.enhanced_result,
         );
         Self {
-            signature: signature.cloned(),
+            receiver: selection
+                .signature
+                .as_ref()
+                .and_then(|signature| signature.receiver),
+            signature: selection.signature,
             declared,
             selected: callable.ret,
-            receiver: signature.and_then(|signature| signature.receiver),
             enhancement: callable.enhanced_result.marks.clone(),
             arguments: publication_arguments(
                 parameter_by_argument,
@@ -104,6 +289,9 @@ impl CompactSelectedResultPublication {
                 whole_array_arguments,
             ),
             explicit_type_arguments,
+            result_alias: callable.result_alias,
+            selected_parameters: selection.parameters,
+            declaring_owner: Some(callable.owner),
         }
     }
 
@@ -112,7 +300,7 @@ impl CompactSelectedResultPublication {
         receiver: Option<Ty>,
         parameter_by_argument: Box<[Option<u32>]>,
         whole_array_arguments: Box<[bool]>,
-        explicit_type_arguments: bool,
+        explicit_type_arguments: Box<[Ty]>,
     ) -> Self {
         let signature = member.generic_sig.as_ref();
         let (declared, _) = declared_result(
@@ -135,6 +323,9 @@ impl CompactSelectedResultPublication {
                 whole_array_arguments,
             ),
             explicit_type_arguments,
+            result_alias: member.result_alias,
+            selected_parameters: member.params.clone().into(),
+            declaring_owner: member.owner,
         }
     }
 
@@ -147,7 +338,7 @@ impl CompactSelectedResultPublication {
         parameter_by_argument: Box<[Option<u32>]>,
         vararg: Option<usize>,
         whole_array_arguments: Box<[bool]>,
-        explicit_type_arguments: bool,
+        explicit_type_arguments: Box<[Ty]>,
     ) -> Self {
         // A constructor yields its classifier's own type, whose arguments are rigid type
         // parameters. Only an inferred argument takes the flexibility of the Java usage it was
@@ -160,7 +351,7 @@ impl CompactSelectedResultPublication {
                     .get(index)
                     .copied()
                     .unwrap_or_else(|| Ty::nullable(Ty::obj("kotlin/Any")));
-                let bound = if explicit_type_arguments && bound.is_platform_nullable() {
+                let bound = if !explicit_type_arguments.is_empty() && bound.is_platform_nullable() {
                     Ty::nullable(bound.platform_lower_bound())
                 } else {
                     bound
@@ -183,6 +374,9 @@ impl CompactSelectedResultPublication {
             enhancement: TypeEnhancement::NONE,
             arguments: publication_arguments(parameter_by_argument, vararg, whole_array_arguments),
             explicit_type_arguments,
+            result_alias: None,
+            selected_parameters: Box::new([]),
+            declaring_owner: None,
         }
     }
 
@@ -195,28 +389,12 @@ impl CompactSelectedResultPublication {
         arguments: &[(Ty, Ty)],
         mut view: impl FnMut(Ty, Ty, TypeName) -> Option<(Ty, Vec<Ty>)>,
     ) -> Ty {
-        let callable_formals = self
-            .signature
-            .as_ref()
-            .map(|signature| signature.formals.clone())
-            .unwrap_or_default();
-        let mut receiver_formals = Vec::new();
-        if let Some(receiver) = self.receiver {
-            collect_type_parameters(receiver, &mut receiver_formals);
-        }
-        receiver_formals.retain(|formal| !callable_formals.contains(formal));
-        let mut formals = callable_formals;
-        for formal in &receiver_formals {
-            if !formals.contains(formal) {
-                formals.push(formal.clone());
-            }
-        }
-
+        let (formals, receiver_formals) = self.formals();
         let mut constraints: HashMap<String, Vec<Ty>> = HashMap::default();
         let mut publication_view =
             |actual, publication: &Ty, owner| view(actual, *publication, owner);
         if let (Some(declared), Some((actual, publication))) = (self.receiver, receiver) {
-            let receiver_constraints = if self.explicit_type_arguments {
+            let receiver_constraints = if !self.explicit_type_arguments.is_empty() {
                 receiver_formals.as_slice()
             } else {
                 formals.as_slice()
@@ -231,7 +409,7 @@ impl CompactSelectedResultPublication {
                 &mut publication_view,
             );
         }
-        if !self.explicit_type_arguments {
+        if self.explicit_type_arguments.is_empty() {
             if let Some(signature) = &self.signature {
                 for (argument, binding) in arguments.iter().zip(&self.arguments) {
                     let Some(binding) = binding else {
@@ -829,7 +1007,10 @@ mod tests {
             receiver: Some(Ty::obj_args_name(list, &[variable])),
             enhancement: TypeEnhancement::NONE,
             arguments: Box::new([]),
-            explicit_type_arguments: false,
+            explicit_type_arguments: Box::new([]),
+            result_alias: None,
+            selected_parameters: Box::new([]),
+            declaring_owner: None,
         };
         let ordinary_receiver = Ty::obj_args_name(list, &[function]);
         let published_receiver =
@@ -864,7 +1045,7 @@ mod tests {
             vec![Some(0)].into_boxed_slice(),
             None,
             vec![false].into_boxed_slice(),
-            false,
+            Box::new([]),
         );
         let published_carrier =
             constructor.publish(None, &[(rigid_list, published_list)], direct_view);
@@ -887,7 +1068,10 @@ mod tests {
             receiver: Some(Ty::obj_args_name(carrier, &[variable])),
             enhancement: TypeEnhancement::NONE,
             arguments: Box::new([]),
-            explicit_type_arguments: false,
+            explicit_type_arguments: Box::new([]),
+            result_alias: None,
+            selected_parameters: Box::new([]),
+            declaring_owner: None,
         };
         assert_eq!(
             member.publish(Some((constructed, published_carrier)), &[], direct_view,),
@@ -918,7 +1102,10 @@ mod tests {
                 vararg_element: false,
             })]
             .into_boxed_slice(),
-            explicit_type_arguments: true,
+            explicit_type_arguments: Box::new([Ty::String]),
+            result_alias: None,
+            selected_parameters: Box::new([]),
+            declaring_owner: None,
         };
         let ordinary_receiver = Ty::obj_args_name(carrier, &[Ty::String]);
         let published_receiver = Ty::obj_args_name(carrier, &[Ty::platform_nullable(Ty::String)]);
@@ -950,7 +1137,10 @@ mod tests {
             receiver: None,
             enhancement: TypeEnhancement::NONE,
             arguments: Box::new([]),
-            explicit_type_arguments: false,
+            explicit_type_arguments: Box::new([]),
+            result_alias: None,
+            selected_parameters: Box::new([]),
+            declaring_owner: None,
         };
 
         assert_eq!(

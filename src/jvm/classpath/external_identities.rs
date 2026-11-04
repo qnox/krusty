@@ -184,6 +184,7 @@ impl Classpath {
         }
         if stored.callable.declared_ret.is_none() {
             stored.callable.declared_ret = callable.declared_ret;
+            stored.callable.result_alias = callable.result_alias;
         }
         if stored.callable.generic_sig.is_none() {
             stored.callable.generic_sig = callable.generic_sig.clone();

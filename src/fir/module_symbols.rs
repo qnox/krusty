@@ -738,6 +738,7 @@ impl<'a> StreamedModuleSymbols<'a> {
             nonvirtual_realization: None,
             overridden_call_realizations: Box::new([]),
             declared_ret: None,
+            result_alias: None,
             overridden_results: Box::new([]),
             enhanced_result: crate::libraries::EnhancedResult::NONE,
         }
@@ -1141,6 +1142,7 @@ impl<'a> StreamedModuleSymbols<'a> {
                 .callable_equality_bound(callable_header.id)
                 .map(|bound| bound.get());
             callable.generic_sig = generic_sig.clone().map(Box::new);
+            callable.result_alias = signature.result_alias();
 
             let mut function = FunctionInfo::plain(
                 if receiver.is_some() {
@@ -1186,6 +1188,7 @@ impl<'a> StreamedModuleSymbols<'a> {
                 LibraryMember::new(name.to_owned(), realized_parameters, result, String::new());
             member.owner = Some(internal);
             member.generic_sig = generic_sig;
+            member.result_alias = signature.result_alias();
             member.set_is_interface(is_interface);
             member.set_is_abstract(header.flags.has(DeclarationFlags::ABSTRACT));
             member.set_is_final(is_final);
@@ -1332,6 +1335,7 @@ impl<'a> StreamedModuleSymbols<'a> {
             getter.origin = Origin::Module { facade: internal };
             getter.owner_is_interface = is_interface;
             getter.is_abstract = header.flags.has(DeclarationFlags::ABSTRACT);
+            getter.result_alias = signature.result_alias();
             let mut setter = property.mutable.then(|| {
                 let mut parameters = getter_parameters.clone();
                 parameters.push(stored_value_ty(public_ty));
@@ -1777,6 +1781,7 @@ impl<'a> StreamedModuleSymbols<'a> {
                 receiver,
                 context_count,
             );
+            getter.result_alias = signature.result_alias();
             let mut setter = property.mutable.then(|| {
                 let mut parameters = getter_parameters.clone();
                 parameters.push(stored_value_ty(public_ty));

@@ -201,6 +201,7 @@ impl Classpath {
                         default_realization: None,
                         nonvirtual_realization: None,
                         declared_ret: builtin_declared_return(m.ret_nullable, m.generic_sig.ret),
+                        result_alias: None,
                         overridden_results: Box::new([]),
                         enhanced_result: crate::libraries::EnhancedResult::NONE,
                         implicit_classifier_callable: None,

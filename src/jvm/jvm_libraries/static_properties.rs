@@ -603,6 +603,7 @@ impl JvmLibraries {
         getter.source_receiver = receiver;
         getter.context_count = context_count;
         getter.inline = getter_inline;
+        getter.result_alias = mp.ret_alias;
         getter.generic_sig = property_gsig.clone().map(Box::new);
         getter.compiler_intrinsic = property_intrinsic;
         let setter = mp.setter.clone().and_then(|setter_sig| {

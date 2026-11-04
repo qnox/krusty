@@ -193,6 +193,7 @@ impl Checker<'_> {
             definitely_non_null: reference.definitely_non_null(),
             use_site_definitely_non_null: reference.definitely_non_null(),
             alias: None,
+            alias_absorbs_nullability: false,
             alias_args: Vec::new(),
             args,
             annotations: Vec::new(),

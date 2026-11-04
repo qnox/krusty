@@ -1321,7 +1321,8 @@ pub(crate) fn encode_alias_reference(
 /// Append `Type.abbreviated_type` (field 13) when source spelled a `typealias` at this node.
 ///
 /// The abbreviated `Type` is a full message in its own right: it repeats the node's `nullable` flag
-/// (a declared `Cargo?` is nullable on BOTH forms), carries the alias's AS-SPELLED arguments — a
+/// (a declared `Cargo?` is nullable on BOTH forms) unless the alias's own expansion supplied it
+/// (`MaybeNames` for `typealias MaybeNames = Names?`), carries the alias's AS-SPELLED arguments — a
 /// different arity from the expanded type's — and names the alias through `Type.type_alias_name`
 /// (field 12) INSTEAD of `class_name`. Like every other `Type`, its classifier reference interns
 /// before its arguments, which is what keeps `d2` in kotlinc's order.
@@ -1336,6 +1337,7 @@ fn encode_abbreviation(
     // `Boxed<Cargo>` writes `abbreviated_type = {argument={Payload, abbreviated={Cargo}}, Boxed}`,
     // NOT a bare `Cargo` reference. This is the one place the two alias-reference forms differ, and
     // it is read off kotlinc 2.4.10 rather than inferred.
+    let nullable = nullable && !spelled.alias_absorbs_nullability;
     let Some(abbreviated) = encode_alias_reference(
         strings,
         spelled,

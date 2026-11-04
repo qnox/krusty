@@ -178,6 +178,7 @@ impl FunctionInfo {
         callable.external_default_provider = member.external_default_provider;
         callable.nonvirtual_realization = member.nonvirtual_realization.clone();
         callable.declared_ret = member.declared_ret;
+        callable.result_alias = member.result_alias;
         callable.overridden_results = member.overridden_results.clone();
         callable.context_count = member.context_count;
         callable.contract = member.contract.clone();

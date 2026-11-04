@@ -18,6 +18,8 @@ pub struct MetaProp {
     /// Whether the Kotlin property return is nullable (`T?`). JVM getter descriptors/signatures erase
     /// this flag, so generic extension-property specialization must restore it from metadata.
     pub ret_nullable: bool,
+    /// The typealias the declared type was spelled through (`val names: Names`).
+    pub ret_alias: Option<crate::libraries::DeclaredResultAlias>,
     /// Metadata-primary generic relation between an extension receiver and its return.
     pub generic_sig: Option<GenericSig>,
     /// Context parameters declared by this property. Legacy unnamed context receivers use an empty
@@ -300,7 +302,7 @@ pub(super) fn decode_properties(
             },
         );
         let is_var = setter_signature.is_some() || flags & is_var_bit != 0;
-        let generic_sig = build_property_generic_sig(
+        let (generic_sig, ret_alias) = build_property_generic_sig(
             ParsedPropertySignature {
                 inherited: class_tparams,
                 inherited_bounds: class_tparam_bounds,
@@ -316,7 +318,8 @@ pub(super) fn decode_properties(
             records,
             d2,
             type_table,
-        );
+        )
+        .map_or((None, None), |(signature, alias)| (Some(signature), alias));
         if let Some(signature) = &generic_sig {
             ret = signature.ret.non_null().obj_internal();
             ret_nullable = signature.ret.is_nullable();
@@ -447,6 +450,7 @@ pub(super) fn decode_properties(
             name,
             ret_class: ret,
             ret_nullable,
+            ret_alias,
             generic_sig,
             context_params: decoded_context_params,
             context_parameter_kinds,
@@ -513,6 +517,121 @@ fn declared_read_stability(
         flags & MODALITY_MASK != 0,
         has_context_parameters,
     )
+}
+
+struct ParsedPropertySignature<'a> {
+    inherited: &'a [(u64, String)],
+    inherited_bounds: &'a [Vec<Ty>],
+    type_params: &'a [ParsedTypeParam],
+    context_params: &'a [ParsedValueParam],
+    context_receiver_bodies: &'a [Vec<u8>],
+    context_receiver_type_ids: &'a [u64],
+    return_body: Option<&'a [u8]>,
+    return_nullable: bool,
+    receiver_body: Option<&'a [u8]>,
+    receiver_nullable: bool,
+}
+
+fn build_property_generic_sig(
+    property: ParsedPropertySignature<'_>,
+    records: &[Rec],
+    d2: &[String],
+    type_table: Option<&[u8]>,
+) -> Option<(GenericSig, Option<crate::libraries::DeclaredResultAlias>)> {
+    let context = type_parameter_context(
+        property.inherited,
+        property.inherited_bounds,
+        property.type_params,
+        records,
+        d2,
+        type_table,
+    )?;
+    let receiver = match property.receiver_body {
+        Some(body) => {
+            let receiver = decode_metadata_type(
+                body,
+                type_table,
+                records,
+                d2,
+                &context.names,
+                &context.erasure_bounds,
+                property.receiver_nullable,
+                0,
+            )?;
+            Some(receiver)
+        }
+        None => None,
+    };
+    let ret = decode_metadata_type(
+        property.return_body?,
+        type_table,
+        records,
+        d2,
+        &context.names,
+        &context.erasure_bounds,
+        property.return_nullable,
+        0,
+    )?;
+    let params = if !property.context_params.is_empty() {
+        property
+            .context_params
+            .iter()
+            .map(|parameter| {
+                let (body, table_nullable) = value_parameter_type(parameter, type_table)?;
+                decode_metadata_type(
+                    body,
+                    type_table,
+                    records,
+                    d2,
+                    &context.names,
+                    &context.erasure_bounds,
+                    table_nullable,
+                    0,
+                )
+            })
+            .collect::<Option<Vec<_>>>()?
+    } else {
+        property
+            .context_receiver_bodies
+            .iter()
+            .map(|body| (Some(body.as_slice()), None))
+            .chain(
+                property
+                    .context_receiver_type_ids
+                    .iter()
+                    .map(|&id| (None, Some(id))),
+            )
+            .map(|(body, id)| {
+                let (body, table_nullable) = metadata_type_ref(body, id, type_table)?;
+                decode_metadata_type(
+                    body,
+                    type_table,
+                    records,
+                    d2,
+                    &context.names,
+                    &context.erasure_bounds,
+                    table_nullable,
+                    0,
+                )
+            })
+            .collect::<Option<Vec<_>>>()?
+    };
+    let alias = super::result_alias::declared(
+        property.return_body.map(|body| (body, false)),
+        type_table,
+        records,
+        d2,
+        Some(&context),
+    );
+    let signature = GenericSig {
+        formals: context.formals[property.inherited.len()..].to_vec(),
+        formal_bounds: context.formal_bounds[property.inherited.len()..].to_vec(),
+        receiver,
+        params,
+        ret,
+        return_policy: Default::default(),
+    };
+    Some((signature, alias))
 }
 
 #[cfg(test)]

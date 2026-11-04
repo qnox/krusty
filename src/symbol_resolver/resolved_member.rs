@@ -80,6 +80,7 @@ impl ResolvedMember {
         member.inline = callable.inline;
         member.inline_body_plan = callable.inline_body_plan;
         member.declared_ret = callable.declared_ret;
+        member.result_alias = callable.result_alias;
         member.overridden_results = callable.overridden_results;
         member.enhanced_result = callable.enhanced_result;
         member.contract = callable.contract;

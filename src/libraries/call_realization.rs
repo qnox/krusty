@@ -546,6 +546,7 @@ impl LibraryCallable {
             nonvirtual_realization: None,
             overridden_call_realizations: Box::new([]),
             declared_ret: None,
+            result_alias: None,
             overridden_results: Box::new([]),
             enhanced_result: crate::libraries::EnhancedResult::NONE,
         }
