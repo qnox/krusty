@@ -935,6 +935,31 @@ impl BodyLowering<'_> {
             preflight_temporary =
                 lambda_splice_contract::preflight(self.ir, invocation, preflight_temporary)?;
         }
+        // The escaping lambdas are regenerated before the anonymous objects are copied: the object
+        // copies' classifier walk then renames inside each call-site lambda it reaches, which this
+        // expansion alone owns. Walked first, the objects would detach the lambdas' shared
+        // declaration implementations onto clones the plan never specializes, and the call-site
+        // lambda would keep the reified marker. The plan commits without declining; a malformed
+        // anonymous object below is a lowering failure, not a decline that leaves the call executable.
+        let inlined_escaping_implementations = match (module_callee, frame.source()) {
+            (Some(module_callee), Some((source_owner, callee_source))) => escaping_lambda::apply(
+                self.ir,
+                escaping_lambda_plan,
+                &bindings,
+                &reified_bindings,
+                caller_declaration,
+                self.expansion_enclosure,
+                self.in_default_argument,
+                &caller_source_name,
+                function,
+                source_owner,
+                callee_source,
+                module_callee,
+                &callee,
+            ),
+            // The plan is empty: a dependency template declares no lambda.
+            _ => Default::default(),
+        };
         // An anonymous object's methods are not children of the inlined template. Cloning only the
         // `new` reuses the declaration class, whose reified parameter is erased. This is the final
         // fallible specialization: both lambda transformations above have already been preflighted,
@@ -1009,25 +1034,6 @@ impl BodyLowering<'_> {
                 self.ir.inline_only_fns.remove(&function);
             }
         }
-        let inlined_escaping_implementations = match (module_callee, frame.source()) {
-            (Some(module_callee), Some((source_owner, callee_source))) => escaping_lambda::apply(
-                self.ir,
-                escaping_lambda_plan,
-                &bindings,
-                &reified_bindings,
-                caller_declaration,
-                self.expansion_enclosure,
-                self.in_default_argument,
-                &caller_source_name,
-                function,
-                source_owner,
-                callee_source,
-                module_callee,
-                &callee,
-            ),
-            // The plan is empty: a dependency template declares no lambda.
-            _ => Default::default(),
-        };
         // Consuming a source lambda implementation is the only irreversible part of escaping
         // inline-lambda specialization. Commit it only after every transformation that can decline
         // this expansion has succeeded; otherwise the original call still needs that body.

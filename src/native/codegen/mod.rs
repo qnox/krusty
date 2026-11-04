@@ -249,8 +249,8 @@ impl Backend for CraneliftBackend {
         }
         let runtime_symbols = state.runtime_symbols.as_ref().expect("read just above");
         // Which classifiers are value classes, read from the checked declarations: a file's own
-        // and its dependencies' alike. See `native::value_classes`.
-        let value_classes = match super::value_classes::NativeValueClasses::inventory(
+        // and its dependencies' alike. See `crate::backend::value_classes`.
+        let value_classes = match crate::backend::value_classes::ValueClassInventory::inventory(
             &file.ir,
             &file.classifiers,
         ) {
@@ -275,7 +275,7 @@ impl Backend for CraneliftBackend {
             .is_none_or(|(module, _)| module != file.module_name)
         {
             let classes = file.classifiers.module().classes();
-            let plan = match super::value_classes::NativeValueClasses::of_module_classes(
+            let plan = match crate::backend::value_classes::ValueClassInventory::of_module_classes(
                 classes.iter().map(|(name, _)| name),
                 classes.carried_types(),
                 &file.classifiers,

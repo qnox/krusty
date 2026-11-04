@@ -45,7 +45,7 @@ pub(super) fn open_variable_bindings(
 ) -> Option<crate::symbol_resolver::GSigBinds> {
     let solves_result = |bindings: &crate::symbol_resolver::GSigBinds| {
         generic_sig.formals.iter().all(|formal| {
-            bindings.contains_key(formal)
+            bindings.contains_key(formal.as_str())
                 || !crate::types::ty_mentions_param(generic_sig.ret, std::slice::from_ref(formal))
         })
     };
@@ -132,7 +132,7 @@ pub(super) fn producer_expectation(
 ) -> Ty {
     let mut dependent = crate::symbol_resolver::GSigBinds::default();
     for (index, formal) in signature.formals.iter().enumerate() {
-        if bindings.contains_key(formal)
+        if bindings.contains_key(formal.as_str())
             || type_args
                 .get(index)
                 .is_some_and(|argument| *argument != Ty::Error)
@@ -153,7 +153,7 @@ pub(super) fn producer_expectation(
         }
         let bound = crate::symbol_resolver::ty_subst_keep_unbound(*bound, bindings);
         if !crate::types::ty_mentions_param(bound, &signature.formals) {
-            dependent.insert(formal.clone(), bound);
+            dependent.insert(crate::types::TyParamName::new(formal), bound);
         }
     }
     let substituted = crate::symbol_resolver::ty_subst_keep_unbound(
@@ -179,7 +179,7 @@ pub(super) fn enforce_declared_bounds(
     mut admits: impl FnMut(Ty, Ty) -> bool,
 ) {
     for (index, formal) in generic_sig.formals.iter().enumerate() {
-        let Some(actual) = nested_bindings.get(formal).copied() else {
+        let Some(actual) = nested_bindings.get(formal.as_str()).copied() else {
             continue;
         };
         let Some(actual_bound) = actual.non_null().ty_param_bound() else {
@@ -199,7 +199,7 @@ pub(super) fn enforce_declared_bounds(
             continue;
         };
         if actual.is_nullable() || !admits(actual_bound, required) {
-            nested_bindings.insert(formal.clone(), required);
+            nested_bindings.insert(crate::types::TyParamName::new(formal), required);
         }
     }
 }

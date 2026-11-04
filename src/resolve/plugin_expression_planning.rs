@@ -206,7 +206,7 @@ impl crate::plugins::FrontendCallResolver for Checker<'_> {
             type_arguments = signature
                 .formals
                 .iter()
-                .map(|formal| bindings.get(formal).copied())
+                .map(|formal| bindings.get(formal.as_str()).copied())
                 .collect();
             type_argument_bounds.resize(type_arguments.len(), Vec::new());
         }

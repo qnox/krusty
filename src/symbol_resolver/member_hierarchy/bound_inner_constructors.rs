@@ -57,7 +57,7 @@ impl BoundInnerConstructorContext {
             .filter_map(|(&formal, &capture)| {
                 outer_bindings
                     .get(formal)
-                    .map(|&actual| (capture.to_owned(), actual))
+                    .map(|&actual| (crate::types::TyParamName::from(capture), actual))
             })
             .collect();
         let renamed = identities

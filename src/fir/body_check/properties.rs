@@ -1591,7 +1591,10 @@ impl BodyFirChecker<'_> {
             .iter()
             .enumerate()
             .filter_map(|(ordinal, formal)| {
-                bindings.get(formal).copied().map(|value| (ordinal, value))
+                bindings
+                    .get(formal.as_str())
+                    .copied()
+                    .map(|value| (ordinal, value))
             })
             .map(|(ordinal, value)| {
                 let ordinal = u32::try_from(ordinal).map_err(|_| {
