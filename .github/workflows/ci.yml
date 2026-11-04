@@ -773,7 +773,9 @@ jobs:
   # Build the release bytes once. The compatibility matrix below consumes this Maven repository;
   # it never rebuilds the plugin from the checkout.
   build-gradle-plugin:
-    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
+    # GitHub-hosted: a one- or two-minute producer that the gradle matrix waits for; in the
+    # self-hosted queue it waited hours (2026-11-04), holding the whole run open.
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -940,7 +942,9 @@ jobs:
   # Build the Maven plugin's release bytes once: a portable local Maven repository the release
   # publishes and the job below consumes.
   build-maven-plugin:
-    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
+    # GitHub-hosted: a one- or two-minute producer that the maven matrix waits for; in the
+    # self-hosted queue it waited hours (2026-11-04), holding the whole run open.
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
         with:
