@@ -40,8 +40,16 @@ fn serialized_bound_extension_references_preserve_receivers_and_once_only_operan
         "SerializedBoundExtensionReference",
         &DependencyConsumer::Native,
         || {
-            super::box_reference_classes::checked_box(source, "SerializedBoundExtensionReference")
-                .expect("the JVM oracle must run the complete bound-reference module graph");
+            let dependency = common::kotlinc_lib_out(&[("Library.kt", library_source.as_str())])
+                .expect("reference compiler required for the complete bound-reference library");
+            assert_eq!(
+                common::kotlinc_box_files_result_with_classpath(
+                    &[("Consumer.kt", consumer_text.as_str())],
+                    "fixture.ConsumerKt",
+                    &[dependency],
+                ),
+                "OK"
+            );
         },
     );
 }
@@ -486,13 +494,28 @@ fn assert_official_dependency_closures_with_oracle(
     };
     if matches!(purpose, DependencyConsumer::SourceClassifierCollision) {
         assert_eq!(
-            diags.diags.iter().map(|diag| (
-                diag.file, diag.span, diag.editor_span, diag.severity, diag.warning_name,
-                diag.kind, diag.identity, diag.msg.as_str(),
-            )).collect::<Vec<_>>(),
+            diags
+                .diags
+                .iter()
+                .map(|diag| (
+                    diag.file,
+                    diag.span,
+                    diag.editor_span,
+                    diag.severity,
+                    diag.warning_name,
+                    diag.kind,
+                    diag.identity,
+                    diag.msg.as_str(),
+                ))
+                .collect::<Vec<_>>(),
             vec![(
-                0, krusty::diag::Span::new(0, 0), None, krusty::diag::Severity::Error, None,
-                krusty::diag::DiagnosticKind::Compiler, None,
+                0,
+                krusty::diag::Span::new(0, 0),
+                None,
+                krusty::diag::Severity::Error,
+                None,
+                krusty::diag::DiagnosticKind::Compiler,
+                None,
                 "cannot materialize a dependency class that collides with a current-module classifier",
             )]
         );
