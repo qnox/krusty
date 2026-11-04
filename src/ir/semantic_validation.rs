@@ -660,14 +660,17 @@ impl IrFile {
                 construction.members.iter().map(|(_, ty)| *ty),
             )?;
         }
-        reject_all("logical expression", self.logical_types.values().copied())?;
+        reject_all("logical expression", self.logical_types().map(|(_, ty)| ty))?;
         reject_all(
             "deferred local declaration",
             self.deferred_local_types.values().copied(),
         )?;
         reject_all("inline declaration", self.inline_declared_types())?;
         reject_all("exhaustive when", self.whens.exhaustive.values().copied())?;
-        reject_all("physical expression", self.physical_types.values().copied())?;
+        reject_all(
+            "physical expression",
+            self.physical_types().map(|(_, ty)| ty),
+        )?;
         for properties in self.member_ext_props.values() {
             for property in properties {
                 validate_member_extension(property)?;
@@ -828,7 +831,7 @@ impl IrFile {
                     },
                 });
             };
-            let ty = self.logical_types.get(capture).copied();
+            let ty = self.logical_type(*capture);
             if !ty.is_some_and(|ty| ty.is_nullable() && ty.is_reference()) {
                 return Err(InvalidIrContract::NullableSam {
                     expression,
@@ -960,8 +963,7 @@ mod tests {
     fn rejects_a_nullable_sam_that_is_not_a_function_value_adapter() {
         let mut ir = IrFile::default();
         let capture = ir.add_expr(IrExpr::Const(IrConst::Null));
-        ir.logical_types
-            .insert(capture, Ty::nullable(Ty::fun(Vec::new(), Ty::Unit)));
+        ir.set_logical_type(capture, Ty::nullable(Ty::fun(Vec::new(), Ty::Unit)));
         let mut sam = nullable_sam_target();
         sam.wraps_function_value = false;
         ir.exprs.push(IrExpr::Lambda {
@@ -985,7 +987,7 @@ mod tests {
     fn rejects_a_nullable_sam_with_a_non_reference_capture() {
         let mut ir = IrFile::default();
         let capture = ir.add_expr(IrExpr::Const(IrConst::Int(1)));
-        ir.logical_types.insert(capture, Ty::Int);
+        ir.set_logical_type(capture, Ty::Int);
         ir.exprs.push(IrExpr::Lambda {
             impl_fn: 0,
             arity: 0,

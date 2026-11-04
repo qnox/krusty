@@ -24,6 +24,8 @@ pub struct DeclarationPrefix {
     /// Every modifier keyword the list wrote, a classifier's kind words (`data`, `enum`,
     /// `annotation`, `companion`, `fun`) included.
     pub modifiers: WrittenModifiers,
+    /// Where [`DeclarationPrefixes::keywords`] finds each written keyword with its span.
+    pub(crate) keywords: (u32, u32),
 }
 
 /// A keyword a declaration's modifier list can write.
@@ -164,10 +166,20 @@ impl WrittenModifiers {
 #[derive(Default)]
 pub struct DeclarationPrefixes {
     by_offset: HashMap<u32, DeclarationPrefix>,
+    keywords: Vec<(ModifierKeyword, Span)>,
 }
 
 impl DeclarationPrefixes {
-    pub(crate) fn record(&mut self, offsets: &[u32], prefix: DeclarationPrefix) {
+    /// Keep `prefix` under each of `offsets`, with the keywords it wrote in source order.
+    pub(crate) fn record(
+        &mut self,
+        offsets: &[u32],
+        mut prefix: DeclarationPrefix,
+        keywords: &[(ModifierKeyword, Span)],
+    ) {
+        let start = self.keywords.len() as u32;
+        self.keywords.extend_from_slice(keywords);
+        prefix.keywords = (start, self.keywords.len() as u32);
         for &offset in offsets {
             self.by_offset.insert(offset, prefix);
         }
@@ -175,5 +187,10 @@ impl DeclarationPrefixes {
 
     pub fn at(&self, offset: u32) -> Option<DeclarationPrefix> {
         self.by_offset.get(&offset).copied()
+    }
+
+    /// Each modifier keyword `prefix` wrote, with its span, in source order.
+    pub fn keywords(&self, prefix: DeclarationPrefix) -> &[(ModifierKeyword, Span)] {
+        &self.keywords[prefix.keywords.0 as usize..prefix.keywords.1 as usize]
     }
 }

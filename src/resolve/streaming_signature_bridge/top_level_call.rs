@@ -182,6 +182,90 @@ impl super::ProductionSignatureSemantics<'_> {
     }
 }
 
+/// The arguments a receiver family is selected under: one mapping shared by every declaration, or
+/// each declaration's own when they name or omit different parameters.
+pub(super) struct MappedFamilyArguments {
+    /// The shared mapping in parameter order, or the source arguments in source order.
+    pub(super) kinds: Vec<crate::symbol_resolver::CallArgKind>,
+    shared_types: Vec<crate::types::Ty>,
+    separate: Option<SeparateMappings>,
+}
+
+struct SeparateMappings {
+    family: Vec<crate::libraries::FunctionInfo>,
+    calls: Vec<crate::symbol_resolver::CandidateCall>,
+    types: Vec<Vec<crate::types::Ty>>,
+}
+
+impl MappedFamilyArguments {
+    /// The family's arguments for selection; `source` stands in for [`Self::kinds`] (a projected
+    /// copy of them).
+    pub(super) fn family<'a>(
+        &'a self,
+        source: &'a [crate::symbol_resolver::CallArgKind],
+    ) -> crate::symbol_resolver::FamilyArguments<'a> {
+        match &self.separate {
+            Some(separate) => crate::symbol_resolver::FamilyArguments::PerCandidate {
+                calls: &separate.calls,
+                source,
+            },
+            None => crate::symbol_resolver::FamilyArguments::Shared(source),
+        }
+    }
+
+    /// The argument types, in its parameter order, of `selected` (one of the mapped declarations).
+    pub(super) fn selected_types(
+        &self,
+        selected: &crate::libraries::FunctionInfo,
+    ) -> Vec<crate::types::Ty> {
+        let Some(separate) = &self.separate else {
+            return self.shared_types.clone();
+        };
+        separate
+            .family
+            .iter()
+            .zip(&separate.types)
+            .find(|(candidate, _)| {
+                super::receiver_member_level::same_candidate_declaration(candidate, selected)
+            })
+            .map(|(_, types)| types.clone())
+            .expect("a separately mapped selection selects a declaration of its own family")
+    }
+}
+
+impl super::ProductionSignatureSemantics<'_> {
+    /// Map a receiver family's arguments: separately per declaration when the family has no single
+    /// mapping, otherwise once for all of them.
+    pub(super) fn family_arguments(
+        callables: &crate::libraries::Callables,
+        arguments: &[crate::fir::ResolvedSigCallArgument<'_>],
+        trailing_lambda: bool,
+    ) -> Option<MappedFamilyArguments> {
+        let candidates = callables.functions();
+        if let Some(separate) =
+            Self::separately_mapped_candidates(candidates, arguments, trailing_lambda)
+        {
+            let (calls, types) = separate.into_iter().unzip();
+            return Some(MappedFamilyArguments {
+                kinds: arguments.iter().map(Self::call_argument_kind).collect(),
+                shared_types: Vec::new(),
+                separate: Some(SeparateMappings {
+                    family: candidates.to_vec(),
+                    calls,
+                    types,
+                }),
+            });
+        }
+        let (kinds, shared_types) =
+            Self::mapped_call_arguments(candidates, arguments, trailing_lambda)?;
+        Some(MappedFamilyArguments {
+            kinds,
+            shared_types,
+            separate: None,
+        })
+    }
+}
+
 /// Constructor arguments in the exact parameter order supplied to overload selection, together
 /// with the source-slot mapping that produced that order. Publication consumes this retained map;
 /// it never reruns argument mapping against the selected declaration.

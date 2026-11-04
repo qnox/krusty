@@ -7,6 +7,8 @@ use super::common;
 mod cast_line_break_e2e;
 #[path = "../class_header_newline_e2e.rs"]
 mod class_header_newline_e2e;
+#[path = "../companion_static_initializer_line_e2e.rs"]
+mod companion_static_initializer_line_e2e;
 #[path = "../decl_body_on_next_line_e2e.rs"]
 mod decl_body_on_next_line_e2e;
 #[path = "../elvis_newline_continuation_e2e.rs"]

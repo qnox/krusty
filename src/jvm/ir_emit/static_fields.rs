@@ -217,8 +217,7 @@ pub(super) fn emit_statics(ir: &IrFile, facade: &str, cw: &mut ClassWriter, env:
         let Some(init) = stored_clinit_initializer(ir, s) else {
             continue;
         };
-        code.mark_line_retained(initializer_line(ir, s, init));
-        e.emit_static_initializer_store(facade, index, init, &mut code);
+        e.emit_clinit_static_store(facade, index, init, &mut code);
     }
     code.ret_void();
     let mut clinit_lines: Vec<(u16, u32)> = code.line_marks()[first_mark..]
@@ -726,6 +725,29 @@ fn declare_static(
     if let Some(annotations) = static_field_annotations(ir, c, static_index) {
         cw.set_last_late_field_annotations(annotations);
     }
+    // A non-private field that leaks a private companion's property onto the outer class is
+    // deprecated for Java, as kotlinc's companion-field lowering marks it.
+    if acc & crate::jvm::classfile::ACC_PRIVATE == 0
+        && moved_from_private_companion(ir, c, static_index)
+    {
+        cw.deprecate_last_late_field();
+    }
+}
+
+/// Whether static `static_index` of `owner` is the storage of a property its
+/// `private companion object` declares: a `const val` or a hoisted property.
+fn moved_from_private_companion(ir: &IrFile, owner: &IrClass, static_index: u32) -> bool {
+    let Some(companion) = owner.companion_class else {
+        return false;
+    };
+    ir.class_visibilities.get(&companion) == Some(&crate::types::Visibility::Private)
+        && (ir
+            .declared_class_statics
+            .get(&companion)
+            .is_some_and(|statics| statics.contains(&static_index))
+            || ir
+                .jvm_companion_static_declaration(static_index)
+                .is_some_and(|(declaring, _)| declaring.fq_name == companion))
 }
 
 fn static_field_annotations<'a>(
@@ -980,23 +1002,21 @@ pub(super) fn emit_class_static_initializer(
             Vec::new()
         };
         emit_companion_init(e.cw, &mut clinit, fq_name, c);
-        // Every hoisted-property store gets an entry at its pc, mapping to the property's
-        // declaration line in the COMPANION source. The `Companion` construction itself has no
-        // entry.
+        // The `Companion` construction itself has no entry. Each store opens on its initializer's
+        // line and keeps the lines its value marks inside itself, as a file facade's do.
         // A generated static that ends the initializer returns on its declaration's last line.
         let mut closing_line = None;
         for &(static_index, s, _) in &clinit_statics {
             let Some(init) = stored_clinit_initializer(ir, s) else {
                 continue;
             };
-            let pc = clinit.bytes.len() as u16;
-            // Every static carries its declaration's line: a hoisted companion property and its
-            // `x$delegate` storage the companion declaration's, a plugin-generated static its own.
-            let line = s.line;
-            if line != 0 && clinit_lines.last().map(|&(_, last)| last) != Some(line) {
-                clinit_lines.push((pc, line));
-            }
-            e.emit_static_initializer_store(fq_name, static_index, init, &mut clinit);
+            let first = clinit.line_marks().len();
+            e.emit_clinit_static_store(fq_name, static_index, init, &mut clinit);
+            let marks = clinit.line_marks()[first..]
+                .iter()
+                .map(|&(pc, line)| (pc, u32::from(line)));
+            clinit_lines.extend(marks);
+            clinit_lines.dedup();
             closing_line = (s.source_order == u32::MAX)
                 .then_some(s.accessor_lines.declaration_end)
                 .filter(|&end| end != 0);
@@ -1471,6 +1491,27 @@ impl Emitter<'_> {
     /// Emit one checked static initializer through its declared JVM storage boundary. Facade,
     /// class/object, interface, and enum `<clinit>` paths share this operation so boxing and carrier
     /// selection cannot diverge by owner shape.
+    /// Emit the `<clinit>` store of static `static_index` as kotlinc's `InitializersLowering`
+    /// places it: the field store takes its initializer expression's offsets, so it opens on the
+    /// initializer's own line (not the declaration's), and the lines its value marks inside
+    /// itself follow. The store's mark is retained so an argument line at the same offset follows
+    /// it. `add_method` drops a `<clinit>`'s marks, so callers collect them from `code`.
+    pub(super) fn emit_clinit_static_store(
+        &mut self,
+        owner: &str,
+        static_index: u32,
+        init: crate::ir::ExprId,
+        code: &mut CodeBuilder,
+    ) {
+        let field = &self.ir.statics[static_index as usize];
+        // A generated static with no position (Compose's `$stable`) marks nothing.
+        let line = initializer_line(self.ir, field, init);
+        if line != 0 {
+            code.mark_line_retained(line);
+        }
+        self.emit_static_initializer_store(owner, static_index, init, code);
+    }
+
     pub(super) fn emit_static_initializer_store(
         &mut self,
         owner: &str,
@@ -1498,5 +1539,76 @@ impl Emitter<'_> {
             code,
         );
         code.putstatic(reference, slot_words(physical) as i32);
+    }
+}
+
+/// Declare an interface's static fields: its companion's constants, then each hoisted `@JvmField`
+/// property. `<clinit>` already interned `Companion`; these follow it in the field table.
+pub(super) fn declare_interface_statics(ir: &IrFile, c: &IrClass, cw: &mut ClassWriter) {
+    let fq_name = c.fq_name();
+    // `<clinit>` already interned `Companion`. These constants follow it in the field table, and
+    // their names, descriptors, and `ConstantValue` payloads intern together at the field visit —
+    // after that alias store, before `@Metadata`. A hoisted `@JvmField` property is visited later
+    // because kotlinc places it after both.
+    for (static_index, property) in ir.statics.iter().enumerate().filter(|(index, property)| {
+        property.owner_matches(&fq_name) && !ir.is_jvm_field_static(*index as u32)
+    }) {
+        let descriptor = ir_type_desc(&property.ty);
+        let value = property.init.and_then(|init| constant_value(ir, init));
+        let nullability = (descriptor.starts_with('L') || descriptor.starts_with('[')).then(|| {
+            if property.ty.is_nullable() {
+                "Lorg/jetbrains/annotations/Nullable;"
+            } else {
+                "Lorg/jetbrains/annotations/NotNull;"
+            }
+        });
+        cw.add_field_late(0x0019, &property.name, &descriptor, value, nullability);
+        deprecate_moved_interface_field(ir, c, static_index, cw);
+    }
+
+    // A hoisted `@JvmField` property is the public static field itself. Its declaration annotations
+    // remain owned by the companion in common IR and are copied onto this target field here.
+    for (static_index, s) in ir
+        .statics
+        .iter()
+        .enumerate()
+        .filter(|(index, s)| s.owner_matches(&fq_name) && ir.is_jvm_field_static(*index as u32))
+    {
+        let descriptor = ir_type_desc(&s.ty);
+        let nullability = (descriptor.starts_with('L') || descriptor.starts_with('[')).then(|| {
+            if s.ty.is_nullable() {
+                "Lorg/jetbrains/annotations/Nullable;"
+            } else {
+                "Lorg/jetbrains/annotations/NotNull;"
+            }
+        });
+        cw.add_field_late(0x0019, &s.name, &descriptor, None, nullability);
+        deprecate_moved_interface_field(ir, c, static_index, cw);
+        if let Some(annotations) = c
+            .companion_class
+            .and_then(|companion| ir.class_id_by_name(companion))
+            .and_then(|companion| {
+                ir.classes[companion as usize]
+                    .field_annotations
+                    .iter()
+                    .find(|annotations| annotations.field == s.name)
+            })
+        {
+            cw.set_last_late_field_annotations(&annotations.annotations);
+        }
+    }
+}
+
+/// An interface's fields are public, so each one its private companion moves out is deprecated
+/// for Java, as on a class.
+fn deprecate_moved_interface_field(
+    ir: &IrFile,
+    interface: &IrClass,
+    static_index: usize,
+    cw: &mut ClassWriter,
+) {
+    let static_index = u32::try_from(static_index).expect("too many statics for a packed index");
+    if moved_from_private_companion(ir, interface, static_index) {
+        cw.deprecate_last_late_field();
     }
 }

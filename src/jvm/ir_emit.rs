@@ -142,6 +142,7 @@ mod object_static_initialization;
 mod operand_representation;
 mod operand_stack;
 mod override_result_emission;
+use method_signatures::method_signature;
 use override_result_emission::{declared_method_desc, declared_method_signature};
 mod primary_constructor_parameters;
 mod property_access;
@@ -814,32 +815,7 @@ fn attach_synth_nullability(
             }
         }
     }
-    // The `Companion` instance field is a never-null reference (`@NotNull`), and each REFERENCE
-    // hoisted companion static is annotated like any other backing field.
-    if let Some(companion) = &c.companion_class {
-        cw.set_field_nullability(
-            crate::jvm::companion_storage::field_name(c.fq_name, *companion),
-            &format!("L{};", companion.render()),
-            "Lorg/jetbrains/annotations/NotNull;",
-        );
-        for (index, s) in ir
-            .statics
-            .iter()
-            .enumerate()
-            .filter(|(index, s)| {
-                ir.is_jvm_companion_hoisted_static(*index as u32) && s.owner_matches(&c.fq_name())
-            })
-            .filter(|(_, s)| !s.is_lateinit)
-        {
-            if let Some(a) = declared_static_annotation(s) {
-                cw.set_field_nullability(
-                    ir.static_field_jvm_name(index as u32),
-                    &desc(jvm_declared_ty(&s.ty)),
-                    a,
-                );
-            }
-        }
-    }
+    companion_field::attach_companion_field_nullability(ir, c, cw);
     // Primary constructor: one parameter annotation slot per SOURCE parameter, plain or
     // property-backed. The prefix takes no slot: kotlinc sizes the table by the source parameters,
     // so an inner class's first declared parameter is annotation parameter 0, as in javac's output.
@@ -1058,65 +1034,8 @@ fn emit_jvm_interface_companion_surface(
         }
     }
 
-    add_companion_field(cw, c);
-    // `<clinit>` already interned `Companion`. These constants follow it in the field table, and
-    // their names, descriptors, and `ConstantValue` payloads intern together at the field visit —
-    // after that alias store, before `@Metadata`. A hoisted `@JvmField` property is visited later
-    // because kotlinc places it after both.
-    for property in ir
-        .statics
-        .iter()
-        .enumerate()
-        .filter(|(index, property)| {
-            property.owner_matches(&fq_name) && !ir.is_jvm_field_static(*index as u32)
-        })
-        .map(|(_, property)| property)
-    {
-        let descriptor = ir_type_desc(&property.ty);
-        let value = property
-            .init
-            .and_then(|init| static_fields::constant_value(ir, init));
-        let nullability = (descriptor.starts_with('L') || descriptor.starts_with('[')).then(|| {
-            if property.ty.is_nullable() {
-                "Lorg/jetbrains/annotations/Nullable;"
-            } else {
-                "Lorg/jetbrains/annotations/NotNull;"
-            }
-        });
-        cw.add_field_late(0x0019, &property.name, &descriptor, value, nullability);
-    }
-
-    // A hoisted `@JvmField` property is the public static field itself. Its declaration annotations
-    // remain owned by the companion in common IR and are copied onto this target field here.
-    for s in ir
-        .statics
-        .iter()
-        .enumerate()
-        .filter(|(index, s)| s.owner_matches(&fq_name) && ir.is_jvm_field_static(*index as u32))
-        .map(|(_, s)| s)
-    {
-        let descriptor = ir_type_desc(&s.ty);
-        let nullability = (descriptor.starts_with('L') || descriptor.starts_with('[')).then(|| {
-            if s.ty.is_nullable() {
-                "Lorg/jetbrains/annotations/Nullable;"
-            } else {
-                "Lorg/jetbrains/annotations/NotNull;"
-            }
-        });
-        cw.add_field_late(0x0019, &s.name, &descriptor, None, nullability);
-        if let Some(annotations) = c
-            .companion_class
-            .and_then(|companion| ir.class_id_by_name(companion))
-            .and_then(|companion| {
-                ir.classes[companion as usize]
-                    .field_annotations
-                    .iter()
-                    .find(|annotations| annotations.field == s.name)
-            })
-        {
-            cw.set_last_late_field_annotations(&annotations.annotations);
-        }
-    }
+    add_companion_field(ir, cw, c);
+    static_fields::declare_interface_statics(ir, c, cw);
 }
 
 /// Construct a `ClassWriter` with the per-file [`EmitOptions`] stamped on — the single place emission
@@ -1578,7 +1497,7 @@ fn emit_pass(
                     .map(|d| d.map(|d| format!(
                         "{:?} logical={:?}",
                         ir.exprs[d as usize],
-                        ir.logical_types.get(&d)
+                        ir.logical_type(d)
                     )))
                     .collect::<Vec<_>>())
             );
@@ -4842,160 +4761,6 @@ fn property_jvm_signatures(
     formatter.property_signatures(ty, type_parameter)
 }
 
-/// A method's generic `Signature`, from whichever source applies: its own declared type parameters, the
-/// `suspend` CPS shape, or a parameterized concrete parameter/return type. `None` when erasure loses
-/// nothing. Shared by concrete and abstract emission — an abstract method has no body, which is not a
-/// reason to drop its signature.
-/// `Signature` for a member whose SEMANTIC types mention enclosing-class type parameters: each
-/// position is a bare `T<name>;` reference or a plain non-generic descriptor. `None` when any
-/// position needs deeper generic formatting (those flow through the ordinary formatters).
-fn method_signature(
-    formatter: &JvmSignatureFormatter<'_>,
-    ir: &IrFile,
-    fid: u32,
-    f: &crate::ir::IrFunction,
-) -> Option<String> {
-    let signature = method_signature_shape(formatter, ir, fid, f)?;
-    // A `Signature` attribute exists to say what the DESCRIPTOR cannot — a type variable, a type
-    // argument, a wildcard. One that spells the descriptor back carries nothing, and kotlinc omits it:
-    // `fun a(x: Array<String>)` signs `([Ljava/lang/String;)V`, which is already its descriptor, so
-    // the attribute is absent. (Only equality is tested, so a shape whose descriptor is computed
-    // differently — suspend, value-class mangling — simply keeps its attribute.)
-    (signature != ir_method_desc(&f.params, &f.ret)).then_some(signature)
-}
-
-fn method_signature_shape(
-    formatter: &JvmSignatureFormatter<'_>,
-    ir: &IrFile,
-    fid: u32,
-    f: &crate::ir::IrFunction,
-) -> Option<String> {
-    // Pick the semantic signature category first. Formatting returns `None` both when no optional
-    // Signature attribute is needed and when the selected shape is invalid, so chaining formatters
-    // with `or_else` would incorrectly treat an encoding error as permission to try a less complete
-    // shape. `JvmSignatureFormatter` records a precise emit error for the latter case.
-    if let (Some(generic), Some((_, declared_ret))) =
-        (ir.signatures.get(&fid), ir.suspend_declared_sigs.get(&fid))
-    {
-        let ret = generic.ret.as_ref().unwrap_or(declared_ret);
-        return suspend_generic_method_sig(formatter, generic, ret);
-    }
-    if let Some(generic) = ir.jvm_value_class_member_signatures.get(&fid) {
-        return formatter.method_signature(generic, f, None);
-    }
-    if let Some(generic) = ir.signatures.get(&fid) {
-        let generic = value_class_signatures::physical_generic_signature(ir, fid, generic);
-        return formatter.method_signature(&generic, f, vararg_parameter_position(ir, fid));
-    }
-    if let (Some((params, ret)), Some(_)) = (
-        ir.member_semantic_sigs.get(&fid),
-        ir.suspend_declared_sigs.get(&fid),
-    ) {
-        return suspend_method_sig(formatter, params, ret);
-    }
-    if let Some((params, ret)) = value_class_signatures::physical_member_signature(ir, fid) {
-        // A member using ENCLOSING-CLASS type parameters declares none: they belong to the class
-        // header's own signature (`(TT;)TT;`).
-        return formatter.method_positions(&params, &ret);
-    }
-    if let Some((params, declared_ret)) = ir.suspend_declared_sigs.get(&fid) {
-        // A value-class RETURN survives in the continuation's type argument as the value class
-        // itself (`Continuation<? super OrganizationId>`), not its erasure. The VC pass ran
-        // before the suspend pass and already erased `declared_ret` to the underlying, so recover the
-        // declared return from `vc_declared_sigs` when this function had one.
-        let ret = ir
-            .vc_declared_sigs
-            .get(&fid)
-            .map(|(_, _, value_class_ret)| value_class_ret)
-            .unwrap_or(declared_ret);
-        return suspend_method_sig(formatter, params, ret);
-    }
-    if let Some((params, ret)) = value_class_signatures::declared_value_class_signature(ir, fid) {
-        return formatter.method_positions(&params, &ret);
-    }
-    method_parameterized_sig(
-        formatter,
-        &signature_function_params(ir, fid),
-        &f.ret,
-        vararg_parameter_position(ir, fid),
-    )
-}
-
-fn suspend_generic_method_sig(
-    formatter: &JvmSignatureFormatter<'_>,
-    generic: &crate::ir::IrGenericSig,
-    ret: &Ty,
-) -> Option<String> {
-    let mut signature = jvm_type_params(formatter, generic)?;
-    signature.push_str(&suspend_method_sig(formatter, &generic.params, ret)?);
-    Some(signature)
-}
-
-/// The generic `Signature` of a `suspend fun`'s CPS method. The declared return type survives only in
-/// the trailing continuation's type argument — `suspend fun f(a: String)` compiles to
-/// `f(String, Continuation): Object` but signs as
-/// `(Ljava/lang/String;Lkotlin/coroutines/Continuation<-Lkotlin/Unit;>;)Ljava/lang/Object;`, the `-`
-/// being `? super`. Takes the DECLARED parameters and return, not the rewritten ones.
-fn suspend_method_sig(
-    formatter: &JvmSignatureFormatter<'_>,
-    params: &[Ty],
-    ret: &Ty,
-) -> Option<String> {
-    // The suspend return travels as `Continuation<-RET>`, a PARAMETER of the erased method, and
-    // kotlinc wildcards inside it: `suspend fun <U> f(): Cont<U>` signs
-    // `(Lkotlin/coroutines/Continuation<-LCont<+TU;>;>;)Ljava/lang/Object;`.
-    let continuation = formatter.continuation(*ret, Wildcards::Declared)?;
-    let mut s = String::from("(");
-    for p in params {
-        s.push_str(&formatter.parameter_ty(p)?);
-    }
-    s.push_str(&continuation);
-    s.push_str(")Ljava/lang/Object;");
-    Some(s)
-}
-
-/// The position of `fid`'s `vararg` among its lowered parameters. The recorded index counts the
-/// declared context and value parameters; captures and the extension receiver are lowered among
-/// them, so the position is the parameter whose identity is that declared parameter.
-fn vararg_parameter_position(ir: &IrFile, fid: u32) -> Option<usize> {
-    let vararg = ir.fn_varargs.get(&fid)?;
-    ir.fn_params
-        .get(&fid)?
-        .identities
-        .iter()
-        .enumerate()
-        .filter(|(_, identity)| identity.role.is_declared_parameter())
-        .nth(vararg.index)
-        .map(|(position, _)| position)
-}
-
-/// A method's generic `Signature` when a concrete param/return type is parameterized (`getXs()` →
-/// `()Ljava/util/List<Ljava/lang/String;>;`); non-generic positions keep their erased descriptor,
-/// `None` when none are parameterized.
-fn method_parameterized_sig(
-    formatter: &JvmSignatureFormatter<'_>,
-    params: &[Ty],
-    ret: &Ty,
-    vararg_index: Option<usize>,
-) -> Option<String> {
-    // Runs for every emitted method — bail before building any string when no position can carry one.
-    let is_parameterized = |t: &Ty| {
-        let inner = t.non_null();
-        matches!(inner.kind(), TyKind::Fun(_) | TyKind::Intersection(_))
-            || matches!(inner.kind(), TyKind::Obj(_, arguments) if !arguments.is_empty())
-    };
-    if !params
-        .iter()
-        .chain(std::iter::once(ret))
-        .any(is_parameterized)
-    {
-        return None;
-    }
-    // A `Unit` parameter is the `kotlin.Unit` object, not `void`.
-    let s = formatter.method_positions_with_vararg(params, ret, vararg_index)?;
-    (s != ir_method_desc(params, ret)).then_some(s)
-}
-
 fn default_mask_count(param_count: usize) -> usize {
     param_count.div_ceil(32).max(1)
 }
@@ -6488,8 +6253,8 @@ impl<'a> Emitter<'a> {
             IrExpr::PropertyRead { ty, .. } => {
                 // A read keeps its LOGICAL type in the IR; a value-class property's accessor returns
                 // the carrier, which the value-class pass records beside it. The stack holds that.
-                if let Some(physical) = self.ir.physical_types.get(&e) {
-                    return jvm_value_ty(physical);
+                if let Some(physical) = self.ir.physical_type(e) {
+                    return jvm_value_ty(&physical);
                 }
                 // A property read always yields a stored value. `Unit` therefore occupies the
                 // `kotlin/Unit` reference slot; only a function's control-flow return uses `V`.
@@ -6553,7 +6318,7 @@ impl<'a> Emitter<'a> {
                 | IrBinOp::Or => Ty::Boolean,
                 // Arithmetic leaves the unboxed primitive of the operator the checker selected,
                 // which its producer recorded. It is never re-derived from the operands.
-                _ => match self.ir.logical_types.get(&e) {
+                _ => match self.ir.logical_type(e) {
                     Some(result) => ir_ty_to_jvm(&result.non_null()),
                     None => {
                         self.run.set_emit_error(

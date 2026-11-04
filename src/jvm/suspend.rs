@@ -2138,7 +2138,7 @@ impl Flat<'_> {
         // already selected the resume completion from the checked BottomValue wrapper in its exact
         // use context; clear the raw call's logical bottom fact independently of that selection.
         if completion.semantic_bottom {
-            self.ir.logical_types.remove(&point);
+            self.ir.take_logical_type(point);
         }
         let dead = self
             .scopes
