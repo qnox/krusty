@@ -519,6 +519,7 @@ mod tests {
             overridden_results: Vec::new(),
             kotlin_interface: true,
             parameter_identities: Box::new([]),
+            type_parameters: Vec::new(),
         }
     }
 

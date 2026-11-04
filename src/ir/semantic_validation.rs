@@ -467,6 +467,11 @@ fn validate_class(class: &IrClass) -> Result<(), UndeterminedIrType> {
     }
     for argument in &class.ctor_args {
         reject("constructor argument", argument.ty)?;
+        if let super::IrCtorParameterProvenance::InterfaceDelegate { interface, .. } =
+            argument.provenance
+        {
+            reject("constructor delegate interface", interface)?;
+        }
         if let Some(declared) = argument.declared_ty {
             reject("declared constructor argument", declared)?;
         }
@@ -890,6 +895,7 @@ mod tests {
             nullable: true,
             kotlin_interface: false,
             parameter_identities: Vec::new(),
+            type_parameters: Vec::new(),
         }
     }
 

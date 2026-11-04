@@ -278,3 +278,77 @@ fn a_krusty_compiled_suspend_lambda_copy_is_regenerated_and_resumes() {
         .expect("the library is compiled");
     assert_eq!(output, "OK");
 }
+
+/// A classpath suspend inline function whose body takes the unified byte splice (its enum `when`
+/// reads `$WhenMappings`, a body shape the MethodInliner port does not inline yet) and invokes its
+/// suspend parameter at each branch. The placed lambda takes the `Continuation` the suspend
+/// `invoke` is passed after the function type's own parameter.
+const PICK_LIB: &str = r#"
+package lib
+
+enum class E { A, B }
+
+suspend inline fun <T> pick(e: E, block: suspend (Int) -> T): T = when (e) {
+    E.A -> block(1)
+    E.B -> block(2)
+}
+"#;
+
+/// `box()` calls `use` through each branch of the spliced `when`.
+macro_rules! pick_program {
+    ($use:literal) => {
+        concat!(
+            r#"
+import kotlin.coroutines.*
+import lib.E
+import lib.pick
+
+fun render(x: Int): String = "v$x"
+
+"#,
+            $use,
+            r#"
+
+fun box(): String {
+    var result: Any? = null
+    suspend { use(E.A) + use(E.B) }
+        .startCoroutine(Continuation(EmptyCoroutineContext) { result = it.getOrThrow() })
+    return if (result == "v1v2") "OK" else "FAIL: $result"
+}
+"#
+        )
+    };
+}
+
+/// `program` returns OK compiled by kotlinc, then compiled by krusty, each against kotlinc's
+/// [`PICK_LIB`].
+fn assert_pick_splice_runs(program: &str) {
+    let lib = common::kotlinc_libraries(&[("Lib.kt", PICK_LIB)])
+        .expect("reference kotlinc is provisioned");
+    assert_eq!(
+        common::kotlinc_box_result_with_classpath(program, &[lib]),
+        "OK",
+        "kotlinc's MainKt"
+    );
+    let output = common::expect_box_run_against_kotlinc(PICK_LIB, program)
+        .expect("reference kotlinc is provisioned");
+    assert_eq!(output, "OK");
+}
+
+/// A reference to a non-suspend function, passed to the suspend parameter of a byte-spliced
+/// classpath inline body, is placed at each invoke with the continuation counted among its
+/// arguments, and renders each branch's argument.
+#[test]
+fn a_reference_to_a_suspend_parameter_of_a_spliced_inline_body_runs() {
+    assert_pick_splice_runs(pick_program!(
+        "suspend fun use(e: E): String = pick(e, ::render)"
+    ));
+}
+
+/// A suspend literal lambda passed to that parameter is placed the same way.
+#[test]
+fn a_suspend_literal_for_a_parameter_of_a_spliced_inline_body_runs() {
+    assert_pick_splice_runs(pick_program!(
+        "suspend fun use(e: E): String = pick(e) { render(it) }"
+    ));
+}
