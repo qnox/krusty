@@ -63,14 +63,11 @@ fn assert_byte_identical(class: &str) {
     }
 }
 
-/// The native backend renders a packaged value class under its qualified name (`t.V(u=…)`), for
-/// any carrier, so it stops at the first check.
+/// The native backend renders a packaged value class under its simple name (`V(u=…)`), as the
+/// JVM does, so both backends pass every check.
 #[test]
 fn unsigned_generated_members_run() {
-    assert_eq!(
-        common::expect_box_run_with_stdlib_diverging(SRC, "UnsignedMembers", "V.toString"),
-        "OK"
-    );
+    common::expect_box_ok_with_stdlib(SRC, "UnsignedMembers");
 }
 
 #[test]

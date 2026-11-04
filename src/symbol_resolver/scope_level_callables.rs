@@ -189,6 +189,21 @@ pub(super) struct FunctionScopeLevel {
     pub(super) symbols: Vec<Rc<ResolvedSymbols>>,
 }
 
+impl FunctionScopeLevel {
+    /// Whether the file brings this level into scope itself: its own package, an explicit import
+    /// or an explicit star import, rather than a default import.
+    pub(super) fn is_written_scope(&self) -> bool {
+        match self.kind {
+            FunctionScopeLevelKind::Explicit | FunctionScopeLevelKind::CurrentPackage => true,
+            FunctionScopeLevelKind::Import => self.rank == EXPLICIT_STAR_IMPORT_RANK,
+            FunctionScopeLevelKind::Flat => false,
+        }
+    }
+}
+
+/// The rank of the explicit star imports in [`FunctionImportScope`]'s callable levels.
+const EXPLICIT_STAR_IMPORT_RANK: u32 = 1;
+
 pub(super) fn tagged_symbol_levels_in_function_scope(
     src: &dyn SymbolSource,
     name: &str,

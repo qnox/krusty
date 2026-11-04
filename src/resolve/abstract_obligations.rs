@@ -450,10 +450,56 @@ impl Checker<'_> {
             }
         }
 
+        // A body-local class's methods are an overlay its walk publishes, not part of the stable
+        // providers: union its own methods as implementations. A method whose result its body
+        // infers implements an obligation with the result its checked body recorded; the walk
+        // checks every method before it asks.
+        let local_implementations = if self.checked_local_methods.contains_key(&owner) {
+            families
+                .iter()
+                .map(|(name, _)| {
+                    let (candidates, _) = self.body_local_declared_member_candidates_at(root, name);
+                    let candidates = candidates
+                        .into_iter()
+                        .filter_map(|mut candidate| {
+                            let generic_pending = candidate
+                                .generic_sig
+                                .as_ref()
+                                .is_some_and(|generic| generic.ret == Ty::Pending);
+                            if candidate.callable.ret == Ty::Pending || generic_pending {
+                                let result = self.checked_source_member_result(
+                                    candidate.source_member,
+                                    candidate.stable_declaration,
+                                )?;
+                                if candidate.callable.ret == Ty::Pending {
+                                    candidate.callable.ret = result;
+                                }
+                                if let Some(generic) = candidate
+                                    .generic_sig
+                                    .as_mut()
+                                    .filter(|generic| generic.ret == Ty::Pending)
+                                {
+                                    generic.ret = result;
+                                }
+                            }
+                            Some(candidate)
+                        })
+                        .collect::<Vec<_>>();
+                    (name.clone(), candidates)
+                })
+                .collect::<crate::fx_hash::HashMap<_, _>>()
+        } else {
+            crate::fx_hash::HashMap::default()
+        };
+
         let mut unresolved = Vec::<UnimplementedMember>::new();
         let mut unresolved_functions = Vec::<(&FunctionInfo, FunctionKey)>::new();
-        for (_, callables) in &families {
+        for (name, callables) in &families {
             let functions = callables.functions();
+            let local = local_implementations
+                .get(name)
+                .map(Vec::as_slice)
+                .unwrap_or_default();
             for function in functions.iter().filter(|function| {
                 function.flags.is_abstract
                     && function
@@ -461,7 +507,7 @@ impl Checker<'_> {
                         .external_identity
                         .is_none_or(|identity| !property_accessor_targets.contains(&identity))
             }) {
-                if functions.iter().any(|implementation| {
+                if functions.iter().chain(local).any(|implementation| {
                     !implementation.flags.is_abstract
                         && implements_abstract_function(
                             &source,

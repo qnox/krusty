@@ -224,11 +224,11 @@ fn aggregate_is_one_stable_always_scheduled_job_over_every_merge_gate() {
         .expect("read focused KLIB binary builder");
     assert!(
         klib_builder.contains("--profile klib-test")
-            && klib_builder.contains("--lib --test klib_e2e")
+            && klib_builder.contains("\nbuild --test klib_e2e\nbuild --lib\n")
             && klib_builder.contains("--features focused-klib-tests")
             && !klib_builder.contains("--profile gate")
             && !klib_builder.contains("--test e2e"),
-        "the focused producer must use its cheaper profile without changing its two test targets: {klib_builder}"
+        "the focused producer must use its cheaper profile and build its two test targets one after the other, so their two krusty compiles never overlap in memory: {klib_builder}"
     );
     let manifest = fs::read_to_string(root.join("Cargo.toml")).expect("read Cargo manifest");
     assert!(

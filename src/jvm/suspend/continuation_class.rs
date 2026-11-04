@@ -85,11 +85,7 @@ pub(super) fn build_continuation_class(
         index: 1,
     });
     let min = ir.add_expr(IrExpr::Const(IrConst::Int(I32_MIN)));
-    let or_lbl = ir.add_expr(IrExpr::PrimitiveBinOp {
-        op: IrBinOp::BitOr,
-        lhs: old_lbl,
-        rhs: min,
-    });
+    let or_lbl = ir.add_arithmetic(IrBinOp::BitOr, old_lbl, min, Ty::Int);
     let this_set_lbl = ir.add_expr(IrExpr::GetValue(0));
     let set_label = ir.add_expr(IrExpr::SetField {
         receiver: this_set_lbl,
@@ -355,5 +351,7 @@ pub(super) fn build_continuation_class(
         property_annotations: Vec::new(),
         annotation_retention: None,
     };
-    ir.add_class(class)
+    let class = ir.add_class(class);
+    ir.jvm_continuation_functions.insert(class, outer_fid);
+    class
 }

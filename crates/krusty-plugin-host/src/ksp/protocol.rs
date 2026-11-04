@@ -7,15 +7,15 @@ use std::io::{self, Read, Write};
 use krusty_plugin_ir::{
     KspAccessor, KspAnnotation, KspArgument, KspClass, KspClassKind, KspDeclaration,
     KspDeclarationOrigin, KspFunction, KspFunctionKind, KspLibraryClass, KspMember, KspModifier,
-    KspNameMapping, KspOrigin, KspParameter, KspProperty, KspRound, KspType, KspTypeArgument,
-    KspTypeDeclaration, KspTypeParameter, KspTypeSlot, KspValue, KspVariance,
+    KspNameMapping, KspOrigin, KspOverridee, KspParameter, KspProperty, KspRound, KspType,
+    KspTypeArgument, KspTypeDeclaration, KspTypeParameter, KspTypeSlot, KspValue, KspVariance,
 };
 
 use crate::protocol::{malformed, put_list, put_str, read_frame, utf8, write_frame, Payload};
 
 use super::{GeneratedKind, KspGenerated, KspLoad, KspOutcome};
 
-pub(crate) const PROTOCOL: u32 = 10;
+pub(crate) const PROTOCOL: u32 = 16;
 
 const HELLO: u8 = 0;
 const LOAD: u8 = 1;
@@ -175,11 +175,17 @@ fn put_class(payload: &mut Vec<u8>, class: &KspClass) {
     put_option(payload, &class.jvm_signature, |payload, text| {
         put_str(payload, text)
     });
+    put_option(payload, &class.all_properties, |payload, members| {
+        put_members(payload, members)
+    });
+    put_option(payload, &class.all_functions, |payload, members| {
+        put_members(payload, members)
+    });
 }
 
 /// A classpath classifier: its header as a class's, then its package, the qualified name of the
-/// classifier it is nested in if any, its origin (0 Kotlin, 1 Java), whether its annotations are
-/// complete, and the members it lists with the inherited ones: its properties, then its functions.
+/// classifier it is nested in if any, its origin (0 Kotlin, 1 Java), and whether its annotations
+/// are complete.
 fn put_library_class(payload: &mut Vec<u8>, library: &KspLibraryClass) {
     put_class(payload, &library.class);
     put_str(payload, &library.package_name);
@@ -191,18 +197,21 @@ fn put_library_class(payload: &mut Vec<u8>, library: &KspLibraryClass) {
         KspOrigin::JavaLib => 1,
     });
     payload.push(u8::from(library.annotations_complete));
-    put_option(payload, &library.all_properties, |payload, members| {
-        put_members(payload, members)
-    });
-    put_option(payload, &library.all_functions, |payload, members| {
-        put_members(payload, members)
-    });
 }
 
-/// Members a classifier lists: 0 and the index of one of its own declarations, or 1, the
-/// qualified name of the classifier that declares an inherited one, and that declaration.
+/// Members a classifier lists: 0 and the index of one of its own declarations; 1, the qualified
+/// name of the classifier that declares one described here, and that declaration; 2, the
+/// qualified name of a source classifier and the index of one of its declarations; or 3, the
+/// qualified name of the classifier an intersection member is made for, the path of the source
+/// file declaring the member it is made from, if any, and its declaration; or 4, the qualified
+/// name of a source classifier, whether its properties (else its functions) are meant, and the
+/// position of a member it lists.
 fn put_members(payload: &mut Vec<u8>, members: &[KspMember]) {
-    put_list(payload, members, |payload, member| match member {
+    put_list(payload, members, put_member);
+}
+
+fn put_member(payload: &mut Vec<u8>, member: &KspMember) {
+    match member {
         KspMember::Declared(index) => {
             payload.push(0);
             payload.extend_from_slice(&index.to_be_bytes());
@@ -212,7 +221,44 @@ fn put_members(payload: &mut Vec<u8>, members: &[KspMember]) {
             put_str(payload, owner);
             put_declaration(payload, declaration);
         }
-    });
+        KspMember::Source { owner, index } => {
+            payload.push(2);
+            put_str(payload, owner);
+            payload.extend_from_slice(&index.to_be_bytes());
+        }
+        KspMember::Intersection {
+            owner,
+            file,
+            declaration,
+        } => {
+            payload.push(3);
+            put_str(payload, owner);
+            put_option(payload, file, |payload, path| put_str(payload, path));
+            put_declaration(payload, declaration);
+        }
+        KspMember::Listed {
+            owner,
+            property,
+            position,
+        } => {
+            payload.push(4);
+            put_str(payload, owner);
+            payload.push(u8::from(*property));
+            payload.extend_from_slice(&position.to_be_bytes());
+        }
+    }
+}
+
+/// What `findOverridee` answers: 0 the round cannot say, 1 nothing, 2 the member that follows.
+fn put_overridee(payload: &mut Vec<u8>, overridee: &KspOverridee) {
+    match overridee {
+        KspOverridee::Undescribed => payload.push(0),
+        KspOverridee::Nothing => payload.push(1),
+        KspOverridee::Member(member) => {
+            payload.push(2);
+            put_member(payload, member);
+        }
+    }
 }
 
 /// Where a declaration comes from: 0 the source, 1 the compiler, 2 a Kotlin library, 3 a Java
@@ -228,7 +274,7 @@ fn put_origin(payload: &mut Vec<u8>, origin: KspDeclarationOrigin) {
 
 /// A function: its name, kind (0 top-level, 1 member, 2 static, 3 primary constructor,
 /// 4 secondary constructor), whether it is abstract, its origin, line, annotations, modifiers, type
-/// parameters, extension receiver, parameters, return type, JVM signature and JVM name.
+/// parameters, extension receiver, parameters, return type, JVM signature, JVM name and overridee.
 fn put_function(payload: &mut Vec<u8>, function: &KspFunction) {
     put_str(payload, &function.name);
     payload.push(match function.kind {
@@ -255,6 +301,7 @@ fn put_function(payload: &mut Vec<u8>, function: &KspFunction) {
     put_option(payload, &function.jvm_name, |payload, text| {
         put_str(payload, text)
     });
+    put_overridee(payload, &function.overridee);
 }
 
 fn put_property(payload: &mut Vec<u8>, property: &KspProperty) {
@@ -277,10 +324,11 @@ fn put_property(payload: &mut Vec<u8>, property: &KspProperty) {
     put_option(payload, &property.jvm_signature, |payload, text| {
         put_str(payload, text)
     });
+    put_overridee(payload, &property.overridee);
 }
 
 /// An accessor: its origin, its modifiers and annotations, a setter's parameter name and
-/// annotations, and its JVM name.
+/// annotations, its JVM name, and whether a getter returns the property's type.
 fn put_accessor(payload: &mut Vec<u8>, accessor: &KspAccessor) {
     put_origin(payload, accessor.origin);
     put_modifiers(payload, &accessor.modifiers);
@@ -296,6 +344,10 @@ fn put_accessor(payload: &mut Vec<u8>, accessor: &KspAccessor) {
     put_option(payload, &accessor.jvm_name, |payload, text| {
         put_str(payload, text)
     });
+    // A getter, which has no parameter, then says whether it returns the property's type.
+    if accessor.parameter.is_none() {
+        payload.push(u8::from(accessor.returns_property_type));
+    }
 }
 
 /// A parameter: its name, its type and a flags byte (bit 0 `val`, 1 `var`, 2 vararg, 3 default,
@@ -339,7 +391,8 @@ fn put_argument(payload: &mut Vec<u8>, argument: &KspArgument) {
 }
 
 /// A value: a tag byte (0 boolean, 1 byte, 2 short, 3 int, 4 long, 5 char, 6 float bits,
-/// 7 double bits, 8 string, 9 enum entry, 10 type, 11 annotation, 12 array), then the value.
+/// 7 double bits, 8 string, 9 enum entry, 10 type, 11 annotation, 12 array,
+/// 13 unsigned byte, 14 unsigned short, 15 unsigned int, 16 unsigned long), then the value.
 fn put_value(payload: &mut Vec<u8>, value: &KspValue) {
     match value {
         KspValue::Boolean(value) => {
@@ -360,6 +413,22 @@ fn put_value(payload: &mut Vec<u8>, value: &KspValue) {
         }
         KspValue::Long(value) => {
             payload.push(4);
+            payload.extend_from_slice(&value.to_be_bytes());
+        }
+        KspValue::UByte(value) => {
+            payload.push(13);
+            payload.extend_from_slice(&value.to_be_bytes());
+        }
+        KspValue::UShort(value) => {
+            payload.push(14);
+            payload.extend_from_slice(&value.to_be_bytes());
+        }
+        KspValue::UInt(value) => {
+            payload.push(15);
+            payload.extend_from_slice(&value.to_be_bytes());
+        }
+        KspValue::ULong(value) => {
+            payload.push(16);
             payload.extend_from_slice(&value.to_be_bytes());
         }
         KspValue::Char(value) => {
@@ -472,6 +541,7 @@ fn put_type(payload: &mut Vec<u8>, ty: &KspType) {
         }
     }
     payload.push(u8::from(ty.nullable));
+    payload.push(u8::from(ty.unannotated));
     put_list(payload, &ty.arguments, |payload, argument| match argument {
         KspTypeArgument::Star => payload.push(0),
         KspTypeArgument::Invariant(ty) => {
@@ -560,6 +630,7 @@ mod tests {
             },
             nullable: false,
             arguments: Vec::new(),
+            unannotated: false,
         }
     }
 
@@ -589,6 +660,7 @@ mod tests {
             return_type: None,
             jvm_signature: Some("(I)V".into()),
             jvm_name: None,
+            overridee: KspOverridee::Nothing,
         };
         let round = KspRound {
             files: vec![KspFile {
@@ -623,16 +695,26 @@ mod tests {
                             declaration: KspTypeDeclaration::Class("k.Any".into()),
                             nullable: true,
                             arguments: Vec::new(),
+                            unannotated: true,
                         }],
                     }]),
                     super_types: Some(vec![KspType {
                         declaration: KspTypeDeclaration::Class("k.C".into()),
                         nullable: false,
                         arguments: vec![KspTypeArgument::Star, KspTypeArgument::In(parameter_t())],
+                        unannotated: false,
                     }]),
                     declarations: vec![KspDeclaration::Function(constructor)],
                     declarations_complete: true,
                     jvm_signature: Some("Lp/A;".into()),
+                    all_properties: None,
+                    all_functions: Some(vec![
+                        KspMember::Declared(0),
+                        KspMember::Source {
+                            owner: "p.B".into(),
+                            index: 2,
+                        },
+                    ]),
                 })],
                 declarations_complete: false,
             }],
@@ -663,15 +745,16 @@ mod tests {
         expected.extend([1, 0, 0, 0, 1, 0, 0, 0, 7, 0, 0, 0, 1, b'T', 1, 0]);
         expected.extend([0, 0, 0, 1, 0, 0, 0, 0, 5]);
         expected.extend(b"k.Any");
-        expected.extend([1, 0, 0, 0, 0]);
+        // Nullable, with no annotations, and no arguments.
+        expected.extend([1, 1, 0, 0, 0, 0]);
         // `k.C<*, in T>`.
         expected.extend([1, 0, 0, 0, 1, 0, 0, 0, 0, 3]);
         expected.extend(b"k.C");
-        expected.extend([0, 0, 0, 0, 2, 0, 3]);
+        expected.extend([0, 0, 0, 0, 0, 2, 0, 3]);
         let t = {
             let mut t = vec![1, 0, 0, 0, 7, 0, 0, 0, 3];
             t.extend(b"p.A");
-            t.extend([0, 0, 0, 1, b'T', 0, 0, 0, 0, 0]);
+            t.extend([0, 0, 0, 1, b'T', 0, 0, 0, 0, 0, 0]);
             t
         };
         expected.extend(&t);
@@ -684,14 +767,20 @@ mod tests {
         expected.extend(b"FINAL");
         expected.extend([0, 0, 0, 0, 0, 1, 0, 0, 0, 1, b'x', 1]);
         expected.extend(&t);
-        // Its flags, no annotations, no return type, its JVM signature and no JVM name.
+        // Its flags, no annotations, no return type, its JVM signature, no JVM name, and that it
+        // overrides nothing.
         expected.extend([0b1001, 0, 0, 0, 0, 0]);
         expected.extend([1, 0, 0, 0, 4]);
         expected.extend(b"(I)V");
-        expected.push(0);
+        expected.extend([0, 1]);
         // The classifier's JVM signature.
         expected.extend([1, 0, 0, 0, 5]);
         expected.extend(b"Lp/A;");
+        // No properties listed, and as functions its own constructor and the third declaration of
+        // the source classifier `p.B`.
+        expected.extend([0, 1, 0, 0, 0, 2, 0, 0, 0, 0, 0, 2, 0, 0, 0, 3]);
+        expected.extend(b"p.B");
+        expected.extend([0, 0, 0, 2]);
         let mut frame = (expected.len() as u32).to_be_bytes().to_vec();
         frame.extend(expected);
         assert_eq!(framed, frame);

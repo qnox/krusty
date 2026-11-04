@@ -4,8 +4,8 @@
 //! `FirArrayOfNullableNothingClassLiteralChecker` reports `Array<Nothing?>`. Both consume the
 //! class-literal LHS's already-resolved semantic type; this checker never repeats name lookup.
 
+use super::array_type_validity::contains_array_of;
 use super::*;
-use crate::types::TyKind;
 
 impl Checker<'_> {
     /// Check the class literal whose left-hand side `lhs` resolved to classifier type `ty`.
@@ -33,28 +33,5 @@ impl Checker<'_> {
                 self.diags.warning(span, message.to_string());
             }
         }
-    }
-}
-
-/// Whether `ty` is `Array<element>` or one of its semantic type arguments contains one.
-fn contains_array_of(ty: Ty, element: Ty) -> bool {
-    let ty = ty.non_null();
-    if ty.is_reference_array()
-        && ty.type_args().first().copied().and_then(argument_type) == Some(element)
-    {
-        return true;
-    }
-    ty.type_args()
-        .iter()
-        .filter_map(|argument| argument_type(*argument))
-        .any(|argument| contains_array_of(argument, element))
-}
-
-/// The semantic type carried by an ordinary or projected type argument; stars name no type.
-fn argument_type(argument: Ty) -> Option<Ty> {
-    match argument.kind() {
-        TyKind::StarProjection(_) => None,
-        TyKind::InProjection(inner) | TyKind::OutProjection(inner) => Some(inner),
-        _ => Some(argument),
     }
 }

@@ -84,6 +84,7 @@ fn local_type_parameters(ty: Ty) -> Vec<LocalPropertyTypeParameter> {
             }
             TyKind::Nullable(inner)
             | TyKind::PlatformNullable(inner)
+            | TyKind::MutabilityFlexible(inner)
             | TyKind::DefinitelyNotNull(inner)
             | TyKind::InProjection(inner)
             | TyKind::OutProjection(inner) => collect(inner, out),

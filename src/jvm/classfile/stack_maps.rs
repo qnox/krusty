@@ -253,12 +253,28 @@ impl ClassWriter {
         }
         let entry = entry_frame(body.access, body.name, body.descriptor, &self.internal_name)
             .expect("a successfully computed method must have a valid entry frame");
-        Some(encode(
+        // ASM writes a frame's classes straight into the pool, never through kotlinc's type
+        // mapper, so a class only a frame names is not one the class's code names.
+        let framed: Vec<String> = computed
+            .frames
+            .frames
+            .iter()
+            .flat_map(|frame| frame.locals.iter().chain(&frame.stack))
+            .filter_map(|value| match value {
+                VerificationType::Reference(name) if !self.cp.has_class(name) => {
+                    Some(name.to_string())
+                }
+                _ => None,
+            })
+            .collect();
+        let table = encode(
             &computed.frames.frames,
             &entry,
             &computed.offsets,
             &mut self.cp,
-        ))
+        );
+        self.record_unmapped_classes(&framed);
+        Some(table)
     }
 
     /// Intern the classes the table of the method last added names, where kotlinc's writer interns

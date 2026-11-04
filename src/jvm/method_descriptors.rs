@@ -11,7 +11,9 @@ pub(in crate::jvm) fn jvm_declared_ty(ty: &Ty) -> Ty {
     fn is_nothing(ty: &Ty) -> bool {
         match ty.kind() {
             TyKind::Nothing => true,
-            TyKind::Nullable(inner) | TyKind::PlatformNullable(inner) => is_nothing(&inner),
+            TyKind::Nullable(inner)
+            | TyKind::PlatformNullable(inner)
+            | TyKind::MutabilityFlexible(inner) => is_nothing(&inner),
             TyKind::Obj(name, _) => name.matches("kotlin/Nothing"),
             _ => false,
         }

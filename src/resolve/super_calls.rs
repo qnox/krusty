@@ -7,6 +7,8 @@ pub struct ResolvedSuperCall {
     /// Exact dispatch receiver selected by `super` / `super@Label`. A labeled super may target an
     /// enclosing class instance, so the callable target alone is not enough for lowering.
     pub receiver: ImplicitReceiverSelection,
+    /// The selected source qualifier, distinct from a platform-mapped invocation owner.
+    pub qualifier: TypeName,
     pub owner: TypeName,
     pub name: String,
     pub params: Vec<Ty>,
@@ -90,6 +92,7 @@ impl ResolvedSuperCall {
         };
         Some(Self {
             receiver,
+            qualifier: dispatch_owner,
             owner,
             name: member.physical_name.unwrap_or(member.name),
             params: member.params,
@@ -133,6 +136,7 @@ impl ResolvedSuperCall {
         };
         Some(Self {
             receiver,
+            qualifier: owner,
             owner: physical_owner,
             name: physical_name,
             params: callable.params,

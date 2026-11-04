@@ -171,6 +171,7 @@ impl BodyLowering<'_> {
                                 parameter,
                                 array_type: parameters[parameter as usize].get(),
                                 elements,
+                                source_line: 0,
                             }
                         }
                         FirAdaptedReferenceArgument::Value(_) => {

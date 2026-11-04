@@ -26,6 +26,18 @@ fn first_body_line(ir: &crate::ir::IrFile, body: ExprId) -> Option<u32> {
     }
 }
 
+/// Whether a lambda body ends in the `Unit` its implicit return yields: the value itself, or the
+/// coercion `{ effects; Unit }`.
+fn ends_in_unit(ir: &crate::ir::IrFile, body: ExprId) -> bool {
+    match ir.expr(body) {
+        IrExpr::UnitInstance => true,
+        IrExpr::Block {
+            value: Some(value), ..
+        } => matches!(ir.expr(*value), IrExpr::UnitInstance),
+        _ => false,
+    }
+}
+
 /// The IR record of one mapped body line of an external inline declaration: the dependency's
 /// line and the call-site line it answers to.
 fn external_frame_line(
@@ -161,9 +173,9 @@ impl BodyLowering<'_> {
                 arg: argument,
                 type_operand: runtime.reified_runtime.get(),
             });
-            self.ir.logical_types.insert(operation, Ty::Boolean);
+            self.ir.set_logical_type(operation, Ty::Boolean);
             let expanded = self.wrap_call_statements(statements, operation);
-            self.ir.logical_types.insert(expanded, Ty::Boolean);
+            self.ir.set_logical_type(expanded, Ty::Boolean);
             self.ir.external_inline_expansions.insert(expanded);
             return Some(expanded);
         }
@@ -327,6 +339,16 @@ impl BodyLowering<'_> {
             source_line,
             !cleanup.is_empty(),
         )?;
+        // An extension lambda's receiver is a separate local; the callee's own receiver
+        // parameter is the frame local that holds the declaration's type-parameter value.
+        if let (Some(slot), Some(declared)) = (
+            callee_receiver,
+            declared_receiver
+                .map(crate::fir::ResolvedTy::get)
+                .filter(|receiver| receiver.non_null().is_ty_param()),
+        ) {
+            self.record_inlined_type_parameter_slot(&statements, slot, declared);
+        }
 
         let value = if let Some(recovery) = recovery {
             if !cleanup.is_empty() || cause.is_some() {
@@ -370,7 +392,7 @@ impl BodyLowering<'_> {
         };
         if matches!(self.ir.expr(expansion), IrExpr::Block { .. }) {
             if let Some(line) = source_line {
-                self.ir.expr_source_lines.insert(expansion, line);
+                self.ir.set_source_line(expansion, line);
             }
         }
         self.ir.external_inline_expansions.insert(expansion);
@@ -560,6 +582,9 @@ impl BodyLowering<'_> {
             if let IrExpr::Variable { named, .. } = &mut self.ir.exprs[declaration as usize] {
                 *named = true;
             }
+            // The frame adopts this operand holder as its formal receiver. Its purpose is now
+            // binding that parameter, rather than a separate checked argument-order temporary.
+            self.ir.argument_evaluation_bindings.remove(&declaration);
             self.ir
                 .value_names
                 .insert(declaration, frame.callee.to_string());
@@ -896,15 +921,32 @@ impl BodyLowering<'_> {
                         depth: 0,
                     },
                 );
-                let lambda_frame = self.ir.add_expr(IrExpr::Block {
-                    stmts: vec![parameter_declaration, marker, inline_body],
-                    value: None,
-                });
+                // A `Unit` lambda falls off its closing brace, which kotlinc marks on a `nop` while
+                // the lambda's locals are still open, ahead of the frame's own closing `nop`. The
+                // frame carries that brace as the `Unit` value it ends in.
+                let brace = self
+                    .ir
+                    .end_line(inline_body)
+                    .filter(|line| *line != 0 && ends_in_unit(self.ir, inline_body));
+                let lambda_frame = match brace {
+                    Some(brace) => {
+                        let frame = self.ir.add_expr(IrExpr::Block {
+                            stmts: vec![parameter_declaration, marker],
+                            value: Some(inline_body),
+                        });
+                        self.ir.set_end_line(frame, brace);
+                        frame
+                    }
+                    None => self.ir.add_expr(IrExpr::Block {
+                        stmts: vec![parameter_declaration, marker, inline_body],
+                        value: None,
+                    }),
+                };
                 if let Some(call_line) = call_line {
                     // The lambda frame closes on the body's invocation line, mapped under the
                     // call; the mark drives the frame's closing `nop`.
                     let line = u32::from(source.invoke_line);
-                    self.ir.expr_source_lines.insert(lambda_frame, line);
+                    self.ir.set_source_line(lambda_frame, line);
                     self.ir
                         .external_frame_lines
                         .insert(lambda_frame, external_frame_line(source, line, call_line));
@@ -1024,6 +1066,16 @@ impl BodyLowering<'_> {
         let IrExpr::GetValue(slot) = *self.ir.expr(receiver) else {
             return;
         };
+        self.record_inlined_type_parameter_slot(statements, slot, declared);
+    }
+
+    /// The local that holds an inlined type-parameter value keeps the declaration type.
+    fn record_inlined_type_parameter_slot(
+        &mut self,
+        statements: &[ExprId],
+        slot: u32,
+        declared: Ty,
+    ) {
         let Some(&declaration) = statements.iter().find(|statement| {
             matches!(
                 self.ir.expr(**statement),
@@ -1171,7 +1223,7 @@ impl BodyLowering<'_> {
         // below to reproduce kotlinc's physical temporary and landing sequence.
         let guarded = self.guarded_try(body, cleanup, cause, result_ty, plan_value)?;
         if let Some(line) = source_line {
-            self.ir.expr_source_lines.insert(guarded, line);
+            self.ir.set_source_line(guarded, line);
         }
         self.ir.inline_cleanup_results.insert(guarded);
         Some(guarded)
@@ -1497,8 +1549,8 @@ impl BodyLowering<'_> {
 
         let inline_body = if callable_reference {
             let (body, _) = crate::ir::clone_expression_dag(self.ir, template);
-            if let Some(line) = self.ir.expr_source_lines.get(&lambda).copied() {
-                self.ir.expr_source_lines.insert(body, line);
+            if let Some(line) = self.ir.source_line(lambda) {
+                self.ir.set_source_line(body, line);
             }
             body
         } else {
@@ -1548,14 +1600,14 @@ impl BodyLowering<'_> {
                     stmts: preamble,
                     value: Some(body),
                 });
-                if let Some(&end) = self.ir.expr_end_lines.get(&body) {
-                    self.ir.expr_end_lines.insert(wrapped, end);
+                if let Some(end) = self.ir.end_line(body) {
+                    self.ir.set_end_line(wrapped, end);
                 }
-                if let Some(&line) = self.ir.expr_source_lines.get(&body) {
-                    self.ir.expr_source_lines.insert(wrapped, line);
+                if let Some(line) = self.ir.source_line(body) {
+                    self.ir.set_source_line(wrapped, line);
                 }
-                if let Some(&ty) = self.ir.logical_types.get(&body) {
-                    self.ir.logical_types.insert(wrapped, ty);
+                if let Some(ty) = self.ir.logical_type(body) {
+                    self.ir.set_logical_type(wrapped, ty);
                 }
                 wrapped
             }

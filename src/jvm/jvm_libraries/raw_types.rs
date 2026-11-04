@@ -51,6 +51,9 @@ impl JvmLibraries {
             TyKind::PlatformNullable(inner) => {
                 Ty::platform_nullable(self.java_raw_occurrences(inner))
             }
+            TyKind::MutabilityFlexible(inner) => {
+                Ty::mutability_flexible(self.java_raw_occurrences(inner))
+            }
             TyKind::InProjection(inner) => Ty::in_projection(self.java_raw_occurrences(inner)),
             TyKind::OutProjection(inner) => Ty::out_projection(self.java_raw_occurrences(inner)),
             _ => ty,

@@ -18,6 +18,7 @@ final class SourceTypeReference implements KSTypeReference {
     // Set after construction for a parameter's type, which is read before its parameter.
     KSNode parent;
     SourceType type;
+    Origin origin = Origin.KOTLIN;
 
     SourceTypeReference(KSNode parent) {
         this.parent = parent;
@@ -45,7 +46,7 @@ final class SourceTypeReference implements KSTypeReference {
 
     @Override
     public Origin getOrigin() {
-        return Origin.KOTLIN;
+        return origin;
     }
 
     @Override

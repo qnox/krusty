@@ -38,7 +38,9 @@ pub(super) fn identity(ty: Ty, parameters: TypeParameters<'_>) -> Result<TypeIde
             },
             None => return Err(format!("the type parameter `{name}` of a class")),
         },
-        TyKind::PlatformNullable(_) => return Err("a platform type".into()),
+        TyKind::PlatformNullable(_) | TyKind::MutabilityFlexible(_) => {
+            return Err("a platform type".into())
+        }
         TyKind::Fun(_) => return Err("a function type".into()),
         TyKind::DefinitelyNotNull(_) => return Err("a definitely non-null type".into()),
         TyKind::Intersection(_) => return Err("an intersection type".into()),

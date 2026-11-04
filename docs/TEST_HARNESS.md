@@ -48,7 +48,7 @@ existing contracts.
   ```
 
   `KRUSTY_KOTLINC` is what the harness reads, so exporting it is the whole of the setup. This matters
-  more than it looks: kotlinc is the correctness oracle (`docs/SPEC.md` §6), so a change validated
+  more than it looks: kotlinc is the correctness oracle, so a change validated
   without it has been checked against an expectation rather than against the reference — which is
   exactly the mistake the differential harness exists to prevent.
 - Use focused harness runs, not raw `cargo test`, while iterating. Standalone suites still use `./run-tests.sh --test <name> -- --nocapture`; grouped e2e tests use a test-name filter, e.g. `./run-tests.sh --test e2e lambda_e2e::lambdas_run -- --nocapture`.
@@ -175,9 +175,13 @@ target test consumes JVM artifacts and no target waits for another target's corp
 `KRUSTY_KOTLIN_BOX_DIR` select the runtime reference toolchain, so the matrix does not rebuild Rust
 code per Kotlin version or target. Toolchain and box/serialization corpora are isolated by version.
 JVM rows require pinned serialization-runtime provisioning, so missing prerequisites fail rather
-than turning those tests into passing skips. Real KSP integrations belong to the plugin host and
-run unconditionally in the lint job through `cargo test -p krusty-plugin-host -- --include-ignored`;
-they use that host's pinned toolchain and the runner's JDK, not JVM matrix opt-in flags. Each row
+than turning those tests into passing skips. Compiler-dependent plugin and KSP integrations belong
+to the root e2e target. After coverage, CI reuses that exact coverage-profile executable for an explicit
+`plugin_host_compiler_e2e:: --include-ignored --test-threads=1` pass under the configurable e2e deadline.
+That pass runs after the coverage report; its counters do not change the measured workload.
+Compiler-independent host tests remain in lint through
+`cargo test --profile gate -p krusty-plugin-host -- --include-ignored`. Both use the host's pinned
+toolchain and JDK 17 in CI, not JVM matrix opt-in flags. Each row
 uses its target's configurable process-group deadline. The complete JVM non-box CI pass retains
 its 600-second cold serialization/reference-CLI toolchain budget. The local 120-second default
 and test inventory are unchanged; an exhausted deadline still fails. JVM rows upload `pct-<version>` and
@@ -206,6 +210,12 @@ and both Wasm target-KLIB lanes' known non-passing backlogs are explicit under `
 `wasm-js-klib`, and `wasm-wasi-klib`. Every pass/fail/not-applicable transition, duplicate, and
 corpus-absent entry fails. Sharded and filtered runs judge only their scheduled files while still
 validating committed paths against the complete corpus.
+
+The one approved outcome reset, for the #2459 KLIB inline-body migration, is spent and cannot be
+renewed. Its rows in `scripts/outcome-list-migrations.tsv` are append-only history:
+`scripts/check-outcome-lists.sh` accepts a row only when the comparison introduces it, so a
+historical row never authorizes a later reset. Follow-ups recovering that debt use the ordinary
+shrink-only rule.
 
 After a change that moves any outcome, rewrite both manifests from a full run and commit the diffs
 with the change, so review sees exactly which files moved:
@@ -242,8 +252,11 @@ keys before the normal `BOX_ONLY`/`BOX_LIMIT` selection. There is no separate ru
 Every owned portable case first requires the actual JVM/kotlinc oracle to return `OK`, on every
 backend. Native module graphs also require the Native oracle. JVM is strict: krusty must return
 `OK`. Native/Wasm use the existing `tests/box_expected_failures/` inventories and canonical release
-inheritance, with no applicability exclusions for owned sources. Harness errors, unavailable setup,
-compiler panics and target skips are fatal before any expectation write. The ordinary upstream
+inheritance. An owned source leaves a target only by naming its backends with `// TARGET_BACKEND:`,
+as a fixture for a JVM-only compiler argument (`-Xuse-inline-scopes-numbers`) does. It is then
+outside that lane, not one of the lane's not-applicable entries: it leaves the lane's scanned
+and applicable counts, and the report line counts it as `outside-lane`. Harness errors, unavailable setup,
+compiler panics and every other target skip are fatal before any expectation write. The ordinary upstream
 per-case applicability policy is unchanged. Full sweeps require the provisioned upstream corpus;
 the separate vendored smoke test does not replace missing setup.
 
@@ -286,7 +299,7 @@ not-applicable lists are not under this gate: they record what the reference kot
 this environment, and the required reference run proves every entry against that compiler.
 
 The rest of the suite is version-sensitive too, because the supported kotlinc releases do not word
-every diagnostic alike (see `docs/SPEC.md` §6). `KRUSTY_LANGUAGE_VERSION=<v> ./run-tests.sh` runs the
+every diagnostic alike. `KRUSTY_LANGUAGE_VERSION=<v> ./run-tests.sh` runs the
 whole suite with krusty reproducing release `<v>` against that release's kotlinc; `just test-all`
 does it for every manifest version at once.
 
@@ -805,9 +818,6 @@ difference per class set in `target/byte_diff_report.txt` (see "Byte-Identity Di
 
 Read the badges, or the `conformance` job of the latest master CI run, when you need today's
 figures; use the target-specific recipes locally when you need this checkout's.
-
-A count in a phase-log entry (`docs/IMPLEMENTATION_PLAN.md`) is a snapshot of what that phase
-measured at the time it landed, not a claim about the present, and must not be quoted as current.
 
 Two rules hold whatever the number is. Only compare `box()=OK` counts when `FAIL: 0` — a count taken
 beside a failure is not a coverage measurement. And `KRUSTY_NO_RUN=1` is for compile/emit profiling

@@ -547,6 +547,7 @@ impl Checker<'_> {
                     self.resolved_stmt_operator_arg_slots.insert((s, op), slots);
                 }
             }
+            self.narrow_operator_receiver(array, &call);
             self.resolved_stmt_operator_calls.insert((s, op), call);
             true
         } else {

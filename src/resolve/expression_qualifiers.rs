@@ -69,7 +69,9 @@ pub(super) fn alias_expansion_classifier(expansion: Ty) -> Option<TypeName> {
 
 impl Checker<'_> {
     /// Whether the root of a qualified spelling is a value in scope. A value root commits the
-    /// entire spelling to ordinary expression checking.
+    /// entire spelling to ordinary expression checking. An implicit receiver supplies a value
+    /// through a member property, or through an extension property that reads on it (`java` on a
+    /// `KClass` receiver), at that receiver's tower level.
     pub(super) fn qualifier_root_is_value(&self, scope: &CheckerScope<'_>, name: &str) -> bool {
         let resolver = self.resolver();
         scope
@@ -88,6 +90,7 @@ impl Checker<'_> {
                                 .classifier(owner)
                                 .is_some_and(|classifier| classifier.constants.contains_key(name))
                         })
+                        || !matches!(self.select_property_read(scope, receiver, name), Ok(None))
                 },
                 || {
                     resolver.top_level_properties(name).iter().any(|property| {

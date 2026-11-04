@@ -10,6 +10,45 @@ use super::scope::{NarrowPath, ScopeKind};
 use super::{Checker, CheckerScope};
 
 impl Checker<'_> {
+    /// `Array` has no runtime type without its element: a bare `is Array`/`as Array` target is
+    /// kotlinc's "one type argument expected".
+    pub(super) fn reject_bare_array_type_ref(&mut self, ty: &crate::ast::TypeRef) -> bool {
+        let bare = ty.name == "Array" && ty.targs.is_empty() && ty.arg.is_none();
+        if bare {
+            self.diags.error(
+                ty.span,
+                "one type argument expected. Use 'Array<*>' if you do not intend to pass type arguments."
+                    .to_string(),
+            );
+        }
+        bare
+    }
+
+    /// A cast target that resolves to a generic classifier with no arguments (`g as? Auto`) takes
+    /// them from the operand's type, as a type test does: `Gen<*>` casts to `Auto<*>`,
+    /// `Gen<String>` to `Auto<String>`. The decision is made on the resolved target, so an alias
+    /// with a fixed application (`typealias IntAuto = Auto<Int>`) stays `Auto<Int>`, and a type
+    /// parameter target (`x as T`) is already complete.
+    pub(super) fn cast_target_with_operand_arguments(&self, operand: Ty, target: Ty) -> Ty {
+        let classifier = target.non_null();
+        if !classifier.type_args().is_empty()
+            || classifier.is_ty_param()
+            || operand.contains_error()
+        {
+            return target;
+        }
+        let applied = crate::symbol_resolver::apply_subtype_arguments_from_supertype(
+            &self.fed_source(),
+            target.non_null(),
+            operand.non_null(),
+        );
+        if target.is_nullable() {
+            Ty::nullable(applied)
+        } else {
+            applied
+        }
+    }
+
     /// Collect checked-cast facts from subexpressions that certainly ran when `expression` ran.
     pub(super) fn as_cast_narrowings(
         &self,
