@@ -813,7 +813,6 @@ mod tests {
             inline_origin: false,
             requires_reification: false,
             extension_receiver_label: None,
-            inline_default_owner: None,
             default_stub_owner: None,
             invoke: implementation,
             function_type: Ty::fun(Vec::new(), Ty::Unit),

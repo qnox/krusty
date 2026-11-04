@@ -152,6 +152,18 @@ fn attach_property_annotation_marker_debug(ir: &IrFile, fid: u32, cw: &mut Class
     cw.set_method_debug(&function.name, &descriptor, None, &locals);
 }
 
+/// Whether an emitted body of `fid` records its source locals' debug entries. Suspend lowering
+/// does not preserve source-local expression IDs, so a suspend body records them only once its
+/// coroutine machine is `transformed`.
+pub(super) fn body_records_locals(ir: &IrFile, fid: u32, transformed: bool) -> bool {
+    (ir.fn_decl_lines.contains_key(&fid)
+        || ir.fn_debug_locals.contains(&fid)
+        || ir
+            .generated_function_publication(fid)
+            .is_some_and(|publication| publication.debug.records_locals()))
+        && (!ir.suspend_funs.contains(&fid) || transformed)
+}
+
 /// Whether the method emitted for `fid` opens with kotlinc's inline-depth marker (`iconst_0;
 /// istore` into `$i$f$<name>`): every emitted `inline fun`, a top-level one or a member. A member's
 /// receiver is value 0, or its dispatch owner survives on a value class's static `-impl`.
