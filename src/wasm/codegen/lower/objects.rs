@@ -249,7 +249,7 @@ impl Body<'_> {
         if params.len() != args.len() {
             return Err("a call whose arguments do not match its parameters".into());
         }
-        self.dispatch(class, slot, receiver, args, &params)
+        self.dispatch(class, slot, receiver, args, &params, Some(function))
     }
 
     /// Dispatch a member-extension property's recorded accessor. Its extension receiver and any
@@ -306,7 +306,7 @@ impl Body<'_> {
             .tables
             .slot(class, &key)
             .ok_or_else(|| "a member-extension property with no dispatch slot".to_string())?;
-        self.dispatch(class, slot, receiver, args, &params)
+        self.dispatch(class, slot, receiver, args, &params, Some(function))
     }
 
     /// A call through `slot` of the table of `receiver`, statically of `class`.
@@ -317,6 +317,7 @@ impl Body<'_> {
         receiver: u32,
         args: &[u32],
         params: &[Ty],
+        function: Option<FunId>,
     ) -> Result<(), Unsupported> {
         let classes = self.file_classes()?;
         let ty = classes
@@ -331,8 +332,11 @@ impl Body<'_> {
         let this = self.local(REFERENCE);
         self.value(receiver, self.object_type(class))?;
         self.code.local_tee(this);
-        for (arg, param) in args.iter().zip(params) {
-            self.value(*arg, *param)?;
+        for (parameter, (&arg, &param)) in args.iter().zip(params).enumerate() {
+            match function {
+                Some(function) => self.function_argument(function, parameter as u32, arg)?,
+                None => self.value(arg, param)?,
+            }
         }
         self.code.local_get(this);
         self.table_of_object();
@@ -537,8 +541,8 @@ impl Body<'_> {
             return Err("a call whose arguments do not match its parameters".into());
         }
         self.value(receiver, Ty::obj_name(owner))?;
-        for (arg, param) in args.iter().zip(params) {
-            self.value(*arg, param)?;
+        for (parameter, &arg) in args.iter().enumerate() {
+            self.function_argument(function, parameter as u32, arg)?;
         }
         let function = self.emitted_function(function)?;
         self.code.call(function);
@@ -723,7 +727,7 @@ impl Body<'_> {
                 .slot(class, &SlotKey::Getter(target))
         });
         if let Some(slot) = slot {
-            return self.dispatch(class, slot, receiver, &[], &[]);
+            return self.dispatch(class, slot, receiver, &[], &[], None);
         }
         if let Some(getter) = property.getter {
             return self.direct_member_call(getter, receiver, &[]);
@@ -795,7 +799,7 @@ impl Body<'_> {
                 .slot(class, &SlotKey::Setter(target))
         });
         if let Some(slot) = slot {
-            return self.dispatch(class, slot, receiver, &[value], &[property.ty]);
+            return self.dispatch(class, slot, receiver, &[value], &[property.ty], None);
         }
         if let Some(setter) = property.setter {
             return self.direct_member_call(setter, receiver, &[value]);
