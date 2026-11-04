@@ -89,6 +89,146 @@ fn stored_value_captures_use_the_existing_constructor_field_transport() {
 }
 
 #[test]
+fn constructor_only_value_captures_use_parameters_without_capture_fields() {
+    let ir = crate::fir_lower::tests::lower_single_source_with_jvm_stdlib(
+        include_str!("../../../../tests/box_regressions/constructorOnlyClassCaptures.kt"),
+        "ConstructorOnlyClassCaptures",
+    );
+    let captured = ir
+        .classes
+        .iter()
+        .enumerate()
+        .filter(|(_, class)| class.constructor_prefix_count != 0)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        captured.len(),
+        2,
+        "superclass and delegate constructor inputs"
+    );
+    for (id, class) in captured {
+        assert_eq!(class.constructor_prefix_count, 2);
+        assert_eq!(class.ctor_args.len(), 2);
+        assert_eq!(class.pre_super_param_fields, []);
+        for argument in &class.ctor_args {
+            assert_eq!(argument.provenance, IrCtorParameterProvenance::Capture);
+            assert!(argument.capture.is_some());
+            assert!(!argument.is_field);
+            assert_eq!(argument.field_index, None);
+        }
+        assert_eq!(check_supported(&ir, id as ClassId), Ok(()));
+    }
+}
+
+#[test]
+fn stored_and_constructor_only_captures_keep_independent_field_and_parameter_slots() {
+    let ir = crate::fir_lower::tests::lower_single_source_with_jvm_stdlib(
+        include_str!("../../../../tests/box_regressions/mixedConstructorClassCaptures.kt"),
+        "MixedConstructorClassCaptures",
+    );
+    let captured = ir
+        .classes
+        .iter()
+        .enumerate()
+        .filter(|(_, class)| class.constructor_prefix_count != 0)
+        .collect::<Vec<_>>();
+    let [(id, class)] = captured.as_slice() else {
+        panic!("the complete source has one captured classifier");
+    };
+    assert_eq!(class.constructor_prefix_count, 2);
+    assert_eq!(class.ctor_args.len(), 2);
+    assert_eq!(class.fields.len(), 1);
+    let stored = class
+        .ctor_args
+        .iter()
+        .enumerate()
+        .filter(|(_, argument)| argument.is_field)
+        .collect::<Vec<_>>();
+    let [(parameter, argument)] = stored.as_slice() else {
+        panic!("one capture survives into the member body");
+    };
+    assert_eq!(argument.ty, Ty::String);
+    assert_eq!(argument.field_index, Some(0));
+    assert_eq!(class.pre_super_param_fields, [(*parameter as u32, 0)]);
+    let constructor_only = &class.ctor_args[1 - *parameter];
+    assert_eq!(constructor_only.ty, Ty::Int);
+    assert!(!constructor_only.is_field);
+    assert_eq!(constructor_only.field_index, None);
+    assert_eq!(check_supported(&ir, *id as ClassId), Ok(()));
+}
+
+#[test]
+fn constructor_only_captures_reject_inconsistent_transport_roles() {
+    type Mutation = fn(&mut IrFile, ClassId, u32);
+    let mutations: &[(&str, Mutation)] = &[
+        ("field flag without storage", |ir, id, p| {
+            ir.classes[id as usize].ctor_args[p as usize].is_field = true;
+        }),
+        ("field index without storage", |ir, id, p| {
+            ir.classes[id as usize].ctor_args[p as usize].field_index = Some(0);
+        }),
+        (
+            "constructor-only parameter stored before super",
+            |ir, id, p| {
+                ir.classes[id as usize].pre_super_param_fields.push((p, 0));
+            },
+        ),
+        ("mixed forward role", |ir, id, p| {
+            ir.classes[id as usize].ctor_args[p as usize].anonymous_super_forward = Some(1);
+        }),
+        ("missing capture payload", |ir, id, p| {
+            ir.classes[id as usize].ctor_args[p as usize].capture = None;
+        }),
+        ("receiver capture", |ir, id, p| {
+            ir.classes[id as usize].ctor_args[p as usize]
+                .capture
+                .as_mut()
+                .unwrap()
+                .receiver = Some(IrCapturedReceiver::Lambda(None));
+        }),
+        ("identity registry mismatch", |ir, id, p| {
+            ir.class_capture_identities
+                .insert((id, p), ClassCaptureIdentity::Receiver(7));
+        }),
+        ("receiver identity", |ir, id, p| {
+            ir.classes[id as usize].ctor_args[p as usize].capture_identity =
+                Some(ClassCaptureIdentity::Receiver(7));
+            ir.class_capture_identities
+                .insert((id, p), ClassCaptureIdentity::Receiver(7));
+        }),
+        ("shared capture field", |ir, id, _| {
+            ir.shared_class_capture_fields.insert((id, 0), Ty::String);
+        }),
+        ("shared superclass edge", |ir, id, _| {
+            ir.shared_super_capture_parameters
+                .insert((id, 0), Ty::String);
+        }),
+        ("shared secondary superclass edge", |ir, id, _| {
+            ir.shared_secondary_super_capture_parameters
+                .insert((id, 0, 0), Ty::String);
+        }),
+    ];
+    let original = crate::fir_lower::tests::lower_single_source_with_jvm_stdlib(
+        include_str!("../../../../tests/box_regressions/constructorOnlyClassCaptures.kt"),
+        "ConstructorOnlyClassCaptures",
+    );
+    let class = original
+        .classes
+        .iter()
+        .position(|class| class.constructor_prefix_count != 0)
+        .expect("a real constructor-only capture") as ClassId;
+    assert_eq!(check_supported(&original, class), Ok(()));
+    let expected = Err(format!(
+        "a class capturing its surroundings (`{}`)",
+        original.classes[class as usize].fq_name()
+    ));
+    for (label, mutate) in mutations {
+        let mut ir = copy_transport(&original);
+        mutate(&mut ir, class, 0);
+        assert_eq!(check_supported(&ir, class), expected, "{label}");
+    }
+}
+
+#[test]
 fn capture_storage_and_unproven_prefix_roles_still_decline() {
     let original = forwarded_classes()
         .into_iter()
