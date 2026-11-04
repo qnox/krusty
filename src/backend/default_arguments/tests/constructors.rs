@@ -503,3 +503,55 @@ fn a_default_calling_with_an_omission_calls_the_entry_from_the_constructor_entry
         fill(2, 1, 1, &format!("fun{function_entry}(absent Int, 1)"))
     );
 }
+
+#[test]
+fn an_uncalled_constructors_defaults_publish_no_function_entry() {
+    let mut ir = IrFile::default();
+    let seven = int(&mut ir, 7);
+    let body = ir.add_expr(IrExpr::GetValue(0));
+    let function = declare(&mut ir, "f", vec![Ty::Int], Ty::Int, Some(body), None);
+    with_defaults(&mut ir, function, vec![Some(seven)]);
+    let call = || IrExpr::Call {
+        callee: Box::new(Callee::LocalWithDefaults {
+            function,
+            defaults: Box::new([0]),
+        }),
+        dispatch_receiver: None,
+        args: Vec::new(),
+    };
+    // `class C(n: Int = f()) { constructor(s: String, m: Int = f()) : this(m) }`, never constructed.
+    let primary_default = ir.add_expr(call());
+    let secondary_default = ir.add_expr(call());
+    let class = class_with_primary(
+        &mut ir,
+        "demo/C",
+        Vec::new(),
+        vec![Ty::Int],
+        vec![Some(primary_default)],
+    );
+    let m = ir.add_expr(IrExpr::GetValue(2));
+    ir.classes[class as usize].secondary_ctors.push(secondary(
+        Vec::new(),
+        vec![Ty::String, Ty::Int],
+        vec![None, Some(secondary_default)],
+        CtorDelegateTarget::This {
+            target_params: vec![Ty::Int],
+            target: target(0),
+            default_masks: Vec::new(),
+        },
+        vec![m],
+        Vec::new(),
+    ));
+
+    realize(&mut ir, &mut CheckedBackendCallables::default());
+
+    // Only a constructor entry's filled copies are emitted; no construction asked for one here.
+    assert!(!ir.default_entries.contains_key(&function));
+    assert_eq!(ir.classes[class as usize].secondary_ctors.len(), 1);
+    for default in [primary_default, secondary_default] {
+        assert!(matches!(
+            &ir.exprs[default as usize],
+            IrExpr::Call { callee, .. } if matches!(**callee, Callee::LocalWithDefaults { .. })
+        ));
+    }
+}

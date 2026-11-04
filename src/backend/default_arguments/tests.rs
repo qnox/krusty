@@ -273,39 +273,6 @@ fn a_default_reads_an_earlier_parameter_and_its_own_locals_move_past_the_masks()
 }
 
 #[test]
-fn a_constructor_default_calling_with_an_omission_calls_the_entry() {
-    let mut ir = IrFile::default();
-    let seven = int(&mut ir, 7);
-    let body = ir.add_expr(IrExpr::GetValue(0));
-    let function = declare(&mut ir, "f", vec![Ty::Int], Ty::Int, Some(body), None);
-    with_defaults(&mut ir, function, vec![Some(seven)]);
-    let call = || IrExpr::Call {
-        callee: Box::new(Callee::LocalWithDefaults {
-            function,
-            defaults: Box::new([0]),
-        }),
-        dispatch_receiver: None,
-        args: Vec::new(),
-    };
-    let primary_default = ir.add_expr(call());
-    let secondary_default = ir.add_expr(call());
-    let mut class = crate::ir::test_support::blank_class("demo/C");
-    let mut secondary = crate::ir::test_support::blank_secondary_ctor();
-    secondary.params = vec![Ty::Int];
-    secondary.defaults = vec![Some(secondary_default)];
-    class.secondary_ctors.push(secondary);
-    ir.add_class(class);
-    ir.insert_class_ctor_defaults("demo/C", vec![Some(primary_default)]);
-
-    realize(&mut ir, &mut CheckedBackendCallables::default());
-
-    let entry = ir.default_entries[&function];
-    for default in [primary_default, secondary_default] {
-        assert_eq!(render(&ir, default), format!("fun{entry}(absent Int, 1)"));
-    }
-}
-
-#[test]
 fn a_call_site_passes_every_parameter_and_constant_mask_words() {
     let mut ir = IrFile::default();
     let unit = ir.add_expr(IrExpr::Block {
