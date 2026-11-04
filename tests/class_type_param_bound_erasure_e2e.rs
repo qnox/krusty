@@ -373,3 +373,40 @@ class Outer<T : Cargo>(val t: T) {
     kotlinc.sort();
     assert_eq!(krusty, kotlinc);
 }
+
+/// A class type parameter's bound is resolved before any rung of the class itself. Neither a
+/// same-named classifier nested in a supertype nor one nested in the class body hides the package
+/// `Limit` that kotlinc binds the bound to, so every member erases to `Lapp/Limit;`.
+#[test]
+fn class_type_param_bound_ignores_nested_classifiers_of_the_class_and_its_supertypes() {
+    for (stem, src, class) in [
+        (
+            "BscopeSuper",
+            "package app\n\nopen class Limit\nopen class Base { open class Limit }\n\
+             class Child<T : Limit>(val bound: T) : Base() { fun f(t: T) {} }\n",
+            "app/Child",
+        ),
+        (
+            "BscopeOwn",
+            "package app\n\nopen class Limit\n\
+             class Own<T : Limit>(val bound: T) { open class Limit\n fun f(t: T) {} }\n",
+            "app/Own",
+        ),
+    ] {
+        let Some((kotlinc, krusty)) = javap_both(stem, src, class) else {
+            eprintln!("skip ({stem}: reference toolchain unavailable)");
+            return;
+        };
+        assert_eq!(
+            descriptors(&krusty),
+            [
+                "Lapp/Limit;",
+                "(Lapp/Limit;)V",
+                "()Lapp/Limit;",
+                "(Lapp/Limit;)V"
+            ],
+            "{stem}"
+        );
+        assert_eq!(descriptors(&krusty), descriptors(&kotlinc), "{stem}");
+    }
+}

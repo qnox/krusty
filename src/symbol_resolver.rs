@@ -69,7 +69,7 @@ use argument_compatibility::{arg_fits_platform, arg_fits_source, untyped_lambda_
 pub(crate) use argument_compatibility::{
     function_input_types, resolution_subtype, sam_arg_matches, sam_return_matches,
 };
-pub(crate) use call_argument::CallArgKind;
+pub(crate) use call_argument::{expected_result_keeps_call_evidence, CallArgKind};
 pub(crate) use callable_shapes::{
     classifier_callable_signature, classifier_callable_signatures, declared_function_type,
 };
