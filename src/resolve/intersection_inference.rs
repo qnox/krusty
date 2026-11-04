@@ -961,7 +961,9 @@ impl Checker<'_> {
 
         let result_formal = match signature.ret.kind() {
             TyKind::TyParam(formal, _) => Some(formal.as_str()),
-            TyKind::Nullable(inner) | TyKind::PlatformNullable(inner) => inner.ty_param_name(),
+            TyKind::Nullable(inner)
+            | TyKind::PlatformNullable(inner)
+            | TyKind::MutabilityFlexible(inner) => inner.ty_param_name(),
             _ => None,
         };
         let Some(formal) = result_formal else {

@@ -908,9 +908,9 @@ fn contextual_serializer_for(ir: &mut IrFile, is_contextual: bool, ty: &Ty) -> O
     })
 }
 
-/// `new ContextualSerializer(<type>::class)` — the element serializer for a `@Contextual` property (or one
-/// whose type is named in `@file:UseContextualSerialization`). Its descriptor `kind` is CONTEXTUAL; the
-/// actual serializer is resolved from the `SerializersModule` at run time.
+/// `new ContextualSerializer(<type>::class)` — the serializer a `@Contextual` property's serialize and
+/// deserialize bodies fall back to when the cached child serializer is unavailable. Its descriptor
+/// `kind` is CONTEXTUAL; the actual serializer is resolved from the `SerializersModule` at run time.
 fn build_contextual_serializer(ir: &mut IrFile, classifier: TypeName) -> ExprId {
     let kclass = contextual_kclass(ir, classifier);
     ir.new_external(
@@ -921,7 +921,7 @@ fn build_contextual_serializer(ir: &mut IrFile, classifier: TypeName) -> ExprId 
 }
 
 /// `new ContextualSerializer(<type>::class, fallback, typeArgumentsSerializers)` — the serializer
-/// kotlinc caches for a contextual PROPERTY, as opposed to a contextual collection element.
+/// kotlinc builds for every contextual type, a property's or a collection element's alike.
 fn build_contextual_property_serializer(
     ir: &mut IrFile,
     classifier: TypeName,

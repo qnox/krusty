@@ -164,3 +164,31 @@ fn captured_mutation_reports_the_exact_declined_smartcast() {
         ]
     );
 }
+
+#[test]
+fn a_when_guard_narrows_only_its_own_arm() {
+    // An arm's `if` guard holds in that arm's body alone: a later arm, and a guard joined by
+    // `||`, read the unnarrowed type, as kotlinc reports.
+    const SRC: &str = "interface Marker { val binary: Boolean }\n\
+open class CT\n\
+class Lit(val columnType: CT)\n\
+fun later(e: Any): Boolean = when (e) {\n\
+    is Lit if e.columnType is Marker -> e.columnType.binary\n\
+    is Lit -> e.columnType.binary\n\
+    else -> false\n\
+}\n\
+fun either(e: Any): Boolean = when (e) {\n\
+    is Lit if e.columnType is Marker || e.hashCode() == 0 -> e.columnType.binary\n\
+    else -> false\n\
+}\n";
+    let sources = [("Main.kt", SRC)];
+    let reference_args = common::language_directives::kotlinc_args(SRC);
+    assert_eq!(
+        common::reference_error_blocks(&sources, &reference_args),
+        [
+            "Main.kt:6:24: unresolved reference 'binary' on receiver of type 'CT'.",
+            "Main.kt:10:71: unresolved reference 'binary' on receiver of type 'CT'.",
+        ]
+    );
+    common::assert_error_blocks_match_kotlinc(&sources, &reference_args);
+}

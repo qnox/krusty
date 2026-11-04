@@ -12,11 +12,12 @@ use krusty_plugin_ir::{
     TypeParameterOwner,
 };
 
+use crate::script_template::{ScriptTemplateDefinition, ScriptType};
 use crate::session::SessionRequest;
 
 mod module_ir;
 
-pub(crate) const PROTOCOL: u32 = 4;
+pub(crate) const PROTOCOL: u32 = 5;
 
 const HELLO: u8 = 0;
 const LOAD: u8 = 1;
@@ -33,6 +34,8 @@ const RESOLVE: u8 = 11;
 const RESOLVED: u8 = 12;
 const GENERATE: u8 = 13;
 const GENERATED: u8 = 14;
+const SCRIPT_DEFINITION: u8 = 15;
+const SCRIPT_DEFINED: u8 = 16;
 
 /// A frame larger than this is a broken stream, not a message.
 const MAX_FRAME: u32 = 1 << 30;
@@ -61,6 +64,11 @@ pub(crate) enum Request<'a> {
     Resolve(&'a [CallableIdentity]),
     /// Build the module's IR in the session and run the loaded plugins' IR generation over it.
     Generate(&'a ModuleIr),
+    /// Read a script template's definition from its compilation configuration.
+    ScriptDefinition {
+        classpath: &'a [String],
+        template: &'a str,
+    },
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -72,6 +80,7 @@ pub(crate) enum Reply {
     /// Each resolved declaration rendered as kotlinc renders IR, in request order.
     Resolved(Vec<String>),
     Generated,
+    ScriptDefined(ScriptTemplateDefinition),
     /// The request failed in the host; the message says why, as kotlinc would.
     Failed(String),
 }
@@ -126,6 +135,16 @@ pub(crate) fn write_request(out: &mut impl Write, request: &Request) -> io::Resu
             payload.push(GENERATE);
             module_ir::put_module(&mut payload, module);
         }
+        Request::ScriptDefinition {
+            classpath,
+            template,
+        } => {
+            payload.push(SCRIPT_DEFINITION);
+            put_list(&mut payload, classpath, |payload, entry| {
+                put_str(payload, entry)
+            });
+            put_str(&mut payload, template);
+        }
     }
     write_frame(out, &payload)
 }
@@ -164,9 +183,33 @@ pub(crate) fn read_reply(input: &mut impl Read) -> io::Result<Reply> {
         SESSION_CLOSED => Ok(Reply::SessionClosed),
         RESOLVED => Ok(Reply::Resolved(payload.list(|payload| payload.string())?)),
         GENERATED => Ok(Reply::Generated),
+        SCRIPT_DEFINED => Ok(Reply::ScriptDefined(ScriptTemplateDefinition {
+            file_extension: payload.string()?,
+            base_class: if payload.byte()? != 0 {
+                Some(script_type(&mut payload)?)
+            } else {
+                None
+            },
+            constructor_parameters: payload
+                .list(|payload| Ok((payload.string()?, script_type(payload)?)))?,
+            implicit_receivers: payload.list(script_type)?,
+            provided_properties: payload
+                .list(|payload| Ok((payload.string()?, script_type(payload)?)))?,
+            default_imports: payload.list(|payload| payload.string())?,
+            is_standalone: payload.byte()? != 0,
+            other_keys: payload.list(|payload| payload.string())?,
+        })),
         FAILED => Ok(Reply::Failed(payload.string()?)),
         tag => Err(malformed(format!("unknown reply {tag}"))),
     }
+}
+
+fn script_type(payload: &mut Payload) -> io::Result<ScriptType> {
+    Ok(ScriptType {
+        name: payload.string()?,
+        nullable: payload.byte()? != 0,
+        arguments: payload.list(script_type)?,
+    })
 }
 
 pub(crate) fn write_frame(out: &mut impl Write, payload: &[u8]) -> io::Result<()> {

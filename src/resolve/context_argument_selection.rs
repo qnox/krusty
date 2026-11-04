@@ -76,6 +76,9 @@ impl super::Checker<'_> {
                         classifier: None,
                         context_binding: None,
                         singleton: self.implicit_singleton_value(actual, receiver.current),
+                        construction_sites: self
+                            .implicit_receiver_selection(receiver)
+                            .construction_sites,
                     });
                 crate::trace_compiler!(
                     "resolve",
@@ -139,6 +142,12 @@ impl super::Checker<'_> {
                             classifier: None,
                             context_binding,
                             singleton: self.implicit_singleton_value(ty, current),
+                            construction_sites:
+                                super::constructor_receiver_frames::scoped_construction_sites(
+                                    &self.constructor_receiver_frames,
+                                    scope,
+                                    receiver_depth,
+                                ),
                         });
                     (argument, ty)
                 }
@@ -167,6 +176,9 @@ impl super::Checker<'_> {
                                 flow_identity: selected_identity,
                             }),
                             singleton: self.implicit_singleton_value(ty, receiver.current),
+                            construction_sites: self
+                                .implicit_receiver_selection(receiver)
+                                .construction_sites,
                         })
                     } else {
                         ResolvedContextArgument::Binding {

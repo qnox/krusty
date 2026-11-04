@@ -27,6 +27,7 @@ mod deferred_local_headers;
 mod delegates;
 mod demanded_source_call;
 mod diagnostics;
+use diagnostics::ProductionSignatureDiagnostic;
 mod file_import_scopes;
 mod generated_member_header;
 mod header_projection;
@@ -132,16 +133,6 @@ struct ProductionSignatureSemantics<'a> {
 struct DeclarationTypeParameters {
     formals: Vec<String>,
     bounds: Vec<Vec<Ty>>,
-}
-
-#[derive(Clone)]
-struct ProductionSignatureDiagnostic {
-    declaration: crate::fir::DeclarationId,
-    file: u32,
-    span: Span,
-    message: String,
-    identity: Option<crate::diag::DiagnosticIdentity>,
-    unconditional: bool,
 }
 
 struct ExplicitContextCall {
@@ -534,14 +525,12 @@ impl ProductionSignatureSemantics<'_> {
                 None => None,
             })
             .unwrap_or(stub.range);
-        diagnostics.push(ProductionSignatureDiagnostic {
+        diagnostics.push(ProductionSignatureDiagnostic::conditional(
             declaration,
-            file: stub.source.raw(),
+            stub.source.raw(),
             span,
-            message: RECURSIVE_INFERENCE_MESSAGE.to_string(),
-            identity: None,
-            unconditional: false,
-        });
+            RECURSIVE_INFERENCE_MESSAGE.to_string(),
+        ));
         crate::fir::DiagnosticId::from_raw(diagnostics.len() as u32)
     }
 
@@ -604,55 +593,9 @@ impl ProductionSignatureSemantics<'_> {
         }) {
             return crate::fir::DiagnosticId::from_raw(index as u32 + 1);
         }
-        diagnostics.push(ProductionSignatureDiagnostic {
-            declaration: owner,
-            file,
-            span,
-            message,
-            identity: None,
-            unconditional: false,
-        });
-        crate::fir::DiagnosticId::from_raw(diagnostics.len() as u32)
-    }
-
-    fn record_source_diagnostic(
-        &self,
-        declaration: crate::fir::DeclarationId,
-        origin: crate::fir::OriginId,
-        message: String,
-    ) -> crate::fir::DiagnosticId {
-        let fallback = self
-            .headers
-            .stub(declaration)
-            .map(|stub| (stub.source.raw(), stub.range));
-        let location = match self.headers.signature_origins.get(origin) {
-            Some(crate::fir::Origin::Source { file, span }) => Some((file.raw(), span)),
-            Some(crate::fir::Origin::Synthetic { cause, .. }) => {
-                match self.headers.signature_origins.get(cause) {
-                    Some(crate::fir::Origin::Source { file, span }) => Some((file.raw(), span)),
-                    Some(crate::fir::Origin::Synthetic { .. }) | None => None,
-                }
-            }
-            None => None,
-        }
-        .or(fallback);
-        let Some((file, span)) = location else {
-            return Self::failure();
-        };
-        let mut diagnostics = self.diagnostics.borrow_mut();
-        if let Some(index) = diagnostics.iter().position(|diagnostic| {
-            diagnostic.file == file && diagnostic.span == span && diagnostic.message == message
-        }) {
-            return crate::fir::DiagnosticId::from_raw(index as u32 + 1);
-        }
-        diagnostics.push(ProductionSignatureDiagnostic {
-            declaration,
-            file,
-            span,
-            message,
-            identity: None,
-            unconditional: false,
-        });
+        diagnostics.push(ProductionSignatureDiagnostic::conditional(
+            owner, file, span, message,
+        ));
         crate::fir::DiagnosticId::from_raw(diagnostics.len() as u32)
     }
 
@@ -872,14 +815,12 @@ impl ProductionSignatureSemantics<'_> {
         }) {
             return crate::fir::DiagnosticId::from_raw(index as u32 + 1);
         }
-        diagnostics.push(ProductionSignatureDiagnostic {
+        diagnostics.push(ProductionSignatureDiagnostic::conditional(
             declaration,
             file,
             span,
             message,
-            identity: None,
-            unconditional: false,
-        });
+        ));
         crate::fir::DiagnosticId::from_raw(diagnostics.len() as u32)
     }
 
@@ -903,14 +844,13 @@ impl ProductionSignatureSemantics<'_> {
         {
             return crate::fir::DiagnosticId::from_raw(index as u32 + 1);
         }
-        diagnostics.push(ProductionSignatureDiagnostic {
+        diagnostics.push(ProductionSignatureDiagnostic::unconditional(
             declaration,
             file,
             span,
             message,
-            identity: Some(identity),
-            unconditional: true,
-        });
+            identity,
+        ));
         crate::fir::DiagnosticId::from_raw(diagnostics.len() as u32)
     }
 
@@ -2194,7 +2134,7 @@ impl ProductionSignatureSemantics<'_> {
                 )) = resolver.select_receiver_function_with_params_tracking(
                     receiver,
                     member_spelling,
-                    &selected_arguments,
+                    crate::symbol_resolver::FamilyArguments::Shared(&selected_arguments),
                     type_arguments,
                     &callables,
                     None,
@@ -4160,7 +4100,11 @@ pub(crate) fn finalized_streamed_signature_index(
     let explicit_diagnostics = explicit_type_semantics.diagnostics.borrow();
     // Parent findings retain their original classifier-publication position. Their cached facts
     // are needed by inference now, but the later header publication replays those findings once.
-    diagnostics::emit_unconditional(diags, &explicit_diagnostics[..parent_diagnostic_start]);
+    diagnostics::emit_unconditional(
+        diags,
+        &explicit_diagnostics[..parent_diagnostic_start],
+        &diagnostics::nothing_published,
+    );
     if !failed.is_empty() {
         crate::trace_compiler!(
             "fir",
@@ -4172,6 +4116,7 @@ pub(crate) fn finalized_streamed_signature_index(
             &explicit_diagnostics[..parent_diagnostic_start],
             &failed_declarations,
             false,
+            &diagnostics::nothing_published,
         );
     }
     let explicit_publication_diagnostics = explicit_diagnostics.len();
@@ -4250,7 +4195,11 @@ pub(crate) fn finalized_streamed_signature_index(
     finalization_failures.extend(auxiliary_failures);
     finalization_failures.sort_by_key(|(declaration, _)| declaration.raw());
     finalization_failures.dedup_by_key(|(declaration, _)| *declaration);
-    diagnostics::emit_unconditional(diags, &semantics.diagnostics.borrow());
+    diagnostics::emit_unconditional(
+        diags,
+        &semantics.diagnostics.borrow(),
+        &diagnostics::published_in(&index),
+    );
     let solver_diagnostics = semantics.diagnostics.borrow().len();
     if !failed.is_empty() || !finalization_failures.is_empty() {
         crate::trace_compiler!(
@@ -4265,15 +4214,16 @@ pub(crate) fn finalized_streamed_signature_index(
             .iter()
             .filter_map(|(_, diagnostic)| *diagnostic)
             .collect::<crate::fx_hash::HashSet<_>>();
-        for (index, diagnostic) in semantics.diagnostics.borrow().iter().enumerate() {
-            let identity = crate::fir::DiagnosticId::from_raw(index as u32 + 1);
+        let published = diagnostics::published_in(&index);
+        for (ordinal, diagnostic) in semantics.diagnostics.borrow().iter().enumerate() {
+            let identity = crate::fir::DiagnosticId::from_raw(ordinal as u32 + 1);
             if diagnostic.unconditional
                 || (!failed_declarations.contains(&diagnostic.declaration)
                     && !selected_diagnostics.contains(&identity))
             {
                 continue;
             }
-            diagnostics::emit_production_signature_diagnostic(diags, diagnostic);
+            diagnostics::emit_production_signature_diagnostic(diags, diagnostic, &published);
         }
         failed.extend(
             finalization_failures
@@ -4292,7 +4242,11 @@ pub(crate) fn finalized_streamed_signature_index(
     macro_rules! emit_publication_diagnostics {
         () => {{
             let recorded = semantics.diagnostics.borrow();
-            diagnostics::emit_unconditional(diags, &recorded[publication_diagnostics..]);
+            diagnostics::emit_unconditional(
+                diags,
+                &recorded[publication_diagnostics..],
+                &diagnostics::published_in(&index),
+            );
         }};
         ($declaration:expr) => {{
             let recorded = semantics.diagnostics.borrow();
@@ -4300,6 +4254,7 @@ pub(crate) fn finalized_streamed_signature_index(
                 diags,
                 &recorded[publication_diagnostics..],
                 $declaration,
+                &diagnostics::published_in(&index),
             );
             publication_diagnostics = recorded.len();
         }};
@@ -4312,6 +4267,7 @@ pub(crate) fn finalized_streamed_signature_index(
                 diags,
                 &recorded[publication_diagnostics..],
                 declaration,
+                &diagnostics::published_in(&index),
             );
             drop(recorded);
             failed.push(declaration);
@@ -4331,7 +4287,7 @@ pub(crate) fn finalized_streamed_signature_index(
         super::plugin_status::OpenByDefault::collect(headers, table, &classifier_types);
     super::plugin_noarg::NoArgConstructors::collect(headers, table, &classifier_types, diags)
         .publish(&mut index);
-    index.publish_sam_with_receiver_annotations(&table.sam_with_receiver_annotations);
+    index.publish_annotation_conventions(&table.annotation_conventions);
     for stub in &headers.stubs {
         let anchor = headers
             .declarations
@@ -4750,6 +4706,7 @@ pub(crate) fn finalized_streamed_signature_index(
         &recorded[explicit_publication_diagnostics..],
         &failed_aliases,
         true,
+        &diagnostics::published_in(&index),
     );
     drop(recorded);
     failed.extend(alias_failures);

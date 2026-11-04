@@ -2726,17 +2726,6 @@ impl<'a> Parser<'a> {
             self.lexical_type_parameters = enclosing_type_parameters;
         }
 
-        if is_inner && supports_inner && !enclosing_instance_exists {
-            // An object is a singleton, so it cannot provide the per-instance receiver an `inner
-            // class` requires. Consume the unsupported declaration without publishing a falsely
-            // constructible classifier. The child parse may have tentatively hoisted descendants,
-            // so remove that declaration-list suffix with the unsupported owner as one atomic unit.
-            // Other classifier kinds ignore an inapplicable `inner` modifier rather than acquiring
-            // class-only capture metadata.
-            self.file.decls.truncate(start);
-            return true;
-        }
-
         if matches!(nested.kind, ClassKind::Class | ClassKind::Interface) {
             nested.modality = modality_from_modifiers(modifiers);
             nested.final_modifier = modifiers.iter().any(|modifier| modifier == "final");
@@ -2750,7 +2739,11 @@ impl<'a> Parser<'a> {
                 .any(|modifier| modifier == "inline" || modifier == "value");
             nested.value_modifier_span = value_modifier_span;
         }
-        if is_inner && supports_inner {
+        // An object or an interface cannot provide the per-instance receiver an `inner class`
+        // requires: the frontend rejects the modifier there, so the class stays an ordinary nested
+        // one. Other classifier kinds ignore an inapplicable `inner` modifier rather than acquiring
+        // class-only capture metadata.
+        if is_inner && supports_inner && enclosing_instance_exists {
             nested.inner_of = Some(outer.to_string());
         }
         self.register_hoisted_nested_classifier(outer, start, nested, modifiers);
@@ -3504,6 +3497,7 @@ impl<'a> Parser<'a> {
             base_args,
             interface_delegations,
         ) = self.parse_supertypes();
+        let hoisted_from = self.file.decls.len();
         let (methods, body_props, init_order, type_aliases) = self.parse_object_body(&name);
         let end = self.t[self.i.saturating_sub(1)].span;
         let synth = ClassDecl {
@@ -3561,6 +3555,7 @@ impl<'a> Parser<'a> {
             Span::new(span.lo, end.hi),
         );
         self.file.anonymous_object_classes.insert(construction, did);
+        self.file.adopt_hoisted_classifiers(did, hoisted_from);
         construction
     }
 
@@ -3590,10 +3585,8 @@ impl<'a> Parser<'a> {
             loop {
                 self.skip_newlines();
                 let mods = self.parse_member_decl_prefix();
-                // Named singleton owners use the same classifier-registration invariant as class
-                // owners. The flag only excludes `inner` classes, whose semantics require an
-                // enclosing instance that a singleton cannot supply. Anonymous-object bodies use
-                // `parse_object_body` instead and have no stable owner identity to publish here.
+                // Named singletons exclude `inner` classes, which require an enclosing instance.
+                // Anonymous objects publish their classifier owner after `parse_object_body`.
                 if self.parse_and_register_nested_classifier(&name, &mods, false) {
                     continue;
                 }
@@ -4695,8 +4688,8 @@ mod tests {
         exact_members.sort_unstable();
         assert_eq!(
             exact_members,
-            vec!["`missing name`", "`missing safe`", "missing"],
-            "rebuilt safe calls must each have one live exact-name entry"
+            vec!["`missing name`", "`missing safe`", "missing", "y"],
+            "each rebuilt safe call and `y = 1`'s kept `y.assign(1)` has one exact-name entry"
         );
     }
 

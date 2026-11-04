@@ -31,7 +31,9 @@ pub(super) fn builtin_erased(ty: Ty) -> Ty {
         TyKind::TyParam(_, bound) => builtin_erased(bound),
         // Nullability is erased from reference classifiers, but not from scalar representation: a
         // nullable scalar occupies its wrapper reference in a JVM descriptor.
-        TyKind::Nullable(inner) | TyKind::PlatformNullable(inner) => {
+        TyKind::Nullable(inner)
+        | TyKind::PlatformNullable(inner)
+        | TyKind::MutabilityFlexible(inner) => {
             inner.boxed_ref().unwrap_or_else(|| builtin_erased(inner))
         }
         TyKind::Obj(name, args) if !args.is_empty() => Ty::obj_name(name),

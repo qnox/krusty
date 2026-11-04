@@ -7,6 +7,10 @@ use crate::klib_libraries::KlibDeclarationBodies;
 use crate::libraries::{KlibBodyCallable, KlibBodyClassContract, KlibBodyClassParameters};
 use crate::metadata::klib_ir::tree::{KlibIrArena, KlibIrClass, KlibIrFunction, KlibIrVariance};
 use crate::metadata::klib_ir::KlibIrSymbolKind;
+use crate::metadata::klib_ir::{
+    tree::{KlibIrNullability, KlibIrType},
+    KlibIrSignature,
+};
 use crate::types::{Ty, TyKind, TypeVariance};
 
 pub(super) struct ClassMemberHeader<'a, 'b> {
@@ -20,6 +24,38 @@ pub(super) struct ClassMemberHeader<'a, 'b> {
 
 fn mismatch(detail: &str) -> KlibBodyDeclineReason {
     KlibBodyDeclineReason::SignatureMismatch(detail.to_owned())
+}
+
+/// Semantic type conversion interns class paths, so prove the raw identity, including its mask,
+/// before using a member's dispatch receiver as a semantic class application.
+pub(super) fn authenticate_receiver(
+    class: &KlibBodyClassContract,
+    arena: &KlibIrArena,
+    function: &KlibIrFunction,
+) -> Result<(), KlibBodyDeclineReason> {
+    let dispatch = function
+        .dispatch_receiver
+        .as_ref()
+        .ok_or_else(|| mismatch("a class member has no serialized dispatch receiver"))?;
+    if !matches!(arena.ty(dispatch.ty), KlibIrType::Simple { classifier,
+        nullability: KlibIrNullability::NotSpecified | KlibIrNullability::DefinitelyNotNull, .. }
+        if classifier.kind == KlibIrSymbolKind::Class
+            && classifier.signature == KlibIrSignature::Public(class.signature.clone()))
+    {
+        return Err(mismatch(
+            "the serialized member receiver names a different class identity",
+        ));
+    }
+    Ok(())
+}
+
+pub(super) fn declared_receiver(class: &KlibBodyClassContract) -> Ty {
+    if class.parameters.formals.is_empty() {
+        crate::types::builtin_semantic(class.classifier)
+            .unwrap_or_else(|| Ty::obj_name(class.classifier))
+    } else {
+        Ty::obj_args_name(class.classifier, &class.parameters.formals)
+    }
 }
 
 pub(super) fn authenticate<'a, 'b>(

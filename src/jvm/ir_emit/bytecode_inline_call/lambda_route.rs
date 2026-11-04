@@ -99,79 +99,13 @@ impl Emitter<'_> {
                 return splice(SpliceReason::CaptureOutsideFrame);
             }
         }
-        // Whether the call's objects regenerate is settled before any code is emitted: the body is
-        // inlined once with each lambda's shape in place of its body, and nothing of it is kept.
+        // Whether the call's objects regenerate is settled from the callee's facts before any code
+        // is emitted; once routed here, a failure to regenerate is an error, never another route.
         if inliner::constructs_regenerated_object(&callee, &self.bodies) {
             for &argument in &lambda_arguments {
                 if self.lambda_reaches_private_members(argument)? {
                     return splice(SpliceReason::PrivateMemberInObject);
                 }
-            }
-            let mut lambdas = Vec::new();
-            let mut captured = Vec::new();
-            let mut lambda_bindings = HashMap::default();
-            for (index, &argument) in args.iter().enumerate() {
-                if !lambda_arguments.contains(&argument) {
-                    continue;
-                }
-                let (mut lambda, captures) = self.lambda_shape(argument)?;
-                let start = captured.len();
-                for (capture, ty) in captures {
-                    captured.push(Parameter {
-                        category: Category::of_descriptor(&type_descriptor(ty)),
-                        binding: self.capture_binding(capture, ty),
-                    });
-                }
-                lambda.captured = start..captured.len();
-                lambda_bindings.insert(index, lambdas.len());
-                lambdas.push(lambda);
-            }
-            let loaded = self
-                .load_default_lambdas(call, &default_lambdas, &physical)
-                .and_then(|loaded| {
-                    for (operand, mut lambda) in loaded {
-                        default_bridge::append_default_lambda_captures(&mut lambda, &mut captured)?;
-                        lambda_bindings.insert(operand, lambdas.len());
-                        lambdas.push(lambda);
-                    }
-                    Ok(())
-                });
-            loaded.map_err(|error| {
-                crate::trace_compiler!("splice", "a default lambda is not inlined: {error:?}");
-                "a default lambda of the call cannot be inlined"
-            })?;
-            let parameters = self.call_parameters(
-                &supplies,
-                &physical,
-                args,
-                &lambda_bindings,
-                captured,
-                &lambdas,
-            );
-            let probe = inliner::inline(
-                &callee,
-                &parameters,
-                &lambdas,
-                target.inline_only,
-                self.inline_splice_base(self.frame.size()),
-                call.reified,
-                inliner::InliningContext {
-                    lines: &mut UnmappedLines,
-                    classes: &self.bodies,
-                    objects: &mut self.call_objects(
-                        call_expression,
-                        target.name,
-                        false,
-                        SourceMap::default(),
-                    ),
-                    enum_entries: &mut self.call_enum_entries(false),
-                },
-            );
-            if let Err(error) = probe {
-                crate::trace_compiler!("splice", "the call's objects do not regenerate: {error:?}");
-                return splice(SpliceReason::CalleeShape(
-                    inliner::UnsupportedShape::AnonymousObject,
-                ));
             }
         }
         Ok(LambdaCallRoute::MethodInliner(callee, default_lambdas))

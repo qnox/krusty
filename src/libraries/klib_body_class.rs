@@ -4,6 +4,9 @@ use crate::metadata::id_signature::KlibPublicIdSignature;
 use crate::metadata::semantic::KotlinModality;
 use crate::types::{Ty, TypeName, TypeVariance};
 
+#[cfg(test)]
+pub(crate) mod test_fixture;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct KlibBodyClassParameters {
     pub(crate) formals: Box<[Ty]>,

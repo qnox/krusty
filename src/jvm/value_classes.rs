@@ -59,15 +59,16 @@ use crate::jvm::names::{method_descriptor, property_getter_name, type_descriptor
 use crate::jvm::operation_relocation::clone_below_representation_wrapper;
 use crate::jvm::physical_type::ir_ty_to_jvm;
 use crate::libraries::InlineKind;
-use crate::types::{existing_type_name, type_name, SemanticCallRole, Ty, TyKind, TypeName};
+use crate::types::{type_name, SemanticCallRole, Ty, TyKind, TypeName};
 use body_scopes::{append_inline_body_scopes, collect_reachable, collect_reachable_scoped};
 use boxing_rewrites::{box_wrap, box_wrap_nullable, to_string_wrap};
 use call_results::CallTypes;
 pub(crate) use class_annotations::class_file_annotations;
 pub(crate) use declaration_inventory::record_referenced as record_referenced_value_classes;
+use descriptor_parameters::erase_descriptor;
 pub(crate) use inherited_default_calls::InheritedDefaultStatics;
 use lambda_slots::{boxed_lambda_own_params_from, lambda_sam_params, lambda_slot_is_boxed};
-pub(crate) use member_names::suspend_lambda_invoke_name;
+pub(crate) use member_names::{member_signature_is_mangled, suspend_lambda_invoke_name};
 use member_names::{vc_mangle, vc_mangle_once, vc_member_entry_name, vc_member_impl_name};
 pub(crate) use module_members::*;
 use operand_nullness::{operand_nonnull, operand_null_only};
@@ -327,7 +328,7 @@ pub(crate) fn lower_value_classes(
         .collect::<Vec<_>>();
     for (expression, operation, accessor, physical) in property_accessor_realizations {
         if matches!(ir.expr(expression), IrExpr::PropertyRead { .. }) {
-            ir.physical_types.insert(expression, physical);
+            ir.set_physical_type(expression, physical);
         }
         ir.property_accessor_jvm_realizations
             .insert(operation, (accessor, physical));
@@ -709,11 +710,7 @@ pub(crate) fn lower_value_classes(
     // `(owner-internal, plain name, arity)` → mangled name for declaration-owned JVM synthetics:
     // annotation markers and override bridges that name their own target method.
     let mut mangle_map: HashMap<(TypeName, String, usize), String> = HashMap::default();
-    let property_annotation_markers = ir
-        .property_annotation_markers
-        .values()
-        .copied()
-        .collect::<HashSet<_>>();
+    let property_annotation_markers = ir.jvm_property_annotation_markers().collect::<HashSet<_>>();
     // `(fid, param idx, boxed value-class Ty)` for DEFAULTED nullable-underlying value-class params —
     // the base method unboxes them (below), but its `$default` stub + call site keep them boxed.
     let mut default_boxed: Vec<(u32, usize, Ty)> = Vec::new();
@@ -730,6 +727,13 @@ pub(crate) fn lower_value_classes(
     let mut lowered_value_members = HashSet::default();
     // Functions whose physical name the mangling below changed, by stable identity.
     let mut renamed_functions = HashSet::default();
+    // kotlinc names a property accessor's extension receiver after the property, not after the
+    // accessor's mangled name.
+    let property_accessors: HashSet<u32> = ir
+        .local_property_layouts
+        .values()
+        .flat_map(crate::ir::IrLocalPropertyLayout::accessor_functions)
+        .collect();
     for (fid, f) in ir.functions.iter_mut().enumerate() {
         let is_box_impl = f.name == "box-impl";
         // A USER value-class member function's body runs on the BOXED object; its value-class-typed
@@ -803,6 +807,13 @@ pub(crate) fn lower_value_classes(
                 if let Some(owner) = f.dispatch_receiver {
                     let key = (owner, source_name.clone(), orig_params[fid].len());
                     mangle_map.insert(key, mangled.clone());
+                }
+                if let Some(suffix) = mangled
+                    .strip_prefix(&source_name)
+                    .filter(|_| !vc_member && !property_accessors.contains(&(fid as u32)))
+                {
+                    ir.value_class_mangle_suffixes
+                        .insert(fid as u32, suffix.to_owned());
                 }
                 f.name = mangled;
                 renamed_functions.insert(fid as u32);
@@ -983,7 +994,7 @@ pub(crate) fn lower_value_classes(
         })
         .collect();
     for (call, classifier) in boxed_calls {
-        ir.physical_types.insert(call, Ty::obj_name(classifier));
+        ir.set_physical_type(call, Ty::obj_name(classifier));
     }
     // An intrinsic point's value comes through a generic slot: a
     // `suspendCoroutineUninterceptedOrReturn<T>` block returns `Any?`. A value-class `T` therefore crosses as its box (or null for `T?`), never as the
@@ -1003,8 +1014,7 @@ pub(crate) fn lower_value_classes(
         })
         .collect::<Vec<_>>();
     for (expression, classifier) in intrinsic_boxes {
-        ir.physical_types
-            .insert(expression, Ty::obj_name(classifier));
+        ir.set_physical_type(expression, Ty::obj_name(classifier));
     }
     for (fid, name, params, ret) in declared_sigs {
         ir.vc_declared_sigs.insert(fid, (name, params, ret));
@@ -1383,8 +1393,8 @@ pub(crate) fn lower_value_classes(
                 // lowerer's generic-erasure self-cast must disappear before property access decides
                 // whether to call `unbox-impl`. A nullable value class whose representation is BOXED
                 // deliberately does not match this arm.
-                IrExpr::RefGet { .. } => ir.logical_types.get(arg).is_some_and(
-                    |logical| matches!(repr_of_ty(logical, &under), Repr::Unboxed(value_class) if value_class == x),
+                IrExpr::RefGet { .. } => ir.logical_type(*arg).is_some_and(
+                    |logical| matches!(repr_of_ty(&logical, &under), Repr::Unboxed(value_class) if value_class == x),
                 ),
                 _ => false,
             };
@@ -1637,12 +1647,7 @@ pub(crate) fn lower_value_classes(
     // A same-module call can be wrapped in an operand-ordering block. Common lowering records the
     // checked result on that exact block, while its terminal call retains the declaration result.
     // Follow only Block.value chains: conversions are distinct nodes and deliberately stop here.
-    let mut logical_results = ir
-        .logical_types
-        .iter()
-        .map(|(&expression, &result)| (expression, result))
-        .collect::<Vec<_>>();
-    logical_results.sort_unstable_by_key(|&(expression, _)| expression);
+    let logical_results = ir.logical_types().collect::<Vec<_>>();
     for (expression, result) in logical_results {
         if let Some(call) = crate::jvm::call_result_boundaries::terminal_call(&ir.exprs, expression)
         {
@@ -1708,7 +1713,7 @@ pub(crate) fn lower_value_classes(
             slots,
             under: &under,
             types: CallTypes::of(ir),
-            physical: &ir.physical_types,
+            physical: ir.node_types(),
             field_getters: &field_getters,
             carrier_unboxes: &carrier_unboxes,
         };
@@ -1819,12 +1824,12 @@ pub(crate) fn lower_value_classes(
                     },
                     repr_ctx.unboxed_value_class(*receiver, &callable_under),
                     repr_ctx.types.get(receiver),
-                    repr_ctx.physical.get(receiver),
+                    repr_ctx.physical.physical(*receiver),
                     args.iter()
                         .map(|argument| (
                             *argument,
                             repr_ctx.types.get(argument),
-                            repr_ctx.physical.get(argument)
+                            repr_ctx.physical.physical(*argument)
                         ))
                         .collect::<Vec<_>>()
                 );
@@ -1834,8 +1839,7 @@ pub(crate) fn lower_value_classes(
         // A value-class callee still shaped as a function-value call has no selected member.
         // Do not invent `invoke-impl` from a name and an arity, and do not box it.
         if function_invocation::missing_member_implementation(
-            &ir.logical_types,
-            &ir.suspend_calls,
+            ir,
             &under,
             &repr_ctx,
             id,
@@ -1919,8 +1923,7 @@ pub(crate) fn lower_value_classes(
                 // has its carrier result stamped separately and does not satisfy this condition. A
                 // read of a generic property (`val boxed: T?`) is the same erased slot.
                 && !ir
-                    .physical_types
-                    .get(arg)
+                    .physical_type(*arg)
                     .is_some_and(|physical| physical.is_erased_top())
                 && !matches!(&ir.exprs[*arg as usize],
                     IrExpr::PropertyRead { ty, .. } if ty.non_null().is_ty_param())
@@ -2299,7 +2302,7 @@ pub(crate) fn lower_value_classes(
         let rewrite = match rw {
             Some(Rw::Ctor(e)) => Some(e),
             Some(Rw::BoxedValue { expr, owner }) => {
-                ir.physical_types.insert(id, Ty::obj_name(owner));
+                ir.set_physical_type(id, Ty::obj_name(owner));
                 Some(expr)
             }
             Some(Rw::ValueConstruction {
@@ -2339,11 +2342,11 @@ pub(crate) fn lower_value_classes(
                 // spelling or by re-inferring a substitution after this boundary.
                 let applied_result = applied_call_results.get(&id).copied().unwrap_or(result);
                 sole_property_coercions.insert(id);
-                ir.logical_types.insert(id, result);
+                ir.set_logical_type(id, result);
                 if let Repr::Unboxed(nested) = repr_of_ty(&result, &under) {
                     carrier_unboxes.insert(id, nested);
                 }
-                ir.physical_types.insert(
+                ir.set_physical_type(
                     id,
                     under
                         .get(&owner)
@@ -2400,7 +2403,7 @@ pub(crate) fn lower_value_classes(
                 // carrier implementation. Any earlier property/call stamp described the pre-rewrite
                 // box; publish the implementation result now so a following sole-property read does
                 // not try to unbox a carrier that is already primitive/reference-underlying.
-                ir.physical_types.insert(
+                ir.set_physical_type(
                     id,
                     representation::carrier_slot(result, &under).unwrap_or(result),
                 );
@@ -2591,7 +2594,7 @@ pub(crate) fn lower_value_classes(
             slots,
             under: &under,
             types: CallTypes::of(ir),
-            physical: &ir.physical_types,
+            physical: ir.node_types(),
             field_getters: &field_getters,
             carrier_unboxes: &carrier_unboxes,
         };
@@ -2746,7 +2749,7 @@ pub(crate) fn lower_value_classes(
                     if !carrier.is_erased_top()
                         && repr_ctx
                             .physical
-                            .get(arg)
+                            .physical(*arg)
                             .is_some_and(|physical| physical.non_null() == carrier.non_null())
                     {
                         retarget.push((id, carrier));
@@ -2779,7 +2782,7 @@ pub(crate) fn lower_value_classes(
                 if let Target::UnboxedX(target) = target(type_operand, &under) {
                     if repr_ctx
                         .physical
-                        .get(arg)
+                        .physical(*arg)
                         .is_some_and(|physical| physical.is_erased_top())
                     {
                         ops.push((*arg, BoxOp::unbox(target, type_operand.is_nullable())));
@@ -2881,8 +2884,7 @@ pub(crate) fn lower_value_classes(
                         Repr::Boxed(x)
                             if is_vc[*class as usize]
                                 && ir
-                                    .physical_types
-                                    .get(receiver)
+                                    .physical_type(*receiver)
                                     .is_some_and(|ty| ty.is_erased_top()) =>
                         {
                             ops.push((*receiver, BoxOp::Narrow(x)));
@@ -3257,7 +3259,7 @@ pub(crate) fn lower_value_classes(
                 } = &**call_callee =>
                 {
                     let element =
-                        array_element_type(&ir.exprs, repr_ctx.slots, &ir.logical_types, *array);
+                        array_element_type(&ir.exprs, repr_ctx.slots, ir.node_types(), *array);
                     crate::trace_compiler!(
                         "value_classes",
                         "array set expr {id} receiver={array} {:?} element={element:?} args={args:?}",
@@ -3376,7 +3378,7 @@ pub(crate) fn lower_value_classes(
             slots: &slot_types[function],
             under: &under,
             types: CallTypes::of(ir),
-            physical: &ir.physical_types,
+            physical: ir.node_types(),
             field_getters: &field_getters,
             carrier_unboxes: &carrier_unboxes,
         };
@@ -3414,7 +3416,7 @@ pub(crate) fn lower_value_classes(
                 slots,
                 under: &under,
                 types: CallTypes::of(ir),
-                physical: &ir.physical_types,
+                physical: ir.node_types(),
                 field_getters: &field_getters,
                 carrier_unboxes: &carrier_unboxes,
             };
@@ -3872,7 +3874,7 @@ impl<'a> ReprInputs<'a> {
             slots: self.slots,
             under: self.under,
             types: CallTypes::of(ir),
-            physical: &ir.physical_types,
+            physical: ir.node_types(),
             field_getters: self.field_getters,
             carrier_unboxes: self.carrier_unboxes,
         }
@@ -3887,7 +3889,7 @@ struct ReprCtx<'a> {
     slots: &'a HashMap<u32, Ty>,
     under: &'a Under,
     types: CallTypes<'a>,
-    physical: &'a HashMap<u32, Ty>,
+    physical: &'a crate::ir::IrNodeTypeColumn,
     field_getters: &'a FieldGetters,
     carrier_unboxes: &'a CarrierUnboxes,
 }
@@ -3920,7 +3922,7 @@ impl ReprCtx<'_> {
         }
         if self
             .physical
-            .get(&id)
+            .physical(id)
             .and_then(|ty| ty.non_null().obj_internal())
             .is_some_and(|classifier| known.contains_key(&classifier))
         {
@@ -3999,10 +4001,10 @@ fn vc_underlying_nullable(t: &Ty, under: &Under) -> bool {
 fn array_element_type(
     exprs: &[IrExpr],
     slots: &HashMap<u32, Ty>,
-    logical: &HashMap<u32, Ty>,
+    logical: &crate::ir::IrNodeTypeColumn,
     id: ExprId,
 ) -> Option<Ty> {
-    if let Some(element) = logical.get(&id).and_then(|ty| ty.array_elem()) {
+    if let Some(element) = logical.logical(id).and_then(|ty| ty.array_elem()) {
         return Some(element);
     }
     match &exprs[id as usize] {
@@ -4086,8 +4088,8 @@ fn repr(context: &ReprCtx<'_>, id: ExprId) -> Repr {
     // (notably at a suspend `Object` boundary). That representation fact is later than the declaration's
     // semantic return type and therefore wins before structural call analysis.
     if let Some(classifier) = physical
-        .get(&id)
-        .and_then(|ty| (*ty).obj_internal())
+        .physical(id)
+        .and_then(|ty| ty.obj_internal())
         .filter(|classifier| under.contains_key(classifier))
     {
         // Argument normalization can wrap a selected call in a block while preserving the declaration's
@@ -4132,7 +4134,7 @@ fn repr(context: &ReprCtx<'_>, id: ExprId) -> Repr {
             let recorded = operation.unwrap_or(id);
             if let Some(declared) = types.unboxed_declared_property(recorded, under) {
                 repr_of_ty(&declared, under)
-            } else if physical.get(&id).is_some_and(|ty| ty.is_erased_top()) {
+            } else if physical.physical(id).is_some_and(|ty| ty.is_erased_top()) {
                 ty.non_null()
                     .obj_internal()
                     .filter(|owner| under.contains_key(owner))
@@ -4211,7 +4213,7 @@ fn repr(context: &ReprCtx<'_>, id: ExprId) -> Repr {
             let fq_name = type_operand.non_null().obj_internal().unwrap();
             match repr(context, *arg) {
                 Repr::Unboxed(x) if x == fq_name => Repr::Unboxed(x),
-                _ if physical.get(arg).is_some_and(|physical| {
+                _ if physical.physical(*arg).is_some_and(|physical| {
                     physical.is_reference() && physical.non_null().obj_internal() != Some(fq_name)
                 }) =>
                 {
@@ -4292,14 +4294,13 @@ fn prop_access(
             "prop access {} receiver arg={arg} {:?} logical={:?} physical={:?}",
             x.render(),
             &ir.exprs[*arg as usize],
-            ir.logical_types.get(arg),
-            ir.physical_types.get(arg),
+            ir.logical_type(*arg),
+            ir.physical_type(*arg),
         );
     }
     let inner = if inferred_boxed {
         let dispatch = if ir
-            .physical_types
-            .get(&receiver)
+            .physical_type(receiver)
             .is_some_and(|ty| ty.is_erased_top())
         {
             ir.add_expr(IrExpr::TypeOp {
@@ -4321,7 +4322,7 @@ fn prop_access(
     // shares `Inner`'s carrier directly; stamping its producer as generic Object would make a
     // coroutine caller cast that raw carrier to the `Inner` box.
     if property_has_erased_generic_slot(x, result, under) {
-        ir.physical_types.insert(inner, u);
+        ir.set_physical_type(inner, u);
     }
     // A generic value class keeps an erased `Object` carrier, but an applied property read
     // (`X<Int>.x`) has a concrete Kotlin result. Preserve that selected result so a real conversion
@@ -4491,7 +4492,7 @@ fn box_ref_tail(ir: &mut IrFile, id: ExprId, x: TypeName, inputs: ReprInputs<'_>
     // type (`suspendCoroutineUninterceptedOrReturn<T> { ... }` may end in a `Unit` block). Its exact physical result belongs
     // to the point as a whole; never recurse through that semantic boundary and reinterpret the block
     // tail as the enclosing function's value-class result.
-    if ir.physical_types.get(&id).is_some_and(|ty| {
+    if ir.physical_type(id).is_some_and(|ty| {
         ty.non_null()
             .obj_internal()
             .is_some_and(|classifier| classifier == x)
@@ -4609,8 +4610,7 @@ fn box_nullable_vc_tail(
             // return descriptor — a suspend continuation's `kotlin/Result` resume value) is left untouched.
             if is_tail {
                 let logical_is_x = ir
-                    .logical_types
-                    .get(&id)
+                    .logical_type(id)
                     .and_then(|t| t.non_null().obj_internal())
                     .is_some_and(|n| n == x);
                 let repr_unboxed_x = matches!(
@@ -4645,41 +4645,6 @@ fn sam_declares_vc_return(
     ir.lambda_sam_signature
         .get(&impl_fn)
         .is_some_and(|(_, ret)| ret.non_null().obj_internal() == Some(x))
-}
-
-/// Erase the value-class types in a JVM method descriptor: each `L<fq>;` whose `<fq>` is a value class
-/// becomes its underlying descriptor (`(LIv;)Ljava/lang/String;` → `(I)Ljava/lang/String;`).
-fn erase_descriptor(descriptor: &str, under: &Under) -> String {
-    let bytes = descriptor.as_bytes();
-    let mut out = String::with_capacity(descriptor.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'L' {
-            let start = i + 1;
-            let mut j = start;
-            while j < bytes.len() && bytes[j] != b';' {
-                j += 1;
-            }
-            let fq = &descriptor[start..j];
-            // A value class in a JVM reference-array component is necessarily BOXED. Erase a
-            // declaration slot `LValue;` to its carrier, but never rewrite the component of
-            // `[LValue;`: doing so silently changes `Array<UInt>` into `IntArray` and likewise turns
-            // `Array<Data>` into the array-valued carrier of `Data`.
-            let underlying = (bytes.get(i.wrapping_sub(1)) != Some(&b'['))
-                .then(|| existing_type_name(fq).and_then(|name| under.get(&name)))
-                .flatten();
-            if let Some(u) = underlying {
-                out.push_str(&desc(&erase(u, under)));
-            } else {
-                out.push_str(&descriptor[i..=j]);
-            }
-            i = j + 1;
-        } else {
-            out.push(bytes[i] as char);
-            i += 1;
-        }
-    }
-    out
 }
 
 fn desc(t: &Ty) -> String {

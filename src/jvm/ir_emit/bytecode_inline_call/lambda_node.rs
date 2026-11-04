@@ -152,8 +152,7 @@ impl Emitter<'_> {
         let arity = usize::from(arity);
         let (semantic, suspend) = match self
             .ir
-            .logical_types
-            .get(&argument)
+            .logical_type(argument)
             .map(|ty| ty.non_null())
             .map(Ty::kind)
         {
@@ -174,10 +173,9 @@ impl Emitter<'_> {
                 );
             }
         };
-        let result_semantic = *self
+        let result_semantic = self
             .ir
-            .logical_types
-            .get(&inline_body)
+            .logical_type(inline_body)
             .ok_or("a placed lambda's body has no checked result type")?;
         let (parameter_types, parameter_coercions) = physical_parameters
             .iter()
@@ -217,12 +215,7 @@ impl Emitter<'_> {
             return Err("a callable reference adapter does not take its captures and parameters");
         }
         let (capture_types, physical_parameters) = physical.split_at(split);
-        let result_semantic = self
-            .ir
-            .logical_types
-            .get(&inline_body)
-            .copied()
-            .unwrap_or(signature.ret);
+        let result_semantic = self.ir.logical_type(inline_body).unwrap_or(signature.ret);
         let (parameter_types, parameter_coercions) = physical_parameters
             .iter()
             .zip(signature.params.iter())
@@ -449,60 +442,6 @@ impl Emitter<'_> {
         }
     }
 
-    /// The literal lambda `argument` as route planning sees it before compiling it: its parameters,
-    /// captured values and names, with a body that only returns; and the caller values it captures.
-    pub(super) fn lambda_shape(
-        &self,
-        argument: u32,
-    ) -> Result<(inliner::Lambda, Vec<(u32, Ty)>), &'static str> {
-        let (lambda, _) = self.literal_lambda(argument)?;
-        let parameter_types: Vec<String> = lambda
-            .parameter_types
-            .iter()
-            .map(|&ty| type_descriptor(ty))
-            .collect();
-        let descriptor = format!(
-            "({}{})V",
-            parameter_types.concat(),
-            lambda
-                .capture_types
-                .iter()
-                .map(|&ty| type_descriptor(ty))
-                .collect::<String>(),
-        );
-        let mut node = MethodNode::new(ACC_STATIC, "invoke", &descriptor);
-        node.max_locals = lambda
-            .parameter_types
-            .iter()
-            .chain(&lambda.capture_types)
-            .map(|&ty| slot_words(ty))
-            .sum();
-        let start = node.new_label();
-        node.nodes = vec![Node::Label(start), Node::Insn(Insn::Op(RETURN))];
-        let shape = inliner::Lambda {
-            node,
-            value_class_parameters: lambda
-                .parameter_coercions
-                .iter()
-                .map(InvokeCoercion::value_class)
-                .collect(),
-            parameter_types,
-            return_type: "V".to_string(),
-            value_class_return: None,
-            captured: 0..0,
-            capture_names: self.capture_names(lambda.impl_fn, lambda.captures.len()),
-            default_class: None,
-            suspend: lambda.suspend,
-        };
-        let captures = lambda
-            .captures
-            .iter()
-            .copied()
-            .zip(lambda.capture_types.iter().copied())
-            .collect();
-        Ok((shape, captures))
-    }
-
     /// Whether the literal lambda `argument`'s body reaches a declaration only its own class may: a
     /// private field (a property's backing field), a private function, an `invokespecial`, or a
     /// nested lambda (which may be materialized as a private method). Inlined into a regenerated
@@ -580,7 +519,7 @@ impl Emitter<'_> {
         callee: &str,
     ) -> Result<LambdaArgument, &'static str> {
         let reference_line = matches!(self.ir.expr(argument), IrExpr::CallableReference(_))
-            .then(|| self.ir.expr_source_lines.get(&argument).copied())
+            .then(|| self.ir.source_line(argument))
             .flatten();
         let (lambda, _) = self.literal_lambda(argument)?;
         let value_class_parameters = lambda
@@ -646,6 +585,10 @@ impl Emitter<'_> {
         // The scratch lambda is a separate method with its own inline-frame identity space.
         let caller_next_inline_frame_identity =
             std::mem::replace(&mut self.next_inline_frame_identity, 0);
+        // It numbers its own inline scopes, as kotlinc's lambda method has a codegen of its own.
+        let caller_inline_scopes = self.inline_scopes;
+        self.inline_scopes = caller_inline_scopes.map(|_| Default::default());
+        let caller_inline_scope_units = std::mem::take(&mut self.inline_scope_units);
         let states_before = self.machine_next_ordinal;
         let caller_continuation = match continuation_slot {
             Some(slot) => self.continuation_slot.replace(slot),
@@ -675,6 +618,8 @@ impl Emitter<'_> {
         self.block_depth = caller_depth;
         let body_locals = std::mem::replace(&mut self.open_locals, caller_locals);
         self.next_inline_frame_identity = caller_next_inline_frame_identity;
+        self.inline_scopes = caller_inline_scopes;
+        self.inline_scope_units = caller_inline_scope_units;
         self.continuation_slot = caller_continuation;
         if self.machine_next_ordinal != states_before {
             return Err("a lambda planned for the inliner started a suspension");
@@ -916,7 +861,7 @@ impl Emitter<'_> {
             })
             .collect();
         let locals: Vec<MethodLocal> = scratch
-            .local_entries()
+            .named_local_entries()
             .iter()
             .map(|(start, length, slot, name, desc)| {
                 let end =

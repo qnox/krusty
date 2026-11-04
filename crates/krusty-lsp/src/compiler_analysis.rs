@@ -369,6 +369,7 @@ fn type_parameters_mentioned(ty: Ty, names: &mut std::collections::HashSet<&'sta
         }
         TyKind::Nullable(inner)
         | TyKind::PlatformNullable(inner)
+        | TyKind::MutabilityFlexible(inner)
         | TyKind::DefinitelyNotNull(inner) => type_parameters_mentioned(inner, names),
         TyKind::InProjection(inner) | TyKind::OutProjection(inner) => {
             type_parameters_mentioned(inner, names)
@@ -432,6 +433,22 @@ struct StandaloneKotlinSymbols;
 
 #[cfg(test)]
 impl krusty::symbol_source::SymbolSource for StandaloneKotlinSymbols {
+    // The core declarations this source hands out carry the core provider's identities, so the
+    // core provider answers for them.
+    fn external_callable(
+        &self,
+        identity: krusty::fir::ExternalCallableId,
+    ) -> Option<krusty::libraries::ExternalCallableRealization> {
+        krusty::libraries::EmptySymbolSource.external_callable(identity)
+    }
+
+    fn external_property(
+        &self,
+        identity: krusty::fir::ExternalPropertyId,
+    ) -> Option<krusty::libraries::ExternalPropertyRealization> {
+        krusty::libraries::EmptySymbolSource.external_property(identity)
+    }
+
     fn package_exists(&self, parent: krusty::types::TypeName, name: &str) -> bool {
         krusty::libraries::EmptySymbolSource.package_exists(parent, name)
     }

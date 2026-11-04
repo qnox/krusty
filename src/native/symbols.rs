@@ -185,6 +185,7 @@ fn mangle_ty(out: &mut String, ty: crate::types::Ty) -> Option<()> {
         }
         TyKind::Nullable(inner) => nested(out, 'N', inner)?,
         TyKind::PlatformNullable(inner) => nested(out, 'Q', inner)?,
+        TyKind::MutabilityFlexible(inner) => nested(out, 'V', inner)?,
         TyKind::InProjection(inner) => nested(out, 'M', inner)?,
         TyKind::OutProjection(inner) => nested(out, 'O', inner)?,
         TyKind::StarProjection(bound) => nested(out, 'S', bound)?,

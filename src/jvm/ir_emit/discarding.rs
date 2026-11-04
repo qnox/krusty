@@ -38,7 +38,7 @@ impl Emitter<'_> {
         // line even when the evaluation leaves no instruction (`Unit`): the next line's mark gives
         // it a `nop` of its own.
         if self.ir.is_jvm_delegate_evaluation(expression) {
-            if let Some(&line) = self.ir.expr_source_lines.get(&expression) {
+            if let Some(line) = self.ir.source_line(expression) {
                 code.mark_line_occupied(line);
             }
         }
@@ -254,15 +254,6 @@ impl Emitter<'_> {
             },
             code,
         );
-    }
-
-    /// A coercion that only reads a call's physical result as its semantic type: the checked
-    /// declaration-result narrowing, or the boundary a dependency call's realization placed over
-    /// the provider's erased result.
-    fn is_call_result_boundary(&self, coercion: u32, arg: u32) -> bool {
-        self.ir.declaration_result_coercions.contains(&coercion)
-            || (matches!(self.ir.expr(arg), IrExpr::Call { .. })
-                && self.ir.physical_types.contains_key(&arg))
     }
 }
 

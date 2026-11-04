@@ -44,9 +44,11 @@ pub const APPLIED: &[&str] = &[
     "-Xno-call-assertions",
     "-Xno-param-assertions",
     "-Xplugin",
+    "-Xreport-all-warnings",
     "-Xsam-conversions",
     "-Xstring-concat",
     "-Xsuppress-version-warnings",
+    "-Xuse-inline-scopes-numbers",
     "-Xwarning-level",
     "-api-version",
     "-classpath",
@@ -72,6 +74,9 @@ pub const INERT: &[&str] = &[
     // krusty does not reserve the `kotlin` package, so it already compiles declarations there as
     // kotlinc does once this argument lifts the reservation.
     "-Xallow-kotlin-package",
+    // krusty reads class files without checking whether an unstable compiler (`-Xabi-stability`)
+    // wrote them, so it already compiles as kotlinc does once this argument lifts that check.
+    "-Xallow-unstable-dependencies",
     // krusty does not warn that expect/actual classes are Beta, so it already reports what kotlinc
     // reports once this argument silences that warning.
     "-Xexpect-actual-classes",
@@ -100,7 +105,6 @@ pub const UNSUPPORTED: &[&str] = &[
     "-Xallow-no-source-files",
     "-Xallow-reified-type-in-catch",
     "-Xallow-returns-result-of",
-    "-Xallow-unstable-dependencies",
     "-Xannotation-default-target",
     "-Xannotation-target-all",
     "-Xannotations-in-metadata",
@@ -185,7 +189,6 @@ pub const UNSUPPORTED: &[&str] = &[
     "-Xprofile-phases",
     "-Xrender-internal-diagnostic-names",
     "-Xrepl",
-    "-Xreport-all-warnings",
     "-Xreport-output-files",
     "-Xreport-perf",
     "-Xreturn-value-checker",
@@ -205,7 +208,6 @@ pub const UNSUPPORTED: &[&str] = &[
     "-Xuse-fir-experimental-checkers",
     "-Xuse-fir-ic",
     "-Xuse-fir-lt",
-    "-Xuse-inline-scopes-numbers",
     "-Xuse-k2",
     "-Xuse-old-class-files-reading",
     "-Xuse-type-table",

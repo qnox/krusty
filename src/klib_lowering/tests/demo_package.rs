@@ -21,7 +21,8 @@ use crate::metadata::id_signature::{
 use crate::metadata::klib_ir::tree::{
     KlibIrArena, KlibIrArguments, KlibIrBody, KlibIrBranch, KlibIrExprId, KlibIrExprKind,
     KlibIrFunction, KlibIrLoop, KlibIrMember, KlibIrMemberAccess, KlibIrNullability,
-    KlibIrParameter, KlibIrStatement, KlibIrType, KlibIrTypeId, KlibIrTypeOperator, KlibIrVariable,
+    KlibIrParameter, KlibIrStatement, KlibIrType, KlibIrTypeArgument, KlibIrTypeId,
+    KlibIrTypeOperator, KlibIrVariable, KlibIrVariance,
 };
 use crate::metadata::klib_ir::{
     KlibIrConstant, KlibIrDeclarationTree, KlibIrModuleTrees, KlibIrSymbol, KlibIrSymbolKind,
@@ -45,10 +46,15 @@ pub(super) enum T {
     Throwable,
     Any,
     NullableAny,
+    NullableBoolean,
     NullableInt,
     NullableString,
     /// `Nothing?`, the type of `null`.
     NullableNothing,
+    /// `List<String>`.
+    ListString,
+    /// `List<Any?>`.
+    ListNullableAny,
 }
 
 impl T {
@@ -65,26 +71,47 @@ impl T {
             T::Throwable => "Throwable",
             T::Any => "Any",
             T::NullableAny => "Any",
+            T::NullableBoolean => "Boolean",
             T::NullableInt => "Int",
             T::NullableString => "String",
             T::NullableNothing => "Nothing",
+            T::ListString | T::ListNullableAny => "List",
+        }
+    }
+
+    /// The package the class is declared in.
+    fn package(self) -> &'static str {
+        match self {
+            T::DemoBox => "demo",
+            T::ListString | T::ListNullableAny => "kotlin/collections",
+            _ => "kotlin",
+        }
+    }
+
+    /// The type argument of a generic class type.
+    fn argument(self) -> Option<T> {
+        match self {
+            T::ListString => Some(T::String),
+            T::ListNullableAny => Some(T::NullableAny),
+            _ => None,
         }
     }
 
     pub(super) fn nullable(self) -> bool {
         matches!(
             self,
-            T::NullableAny | T::NullableInt | T::NullableString | T::NullableNothing
+            T::NullableAny
+                | T::NullableBoolean
+                | T::NullableInt
+                | T::NullableString
+                | T::NullableNothing
         )
     }
 
     pub(super) fn kotlin(self) -> KotlinType {
         KotlinType::Class {
-            internal: match self {
-                T::DemoBox => "demo/Box".to_owned(),
-                _ => format!("kotlin/{}", self.class()),
-            },
-            args: Vec::new(),
+            internal: format!("{}/{}", self.package(), self.class()),
+            args: self.argument().map(T::kotlin).into_iter().collect(),
             nullable: self.nullable(),
             shape: KotlinFunctionTypeShape::default(),
         }
@@ -95,10 +122,16 @@ impl T {
     }
 
     pub(super) fn klib(self) -> KlibIrType {
-        let package = [match self {
-            T::DemoBox => "demo".to_owned(),
-            _ => "kotlin".to_owned(),
-        }];
+        self.klib_applied(Vec::new())
+    }
+
+    /// The KLIB type of the class applied to `arguments`.
+    fn klib_applied(self, arguments: Vec<KlibIrTypeArgument>) -> KlibIrType {
+        let package = self
+            .package()
+            .split('/')
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
         let signature = metadata_class_signature(
             MetadataContainer {
                 package: &package,
@@ -118,7 +151,7 @@ impl T {
             } else {
                 KlibIrNullability::NotSpecified
             },
-            arguments: Vec::new(),
+            arguments,
             annotations: Vec::new(),
             abbreviation: None,
         }
@@ -272,7 +305,15 @@ impl Body {
         if let Some((_, id)) = self.types.iter().find(|(known, _)| *known == ty) {
             return *id;
         }
-        let id = self.arena.push_type(ty.klib());
+        let arguments = ty
+            .argument()
+            .map(|argument| KlibIrTypeArgument::Type {
+                variance: KlibIrVariance::Invariant,
+                ty: self.ty(argument),
+            })
+            .into_iter()
+            .collect();
+        let id = self.arena.push_type(ty.klib_applied(arguments));
         self.types.push((ty, id));
         id
     }
@@ -781,7 +822,7 @@ pub(super) fn assert_unit_is_empty(unit: &DependencyBodyUnit) {
     let ir = unit.ir();
     assert!(ir.exprs.is_empty());
     assert!(ir.functions.is_empty());
-    assert!(ir.logical_types.is_empty());
+    assert_eq!(ir.logical_types().count(), 0);
     assert!(ir.binding_read_stability.is_empty());
     assert!(ir.checked_return_depths.is_empty());
     assert!(ir.callable_scopes.is_empty());
@@ -799,6 +840,18 @@ pub(super) fn source_body(source: &str, name: &str, arity: usize) -> String {
         "KlibBodyEquivalent",
         Box::new(crate::libraries::EmptySymbolSource),
     );
+    rendered_function(&ir, name, arity)
+}
+
+/// [`source_body`] for a source that calls a builtin member, such as `Boolean.not`, the library
+/// declares.
+pub(super) fn source_body_with_stdlib(source: &str, name: &str, arity: usize) -> String {
+    let ir =
+        crate::fir_lower::tests::lower_single_source_with_jvm_stdlib(source, "KlibBodyEquivalent");
+    rendered_function(&ir, name, arity)
+}
+
+fn rendered_function(ir: &crate::ir::IrFile, name: &str, arity: usize) -> String {
     let functions = ir
         .fn_source_names
         .iter()
@@ -810,7 +863,7 @@ pub(super) fn source_body(source: &str, name: &str, arity: usize) -> String {
     let [function] = functions.as_slice() else {
         panic!("expected one source `{name}`, found {}", functions.len());
     };
-    render(&ir, ir.functions[*function as usize].body.expect("a body"))
+    render(ir, ir.functions[*function as usize].body.expect("a body"))
 }
 
 pub(super) fn lowered_f(demo: &Demo) -> String {

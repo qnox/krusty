@@ -26,6 +26,49 @@ fn descriptor_param_count(descriptor: &str) -> usize {
 }
 
 impl ClassWriter {
+    /// Intern complete parameter annotation payloads before the method body, in ASM's attribute
+    /// order: return nullability, all visible parameters, then each invisible parameter followed
+    /// by its synthesized nullability. Attachment after body emission reuses these same constants.
+    pub fn reserve_method_parameter_annotation_pool(
+        &mut self,
+        result: Option<&str>,
+        parameters: &[crate::ir::DeclarationAnnotations],
+        nullability: &[Option<&str>],
+        annotate_nullability: bool,
+    ) {
+        if let Some(result) = result.filter(|_| annotate_nullability) {
+            if let Some(result) = self.written_annotation(result) {
+                self.cp.utf8(result);
+            }
+        }
+        let split = parameters
+            .iter()
+            .map(split_declaration_annotations)
+            .collect::<Vec<_>>();
+        for (visible, _) in &split {
+            for annotation in visible {
+                let _ = self.encode_annotation(annotation);
+            }
+        }
+        for index in 0..parameters.len().max(nullability.len()) {
+            if let Some((_, invisible)) = split.get(index) {
+                for annotation in invisible {
+                    let _ = self.encode_annotation(annotation);
+                }
+            }
+            if let Some(annotation) = nullability
+                .get(index)
+                .copied()
+                .flatten()
+                .filter(|_| annotate_nullability)
+            {
+                if let Some(annotation) = self.written_annotation(annotation) {
+                    self.cp.utf8(annotation);
+                }
+            }
+        }
+    }
+
     /// Attach source parameter annotations, split by retention and padded to physical JVM arity.
     pub fn set_method_param_annotations(
         &mut self,

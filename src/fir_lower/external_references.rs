@@ -156,6 +156,7 @@ impl BodyLowering<'_> {
                                 parameter,
                                 array_type,
                                 elements,
+                                source_line: 0,
                             }
                         }
                     })

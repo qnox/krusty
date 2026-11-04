@@ -93,7 +93,7 @@ fn recover<S: SignatureSemantics>(
             Ok(Some((
                 published,
                 published != current,
-                result_abbreviation(semantics, graph, expression, memo),
+                semantics.published_call_result_abbreviation(selection.origin, published),
             )))
         }
         Some(SigExpr::MemberCall {

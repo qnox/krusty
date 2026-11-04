@@ -70,3 +70,33 @@ pub(crate) fn blank_class(fq: &str) -> IrClass {
         annotation_retention: None,
     }
 }
+
+/// A minimal generated secondary constructor delegating to the primary one, with no parameters,
+/// delegation arguments or body.
+pub(crate) fn blank_secondary_ctor() -> super::IrSecondaryCtor {
+    super::IrSecondaryCtor {
+        annotations: DeclarationAnnotations::default(),
+        source_order: u32::MAX,
+        lines: super::IrSecondaryCtorLines::default(),
+        prefix_params: Vec::new(),
+        params: Vec::new(),
+        declared_spellings: crate::spelling::DeclaredSpellings::default(),
+        named_params: Vec::new(),
+        metadata_visibility: None,
+        generated_debug: super::IrGeneratedDeclarationDebug::None,
+        vararg_index: None,
+        defaults: Vec::new(),
+        delegate_prelude: Vec::new(),
+        delegate_args: Vec::new(),
+        default_parameters: Vec::new(),
+        body: None,
+        delegate: super::CtorDelegateTarget::This {
+            target_params: Vec::new(),
+            target: super::IrConstructorTarget::UNRESTRICTED_PRIMARY,
+            default_masks: Vec::new(),
+        },
+        synthetic: false,
+        vc_params: false,
+        param_checks: Vec::new(),
+    }
+}

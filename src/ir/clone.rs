@@ -5,6 +5,7 @@
 
 use crate::fx_hash::HashMap;
 
+use super::expression_copy::copy_expression_facts;
 use super::{ExprId, FunId, IrCheckedArgument, IrCheckedOperation, IrExpr, IrFile, IrFunction};
 use crate::types::{ty_subst_keep_unbound, Ty};
 
@@ -31,6 +32,232 @@ pub fn clone_expression_dag(ir: &mut IrFile, root: ExprId) -> (ExprId, HashMap<E
     let mut cloned = HashMap::default();
     let root = clone_one(ir, root, &mut cloned);
     (root, cloned)
+}
+
+/// Clone `root` as kotlinc's IR `deepCopy` copies a declaration body before lambdas are lowered:
+/// every lambda in the copy, indy or spliced at an inline call, is a lambda of its own. Each takes
+/// the next identity and the next implementation, class-mode and generated-class ordinals in its
+/// own context, and an implementation that is emitted gets a method of its own beside the
+/// original's.
+pub(crate) fn clone_expression_with_own_lambdas(ir: &mut IrFile, root: ExprId) -> ExprId {
+    let (copy, cloned) = clone_expression_dag(ir, root);
+    give_copied_lambdas_their_own_identity(ir, &cloned, &mut CopiedLambdas::default());
+    copy
+}
+
+/// What one copy has made so far: each original lambda's own copy (a lambda is reached both from
+/// its value's inline body and from its implementation's body), the lifting position each copy
+/// takes in place of its original's, by sequence, and the class name each copied lambda's class
+/// nests its classes under in place of its original's.
+#[derive(Default)]
+struct CopiedLambdas {
+    own: HashMap<FunId, FunId>,
+    positions: HashMap<(super::IrLiftingSequence, u32), u32>,
+    class_prefixes: Vec<(super::IrLocalClassNameProvenance, Box<[String]>)>,
+}
+
+fn give_copied_lambdas_their_own_identity(
+    ir: &mut IrFile,
+    cloned: &HashMap<ExprId, ExprId>,
+    copies: &mut CopiedLambdas,
+) {
+    use super::debug_locals::IrDebugLocalProvenance;
+    let implementation = |ir: &IrFile, expression: ExprId| match ir.expr(expression) {
+        IrExpr::Lambda { impl_fn, .. } => Some(*impl_fn),
+        _ => match ir.debug_local_provenance(expression) {
+            Some(
+                IrDebugLocalProvenance::InlineLambdaReceiver { implementation }
+                | IrDebugLocalProvenance::LambdaFrameMarker { implementation, .. },
+            ) => Some(implementation),
+            _ => None,
+        },
+    };
+    let mut sources = cloned
+        .values()
+        .filter_map(|&expression| implementation(ir, expression))
+        .filter(|function| ir.lambda_origins.contains_key(function))
+        .collect::<Vec<_>>();
+    // A lambda nested in another is copied with it, after it, wherever the copy reaches it first.
+    sources.sort_unstable_by_key(|function| {
+        let depth = ir
+            .lifted_functions
+            .get(function)
+            .map_or(0, |(_, site)| site.path.len());
+        (depth, ir.lambda_origins[function].identity)
+    });
+    sources.dedup();
+    for source in sources {
+        if !copies.own.contains_key(&source) {
+            own_lambda(ir, source, copies);
+        }
+    }
+    let own = &copies.own;
+    for &expression in cloned.values() {
+        if let IrExpr::Lambda { impl_fn, .. } = &mut ir.exprs[expression as usize] {
+            if let Some(&target) = own.get(impl_fn) {
+                *impl_fn = target;
+            }
+            continue;
+        }
+        let provenance = match ir.debug_local_provenance(expression) {
+            Some(IrDebugLocalProvenance::InlineLambdaReceiver { implementation }) => {
+                own.get(&implementation).map(|&implementation| {
+                    IrDebugLocalProvenance::InlineLambdaReceiver { implementation }
+                })
+            }
+            Some(IrDebugLocalProvenance::LambdaFrameMarker {
+                implementation,
+                depth,
+            }) => own.get(&implementation).map(|&implementation| {
+                IrDebugLocalProvenance::LambdaFrameMarker {
+                    implementation,
+                    depth,
+                }
+            }),
+            _ => None,
+        };
+        if let Some(provenance) = provenance {
+            ir.set_debug_local_provenance(expression, provenance);
+        }
+    }
+}
+
+/// Record in `copies` a lambda of its own copied from `source`: its body cloned the same way, its
+/// implementation facts and class placement copied, and its origin renumbered after every lambda
+/// of its context.
+fn own_lambda(ir: &mut IrFile, source: FunId, copies: &mut CopiedLambdas) {
+    let mut shape = ir.functions[source as usize].clone();
+    let body = shape.body.map(|body| clone_expression_dag(ir, body));
+    shape.body = body.as_ref().map(|(body, _)| *body);
+    let target = clone_class_method(ir, source, shape, &HashMap::default());
+    copies.own.insert(source, target);
+    for class in ir
+        .class_method_owners
+        .get(&source)
+        .cloned()
+        .unwrap_or_default()
+    {
+        ir.classes[class as usize].methods.push(target);
+        ir.note_class_method(class, target);
+    }
+    let mut origin = ir.lambda_origins[&source].clone();
+    let next = |select: &dyn Fn(&super::IrLambdaOrigin) -> Option<u32>| {
+        ir.lambda_origins
+            .values()
+            .filter_map(select)
+            .max()
+            .map_or(0, |ordinal| ordinal.saturating_add(1))
+    };
+    let identity = next(&|other| Some(other.identity));
+    let implementation_ordinal = next(&|other| {
+        (other.lexical_owner == origin.lexical_owner
+            && other.implementation_name == origin.implementation_name)
+            .then_some(other.implementation_ordinal)
+    });
+    let ordinal = next(&|other| {
+        (other.lexical_owner == origin.lexical_owner
+            && other.enclosing_name == origin.enclosing_name
+            && other.binding_name == origin.binding_name)
+            .then_some(other.ordinal)
+    });
+    origin.identity = identity;
+    origin.implementation_ordinal = implementation_ordinal;
+    origin.ordinal = ordinal;
+    if let Some(provenance) = origin.class_provenance.as_mut() {
+        // A class nested in a copied lambda's class is nested in the copy's.
+        if let Some((old, new)) = copies.class_prefixes.iter().find(|(old, _)| {
+            old.source == provenance.source
+                && old.lexical_owner == provenance.lexical_owner
+                && provenance.segments.starts_with(&old.segments)
+        }) {
+            provenance.segments = new
+                .iter()
+                .chain(&provenance.segments[old.segments.len()..])
+                .cloned()
+                .collect();
+        }
+        if let Some(previous) = provenance.ordinal {
+            let class_ordinal = ir
+                .lambda_origins
+                .values()
+                .filter_map(|other| other.class_provenance.as_ref())
+                .filter(|other| {
+                    other.source == provenance.source
+                        && other.lexical_owner == provenance.lexical_owner
+                        && other.segments == provenance.segments
+                })
+                .filter_map(|other| other.ordinal)
+                .max()
+                .map_or(1, |ordinal| ordinal.saturating_add(1));
+            provenance.ordinal = Some(class_ordinal);
+            let original = &ir.lambda_origins[&source]
+                .class_provenance
+                .as_ref()
+                .expect("the copy's class provenance is its original's");
+            let nested = |segments: &[String], ordinal: u32| {
+                segments
+                    .iter()
+                    .cloned()
+                    .chain(std::iter::once(ordinal.to_string()))
+                    .collect::<Box<[_]>>()
+            };
+            copies.class_prefixes.push((
+                super::IrLocalClassNameProvenance {
+                    segments: nested(&original.segments, previous),
+                    ..(*original).clone()
+                },
+                nested(&provenance.segments, class_ordinal),
+            ));
+        }
+    }
+    ir.lambda_origins.insert(target, origin);
+    if let Some((sequence, mut site)) = ir.lifted_functions.get(&source).cloned() {
+        for step in site.path.iter_mut() {
+            step.position =
+                copied_lifting_position(ir, &sequence, step.position, &mut copies.positions);
+        }
+        ir.lifted_functions.insert(target, (sequence, site));
+    }
+    if let Some((_, cloned)) = body {
+        give_copied_lambdas_their_own_identity(ir, &cloned, copies);
+    }
+}
+
+/// The position a copy of the callable at `position` in `sequence` takes: a new entry after every
+/// other, numbered as the original's, nested in the copy of the lambda the original is nested in.
+fn copied_lifting_position(
+    ir: &mut IrFile,
+    sequence: &super::IrLiftingSequence,
+    position: u32,
+    positions: &mut HashMap<(super::IrLiftingSequence, u32), u32>,
+) -> u32 {
+    if let Some(&copied) = positions.get(&(sequence.clone(), position)) {
+        return copied;
+    }
+    let Some(mut entry) = ir
+        .lifting_sequences
+        .get(sequence)
+        .and_then(|entries| entries.get(&position))
+        .cloned()
+    else {
+        return position;
+    };
+    entry.scope = entry
+        .scope
+        .map(|scope| copied_lifting_position(ir, sequence, scope, positions));
+    let entries = ir.lifting_sequences.entry(sequence.clone()).or_default();
+    let copied = entries
+        .keys()
+        .next_back()
+        .map_or(0, |last| last.saturating_add(1));
+    entry.order = entries
+        .values()
+        .map(|other| other.order)
+        .max()
+        .map_or(0, |order| order.saturating_add(1));
+    entries.insert(copied, entry);
+    positions.insert((sequence.clone(), position), copied);
+    copied
 }
 
 /// A copy of `source` alone whose direct operands are `map`ped, with its sparse semantic/source
@@ -354,185 +581,8 @@ fn remap_direct_children(expression: &mut IrExpr, mut map: impl FnMut(ExprId) ->
         | IrExpr::ReifiedClassMarker { .. }
         | IrExpr::UnitInstance
         | IrExpr::CurrentContinuation
+        | IrExpr::AbsentArgument { .. }
         | IrExpr::InlineFrameMarker => {}
-    }
-}
-
-fn copy_expression_facts(ir: &mut IrFile, source: ExprId, target: ExprId) {
-    macro_rules! copy_map {
-        ($field:ident) => {
-            if let Some(value) = ir.$field.get(&source).cloned() {
-                ir.$field.insert(target, value);
-            }
-        };
-    }
-    ir.copy_generated_line_marks(source, target);
-    ir.copy_inline_copy_mark(source, target);
-    ir.copy_compiled_inline_call(source, target);
-    copy_map!(fir_origins);
-    copy_map!(expression_owners);
-    copy_map!(callable_reference_provenance);
-    copy_map!(callable_reference_enclosures);
-    copy_map!(checked_return_depths);
-    copy_map!(inline_return_frames);
-    if ir.kept_start_lines.contains(&source) {
-        ir.kept_start_lines.insert(target);
-    }
-    if ir.inline_cleanup_results.contains(&source) {
-        ir.inline_cleanup_results.insert(target);
-    }
-    copy_map!(annotation_constructions);
-    copy_map!(generated_secondary_constructor_calls);
-    copy_map!(expr_lines);
-    copy_map!(expr_source_lines);
-    copy_map!(expr_end_lines);
-    copy_map!(value_names);
-    copy_map!(logical_types);
-    copy_map!(deferred_local_types);
-    if let Some(result) = ir.whens.exhaustive.get(&source).copied() {
-        ir.whens.exhaustive.insert(target, result);
-    }
-    if let Some(line) = ir.whens.source_lines.get(&source).copied() {
-        ir.whens.source_lines.insert(target, line);
-    }
-    if let Some(line) = ir.whens.elvises.get(&source).copied() {
-        ir.whens.elvises.insert(target, line);
-    }
-    copy_map!(binding_read_stability);
-    copy_map!(short_circuits);
-    copy_map!(physical_types);
-    if ir.jvm_erased_primitive_wrapper_values.contains(&source) {
-        ir.jvm_erased_primitive_wrapper_values.insert(target);
-    }
-    copy_map!(reified_call_subst);
-    ir.copy_reified_markers(source, target);
-    ir.copy_lambda_exit(source, target);
-    copy_map!(inline_call_type_arguments);
-    copy_map!(ext_call_source_receiver);
-    copy_map!(external_singleton_dispatches);
-    copy_map!(dispatch_classes);
-    copy_map!(call_declared_ret);
-    copy_map!(synthesized_accessor_calls);
-    copy_map!(private_property_accessor_calls);
-    copy_map!(call_declared_params);
-    copy_map!(module_member_accesses);
-    copy_map!(jvm_protected_dependency_calls);
-    copy_map!(construction_declared_params);
-    copy_map!(construction_targets);
-    if let Some(constructor) = ir.module_constructions.selected.get(&source).copied() {
-        ir.module_constructions.selected.insert(target, constructor);
-    }
-    copy_map!(static_extension_receivers);
-    copy_map!(call_inline_modifiers);
-    copy_map!(suspend_calls);
-    copy_map!(suspend_lambda_placements);
-    copy_map!(suspend_call_overridden_results);
-    copy_map!(value_class_suspend_calls);
-    copy_map!(intrinsic_suspension_points);
-    copy_map!(erased_value_constructions);
-    if ir.has_value_class_parameter_construction(source) {
-        ir.mark_value_class_parameter_construction(target);
-    }
-    if let Some(provenance) = ir.debug_local_provenance(source) {
-        ir.set_debug_local_provenance(target, provenance);
-    }
-    if ir.property_initializer_stores.contains(&source) {
-        ir.property_initializer_stores.insert(target);
-    }
-    if ir.inline_regions.contains(&source) {
-        ir.inline_regions.insert(target);
-    }
-    if ir.callable_scopes.contains(&source) {
-        ir.callable_scopes.insert(target);
-    }
-    if ir.call_operand_bindings.contains(&source) {
-        ir.call_operand_bindings.insert(target);
-    }
-    if ir.invocation_operand_bindings.contains(&source) {
-        ir.invocation_operand_bindings.insert(target);
-    }
-    if ir.destructuring_containers.contains(&source) {
-        ir.destructuring_containers.insert(target);
-    }
-    if ir
-        .inline_callable_reference_receiver_bindings
-        .contains(&source)
-    {
-        ir.inline_callable_reference_receiver_bindings
-            .insert(target);
-    }
-    if ir.inline_synthetic_lines.contains(&source) {
-        ir.inline_synthetic_lines.insert(target);
-    }
-    if ir.external_inline_expansions.contains(&source) {
-        ir.external_inline_expansions.insert(target);
-    }
-    copy_map!(external_frame_lines);
-    copy_map!(external_frame_closes);
-    if ir.null_guards.contains(&source) {
-        ir.null_guards.insert(target);
-    }
-    if ir.plain_updates.contains(&source) {
-        ir.plain_updates.insert(target);
-    }
-    if ir.postfix_updates.contains(&source) {
-        ir.postfix_updates.insert(target);
-    }
-    if ir.negations.contains(&source) {
-        ir.negations.insert(target);
-    }
-    if ir.transparent_loop_bodies.contains(&source) {
-        ir.transparent_loop_bodies.insert(target);
-    }
-    if ir.for_loop_next_loops.contains(&source) {
-        ir.for_loop_next_loops.insert(target);
-    }
-    if ir.lateinit_initialization_probes.contains(&source) {
-        ir.lateinit_initialization_probes.insert(target);
-    }
-    if ir.written_casts.contains(&source) {
-        ir.written_casts.insert(target);
-    }
-    if ir.declaration_result_coercions.contains(&source) {
-        ir.declaration_result_coercions.insert(target);
-    }
-    if let Some(boundaries) = ir.declaration_argument_boundaries.get(&source).cloned() {
-        let supplied = |expression: ExprId| match ir.expr(expression) {
-            IrExpr::Call { args, .. } => args.clone(),
-            IrExpr::MethodCall { args, .. } => args.iter().copied().flatten().collect(),
-            _ => Vec::new(),
-        };
-        let source_arguments = supplied(source);
-        let target_arguments = supplied(target);
-        let boundaries = boundaries
-            .iter()
-            .map(|boundary| {
-                let position = source_arguments
-                    .iter()
-                    .position(|argument| *argument == boundary.argument)
-                    .expect("recorded declaration argument belongs to cloned call");
-                let mut boundary = *boundary;
-                boundary.argument = target_arguments[position];
-                boundary
-            })
-            .collect::<Vec<_>>();
-        ir.declaration_argument_boundaries
-            .insert(target, boundaries.into_boxed_slice());
-    }
-    if let Some(parameters) = ir.physical_call_parameters.get(&source).cloned() {
-        ir.physical_call_parameters.insert(target, parameters);
-    }
-    if ir.elvis_safe_call_guards.contains(&source) {
-        ir.elvis_safe_call_guards.insert(target);
-    }
-    if ir.jvm_value_class_null_guards.contains(&source) {
-        ir.jvm_value_class_null_guards.insert(target);
-    }
-    if ir.inline_call_sites.contains(&source) {
-        ir.inline_call_sites.insert(target);
-    }
-    if ir.module_inline_calls.contains(&source) {
-        ir.module_inline_calls.insert(target);
     }
 }
 
