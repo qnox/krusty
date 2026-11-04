@@ -911,7 +911,7 @@ fn add_type_serializer_getters(ir: &mut IrFile, serializer: ClassId, n_tp: usize
 
 /// The source span of `class_id`'s companion: a declared companion's own lines, else the class's,
 /// which a plugin-generated companion takes.
-fn companion_lines(ir: &IrFile, class_id: ClassId) -> (u32, u32) {
+pub(super) fn companion_lines(ir: &IrFile, class_id: ClassId) -> (u32, u32) {
     let class = &ir.classes[class_id as usize];
     class
         .companion_class

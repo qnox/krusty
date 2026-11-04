@@ -78,7 +78,7 @@ jobs:
           key: plugin-host-${{ hashFiles('crates/krusty-plugin-host/src/pins/*.tsv', 'crates/krusty-plugin-host/adapter/*', 'crates/krusty-plugin-host/ksp-adapter/**') }}
       # Outside the default members and the coverage packages, so no other job runs its tests.
       - name: plugin host tests
-        run: cargo test -p krusty-plugin-host -- --include-ignored
+        run: cargo test --profile gate -p krusty-plugin-host -- --include-ignored
 
   ci:
     runs-on: ubuntu-latest
@@ -496,8 +496,8 @@ jobs:
       # key also hashes the inventory owner, shared case planning, reference server/Javac driver and
       # content-identity implementation. A producer or layout change therefore starts a fresh cache
       # instead of replaying inventories built by code that a hit would otherwise never execute.
+      # Owned Native/Wasm cases require these same JVM oracle inventories.
       - name: restore kotlinc box references (${{ matrix.version }})
-        if: matrix.target == 'jvm'
         id: box-references
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -844,6 +844,17 @@ jobs:
         with:
           distribution: zulu
           java-version: '17'
+      - name: select Android integration requirements
+        id: android
+        run: |
+          if printf '9.6.0\n%s\n' "${{ matrix.gradle }}" | sort -V -C; then
+            echo 'enabled=true' >> "$GITHUB_OUTPUT"
+          fi
+      - name: provision the Android integration SDK
+        if: steps.android.outputs.enabled == 'true'
+        uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
+        with:
+          packages: 'platforms;android-36'
       - uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
         with:
           gradle-version: ${{ matrix.gradle }}
@@ -893,9 +904,8 @@ jobs:
           if [ "${{ matrix.ksp }}" = true ]; then
             tests="$tests ksp2_generated_sources_compile_through_krusty"
           fi
-          # The fixture's Android Gradle plugin (9.4) needs Gradle 9.6 or newer; the runner image
-          # provides ANDROID_HOME.
-          if printf '9.6.0\n%s\n' "${{ matrix.gradle }}" | sort -V -C; then
+          # The SDK setup uses the same Gradle compatibility decision as the test inventory.
+          if [ "${{ steps.android.outputs.enabled }}" = true ]; then
             tests="$tests android_variants_compile_through_krusty"
           fi
           KRUSTY_GRADLE_BIN=$(command -v gradle) \
@@ -918,6 +928,9 @@ jobs:
           java-version: '17'
           cache: maven
           cache-dependency-path: tools/krusty-maven/pom.xml
+      - uses: stCarolas/setup-maven@12eb41b233df95d49b0c11fc1b5bc8312e5d4ce0 # v5.1
+        with:
+          maven-version: '3.9.11'
       - name: build portable local-Maven distribution
         run: |
           set -euo pipefail
@@ -950,6 +963,9 @@ jobs:
           java-version: '17'
           cache: maven
           cache-dependency-path: tools/krusty-maven/pom.xml
+      - uses: stCarolas/setup-maven@12eb41b233df95d49b0c11fc1b5bc8312e5d4ce0 # v5.1
+        with:
+          maven-version: '3.9.11'
       - uses: actions/download-artifact@v8
         with:
           name: tool-bins
@@ -991,6 +1007,11 @@ jobs:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: tool-bins
+      # The smoke test generates the registry with the site's Node.js script; the self-hosted image
+      # has no Node.js.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
       # ubuntu-latest has Bazelisk installed as `bazel`; the self-hosted image installs it as
       # `bazelisk`.
       - name: put bazelisk on PATH as bazel

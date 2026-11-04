@@ -35,6 +35,7 @@ use scope::{ContextReceiver, ContextReceiverKind, FlowExclusion, NarrowPath, Ns}
 mod abstract_obligations;
 mod constructor_references;
 mod implicit_source_member_lambda;
+mod null_check_narrowing;
 use constructor_references::ReferenceReceiver;
 mod access_control;
 mod accessor_annotations;
@@ -82,6 +83,7 @@ mod call_diagnostics;
 mod call_result_constraint;
 mod call_result_templates;
 mod callable_reference_lhs;
+mod callable_reference_outer_selection;
 mod callable_reference_prefilter;
 mod callable_reference_publication;
 mod callable_reference_selection;
@@ -151,10 +153,11 @@ mod explicit_property_write;
 mod explicit_receiver_levels;
 mod expression_qualifier_tree;
 mod expression_qualifiers;
+mod extension_reference_selection;
 mod misfit_callable_references;
 use misfit_callable_references::{MisfitReference, ReferenceCandidateLevels};
 mod nested_type_aliases;
-use explicit_receiver_levels::{FunctionValueLevel, FunctionValueRungs};
+use explicit_receiver_levels::{FunctionValueLevel, ScopeLevelSearch};
 mod expected_expression;
 mod expression_getter;
 mod extension_receiver_uses;
@@ -376,6 +379,7 @@ use delegated_properties::{
 };
 pub(crate) use dependency_platform::DependencyPlatform;
 pub(crate) use diagnostic_selection::unresolved_member_message;
+use extension_reference_selection::ExtensionReferenceChoice;
 pub(crate) use finalized_projection::{
     project_finalized_signatures, publish_stable_declaration_metadata,
 };
@@ -12025,7 +12029,7 @@ impl<'a> Checker<'a> {
             receiver,
             receiver_ty,
             name,
-            FunctionValueRungs::AlreadyTried,
+            ScopeLevelSearch::already_tried(CallResultConstraint::direct(expected)),
         ) {
             return ClassifierValueCall::Checked(ret);
         }
@@ -16162,7 +16166,7 @@ impl<'a> Checker<'a> {
                     receiver,
                     rt,
                     &name,
-                    FunctionValueRungs::InTower,
+                    ScopeLevelSearch::in_tower(CallResultConstraint::direct(expected)),
                 ) {
                     return ret;
                 }
@@ -17401,9 +17405,15 @@ impl<'a> Checker<'a> {
                             scope,
                             call,
                             &fname,
-                            args,
-                            arg_names.as_deref(),
-                            toplevel_partial.as_deref().unwrap_or_default(),
+                            ArgSlots {
+                                args,
+                                partial_arg_tys: toplevel_partial.as_deref().unwrap_or_default(),
+                                arg_names: arg_names.as_deref(),
+                                trailing_lambda: self
+                                    .file
+                                    .call_has_trailing_lambda
+                                    .contains(&call.0),
+                            },
                             expected,
                         )
                     })
@@ -19462,13 +19472,10 @@ impl<'a> Checker<'a> {
                     // receiver-less declaration and are evaluated by the later shared rung.
                     if let Some(ret) = self.check_member_extension_function_call(
                         scope,
-                        CallArgs {
-                            call,
-                            args,
-                            arg_tys: &arg_tys,
-                        },
+                        associated_site.call_args,
                         receiver,
                         &fname,
+                        CallResultConstraint::direct(expected),
                         Some(&postponed_solutions),
                     ) {
                         self.mark_implicit_receiver_selection(call, implicit_receiver);
@@ -34888,169 +34895,25 @@ impl<'a> Checker<'a> {
         overloads: &[crate::libraries::FunctionInfo],
         inaccessible: &[crate::libraries::FunctionInfo],
         receiver: Ty,
-        name: &str,
         expected: Option<&'static crate::types::FnSig>,
         binding: CallableReferenceBinding,
     ) -> ExtensionRefSelection {
-        let candidates = overloads
-            .iter()
-            .cloned()
-            .filter_map(|mut function| {
-                if !function.is_extension() {
-                    return None;
-                }
-                let unbound = matches!(binding, CallableReferenceBinding::Unbound);
-                let context_count = function.context_count.min(function.semantic_params().len());
-                let expected_values = if let Some(expected) = expected {
-                    let mut values = expected.params.to_vec();
-                    if unbound {
-                        values.get(context_count)?;
-                        values.remove(context_count);
-                    }
-                    Some(values)
-                } else {
-                    None
-                };
-                let type_arguments = self
-                    .specialize_callable_ref_candidate(
-                        &mut function,
-                        Some(receiver),
-                        expected_values.as_deref(),
-                        expected.map(|expected| expected.ret),
-                    )
-                    .ok()?;
-                let declared_receiver = function.semantic_receiver()?;
-                if !self.receiver_is_assignable(receiver, declared_receiver) {
-                    crate::trace_compiler!(
-                        "resolve",
-                        "reject extension reference {name}: receiver {receiver:?} is not assignable to {declared_receiver:?}",
-                    );
-                    return None;
-                }
-                let accessible = crate::callable_access::source_callable_accessible(
-                    function.visibility,
-                    function.source_file,
-                    Some(self.file_index),
-                    || self.libraries.dependency_access_policy().internal_callable_accessible(
-                        function.callable.external_identity,
-                        function.callable.owner,
-                    ),
-                );
-                if !accessible {
-                    return None;
-                }
-                let semantic_params = function.semantic_params();
-                let value_params = &*semantic_params;
-                let context_count = function.context_count.min(value_params.len());
-                crate::trace_compiler!(
-                    "resolve",
-                    "extension reference candidate name={name} binding={binding:?} receiver={receiver:?} declared_receiver={declared_receiver:?} params={value_params:?} required={} owner={} descriptor={}",
-                    function.call_sig.required,
-                    function.callable.owner.render(),
-                    function.callable.descriptor,
-                );
-                let mut reference_params = value_params.to_vec();
-                if unbound {
-                    reference_params.insert(context_count, receiver);
-                }
-                let plan = match expected {
-                    Some(expected) => {
-                        if function.callable.suspend && !expected.suspend {
-                            return None;
-                        }
-                        if unbound {
-                            let expected_receiver = *expected.params.get(context_count)?;
-                            if !self.receiver_is_assignable(expected_receiver, receiver) {
-                                return None;
-                            }
-                        }
-                        let expected_values = expected_values.as_deref()?;
-                        let values = self.callable_ref_parameter_plan(
-                            value_params,
-                            &function.call_sig,
-                            expected_values,
-                        )?;
-                        let mut plan = values;
-                        if unbound {
-                            callable_reference_selection::shift_plan_values_from(
-                                &mut plan,
-                                context_count,
-                                1,
-                            );
-                            plan.insert(
-                                context_count,
-                                AdaptedRefArgument::Value(context_count),
-                            );
-                        }
-                        if !self.callable_ref_is_compatible(
-                            &expected.params,
-                            function.callable.ret,
-                            function.callable.suspend,
-                            expected,
-                            true,
-                        ) {
-                            return None;
-                        }
-                        plan
-                    }
-                    None => (0..reference_params.len())
-                        .map(AdaptedRefArgument::Value)
-                        .collect(),
-                };
-                // Overload specificity is a property of the DECLARATIONS. The expected/adapted
-                // function shape is intentionally absent here: every compatible overload adapts to
-                // that same shape, so comparing it would turn `C::pick` for `(C, Int) -> Unit` into
-                // a false tie between `pick(Int)` and `pick(Any)`.
-                Some((function, reference_params, plan, type_arguments))
-            })
-            .collect::<Vec<_>>();
-        if candidates.is_empty() {
+        let unbound = matches!(binding, CallableReferenceBinding::Unbound);
+        let source = self.fed_source();
+        match extension_reference_selection::select_extension_reference(
+            &source, overloads, receiver, unbound, expected, self,
+        ) {
+            ExtensionReferenceChoice::Selected(selected) => {
+                ExtensionRefSelection::Selected(selected)
+            }
+            ExtensionReferenceChoice::Ambiguous(tied) => ExtensionRefSelection::Ambiguous(tied),
             // Kotlin diagnoses a receiver-applicable inaccessible declaration before an expected
-            // callable-shape mismatch. The quarantined family is intentionally not mapped or
-            // selected; its presence only determines this terminal diagnostic.
-            return if !inaccessible.is_empty() {
+            // callable-shape mismatch. The quarantined family is never mapped or selected; its
+            // presence only determines this terminal diagnostic.
+            ExtensionReferenceChoice::None if !inaccessible.is_empty() => {
                 ExtensionRefSelection::Inaccessible
-            } else {
-                ExtensionRefSelection::None
-            };
-        }
-        let nearest = candidates
-            .iter()
-            .map(|(function, ..)| function.receiver_rank)
-            .min()
-            .expect("nonempty candidates");
-        let candidates = candidates
-            .into_iter()
-            .filter(|(function, ..)| function.receiver_rank == nearest)
-            .collect::<Vec<_>>();
-        let specificity = candidates
-            .iter()
-            .map(|(function, parameters, plan, _)| {
-                callable_reference_selection::AdaptedReferenceSpecificity {
-                    parameters,
-                    plan,
-                    is_vararg: function.call_sig.vararg_index.is_some(),
-                }
-            })
-            .collect::<Vec<_>>();
-        let maximal = callable_reference_selection::maximal_adapted_references(
-            &specificity,
-            |left_params, right_params| {
-                self.callable_ref_parameter_shape_at_least_as_specific(left_params, right_params)
-            },
-        );
-        match maximal.as_slice() {
-            [selected] => ExtensionRefSelection::Selected(Box::new((
-                candidates[*selected].0.clone(),
-                candidates[*selected].2.clone(),
-                candidates[*selected].3.clone(),
-            ))),
-            _ => ExtensionRefSelection::Ambiguous(
-                maximal
-                    .into_iter()
-                    .map(|index| candidates[index].0.clone())
-                    .collect(),
-            ),
+            }
+            ExtensionReferenceChoice::None => ExtensionRefSelection::None,
         }
     }
 
@@ -35212,7 +35075,6 @@ impl<'a> Checker<'a> {
         &self,
         candidates: &CallableRefCandidates,
         receiver: Ty,
-        name: &str,
         expected: Option<Ty>,
         binding: CallableReferenceBinding,
     ) -> ExtensionCallableRefSelection {
@@ -35241,7 +35103,6 @@ impl<'a> Checker<'a> {
             &candidates.overloads,
             &candidates.inaccessible_extensions,
             receiver,
-            name,
             expected_function,
             binding,
         );
@@ -35698,42 +35559,12 @@ impl<'a> Checker<'a> {
         call_sig: &crate::libraries::CallSig,
         expected_params: &[Ty],
     ) -> Option<Vec<AdaptedRefArgument>> {
-        let plan = callable_reference_selection::parameter_plan(
+        extension_reference_selection::checked_parameter_plan(
             params,
             call_sig,
             expected_params,
-            |actual, target| self.receiver_is_assignable(actual, target),
-        )?;
-        for (target, argument) in plan.iter().enumerate() {
-            let declared = *params.get(target)?;
-            match argument {
-                AdaptedRefArgument::Value(value) => {
-                    if !self.postponed_reference_input_fits(*expected_params.get(*value)?, declared)
-                    {
-                        return None;
-                    }
-                }
-                AdaptedRefArgument::Vararg {
-                    values,
-                    whole_array,
-                } => {
-                    let target = if *whole_array {
-                        declared
-                    } else {
-                        declared.array_read_elem().unwrap_or(declared)
-                    };
-                    if values.iter().any(|value| {
-                        expected_params.get(*value).is_none_or(|expected| {
-                            !self.postponed_reference_input_fits(*expected, target)
-                        })
-                    }) {
-                        return None;
-                    }
-                }
-                AdaptedRefArgument::Default => {}
-            }
-        }
-        Some(plan)
+            self,
+        )
     }
 
     /// Whether a callable-reference expression can realize one exact function shape through the
@@ -35844,7 +35675,7 @@ impl<'a> Checker<'a> {
         if self.classifier_is_object(classifier) {
             return None;
         }
-        let receiver_ty = Ty::obj_name(classifier);
+        let receiver_ty = self.callable_ref_lhs_probe_type(scope, receiver, classifier);
         if let Some((_, candidates)) = self.resolver().classifier_call_candidates(classifier, name)
         {
             let source = self.fed_source();
@@ -35890,7 +35721,6 @@ impl<'a> Checker<'a> {
                         &companion_candidates.overloads,
                         &companion_candidates.inaccessible_extensions,
                         companion_ty,
-                        name,
                         Some(expected),
                         CallableReferenceBinding::Bound,
                     ),
@@ -35950,7 +35780,6 @@ impl<'a> Checker<'a> {
                 &candidates.overloads,
                 &candidates.inaccessible_extensions,
                 receiver_ty,
-                name,
                 Some(expected),
                 CallableReferenceBinding::Unbound,
             ),
@@ -43913,53 +43742,6 @@ impl<'a> Checker<'a> {
             if self.closure_writes_only_null(&name, site) {
                 out.push((path, Ty::nullable(Ty::Nothing)));
             }
-        }
-    }
-
-    /// Narrowings from a `!= null`/`== null` proof on `operand`: the operand's whole ACCESS PATH
-    /// (`a.b != null` proves `a.b` non-null) — and, for a SAFE-CALL chain (`a?.b?.c != null`),
-    /// every prefix too, since a non-null safe-call result means every link held (kotlinc narrows
-    /// the root receiver in the branch). Only stable paths narrow soundly.
-    fn null_check_narrowings(
-        &self,
-        scope: &CheckerScope<'_>,
-        operand: ExprId,
-        out: &mut Vec<(NarrowPath, Ty)>,
-        declined: &mut Vec<(String, Ty)>,
-    ) {
-        let Some(path) = self.expr_access_path(operand) else {
-            // Not a property path. A SAFE-CALL chain ending in a method (`u?.f() != null`,
-            // `u?.f() ?: return`) is no property read, but a non-null result still proves the
-            // chain's ROOT receiver non-null — it only completes when every `?.` held.
-            let mut root = operand;
-            while let Expr::SafeCall { receiver, .. } = self.file.expr(root) {
-                root = *receiver;
-            }
-            // A non-null safe cast (`x as? T`, or a safe-call chain rooted at one) proves `x is T`.
-            if let Some(test) = self.safe_cast_type_test(root) {
-                self.type_test_narrowings(scope, test, out, declined);
-                return;
-            }
-            if let Some(root_path) = self
-                .expr_access_path(root)
-                .filter(|path| path.segments.is_empty())
-            {
-                self.null_proof_or_decline(scope, &root_path, out, declined, self.span(operand));
-            }
-            return;
-        };
-        // A plain chain's proof covers only the full path; a safe-call chain's covers every prefix.
-        let shortest = if matches!(self.file.expr(operand), Expr::SafeCall { .. }) {
-            0
-        } else {
-            path.segments.len()
-        };
-        for len in (shortest..=path.segments.len()).rev() {
-            let prefix = NarrowPath {
-                root: path.root.clone(),
-                segments: path.segments[..len].to_vec(),
-            };
-            self.null_proof_or_decline(scope, &prefix, out, declined, self.span(operand));
         }
     }
 
@@ -52306,230 +52088,6 @@ impl<'a> Checker<'a> {
             .collect()
     }
 
-    /// Select the outer source call shape before contextually checking callable-reference arguments.
-    /// Ordinary syntax/arity/non-reference argument scoring runs first; the selected signature then
-    /// supplies the expected callable type to the single callable-reference resolver.
-    fn select_callable_ref_outer_signature(
-        &mut self,
-        scope: &CheckerScope<'_>,
-        call: ExprId,
-        name: &str,
-        args: &[ExprId],
-        arg_names: Option<&[Option<String>]>,
-        partial: &[Option<Ty>],
-        expected_result: Option<Ty>,
-    ) -> Option<(
-        Signature,
-        crate::symbol_resolver::GSigBinds,
-        crate::fx_hash::HashSet<String>,
-    )> {
-        let trailing_lambda = self.file.call_has_trailing_lambda.contains(&call.0);
-        let explicit_type_arguments = self
-            .file
-            .call_type_args
-            .get(&call.0)
-            .map(|syntax| syntax.arguments.clone())
-            .unwrap_or_default()
-            .iter()
-            .map(|argument| self.type_ref_ty(scope, argument))
-            .collect::<Vec<_>>();
-        let select_level = |functions: Vec<crate::libraries::FunctionInfo>| {
-            let mut candidates = Vec::new();
-            for function in functions {
-                if !self.source_callable_visible(&function) {
-                    continue;
-                }
-                let signature = signature_from_resolved_function(&function);
-                crate::trace_compiler!(
-                    "resolve",
-                    "callable-reference outer candidate name={name} source={:?} owner={} jvm_name={} descriptor={} visibility={:?} inline={:?} overload_rank={} params={:?} generic={:?}",
-                    function.source_key,
-                    function.callable.owner.render(),
-                    function.callable.name,
-                    function.callable.descriptor,
-                    function.visibility,
-                    function.flags.inline,
-                    function.overload_rank,
-                    signature.params,
-                    signature.generic_sig,
-                );
-                let call_sig = signature.call_sig();
-                let Some(argument_parameters) = call_argument_parameter_indices(
-                    args.len(),
-                    signature.params.len(),
-                    arg_names,
-                    trailing_lambda,
-                    &call_sig,
-                ) else {
-                    continue;
-                };
-
-                let mut bindings = crate::symbol_resolver::GSigBinds::default();
-                let semantic_params = if let Some(generic) = signature.generic_sig.as_ref() {
-                    bindings = crate::symbol_resolver::seeded_gsig_binds(
-                        generic,
-                        &explicit_type_arguments,
-                    );
-                    let inferred = crate::symbol_resolver::infer_generic_bindings(
-                        generic,
-                        argument_parameters
-                            .iter()
-                            .copied()
-                            .zip(partial.iter().copied())
-                            .enumerate()
-                            .filter_map(|(source, (parameter, actual))| {
-                                let actual = actual?;
-                                let declared = *generic.params.get(parameter)?;
-                                // Integer literals are soft constraints until the surrounding
-                                // callable reference has been resolved. In
-                                // `choose(0, ::takesByte)`, binding `T = Int` here prevents the
-                                // reference from contributing the stronger `T = Byte` constraint,
-                                // even though the literal is contextually admissible as `Byte`.
-                                // Final call scoring still sees the literal expression and records
-                                // its selected conversion after all constraints are known.
-                                if ty_mentions_param(declared, &generic.formals)
-                                    && args.get(source).is_some_and(|argument| {
-                                        folded_integer_literal(self.file, *argument).is_some()
-                                    })
-                                {
-                                    return None;
-                                }
-                                Some((parameter, actual))
-                            }),
-                    );
-                    crate::symbol_resolver::merge_generic_bindings(
-                        generic,
-                        explicit_type_arguments.len(),
-                        &mut bindings,
-                        inferred,
-                    );
-                    if let Some(expected) = expected_result {
-                        if let Some(inferred) =
-                            crate::symbol_resolver::infer_generic_return_bindings(
-                                generic,
-                                expected,
-                                |actual, bound| self.receiver_is_assignable(actual, bound),
-                            )
-                        {
-                            crate::symbol_resolver::merge_generic_bindings(
-                                generic,
-                                explicit_type_arguments.len(),
-                                &mut bindings,
-                                inferred,
-                            );
-                        }
-                    }
-                    if !crate::symbol_resolver::generic_bindings_satisfy_bounds(
-                        generic,
-                        &bindings,
-                        |actual, bound| self.generic_bound_admits(actual, bound),
-                    ) {
-                        continue;
-                    }
-                    generic
-                        .params
-                        .iter()
-                        .map(|parameter| {
-                            crate::symbol_resolver::ty_subst_keep_unbound(*parameter, &bindings)
-                        })
-                        .collect::<Vec<_>>()
-                } else {
-                    signature.params.clone()
-                };
-                let Some(score) = call_applicability::score(
-                    self,
-                    scope,
-                    &semantic_params,
-                    &call_sig,
-                    ArgSlots {
-                        args,
-                        partial_arg_tys: partial,
-                        arg_names,
-                        trailing_lambda,
-                    },
-                ) else {
-                    crate::trace_compiler!(
-                        "resolve",
-                        "callable-reference outer candidate rejected name={name} semantic_params={semantic_params:?} partial={partial:?}",
-                    );
-                    continue;
-                };
-                let low_priority_annotation =
-                    crate::types::type_name("kotlin/internal/LowPriorityInOverloadResolution");
-                candidates.push((
-                    score.rank,
-                    function
-                        .callable
-                        .annotations
-                        .contains(&low_priority_annotation),
-                    signature,
-                    bindings,
-                ));
-            }
-            if candidates.iter().any(|(_, low_priority, ..)| !low_priority) {
-                candidates.retain(|(_, low_priority, ..)| !*low_priority);
-            }
-            let best = candidates.iter().map(|candidate| candidate.0).max()?;
-            crate::trace_compiler!(
-                "resolve",
-                "callable-reference outer selection name={name} candidates={} best={best:?}",
-                candidates.len(),
-            );
-            let mut best_candidates = candidates
-                .into_iter()
-                .filter(|candidate| candidate.0 == best);
-            let (_, _, signature, bindings) = best_candidates.next()?;
-            if best_candidates.next().is_some() {
-                return None;
-            }
-            let invariant_expected_result_constraints = expected_result
-                .and_then(|expected| {
-                    let source = self.fed_source();
-                    crate::symbol_resolver::infer_generic_return_bindings_from_symbols(
-                        &source,
-                        signature.generic_sig.as_ref()?,
-                        expected,
-                        |actual, bound| self.receiver_is_assignable(actual, bound),
-                    )
-                    .map(|expected_bindings| {
-                        crate::symbol_resolver::expected_result_equality_formals(
-                            &source,
-                            signature
-                                .generic_sig
-                                .as_ref()
-                                .expect("generic result bindings"),
-                            expected,
-                            &expected_bindings,
-                        )
-                    })
-                })
-                .unwrap_or_default();
-            crate::trace_compiler!(
-                "resolve",
-                "callable-reference outer selected name={name} bindings={bindings:?} invariant_expected_result_constraints={invariant_expected_result_constraints:?}",
-            );
-            Some((signature, bindings, invariant_expected_result_constraints))
-        };
-
-        // Callable-reference arguments need an expected signature before their own resolution, but
-        // that does not change the ordinary scope tower. Probe one candidate level at a time: the
-        // nearest implicit receiver member that is applicable wins; only then do package-level
-        // callables participate. Every provider supplies the same `FunctionInfo` structure here.
-        for receiver in self.implicit_receiver_types(scope) {
-            let functions = self
-                .stable_receiver_callables(receiver, name)
-                .functions()
-                .iter()
-                .filter(|function| function.kind == crate::libraries::FnKind::Member)
-                .cloned()
-                .collect::<Vec<_>>();
-            if let Some(selected) = select_level(functions) {
-                return Some(selected);
-            }
-        }
-        select_level(self.resolver().top_level_candidates(name))
-    }
-
     fn expr_inner(
         &mut self,
         scope: &CheckerScope<'_>,
@@ -54385,6 +53943,7 @@ impl<'a> Checker<'a> {
         name: String,
         args: Option<Vec<ExprId>>,
     ) -> Ty {
+        let safe_search = ScopeLevelSearch::in_tower(CallResultConstraint::safe_lifted(expected));
         let t = {
             let rt = self.expr(scope, receiver);
             if rt == Ty::Error {
@@ -54502,7 +54061,7 @@ impl<'a> Checker<'a> {
                                         receiver,
                                         recv,
                                         &name,
-                                        FunctionValueRungs::InTower,
+                                        safe_search,
                                     )
                                     .or_else(|| {
                                         let call_args = CallArgs {
@@ -54579,7 +54138,7 @@ impl<'a> Checker<'a> {
                                         receiver,
                                         recv,
                                         &name,
-                                        FunctionValueRungs::InTower,
+                                        safe_search,
                                     )
                                     .or_else(|| {
                                         let call_args = CallArgs {
@@ -54655,7 +54214,7 @@ impl<'a> Checker<'a> {
                                 receiver,
                                 recv,
                                 &name,
-                                FunctionValueRungs::InTower,
+                                safe_search,
                             )
                             .or_else(|| {
                                 self.record_extension_call(
@@ -57650,7 +57209,6 @@ impl<'a> Checker<'a> {
             let extension_selection = self.select_extension_callable_ref(
                 &extension_candidates,
                 extension_receiver_ty,
-                name,
                 expected,
                 CallableReferenceBinding::Unbound,
             );
@@ -57682,7 +57240,6 @@ impl<'a> Checker<'a> {
                 let extension_selection = self.select_extension_callable_ref(
                     &candidates,
                     companion_ty,
-                    name,
                     expected,
                     CallableReferenceBinding::Bound,
                 );
@@ -57856,7 +57413,6 @@ impl<'a> Checker<'a> {
                     let extension_selection = self.select_extension_callable_ref(
                         &candidates,
                         receiver,
-                        &name,
                         expected,
                         CallableReferenceBinding::ImplicitThis,
                     );
@@ -58280,7 +57836,6 @@ impl<'a> Checker<'a> {
                 let extension_selection = self.select_extension_callable_ref(
                     &extension_candidates,
                     extension_receiver,
-                    &name,
                     expected,
                     CallableReferenceBinding::Bound,
                 );
@@ -58475,7 +58030,7 @@ impl<'a> Checker<'a> {
                 .select_receiver_function_with_params_tracking(
                     rt,
                     name,
-                    &argument_kinds,
+                    crate::symbol_resolver::FamilyArguments::Shared(&argument_kinds),
                     &[],
                     callables,
                     Some(ret),
@@ -59747,7 +59302,7 @@ impl<'a> Checker<'a> {
             resolver.select_receiver_function_with_params_tracking(
                 recv,
                 name,
-                &[],
+                crate::symbol_resolver::FamilyArguments::Shared(&[]),
                 &[],
                 &callables,
                 None,
