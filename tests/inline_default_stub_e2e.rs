@@ -155,8 +155,9 @@ fn every_member_inline_default_stub_copies_the_body() {
     );
 }
 
-/// The whole runtime program: every top-level and member shape above, with the catch, finally and
-/// loop bodies, shared with every box lane.
+/// The whole runtime program: every portable top-level and member shape above, with the catch,
+/// finally and loop bodies, shared with every box lane. The JVM-only `@JvmStatic` and `@JvmInline`
+/// members run in [`JVM_STATIC`].
 const RUN: &str = include_str!("box_regressions/inlineDefaultStubRun.kt");
 
 #[test]
@@ -197,7 +198,7 @@ fn a_jvm_static_inline_default_stub_reads_its_parameters_like_kotlinc() {
         classes.krusty.keys().collect::<Vec<_>>(),
         classes.reference.keys().collect::<Vec<_>>()
     );
-    for name in ["S", "H", "H$Companion"] {
+    for name in ["S", "H", "H$Companion", "O", "K", "K$Companion", "V"] {
         let (reference, krusty) = classes.class_listing(name);
         assert_eq!(krusty, reference, "{name}");
     }
