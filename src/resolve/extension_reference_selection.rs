@@ -190,11 +190,18 @@ fn applicable_extension(
                 shift_plan_values_from(&mut plan, context_count, 1);
                 plan.insert(context_count, AdaptedRefArgument::Value(context_count));
             }
-            // The plan has already mapped every input; only the result remains to fit.
+            // The plan has mapped every input; the result must fit, and the variables it binds
+            // must agree with their input occurrences.
             if !super::callable_reference_selection::result_is_compatible(
                 function.callable.ret,
                 expected,
                 true,
+                |actual, target| rules.assignable(actual, target),
+            ) || !super::callable_reference_selection::inputs_agree_with_result(
+                function.callable.ret,
+                expected,
+                &reference_params,
+                &plan,
                 |actual, target| rules.assignable(actual, target),
             ) {
                 return None;

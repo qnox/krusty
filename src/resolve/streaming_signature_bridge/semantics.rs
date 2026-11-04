@@ -2317,18 +2317,12 @@ impl crate::fir::SignatureSemantics for ProductionSignatureSemantics<'_> {
                         generic,
                         &resolved_type_arguments,
                     );
+                    let beside_reference = arguments.iter().any(|argument| {
+                        matches!(argument, crate::fir::SigCallArgumentProbe::PostponedCallableReference { .. })
+                    });
                     let inferred = crate::symbol_resolver::infer_generic_call_bindings(
                         generic,
-                        kinds.iter().enumerate().filter_map(|(parameter, argument)| {
-                            let actual = argument.ty();
-                            (actual != Ty::Error && !argument.is_omitted_default()).then_some((
-                                parameter,
-                                argument.type_for(
-                                    generic.params.get(parameter).copied().unwrap_or(Ty::Error),
-                                ),
-                                argument.is_spread(),
-                            ))
-                        }),
+                        typed_argument_evidence(&kinds, generic, beside_reference),
                         selected.call_sig.vararg_index,
                     );
                     for (parameter, actual) in inferred {

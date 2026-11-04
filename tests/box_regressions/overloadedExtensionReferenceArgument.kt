@@ -2,6 +2,8 @@
 // `Op<Boolean>::and` fits `(Op<Boolean>, Op<Boolean>) -> Op<Boolean>` only through
 // `and(Expr<Boolean>)`. The call's candidate comes from every scope-tower level first, including
 // the extensions on an implicit receiver, and the reference keeps its written type arguments.
+// Each candidate is one constraint system: `pick(Int): String` cannot satisfy `(Receiver, T) -> T`,
+// so only `pick(Byte): Byte` fits and the soft literal `1` becomes a `Byte`.
 
 open class Expr<T>(val label: String)
 class Op<T>(label: String) : Expr<T>(label)
@@ -34,6 +36,14 @@ class Conditions(private val chain: Chain<Op<Boolean>>) {
     fun all(): Op<Boolean> = combineAll(Op<Boolean>::and)
 }
 
+class Receiver
+
+fun Receiver.pick(value: Int): String = "wrong"
+
+fun Receiver.pick(value: Byte): Byte = value
+
+fun <T> choose(seed: T, operation: (Receiver, T) -> T): T = operation(Receiver(), seed)
+
 fun box(): String {
     val chain = Chain(Op<Boolean>("a"), Op("b"), Op("c"))
     val expected = "((a and b) and c)"
@@ -43,5 +53,7 @@ fun box(): String {
     if (inferredExplicitReceiver(chain).label != expected) return "inferred explicit receiver"
     if (inferredTopLevel(chain.first, chain.second).label != "(a and b)") return "inferred top level"
     if (Conditions(chain).all().label != expected) return "member"
+    val selected = choose(1, Receiver::pick)
+    if (selected != 1.toByte()) return "explicit choice"
     return "OK"
 }
