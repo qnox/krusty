@@ -229,8 +229,15 @@ impl CallableRegistry {
                     if !defaults.is_empty() && default_entry.is_none() {
                         continue;
                     }
+                    if super::lower::value_hash::call_kind(ir, callables, expression).is_some() {
+                        continue;
+                    }
                     if callable
                         .compiler_operation()
+                        .filter(|operation| {
+                            *operation
+                                != crate::backend::BackendCompilerIntrinsic::PrimitiveHashCode
+                        })
                         .is_some_and(super::lower::is_direct_operation)
                         && !callable
                             .dependency_callable
