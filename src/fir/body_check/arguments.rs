@@ -1713,6 +1713,25 @@ impl BodyFirChecker<'_> {
             nullable,
             kotlin_interface: sam.kotlin_interface,
             parameter_identities: sam.parameter_identities.clone(),
+            type_parameters: sam
+                .type_parameters
+                .iter()
+                .map(|parameter| {
+                    Ok(crate::fir::FirSamTypeParameter {
+                        name: parameter.name.as_str().into(),
+                        bounds: parameter
+                            .bounds
+                            .iter()
+                            .map(|&(ty, is_interface)| {
+                                Ok(crate::fir::ResolvedTypeParameterBound {
+                                    ty: resolved(ty)?,
+                                    is_interface,
+                                })
+                            })
+                            .collect::<Result<Box<[_]>, _>>()?,
+                    })
+                })
+                .collect::<Result<Box<[_]>, _>>()?,
         })
     }
 }
