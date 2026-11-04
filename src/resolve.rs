@@ -36034,15 +36034,18 @@ impl<'a> Checker<'a> {
                 let Some(&declared_parameter) = signature.params.get(parameter) else {
                     continue;
                 };
-                let declared_parameter = if candidate.call_sig.vararg_index == Some(parameter)
-                    && !self.file.is_spread_arg(args[argument])
-                {
-                    declared_parameter
-                        .array_read_elem()
-                        .unwrap_or(declared_parameter)
-                } else {
-                    declared_parameter
-                };
+                // A spread or named array is the whole vararg array; any other argument is one
+                // element. The parameter view and the constraint below must agree on that.
+                let whole_array = whole_arrays.get(argument).copied().unwrap_or(false)
+                    || self.file.is_spread_arg(args[argument]);
+                let declared_parameter =
+                    if candidate.call_sig.vararg_index == Some(parameter) && !whole_array {
+                        declared_parameter
+                            .array_read_elem()
+                            .unwrap_or(declared_parameter)
+                    } else {
+                        declared_parameter
+                    };
                 let open_formal = nested_producer_bindings::open_variable(
                     &signature,
                     type_args,
@@ -36126,7 +36129,7 @@ impl<'a> Checker<'a> {
                     crate::symbol_resolver::infer_generic_call_constraints_from_symbols(
                         &source,
                         &signature,
-                        [(parameter, nested_actual, false)],
+                        [(parameter, nested_actual, whole_array)],
                         candidate.call_sig.vararg_index,
                     );
                 let mut inferred_nested = nested_constraints.bindings;
@@ -38715,6 +38718,15 @@ impl<'a> Checker<'a> {
                         continue;
                     }
                     if !infer_all_arguments && postponed_result_arguments.contains(argument) {
+                        continue;
+                    }
+                    // A nested call that commitment left open still types as its own variables:
+                    // the enclosing call completes both, so it is not evidence for this call yet.
+                    if postponed_result_arguments.contains(argument)
+                        && self
+                            .unbound_contextual_result_signature(*argument)
+                            .is_some()
+                    {
                         continue;
                     }
                     let actual = self.expr_types[argument.0 as usize];

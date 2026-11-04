@@ -280,6 +280,7 @@ impl Checker<'_> {
             debug_assert!(false, "successful argument mapping must be invertible");
             return false;
         };
+        let lexical_formals = scope.lexical_tparam_identities();
         let mut argument_bindings = Vec::with_capacity(args.len());
         for (source, (&argument, &parameter)) in args.iter().zip(&argument_parameters).enumerate() {
             let Some((&array_or_parameter, &probed_actual)) =
@@ -315,6 +316,28 @@ impl Checker<'_> {
             } else {
                 inferred.unwrap_or(array_or_parameter)
             };
+            let vararg_element = call_sig.vararg_index == Some(parameter) && !whole_array;
+            // A nested generic call is completed against its parameter only once that parameter
+            // is a type of this site. Until the enclosing call solves the selected call's open
+            // variables, the nested call keeps its own and joins that enclosing system instead.
+            if self.unbound_contextual_result_signature(argument).is_some()
+                && names_formal_outside_scope(expected, &lexical_formals)
+            {
+                crate::trace_compiler!(
+                    "lambda_apply",
+                    "defer selected argument={argument:?} expected={expected:?}",
+                );
+                argument_bindings.push(self.finalized_selected_argument_binding(
+                    scope,
+                    argument,
+                    parameter,
+                    vararg_element,
+                    source_declared_type,
+                    source_intersection,
+                    probed_actual,
+                ));
+                continue;
+            }
             let actual = self.selected_argument_type(
                 scope,
                 argument,
@@ -324,7 +347,6 @@ impl Checker<'_> {
                 parameter,
                 implicit_lambda_label.as_deref(),
             );
-            let vararg_element = call_sig.vararg_index == Some(parameter) && !whole_array;
             if whole_array {
                 self.expect_whole_array_vararg_arg(
                     Some(scope),
@@ -656,6 +678,17 @@ fn required_indexed_operator_argument_slots(
 ) -> Result<Vec<Option<ExprId>>, &'static str> {
     indexed_operator_argument_slots(params, vararg_index, arguments, false)
         .ok_or(SELECTED_INDEXED_ARGUMENT_MISMATCH)
+}
+
+/// Whether `ty` names a type parameter that is not in scope at the call. A selected callee's formal
+/// that its own arguments left unsolved is published in its declared form; outside its declaration
+/// it can only be that call's still-open variable, never a fixed type.
+fn names_formal_outside_scope(ty: Ty, lexical: &[String]) -> bool {
+    let mut formals = Vec::new();
+    super::type_parameter_owners::ty_param_names_into(ty, &mut formals);
+    formals
+        .iter()
+        .any(|formal| !lexical.iter().any(|visible| visible == formal))
 }
 
 #[cfg(test)]
