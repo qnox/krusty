@@ -312,11 +312,7 @@ fn mark(ir: &mut IrFile, index: usize, reads: Option<Vec<TypeName>>, parameters:
             let mut value = read_stable(ir, *first);
             for &class in rest {
                 let rhs = read_stable(ir, class);
-                value = ir.add_expr(IrExpr::PrimitiveBinOp {
-                    op: IrBinOp::BitOr,
-                    lhs: value,
-                    rhs,
-                });
+                value = ir.add_arithmetic(IrBinOp::BitOr, value, rhs, Ty::Int);
                 ir.mark_positionless(value);
             }
             value

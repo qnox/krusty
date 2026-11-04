@@ -13,16 +13,21 @@ use super::BodyLowering;
 /// The first line a body's emission marks: its own, or the first position a block reaches.
 /// An `@InlineOnly` expansion whose lambda starts on the call's line separates the two with the
 /// synthetic inline line, so the marker's attribution is decided from this line.
+///
+/// A type operation without a position of its own evaluates its operand first, so the operand's
+/// line is the first one: a lambda result converted to the inline function's return type
+/// (`s.let { parse(it) }` where an `Int?` is expected) starts on its value's line.
 fn first_body_line(ir: &crate::ir::IrFile, body: ExprId) -> Option<u32> {
     let mut expression = body;
     loop {
         if let Some(line) = ir.statement_line(expression) {
             return (line != 0).then_some(line);
         }
-        let IrExpr::Block { stmts, value } = ir.expr(expression) else {
-            return None;
+        expression = match ir.expr(expression) {
+            IrExpr::Block { stmts, value } => *stmts.first().or(value.as_ref())?,
+            IrExpr::TypeOp { arg, .. } => *arg,
+            _ => return None,
         };
-        expression = *stmts.first().or(value.as_ref())?;
     }
 }
 
