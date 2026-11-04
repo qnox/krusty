@@ -760,3 +760,36 @@ fun install() { defineFunc<Token>() }\n",
         Some(&crate::ir::IrEnclosure::Lambda(outer))
     );
 }
+
+const REIFIED_BESIDE_OBJECT: &str = "\
+interface Item\n\
+class Token : Item\n\
+interface Check { fun test(item: Item): Boolean }\n\
+class Checks(val lambda: (Item) -> Boolean, val check: Check)\n\
+inline fun <reified T : Item> checks(): Checks =\n\
+    Checks({ it is T }, object : Check { override fun test(item: Item) = item is T })\n\
+fun caller() = checks<Token>()\n";
+
+/// An expansion that copies an anonymous object for the reified binding keeps the call-site
+/// lambda it specialized beside it: the lambda's check still tests `Token`.
+#[test]
+fn a_reified_check_beside_a_specialized_object_keeps_the_call_site_lambda() {
+    let ir = lower(REIFIED_BESIDE_OBJECT, "ReifiedBesideObject");
+    let declaration = lambda_implementations(&ir, function_named(&ir, "checks"));
+    let call = lambda_implementations(&ir, function_named(&ir, "caller"));
+    assert_eq!(declaration.len(), 1, "the declaration creates one lambda");
+    assert_eq!(call.len(), 1, "the call creates one lambda");
+    assert_ne!(declaration[0], call[0], "the call's lambda is a copy");
+    let targets = instanceof_targets(&ir, call[0]);
+    assert_eq!(targets.len(), 1, "{targets:?}");
+    assert!(
+        is_token(targets[0]),
+        "the call-site lambda tests {:?}",
+        targets[0]
+    );
+    let specialization = ir
+        .specialized_functions
+        .get(&call[0])
+        .expect("the call-site lambda records its expansion");
+    assert_eq!(specialization.source, declaration[0]);
+}

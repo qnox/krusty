@@ -32,7 +32,6 @@ mod linker;
 mod prebuilt;
 mod runtime;
 mod symbols;
-mod value_classes;
 
 pub use codegen::{CraneliftBackend, Entry, BOX_RESULT_FRAME};
 pub use compiler_tool::{compile_native, NativeCompileError, NativeCompileOptions, NativeCompiled};

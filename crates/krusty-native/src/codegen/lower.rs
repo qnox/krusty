@@ -223,8 +223,8 @@ pub struct FileInput<'a> {
     pub dependency_properties:
         &'a krusty::fx_hash::HashMap<u32, super::super::dependency_references::DependencyProperty>,
     /// Which classifiers are value classes, and how this target carries each occurrence of one;
-    /// see [`crate::value_classes`].
-    pub value_classes: &'a super::super::value_classes::NativeValueClasses,
+    /// see [`krusty::backend::value_classes`].
+    pub value_classes: &'a krusty::backend::value_classes::ValueClassInventory,
     /// The dispatch numbering of the module's named classes, shared by every file.
     pub slot_plan: &'a krusty::backend::class_tables::module_slots::ModuleSlotPlan,
     /// The module's classifier facts, which every file reads alike.
@@ -431,7 +431,7 @@ struct FileLowering<'a> {
     /// Staged bound singleton accesses proven inert by the exact checked call and export effect.
     inert_singleton_bindings: krusty::fx_hash::HashSet<krusty::ir::ExprId>,
     /// Which classifiers are value classes, and which occurrences travel unboxed.
-    values: &'a super::super::value_classes::NativeValueClasses,
+    values: &'a krusty::backend::value_classes::ValueClassInventory,
     /// The module's dispatch numbering, which a call through a class of another file reads.
     slot_plan: &'a krusty::backend::class_tables::module_slots::ModuleSlotPlan,
     /// The module's classifier facts, which say what every file, not only this one, declares.

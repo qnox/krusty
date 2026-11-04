@@ -17,6 +17,7 @@ pub mod interface_identity;
 pub mod local_properties;
 mod module_facts;
 mod source_class_members;
+pub mod value_classes;
 
 pub use constructor_selection::selected_constructor;
 pub use dependency_call_shape::{DeclaredOperandRoles, DependencyCallShape, DependencyExportCall};

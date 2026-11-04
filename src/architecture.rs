@@ -106,6 +106,8 @@ mod tests {
                 "libraries",
                 "symbol_source",
                 "types",
+                // The provider-neutral value-class traversal the KLIB backends' policy runs over.
+                "value_classes",
             ],
         );
         // The class tables every backend lays its objects out from read only the checked IR: no
@@ -566,9 +568,10 @@ mod tests {
     #[test]
     fn the_class_model_uses_only_ir_contract_dependencies() {
         assert_allowed_crate_modules("crates/krusty-native/src/intrinsics.rs", &["types"]);
-        // `value_classes` is the traversal every backend shares; what this file adds is the policy.
+        // `value_classes` is the traversal every backend shares; what this file adds is the KLIB
+        // backends' policy.
         assert_allowed_crate_modules(
-            "crates/krusty-native/src/value_classes.rs",
+            "src/backend/value_classes.rs",
             &["ir", "types", "value_classes"],
         );
     }
@@ -587,9 +590,10 @@ mod tests {
             "crates/krusty-native/src/codegen/lower.rs",
             &["backend", "fir", "ir", "types"],
         );
+        // `backend` supplies the shared value-class inventory a capture layout stores values by.
         assert_allowed_crate_modules(
             "crates/krusty-native/src/codegen/lower/functions.rs",
-            &["ir", "types"],
+            &["backend", "ir", "types"],
         );
         assert_allowed_crate_modules(
             "crates/krusty-native/src/codegen/lower/arrays.rs",

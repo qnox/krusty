@@ -23,7 +23,7 @@
 //! table indexed by the module-wide member number ([`Dispatch::Interface`]), so a call through an
 //! interface reaches the receiver's implementation from any file.
 
-use super::value_classes::NativeValueClasses;
+use krusty::backend::value_classes::ValueClassInventory;
 use krusty::fx_hash::HashMap;
 
 use krusty::backend::class_tables::module_interfaces::ModuleInterfaces;
@@ -66,8 +66,8 @@ impl CKind {
 }
 
 /// The carrier for a Kotlin type as this target carries it: a value class is its underlying value
-/// wherever the representation policy projects it (see `native::value_classes`).
-pub(super) fn c_kind(values: &NativeValueClasses, ty: Ty) -> CKind {
+/// wherever the representation policy projects it (see `krusty::backend::value_classes`).
+pub(super) fn c_kind(values: &ValueClassInventory, ty: Ty) -> CKind {
     machine_kind(values.project(ty))
 }
 
@@ -75,7 +75,7 @@ pub(super) fn c_kind(values: &NativeValueClasses, ty: Ty) -> CKind {
 /// for, if any. Two signatures agree only where both do — a value class over `Any` and `Any` share
 /// a carrier, and still differ, because one is the value and the other a box of it.
 pub(super) fn representation(
-    values: &NativeValueClasses,
+    values: &ValueClassInventory,
     ty: Ty,
 ) -> (CKind, Option<krusty::types::TypeName>) {
     (c_kind(values, ty), values.unboxed(ty))
@@ -138,7 +138,7 @@ pub(super) fn value_field(ir: &IrFile, class: ClassId) -> Result<u32, Unsupporte
 /// Int>(val v: T)` holds an `Int` in a field the IR types `T`. Every other field is stored at its
 /// own physical type.
 pub(super) fn field_storage_ty(
-    values: &NativeValueClasses,
+    values: &ValueClassInventory,
     ir: &IrFile,
     class: ClassId,
     index: u32,
@@ -363,17 +363,17 @@ fn any_member_symbol(root: &IrClass, member: AnyMember) -> &'static str {
 }
 
 /// The dispatch numbering of the module's named classes, as every file of the module reads it.
-/// `values` must be the module-wide answer ([`NativeValueClasses::of_module_classes`]), so the
+/// `values` must be the module-wide answer ([`ValueClassInventory::of_module_classes`]), so the
 /// numbering does not depend on which file asks.
 pub(super) fn module_plan(
     classes: &krusty::backend::class_tables::module_classes::ModuleClasses,
-    values: &NativeValueClasses,
+    values: &ValueClassInventory,
 ) -> ModuleSlotPlan {
     ModuleSlotPlan::build(classes, &NativeRepresentation(values))
 }
 
 /// How Native carries values, as the shared tables ask it.
-struct NativeRepresentation<'v>(&'v NativeValueClasses);
+struct NativeRepresentation<'v>(&'v ValueClassInventory);
 
 impl Representation for NativeRepresentation<'_> {
     fn same(&self, a: Ty, b: Ty) -> bool {
@@ -497,7 +497,7 @@ const ANY_SLOTS: u32 = class_tables::ANY_SLOTS;
 /// Build the layout and vtable of every class in `ir`, superclasses first.
 pub(super) fn build(
     ir: &IrFile,
-    values: &NativeValueClasses,
+    values: &ValueClassInventory,
     plan: &ModuleSlotPlan,
 ) -> Result<ClassModel, Unsupported> {
     for class in &ir.classes {
@@ -573,7 +573,7 @@ fn root_class(ir: &IrFile, mut id: ClassId) -> &IrClass {
 /// Lay out class `id` in memory over its shared `table`, whose superclass in this file (already
 /// laid out) is `parent`.
 fn layout_class(
-    values: &NativeValueClasses,
+    values: &ValueClassInventory,
     ir: &IrFile,
     id: ClassId,
     table: &ClassTable,
@@ -682,7 +682,11 @@ mod tests {
     use krusty::ir::IrProperty;
 
     fn build(ir: &IrFile) -> Result<ClassModel, Unsupported> {
-        super::build(ir, &NativeValueClasses::default(), &ModuleSlotPlan::empty())
+        super::build(
+            ir,
+            &ValueClassInventory::default(),
+            &ModuleSlotPlan::empty(),
+        )
     }
 
     #[test]
@@ -1111,7 +1115,7 @@ mod tests {
 
         let model = super::build(
             &ir,
-            &NativeValueClasses::default(),
+            &ValueClassInventory::default(),
             &ModuleSlotPlan::empty(),
         )
         .expect("layout");

@@ -14,6 +14,7 @@ mod capture_names;
 mod checked_classifiers;
 pub mod class_comparison;
 mod collection_barriers;
+mod collection_override_signatures;
 mod collection_to_array;
 pub mod companion;
 mod companion_storage;

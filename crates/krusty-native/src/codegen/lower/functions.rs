@@ -219,7 +219,7 @@ pub(super) struct LambdaItems {
 /// model applies to fields, for the same reason: the collector is told where the references are
 /// and must be told the truth.
 fn layout(
-    values: &super::super::super::value_classes::NativeValueClasses,
+    values: &krusty::backend::value_classes::ValueClassInventory,
     types: &[Ty],
 ) -> (Vec<u32>, u32, Vec<u32>) {
     let mut offsets = Vec::with_capacity(types.len());
