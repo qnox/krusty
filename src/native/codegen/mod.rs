@@ -56,6 +56,8 @@ struct DependencyExportDefinition {
     default_entry: Option<String>,
 }
 
+use lower::FieldGetterExports;
+
 /// The symbol every program object must define for the runtime's `_start` to call.
 pub const PROGRAM_ENTRY: &str = "kt_program_entry";
 
@@ -368,6 +370,44 @@ impl Backend for CraneliftBackend {
                 },
             );
         }
+        let mut field_getter_exports = FieldGetterExports::default();
+        let mut getters = file.dependency_exports.field_getters().collect::<Vec<_>>();
+        getters.sort_unstable_by_key(|(getter, _)| (getter.class(), getter.field()));
+        for (getter, identity) in getters {
+            let symbol = format!("kt_klib_export_{}", state.next_dependency_symbol);
+            state.next_dependency_symbol += 1;
+            let definition = DependencyExportDefinition {
+                symbol: symbol.clone(),
+                signature: getter.signature().clone(),
+                member_receiver: Some(getter.receiver()),
+                default_entry: None,
+            };
+            let export = DependencyExport {
+                symbol,
+                // Field-backed getters publish no callable-reference marker declaration.
+                reference_declaration: None,
+                signature: definition.signature.clone(),
+                member_receiver: definition.member_receiver,
+                singleton_member_receiver: None,
+                singleton_extension_receiver: None,
+                default_entry: None,
+            };
+            if state
+                .dependency_symbols
+                .insert(identity.clone(), export)
+                .is_some()
+            {
+                diags.error(
+                    crate::diag::Span::new(0, 0),
+                    "internal error: two property exports share one KLIB identity",
+                );
+                return Vec::new();
+            }
+            field_getter_exports.insert(
+                (getter.class(), getter.field()),
+                (getter.clone(), definition),
+            );
+        }
         let lowered = match lower::lower_file(
             lower::FileInput {
                 ir: &file.ir,
@@ -384,6 +424,7 @@ impl Backend for CraneliftBackend {
                 module_name: file.module_name,
                 unit_kind: file.kind,
                 dependency_exports: &dependency_exports,
+                field_getter_exports: &field_getter_exports,
                 dependency_signatures: &file.dependency_exports,
                 dependency_symbols: &state.dependency_symbols,
             },

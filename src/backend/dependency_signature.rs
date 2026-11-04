@@ -52,6 +52,13 @@ pub(crate) struct DependencyFunctionSignature {
 }
 
 impl DependencyFunctionSignature {
+    pub(super) fn field_getter(receiver: DependencyMemberReceiver, result: Ty) -> Self {
+        Self {
+            parameters: vec![receiver.semantic_type()].into_boxed_slice(),
+            result,
+        }
+    }
+
     pub(crate) fn from_ir(
         ir: &IrFile,
         function: FunId,

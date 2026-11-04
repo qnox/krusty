@@ -25,6 +25,7 @@ pub use dependency_facts::{
     BackendCallableFact, BackendCompilerIntrinsic, BackendPropertyFact, BackendSemanticCallRole,
     CheckedBackendCallables, DependencyClassifier, DependencyFactError, DependencyGetterSignature,
 };
+pub(crate) use dependency_metadata::DependencyFieldGetter;
 pub(crate) use dependency_metadata::KlibDependencyCallable;
 pub(crate) use dependency_metadata::{
     authenticated_singleton_receiver, has_standalone_dependency_code,

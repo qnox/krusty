@@ -171,6 +171,33 @@ pub struct SingletonMemberReceiver {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DependencyMemberReceiver(crate::types::Ty);
 
+/// A source property's default getter, authenticated before target representation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct DependencyFieldGetter {
+    class: crate::ir::ClassId,
+    field: u32,
+    receiver: DependencyMemberReceiver,
+    signature: super::DependencyFunctionSignature,
+}
+
+impl DependencyFieldGetter {
+    pub(crate) fn class(&self) -> crate::ir::ClassId {
+        self.class
+    }
+
+    pub(crate) fn field(&self) -> u32 {
+        self.field
+    }
+
+    pub(crate) fn receiver(&self) -> DependencyMemberReceiver {
+        self.receiver
+    }
+
+    pub(crate) fn signature(&self) -> &super::DependencyFunctionSignature {
+        &self.signature
+    }
+}
+
 impl DependencyMemberReceiver {
     pub fn semantic_type(self) -> crate::types::Ty {
         self.0
@@ -195,6 +222,7 @@ impl SingletonMemberReceiver {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct DependencyExportSignatures {
     callables: HashMap<FunId, KlibDependencyCallable>,
+    field_getters: HashMap<crate::fir::PropertyId, (DependencyFieldGetter, KlibDependencyCallable)>,
     /// Every visible function an interface of this file declares, abstract ones included: the
     /// identity a dependent module's implementation of the member is recorded under.
     interface_members: HashMap<FunId, KlibDependencyCallable>,
@@ -205,6 +233,73 @@ pub struct DependencyExportSignatures {
 }
 
 impl DependencyExportSignatures {
+    pub(crate) fn field_getters(
+        &self,
+    ) -> impl Iterator<Item = (&DependencyFieldGetter, &KlibDependencyCallable)> {
+        self.field_getters
+            .values()
+            .map(|(getter, identity)| (getter, identity))
+    }
+
+    pub(crate) fn record_field_getter(
+        &mut self,
+        ir: &crate::ir::IrFile,
+        property: crate::fir::PropertyId,
+        identity: KlibDependencyCallable,
+    ) -> Result<(), &'static str> {
+        let Some(crate::ir::IrLocalPropertyLayout::Member {
+            class,
+            owner,
+            backing_field: Some(field),
+            getter: None,
+            ty,
+            property: ordinal,
+            context_parameters,
+            ..
+        }) = ir.local_property_layouts.get(&property)
+        else {
+            return Err("a default getter export has no declared field-property role");
+        };
+        let declared = ir
+            .classes
+            .get(*class as usize)
+            .ok_or("a default getter export has no declaring class")?;
+        let member = declared
+            .properties
+            .get(*ordinal as usize)
+            .ok_or("a default getter export has no declaring property")?;
+        let storage = declared
+            .fields
+            .get(*field as usize)
+            .ok_or("a default getter export has no declared backing field")?;
+        if declared.fq_name_id() != *owner
+            || member.backing_field != Some(*field)
+            || member.ty != *ty
+            || storage.ty != member.storage_ty.unwrap_or(member.ty)
+            || !context_parameters.is_empty()
+        {
+            return Err("a default getter export disagrees with its declared property storage");
+        }
+        let receiver = DependencyMemberReceiver(
+            ir.declared_class_self_type(*owner)
+                .ok_or("a default getter export has no declared class application")?,
+        );
+        let getter = DependencyFieldGetter {
+            class: *class,
+            field: *field,
+            receiver,
+            signature: super::DependencyFunctionSignature::field_getter(receiver, *ty),
+        };
+        if self
+            .field_getters
+            .insert(property, (getter, identity))
+            .is_some()
+        {
+            return Err("one default getter cannot publish two declaration identities");
+        }
+        Ok(())
+    }
+
     /// The public dependency identity exported for `callable`, when the declaration is visible to
     /// another module and has a callable realization.
     pub fn callable(&self, callable: FunId) -> Option<&KlibDependencyCallable> {
