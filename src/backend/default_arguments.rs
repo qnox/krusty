@@ -26,7 +26,7 @@ pub(crate) use masks::{mask_words, omission_masks};
 
 use super::CheckedBackendCallables;
 use crate::fx_hash::HashSet;
-use crate::ir::IrFile;
+use crate::ir::{ExprId, IrFile};
 
 /// Build the default-argument entries of `ir`'s declarations and rewrite every emitted call that
 /// leaves arguments out to call one. `callables` are the facts frozen for `ir` before this
@@ -37,6 +37,7 @@ pub(crate) fn realize(ir: &mut IrFile, callables: &mut CheckedBackendCallables) 
     entries.take_new_bodies();
     // Every emitted body, the entries' own included: a default may itself call with omissions.
     let mut pending = crate::ir::emitted_body_roots(ir);
+    pending.extend(constructor_defaults(ir));
     let mut seen = HashSet::default();
     while let Some(root) = pending.pop() {
         for expression in crate::ir::value_namespace_expressions(ir, root) {
@@ -47,4 +48,27 @@ pub(crate) fn realize(ir: &mut IrFile, callables: &mut CheckedBackendCallables) 
         pending.extend(entries.take_new_bodies());
     }
     callables.extend_to_clones(entries.clones());
+}
+
+/// The defaults of every constructor `ir` emits. This lowering gives a constructor no entry: the
+/// target fills a construction's, a `super(…)` delegation's or an enum constant's omitted
+/// arguments by evaluating these in the constructor's frame, so a call one of them makes is a call
+/// site of this file like any in a body.
+fn constructor_defaults(ir: &IrFile) -> Vec<ExprId> {
+    ir.classes
+        .iter()
+        .flat_map(|class| {
+            let primary = class
+                .has_primary_ctor
+                .then(|| ir.class_ctor_defaults_name(class.fq_name_id()))
+                .flatten()
+                .into_iter()
+                .flatten();
+            let secondaries = class
+                .secondary_ctors
+                .iter()
+                .flat_map(|constructor| &constructor.defaults);
+            primary.chain(secondaries).flatten().copied()
+        })
+        .collect()
 }
