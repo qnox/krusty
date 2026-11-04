@@ -98,11 +98,14 @@ pub(super) fn operation(
             let arithmetic = |ty: Ty| if ty == Ty::Char { Ty::Int } else { ty };
             let lhs = coerce(ir, receiver, receiver_ty, arithmetic(carrier(lhs_ty)));
             let rhs = coerce(ir, *argument, parameter, arithmetic(carrier(rhs_ty)));
-            let value = IrExpr::PrimitiveBinOp { op, lhs, rhs };
             if arithmetic(result) == result {
-                return Some(BuiltinMemberOperation::Value(value));
+                return Some(BuiltinMemberOperation::Value(IrExpr::PrimitiveBinOp {
+                    op,
+                    lhs,
+                    rhs,
+                }));
             }
-            let value = ir.add_expr(value);
+            let value = ir.add_arithmetic(op, lhs, rhs, arithmetic(result));
             Some(BuiltinMemberOperation::Value(IrExpr::TypeOp {
                 op: IrTypeOp::ImplicitCoercion,
                 arg: value,
