@@ -124,20 +124,30 @@ fn dependency_generic_class_initializers_preserve_declared_carriers() {
     assert!(modules.iter().all(|module| module.friends.is_empty()
         && module.depends_on.is_empty()
         && module.java_files.is_empty()));
-    let [(_, library_source)] = library.files.as_slice() else {
+    let [(library_stem, library_source)] = library.files.as_slice() else {
         panic!("the complete library source must be retained");
     };
-    let [(_, consumer_text)] = consumer.files.as_slice() else {
+    let [(consumer_stem, consumer_text)] = consumer.files.as_slice() else {
         panic!("the complete consumer source must be retained");
     };
+    assert_eq!(library_stem, "Library");
+    assert_eq!(consumer_stem, "Consumer");
     assert_official_dependency_closures_with_oracle(
         library_source,
         consumer_text,
         "ImportedGenericClassInitialization",
         &DependencyConsumer::Native,
         || {
-            super::box_reference_classes::checked_box(source, "ImportedGenericClassInitialization")
-                .expect("the JVM oracle must run the complete generic initializer module graph");
+            let dependency = common::kotlinc_lib_out(&[("Library.kt", library_source.as_str())])
+                .expect("reference compiler required for the complete initializer library");
+            assert_eq!(
+                common::kotlinc_box_files_result_with_classpath(
+                    &[("Consumer.kt", consumer_text.as_str())],
+                    "fixture.ConsumerKt",
+                    &[dependency],
+                ),
+                "OK"
+            );
         },
     );
 }
@@ -487,13 +497,28 @@ fn assert_official_dependency_closures_with_oracle(
     };
     if matches!(purpose, DependencyConsumer::SourceClassifierCollision) {
         assert_eq!(
-            diags.diags.iter().map(|diag| (
-                diag.file, diag.span, diag.editor_span, diag.severity, diag.warning_name,
-                diag.kind, diag.identity, diag.msg.as_str(),
-            )).collect::<Vec<_>>(),
+            diags
+                .diags
+                .iter()
+                .map(|diag| (
+                    diag.file,
+                    diag.span,
+                    diag.editor_span,
+                    diag.severity,
+                    diag.warning_name,
+                    diag.kind,
+                    diag.identity,
+                    diag.msg.as_str(),
+                ))
+                .collect::<Vec<_>>(),
             vec![(
-                0, krusty::diag::Span::new(0, 0), None, krusty::diag::Severity::Error, None,
-                krusty::diag::DiagnosticKind::Compiler, None,
+                0,
+                krusty::diag::Span::new(0, 0),
+                None,
+                krusty::diag::Severity::Error,
+                None,
+                krusty::diag::DiagnosticKind::Compiler,
+                None,
                 "cannot materialize a dependency class that collides with a current-module classifier",
             )]
         );
