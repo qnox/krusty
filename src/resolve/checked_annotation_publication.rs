@@ -1254,12 +1254,12 @@ impl Checker<'_> {
             } if name == "class" => {
                 AnnotationValue::Class(Ty::obj_name(self.class_literal_targets.get(&e).copied()?))
             }
-            Expr::Call { callee, args } => match self.expr_lowers.get(&e) {
-                Some(ExprLowering::CompilerSynthetic(
+            Expr::Call { callee, args } => match self.selected_array_operation(e) {
+                Some(
                     SyntheticKind::PrimitiveVararg(_)
                     | SyntheticKind::ReferenceVararg
                     | SyntheticKind::EmptyReference,
-                )) => {
+                ) => {
                     let element = expected.and_then(Ty::array_elem);
                     let mut values = Vec::new();
                     for &argument in args {

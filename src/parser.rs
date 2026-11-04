@@ -10,6 +10,7 @@ use crate::kt_string::{KtString, KtStringBuf};
 use crate::token::{decode_char_literal_content, Token, TokenKind};
 use crate::types::Visibility;
 
+mod annotation_classes;
 mod annotation_values;
 mod anonymous_functions;
 mod class_recovery;
@@ -629,6 +630,9 @@ struct Parser<'a> {
     no_trailing_lambda: bool,
     /// Array syntax anywhere inside an annotation value retains its annotation-array role.
     annotation_value_context: bool,
+    /// The class about to be parsed is an annotation class: its primary-constructor parameter
+    /// defaults are annotation values, where `[…]` is an array literal.
+    annotation_class_header: bool,
     /// Whether physical line breaks are whitespace, as inside `(…)` and `[…]`; see
     /// `parser/line_breaks.rs`.
     newlines_insignificant: bool,
@@ -801,6 +805,7 @@ impl<'a> Parser<'a> {
             when_guards: features.has("WhenGuards"),
             no_trailing_lambda: false,
             annotation_value_context: false,
+            annotation_class_header: false,
             newlines_insignificant: false,
             block_trailing_is_value: false,
             bare_branch_value: false,
@@ -1217,8 +1222,7 @@ impl<'a> Parser<'a> {
                             .map_or(false, |t| t.kind == TokenKind::KwClass) =>
                 {
                     self.bump(); // 'annotation'
-                    let mut d = self.parse_class();
-                    d.kind = ClassKind::Annotation;
+                    let d = self.parse_annotation_class();
                     self.register_top_level_classifier(d, &mods, decls_before);
                 }
                 // `enum class Name { A, B, C }` (soft keyword `enum` + `class`).
@@ -1557,9 +1561,7 @@ impl<'a> Parser<'a> {
             }
             TokenKind::Ident if self.keyword_text("annotation") => {
                 self.bump();
-                let mut declaration = self.parse_class();
-                declaration.kind = ClassKind::Annotation;
-                declaration
+                self.parse_annotation_class()
             }
             TokenKind::Ident if self.keyword_text("sealed") => {
                 self.bump();
@@ -2700,9 +2702,7 @@ impl<'a> Parser<'a> {
                         .is_some_and(|token| token.kind == TokenKind::KwClass) =>
             {
                 self.bump(); // `annotation`
-                let mut nested = self.parse_class();
-                nested.kind = ClassKind::Annotation;
-                (nested, false)
+                (self.parse_annotation_class(), false)
             }
             TokenKind::Ident
                 if self.keyword_text("enum")
@@ -2788,6 +2788,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_class_inner(&mut self) -> ClassDecl {
+        let annotation_parameters = std::mem::take(&mut self.annotation_class_header);
         let annotations = self.take_pending_annotations();
         let annotation_args = self.take_pending_annotation_args();
         let context_params = std::mem::take(&mut self.pending_context_params);
@@ -2898,12 +2899,7 @@ impl<'a> Parser<'a> {
                 self.expect(TokenKind::Colon, "':'");
                 self.skip_newlines(); // a wrapped declaration puts the type on the next line (`val x:\n  T`)
                 let ty = self.parse_vararg_aware_type(is_vararg);
-                let default = if self.eat(TokenKind::Eq) {
-                    self.skip_newlines();
-                    Some(self.parse_expr())
-                } else {
-                    None
-                };
+                let default = self.primary_parameter_default(annotation_parameters);
                 let declaration_end = self.t[self.i.saturating_sub(1)].span.hi;
                 props.push(PropParam {
                     name: pname,

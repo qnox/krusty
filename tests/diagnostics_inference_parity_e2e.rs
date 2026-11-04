@@ -265,6 +265,44 @@ fn empty_reference_array_does_not_match_a_primitive_array_parameter() {
 }
 
 #[test]
+fn array_factories_without_element_evidence_match_kotlinc_exactly() {
+    // `arrayOf`, `emptyArray` and `arrayOfNulls` are ordinary generic declarations: with no
+    // element and no expected type, nothing infers `T`. An empty vararg and an omitted default
+    // argument supply no evidence for a formal that only their parameters mention.
+    let source = "fun <T> pick(vararg xs: T, fallback: T? = null): T? = fallback\n\
+                  \n\
+                  fun use() {\n\
+                  \x20   val a = emptyArray()\n\
+                  \x20   val b = arrayOf()\n\
+                  \x20   val c = arrayOfNulls(1)\n\
+                  \x20   val d = pick()\n\
+                  }\n";
+    let result = common::compiler_diagnostics(
+        &[("ArrayFactoryInference.kt", source)],
+        &[common::stdlib_jar()],
+    );
+    assert_eq!(result.krusty_stdout, "");
+    let krusty = errors(&result.krusty_stderr);
+    let reference = errors(&result.reference_stderr);
+    let message = "cannot infer type for type parameter 'T'. Specify it explicitly.";
+    let expected = [(4, 13), (5, 13), (6, 13), (7, 13)]
+        .into_iter()
+        .map(|(line, column)| ObservedError {
+            file: "ArrayFactoryInference.kt".to_string(),
+            line,
+            column,
+            message: message.to_string(),
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!((result.krusty_code, result.reference_code), (1, 1));
+    assert_eq!(krusty.len(), 4);
+    assert_eq!(reference.len(), 4);
+    assert_eq!(krusty, expected);
+    assert_eq!(reference, expected);
+}
+
+#[test]
 fn subjectless_when_fallthrough_diagnostics_match_kotlinc() {
     let result = common::compiler_diagnostics(
         &[(
