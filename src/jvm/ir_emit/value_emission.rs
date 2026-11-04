@@ -993,6 +993,7 @@ impl super::Emitter<'_> {
                     self.guard_private_lateinit_read(e, code);
                 }
                 Callee::Module { .. }
+                | Callee::ModuleDefaultEntry { .. }
                 | Callee::ModuleWithDefaults { .. }
                 | Callee::LocalWithDefaults { .. }
                 | Callee::ClassStaticWithDefaults { .. }
@@ -1615,7 +1616,7 @@ impl super::Emitter<'_> {
                 // first, as kotlinc's `-value as T` boxes the negated `Double`.
                 let physical = self.value_ty(*arg);
                 if physical.is_jvm_scalar() {
-                    let semantic = self.ir.logical_types.get(arg).copied().unwrap_or(physical);
+                    let semantic = self.ir.logical_type(*arg).unwrap_or(physical);
                     super::box_prim_free(
                         self.cw,
                         code,

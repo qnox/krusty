@@ -1769,6 +1769,7 @@ mod tests {
                     bounds: vec![(bound, false), (comparable, true)],
                     variance: crate::types::TypeVariance::Invariant,
                     reified: false,
+                    captured_from_enclosing: false,
                 }],
                 params: vec![crate::types::Ty::Int],
                 ret: Some(parameter),

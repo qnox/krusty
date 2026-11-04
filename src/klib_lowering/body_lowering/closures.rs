@@ -53,6 +53,7 @@ impl BodyLowering<'_> {
                         IrValueCapture {
                             declaration: IrCapturedDeclaration::Variable,
                             capturer,
+                            crossinline_parameter: None,
                         },
                     ),
                     receiver: None,
@@ -82,6 +83,7 @@ impl BodyLowering<'_> {
                         IrValueCapture {
                             declaration: IrCapturedDeclaration::Variable,
                             capturer,
+                            crossinline_parameter: None,
                         },
                     ),
                     receiver: None,

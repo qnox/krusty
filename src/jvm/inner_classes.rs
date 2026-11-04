@@ -89,7 +89,7 @@ impl InnerClasses {
                 access: declared
                     .get(&companion)
                     .copied()
-                    .map_or(0x0019, |class| class_access(ir, class)),
+                    .map_or(0x0019, |class| companion_access(ir, owner, class)),
             });
         }
 
@@ -203,9 +203,14 @@ impl InnerClasses {
                 outer: (!coroutine && !local).then_some(outer),
                 name: (!coroutine).then_some(name),
                 access: if coroutine {
+                    let class_id =
+                        u32::try_from(class_id).expect("too many classes for a class id");
                     let public = u16::from(
                         (suspend_lambda && suspend_lambda_is_public(ir, class))
-                            || published_inline_lambda(ir, class),
+                            || published_inline_lambda(ir, class)
+                            || crate::jvm::suspend_inline_functions::constructed_by_method_copy(
+                                ir, class_id,
+                            ),
                     );
                     0x0008 | 0x0010 | public
                 } else {
@@ -683,6 +688,18 @@ fn enclosure_reaches_inline(ir: &IrFile, start: Option<crate::ir::IrEnclosure>) 
         }
     }
     false
+}
+
+/// kotlinc's `specialCaseVisibility`: a private companion of an interface is public in bytecode,
+/// since an interface's members are. Its `Companion` field is public for the same reason.
+fn companion_access(ir: &IrFile, owner: &IrClass, companion: &IrClass) -> u16 {
+    const VISIBILITY: u16 = 0x0007;
+    let access = class_access(ir, companion);
+    if owner.is_interface {
+        access & !VISIBILITY | 0x0001
+    } else {
+        access
+    }
 }
 
 pub(super) fn class_access(ir: &IrFile, class: &IrClass) -> u16 {
