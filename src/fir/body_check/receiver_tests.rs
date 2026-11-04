@@ -645,13 +645,17 @@ fn companion_property_wins_over_same_named_zero_argument_member_function() {
     );
     let root = body.expr(root_expression(&body)).expect("indexed read");
     assert_eq!(root.ty.get(), Ty::Int);
-    assert!(matches!(
-        root.kind,
-        FirExprKind::IndexedRead {
-            kind: FirIndexedAccessKind::Array,
-            ..
-        }
-    ));
+    let FirExprKind::Call(call) = &root.kind else {
+        panic!("the subscript must be the selected `IntArray.get` call")
+    };
+    let receiver = call
+        .dispatch_receiver
+        .as_ref()
+        .expect("`get` has a dispatch receiver");
+    assert_eq!(
+        body.expr(receiver.value).unwrap().ty.get(),
+        Ty::obj("kotlin/IntArray")
+    );
 }
 
 /// Every `super` call the checker published in `body`, as `(name, declaration)`, in expression
