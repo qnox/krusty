@@ -58850,7 +58850,7 @@ impl<'a> Checker<'a> {
                         }
                         return Ty::Error;
                     };
-                    let expected_array = Ty::obj_args("kotlin/Array", &[contributed]);
+                    let expected_array = Ty::array(Ty::out_projection(contributed));
                     self.expect_assignable(
                         expected_array,
                         actual,
