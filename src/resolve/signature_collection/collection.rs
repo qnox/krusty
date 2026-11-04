@@ -12,6 +12,7 @@
 //! instead of reaching for those locals. Do not add another declaration shape to it in place.
 
 use super::*;
+use crate::resolve::local_class_scope::inner_class_enclosing_type_parameters;
 
 /// Stub positions grouped by source file. Signature collection used to scan every stub in the
 /// module once per classifier; a file only needs its own declarations.
@@ -53,6 +54,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
         legacy_local_class_siblings,
         source_classifier_visibility,
         source_direct_supertypes,
+        source_interfaces,
     } = declared_classifier_inventory(
         files,
         compact_headers,
@@ -83,7 +85,10 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                 })
             },
         ));
-    table.sam_with_receiver_annotations = frontend_plugins.sam_with_receiver_annotations();
+    table.annotation_conventions = crate::symbol_source::AnnotationConventions {
+        sam_with_receiver: frontend_plugins.sam_with_receiver_annotations(),
+        assignment: frontend_plugins.assignment_annotations(),
+    };
     let mut declaration_annotation_resolution_attempts = crate::fx_hash::HashSet::default();
     for file_index in 0..source_packages.len() {
         diags.set_file(file_index as u32);
@@ -621,11 +626,6 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                         });
                     if let Some(signature) = &mut generic_sig {
                         signature.receiver = source_receiver;
-                        order_primary_class_bounds(
-                            signature,
-                            &table.source_class_headers,
-                            &*libraries,
-                        );
                     }
                     let projected_return_hazard = if compact_headers.is_some() {
                         has_projected_generic_return_hazard_from_header(&callable_header)
@@ -973,35 +973,8 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                         })
                         .unwrap_or_default();
                     if compact_headers.is_none() {
-                        let mut outer = c.inner_of.clone();
-                        let mut guard = 0;
-                        let mut outer_declarations = Vec::new();
-                        while let Some(on) = outer {
-                            guard += 1;
-                            if guard > 32 {
-                                break;
-                            }
-                            if let Some(oc) = file
-                                .decls
-                                .iter()
-                                .filter_map(|&d| match file.decl(d) {
-                                    Decl::Class(x) => Some(x),
-                                    _ => None,
-                                })
-                                .find(|x| x.name == on)
-                            {
-                                outer_declarations.push(EnclosingTypeParameterDeclaration {
-                                    declaration_start: oc.span.lo,
-                                    names: oc.type_params.clone(),
-                                    bounds: oc.type_param_bounds.clone(),
-                                });
-                                outer = oc.inner_of.clone();
-                            } else {
-                                break;
-                            }
-                        }
-                        outer_declarations.reverse();
-                        enclosing_tparam_declarations.splice(0..0, outer_declarations);
+                        enclosing_tparam_declarations
+                            .splice(0..0, inner_class_enclosing_type_parameters(file, c));
                     }
                     // A classifier header is resolved before declarations in that classifier's own
                     // body enter scope. Keep this declaration-owned header scope separate from the
@@ -1148,29 +1121,20 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                                 }
                                 let mut inherited =
                                     crate::symbol_resolver::InheritedNestedClassifier::NotFound;
+                                let inheriting_supertypes = |owner| {
+                                    source_nested_classifier_supertypes(
+                                        &source_direct_supertypes,
+                                        &source_interfaces,
+                                        &*libraries,
+                                        owner,
+                                    )
+                                };
                                 for &lexical_inheritor in lexical_inheritors {
-                                    let roots = source_direct_supertypes
-                                        .get(&lexical_inheritor)
-                                        .cloned()
-                                        .unwrap_or_default();
                                     inherited =
                                         crate::symbol_resolver::inherited_nested_classifier_name(
                                             name,
-                                            roots,
-                                            |owner| {
-                                                source_direct_supertypes
-                                                    .get(&owner)
-                                                    .cloned()
-                                                    .unwrap_or_else(|| {
-                                                        crate::symbol_resolver::direct_supertypes(
-                                                            &*libraries,
-                                                            Ty::obj_name(owner),
-                                                        )
-                                                        .into_iter()
-                                                        .filter_map(Ty::obj_internal)
-                                                        .collect()
-                                                    })
-                                            },
+                                            inheriting_supertypes(lexical_inheritor),
+                                            inheriting_supertypes,
                                             |candidate| {
                                                 source_classifier_visibility
                                                     .get(&candidate)
@@ -1215,6 +1179,10 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                         .filter(|owner| *owner != internal)
                         .collect::<Vec<_>>();
                     extend_inherited_names(&mut header_class_names, &header_inheritors, false);
+                    // Type-parameter bounds see no rung of the classifier itself: neither its body
+                    // nor its inherited nested classifiers (`class C<T : Limit> : Base()` binds the
+                    // package `Limit` even when `Base` declares one).
+                    let bound_class_names = header_class_names.clone();
                     // The classifier's own inherited nested classifiers form a later header rung:
                     // package/import/lexical declarations win, but an otherwise unresolved bare
                     // type may still come from a supertype (`class Child(x: Category) : Parent()`).
@@ -1325,7 +1293,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                         .erased_extended_with(
                             &classifier_header.type_parameters,
                             &classifier_header.bounds,
-                            &|name| class_names.get(name),
+                            &|name| bound_class_names.get(name),
                         );
                     // An enum entry contributes a nearer lexical classifier rung than its enum.
                     // Bind entry-owned declarations first so the general class inventory cannot
@@ -1389,7 +1357,7 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                         .symbolic_extended_with(
                             &classifier_header.type_parameters,
                             &classifier_header.bounds,
-                            &|name| class_names.get(name),
+                            &|name| bound_class_names.get(name),
                         )
                         .alpha_renamed_declaration(
                             &classifier_header.type_parameters,
@@ -2872,58 +2840,58 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                         for (i, ((property, ty), (shape, _))) in data_properties.iter().enumerate()
                         {
                             let generated_name = format!("component{}", i + 1);
-                            declared_callable_order.push(generated_name.clone());
-                            methods.insert(
-                                generated_name.clone(),
-                                vec![Signature {
-                                    params: vec![],
-                                    ret: **ty,
-                                    generic_sig: Some(GenericSig {
-                                        formals: Vec::new(),
-                                        formal_bounds: Vec::new(),
-                                        receiver: None,
-                                        params: Vec::new(),
-                                        ret: *shape,
-                                        return_policy: GenericReturnPolicy::Exact,
-                                    }),
-                                    projected_return_hazard: false,
-                                    flags: SigFlags::default()
-                                        .with_vararg(false)
-                                        .with_is_inline(false)
-                                        .with_is_operator(true)
-                                        .with_is_override(false)
-                                        .with_is_final(true)
-                                        .with_is_suspend(false),
-                                    annotations: Vec::new(),
-                                    equality_bound: None,
-                                    vararg_index: None,
-                                    required: 0,
-                                    param_defaults: Vec::new().into(),
-                                    exact_params: Vec::new().into(),
-                                    no_infer_params: Vec::new().into(),
-                                    implicit_integer_coercion: Vec::new().into(),
-                                    param_default_values: Vec::new(),
-                                    param_names: Vec::new(),
-                                    parameter_identities: Vec::new(),
-                                    lambda_param_types: Vec::new(),
-                                    lambda_recv: Vec::new().into(),
-                                    inline_modifiers: Vec::new(),
-                                    visibility: property.visibility,
-                                    context_count: 0,
-                                    source_decl: None,
-                                    stable_declaration: compact_generated_member_declaration(
-                                        compact_headers,
-                                        compact_classifier.map(|stub| stub.id),
-                                        &generated_name,
-                                    ),
-                                    source_file: None,
-                                    source_member: None,
-                                    source_receiver: None,
-                                    package: TypeName::ROOT,
-                                    contract: None,
-                                    plugin_expression: None,
-                                }],
-                            );
+                            if !declared_callable_order.contains(&generated_name) {
+                                declared_callable_order.push(generated_name.clone());
+                            }
+                            let overloads = methods.entry(generated_name.clone()).or_default();
+                            overloads.push(Signature {
+                                params: vec![],
+                                ret: **ty,
+                                generic_sig: Some(GenericSig {
+                                    formals: Vec::new(),
+                                    formal_bounds: Vec::new(),
+                                    receiver: None,
+                                    params: Vec::new(),
+                                    ret: *shape,
+                                    return_policy: GenericReturnPolicy::Exact,
+                                }),
+                                projected_return_hazard: false,
+                                flags: SigFlags::default()
+                                    .with_vararg(false)
+                                    .with_is_inline(false)
+                                    .with_is_operator(true)
+                                    .with_is_override(false)
+                                    .with_is_final(true)
+                                    .with_is_suspend(false),
+                                annotations: Vec::new(),
+                                equality_bound: None,
+                                vararg_index: None,
+                                required: 0,
+                                param_defaults: Vec::new().into(),
+                                exact_params: Vec::new().into(),
+                                no_infer_params: Vec::new().into(),
+                                implicit_integer_coercion: Vec::new().into(),
+                                param_default_values: Vec::new(),
+                                param_names: Vec::new(),
+                                parameter_identities: Vec::new(),
+                                lambda_param_types: Vec::new(),
+                                lambda_recv: Vec::new().into(),
+                                inline_modifiers: Vec::new(),
+                                visibility: property.visibility,
+                                context_count: 0,
+                                source_decl: None,
+                                stable_declaration: compact_generated_member_declaration(
+                                    compact_headers,
+                                    compact_classifier.map(|stub| stub.id),
+                                    &generated_name,
+                                ),
+                                source_file: None,
+                                source_member: None,
+                                source_receiver: None,
+                                package: TypeName::ROOT,
+                                contract: None,
+                                plugin_expression: None,
+                            });
                         }
                         if !declared_callable_order.iter().any(|name| name == "copy") {
                             declared_callable_order.push("copy".to_string());
@@ -4297,6 +4265,10 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
         for (alias, formals, target) in &file_type_aliases[file_index] {
             let alias = SourceAlias {
                 identity: crate::types::type_name_child(package, alias),
+                declaration_name: crate::types::ClassifierDeclarationName::TopLevel {
+                    package,
+                    name: alias.as_str().into(),
+                },
                 nested_in: None,
                 formals,
                 target,
@@ -4385,6 +4357,10 @@ pub(in crate::resolve) fn collect_signatures_with_cp_impl(
                     .fold(package, crate::types::type_name_child);
                 let source_alias = SourceAlias {
                     identity: crate::types::type_name_child(owner, &alias.name),
+                    declaration_name: crate::types::ClassifierDeclarationName::Nested {
+                        owner: alias_owner,
+                        name: alias.name.as_str().into(),
+                    },
                     nested_in: Some((alias_owner, &alias.name)),
                     formals: &alias.type_params,
                     target: &alias.target,

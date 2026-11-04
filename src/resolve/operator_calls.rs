@@ -157,14 +157,22 @@ impl<'a> Checker<'a> {
     ) -> Option<Ty> {
         let key = SyntheticOperatorCall::from_name(name)
             .expect("a binary operator expression names a synthetic operator");
-        let (ret, call) = self.operator_expression_call_ret(
+        self.binary_operator_reported = false;
+        let Some((ret, call)) = self.operator_expression_call_ret(
             scope,
             expression,
             receiver,
             name,
             operand,
             expected_result,
-        )?;
+        ) else {
+            // An inaccessible or ambiguous selection already carries kotlinc's diagnostic; the
+            // expression must not add a second "operator cannot be applied" for it.
+            return std::mem::take(&mut self.binary_operator_reported).then_some(Ty::Error);
+        };
+        if let Expr::Binary { lhs, .. } = self.file.expr(expression) {
+            self.narrow_operator_receiver(*lhs, &call);
+        }
         self.resolved_operator_calls.insert((expression, key), call);
         Some(ret)
     }
@@ -422,10 +430,13 @@ impl<'a> Checker<'a> {
                 && (candidate.kind != crate::libraries::FnKind::Member
                     || candidate.context_count == 0)
         });
+        // The member rung resolves only with a member this site can see. One it cannot see stays
+        // in the final selection below, ranked under every accessible candidate.
         let mut members = functions.clone();
-        members
-            .overloads
-            .retain(|candidate| candidate.kind == crate::libraries::FnKind::Member);
+        members.overloads.retain(|candidate| {
+            candidate.kind == crate::libraries::FnKind::Member
+                && self.member_candidate_accessible(candidate, Some(receiver))
+        });
         let members = crate::libraries::Callables::Functions(members);
         let callables = crate::libraries::Callables::from_parts(functions, properties);
         let member_applicable = {
@@ -434,7 +445,7 @@ impl<'a> Checker<'a> {
                     .select_receiver_function_with_params_tracking(
                         receiver,
                         name,
-                        &arg_kinds,
+                        crate::symbol_resolver::FamilyArguments::Shared(&arg_kinds),
                         &[],
                         &members,
                         None,
@@ -530,12 +541,20 @@ impl<'a> Checker<'a> {
         } = match resolver.select_receiver_function_with_applied_receiver_tracking(
             receiver,
             name,
-            &arg_kinds,
+            crate::symbol_resolver::FamilyArguments::Shared(&arg_kinds),
             &[],
             &callables,
             expected_result,
         ) {
             crate::symbol_resolver::ReceiverFunctionSelection::Selected(selected) => selected,
+            crate::symbol_resolver::ReceiverFunctionSelection::Ambiguous(candidates)
+                if matches!(self.file.expr(site), Expr::Binary { .. }) =>
+            {
+                drop(resolver);
+                self.report_callable_ambiguity(site, name, &candidates);
+                self.binary_operator_reported = true;
+                return None;
+            }
             crate::symbol_resolver::ReceiverFunctionSelection::None
             | crate::symbol_resolver::ReceiverFunctionSelection::Ambiguous(_) => return None,
         };
@@ -554,6 +573,17 @@ impl<'a> Checker<'a> {
             );
             return None;
         };
+        if selected.kind == crate::libraries::FnKind::Member
+            && matches!(self.file.expr(site), Expr::Binary { .. })
+            && self.reject_function_if_inaccessible(
+                &selected,
+                selected.callable.owner,
+                self.call_callee_name_span(site),
+            )
+        {
+            self.binary_operator_reported = true;
+            return None;
+        }
         if selected.kind == crate::libraries::FnKind::Member
             && !self.callable_accessible(
                 selected.visibility,
@@ -603,7 +633,7 @@ impl<'a> Checker<'a> {
                     arguments: signature
                         .formals
                         .iter()
-                        .map(|formal| bindings.get(formal).copied())
+                        .map(|formal| bindings.get(formal.as_str()).copied())
                         .collect(),
                     signature: signature.clone(),
                     call_sig: selected.call_sig.clone(),
@@ -915,7 +945,9 @@ impl<'a> Checker<'a> {
                 .select_receiver_function_with_params_tracking(
                     comparable,
                     "compareTo",
-                    &[crate::symbol_resolver::CallArgKind::Typed(element)],
+                    crate::symbol_resolver::FamilyArguments::Shared(&[
+                        crate::symbol_resolver::CallArgKind::Typed(element),
+                    ]),
                     &[],
                     &callables,
                     None,

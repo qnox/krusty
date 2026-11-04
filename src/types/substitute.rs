@@ -3,7 +3,10 @@
 use crate::fx_hash::HashMap;
 use crate::types::TyKind;
 
-use super::{intern, Ty};
+use super::{intern, Ty, TyParamName};
+
+/// A substitution of type parameters, keyed by their semantic identity.
+pub(crate) type TyParamBindings = HashMap<TyParamName, Ty>;
 
 fn compose_in_projection(inner: Ty) -> Ty {
     match inner.kind() {
@@ -19,27 +22,38 @@ fn compose_out_projection(inner: Ty) -> Ty {
     }
 }
 
+/// How a binding is read at an occurrence whose bound excludes null.
+#[derive(Clone, Copy)]
+enum BoundNarrowing {
+    /// The binding was validated when its classifier was formed; read it unchanged.
+    Keep,
+    /// Strip the binding's `?`.
+    NonNull,
+    /// The occurrence is a written `T & Any`: the binding becomes `binding & Any`, which keeps a
+    /// type parameter's identity (`V` becomes `V & Any`).
+    DefinitelyNonNull,
+}
+
 /// Substitute semantic type parameters throughout one type shape. This belongs to the type model:
 /// providers, overload selection, checking, and lowering all consume the same transformation.
-fn substitute_type_parameters<F, P>(
-    ty: Ty,
-    lookup: F,
-    preserve_unbound: P,
-    enforce_bound_nullability: bool,
-) -> Ty
+fn substitute_type_parameters<F, P, N>(ty: Ty, lookup: F, preserve_unbound: P, narrowing: N) -> Ty
 where
     F: Fn(&str) -> Option<Ty> + Copy,
     P: Fn(&str) -> bool + Copy,
+    N: Fn(&str) -> BoundNarrowing + Copy,
 {
     match ty.kind() {
         // A Java raw receiver binds each formal to its erasure: its member reads it as erased.
         TyKind::TyParam(name, bound) => lookup(name.as_str())
             .map(Ty::raw_binding_read)
             .map(|binding| {
-                if !enforce_bound_nullability || bound.upper_bound_admits_null() {
-                    binding
-                } else {
-                    binding.non_null()
+                if bound.upper_bound_admits_null() {
+                    return binding;
+                }
+                match narrowing(name.as_str()) {
+                    BoundNarrowing::Keep => binding,
+                    BoundNarrowing::NonNull => binding.non_null(),
+                    BoundNarrowing::DefinitelyNonNull => binding.non_null().definitely_non_null(),
                 }
             })
             .unwrap_or_else(|| {
@@ -54,20 +68,10 @@ where
                 .params
                 .iter()
                 .map(|parameter| {
-                    substitute_type_parameters(
-                        *parameter,
-                        lookup,
-                        preserve_unbound,
-                        enforce_bound_nullability,
-                    )
+                    substitute_type_parameters(*parameter, lookup, preserve_unbound, narrowing)
                 })
                 .collect(),
-            substitute_type_parameters(
-                signature.ret,
-                lookup,
-                preserve_unbound,
-                enforce_bound_nullability,
-            ),
+            substitute_type_parameters(signature.ret, lookup, preserve_unbound, narrowing),
             signature.context_count,
             signature.has_receiver,
             signature.suspend,
@@ -85,88 +89,89 @@ where
                         None => bound.contributed_through_nullable_formal(),
                     }
                 }
-                _ => substitute_type_parameters(
-                    other,
-                    lookup,
-                    preserve_unbound,
-                    enforce_bound_nullability,
-                )
-                .contributed_through_nullable_formal(),
+                _ => substitute_type_parameters(other, lookup, preserve_unbound, narrowing)
+                    .contributed_through_nullable_formal(),
             }
         }
         TyKind::Nullable(inner) => Ty::nullable(substitute_type_parameters(
             inner,
             lookup,
             preserve_unbound,
-            enforce_bound_nullability,
+            narrowing,
         )),
         TyKind::PlatformNullable(inner) => Ty::platform_nullable(substitute_type_parameters(
             inner,
             lookup,
             preserve_unbound,
-            enforce_bound_nullability,
+            narrowing,
+        )),
+        TyKind::MutabilityFlexible(inner) => Ty::mutability_flexible(substitute_type_parameters(
+            inner,
+            lookup,
+            preserve_unbound,
+            narrowing,
         )),
         TyKind::InProjection(inner) => compose_in_projection(substitute_type_parameters(
             inner,
             lookup,
             preserve_unbound,
-            enforce_bound_nullability,
+            narrowing,
         )),
         TyKind::OutProjection(inner) => compose_out_projection(substitute_type_parameters(
             inner,
             lookup,
             preserve_unbound,
-            enforce_bound_nullability,
+            narrowing,
         )),
         TyKind::StarProjection(inner) => Ty::star_projection(substitute_type_parameters(
             inner,
             lookup,
             preserve_unbound,
-            enforce_bound_nullability,
+            narrowing,
         )),
         TyKind::RawProjection(inner) => Ty::raw_projection(substitute_type_parameters(
             inner,
             lookup,
             preserve_unbound,
-            enforce_bound_nullability,
+            narrowing,
         )),
         TyKind::Obj(name, arguments) if !arguments.is_empty() => Ty::obj_args_name(
             name,
             &arguments
                 .iter()
                 .map(|argument| {
-                    substitute_type_parameters(
-                        *argument,
-                        lookup,
-                        preserve_unbound,
-                        enforce_bound_nullability,
-                    )
+                    substitute_type_parameters(*argument, lookup, preserve_unbound, narrowing)
                 })
                 .collect::<Vec<_>>(),
         ),
         TyKind::Intersection(parts) => Ty::intersection(
             &parts
                 .iter()
-                .map(|part| {
-                    substitute_type_parameters(
-                        *part,
-                        lookup,
-                        preserve_unbound,
-                        enforce_bound_nullability,
-                    )
-                })
+                .map(|part| substitute_type_parameters(*part, lookup, preserve_unbound, narrowing))
                 .collect::<Vec<_>>(),
         ),
         _ => ty,
     }
 }
 
-fn recorded_binding(bindings: &HashMap<String, Ty>, name: &str) -> Option<Ty> {
+/// A type-parameter binding map. The frontend keys bindings by [`TyParamName`]; lowering and
+/// backends still key theirs by the identity's text until they move to the typed key.
+pub(crate) trait TyParamKey: std::borrow::Borrow<str> + Eq + std::hash::Hash {}
+
+impl TyParamKey for TyParamName {}
+impl TyParamKey for String {}
+
+fn recorded_binding<K: TyParamKey>(bindings: &HashMap<K, Ty>, name: &str) -> Option<Ty> {
     bindings.get(name).copied()
 }
 
-pub(crate) fn ty_subst(ty: Ty, bindings: &HashMap<String, Ty>) -> Ty {
-    substitute_type_parameters(ty, |name| recorded_binding(bindings, name), |_| false, true)
+pub(crate) fn ty_subst<K: TyParamKey>(ty: Ty, bindings: &HashMap<K, Ty>) -> Ty {
+    substitute_type_parameters(
+        ty,
+        |name| recorded_binding(bindings, name),
+        |_| false,
+        |_| BoundNarrowing::NonNull,
+    )
 }
 
 /// Apply a typealias template to its use-site arguments.
@@ -175,7 +180,7 @@ pub(crate) fn ty_subst(ty: Ty, bindings: &HashMap<String, Ty>) -> Ty {
 /// function parameter/result, the function component consumes the projection and keeps its
 /// underlying semantic type (`typealias F<T> = () -> T; F<*>` returns the star's `Any?` bound).
 /// Projections below a classifier remain written generic arguments and must survive.
-pub(crate) fn ty_subst_alias_expansion(ty: Ty, bindings: &HashMap<String, Ty>) -> Ty {
+pub(crate) fn ty_subst_alias_expansion<K: TyParamKey>(ty: Ty, bindings: &HashMap<K, Ty>) -> Ty {
     fn normalize(ty: Ty) -> Ty {
         match ty.kind() {
             TyKind::Fun(signature) => Ty::fun_with_shape(
@@ -191,6 +196,7 @@ pub(crate) fn ty_subst_alias_expansion(ty: Ty, bindings: &HashMap<String, Ty>) -
             ),
             TyKind::Nullable(inner) => Ty::nullable(normalize(inner)),
             TyKind::PlatformNullable(inner) => Ty::platform_nullable(normalize(inner)),
+            TyKind::MutabilityFlexible(inner) => Ty::mutability_flexible(normalize(inner)),
             TyKind::DefinitelyNotNull(inner) => {
                 Ty::from(TyKind::DefinitelyNotNull(normalize(inner)))
             }
@@ -223,6 +229,7 @@ pub(crate) fn ty_subst_alias_expansion(ty: Ty, bindings: &HashMap<String, Ty>) -
             | TyKind::RawProjection(inner) => function_component(inner),
             TyKind::Nullable(inner) => Ty::nullable(function_component(inner)),
             TyKind::PlatformNullable(inner) => Ty::platform_nullable(function_component(inner)),
+            TyKind::MutabilityFlexible(inner) => Ty::mutability_flexible(function_component(inner)),
             TyKind::DefinitelyNotNull(inner) => {
                 Ty::from(TyKind::DefinitelyNotNull(function_component(inner)))
             }
@@ -237,23 +244,27 @@ pub(crate) fn ty_subst_alias_expansion(ty: Ty, bindings: &HashMap<String, Ty>) -
 /// does. Every other type parameter belongs to a declaration enclosing the call (`T` of the class
 /// whose member is called through `this`); it is in scope at the call site, not a variable of the
 /// call, so it stays as written.
-pub(crate) fn ty_subst_formals(ty: Ty, formals: &[String], bindings: &HashMap<String, Ty>) -> Ty {
+pub(crate) fn ty_subst_formals<K: TyParamKey>(
+    ty: Ty,
+    formals: &[String],
+    bindings: &HashMap<K, Ty>,
+) -> Ty {
     substitute_type_parameters(
         ty,
         |name| recorded_binding(bindings, name),
         |name| !formals.iter().any(|formal| formal == name),
-        true,
+        |_| BoundNarrowing::NonNull,
     )
 }
 
-pub(crate) fn ty_subst_all(types: &[Ty], bindings: &HashMap<String, Ty>) -> Vec<Ty> {
+pub(crate) fn ty_subst_all<K: TyParamKey>(types: &[Ty], bindings: &HashMap<K, Ty>) -> Vec<Ty> {
     types.iter().map(|ty| ty_subst(*ty, bindings)).collect()
 }
 
 /// Replace the inline bounds carried by type-parameter references throughout a type shape. Signature
 /// decoders first discover formal declarations and type uses independently; this single type-model
 /// operation joins them without each decoder growing its own recursive walk.
-pub(crate) fn ty_with_param_bounds(ty: Ty, bounds: &HashMap<String, Ty>) -> Ty {
+pub(crate) fn ty_with_param_bounds<K: TyParamKey>(ty: Ty, bounds: &HashMap<K, Ty>) -> Ty {
     match ty.kind() {
         TyKind::TyParam(name, current) => Ty::ty_param(
             name.as_str(),
@@ -276,6 +287,9 @@ pub(crate) fn ty_with_param_bounds(ty: Ty, bounds: &HashMap<String, Ty>) -> Ty {
         TyKind::Nullable(inner) => Ty::nullable(ty_with_param_bounds(inner, bounds)),
         TyKind::PlatformNullable(inner) => {
             Ty::platform_nullable(ty_with_param_bounds(inner, bounds))
+        }
+        TyKind::MutabilityFlexible(inner) => {
+            Ty::mutability_flexible(ty_with_param_bounds(inner, bounds))
         }
         TyKind::InProjection(inner) => Ty::in_projection(ty_with_param_bounds(inner, bounds)),
         TyKind::OutProjection(inner) => Ty::out_projection(ty_with_param_bounds(inner, bounds)),
@@ -302,8 +316,15 @@ pub(crate) fn ty_with_param_bounds(ty: Ty, bounds: &HashMap<String, Ty>) -> Ty {
 /// hydrating references between formals. A declaration such as `T : U, U : A, B` therefore gives
 /// occurrences of `T` the full transitive proof. Cycles retain their first repeated occurrence and
 /// terminate without inventing a bound.
-pub(crate) fn ty_with_transitive_param_bounds(ty: Ty, bounds: &HashMap<String, Ty>) -> Ty {
-    fn hydrate(ty: Ty, bounds: &HashMap<String, Ty>, visiting: &mut Vec<&'static str>) -> Ty {
+pub(crate) fn ty_with_transitive_param_bounds<K: TyParamKey>(
+    ty: Ty,
+    bounds: &HashMap<K, Ty>,
+) -> Ty {
+    fn hydrate<K: TyParamKey>(
+        ty: Ty,
+        bounds: &HashMap<K, Ty>,
+        visiting: &mut Vec<&'static str>,
+    ) -> Ty {
         match ty.kind() {
             TyKind::TyParam(name, current) => {
                 if visiting.contains(&name.as_str()) {
@@ -332,6 +353,9 @@ pub(crate) fn ty_with_transitive_param_bounds(ty: Ty, bounds: &HashMap<String, T
             TyKind::Nullable(inner) => Ty::nullable(hydrate(inner, bounds, visiting)),
             TyKind::PlatformNullable(inner) => {
                 Ty::platform_nullable(hydrate(inner, bounds, visiting))
+            }
+            TyKind::MutabilityFlexible(inner) => {
+                Ty::mutability_flexible(hydrate(inner, bounds, visiting))
             }
             TyKind::InProjection(inner) => Ty::in_projection(hydrate(inner, bounds, visiting)),
             TyKind::OutProjection(inner) => Ty::out_projection(hydrate(inner, bounds, visiting)),
@@ -387,6 +411,9 @@ pub(crate) fn ty_rename_params(ty: Ty, identities: &HashMap<&str, &'static str>)
         TyKind::PlatformNullable(inner) => {
             Ty::platform_nullable(ty_rename_params(inner, identities))
         }
+        TyKind::MutabilityFlexible(inner) => {
+            Ty::mutability_flexible(ty_rename_params(inner, identities))
+        }
         TyKind::InProjection(inner) => Ty::in_projection(ty_rename_params(inner, identities)),
         TyKind::OutProjection(inner) => Ty::out_projection(ty_rename_params(inner, identities)),
         TyKind::StarProjection(inner) => Ty::star_projection(ty_rename_params(inner, identities)),
@@ -425,8 +452,13 @@ pub(crate) fn ty_canonicalize_params(ty: Ty, formals: &[String]) -> Ty {
     ty_rename_params(ty, &identities)
 }
 
-pub(crate) fn ty_subst_keep_unbound(ty: Ty, bindings: &HashMap<String, Ty>) -> Ty {
-    substitute_type_parameters(ty, |name| recorded_binding(bindings, name), |_| true, true)
+pub(crate) fn ty_subst_keep_unbound<K: TyParamKey>(ty: Ty, bindings: &HashMap<K, Ty>) -> Ty {
+    substitute_type_parameters(
+        ty,
+        |name| recorded_binding(bindings, name),
+        |_| true,
+        |_| BoundNarrowing::NonNull,
+    )
 }
 
 /// Apply arguments from an already-validated classifier use without narrowing them against the
@@ -436,10 +468,34 @@ pub(crate) fn ty_subst_applied_lookup<F>(ty: Ty, lookup: F) -> Ty
 where
     F: Fn(&str) -> Option<Ty> + Copy,
 {
-    substitute_type_parameters(ty, lookup, |_| true, false)
+    substitute_type_parameters(ty, lookup, |_| true, |_| BoundNarrowing::Keep)
 }
 
-pub(crate) fn ty_subst_applied_arguments(ty: Ty, bindings: &HashMap<String, Ty>) -> Ty {
+/// Apply a classifier's arguments to one of its supertype templates. Like
+/// [`ty_subst_applied_lookup`], an applied argument is not re-narrowed against the formal's
+/// declared bound. A template occurrence of a formal that is non-null although the formal's
+/// declaration admits null (`open class B<W> : ColumnType<W & Any>()`) is a written `W & Any`, so
+/// it reads the argument's definitely-non-null form: `B<String?>` is a `ColumnType<String>`.
+pub(crate) fn ty_subst_supertype_template<F, D>(ty: Ty, lookup: F, written_non_null: D) -> Ty
+where
+    F: Fn(&str) -> Option<Ty> + Copy,
+    D: Fn(&str) -> bool + Copy,
+{
+    substitute_type_parameters(
+        ty,
+        lookup,
+        |_| true,
+        |name| {
+            if written_non_null(name) {
+                BoundNarrowing::DefinitelyNonNull
+            } else {
+                BoundNarrowing::Keep
+            }
+        },
+    )
+}
+
+pub(crate) fn ty_subst_applied_arguments<K: TyParamKey>(ty: Ty, bindings: &HashMap<K, Ty>) -> Ty {
     ty_subst_applied_lookup(ty, |name| recorded_binding(bindings, name))
 }
 
@@ -504,11 +560,11 @@ mod tests {
         let intersection = Ty::from(TyKind::DefinitelyNotNull(declared));
 
         assert_eq!(
-            ty_subst_keep_unbound(intersection, &HashMap::default()),
+            ty_subst_keep_unbound(intersection, &TyParamBindings::default()),
             intersection
         );
         assert_eq!(
-            ty_subst(intersection, &HashMap::default()),
+            ty_subst(intersection, &TyParamBindings::default()),
             Ty::obj("kotlin/Any")
         );
 

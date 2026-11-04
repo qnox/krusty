@@ -3,11 +3,13 @@ package krusty.ksphost;
 import com.google.devtools.ksp.symbol.KSAnnotation;
 import com.google.devtools.ksp.symbol.KSDeclaration;
 import com.google.devtools.ksp.symbol.KSType;
+import com.google.devtools.ksp.symbol.KSTypeAlias;
 import com.google.devtools.ksp.symbol.KSTypeArgument;
 import com.google.devtools.ksp.symbol.Nullability;
 import com.google.devtools.ksp.symbol.Variance;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.Supplier;
 import kotlin.sequences.Sequence;
 
 // A type a source declaration names: a classifier or a type parameter, applied to arguments. Its
@@ -18,9 +20,12 @@ final class SourceType implements KSType {
     private final String name;
     // The type parameter's round-unique id, or -1 for a classifier.
     private final int parameter;
-    // The library type alias the type was named by, or null.
-    LibraryTypeAlias alias;
+    // The type alias the type was named by, found when asked for, or null.
+    Supplier<KSTypeAlias> alias;
     private final boolean nullable;
+    // Whether the type has no annotations: source spells it with no type-use annotation, or it is
+    // the classifier type a constructor returns.
+    private final boolean unannotated;
     final List<KSTypeArgument> arguments;
 
     SourceType(
@@ -28,18 +33,20 @@ final class SourceType implements KSType {
             String name,
             int parameter,
             boolean nullable,
+            boolean unannotated,
             List<KSTypeArgument> arguments) {
         this.symbols = symbols;
         this.name = name;
         this.parameter = parameter;
         this.nullable = nullable;
+        this.unannotated = unannotated;
         this.arguments = arguments;
     }
 
     @Override
     public KSDeclaration getDeclaration() {
         if (alias != null) {
-            return alias;
+            return alias.get();
         }
         return parameter < 0 ? symbols.resolvedClass(name) : symbols.typeParameter(parameter);
     }
@@ -56,7 +63,10 @@ final class SourceType implements KSType {
 
     @Override
     public Sequence<KSAnnotation> getAnnotations() {
-        throw Nodes.notImplemented("KSType.annotations");
+        if (!unannotated) {
+            throw Nodes.notImplemented("KSType.annotations");
+        }
+        return Nodes.empty();
     }
 
     @Override
@@ -79,19 +89,30 @@ final class SourceType implements KSType {
         throw Nodes.notImplemented("KSType.replace");
     }
 
+    // KSP2 projects the classifier the type names, keeping the type's nullability; a type parameter
+    // or a type alias is not answered yet.
     @Override
     public KSType starProjection() {
-        throw Nodes.notImplemented("KSType.starProjection");
+        if (parameter >= 0 || alias != null) {
+            throw Nodes.notImplemented("KSType.starProjection");
+        }
+        return ClassType.starProjected(symbols.resolvedClass(name)).withNullability(nullable);
     }
 
     @Override
     public KSType makeNullable() {
-        return nullable ? this : new SourceType(symbols, name, parameter, true, arguments);
+        return nullable ? this : withNullability(true);
     }
 
     @Override
     public KSType makeNotNullable() {
-        return nullable ? new SourceType(symbols, name, parameter, false, arguments) : this;
+        return nullable ? withNullability(false) : this;
+    }
+
+    private SourceType withNullability(boolean nullable) {
+        SourceType type = new SourceType(symbols, name, parameter, nullable, unannotated, arguments);
+        type.alias = alias;
+        return type;
     }
 
     @Override

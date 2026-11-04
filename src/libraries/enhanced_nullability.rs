@@ -123,6 +123,7 @@ impl TypeEnhancement {
             },
             TyKind::Nullable(inner)
             | TyKind::PlatformNullable(inner)
+            | TyKind::MutabilityFlexible(inner)
             | TyKind::DefinitelyNotNull(inner)
             | TyKind::InProjection(inner)
             | TyKind::OutProjection(inner) => self.substitute(inner, binding),

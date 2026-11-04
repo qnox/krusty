@@ -187,7 +187,7 @@ fn symbolic_from_resolved_bounds(
 pub(super) fn enclosing(
     index: &crate::fir::ResolvedModuleIndex,
     declaration: crate::fir::DeclarationId,
-) -> crate::fx_hash::HashMap<String, Ty> {
+) -> crate::types::TyParamBindings {
     let mut visible = crate::fx_hash::HashMap::default();
     let mut scope = declaration;
     while let Some(header) = index.declaration_header(scope) {
@@ -216,7 +216,7 @@ pub(super) fn enclosing(
                 |bound| bound.ty.get(),
             );
             visible
-                .entry(name.to_owned())
+                .entry(crate::types::TyParamName::from(name))
                 .or_insert_with(|| Ty::ty_param(semantic, bound));
         }
         scope = current;
@@ -487,7 +487,10 @@ pub(super) fn publish_source_declarations(
             );
             super::publication_continuation::retain_or_report(
                 diagnostics,
-                &semantics.diagnostics.borrow()[solver_diagnostics..],
+                super::diagnostics::RetainedFindings {
+                    recorded: &semantics.diagnostics.borrow()[solver_diagnostics..],
+                    published: &super::diagnostics::published_in(index),
+                },
                 stub.id,
                 None,
                 deferred_candidates,
@@ -518,7 +521,10 @@ pub(super) fn publish_source_declarations(
             );
             super::publication_continuation::retain_or_report(
                 diagnostics,
-                &semantics.diagnostics.borrow()[solver_diagnostics..],
+                super::diagnostics::RetainedFindings {
+                    recorded: &semantics.diagnostics.borrow()[solver_diagnostics..],
+                    published: &super::diagnostics::published_in(index),
+                },
                 stub.id,
                 None,
                 deferred_candidates,
@@ -548,7 +554,10 @@ pub(super) fn publish_source_declarations(
             Err(diagnostic) => {
                 super::publication_continuation::retain_or_report(
                     diagnostics,
-                    &semantics.diagnostics.borrow()[solver_diagnostics..],
+                    super::diagnostics::RetainedFindings {
+                        recorded: &semantics.diagnostics.borrow()[solver_diagnostics..],
+                        published: &super::diagnostics::published_in(index),
+                    },
                     stub.id,
                     Some(diagnostic),
                     deferred_candidates,
@@ -572,7 +581,10 @@ pub(super) fn publish_source_declarations(
         {
             super::publication_continuation::retain_or_report(
                 diagnostics,
-                &semantics.diagnostics.borrow()[solver_diagnostics..],
+                super::diagnostics::RetainedFindings {
+                    recorded: &semantics.diagnostics.borrow()[solver_diagnostics..],
+                    published: &super::diagnostics::published_in(index),
+                },
                 stub.id,
                 None,
                 deferred_candidates,
@@ -598,6 +610,7 @@ fn mentions_external_formal(ty: Ty, own_formals: &[String]) -> bool {
         }
         TyKind::Nullable(inner)
         | TyKind::PlatformNullable(inner)
+        | TyKind::MutabilityFlexible(inner)
         | TyKind::InProjection(inner)
         | TyKind::OutProjection(inner)
         | TyKind::StarProjection(inner) => mentions_external_formal(inner, own_formals),

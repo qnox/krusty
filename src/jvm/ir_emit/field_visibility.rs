@@ -70,6 +70,15 @@ pub(super) fn jvm_field_visibility(c: &IrClass, field_index: usize) -> Option<u1
     })
 }
 
+/// Whether `field_index` is the backing field of a `var` property, the fact kotlinc's field
+/// signature mode follows.
+pub(super) fn backs_var_property(c: &IrClass, field_index: usize) -> bool {
+    c.properties
+        .iter()
+        .find(|declaration| declaration.backing_field == Some(field_index as u32))
+        .is_some_and(|declaration| declaration.is_var)
+}
+
 /// A declared backing field's JVM access. Its visibility maps from the platform-neutral one: a
 /// `private` field is `ACC_PRIVATE` (the default: Kotlin backing fields are reached via accessors)
 /// and a non-private one `ACC_PUBLIC`, unless [`jvm_field_visibility`] publishes it otherwise.

@@ -185,6 +185,12 @@ impl Checker<'_> {
                                     signature.clone(),
                                 )
                             }),
+                            self.rejected_constructor_function_arguments(
+                                args,
+                                &argument_slots,
+                                signature,
+                                &explicit_type_arguments,
+                            ),
                         )
                     });
                     continue;
@@ -342,17 +348,24 @@ impl Checker<'_> {
                         )
                     },
                 );
-                if let Some(violation) = constraints.bound_violation {
-                    let source_argument = violation.argument;
-                    if args.get(source_argument).is_none() {
-                        continue;
-                    }
-                    bound_failures.push(LibraryConstructorFailure::TypeMismatch {
-                        source_argument,
-                        expected: violation.expected,
-                        actual: violation.actual,
-                        result: None,
-                    });
+                let owner = super::type_parameter_owners::classifier_type_parameter_owner(
+                    &source, internal, classifier,
+                );
+                if let Some(contradictions) =
+                    super::generic_argument_bounds::ArgumentContradictions::new(
+                        signature,
+                        &constraints.bound_violations,
+                        owner,
+                        |source_argument| {
+                            let argument = *args.get(source_argument)?;
+                            let parameter = *argument_slots.get(source_argument)?;
+                            Some((argument, *signature.params.get(parameter)?))
+                        },
+                    )
+                {
+                    bound_failures.push(LibraryConstructorFailure::ArgumentContradictions(
+                        Box::new(contradictions),
+                    ));
                     continue;
                 }
                 let tightest_upper = constraints.tightest_upper_bindings(&source);
@@ -416,14 +429,16 @@ impl Checker<'_> {
                             {
                                 continue;
                             }
-                            let Some(&fixed) = expected_bindings.get(&formal).filter(|&&fixed| {
-                                fixed.non_null().is_ty_param()
-                                    && Self::type_is_lexically_fixed(scope, fixed)
-                            }) else {
+                            let Some(&fixed) =
+                                expected_bindings.get(formal.as_str()).filter(|&&fixed| {
+                                    fixed.non_null().is_ty_param()
+                                        && Self::type_is_lexically_fixed(scope, fixed)
+                                })
+                            else {
                                 continue;
                             };
                             let mut trial = bindings.clone();
-                            trial.insert(formal.clone(), fixed);
+                            trial.insert(crate::types::TyParamName::new(&formal), fixed);
                             if !crate::symbol_resolver::generic_bindings_satisfy_bounds(
                                 signature,
                                 &trial,
@@ -484,7 +499,7 @@ impl Checker<'_> {
                 for (index, formal) in classifier.type_params().iter().enumerate() {
                     if !enclosing_context_formals.contains(formal)
                         || bindings
-                            .get(formal)
+                            .get(formal.as_str())
                             .is_some_and(|binding| *binding != Ty::Error)
                     {
                         continue;
@@ -495,7 +510,7 @@ impl Checker<'_> {
                         .take(index)
                         .filter_map(|known_formal| {
                             bindings
-                                .get(known_formal)
+                                .get(known_formal.as_str())
                                 .copied()
                                 .filter(|binding| *binding != Ty::Error)
                                 .map(|binding| (known_formal.clone(), binding))
@@ -509,7 +524,7 @@ impl Checker<'_> {
                         .filter(|bound| *bound != Ty::Error)
                     {
                         bindings.insert(
-                            formal.clone(),
+                            crate::types::TyParamName::new(formal),
                             crate::symbol_resolver::ty_subst_keep_unbound(bound, &known),
                         );
                     }
@@ -534,7 +549,7 @@ impl Checker<'_> {
                     .zip(explicit_type_arguments.iter().copied())
                 {
                     if !explicit.mentions_error() && !explicit.mentions_pending() {
-                        bindings.insert(formal.clone(), explicit);
+                        bindings.insert(crate::types::TyParamName::new(formal), explicit);
                     }
                 }
                 // Expected-result inference runs after argument inference and may replace a class
@@ -557,6 +572,7 @@ impl Checker<'_> {
                                     signature.clone(),
                                 )
                             }),
+                            Vec::new(),
                         )
                     });
                     continue;
@@ -638,6 +654,9 @@ impl Checker<'_> {
                                             source_argument,
                                             ..
                                         } => *source_argument,
+                                        LibraryConstructorFailure::ArgumentContradictions(
+                                            contradictions,
+                                        ) => contradictions.first_argument(),
                                         LibraryConstructorFailure::Mapping(_)
                                         | LibraryConstructorFailure::TypeArgumentMismatch {
                                             ..
@@ -647,8 +666,12 @@ impl Checker<'_> {
                                 return Err(failure);
                             }
                         }
-                        if let Some(((expected, actual), constructor, bound_constructor)) =
-                            type_argument_bound_failure
+                        if let Some((
+                            (expected, actual),
+                            constructor,
+                            bound_constructor,
+                            postponed_arguments,
+                        )) = type_argument_bound_failure
                         {
                             return Err(LibraryConstructorFailure::TypeArgumentMismatch {
                                 expected,
@@ -657,6 +680,7 @@ impl Checker<'_> {
                                 explicit: explicit_type_arguments,
                                 constructor,
                                 bound_constructor,
+                                postponed_arguments,
                             });
                         }
                         if let Some((failure, (params, call_sig))) =

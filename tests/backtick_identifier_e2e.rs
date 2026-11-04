@@ -33,3 +33,36 @@ fn backtick_function_name_with_spaces() {
 fun box(): String = `make result`()\n";
     assert_eq!(run(SRC).expect("backtick fn name with spaces"), "OK");
 }
+
+#[test]
+fn literal_dollar_classifier_preserves_its_complete_classfile() {
+    let classes = common::classes_against_kotlinc_module(&[(
+        "Reserved.kt",
+        r#"package p
+class `ConsumerKt$fir$referenceAdapter$2` { fun token(): String = "OK" }
+"#,
+    )]);
+    assert_eq!(classes.differences(), Vec::<String>::new());
+}
+
+#[test]
+fn literal_dollars_in_nested_declarations_preserve_complete_classfiles() {
+    let classes = common::classes_against_kotlinc_module(&[(
+        "Nested.kt",
+        r#"package p
+class `Owner$Literal` { class `Child$Name` { fun token(): String = "OK" } }
+"#,
+    )]);
+    assert_eq!(classes.differences(), Vec::<String>::new());
+}
+
+#[test]
+fn literal_dollar_named_companion_preserves_complete_classfiles() {
+    let classes = common::classes_against_kotlinc_module(&[(
+        "Companion.kt",
+        r#"package p
+class `Owner$Literal` { companion object `Part$Name` { fun token(): String = "OK" } }
+"#,
+    )]);
+    assert_eq!(classes.differences(), Vec::<String>::new());
+}

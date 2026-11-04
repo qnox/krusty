@@ -14,6 +14,26 @@ fn assert_identical(stem: &str, src: &str, class_internal: &str) {
     result.unwrap_or_else(|diff| panic!("{diff}"));
 }
 
+#[test]
+fn nested_vararg_annotations_keep_checked_argument_order_in_metadata() {
+    let source = include_str!("fixtures/annotation_metadata_argument_order/Annotations.kt");
+    assert_identical("Annotations", source, "app/AnnotationsKt");
+}
+
+#[test]
+fn declaration_annotations_match_complete_reference_classes() {
+    let source = include_str!("fixtures/annotation_metadata_argument_order/Annotations.kt");
+    let classes = common::classes_against_kotlinc_module(&[("Annotations.kt", source)]);
+    assert_eq!(classes.differences(), Vec::<String>::new());
+}
+
+#[test]
+fn parameter_annotation_payloads_precede_method_bodies_in_every_realization() {
+    let source = include_str!("fixtures/annotation_metadata_argument_order/ParameterPayloads.kt");
+    let classes = common::classes_against_kotlinc_module(&[("ParameterPayloads.kt", source)]);
+    assert_eq!(classes.differences(), Vec::<String>::new());
+}
+
 const PRELUDE: &str = "package app\n\
     \n\
     @Target(AnnotationTarget.TYPE) annotation class Mark\n\

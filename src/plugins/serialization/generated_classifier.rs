@@ -278,6 +278,69 @@ mod tests {
     }
 
     #[test]
+    fn generated_header_names_survive_the_frozen_backend_boundary() {
+        use crate::backend::{
+            BackendClassifierSource, BackendModuleFacts, CheckedBackendClassifiers,
+        };
+        use crate::libraries::ClassifierDeclarationKey;
+        use crate::metadata::class_id::ResolvedClassId;
+        use crate::metadata::type_encoder::StringTable;
+
+        let source = "package header_names\nclass `Owner$Literal`";
+        let mut diagnostics = crate::diag::DiagSink::new();
+        let analysis = crate::frontend::analyze_source_set_with_features(
+            &[crate::frontend::SourceInput::kotlin(source)],
+            crate::frontend::PlatformProvider::jvm(Box::new(crate::libraries::EmptySymbolSource)),
+            &crate::features::LangFeatures::new(),
+            &mut diagnostics,
+        );
+        assert_eq!(diagnostics.diags.len(), 0, "{:?}", diagnostics.diags);
+        let (mut index, _, _, _) = analysis.streamed.unwrap().module.into_parts();
+        let owner = type_name("header_names/Owner$Literal");
+        let declaration = index.classifier_declaration(owner).unwrap();
+        let parameters = crate::types::TypeParameters::default();
+        let annotations = [type_name(SERIALIZABLE_FQ)];
+        let mut generated = Vec::new();
+        publish_generated_classifier_facts(
+            &FrontendClassContext {
+                classifier: owner,
+                companion: None,
+                kind: crate::libraries::TypeKind::Class,
+                is_sealed: false,
+                is_abstract: false,
+                type_parameters: &parameters,
+                annotations: &annotations,
+                annotation_class_arguments: &[],
+            },
+            &mut generated,
+        );
+        index.publish_generated_classifiers(declaration, generated.clone());
+        let module = BackendModuleFacts::from_resolved_index(&index).unwrap();
+        assert_eq!(module.generated_classifiers(), generated);
+        let dependencies = crate::libraries::EmptySymbolSource;
+        let checked = CheckedBackendClassifiers::new(&module, &dependencies);
+        let mut actual = Vec::new();
+        for generated in module.generated_classifiers() {
+            let name = ResolvedClassId::resolve(
+                ClassifierDeclarationKey::Ordinary(generated.classifier),
+                &|key| checked.classifier_declaration_name(key),
+            )
+            .unwrap();
+            let mut strings = StringTable::default();
+            assert_eq!(strings.declaration_class_id(&name), Ok(0));
+            assert_eq!(strings.serialize_types().as_bytes(), &[10, 0]);
+            actual.push(strings.into_strings());
+        }
+        assert_eq!(
+            actual,
+            [
+                vec!["header_names/Owner$Literal.$serializer"],
+                vec!["header_names/Owner$Literal.Companion"],
+            ]
+        );
+    }
+
+    #[test]
     fn rejects_non_generating_serializable_forms() {
         let annotation = [type_name(SERIALIZABLE_FQ)];
         let custom = [(0, type_name("demo/OwnSerializer"))];

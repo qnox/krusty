@@ -91,6 +91,7 @@ pub(crate) fn render_ty(ty: Ty) -> String {
         }
         TyKind::Nullable(inner) => render_nullable(inner),
         TyKind::PlatformNullable(inner) => format!("{}!", render_ty(inner)),
+        TyKind::MutabilityFlexible(inner) => render_ty(inner),
         TyKind::DefinitelyNotNull(inner) => format!("{} & Any", render_ty(inner)),
         TyKind::Intersection(parts) => parts
             .iter()

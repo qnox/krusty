@@ -5,6 +5,7 @@ import com.google.devtools.ksp.symbol.KSAnnotation;
 import com.google.devtools.ksp.symbol.KSClassDeclaration;
 import com.google.devtools.ksp.symbol.KSDeclaration;
 import com.google.devtools.ksp.symbol.KSTypeReference;
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -13,6 +14,18 @@ import java.util.List;
 // declaration, a class literal's type, a nested annotation, or a list for an array.
 abstract class ConstantValue {
     abstract Object resolve(KSAnnotation owner);
+
+    // Kotlin's unsigned wrappers expose their primitive-carrier boxing operation under a
+    // mangled JVM name. The wire tag supplies the exact wrapper and carrier; KSP observes the
+    // unsigned object, including its runtime class, rather than the signed carrier.
+    static ConstantValue unsigned(Class<?> wrapper, Class<?> carrier, Object bits)
+            throws IOException {
+        try {
+            return of(wrapper.getDeclaredMethod("box-impl", carrier).invoke(null, bits));
+        } catch (ReflectiveOperationException error) {
+            throw new IOException("cannot box an unsigned annotation value", error);
+        }
+    }
 
     // A primitive or string, which KSP hands over boxed.
     static ConstantValue of(Object value) {

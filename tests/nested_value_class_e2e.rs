@@ -106,3 +106,88 @@ fn interface_nested_value_class_runs() {
         }\n";
     assert_eq!(run(SRC).expect("interface-nested value class"), "OK");
 }
+
+/// A nested value class's generated `toString` names it by its own simple name, as a data class's
+/// does: `IC1(s=…)`, never the owner-qualified `C.IC1(s=…)` krusty wrote.
+const NESTED_TEXT: &str = r#"class C {
+    @JvmInline
+    value class IC1(val s: String)
+
+    companion object {
+        @JvmInline
+        value class IC2(val s: String)
+    }
+}
+
+object O {
+    @JvmInline
+    value class IC3(val s: String)
+}
+
+fun box(): String {
+    val text = "${C.IC1("a")}${C.Companion.IC2("b")}${O.IC3("c")}"
+    return if (text == "IC1(s=a)IC2(s=b)IC3(s=c)") "OK" else text
+}
+"#;
+
+#[test]
+fn a_nested_value_class_prints_its_simple_name() {
+    common::assert_classes_identical_to_kotlinc(
+        "NestedValueClassText",
+        NESTED_TEXT,
+        &["C$IC1", "C$Companion$IC2", "O$IC3"],
+    );
+}
+
+#[test]
+fn nested_value_class_text_runs() {
+    common::expect_box_ok_with_stdlib(NESTED_TEXT, "NestedValueClassText");
+}
+
+/// A `$` inside a backticked classifier name is part of its declared name, not a nesting
+/// separator: kotlinc's generated `toString` keeps it whole (`Cash$Tag(s=…)`, `Part$Name(s=…)`)
+/// and drops only the real owners. A name read back from the JVM spelling cannot tell the two
+/// apart. Every class's header, member table and members (code and debug tables) are kotlinc's;
+/// `@Metadata` is compared once the metadata class-id encoder takes declared ownership instead of
+/// the JVM spelling (`docs/METADATA_NOTES.md`, "Source inventory publication").
+const LITERAL_DOLLAR_TEXT: &str = r#"@JvmInline
+value class `Cash$Tag`(val s: String)
+
+class Part {
+    @JvmInline
+    value class `Part$Name`(val s: String)
+}
+
+class `Outer$Shell` {
+    @JvmInline
+    value class Leaf(val s: String)
+}
+
+fun box(): String = "${`Cash$Tag`("a")}|${Part.`Part$Name`("b")}|${`Outer$Shell`.Leaf("c")}"
+"#;
+
+#[test]
+fn a_literal_dollar_value_class_prints_its_whole_declared_name() {
+    for class in [
+        "Cash$Tag",
+        "Part",
+        "Part$Part$Name",
+        "Outer$Shell",
+        "Outer$Shell$Leaf",
+        "LiteralDollarValueClassTextKt",
+    ] {
+        common::assert_class_code_matches_kotlinc(
+            "LiteralDollarValueClassText",
+            LITERAL_DOLLAR_TEXT,
+            class,
+        );
+    }
+}
+
+#[test]
+fn literal_dollar_value_class_text_runs() {
+    assert_eq!(
+        common::expect_box_run_with_stdlib(LITERAL_DOLLAR_TEXT, "LiteralDollarValueClassText"),
+        "Cash$Tag(s=a)|Part$Name(s=b)|Leaf(s=c)"
+    );
+}

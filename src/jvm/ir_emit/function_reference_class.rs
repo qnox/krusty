@@ -74,12 +74,11 @@ pub(super) fn emit_func_ref_class(
     }
     // Package-private, kotlinc's shape — EXCEPT when the class lands cross-package (an
     // INLINE-SPLICED reference regenerates the callee module's adapter under the callee's package
-    // while the caller lives elsewhere) or is referenced from a PUBLIC INLINE body
-    // (`IrFile::public_synthetics`) — package-private there is an IllegalAccessError (corpus
-    // `adaptedSuspendFunctionReference.kt`).
+    // while the caller lives elsewhere) or is declared in an inline function's scope, which kotlinc
+    // makes public (`inInlineFunctionScope`): the function's callers construct it from any package.
     let cross_package =
         fq.rsplit_once('/').map(|(p, _)| p) != facade.rsplit_once('/').map(|(p, _)| p);
-    let inline_reachable = ir.public_synthetics.contains(&c.fq_name_id());
+    let inline_reachable = super::enclosure::in_inline_function_scope(ir, c);
     // kotlinc marks every callable-reference carrier ACC_SYNTHETIC.
     cw.set_access(if cross_package || inline_reachable {
         0x1000 | 0x0001 | 0x0010 | 0x0020 // SYNTHETIC | PUBLIC | FINAL | SUPER
@@ -377,7 +376,7 @@ pub(super) fn emit_func_ref_class(
             emit_singleton_instance_clinit(&mut cw, &fq);
             add_singleton_instance_field(&mut cw, &fq);
         }
-        return finish_local_synthetic_class(cw, env);
+        return super::metadata_policy::finish_reference_class(cw, env, ir, c);
     }
 
     // Numbered JVM function interfaces stop at arity 22. Larger Kotlin function types use the
@@ -594,7 +593,7 @@ pub(super) fn emit_func_ref_class(
         emit_singleton_instance_clinit(&mut cw, &fq);
         add_singleton_instance_field(&mut cw, &fq);
     }
-    finish_local_synthetic_class(cw, env)
+    super::metadata_policy::finish_reference_class(cw, env, ir, c)
 }
 
 /// Push the `Class` a carrier reflects its declaration's owner as, the way kotlinc's
