@@ -8,6 +8,7 @@
 
 use super::*;
 pub(crate) use crate::lexical_policy::LexicalPolicy;
+use crate::types::PropertyAnnotationSite;
 
 /// Resolve each source's file annotations once, while Pass 1 still holds their syntax, and publish
 /// their policies and checked applications for every later checking unit and backend of that
@@ -124,10 +125,51 @@ impl Checker<'_> {
     ) -> usize {
         let depth = self.active_lexical_policies.len();
         for (annotation, arguments) in annotations.iter().zip(arguments) {
-            if !include(annotation) {
+            // A use-site application (`@get:OptIn(M::class)`) covers only its site, which the
+            // accessor opens; the declaration's own policies are those written for it.
+            if !include(annotation)
+                || !matches!(
+                    annotation.property_site,
+                    None | Some(PropertyAnnotationSite::Property)
+                )
+            {
                 continue;
             }
             let policies = self.application_policies(scope, annotation, arguments);
+            self.active_lexical_policies
+                .extend(policies.iter().cloned());
+        }
+        depth
+    }
+
+    /// Open the policies of one accessor of `property`: the property's applications written for
+    /// that accessor's use-site (`@get:`, `@set:`) and the accessor's own (`@A get()`), resolved
+    /// in the scope of the property's annotations. The property's declaration policies are
+    /// already open. Returns the depth to truncate back to.
+    pub(super) fn push_accessor_policies(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        property: &PropDecl,
+        site: PropertyAnnotationSite,
+    ) -> usize {
+        let depth = self.active_lexical_policies.len();
+        for (annotation, arguments) in property.annotations.iter().zip(&property.annotation_args) {
+            if annotation.property_site == Some(site) {
+                let policies = self.application_policies(scope, annotation, arguments);
+                self.active_lexical_policies
+                    .extend(policies.iter().cloned());
+            }
+        }
+        let accessor = match site {
+            PropertyAnnotationSite::Getter => &property.getter_annotations[..],
+            PropertyAnnotationSite::Setter => property
+                .setter
+                .as_ref()
+                .map_or(&[][..], |setter| &setter.annotations[..]),
+            _ => &[],
+        };
+        for entry in accessor {
+            let policies = self.application_policies(scope, &entry.annotation, &entry.arguments);
             self.active_lexical_policies
                 .extend(policies.iter().cloned());
         }
@@ -150,18 +192,24 @@ impl Checker<'_> {
             return policies.clone();
         }
         let diagnostics = self.diags.diags.len();
-        let identity = self.check_annotation_application(scope, annotation, arguments);
+        let policies: std::rc::Rc<[LexicalPolicy]> = if annotation.property_site.is_some() {
+            // A use-site application is validated and published by its property's host check;
+            // its policies need only the identity and values it binds here.
+            self.use_site_application_values(scope, annotation, arguments)
+                .map(|(identity, values)| LexicalPolicy::of_application(identity, &values))
+        } else {
+            self.check_annotation_application(scope, annotation, arguments)
+                .map(|identity| {
+                    let values = self
+                        .applied_annotations
+                        .get(&key)
+                        .map_or(&[][..], |applied| applied.values.as_slice());
+                    LexicalPolicy::of_application(identity, values)
+                })
+        }
+        .unwrap_or_default()
+        .into();
         self.diags.diags.truncate(diagnostics);
-        let policies: std::rc::Rc<[LexicalPolicy]> = identity
-            .map(|identity| {
-                let values = self
-                    .applied_annotations
-                    .get(&key)
-                    .map_or(&[][..], |applied| applied.values.as_slice());
-                LexicalPolicy::of_application(identity, values)
-            })
-            .unwrap_or_default()
-            .into();
         self.lexical_policy_facts.insert(key, policies.clone());
         policies
     }
