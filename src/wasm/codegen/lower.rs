@@ -45,6 +45,7 @@ pub(super) fn is_direct_operation(operation: crate::backend::BackendCompilerIntr
         || IrBinOp::of_primitive_operator(operation).is_some()
         || operation == crate::backend::BackendCompilerIntrinsic::ThrowableMessage
         || operation == crate::backend::BackendCompilerIntrinsic::ArrayGet
+        || operation == crate::backend::BackendCompilerIntrinsic::ArraySet
         || operation == crate::backend::BackendCompilerIntrinsic::PrimitiveHashCode
 }
 
@@ -1137,6 +1138,27 @@ impl<'a> Body<'a> {
                     return Err("an authenticated array read with malformed operands".into());
                 };
                 self.reference_array_get(receiver, *index)?;
+            }
+            IrExpr::Call {
+                callee: ref call_callee,
+                dispatch_receiver,
+                args,
+            } if let Callee::External {
+                target,
+                defaults,
+                extension_receiver_parameter: None,
+                ..
+            } = &**call_callee
+                && defaults.is_empty()
+                && self.callables.callable(*target).is_some_and(|fact| {
+                    fact.compiler_operation()
+                        == Some(crate::backend::BackendCompilerIntrinsic::ArraySet)
+                }) =>
+            {
+                let (Some(receiver), [index, value]) = (dispatch_receiver, args.as_slice()) else {
+                    return Err("an authenticated array store with malformed operands".into());
+                };
+                self.reference_array_set(receiver, *index, *value)?;
             }
             IrExpr::Call {
                 callee: ref call_callee,
