@@ -53,6 +53,7 @@ pub use compiled_inline_calls::{CompiledInlineOperands, SameModuleInlining};
 mod constants;
 mod constructors;
 mod default_arguments;
+mod endless_loops;
 mod enum_switch_whens;
 pub use enum_switch_whens::EnumSwitchWhen;
 mod emitted_body_roots;
