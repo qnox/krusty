@@ -3957,7 +3957,7 @@ impl JvmLibraries {
         // Language builtin classifiers exist independently of whether the target classpath contains
         // stdlib. Federate that classifier source with the platform record here; platform metadata wins
         // when present, while callables remain exclusively metadata/platform declarations.
-        let core = EmptySymbolSource.symbols(namespace, name);
+        let core = EmptySymbolSource::declarations(namespace, name);
         let (classifier_name, classifier_declaration, classifier, builtin_classifier) =
             if classifier.is_some() {
                 (
