@@ -3,6 +3,7 @@
 //! captures after them, its `$i$a$` marker as its first local, and its body ending in a return of
 //! its own type. The inliner places that node at each `invoke` of the lambda.
 
+use super::super::inline_lambda_parameters::placed_lambda_parameters;
 use super::lambda_route::SpliceReason;
 use super::*;
 use crate::jvm::classreader::{ExcEntry, MethodLocal};
@@ -169,17 +170,12 @@ impl Emitter<'_> {
             .map(|ty| ty.non_null())
             .map(Ty::kind)
         {
-            Some(TyKind::Fun(signature)) if signature.params.len() == arity => {
-                (signature.params.clone(), false)
-            }
-            // A suspend lambda's last parameter is the continuation its `invoke` is passed.
-            Some(TyKind::Fun(signature))
-                if signature.suspend && signature.params.len() + 1 == arity =>
-            {
-                let mut params = signature.params.clone();
-                params.push(Ty::obj("kotlin/coroutines/Continuation"));
-                (params, true)
-            }
+            Some(TyKind::Fun(signature)) => (
+                placed_lambda_parameters(signature, arity).ok_or(
+                    "a placed lambda has no checked function type with each argument's type",
+                )?,
+                signature.suspend,
+            ),
             _ => {
                 return Err(
                     "a placed lambda has no checked function type with each argument's type",
@@ -231,10 +227,8 @@ impl Emitter<'_> {
         let (capture_types, physical_parameters) = physical.split_at(split);
         // A suspend reference's adapter, like a suspend literal's implementation, takes the
         // continuation its `invoke` is passed after the function type's parameters.
-        let mut semantic = signature.params.clone();
-        if signature.suspend {
-            semantic.push(Ty::obj("kotlin/coroutines/Continuation"));
-        }
+        let semantic = placed_lambda_parameters(signature, arity)
+            .ok_or("a callable reference has no checked function type with each argument's type")?;
         let result_semantic = self.ir.logical_type(inline_body).unwrap_or(signature.ret);
         let (parameter_types, parameter_coercions) = physical_parameters
             .iter()
