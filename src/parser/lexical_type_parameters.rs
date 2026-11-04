@@ -150,4 +150,45 @@ mod tests {
         assert_eq!(class.supertypes[0].targs.len(), 1);
         assert_eq!(class.supertypes[0].targs[0].name, "T");
     }
+
+    #[test]
+    fn interface_type_parameters_scope_over_default_method_bodies() {
+        let source = r#"
+            interface Shape<X>
+            interface Adapter<T> {
+                fun shape(): Shape<T> = object : Shape<T> {}
+                class Nested<U> {
+                    val nested = object : Shape<U> {}
+                }
+            }
+        "#;
+        let mut diagnostics = DiagSink::new();
+        let tokens = lex(source, &mut diagnostics);
+        let file = parse(source, &tokens, &mut diagnostics);
+        assert_eq!(
+            diagnostics.diags.len(),
+            0,
+            "{}",
+            diagnostics.render("interface-capture.kt", source)
+        );
+
+        let mut captures = file
+            .anonymous_object_classes
+            .values()
+            .map(|&declaration| match file.decl(declaration) {
+                Decl::Class(class) => {
+                    (class.span.lo, class.lexical_type_parameter_captures.clone())
+                }
+                Decl::Fun(_) | Decl::Property(_) => panic!("anonymous declaration is not a class"),
+            })
+            .collect::<Vec<_>>();
+        captures.sort_by_key(|(start, _)| *start);
+        assert_eq!(
+            captures
+                .into_iter()
+                .map(|(_, parameters)| parameters)
+                .collect::<Vec<_>>(),
+            [vec!["T".to_string()], vec!["U".to_string()]]
+        );
+    }
 }

@@ -3243,6 +3243,8 @@ impl<'a> Parser<'a> {
                 Vec::new(),
             )
         };
+        let lexical_type_param_lens =
+            self.push_lexical_type_params(&type_params, &type_param_bounds);
         let (supertypes, _base, _base_span, _base_type_args, _base_args, _) =
             self.parse_supertypes();
         // `interface I<T> where T : Bound` — generic constraints after the supertype list, before the
@@ -3324,6 +3326,7 @@ impl<'a> Parser<'a> {
             self.expect(TokenKind::RBrace, "'}'");
         }
         let end = self.t[self.i.saturating_sub(1)].span;
+        self.pop_lexical_type_params(lexical_type_param_lens);
         ClassDecl {
             name_span,
             primary_ctor_visibility: Visibility::Public,
