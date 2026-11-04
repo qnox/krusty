@@ -211,7 +211,7 @@ pub(super) fn add_companion_field(cw: &mut ClassWriter, class: &IrClass) {
     };
     cw.add_field(
         0x0019,
-        companion.nested_segment_ref(),
+        crate::jvm::companion_storage::field_name(class.fq_name, companion),
         &format!("L{};", companion.render()),
     );
 }
@@ -232,7 +232,11 @@ pub(super) fn emit_companion_init(
     if is_jvm_interface(class) {
         let instance = cw.fieldref(&companion_name, "$$INSTANCE", &descriptor);
         code.getstatic(instance, 1);
-        let field = cw.fieldref(owner, companion.nested_segment_ref(), &descriptor);
+        let field = cw.fieldref(
+            owner,
+            crate::jvm::companion_storage::field_name(class.fq_name, companion),
+            &descriptor,
+        );
         code.putstatic(field, 1);
         return;
     }
@@ -246,7 +250,11 @@ pub(super) fn emit_companion_init(
         "(Lkotlin/jvm/internal/DefaultConstructorMarker;)V",
     );
     code.invokespecial(constructor, 1, 0);
-    let field = cw.fieldref(owner, companion.nested_segment_ref(), &descriptor);
+    let field = cw.fieldref(
+        owner,
+        crate::jvm::companion_storage::field_name(class.fq_name, companion),
+        &descriptor,
+    );
     code.putstatic(field, 1);
 }
 

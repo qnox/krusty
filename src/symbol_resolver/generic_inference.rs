@@ -20,13 +20,11 @@ pub(crate) use bound_relations::{
     generic_bindings_admit_expected_return_intersection, generic_bindings_satisfy_bounds,
     resolve_bound_violating_bindings, unsolved_formal_bound,
 };
-#[cfg(test)]
-use call_constraints::GenericBoundViolation;
 pub(crate) use call_constraints::{
     collect_assignability_constraints_from_symbols, infer_generic_call_constraints_from_symbols,
     infer_generic_call_constraints_with_argument_ordinals,
     infer_generic_call_constraints_with_receiver_from_symbols, publish_denotable_upper_bindings,
-    seed_denotable_upper_placeholders, AssignabilityConstraints,
+    seed_denotable_upper_placeholders, AssignabilityConstraints, GenericBoundViolation,
 };
 pub(crate) use call_site_variables::{CallSiteVariableMap, CallSiteVariables};
 pub(crate) use conditional_result::generic_return_expectation_from_sibling;
@@ -518,8 +516,17 @@ fn unify_ty_impl(source: Option<&dyn SymbolSource>, sig: Ty, actual: Ty, binds: 
             let actual = actual.projection_inner().unwrap_or(actual);
             let flexible_upper = platform_flexible_upper_bound(source, actual).map(Ty::non_null);
             let mut actual = actual.non_null();
-            while let (Some(_), TyKind::TyParam(_, bound)) = (source, actual.kind()) {
-                actual = bound.projection_inner().unwrap_or(bound).non_null();
+            // A caller's variable stands for its bound here, and `V & Any` for the non-null bound
+            // of `V`: binding `E` from `V` through a nullable formal `E?` must still read `T` from
+            // `V : EntityID<String>?` in `E : EntityID<T>`.
+            while source.is_some() {
+                actual = match actual.kind() {
+                    TyKind::TyParam(_, bound) => {
+                        bound.projection_inner().unwrap_or(bound).non_null()
+                    }
+                    TyKind::DefinitelyNotNull(inner) => inner.non_null(),
+                    _ => break,
+                };
             }
             let projected = match actual.kind() {
                 TyKind::Obj(actual_name, _) if name == actual_name => Some(actual),
@@ -561,6 +568,12 @@ fn unify_ty_impl(source: Option<&dyn SymbolSource>, sig: Ty, actual: Ty, binds: 
         }
         TyKind::PlatformNullable(inner) => {
             let actual = nullable_generic_actual(actual);
+            let inner = source
+                .map(|source| choose_platform_lower_face(source, inner, actual))
+                .unwrap_or(inner);
+            unify_ty_impl(source, inner, actual, binds);
+        }
+        TyKind::MutabilityFlexible(inner) => {
             let inner = source
                 .map(|source| choose_platform_lower_face(source, inner, actual))
                 .unwrap_or(inner);
@@ -614,12 +627,16 @@ pub(crate) fn collect_generic_identity_bindings(
         (TyKind::InProjection(declared), TyKind::InProjection(actual))
         | (TyKind::OutProjection(declared), TyKind::OutProjection(actual))
         | (TyKind::Nullable(declared), TyKind::Nullable(actual))
-        | (TyKind::PlatformNullable(declared), TyKind::PlatformNullable(actual)) => {
+        | (TyKind::PlatformNullable(declared), TyKind::PlatformNullable(actual))
+        | (TyKind::MutabilityFlexible(declared), TyKind::MutabilityFlexible(actual)) => {
             collect_generic_identity_bindings(declared, actual, formals, bindings);
         }
-        (TyKind::Nullable(declared) | TyKind::PlatformNullable(declared), _)
-            if !null_only(actual) =>
-        {
+        (
+            TyKind::Nullable(declared)
+            | TyKind::PlatformNullable(declared)
+            | TyKind::MutabilityFlexible(declared),
+            _,
+        ) if !null_only(actual) => {
             collect_generic_identity_bindings(declared, actual.non_null(), formals, bindings);
         }
         (TyKind::Obj(declared_name, declared_args), TyKind::Obj(actual_name, actual_args))
@@ -672,7 +689,7 @@ pub(crate) fn merge_inferred_ty(current: Option<Ty>, actual: Ty) -> Ty {
     } else if matches!(current.kind(), TyKind::Nullable(inner) if inner == Ty::Nothing) {
         Ty::nullable(actual)
     } else if current.non_null() == actual.non_null() {
-        Ty::nullable(current.non_null())
+        Ty::nullable(current)
     } else {
         let any = Ty::obj("kotlin/Any");
         if current.is_nullable() || actual.is_nullable() {
@@ -783,7 +800,9 @@ fn formal_has_nested_flexible_expected_occurrence(
                 }
                 visit(inner, expected.non_null(), formal, nested)
             }
-            TyKind::Nullable(inner) | TyKind::DefinitelyNotNull(inner) => {
+            TyKind::Nullable(inner)
+            | TyKind::DefinitelyNotNull(inner)
+            | TyKind::MutabilityFlexible(inner) => {
                 visit(inner, expected.non_null(), formal, nested)
             }
             TyKind::InProjection(inner) | TyKind::OutProjection(inner) => visit(
@@ -892,7 +911,9 @@ fn formal_has_unprojected_expected_occurrence(declared: Ty, expected: Ty, formal
                 _ => false,
             }
         }
-        TyKind::Nullable(declared) | TyKind::PlatformNullable(declared) => {
+        TyKind::Nullable(declared)
+        | TyKind::PlatformNullable(declared)
+        | TyKind::MutabilityFlexible(declared) => {
             formal_has_unprojected_expected_occurrence(declared, expected.non_null(), formal)
         }
         TyKind::InProjection(declared) | TyKind::OutProjection(declared) => {
@@ -1134,6 +1155,103 @@ pub(crate) fn formal_variance_in_type(
     }
 }
 
+/// Whether every occurrence of `formal` in `shape` sits on an invariant path, so an argument at
+/// this parameter fixes the formal exactly. [`formal_variance_in_type`] also answers `Invariant`
+/// for mixed occurrences such as `(T) -> T`, which keep independent lower and upper bounds.
+///
+/// An occurrence that writes its own nullability (`T?` or `T & Any`) of a formal whose declared
+/// bound admits null fixes the formal only up to nullability: `Inv<T & Any>` against
+/// `Inv<String>` admits both `String` and `String?`, so it does not fix `T` exactly.
+pub(crate) fn formal_fixed_exactly_by(
+    source: &dyn SymbolSource,
+    shape: Ty,
+    formal: &str,
+    nullable_formal: bool,
+) -> bool {
+    use crate::types::TypeVariance;
+
+    fn occurrences(
+        source: &dyn SymbolSource,
+        shape: Ty,
+        formal: &str,
+        nullable_formal: bool,
+        invariant_path: bool,
+        found: &mut Vec<bool>,
+    ) {
+        let (occurrence, written_nullability) = match shape.kind() {
+            TyKind::Nullable(inner) | TyKind::DefinitelyNotNull(inner) => (inner, true),
+            _ => (shape.non_null(), false),
+        };
+        if let TyKind::TyParam(name, bound) = occurrence.kind() {
+            if name == formal {
+                // A compact `T & Any` carries a non-null occurrence bound.
+                let pinned_nullability =
+                    nullable_formal && (written_nullability || !bound.upper_bound_admits_null());
+                found.push(invariant_path && !pinned_nullability);
+                return;
+            }
+        }
+        match shape.non_null().kind() {
+            TyKind::InProjection(inner) | TyKind::OutProjection(inner) => occurrences(
+                source,
+                inner,
+                formal,
+                nullable_formal,
+                invariant_path,
+                found,
+            ),
+            TyKind::Obj(owner, arguments) => {
+                let classifier = source.classifier(owner);
+                for (index, argument) in arguments.iter().enumerate() {
+                    let invariant = !matches!(
+                        argument.kind(),
+                        TyKind::InProjection(_)
+                            | TyKind::OutProjection(_)
+                            | TyKind::StarProjection(_)
+                    ) && classifier
+                        .as_ref()
+                        .and_then(|classifier| classifier.type_param_variances.get(index).copied())
+                        .unwrap_or(TypeVariance::Invariant)
+                        == TypeVariance::Invariant;
+                    occurrences(
+                        source,
+                        *argument,
+                        formal,
+                        nullable_formal,
+                        invariant_path || invariant,
+                        found,
+                    );
+                }
+            }
+            TyKind::Fun(function) => {
+                for parameter in &function.params {
+                    occurrences(
+                        source,
+                        *parameter,
+                        formal,
+                        nullable_formal,
+                        invariant_path,
+                        found,
+                    );
+                }
+                occurrences(
+                    source,
+                    function.ret,
+                    formal,
+                    nullable_formal,
+                    invariant_path,
+                    found,
+                );
+            }
+            _ => {}
+        }
+    }
+
+    let mut found = Vec::new();
+    occurrences(source, shape, formal, nullable_formal, false, &mut found);
+    !found.is_empty() && found.iter().all(|invariant| *invariant)
+}
+
 pub(super) fn unify_inferred_ty_impl(
     source: Option<&dyn SymbolSource>,
     sig: Ty,
@@ -1243,6 +1361,12 @@ pub(super) fn unify_inferred_ty_impl(
                 .unwrap_or(inner);
             unify_inferred_ty_impl(source, inner, actual, binds);
         }
+        TyKind::MutabilityFlexible(inner) => {
+            let inner = source
+                .map(|source| choose_platform_lower_face(source, inner, actual))
+                .unwrap_or(inner);
+            unify_inferred_ty_impl(source, inner, actual, binds);
+        }
         _ => {}
     }
 }
@@ -1272,6 +1396,21 @@ pub(crate) fn merge_inferred_ty_from_symbols(
         return current;
     }
     if same_parameter_dnn(actual, current) {
+        return actual;
+    }
+    // `T & Any` is a subtype of `T` (and of `T?`), so the join of a parameter with its own
+    // definitely-non-null face is that parameter, in either representation of the face.
+    let own_dnn_face = |face: Ty, plain: Ty| {
+        let parameter = plain.non_null();
+        matches!(parameter.kind(), TyKind::TyParam(..))
+            && face != parameter
+            && (face == parameter.definitely_non_null()
+                || face == parameter.contributed_through_nullable_formal())
+    };
+    if own_dnn_face(actual, current) {
+        return current;
+    }
+    if own_dnn_face(current, actual) {
         return actual;
     }
     if current.non_null() == actual.non_null() {
@@ -1352,7 +1491,7 @@ pub(crate) fn merge_inferred_ty_from_symbols(
             common_supertype::common_super_type(source, current.non_null(), actual.non_null());
         if !supertype.is_erased_top() {
             return if current.is_nullable() || actual.is_nullable() {
-                Ty::nullable(supertype.non_null())
+                Ty::nullable(supertype)
             } else {
                 supertype
             };
@@ -1387,7 +1526,7 @@ pub(crate) fn merge_inferred_ty_from_symbols(
         return merged;
     };
     if current.is_nullable() || actual.is_nullable() {
-        Ty::nullable(common.non_null())
+        Ty::nullable(*common)
     } else {
         *common
     }
@@ -2098,6 +2237,9 @@ fn platform_argument_shape(source: &dyn SymbolSource, shape: Ty, actual: Ty) -> 
         TyKind::PlatformNullable(inner) => {
             Ty::platform_nullable(choose_platform_lower_face(source, inner, actual))
         }
+        TyKind::MutabilityFlexible(inner) => {
+            Ty::mutability_flexible(choose_platform_lower_face(source, inner, actual))
+        }
         _ => shape,
     }
 }
@@ -2208,7 +2350,9 @@ pub(crate) fn infer_generic_symbolic_return_constraints(
     fn symbolic_parameter(ty: Ty) -> bool {
         match ty.kind() {
             TyKind::TyParam(..) => true,
-            TyKind::Nullable(inner) | TyKind::PlatformNullable(inner) => symbolic_parameter(inner),
+            TyKind::Nullable(inner)
+            | TyKind::PlatformNullable(inner)
+            | TyKind::MutabilityFlexible(inner) => symbolic_parameter(inner),
             _ => false,
         }
     }
@@ -2280,6 +2424,7 @@ pub(crate) fn infer_generic_symbolic_return_constraints(
             }
             (TyKind::Nullable(declared), TyKind::Nullable(expected))
             | (TyKind::PlatformNullable(declared), TyKind::PlatformNullable(expected))
+            | (TyKind::MutabilityFlexible(declared), TyKind::MutabilityFlexible(expected))
             | (TyKind::InProjection(declared), TyKind::InProjection(expected))
             | (TyKind::OutProjection(declared), TyKind::OutProjection(expected)) => {
                 collect(declared, expected, formals, candidates, constrained_formals);
@@ -2354,6 +2499,9 @@ pub(super) fn seed_undeclared_return_bindings(
                 seed_undeclared_return_bindings(inner, actual, declared_formals, binds);
             }
         }
+        TyKind::MutabilityFlexible(inner) => {
+            seed_undeclared_return_bindings(inner, actual.non_null(), declared_formals, binds);
+        }
         TyKind::Obj(_, args) => {
             if let TyKind::Obj(_, actual_args) = actual.kind() {
                 for (s, a) in args.iter().zip(actual_args.iter()) {
@@ -2392,6 +2540,12 @@ pub(super) fn merge_specialized_return(provider: Ty, inferred: Ty) -> Ty {
         (_, TyKind::PlatformNullable(inferred)) => {
             Ty::platform_nullable(merge_specialized_return(provider.non_null(), inferred))
         }
+        (TyKind::MutabilityFlexible(provider), _) => {
+            Ty::mutability_flexible(merge_specialized_return(provider, inferred.non_null()))
+        }
+        (_, TyKind::MutabilityFlexible(inferred)) => {
+            Ty::mutability_flexible(merge_specialized_return(provider.non_null(), inferred))
+        }
         (TyKind::Nullable(provider), TyKind::Nullable(inferred)) => {
             Ty::nullable(merge_specialized_return(provider, inferred))
         }
@@ -2426,6 +2580,9 @@ pub(super) fn merge_specialized_return(provider: Ty, inferred: Ty) -> Ty {
                 .collect::<Vec<_>>();
             Ty::obj_args_name(provider_name, &args)
         }
+        // The declaration's formal specialized to a caller variable (`A := X` for `X : Number?`)
+        // names that variable; restoring the declaration formal would leak it out of the call.
+        (TyKind::TyParam(..), TyKind::TyParam(..)) => inferred,
         _ => provider,
     }
 }

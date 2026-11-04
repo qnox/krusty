@@ -7,10 +7,13 @@
 use super::encode::{Code, CompositeType, HeapType, Module, SubType, ValType};
 use super::objects::{immutable, ObjectRoot, REFERENCE};
 
+mod class_registry;
+
 pub(super) struct ExceptionTransport {
     pub(super) tag: u32,
     structure: u32,
     table: u32,
+    classes: class_registry::RuntimeClasses,
 }
 
 impl ExceptionTransport {
@@ -43,18 +46,38 @@ impl ExceptionTransport {
             tag,
             structure,
             table,
+            classes: class_registry::RuntimeClasses::new(structure, objects.any_table, string),
         }
     }
 
     /// The nullable message is already evaluated into a local. Both supported constructors have
     /// no cause; retain the null cause slot rather than inventing a different base layout later.
     pub(super) fn construct(&self, code: &mut Code, message: Option<u32>, string: u32) {
+        self.construct_class(code, self.structure, message, string);
+    }
+
+    pub(super) fn ensure_class(
+        &mut self,
+        module: &mut Module,
+        source: &dyn crate::backend::BackendClassifierSource,
+        identity: crate::types::TypeName,
+    ) -> Result<u32, String> {
+        self.classes.ensure(module, source, identity)
+    }
+
+    pub(super) fn construct_class(
+        &self,
+        code: &mut Code,
+        structure: u32,
+        message: Option<u32>,
+        string: u32,
+    ) {
         code.global_get(self.table);
         match message {
             Some(message) => code.local_get(message),
             None => code.ref_null(HeapType::Concrete(string)),
         };
-        code.ref_null(HeapType::Eq).struct_new(self.structure);
+        code.ref_null(HeapType::Eq).struct_new(structure);
     }
 
     pub(super) fn message(&self, code: &mut Code) {

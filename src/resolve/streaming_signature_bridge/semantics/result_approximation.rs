@@ -122,6 +122,9 @@ pub(super) fn denotable_signature_result(
             TyKind::PlatformNullable(inner) => {
                 Ty::platform_nullable(result(inner, denotable, visiting))
             }
+            TyKind::MutabilityFlexible(inner) => {
+                Ty::mutability_flexible(result(inner, denotable, visiting))
+            }
             TyKind::InProjection(inner) => Ty::in_projection(result(inner, denotable, visiting)),
             TyKind::OutProjection(inner) => Ty::out_projection(result(inner, denotable, visiting)),
             TyKind::StarProjection(inner) => {

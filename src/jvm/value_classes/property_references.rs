@@ -56,6 +56,29 @@ fn dependency_getter_bypasses_the_carrier(
         .is_some_and(|carrier| desc(&physical) != desc(&carrier))
 }
 
+/// kotlinc's reference to a value class's underlying property reads it from the box with
+/// `unbox-impl`, whatever the property's visibility, and reports the property's own getter
+/// (`getX()I`) to reflection. The getter is therefore what the reference names and the JVM
+/// emitter calls the unbox in its place, so a private property needs no `access$` bridge.
+fn read_storage_through_unbox(
+    reference: &mut crate::ir::PropRef,
+    realization: &mut PropertyReferenceRealization,
+    carrier: &Ty,
+) {
+    reference.getter_descriptor = Some(format!("(){}", desc(carrier)));
+    realization.physical_getter_ret = Some(*carrier);
+    if realization.accessor_role == PropertyAccessorRole::AccessBridge {
+        // The bridge was the only reason the read was static on the owner.
+        realization.accessor_role = PropertyAccessorRole::Member;
+        realization.member_access_bridge = None;
+        realization.reflection_getter = None;
+        reference
+            .getter_name
+            .clone_from(&realization.declared_getter_name);
+        reference.ext_facade = None;
+    }
+}
+
 pub(super) fn realize(
     ir: &mut IrFile,
     callable_under: &Under,
@@ -248,21 +271,20 @@ pub(super) fn realize(
         else {
             continue;
         };
-        // A value class's own UNDERLYING property is the exception: reading it IS the unbox, and
-        // its accessor stays an ordinary instance getter on the box (`Z.getX()I`, which is also
-        // the signature the reference reports) rather than a static realization over the carrier.
-        // Such a reference needs no rewrite at all. The selection recorded that the property is
-        // the class's storage; a value class's underlying property has no spelling to recognize it
-        // by, and the sole-field position that does identify it belongs to the declaration.
-        if realization.declares_value_class_storage {
-            continue;
-        }
         let Some(carrier) = callable_under
             .get(&receiver)
             .map(|underlying| erase(underlying, callable_under))
         else {
             continue;
         };
+        // A value class's own UNDERLYING property is the exception: it is the carrier, so reading
+        // it from the box IS the unbox. The selection recorded that the property is the class's
+        // storage; a value class's underlying property has no spelling to recognize it by, and the
+        // sole-field position that does identify it belongs to the declaration.
+        if realization.declares_value_class_storage {
+            read_storage_through_unbox(reference, realization, &carrier);
+            continue;
+        }
         // An EXTENSION accessor already names its receiver in its descriptor and is mangled by the
         // hash; a MEMBER accessor names none and takes the structural `-impl` suffix, with the
         // carrier prepended after mangling — the same two rules the declaration side applies.

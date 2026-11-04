@@ -788,6 +788,7 @@ fn selected_singletons_are_frozen_per_call_edge_not_on_the_provider_base_record(
             klib_body_type_parameters: Box::new([]),
             klib_body_declaration_modifiers: None,
             klib_body_class_contract: None,
+            klib_body_accessor: None,
             klib_body_vararg_index: None,
             klib_body_parameter_defaults: None,
         },
@@ -964,6 +965,7 @@ fn a_plugin_added_dependency_super_call_is_frozen_once() {
         klib_body_type_parameters: Box::new([]),
         klib_body_declaration_modifiers: None,
         klib_body_class_contract: None,
+        klib_body_accessor: None,
         klib_body_vararg_index: None,
         klib_body_parameter_defaults: None,
     };

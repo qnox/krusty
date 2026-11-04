@@ -32,15 +32,16 @@ pub(super) fn normalize_tail(
                 ))
             })
             .flatten()
-            .and_then(|(target, formals, expansion, _)| {
-                let [formal] = formals.as_slice() else {
+            .and_then(|alias| {
+                let [formal] = alias.formals.as_slice() else {
                     return None;
                 };
                 let element = crate::types::Ty::ty_param(
                     formal,
                     crate::types::Ty::nullable(crate::types::Ty::obj("kotlin/Any")),
                 );
-                (expansion == crate::types::Ty::obj_args_name(target, &[element])).then_some(target)
+                (alias.expansion == crate::types::Ty::obj_args_name(alias.target, &[element]))
+                    .then_some(alias.target)
             });
     attach_dependency_function_realization(
         package,

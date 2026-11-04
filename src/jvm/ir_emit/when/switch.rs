@@ -92,7 +92,7 @@ impl Emitter<'_> {
         }
         let (_, subject) = subject?;
         // The local's physical type selects the switch; a `String` local's checked type says
-        // whether it may be `null`.
+        // whether it may be `null`, and a platform `String!` may, as in kotlinc's IR.
         let kind = match self.value_ty(subject) {
             Ty::Int => SubjectKind::Int,
             Ty::Char => SubjectKind::Char,
@@ -112,7 +112,7 @@ impl Emitter<'_> {
                     .collect::<Option<Vec<_>>>()?,
             ),
             SubjectKind::String => Dispatch::String(StringDispatch::new(
-                self.ir.logical_types.get(&subject)?.is_nullable(),
+                self.ir.logical_types.get(&subject)?.admits_null(),
                 cases,
             )?),
         };

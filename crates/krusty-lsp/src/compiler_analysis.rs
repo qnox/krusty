@@ -369,6 +369,7 @@ fn type_parameters_mentioned(ty: Ty, names: &mut std::collections::HashSet<&'sta
         }
         TyKind::Nullable(inner)
         | TyKind::PlatformNullable(inner)
+        | TyKind::MutabilityFlexible(inner)
         | TyKind::DefinitelyNotNull(inner) => type_parameters_mentioned(inner, names),
         TyKind::InProjection(inner) | TyKind::OutProjection(inner) => {
             type_parameters_mentioned(inner, names)

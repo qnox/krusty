@@ -232,6 +232,8 @@ mod recording_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod compiler_options;
     use krusty::plugins::registry::PluginDiagnostic;
 
     #[test]
@@ -431,7 +433,6 @@ mod tests {
                 "$ROOT/core/util.runtime/src/org/jetbrains/kotlin/util/RuntimeJava.java",
                 "-classpath",
                 runtime_classpath.as_str(),
-                "-Xconsistent-data-class-copy-visibility",
                 "-language-version",
                 "2.4",
                 "-api-version",
@@ -443,6 +444,7 @@ mod tests {
                 "-jvm-default",
                 "no-compatibility",
                 "-java-parameters",
+                "-Xconsistent-data-class-copy-visibility",
                 "-Xplugin=$KOTLIN_PLUGIN_CLASSPATH",
                 reference_version.as_str(),
                 "-jdk-home",
@@ -465,8 +467,6 @@ mod tests {
                 "$ROOT/compiler/util/src/org/jetbrains/kotlin/util/Util.kt",
                 "-classpath",
                 util_classpath.as_str(),
-                "-Xconsistent-data-class-copy-visibility",
-                "-Xskip-prerelease-check",
                 "-language-version",
                 "2.4",
                 "-api-version",
@@ -480,6 +480,8 @@ mod tests {
                 "-jvm-default",
                 "no-compatibility",
                 "-java-parameters",
+                "-Xconsistent-data-class-copy-visibility",
+                "-Xskip-prerelease-check",
                 "-Xplugin=$KOTLIN_PLUGIN_CLASSPATH",
                 reference_version.as_str(),
                 "-jdk-home",
@@ -497,8 +499,6 @@ mod tests {
                 "-classpath",
                 friend_classpath.as_str(),
                 friend_argument.as_str(),
-                "-Xconsistent-data-class-copy-visibility",
-                "-Xskip-prerelease-check",
                 "-language-version",
                 "2.4",
                 "-api-version",
@@ -512,6 +512,8 @@ mod tests {
                 "-jvm-default",
                 "no-compatibility",
                 "-java-parameters",
+                "-Xconsistent-data-class-copy-visibility",
+                "-Xskip-prerelease-check",
                 "-Xplugin=$KOTLIN_PLUGIN_CLASSPATH",
                 reference_version.as_str(),
                 "-jdk-home",
@@ -831,452 +833,7 @@ mod tests {
         }
 
         if kgp == "2.4.10" {
-            // A request the plugin cannot derive krusty's arguments from is valid for kotlinc: the
-            // check reports it without asking krusty, and the compile is left to kotlinc. The
-            // probe stops after the check, since several of these requests name files that do not
-            // exist.
-            for (case, expected) in [
-                (
-                    "structured-option",
-                    "krusty does not support compilerOptions.extraWarnings",
-                ),
-                (
-                    "reserved-free-argument",
-                    "freeCompilerArg '-d=forbidden' conflicts with the plugin-owned destination; configure the structured Gradle input instead",
-                ),
-                (
-                    "plugin-free-argument",
-                    "freeCompilerArg '-Xplugin=forbidden.jar' conflicts with compiler plugin configuration; configure the structured Gradle input instead",
-                ),
-                (
-                    "compiler-version",
-                    "Kotlin compiler 2.4.0 differs from Kotlin Gradle plugin 2.4.10",
-                ),
-                (
-                    "jvm-default-conflict",
-                    "compilerOptions.jvmDefault and freeCompilerArg '-jvm-default=disable' are both set; configure exactly one",
-                ),
-                (
-                    "progressive-free-argument",
-                    "freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead",
-                ),
-                (
-                    "free-end-of-options",
-                    "freeCompilerArg '--' would make the arguments after it sources; add sources to the task's source set instead",
-                ),
-                (
-                    "free-argfile",
-                    "freeCompilerArg '@overrides.args' is an argument file, which could hide plugin-owned arguments; pass its arguments as freeCompilerArgs instead",
-                ),
-                (
-                    "free-source",
-                    "freeCompilerArg 'Extra.kt' would be compiled as a source; add sources to the task's source set instead",
-                ),
-                (
-                    "classpath-alias",
-                    "freeCompilerArg '-cp' conflicts with the task libraries classpath; configure the structured Gradle input instead",
-                ),
-                (
-                    "progressive-alias",
-                    "freeCompilerArg '-Xprogressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead",
-                ),
-                (
-                    "compiler-plugin-alias",
-                    "freeCompilerArg '-Xcompiler-plugin=forbidden.jar' conflicts with compiler plugin configuration; configure the structured Gradle input instead",
-                ),
-                (
-                    "plugin-option-free-argument",
-                    "freeCompilerArg '-P' conflicts with compiler plugin configuration; configure the structured Gradle input instead",
-                ),
-                (
-                    "reference-version-free-argument",
-                    "freeCompilerArg '-Xkotlin-reference-version=2.4.0' conflicts with the Kotlin Gradle plugin version; configure the structured Gradle input instead",
-                ),
-                (
-                    "dependency-policy-free-argument",
-                    "freeCompilerArg '-no-stdlib=false' conflicts with the plugin-owned dependency policy; configure the structured Gradle input instead",
-                ),
-                (
-                    "dev-compiler-version",
-                    "Kotlin compiler 2.4.10-dev-7885 differs from Kotlin Gradle plugin 2.4.10",
-                ),
-                (
-                    "empty-opt-in",
-                    "compilerOptions.optIn contains an empty marker",
-                ),
-                (
-                    "duplicate-opt-in",
-                    "compilerOptions.optIn contains duplicate marker 'krusty.fixture.ExperimentalFirstApi'",
-                ),
-                (
-                    "opt-in-overlap",
-                    "compilerOptions.optIn and freeCompilerArg '-opt-in=krusty.fixture.ExperimentalFirstApi' both request marker 'krusty.fixture.ExperimentalFirstApi'; configure exactly one",
-                ),
-            ] {
-                clear_invocation_log(&log);
-                clear_invocation_log(&fixture.probes);
-                let output = build()
-                    .property("krusty.negative", case)
-                    .tasks([":compiler:util:compileKotlinKrustyCheck"])
-                    .run_output()
-                    .unwrap_or_else(|error| panic!("{case}: {error}"));
-                assert_left_to_kotlinc(
-                    &output,
-                    ":compiler:util:compileKotlin",
-                    &[expected.to_string()],
-                );
-                assert!(
-                    !fixture.probes.exists(),
-                    "{case}: the plugin refuses without asking krusty"
-                );
-                assert!(!log.exists(), "{case} must not compile with krusty");
-            }
-
-            // End to end, such a compile is kotlinc's: the replacement is skipped and the Kotlin
-            // task writes the classes. A free `-progressive` is one kotlinc compiles as it is.
-            clear_invocation_log(&log);
-            clear_invocation_log(&fixture.probes);
-            let _ = std::fs::remove_dir_all(&kotlin_classes);
-            let output = build()
-                .property("krusty.negative", "progressive-free-argument")
-                .tasks([":compiler:util:compileKotlin"])
-                .run_output()
-                .unwrap_or_else(|error| panic!("progressive-free-argument: {error}"));
-            assert_left_to_kotlinc(
-                &output,
-                ":compiler:util:compileKotlin",
-                &["freeCompilerArg '-progressive' conflicts with compilerOptions.progressiveMode; configure the structured Gradle input instead"
-                    .to_string()],
-            );
-            assert!(
-                !fixture.probes.exists(),
-                "the plugin refuses a free -progressive without asking krusty"
-            );
-            assert!(
-                !log.exists(),
-                "kotlinc, not krusty, compiles a refused request"
-            );
-            assert!(
-                kotlin_classes
-                    .join("org/jetbrains/kotlin/util/UtilKt.class")
-                    .is_file(),
-                "kotlinc wrote the module's classes"
-            );
-
-            // A Kotlin JVM target that differs from the Java one fails the build, as it does with
-            // kotlinc under the default validation mode.
-            clear_invocation_log(&log);
-            let rendered = build()
-                .property("krusty.negative", "jvm-target")
-                .tasks([":compiler:util:compileKotlin"])
-                .run()
-                .expect_err("negative case jvm-target succeeded")
-                .to_string();
-            assert_eq!(
-                rendered
-                    .lines()
-                    .filter(
-                        |line| line.trim() == "> Kotlin JVM target 17 differs from Java target 11"
-                    )
-                    .count(),
-                1,
-                "jvm-target: {rendered}",
-            );
-            assert!(!log.exists(), "jvm-target must fail before execing krusty");
-
-            // A compiler plugin krusty does not implement leaves the compile to kotlinc, reported.
-            clear_invocation_log(&log);
-            clear_invocation_log(&fixture.probes);
-            let output = build()
-                .property("krusty.negative", "compiler-plugin")
-                .tasks([":compiler:util:compileKotlin"])
-                .run_output()
-                .unwrap_or_else(|error| panic!("compiler-plugin: {error}"));
-            assert_assignment_left_to_kotlinc(
-                &output,
-                &fixture.probes,
-                ":compiler:util:compileKotlin",
-            );
-            assert!(
-                !log.exists(),
-                "kotlinc, not krusty, compiles a refused plugin request"
-            );
-
-            // `compilerOptions.progressiveMode` is a structured input like `javaParameters`: the
-            // plugin forwards it as kotlinc's `-progressive`, which krusty honors because it models
-            // every progressive feature of the selected release.
-            clear_invocation_log(&log);
-            build()
-                .property("krusty.negative", "progressive-mode")
-                .tasks([":compiler:util:compileKotlin"])
-                .run()
-                .unwrap_or_else(|error| panic!("progressive-mode: {error}"));
-            let invocation = single_module_invocation(&log, "kotlin-compiler-util");
-            assert_eq!(
-                invocation
-                    .iter()
-                    .filter(|argument| argument.as_str() == "-progressive")
-                    .count(),
-                1,
-                "progressive-mode: {invocation:?}"
-            );
-
-            // Free arguments reach krusty verbatim: the plugin keeps no copy of kotlinc's argument
-            // table. An argument krusty does not implement leaves the compile to kotlinc, reported.
-            clear_invocation_log(&log);
-            let output = build()
-                .property("krusty.negative", "jspecify-free-argument")
-                .tasks([":compiler:util:compileKotlin"])
-                .run_output()
-                .unwrap_or_else(|error| panic!("jspecify-free-argument: {error}"));
-            assert_left_to_kotlinc(
-                &output,
-                ":compiler:util:compileKotlin",
-                &["krusty does not implement the kotlinc argument '-Xjspecify-annotations=strict'"
-                    .to_string()],
-            );
-            assert!(
-                !log.exists(),
-                "kotlinc, not krusty, compiles a refused argument"
-            );
-
-            // A malformed value is no refusal: the support check rejects it with the same parser
-            // and the same one error line as a direct CLI or Bazel-worker invocation, so neither
-            // compiler runs and the task's destination is left untouched.
-            for (case, argument, expected) in [
-                (
-                    "explicit-api-bad-mode",
-                    "-Xexplicit-api=sideways",
-                    "krusty: error: unknown value for parameter -Xexplicit-api: 'sideways'. \
-                     Value should be one of {disable, strict, warning}"
-                        .to_owned(),
-                ),
-                (
-                    "jdk-release-free-argument",
-                    "-Xjdk-release=21",
-                    "krusty: error: '-Xjdk-release=21' option conflicts with '-jvm-target 17'. \
-                     Please remove the '-jvm-target' option"
-                        .to_owned(),
-                ),
-                (
-                    "warning-level-bad-severity",
-                    "-Xwarning-level=REDUNDANT_CLI_ARG:loud",
-                    "krusty: error: invalid severity 'loud' in \
-                     -Xwarning-level=REDUNDANT_CLI_ARG:loud; supported severities: error, \
-                     warning, disabled"
-                        .to_owned(),
-                ),
-                (
-                    "warning-level-missing-colon",
-                    "-Xwarning-level=REDUNDANT_CLI_ARG",
-                    "krusty: error: invalid value 'REDUNDANT_CLI_ARG' for -Xwarning-level: \
-                     expected <NAME>:<error|warning|disabled>"
-                        .to_owned(),
-                ),
-            ] {
-                clear_invocation_log(&log);
-                clear_invocation_log(&fixture.probes);
-                let _ = std::fs::remove_dir_all(&kotlin_classes);
-                let rendered = match build()
-                    .property("krusty.negative", case)
-                    .tasks([":compiler:util:compileKotlin"])
-                    .run()
-                {
-                    Ok(()) => panic!("negative case {case} succeeded"),
-                    Err(error) => error.to_string(),
-                };
-                let check = single_invocation(&fixture.probes);
-                assert_eq!(
-                    check
-                        .iter()
-                        .filter(|actual| actual.as_str() == argument)
-                        .count(),
-                    1,
-                    "{case}: {check:?}",
-                );
-                assert_eq!(
-                    task_failure(&rendered, ":compiler:util:compileKotlinKrustyCheck"),
-                    [expected.as_str()],
-                    "{case}: {rendered}",
-                );
-                assert!(!log.exists(), "{case} must fail before compiling");
-                assert!(
-                    !kotlin_classes.exists(),
-                    "{case} wrote to {}",
-                    kotlin_classes.display()
-                );
-            }
-
-            // Gradle forwards standard version values without duplicating kotlinc's
-            // release-specific version table in the plugin. The shared compiler settings boundary
-            // rejects values unavailable in the selected 2.4.10 compiler after seeing the exact
-            // standard argument.
-            for (case, option, kind) in [
-                ("old-language-version", "-language-version", "language"),
-                ("old-api-version", "-api-version", "API"),
-            ] {
-                clear_invocation_log(&log);
-                clear_invocation_log(&fixture.probes);
-                let _ = std::fs::remove_dir_all(&kotlin_classes);
-                let rendered = build()
-                    .property("krusty.negative", case)
-                    .tasks([":compiler:util:compileKotlin"])
-                    .run()
-                    .expect_err("negative case succeeded")
-                    .to_string();
-                assert_eq!(
-                    task_failure(&rendered, ":compiler:util:compileKotlinKrustyCheck"),
-                    [
-                        format!("krusty: error: unknown {kind} version: 1.9"),
-                        format!(
-                            "Supported {kind} versions: 2.0 (deprecated), 2.1 (deprecated), 2.2, \
-                             2.3, 2.4, 2.5 (experimental)"
-                        ),
-                    ],
-                    "{case}: {rendered}",
-                );
-                assert!(!log.exists(), "{case} must fail before compiling");
-                assert!(
-                    !kotlin_classes.exists(),
-                    "{case} wrote to {}",
-                    kotlin_classes.display()
-                );
-                let invocation = single_invocation(&fixture.probes);
-                assert_eq!(
-                    invocation
-                        .windows(2)
-                        .filter(|pair| pair == &[option, "1.9"])
-                        .count(),
-                    1,
-                    "{case}: {invocation:?}",
-                );
-            }
-
-            // A well-formed named policy is forwarded to and applied by the compiler. Disabling a
-            // warning does not change classfile bytes, so this compile succeeds normally.
-            clear_invocation_log(&log);
-            build()
-                .property("krusty.negative", "warning-level")
-                .tasks([":compiler:util:compileKotlin"])
-                .run()
-                .unwrap_or_else(|error| panic!("warning-level forwarding: {error}"));
-            let forwarded = single_invocation(&log);
-            assert_eq!(
-                forwarded
-                    .iter()
-                    .filter(|argument| {
-                        argument.as_str() == "-Xwarning-level=REDUNDANT_CLI_ARG:disabled"
-                    })
-                    .count(),
-                1,
-                "{forwarded:?}"
-            );
-
-            // The standard Gradle languageVersion reaches the compiler unchanged. No krusty-only
-            // property and no metadata-only substitution is part of the contract.
-            clear_invocation_log(&log);
-            std::fs::write(
-                &runtime_source,
-                "package org.jetbrains.kotlin.util\nfun runtimeMarker() = \"runtime\"\nfun languageLevel22() = 1\n",
-            )
-            .expect("edit runtime for languageVersion 2.2");
-            build()
-                .property("krusty.negative", "language-version-2-2")
-                .tasks([":core:util.runtime:compileKotlin"])
-                .run()
-                .unwrap_or_else(|error| panic!("languageVersion 2.2: {error}"));
-            let language_2_2_run = single_invocation(&log);
-            assert_eq!(
-                language_2_2_run
-                    .windows(2)
-                    .filter(|pair| pair == &["-language-version", "2.2"])
-                    .count(),
-                1,
-                "{language_2_2_run:?}",
-            );
-            assert_eq!(
-                language_2_2_run
-                    .windows(2)
-                    .filter(|pair| pair == &["-api-version", "2.2"])
-                    .count(),
-                1,
-                "{language_2_2_run:?}",
-            );
-            assert!(
-                language_2_2_run
-                    .iter()
-                    .all(|argument| !argument.starts_with("-Xmetadata-version")),
-                "{language_2_2_run:?}",
-            );
-
-            // `-Werror` and `allWarningsAsErrors` both reach krusty as one warning policy. This
-            // module intentionally carries two unresolved opt-in markers, so each form must fail
-            // with the complete ordered compiler diagnostic stream. Setting both is idempotent,
-            // like kotlinc's command line, rather than a transport conflict.
-            let diagnostic_log = root.join("krusty-diagnostics.txt");
-            let expected_werror_diagnostics = "warning: opt-in requirement marker 'krusty.fixture.ExperimentalFirstApi' is unresolved. Make sure it's present in the module dependencies.\n\
-warning: opt-in requirement marker 'krusty.fixture.ExperimentalSecondApi' is unresolved. Make sure it's present in the module dependencies.\n\
-error: warnings found and -Werror specified\n";
-            for case in ["all-warnings-as-errors", "free-werror", "werror-overlap"] {
-                clear_invocation_log(&log);
-                let _ = std::fs::remove_file(&diagnostic_log);
-                let result = build()
-                    .property("krusty.negative", case)
-                    .tasks([":compiler:util:compileKotlin"])
-                    .run();
-                let status = match result {
-                    Err(GradleError::Failed { status, .. }) => status,
-                    other => {
-                        panic!("{case}: expected the warning-bearing module to fail, got {other:?}")
-                    }
-                };
-                assert_eq!(status, "exit status: 1", "{case}");
-                assert_eq!(
-                    std::fs::read_to_string(&diagnostic_log).expect("recorded krusty diagnostics"),
-                    expected_werror_diagnostics,
-                    "{case}",
-                );
-                let invocation = single_module_invocation(&log, "kotlin-compiler-util");
-                assert_eq!(
-                    invocation
-                        .iter()
-                        .filter(|argument| argument.as_str() == "-Werror")
-                        .count(),
-                    1,
-                    "{case}: {invocation:?}"
-                );
-            }
-
-            // A named level remains an override when the structured global policy is enabled.
-            // `-Xcontext-parameters` is redundant at language level 2.4, so success proves that
-            // the transported `:warning` exception was applied rather than promoted by `-Werror`.
-            clear_invocation_log(&log);
-            let _ = std::fs::remove_file(&diagnostic_log);
-            build()
-                .property("krusty.negative", "werror-warning-exception")
-                .tasks([":compiler:util:compileKotlin"])
-                .run()
-                .unwrap_or_else(|error| panic!("werror warning exception: {error}"));
-            assert_eq!(
-                std::fs::read_to_string(&diagnostic_log).expect("recorded krusty diagnostics"),
-                "warning: the argument '-Xcontext-parameters' is redundant for the current language version 2.4.\n",
-                "werror warning exception diagnostics",
-            );
-            let invocation = single_module_invocation(&log, "kotlin-compiler-util");
-            for expected in [
-                "-Werror",
-                "-Xcontext-parameters",
-                "-Xwarning-level=REDUNDANT_CLI_ARG:warning",
-            ] {
-                assert_eq!(
-                    invocation
-                        .iter()
-                        .filter(|argument| argument.as_str() == expected)
-                        .count(),
-                    1,
-                    "{expected}: {invocation:?}"
-                );
-            }
+            compiler_options::check(&fixture, &kotlin_classes, &runtime_source);
         }
 
         let _ = std::fs::remove_dir_all(&root);
@@ -1952,29 +1509,20 @@ fun main() {
             "{output}"
         );
 
-        // AGP passes `-Xuse-inline-scopes-numbers` to an application's debug compiles. krusty does
-        // not implement it yet, so the build reports it and kotlinc compiles that variant.
+        // AGP passes `-Xuse-inline-scopes-numbers` to an application's debug compiles, which
+        // krusty compiles with it.
         clear_invocation_log(log);
         clear_invocation_log(&fixture.probes);
-        let output = fixture
+        fixture
             .build()
             .tasks([":app:compileDebugKotlin"])
             .run_output()
             .unwrap_or_else(|error| panic!("{error}"));
-        assert_left_to_kotlinc(
-            &output,
-            ":app:compileDebugKotlin",
-            &[
-                "krusty does not implement the kotlinc argument '-Xuse-inline-scopes-numbers'"
-                    .to_string(),
-            ],
-        );
-        let text = optional_invocation_log(log);
+        let app = single_module_invocation(log, "app");
         assert!(
-            invocations(&text)
-                .iter()
-                .all(|run| !has_pair(run, "-module-name", "app")),
-            "{text}"
+            app.iter()
+                .any(|argument| argument == "-Xuse-inline-scopes-numbers"),
+            "{app:?}"
         );
         assert!(root
             .join("app/build/intermediates/built_in_kotlinc/debug/compileDebugKotlin/classes/sample/app/MainActivity.class")
@@ -2504,10 +2052,9 @@ fun main() {
             .collect()
     }
 
-    /// Assert that `task` was left to kotlinc because of the assignment compiler plugin: the build
-    /// reports exactly the refusal the krusty binary's support check printed for the assignment jar,
-    /// once. The Gradle cache prefix and artifact version vary by lane, so the exact jar path comes
-    /// from the recorded check rather than from Gradle's output.
+    /// Assert that `task` was left to kotlinc because of the assignment compiler plugin, which
+    /// krusty implements only partly: the support check saw the assignment jar exactly once, and
+    /// the build reports exactly the partial-substitution refusal it printed for that plugin.
     fn assert_assignment_left_to_kotlinc(output: &str, probes: &Path, task: &str) {
         let text = read_invocation_log(probes).expect("support check log");
         let mut assignments = invocations(&text)
@@ -2528,8 +2075,8 @@ fun main() {
             .collect::<Vec<_>>();
         assignments.dedup();
         assert_eq!(assignments.len(), 1, "{text}");
-        let refusal = PluginDiagnostic::Unsupported {
-            plugin: assignments.remove(0),
+        let refusal = PluginDiagnostic::PartialSubstitution {
+            plugin_id: "org.jetbrains.kotlin.assignment".to_string(),
         };
         assert_left_to_kotlinc(output, task, &[refusal.message()]);
     }
@@ -3138,6 +2685,7 @@ tasks.withType<KotlinJvmCompile>().configureEach {
                 "werror-warning-exception" -> emptyList<String>()
                 "duplicate-opt-in" -> listOf(
                     "krusty.fixture.ExperimentalFirstApi",
+                    "krusty.fixture.ExperimentalSecondApi",
                     "krusty.fixture.ExperimentalFirstApi",
                 )
                 else -> listOf(
@@ -3159,6 +2707,7 @@ tasks.withType<KotlinJvmCompile>().configureEach {
             "old-api-version" -> apiVersion.set(KotlinVersion.fromVersion("1.9"))
             "progressive-free-argument" -> freeCompilerArgs.add("-progressive")
             "progressive-mode" -> progressiveMode.set(true)
+            "module-name-free-argument" -> freeCompilerArgs.add("-module-name=overridden")
             "free-end-of-options" -> freeCompilerArgs.addAll("--", "-d", "elsewhere")
             "free-argfile" -> freeCompilerArgs.add("@overrides.args")
             "free-source" -> freeCompilerArgs.add("Extra.kt")

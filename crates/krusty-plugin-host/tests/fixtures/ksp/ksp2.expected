@@ -2,6 +2,7 @@
 # relative to their output directory, what the processor logs, and the dump it writes.
 # $SOURCES is the sources directory and $OUTPUT the output directory for Kotlin sources.
 kotlin gen/Generated.kt
+resource META-INF/services/dump.Service
 resource dump.txt
 w: [ksp] $SOURCES/Other.kt:5: seen here
 w: [ksp] finished after 2 rounds

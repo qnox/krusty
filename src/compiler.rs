@@ -420,6 +420,7 @@ fn emit_analyzed_into<B: Backend>(
             &symbols,
             backend_handoff::ModuleEmission {
                 module_name,
+                text: source.text(),
                 stems,
                 origins: source_map.origins(),
             },
@@ -653,12 +654,22 @@ fn active_body_check_groups(
     let mut groups = body_check_groups(rooted);
     // Declaration annotations and other checked header metadata are consumed during this same
     // bounded Pass-2 reparse. A classifier with no executable body (most notably an interface or
-    // annotation class) still needs one semantic group; tying metadata handoff to body presence
-    // silently dropped it. This group selects no body and retains no syntax/FIR after the callback.
+    // annotation class) still needs one semantic group, and so does a top-level property or
+    // function without one (a `lateinit var`, an `external fun`); tying metadata handoff to body
+    // presence silently dropped their annotations, `@set:JvmName` among them. This group selects
+    // no body and retains no syntax/FIR after the callback.
     for declaration in active.stable_declarations().filter(|declaration| {
         index
             .declaration_header(*declaration)
-            .is_some_and(|header| header.kind == crate::fir::DeclarationKind::Classifier)
+            .is_some_and(|header| match header.kind {
+                crate::fir::DeclarationKind::Classifier => true,
+                crate::fir::DeclarationKind::Property | crate::fir::DeclarationKind::Function => {
+                    index
+                        .declaration_anchor(*declaration)
+                        .is_some_and(|anchor| anchor.owner.is_none())
+                }
+                _ => false,
+            })
     }) {
         if groups.iter().any(|group| group.root == declaration) {
             continue;

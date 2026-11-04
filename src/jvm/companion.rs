@@ -145,7 +145,7 @@ fn synthetic_owner_static_field(
 ) -> bool {
     let class = &ir.classes[owner as usize];
     let companion_field = class.companion_class.is_some_and(|companion| {
-        name == companion.nested_segment_ref()
+        name == super::companion_storage::field_name(class.fq_name, companion)
             && (!public_source_field || descriptor == format!("L{};", companion.render()))
     });
     if companion_field {
@@ -459,12 +459,11 @@ pub(super) fn lower_companion_properties(
         // A delegate field is not the property. Reads of `secret` stay on `getSecret`, which
         // then loads `secret$delegate`. Recording the delegate as the property static would
         // bypass that accessor.
-        if !candidate.delegate_storage {
-            ir.mark_jvm_companion_property_static(
-                ir.classes[candidate.companion as usize].fq_name,
-                candidate.property as u32,
-                index,
-            );
+        let companion = ir.classes[candidate.companion as usize].fq_name;
+        if candidate.delegate_storage {
+            ir.mark_jvm_companion_delegate_static(companion, candidate.property as u32, index);
+        } else {
+            ir.mark_jvm_companion_property_static(companion, candidate.property as u32, index);
         }
         static_for_field.insert((candidate.companion, candidate.field), index);
     }
@@ -725,7 +724,7 @@ pub(super) fn lower_companion_properties(
                 let singleton = ir.add_expr(IrExpr::ExternalStaticInstance {
                     owner: outer,
                     ty: companion,
-                    field: companion.nested_segment_ref().to_string(),
+                    field: super::companion_storage::field_name(outer, companion).to_string(),
                 });
                 let binding = ir.add_expr(IrExpr::Variable {
                     index: 0,
@@ -980,7 +979,7 @@ fn reload_companion_instance(
     body: ExprId,
 ) {
     let companion_name = ir.classes[companion as usize].fq_name;
-    let field = companion_name.nested_segment_ref().to_string();
+    let field = super::companion_storage::field_name(outer, companion_name).to_string();
     // A lambda's `inline_body` numbers its own values: its value 0 is not the companion.
     for expression in crate::ir::value_namespace_expressions(ir, body) {
         if matches!(ir.expr(expression), IrExpr::GetValue(0)) {

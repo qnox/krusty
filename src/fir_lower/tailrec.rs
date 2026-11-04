@@ -7,6 +7,7 @@
 use crate::fir::{OriginId, SyntheticOriginKind};
 use crate::ir::{Callee, ExprId, FunId, IrConst, IrExpr, IrFile, IrNodeOrigin};
 use crate::types::Ty;
+use std::rc::Rc;
 
 use super::FirLoweringFailure;
 
@@ -29,10 +30,7 @@ pub(super) fn finish_tailrec_body(
 ) -> Result<ExprId, FirLoweringFailure> {
     let result = ir.functions[frame.function as usize].ret;
     let unit = result == Ty::Unit;
-    collect_this_slots(ir, &roots, &mut frame);
-    frame.next_slot.set(first_free_slot(ir, &roots, &frame));
-    frame.fixed_temporaries = fixed_temporaries(ir, &roots);
-    frame.spill_inits = fixed_temporary_inits(ir, &roots, &frame.fixed_temporaries);
+    frame.survey(ir, &roots);
     let frame = &frame;
     if implicit_return {
         if unit {
@@ -48,7 +46,13 @@ pub(super) fn finish_tailrec_body(
             roots.push(returned);
         }
     }
-    let tail_calls = tail_calls(ir, &roots, frame, unit);
+    let tail_calls = loop {
+        let walk = tail_calls(ir, &roots, frame, unit);
+        match walk.uncaptured.first() {
+            Some(lambda) => capture_parameters(ir, lambda),
+            None => break walk.found,
+        }
+    };
     if tail_calls.is_empty() {
         return super::finish_callable_body(
             ir,
@@ -60,7 +64,14 @@ pub(super) fn finish_tailrec_body(
             origin,
         );
     }
-    for TailCall { edge, call, line } in tail_calls {
+    for TailCall {
+        edge,
+        call,
+        line,
+        frame: lambda_frame,
+    } in tail_calls
+    {
+        let frame = lambda_frame.as_deref().unwrap_or(frame);
         let step = loop_step(ir, call, line, frame, origin);
         let step = generated(ir, step, origin);
         edge.replace(ir, &mut roots, step);
@@ -117,6 +128,9 @@ struct TailCall {
     edge: Edge,
     call: ExprId,
     line: Option<u32>,
+    /// The frame of the inline lambda body the call is written in; `None` in the function's own
+    /// body.
+    frame: Option<Rc<Frame>>,
 }
 
 /// Where a tail position sits: the one child slot a loop step replaces.
@@ -170,19 +184,30 @@ impl Edge {
 /// A position is a tail when nothing of this function runs after it: the value of a `return` of
 /// this function, the last statement of a tail block, a branch result of a tail `when`, the operand
 /// of a tail coercion, and in a `Unit` function any statement a `return` follows. A `try` is never
-/// entered — its `finally` runs after the value — and neither is a lambda's body, whose returns are
-/// the lambda's. A `return` or coercion that holds the call directly is replaced along with it: the
-/// step leaves the loop turn and produces no value for either.
+/// entered — its `finally` runs after the value. An inline lambda's body is entered in its own
+/// frame: only a `return` of this function written in it (a non-local return) is a tail position
+/// there, and its step leaves the lambda for the loop as a non-local `continue` (kotlinc's
+/// `TailRecursionCallsCollector` visits an inline lambda's returns of the function the same way).
+/// A `return` or coercion that holds the call directly is replaced along with it: the step leaves
+/// the loop turn and produces no value for either.
 ///
 /// Only a node reached by exactly ONE path is rewritten. A call below a shared ancestor is seen by
 /// another path too, which may cross a boundary this walk does not enter, so it stays a call.
-fn tail_calls(ir: &IrFile, roots: &[ExprId], frame: &Frame, unit: bool) -> Vec<TailCall> {
+fn tail_calls(ir: &IrFile, roots: &[ExprId], frame: &Frame, unit: bool) -> TailCalls {
     struct Walk<'a> {
         ir: &'a IrFile,
         frame: &'a Frame,
+        /// `frame` when it is an inline lambda body's, for the tail calls found in it.
+        lambda_frame: Option<Rc<Frame>>,
+        /// Whether the walk is inside an inline lambda's body.
+        in_inline_body: bool,
         unit: bool,
-        paths: crate::fx_hash::HashMap<ExprId, u8>,
+        paths: &'a crate::fx_hash::HashMap<ExprId, u8>,
         found: Vec<TailCall>,
+        /// The outermost inline lambda around this walk whose frame lacks a parameter of the
+        /// frame it is written in.
+        uncaptured_lambda: Option<Rc<UncapturedParameters>>,
+        uncaptured: Vec<Rc<UncapturedParameters>>,
         seen: crate::fx_hash::HashSet<ExprId>,
         /// The source line of the innermost node visited that has one.
         line: Option<u32>,
@@ -211,9 +236,19 @@ fn tail_calls(ir: &IrFile, roots: &[ExprId], frame: &Frame, unit: bool) -> Vec<T
         fn visit_node(&mut self, expression: ExprId, tail: bool, edge: Option<Edge>) {
             match self.ir.expr(expression) {
                 IrExpr::Try { .. } => {}
-                IrExpr::Lambda { captures, .. } => {
-                    for capture in captures.clone() {
+                IrExpr::Lambda {
+                    captures,
+                    impl_fn,
+                    inline_body,
+                    ..
+                } => {
+                    let (captures, impl_fn, inline_body) =
+                        (captures.clone(), *impl_fn, *inline_body);
+                    for &capture in &captures {
                         self.visit(capture, false, None);
+                    }
+                    if let Some(body) = inline_body {
+                        self.visit_inline_body(expression, body, &captures, impl_fn);
                     }
                 }
                 IrExpr::Call { .. } | IrExpr::MethodCall { .. } => {
@@ -221,17 +256,21 @@ fn tail_calls(ir: &IrFile, roots: &[ExprId], frame: &Frame, unit: bool) -> Vec<T
                     if let Some(edge) = edge.filter(|_| {
                         tail && self.is_self_call(expression) && !self.step_suspends(expression)
                     }) {
-                        self.found.push(TailCall {
-                            edge,
-                            call: expression,
-                            line: self.line,
-                        });
+                        match &self.uncaptured_lambda {
+                            Some(lambda) => self.uncaptured.push(lambda.clone()),
+                            None => self.found.push(TailCall {
+                                edge,
+                                call: expression,
+                                line: self.line,
+                                frame: self.lambda_frame.clone(),
+                            }),
+                        }
                     }
                 }
                 IrExpr::Return(Some(value)) => {
                     let value = *value;
                     let holder = edge.or(Some(Edge::Return(expression)));
-                    self.visit_held(value, returns_from_here(self.ir, expression), holder);
+                    self.visit_held(value, self.returns_from_function(expression), holder);
                 }
                 IrExpr::TypeOp {
                     op: crate::ir::IrTypeOp::ImplicitCoercion,
@@ -294,8 +333,60 @@ fn tail_calls(ir: &IrFile, roots: &[ExprId], frame: &Frame, unit: bool) -> Vec<T
             self.visit(held, tail, holder);
         }
 
+        /// The body of an inline lambda written in this frame, walked in the lambda's own frame.
+        /// Nothing in it runs as this frame's tail but the returns of the function it holds.
+        fn visit_inline_body(
+            &mut self,
+            lambda: ExprId,
+            body: ExprId,
+            captures: &[ExprId],
+            impl_fn: FunId,
+        ) {
+            let frame = Rc::new(Frame::of_inline_body(
+                self.ir, self.frame, captures, impl_fn, body,
+            ));
+            let uncaptured_lambda = self.uncaptured_lambda.clone().or_else(|| {
+                let parameters = frame.uncaptured_parameters(self.frame);
+                (!parameters.is_empty())
+                    .then(|| Rc::new(UncapturedParameters { lambda, parameters }))
+            });
+            let mut walk = Walk {
+                ir: self.ir,
+                frame: &frame,
+                lambda_frame: Some(frame.clone()),
+                in_inline_body: true,
+                unit: self.unit,
+                paths: self.paths,
+                found: Vec::new(),
+                uncaptured_lambda,
+                uncaptured: Vec::new(),
+                seen: crate::fx_hash::HashSet::default(),
+                line: self.line,
+            };
+            walk.visit(body, false, None);
+            self.found.append(&mut walk.found);
+            self.uncaptured.append(&mut walk.uncaptured);
+        }
+
+        /// Whether `returned` leaves the function, not an inline lambda the walk is inside.
+        fn returns_from_function(&self, returned: ExprId) -> bool {
+            if self.in_inline_body {
+                // The lambda's template was prepared for the boundary it crosses into this body
+                // (`inline_returns::prepare_inline_template`): its own returns became exits of its
+                // frame, and a return of the function moved to depth zero. A `return` lowering
+                // generated there carries no depth and is the lambda's own.
+                self.ir.checked_return_depths.get(&returned) == Some(&0)
+            } else {
+                returns_from_here(self.ir, returned)
+            }
+        }
+
+        /// A self-call in a frame that lacks a parameter is one only once the lambda captures it:
+        /// the walk reports the lambda instead of the call.
         fn is_self_call(&self, call: ExprId) -> bool {
-            self.paths.get(&call) == Some(&1) && is_self_call(self.ir, call, self.frame)
+            self.paths.get(&call) == Some(&1)
+                && (self.uncaptured_lambda.is_some() || self.frame.holds_every_position())
+                && is_self_call(self.ir, call, self.frame)
         }
 
         /// See [`stepped_evaluation_suspends`].
@@ -315,7 +406,7 @@ fn tail_calls(ir: &IrFile, roots: &[ExprId], frame: &Frame, unit: bool) -> Vec<T
 
         /// A `return` of this function, bare or of `Unit`.
         fn returns_unit(&self, statement: ExprId) -> bool {
-            returns_from_here(self.ir, statement)
+            self.returns_from_function(statement)
                 && match self.ir.expr(statement) {
                     IrExpr::Return(None) => true,
                     IrExpr::Return(Some(value)) => {
@@ -326,12 +417,17 @@ fn tail_calls(ir: &IrFile, roots: &[ExprId], frame: &Frame, unit: bool) -> Vec<T
         }
     }
 
+    let paths = root_path_counts(ir, roots);
     let mut walk = Walk {
         ir,
         frame,
+        lambda_frame: None,
+        in_inline_body: false,
         unit,
-        paths: root_path_counts(ir, roots),
+        paths: &paths,
         found: Vec::new(),
+        uncaptured_lambda: None,
+        uncaptured: Vec::new(),
         seen: crate::fx_hash::HashSet::default(),
         line: None,
     };
@@ -342,7 +438,116 @@ fn tail_calls(ir: &IrFile, roots: &[ExprId], frame: &Frame, unit: bool) -> Vec<T
         };
         walk.visit(root, tail, Some(Edge::Root(index)));
     }
-    walk.found
+    TailCalls {
+        found: walk.found,
+        uncaptured: walk.uncaptured,
+    }
+}
+
+/// What [`tail_calls`] found: the self-calls in tail position a loop step replaces, and the inline
+/// lambdas that must first capture a parameter a self-call written in them writes.
+struct TailCalls {
+    found: Vec<TailCall>,
+    uncaptured: Vec<Rc<UncapturedParameters>>,
+}
+
+/// An inline lambda whose body holds a self-call in tail position but does not capture every
+/// parameter of the frame it is written in. kotlinc's `TailrecLowering` runs before its lambdas
+/// capture anything, so the step's write of such a parameter makes the lambda capture it; here the
+/// lambda is already lowered, and [`capture_parameters`] gives it those captures.
+struct UncapturedParameters {
+    lambda: ExprId,
+    /// The parameters it lacks, as the enclosing frame holds them.
+    parameters: Vec<FrameParameter>,
+}
+
+/// A parameter as a frame holds it: its value slot there, and the function whose parameter list
+/// that slot indexes (the function's own, or an inline lambda's, whose captures lead its list).
+#[derive(Clone, Copy, Debug)]
+struct FrameParameter {
+    slot: u32,
+    numbering: FunId,
+    index: usize,
+}
+
+/// Give `uncaptured.lambda` a capture of each parameter it lacks, after its own captures. The
+/// lambda's frame numbers its captures first, so its parameters and locals each move up one slot
+/// per capture added, in both its method body and its inline template; the inliner binds the new
+/// capture to the enclosing frame's own slot, so the step's write reaches it.
+fn capture_parameters(ir: &mut IrFile, uncaptured: &UncapturedParameters) {
+    for parameter in &uncaptured.parameters {
+        let IrExpr::Lambda {
+            impl_fn,
+            captures,
+            inline_body,
+            ..
+        } = ir.expr(uncaptured.lambda).clone()
+        else {
+            unreachable!("an uncaptured parameter belongs to a lambda")
+        };
+        let position = u32::try_from(captures.len()).expect("capture count fits packed value ids");
+        let index = captures.len();
+        let ty = ir.functions[parameter.numbering as usize].params[parameter.index];
+        let source_name = ir
+            .fn_params
+            .get(&parameter.numbering)
+            .and_then(|info| info.identities.get(parameter.index))
+            .and_then(|identity| identity.source_name.clone());
+        let read = ir.add_expr(IrExpr::GetValue(parameter.slot));
+        let bodies = [inline_body, ir.functions[impl_fn as usize].body];
+        for body in bodies.into_iter().flatten() {
+            crate::ir::shift_value_indices(ir, body, position, 1);
+        }
+        ir.resize_lambda_capture_prefix(impl_fn, index, 0, 1);
+        let function = &mut ir.functions[impl_fn as usize];
+        function.params.insert(index, ty);
+        if function.param_checks.len() >= index && !function.param_checks.is_empty() {
+            function.param_checks.insert(index, None);
+        }
+        if let Some(info) = ir.fn_params.get_mut(&impl_fn) {
+            info.identities.insert(
+                index,
+                crate::ir::IrParameterIdentity::captured_value(
+                    source_name,
+                    position,
+                    crate::ir::IrValueCapture {
+                        declaration: crate::ir::IrCapturedDeclaration::Parameter,
+                        capturer: crate::ir::IrCapturingCallable::Lambda,
+                    },
+                ),
+            );
+            if !info.inline_modifiers.is_empty() {
+                info.inline_modifiers
+                    .insert(index, crate::types::InlineParameterModifier::None);
+            }
+            if !info.expansion_modes.is_empty() {
+                info.expansion_modes
+                    .insert(index, crate::types::InlineExpansionMode::Materialize);
+            }
+        }
+        let shared = ir
+            .shared_capture_parameters
+            .keys()
+            .filter(|(function, slot)| *function == impl_fn && *slot >= position)
+            .copied()
+            .collect::<Vec<_>>();
+        let moved = shared
+            .into_iter()
+            .filter_map(|key| {
+                ir.shared_capture_parameters
+                    .remove(&key)
+                    .map(|ty| (key, ty))
+            })
+            .collect::<Vec<_>>();
+        for ((function, slot), ty) in moved {
+            ir.shared_capture_parameters
+                .insert((function, slot + 1), ty);
+        }
+        let IrExpr::Lambda { captures, .. } = &mut ir.exprs[uncaptured.lambda as usize] else {
+            unreachable!("an uncaptured parameter belongs to a lambda")
+        };
+        captures.push(read);
+    }
 }
 
 /// Find every value slot that holds THIS frame's instance.
@@ -362,7 +567,7 @@ fn tail_calls(ir: &IrFile, roots: &[ExprId], frame: &Frame, unit: bool) -> Vec<T
 /// Being conservative here costs nothing but a missed rewrite: a self-call this does not recognize
 /// stays an ordinary call, which is what the program did before.
 fn collect_this_slots(ir: &IrFile, roots: &[ExprId], frame: &mut Frame) {
-    if frame.receiver.is_none() {
+    if !frame.member {
         return;
     }
     let mut bindings: Vec<(u32, ExprId)> = Vec::new();
@@ -469,8 +674,7 @@ fn fixed_temporary_inits(
 
 /// The first value slot nothing in the body uses, where a loop step's temporaries start.
 fn first_free_slot(ir: &IrFile, roots: &[ExprId], frame: &Frame) -> u32 {
-    let parameters_end = frame.parameter_slot(frame.capture_prefix + frame.count);
-    let mut free = parameters_end;
+    let mut free = frame.floor;
     let mut pending: Vec<ExprId> = roots.to_vec();
     let mut seen = crate::fx_hash::HashSet::default();
     while let Some(expression) = pending.pop() {
@@ -569,16 +773,30 @@ fn returns_from_here(ir: &IrFile, expression: ExprId) -> bool {
 /// zero there would write the receiver and shift every argument by one.
 pub(super) struct Frame {
     function: FunId,
-    /// Value slot of the first parameter.
-    first_parameter: u32,
+    /// The function whose parameter list this frame's slots index: [`Self::function`], or the
+    /// inline lambda's method, whose captures lead its list.
+    numbering: FunId,
+    /// The value slot holding each argument position of a self-call: the capture prefix, then the
+    /// logical parameters. In an inline lambda's frame a position is `None` where the lambda does
+    /// not capture the slot of the enclosing frame that holds it.
+    slots: Vec<Option<u32>>,
     count: usize,
-    /// A member's `this` slot. `None` for a static function, including an extension: an extension
-    /// receiver is an ordinary parameter inside `first_parameter..count`, which is what lets a
-    /// self-call re-bind it by stepping.
-    receiver: Option<u32>,
-    /// Slots that hold this frame's own instance — `receiver` plus the generated temporaries a call
-    /// spills it into. Empty for a static frame. Filled by [`finish_tailrec_body`].
+    /// Whether the function is a member, whose frame is its instance too. `false` for a static
+    /// function, including an extension: an extension receiver is an ordinary parameter, which is
+    /// what lets a self-call re-bind it by stepping.
+    member: bool,
+    /// Slots that hold this frame's own instance — the dispatch receiver (or, in an inline lambda's
+    /// frame, the capture of it) plus the generated temporaries a call spills it into. Empty for a
+    /// static frame. Filled by [`Frame::survey`].
     this_slots: crate::fx_hash::HashSet<u32>,
+    /// The first value slot above the frame's parameters: an inline lambda's captures and
+    /// parameters, or the function's own parameters.
+    floor: u32,
+    /// Whether this is the frame of an inline lambda's body, whose slots number from the lambda's
+    /// own frame. A step there writes the captures of the function's parameters, which the
+    /// inliner binds to the caller's own slots, and evaluates no default: a default reads the
+    /// function's frame.
+    inline_lambda: bool,
     /// Arguments a self-call passes AHEAD of the logical parameters: a LOCAL function's captures,
     /// which lifting added to its declaration and therefore to every call to it. The loop must
     /// leave those slots exactly as they are — a self-call re-reads the frame's own capture
@@ -605,12 +823,19 @@ impl Frame {
     /// member's parameters are not always `this + 1` — captures, a local class's constructor
     /// captures and its context values all take slots first, and only the lowering knows how many.
     pub(super) fn of_body(function: FunId, slots: super::BodySlots, count: usize) -> Self {
+        let count_slots =
+            u32::try_from(count).expect("tailrec parameter count exceeds packed value ids");
         Self {
             function,
-            first_parameter: slots.first_parameter,
+            numbering: function,
+            slots: (slots.first_parameter..slots.first_parameter + count_slots)
+                .map(Some)
+                .collect(),
             count,
-            receiver: slots.dispatch_receiver,
+            member: slots.dispatch_receiver.is_some(),
             this_slots: slots.dispatch_receiver.into_iter().collect(),
+            floor: slots.first_parameter + count_slots,
+            inline_lambda: false,
             capture_prefix: 0,
             next_slot: std::cell::Cell::new(0),
             fixed_temporaries: crate::fx_hash::HashSet::default(),
@@ -622,23 +847,106 @@ impl Frame {
     /// values lifting captured. `count` is the LOGICAL parameters that follow: the context
     /// parameters, an extension receiver where there is one, then the declared value parameters.
     pub(super) fn of_local_body(function: FunId, slots: super::BodySlots, count: usize) -> Self {
-        Self {
-            capture_prefix: slots.first_parameter as usize,
-            ..Self::of_body(function, slots, count)
-        }
+        let mut frame = Self::of_body(function, slots, count);
+        // The captures take the slots below the first parameter, each at its own position.
+        frame
+            .slots
+            .splice(0..0, (0..slots.first_parameter).map(Some));
+        frame.capture_prefix = slots.first_parameter as usize;
+        frame
+    }
+
+    /// The frame of the body of an inline lambda written in `outer`, which captures `captures`
+    /// and is implemented by `impl_fn`. The body numbers its slots from the lambda's frame,
+    /// captures first: a slot of `outer` is reached through the capture that reads it.
+    fn of_inline_body(
+        ir: &IrFile,
+        outer: &Frame,
+        captures: &[ExprId],
+        impl_fn: FunId,
+        body: ExprId,
+    ) -> Self {
+        let captured = |outer_slot: u32| {
+            captures
+                .iter()
+                .position(|&capture| {
+                    matches!(ir.expr(capture), IrExpr::GetValue(slot) if *slot == outer_slot)
+                })
+                .and_then(|capture| u32::try_from(capture).ok())
+        };
+        let mut frame = Self {
+            function: outer.function,
+            numbering: impl_fn,
+            slots: outer
+                .slots
+                .iter()
+                .map(|slot| slot.and_then(captured))
+                .collect(),
+            count: outer.count,
+            member: outer.member,
+            this_slots: outer
+                .this_slots
+                .iter()
+                .filter_map(|&slot| captured(slot))
+                .collect(),
+            floor: u32::try_from(ir.functions[impl_fn as usize].params.len())
+                .expect("lambda parameter count exceeds packed value ids"),
+            inline_lambda: true,
+            capture_prefix: outer.capture_prefix,
+            next_slot: std::cell::Cell::new(0),
+            fixed_temporaries: crate::fx_hash::HashSet::default(),
+            spill_inits: crate::fx_hash::HashMap::default(),
+        };
+        frame.survey(ir, &[body]);
+        frame
+    }
+
+    /// Record what the body `roots` holds in this frame: the slots aliasing its instance, where a
+    /// step's temporaries start, and the temporaries the body never reassigns.
+    fn survey(&mut self, ir: &IrFile, roots: &[ExprId]) {
+        collect_this_slots(ir, roots, self);
+        self.next_slot.set(first_free_slot(ir, roots, self));
+        self.fixed_temporaries = fixed_temporaries(ir, roots);
+        self.spill_inits = fixed_temporary_inits(ir, roots, &self.fixed_temporaries);
     }
 
     /// The value slot of the parameter at `position` in a self-call's argument list, which counts
-    /// the capture prefix: captures take the slots below `first_parameter`.
+    /// the capture prefix. Only a frame that [`Self::holds_every_position`] steps a call.
     fn parameter_slot(&self, position: usize) -> u32 {
-        let logical = u32::try_from(position - self.capture_prefix)
-            .expect("tailrec parameter count exceeds packed value ids");
-        self.first_parameter + logical
+        self.slots[position].expect("a stepped frame holds every parameter")
     }
 
     fn is_parameter_slot(&self, slot: u32) -> bool {
-        (self.first_parameter..self.parameter_slot(self.capture_prefix + self.count))
-            .contains(&slot)
+        self.slots[self.capture_prefix..].contains(&Some(slot))
+    }
+
+    /// Whether every argument position has a slot in this frame, which a step writes or re-reads.
+    fn holds_every_position(&self) -> bool {
+        self.slots.iter().all(Option::is_some)
+    }
+
+    /// The parameters `outer` holds that this inline lambda's frame does not capture.
+    fn uncaptured_parameters(&self, outer: &Frame) -> Vec<FrameParameter> {
+        self.slots
+            .iter()
+            .zip(&outer.slots)
+            .enumerate()
+            .filter_map(|(position, (own, outer_slot))| {
+                let slot = (*outer_slot).filter(|_| own.is_none())?;
+                // A function's frame lists its parameters in argument order; an inline lambda's
+                // lists each capture at its own slot.
+                let index = if outer.inline_lambda {
+                    slot as usize
+                } else {
+                    position
+                };
+                Some(FrameParameter {
+                    slot,
+                    numbering: outer.numbering,
+                    index,
+                })
+            })
+            .collect()
     }
 
     fn temporary(&self) -> u32 {
@@ -672,7 +980,7 @@ fn is_self_call(ir: &IrFile, call: ExprId, frame: &Frame) -> bool {
             ..
         } = &**call_callee =>
         {
-            frame.receiver.is_none()
+            !frame.member
                 && *target == frame.function
                 && args.len() + defaults.len() == frame.capture_prefix + frame.count
                 && passes_its_own_captures(ir, args, frame)
@@ -695,7 +1003,7 @@ fn is_self_call(ir: &IrFile, call: ExprId, frame: &Frame) -> bool {
             function: target, ..
         } = &**call_callee =>
         {
-            frame.receiver.is_none()
+            !frame.member
                 && *target == frame.function
                 && args.len() == frame.capture_prefix + frame.count
                 && passes_its_own_captures(ir, args, frame)
@@ -706,7 +1014,7 @@ fn is_self_call(ir: &IrFile, call: ExprId, frame: &Frame) -> bool {
             receiver,
             args,
         } => {
-            if frame.receiver.is_none() {
+            if !frame.member {
                 return false;
             }
             let Some(owner) = ir.classes.get(*class as usize) else {
@@ -834,7 +1142,14 @@ fn evaluation_suspends(
 /// parameters before it (kotlinc's `TailrecLowering.genTailCall`). A default that reads its own or a
 /// later parameter would read kotlinc's null-initialized placeholder, a shape the step does not
 /// build, so such a call stays a call.
-fn fillable_defaults(ir: &IrFile, frame: &Frame, positions: impl Iterator<Item = usize>) -> bool {
+fn fillable_defaults(
+    ir: &IrFile,
+    frame: &Frame,
+    mut positions: impl Iterator<Item = usize>,
+) -> bool {
+    if frame.inline_lambda {
+        return positions.next().is_none();
+    }
     let defaults = ir.param_defaults(frame.function);
     positions.into_iter().all(|position| {
         let Some(default) = defaults.and_then(|defaults| defaults.get(position).copied().flatten())
@@ -879,9 +1194,9 @@ fn reads_value(ir: &IrFile, root: ExprId, matches: &dyn Fn(u32) -> bool) -> bool
 /// dropping those arguments sound — the loop step does not reassign a capture slot, so an argument
 /// that was anything but a re-read of the slot it fills would be lost.
 fn passes_its_own_captures(ir: &IrFile, args: &[ExprId], frame: &Frame) -> bool {
-    args.iter().take(frame.capture_prefix).enumerate().all(
-        |(slot, argument)| matches!(ir.expr(*argument), IrExpr::GetValue(source) if *source as usize == slot),
-    )
+    args.iter().take(frame.capture_prefix).enumerate().all(|(position, argument)| {
+        matches!(ir.expr(*argument), IrExpr::GetValue(source) if frame.slots[position] == Some(*source))
+    })
 }
 
 /// The arguments a self-call passes, in parameter order, with `None` for each one it leaves to
@@ -1063,7 +1378,7 @@ fn step_assignments(
         .param_defaults(frame.function)
         .cloned()
         .unwrap_or_default();
-    let parameters_end = frame.parameter_slot(frame.capture_prefix + frame.count);
+    let parameters_end = frame.floor;
     for (position, _) in args
         .iter()
         .enumerate()
@@ -1181,782 +1496,4 @@ fn generated(ir: &mut IrFile, expression: IrExpr, cause: OriginId) -> ExprId {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::ir::{IrFunction, IrNodeOrigin};
-
-    const FUNCTION: FunId = 0;
-
-    /// A one-parameter `tailrec fun step(n: Int): Int` with nothing in it yet. The body is supplied
-    /// per test, because what each test is about is the SHAPE the sweep is handed.
-    fn file() -> IrFile {
-        let mut ir = IrFile::default();
-        ir.add_fun(IrFunction {
-            name: "step".to_string(),
-            params: vec![Ty::Int],
-            ret: Ty::Int,
-            body: None,
-            is_static: true,
-            dispatch_receiver: None,
-            param_checks: Vec::new(),
-        });
-        ir
-    }
-
-    /// `return step(n)` — the shape the rewrite turns into a loop step.
-    fn returned_self_call(ir: &mut IrFile) -> ExprId {
-        let argument = ir.add_expr(IrExpr::GetValue(0));
-        let call = ir.add_expr(IrExpr::Call {
-            callee: Box::new(Callee::Local(FUNCTION)),
-            dispatch_receiver: None,
-            args: vec![argument],
-        });
-        ir.add_expr(IrExpr::Return(Some(call)))
-    }
-
-    fn finish(ir: &mut IrFile, roots: Vec<ExprId>) {
-        finish_tailrec_body(
-            ir,
-            roots,
-            Frame::of_body(
-                FUNCTION,
-                crate::fir_lower::BodySlots {
-                    dispatch_receiver: None,
-                    first_parameter: 0,
-                },
-                1,
-            ),
-            false,
-            OriginId::from_raw(0),
-        )
-        .expect("the body has a tail");
-    }
-
-    /// A one-parameter MEMBER `tailrec fun step(n: Int): Int` on a class that declares it, with
-    /// `this` in slot 0 and the parameter in slot 1 — the layout a member body is lowered with.
-    fn member_file() -> IrFile {
-        let mut ir = file();
-        ir.functions[FUNCTION as usize].is_static = false;
-        ir.functions[FUNCTION as usize].dispatch_receiver = Some(crate::types::type_name("C"));
-        let class = ir.add_class(crate::ir::IrClass::synthetic(crate::types::type_name("C")));
-        ir.classes[class as usize].methods.push(FUNCTION);
-        ir
-    }
-
-    /// `{ t = <receiver>; this.step(n) }` returned — the shape a member call is lowered into, with
-    /// the receiver spilled into temporary slot `temp`.
-    fn returned_member_call(ir: &mut IrFile, receiver: ExprId, temp: u32) -> ExprId {
-        let binding = ir.add_expr(IrExpr::Variable {
-            index: temp,
-            ty: Ty::obj_name(crate::types::type_name("C")),
-            init: Some(receiver),
-            named: false,
-        });
-        let read = ir.add_expr(IrExpr::GetValue(temp));
-        let argument = ir.add_expr(IrExpr::GetValue(1));
-        let call = ir.add_expr(IrExpr::MethodCall {
-            class: 0,
-            index: 0,
-            receiver: read,
-            args: vec![Some(argument)],
-        });
-        let block = ir.add_expr(IrExpr::Block {
-            stmts: vec![binding],
-            value: Some(call),
-        });
-        ir.add_expr(IrExpr::Return(Some(block)))
-    }
-
-    fn finish_member(ir: &mut IrFile, roots: Vec<ExprId>) {
-        finish_tailrec_body(
-            ir,
-            roots,
-            Frame::of_body(
-                FUNCTION,
-                crate::fir_lower::BodySlots {
-                    dispatch_receiver: Some(0),
-                    first_parameter: 1,
-                },
-                1,
-            ),
-            false,
-            OriginId::from_raw(0),
-        )
-        .expect("the body has a tail");
-    }
-
-    /// Whether the rewrite produced a LOOP STEP anywhere in the body.
-    ///
-    /// A `continue` carrying the synthetic loop's label is written by `loop_step` and by nothing
-    /// else.
-    fn steps(ir: &IrFile) -> bool {
-        ir.exprs.iter().any(|expression| {
-            matches!(expression, IrExpr::Continue { label: Some(label) } if label == LOOP_LABEL)
-        })
-    }
-
-    /// `return step(n)` whose value reaches the return through a coercion (an erased result, an
-    /// elvis operand widened to the declared type) is still a tail call. The step takes the
-    /// RETURN's place: no coercion is left holding it, and nothing is returned.
-    #[test]
-    fn a_self_call_under_a_coercion_replaces_its_return() {
-        let mut ir = file();
-        let argument = ir.add_expr(IrExpr::GetValue(0));
-        let call = ir.add_expr(IrExpr::Call {
-            callee: Box::new(Callee::Local(FUNCTION)),
-            dispatch_receiver: None,
-            args: vec![argument],
-        });
-        let coerced = ir.add_expr(IrExpr::TypeOp {
-            op: crate::ir::IrTypeOp::ImplicitCoercion,
-            arg: call,
-            type_operand: Ty::nullable(Ty::Int),
-        });
-        let returned = ir.add_expr(IrExpr::Return(Some(coerced)));
-        ir.checked_return_depths.insert(returned, 0);
-        let tail = ir.add_expr(IrExpr::Return(None));
-        let body = finish_tailrec_body(
-            &mut ir,
-            vec![returned, tail],
-            Frame::of_body(
-                FUNCTION,
-                crate::fir_lower::BodySlots {
-                    dispatch_receiver: None,
-                    first_parameter: 0,
-                },
-                1,
-            ),
-            false,
-            OriginId::from_raw(0),
-        )
-        .expect("the body has a tail");
-
-        assert!(steps(&ir), "the coerced self call is the loop step");
-        let mut reachable = vec![body];
-        let mut seen = crate::fx_hash::HashSet::default();
-        while let Some(expression) = reachable.pop() {
-            if seen.insert(expression) {
-                crate::ir::for_each_child(&ir.exprs, expression, &mut |child| {
-                    reachable.push(child)
-                });
-            }
-        }
-        assert!(
-            !seen.contains(&returned) && !seen.contains(&coerced) && !seen.contains(&call),
-            "the step took the place of the return, its coercion and the call"
-        );
-    }
-
-    /// `return step(n)!!`-shaped: a platform-narrowing assertion wraps the self call when a
-    /// sibling branch yields a platform type. The assertion is as transparent as a coercion —
-    /// the step takes its place, and nothing remains to assert.
-    #[test]
-    fn a_self_call_under_a_not_null_assertion_replaces_its_return() {
-        let mut ir = file();
-        let argument = ir.add_expr(IrExpr::GetValue(0));
-        let call = ir.add_expr(IrExpr::Call {
-            callee: Box::new(Callee::Local(FUNCTION)),
-            dispatch_receiver: None,
-            args: vec![argument],
-        });
-        let asserted = ir.add_expr(IrExpr::NotNullAssert {
-            operand: call,
-            check: crate::ir::NullCheck::Named("step(n)".to_string()),
-        });
-        let returned = ir.add_expr(IrExpr::Return(Some(asserted)));
-        ir.checked_return_depths.insert(returned, 0);
-        let tail = ir.add_expr(IrExpr::Return(None));
-        let body = finish_tailrec_body(
-            &mut ir,
-            vec![returned, tail],
-            Frame::of_body(
-                FUNCTION,
-                crate::fir_lower::BodySlots {
-                    dispatch_receiver: None,
-                    first_parameter: 0,
-                },
-                1,
-            ),
-            false,
-            OriginId::from_raw(0),
-        )
-        .expect("the body has a tail");
-
-        assert!(steps(&ir), "the asserted self call is the loop step");
-        let mut reachable = vec![body];
-        let mut seen = crate::fx_hash::HashSet::default();
-        while let Some(expression) = reachable.pop() {
-            if seen.insert(expression) {
-                crate::ir::for_each_child(&ir.exprs, expression, &mut |child| {
-                    reachable.push(child)
-                });
-            }
-        }
-        assert!(
-            !seen.contains(&returned) && !seen.contains(&asserted) && !seen.contains(&call),
-            "the step took the place of the return, its assertion and the call"
-        );
-    }
-
-    /// An EXPLICIT `!!` (`NullCheck::Source`) is not transparent: kotlinc reports the call under it as
-    /// not a tail call and runs the check on every frame, so the sweep leaves the shape alone.
-    #[test]
-    fn a_self_call_under_an_explicit_bang_bang_is_left_alone() {
-        let mut ir = file();
-        let argument = ir.add_expr(IrExpr::GetValue(0));
-        let call = ir.add_expr(IrExpr::Call {
-            callee: Box::new(Callee::Local(FUNCTION)),
-            dispatch_receiver: None,
-            args: vec![argument],
-        });
-        let asserted = ir.add_expr(IrExpr::NotNullAssert {
-            operand: call,
-            check: crate::ir::NullCheck::Source,
-        });
-        let returned = ir.add_expr(IrExpr::Return(Some(asserted)));
-        ir.checked_return_depths.insert(returned, 0);
-        finish(&mut ir, vec![returned]);
-
-        assert!(!steps(&ir), "an explicit `!!` keeps its call a call");
-    }
-
-    /// The control for the suspend guards below: a self-call whose argument is read back from a
-    /// spilled operand still steps when nothing in that operand suspends. Without it, a "left
-    /// alone" below could be the sweep failing to follow the spill rather than the guard firing.
-    #[test]
-    fn a_self_call_on_a_spilled_pure_argument_still_steps() {
-        let mut ir = file();
-        let operand = ir.add_expr(IrExpr::GetValue(0));
-        let spill = ir.add_expr(IrExpr::Variable {
-            index: 1,
-            ty: Ty::Int,
-            init: Some(operand),
-            named: false,
-        });
-        let read = ir.add_expr(IrExpr::GetValue(1));
-        let call = ir.add_expr(IrExpr::Call {
-            callee: Box::new(Callee::Local(FUNCTION)),
-            dispatch_receiver: None,
-            args: vec![read],
-        });
-        let block = ir.add_expr(IrExpr::Block {
-            stmts: vec![spill],
-            value: Some(call),
-        });
-        let returned = ir.add_expr(IrExpr::Return(Some(block)));
-        ir.checked_return_depths.insert(returned, 0);
-        let tail = ir.add_expr(IrExpr::Return(None));
-        finish(&mut ir, vec![returned, tail]);
-
-        assert!(steps(&ir), "a pure spilled argument does not stop the step");
-    }
-
-    /// A `tailrec suspend fun` whose self-call's stepped argument evaluation SUSPENDS stays a
-    /// call. The spill is the shape the call lowering produces for exactly this case:
-    /// `{ t = escapeChar(c); return step(t) }`. kotlinc re-invokes this shape through the
-    /// continuation too, and krusty's state machine cannot resume into the middle of the turn's
-    /// argument reassignment — stepping it miscompiled at run time.
-    #[test]
-    fn a_self_call_whose_spilled_argument_suspends_stays_a_call() {
-        let mut ir = file();
-        let suspendee = ir.add_fun(IrFunction {
-            name: "escapeChar".to_string(),
-            params: Vec::new(),
-            ret: Ty::Int,
-            body: None,
-            is_static: true,
-            dispatch_receiver: None,
-            param_checks: Vec::new(),
-        });
-        ir.suspend_funs.push(suspendee);
-        let suspension = ir.add_expr(IrExpr::Call {
-            callee: Box::new(Callee::Local(suspendee)),
-            dispatch_receiver: None,
-            args: Vec::new(),
-        });
-        let spill = ir.add_expr(IrExpr::Variable {
-            index: 1,
-            ty: Ty::Int,
-            init: Some(suspension),
-            named: false,
-        });
-        let read = ir.add_expr(IrExpr::GetValue(1));
-        let call = ir.add_expr(IrExpr::Call {
-            callee: Box::new(Callee::Local(FUNCTION)),
-            dispatch_receiver: None,
-            args: vec![read],
-        });
-        let block = ir.add_expr(IrExpr::Block {
-            stmts: vec![spill],
-            value: Some(call),
-        });
-        let returned = ir.add_expr(IrExpr::Return(Some(block)));
-        ir.checked_return_depths.insert(returned, 0);
-        let tail = ir.add_expr(IrExpr::Return(None));
-        finish(&mut ir, vec![returned, tail]);
-
-        assert!(
-            !steps(&ir),
-            "a stepped argument that suspends keeps the call a call"
-        );
-    }
-
-    /// The same decline when the suspension is recorded per expression instead of by callee — a
-    /// CROSS-UNIT suspend call, whose callee has no local `FunId` for `suspend_funs` to hold. Its
-    /// `suspend_calls` entry is written as the call site lowers, before the sweep runs.
-    #[test]
-    fn a_self_call_whose_argument_suspends_across_a_unit_boundary_stays_a_call() {
-        let mut ir = file();
-        let suspension = ir.add_expr(IrExpr::Call {
-            callee: Box::new(Callee::Local(FUNCTION)),
-            dispatch_receiver: None,
-            args: Vec::new(),
-        });
-        ir.suspend_calls.insert(suspension, Ty::Int);
-        let nested = ir.add_expr(IrExpr::Call {
-            callee: Box::new(Callee::Local(FUNCTION)),
-            dispatch_receiver: None,
-            args: vec![suspension],
-        });
-        let returned = ir.add_expr(IrExpr::Return(Some(nested)));
-        ir.checked_return_depths.insert(returned, 0);
-        let tail = ir.add_expr(IrExpr::Return(None));
-        finish(&mut ir, vec![returned, tail]);
-
-        assert!(
-            !steps(&ir),
-            "a per-expression suspend record in the argument region keeps the call a call"
-        );
-    }
-
-    /// A suspension the body runs as its OWN statement is not the step's argument region: the
-    /// state machine handles a suspension inside the loop, so the self-call still steps.
-    #[test]
-    fn a_suspend_statement_before_the_tail_call_does_not_stop_the_step() {
-        let mut ir = file();
-        let suspendee = ir.add_fun(IrFunction {
-            name: "mark".to_string(),
-            params: Vec::new(),
-            ret: Ty::Int,
-            body: None,
-            is_static: true,
-            dispatch_receiver: None,
-            param_checks: Vec::new(),
-        });
-        ir.suspend_funs.push(suspendee);
-        let suspension = ir.add_expr(IrExpr::Call {
-            callee: Box::new(Callee::Local(suspendee)),
-            dispatch_receiver: None,
-            args: Vec::new(),
-        });
-        let named = ir.add_expr(IrExpr::Variable {
-            index: 1,
-            ty: Ty::Int,
-            init: Some(suspension),
-            named: true,
-        });
-        let argument = ir.add_expr(IrExpr::GetValue(0));
-        let call = ir.add_expr(IrExpr::Call {
-            callee: Box::new(Callee::Local(FUNCTION)),
-            dispatch_receiver: None,
-            args: vec![argument],
-        });
-        let returned = ir.add_expr(IrExpr::Return(Some(call)));
-        ir.checked_return_depths.insert(returned, 0);
-        let tail = ir.add_expr(IrExpr::Return(None));
-        finish(&mut ir, vec![named, returned, tail]);
-
-        assert!(
-            steps(&ir),
-            "a suspension outside the stepped argument region keeps the loop"
-        );
-    }
-
-    /// The control for the two member tests below: a receiver spilled from `this` is still `this`,
-    /// so the call is the same frame and steps. No Kotlin source reaches the rewrite WITHOUT this
-    /// spill, so a member rewrite that did not follow the alias would never fire at all.
-    #[test]
-    fn a_receiver_spilled_from_this_is_still_this() {
-        let mut ir = member_file();
-        let this = ir.add_expr(IrExpr::GetValue(0));
-        let returned = returned_member_call(&mut ir, this, 2);
-        ir.checked_return_depths.insert(returned, 0);
-        // A trailing statement keeps `returned` off the body's last root, so what rewrites it is
-        // the SWEEP, in place — the same path the static control above takes.
-        let tail = ir.add_expr(IrExpr::Return(None));
-        finish_member(&mut ir, vec![returned, tail]);
-
-        assert!(
-            steps(&ir),
-            "a self call on a temporary holding `this` is the loop step"
-        );
-    }
-
-    /// A temporary the body REASSIGNS is not a reliable alias: what it held where the alias was
-    /// established is not what it holds at the call. The slot is dropped and the call keeps
-    /// recursing, which is the answer the program had before.
-    #[test]
-    fn a_reassigned_temporary_is_not_an_alias_for_this() {
-        let mut ir = member_file();
-        let this = ir.add_expr(IrExpr::GetValue(0));
-        let returned = returned_member_call(&mut ir, this, 2);
-        ir.checked_return_depths.insert(returned, 0);
-        let other = ir.add_expr(IrExpr::GetValue(1));
-        let overwrite = ir.add_expr(IrExpr::SetValue {
-            var: 2,
-            value: other,
-        });
-        let tail = ir.add_expr(IrExpr::Return(None));
-        finish_member(&mut ir, vec![overwrite, returned, tail]);
-
-        assert!(
-            !steps(&ir),
-            "a reassigned slot is not followed, so the call stays a call"
-        );
-    }
-
-    /// The loop writes the slots the BODY reported, not slots derived from the receiver.
-    ///
-    /// `first_parameter` is not always `0` and not always `this + 1`. Captures, a local class's
-    /// constructor captures and its context values all take slots before the parameters, so a body
-    /// can put `this` at 3 and its first parameter at 7. Re-deriving the layout here — the thing
-    /// `BodySlots` exists to stop — would write slot 4 and shift every argument by three, which is
-    /// a miscompile no source-level test in this file would show, because the shapes that produce a
-    /// prefix are the ones that decline for other reasons today.
-    ///
-    /// So this asserts on the store the step emits: reported slot in, same slot out.
-    #[test]
-    fn the_loop_step_writes_the_reported_parameter_slots() {
-        const RECEIVER: u32 = 3;
-        const FIRST_PARAMETER: u32 = 7;
-
-        let mut ir = member_file();
-        let this = ir.add_expr(IrExpr::GetValue(RECEIVER));
-        let binding = ir.add_expr(IrExpr::Variable {
-            index: 11,
-            ty: Ty::obj_name(crate::types::type_name("C")),
-            init: Some(this),
-            named: false,
-        });
-        let read = ir.add_expr(IrExpr::GetValue(11));
-        let argument = ir.add_expr(IrExpr::GetValue(FIRST_PARAMETER));
-        let call = ir.add_expr(IrExpr::MethodCall {
-            class: 0,
-            index: 0,
-            receiver: read,
-            args: vec![Some(argument)],
-        });
-        let block = ir.add_expr(IrExpr::Block {
-            stmts: vec![binding],
-            value: Some(call),
-        });
-        let returned = ir.add_expr(IrExpr::Return(Some(block)));
-        ir.checked_return_depths.insert(returned, 0);
-        let tail = ir.add_expr(IrExpr::Return(None));
-
-        finish_tailrec_body(
-            &mut ir,
-            vec![returned, tail],
-            Frame::of_body(
-                FUNCTION,
-                crate::fir_lower::BodySlots {
-                    dispatch_receiver: Some(RECEIVER),
-                    first_parameter: FIRST_PARAMETER,
-                },
-                1,
-            ),
-            false,
-            OriginId::from_raw(0),
-        )
-        .expect("the body has a tail");
-
-        assert!(steps(&ir), "the spilled receiver is still this frame");
-        let written: Vec<u32> = ir
-            .exprs
-            .iter()
-            .filter_map(|expression| match expression {
-                IrExpr::SetValue { var, .. } => Some(*var),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(
-            written,
-            vec![FIRST_PARAMETER],
-            "the step must write the reported first-parameter slot, and must not write the receiver"
-        );
-    }
-
-    /// A call on an instance the frame did not supply is a different frame however it was reached,
-    /// so it stays a call — this is what stops `Other().step(n)` from being stepped as if it were
-    /// `this`.
-    #[test]
-    fn a_receiver_that_is_not_this_is_a_different_frame() {
-        let mut ir = member_file();
-        let other = ir.add_expr(IrExpr::GetValue(1));
-        let returned = returned_member_call(&mut ir, other, 2);
-        ir.checked_return_depths.insert(returned, 0);
-        // A trailing statement keeps `returned` off the body's last root, so what rewrites it is
-        // the SWEEP, in place — the same path the static control above takes.
-        let tail = ir.add_expr(IrExpr::Return(None));
-        finish_member(&mut ir, vec![returned, tail]);
-
-        assert!(
-            !steps(&ir),
-            "a self call on another instance is not this frame"
-        );
-    }
-
-    /// Every node carrying a checked return depth is still a `Return`, which is the side table's
-    /// documented contract.
-    fn depths_describe_returns(ir: &IrFile) -> bool {
-        ir.checked_return_depths
-            .keys()
-            .all(|&expression| matches!(ir.expr(expression), IrExpr::Return(_)))
-    }
-
-    #[test]
-    fn a_bare_return_retargets_the_block_edge_without_retyping_the_selected_call() {
-        let mut ir = file();
-        ir.functions[FUNCTION as usize].ret = Ty::Unit;
-        let argument = ir.add_expr(IrExpr::GetValue(0));
-        let call = ir.add_expr(IrExpr::Call {
-            callee: Box::new(Callee::Local(FUNCTION)),
-            dispatch_receiver: None,
-            args: vec![argument],
-        });
-        ir.logical_types.insert(call, Ty::Unit);
-        let returned = ir.add_expr(IrExpr::Return(None));
-        let nested = ir.add_expr(IrExpr::Block {
-            stmts: vec![call, returned],
-            value: None,
-        });
-        let tail = ir.add_expr(IrExpr::Return(None));
-
-        finish(&mut ir, vec![nested, tail]);
-
-        let IrExpr::Block { stmts, value: None } = ir.expr(nested) else {
-            panic!("the nested statement block remains")
-        };
-        assert_eq!(stmts.len(), 2);
-        let step = stmts[0];
-        assert_ne!(step, call);
-        assert!(matches!(ir.expr(call), IrExpr::Call { .. }));
-        assert_eq!(ir.logical_types.get(&call), Some(&Ty::Unit));
-        assert!(matches!(
-            ir.fir_origins.get(&step),
-            Some(IrNodeOrigin::Synthetic {
-                kind: SyntheticOriginKind::GeneratedControlFlow,
-                ..
-            })
-        ));
-    }
-
-    #[test]
-    fn a_return_reached_by_one_path_becomes_a_loop_step() {
-        // The control for the two tests below: with nothing else pointing at it, the `return` is
-        // rewritten, so a later "left alone" is the guard working and not the rewrite being off.
-        let mut ir = file();
-        let returned = returned_self_call(&mut ir);
-        ir.checked_return_depths.insert(returned, 0);
-        let tail = ir.add_expr(IrExpr::Return(None));
-        finish(&mut ir, vec![returned, tail]);
-
-        assert!(
-            steps(&ir),
-            "a uniquely owned `return` of a self call is the loop step"
-        );
-        assert!(depths_describe_returns(&ir));
-    }
-
-    #[test]
-    fn a_return_the_dag_shares_with_a_try_is_left_alone() {
-        // Common IR is a DAG. This `return` is reachable both as an ordinary statement and from
-        // inside a `try`, which the sweep deliberately does not enter — so rewriting it through
-        // the edge the sweep DOES follow would change what the `try` holds, where a `finally` still
-        // has to run. One edge is the whole licence to rewrite in place, and there are two here.
-        let mut ir = file();
-        let shared = returned_self_call(&mut ir);
-        let guarded = ir.add_expr(IrExpr::Try {
-            body: shared,
-            catches: Vec::new(),
-            finally: None,
-            result: Ty::Int,
-        });
-        let tail = ir.add_expr(IrExpr::Return(None));
-        finish(&mut ir, vec![shared, guarded, tail]);
-
-        assert!(
-            matches!(ir.expr(shared), IrExpr::Return(Some(_))),
-            "a `return` the DAG shares is left as it was"
-        );
-        assert!(depths_describe_returns(&ir));
-    }
-
-    #[test]
-    fn a_return_below_a_shared_ancestor_is_left_alone() {
-        // The return has one DIRECT parent (the block), but the block itself is reached both as an
-        // ordinary root and through an opaque `try`. Path uniqueness must propagate through the
-        // shared ancestor; direct incoming-edge counting alone incorrectly rewrites the return.
-        let mut ir = file();
-        let returned = returned_self_call(&mut ir);
-        ir.checked_return_depths.insert(returned, 0);
-        let shared_block = ir.add_expr(IrExpr::Block {
-            stmts: vec![returned],
-            value: None,
-        });
-        let guarded = ir.add_expr(IrExpr::Try {
-            body: shared_block,
-            catches: Vec::new(),
-            finally: None,
-            result: Ty::Int,
-        });
-        let tail = ir.add_expr(IrExpr::Return(None));
-        finish(&mut ir, vec![shared_block, guarded, tail]);
-
-        assert!(matches!(ir.expr(returned), IrExpr::Return(Some(_))));
-        assert_eq!(ir.checked_return_depths.get(&returned), Some(&0));
-        assert!(depths_describe_returns(&ir));
-    }
-
-    #[test]
-    fn a_return_under_a_privately_owned_ancestor_is_still_swept() {
-        // The control for the test above, and the one a descendant-marking rule needs most: the
-        // same nesting with nothing else pointing at the block. One path reaches the return, so it
-        // becomes the loop step. Without this, marking EVERY descendant of every node shared would
-        // pass the test above while quietly switching the sweep off for anything inside a block.
-        let mut ir = file();
-        let returned = returned_self_call(&mut ir);
-        ir.checked_return_depths.insert(returned, 0);
-        let owned = ir.add_expr(IrExpr::Block {
-            stmts: vec![returned],
-            value: None,
-        });
-        let tail = ir.add_expr(IrExpr::Return(None));
-        finish(&mut ir, vec![owned, tail]);
-
-        let IrExpr::Block { stmts, .. } = ir.expr(owned) else {
-            panic!("the owning block remains")
-        };
-        assert_ne!(
-            stmts[0], returned,
-            "one path to the `return` is the licence to replace it where it stands"
-        );
-        assert!(steps(&ir));
-        assert!(depths_describe_returns(&ir));
-    }
-
-    #[test]
-    fn a_lambdas_capture_is_swept_and_its_inline_body_is_not() {
-        // The two halves of one boundary. A lambda's captures are evaluated by THIS function, so a
-        // `return` among them is this function's tail position; its inline body belongs to the
-        // lambda, and a depth-ZERO return there is the lambda's own — the one shape the checked
-        // depth cannot tell apart from this function's, which is why the boundary and not the depth
-        // is what keeps the sweep out of an inline body.
-        let mut ir = file();
-        let capture = returned_self_call(&mut ir);
-        ir.checked_return_depths.insert(capture, 0);
-        let inner = returned_self_call(&mut ir);
-        ir.checked_return_depths.insert(inner, 0);
-        let lambda = ir.add_expr(IrExpr::Lambda {
-            impl_fn: FUNCTION,
-            arity: 0,
-            captures: vec![capture],
-            sam: None,
-            inline_body: Some(inner),
-        });
-        let tail = ir.add_expr(IrExpr::Return(None));
-        finish(&mut ir, vec![lambda, tail]);
-
-        assert!(
-            matches!(ir.expr(capture), IrExpr::Block { .. }),
-            "a capture expression is this function's and is swept"
-        );
-        assert!(
-            matches!(ir.expr(inner), IrExpr::Return(Some(_))),
-            "an inline body is the lambda's and is left whole"
-        );
-        assert_eq!(ir.checked_return_depths.get(&inner), Some(&0));
-        assert!(depths_describe_returns(&ir));
-    }
-
-    #[test]
-    fn a_return_that_targets_an_outer_frame_is_left_alone() {
-        // The ownership test is the checked DEPTH, not the shape the `return` was found in: a
-        // non-zero depth names a frame outside this one, and stepping this function's loop would
-        // answer a question nobody asked.
-        let mut ir = file();
-        let returned = returned_self_call(&mut ir);
-        ir.checked_return_depths.insert(returned, 1);
-        let tail = ir.add_expr(IrExpr::Return(None));
-        finish(&mut ir, vec![returned, tail]);
-
-        assert!(matches!(ir.expr(returned), IrExpr::Return(Some(_))));
-        assert_eq!(ir.checked_return_depths.get(&returned), Some(&1));
-        assert!(depths_describe_returns(&ir));
-    }
-
-    #[test]
-    fn a_generated_node_records_where_it_came_from() {
-        let mut ir = file();
-        let tail = ir.add_expr(IrExpr::Return(None));
-        finish(&mut ir, vec![tail]);
-        let generated = ir.exprs.len() as ExprId - 1;
-        assert!(matches!(
-            ir.fir_origins.get(&generated),
-            Some(IrNodeOrigin::Synthetic { .. })
-        ));
-    }
-
-    /// A lambda's inline body numbers its slots from its own frame, so its slot 1 is not this
-    /// function's slot 1. The outer frame holds an unreassigned temporary in slot 1; the lambda
-    /// declares its own temporary in slot 2 and reassigns its own slot 1, and uses slot 9.
-    #[test]
-    fn slot_inventories_stay_in_this_frame() {
-        let mut ir = file();
-        let seed = ir.add_expr(IrExpr::GetValue(0));
-        let outer = ir.add_expr(IrExpr::Variable {
-            index: 1,
-            ty: Ty::Int,
-            init: Some(seed),
-            named: false,
-        });
-        let inner_seed = ir.add_expr(IrExpr::Const(crate::ir::IrConst::Int(0)));
-        let inner = ir.add_expr(IrExpr::Variable {
-            index: 2,
-            ty: Ty::Int,
-            init: Some(inner_seed),
-            named: false,
-        });
-        let inner_value = ir.add_expr(IrExpr::GetValue(9));
-        let overwrite = ir.add_expr(IrExpr::SetValue {
-            var: 1,
-            value: inner_value,
-        });
-        let body = ir.add_expr(IrExpr::Block {
-            stmts: vec![inner, overwrite],
-            value: None,
-        });
-        let lambda = ir.add_expr(IrExpr::Lambda {
-            impl_fn: FUNCTION,
-            arity: 0,
-            captures: Vec::new(),
-            sam: None,
-            inline_body: Some(body),
-        });
-        let roots = vec![outer, lambda];
-        let frame = Frame::of_body(
-            FUNCTION,
-            crate::fir_lower::BodySlots {
-                dispatch_receiver: None,
-                first_parameter: 0,
-            },
-            1,
-        );
-
-        assert_eq!(
-            fixed_temporaries(&ir, &roots),
-            crate::fx_hash::HashSet::from_iter([1])
-        );
-        assert_eq!(first_free_slot(&ir, &roots, &frame), 2);
-    }
-}
+mod tests;

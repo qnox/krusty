@@ -32,6 +32,22 @@ pub enum IrParameterRole {
     Generated(IrGeneratedParameterRole),
 }
 
+impl IrParameterRole {
+    /// A declared context or value parameter: what [`IrVarargParameter::index`] counts. Receivers,
+    /// captures and compiler-generated parameters are not declared parameters.
+    pub const fn is_declared_parameter(self) -> bool {
+        matches!(
+            self,
+            Self::Value
+                | Self::UnusedValue
+                | Self::DestructuredValue
+                | Self::ContextValue
+                | Self::AnonymousContextParameter { .. }
+                | Self::ContextReceiver { .. }
+        )
+    }
+}
+
 /// What a lifted callable's captured value was declared as, and what kind of callable captures
 /// it. Both are source facts; a target that names the lifted parameter after them (kotlinc's
 /// `LocalDeclarationsLowering` keeps a variable's own name for a named local function or an
@@ -122,6 +138,9 @@ pub enum IrGeneratedParameterRole {
     /// The owner or extension receiver a generated property-delegate accessor receives for its
     /// property. The JVM spells it `<this>`.
     DelegateMethodReceiver,
+    /// The mask of omitted arguments a function takes in place of a `$default` synthetic, as the
+    /// Compose plugin's functions do. It has no local-variable row.
+    DefaultMask,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -342,6 +361,29 @@ impl FnParamInfo {
 }
 
 impl IrFile {
+    /// Record that `inserted` captured values replace the `removed` parameters at `parameter` of
+    /// lambda implementation `function`. When those parameters lie inside its capture prefix (an
+    /// insertion at the prefix's end included), the boundary to the lambda's own parameters
+    /// ([`IrFile::lambda_own_params_from`]) moves by the difference; parameters after the prefix
+    /// leave it where it is. Several replacements apply from the highest `parameter` down.
+    pub(crate) fn resize_lambda_capture_prefix(
+        &mut self,
+        function: FunId,
+        parameter: usize,
+        removed: usize,
+        inserted: usize,
+    ) {
+        let Some(own_from) = self.lambda_own_params_from.get_mut(&function) else {
+            return;
+        };
+        let prefix = *own_from as usize;
+        if parameter + removed > prefix {
+            return;
+        }
+        *own_from =
+            u32::try_from(prefix - removed + inserted).expect("a lambda's capture prefix fits u32");
+    }
+
     /// The exact checked declaration that supplied inherited defaults for `fid`.
     pub(crate) fn inherited_param_default_provider(
         &self,
@@ -566,7 +608,9 @@ mod tests {
 /// The `vararg` parameter of a declared function.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct IrVarargParameter {
-    /// SOURCE index among the value parameters (receiver excluded).
+    /// Index among the declared parameters: context parameters first, then value parameters.
+    /// Receivers and captures are not counted; a target finds the physical slot through the
+    /// function's parameter identities.
     pub index: usize,
     /// No value parameter follows it.
     pub is_last: bool,

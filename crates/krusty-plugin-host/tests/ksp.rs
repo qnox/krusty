@@ -259,6 +259,10 @@ fn a_processor_sees_generates_and_logs_what_it_does_under_ksp2() {
         std::fs::read_to_string(outputs.kotlin.join("gen/Generated.kt")).unwrap(),
         "package gen\n\n@sample.Marker\nclass Generated {\n    class Nested\n}\n"
     );
+    assert_eq!(
+        std::fs::read_to_string(outputs.resources.join("META-INF/services/dump.Service")).unwrap(),
+        "dump.Implementation\n"
+    );
 }
 
 #[test]
@@ -546,6 +550,16 @@ fn declarations_are_in_the_order_ksp2_lists_them() {
 
 #[test]
 #[ignore = "downloads symbol-processing-api 2.3.12 and a JDK"]
+fn members_sharing_a_name_are_listed_together_as_ksp2_lists_them() {
+    members_log_is_what_ksp2_reports(
+        &[fixtures().join("grouping/Grouping.kt")],
+        "ksp-outputs-grouping",
+        "grouping.expected",
+    );
+}
+
+#[test]
+#[ignore = "downloads symbol-processing-api 2.3.12 and a JDK"]
 fn annotation_arguments_and_accessors_are_what_ksp2_reports() {
     log_is_what_ksp2_reports(
         "Annotations",
@@ -556,6 +570,19 @@ fn annotation_arguments_and_accessors_are_what_ksp2_reports() {
         ],
         "ksp-outputs-annotations",
         "annotations.expected",
+    );
+}
+
+#[test]
+#[ignore = "downloads symbol-processing-api 2.3.12 and a JDK"]
+fn unsigned_annotation_values_are_what_ksp2_reports() {
+    log_is_what_ksp2_reports(
+        "Annotations",
+        "annotations.AnnotationsProvider",
+        &[Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/unsigned_annotation_values/UnsignedAnnotations.kt")],
+        "ksp-outputs-unsigned-annotations",
+        "unsigned-annotations.expected",
     );
 }
 
@@ -589,6 +616,176 @@ fn library_annotation_members_are_what_ksp2_reports() {
     );
 }
 
+/// A type that names a typealias, as a whole or in a type argument, annotated or not, is one the
+/// round leaves undescribed: KSP2 resolves it to the alias, keeping the alias's arguments (its log
+/// shows `List<members.KeptString>`) and answering no annotations for any of these, but the round
+/// does not describe a source alias type yet, so it refuses rather than report the expansion.
+#[test]
+#[ignore = "downloads symbol-processing-api 2.3.12 and a JDK"]
+fn types_naming_aliases_are_what_ksp2_reports() {
+    members_log_is_what_ksp2_reports(
+        &[fixtures().join("aliases/Aliases.kt")],
+        "ksp-outputs-aliases",
+        "aliases.expected",
+    );
+}
+
+#[test]
+#[ignore = "downloads symbol-processing-api 2.3.12 and a JDK"]
+fn a_type_naming_an_alias_applied_to_arguments_is_refused() {
+    let (runtime, env) = runtime();
+    let processor = processor_in(
+        &runtime,
+        "Members",
+        "members.MembersProvider",
+        "ksp-processor-members-alias-refusals",
+    );
+    let out = scratch("ksp-outputs-alias-refusals");
+    let outputs = KspOutputs {
+        kotlin: out.join("kotlin"),
+        java: out.join("java"),
+        classes: out.join("classes"),
+        resources: out.join("resources"),
+    };
+    let error = run(
+        &runtime,
+        &env,
+        &processor,
+        &[fixtures().join("members-refused/GenericAlias.kt")],
+        &[],
+        &outputs,
+    )
+    .err()
+    .expect("the host refuses a type naming an alias applied to arguments");
+    assert_eq!(
+        error.to_string(),
+        "krusty's KSP host does not implement KSPropertyDeclaration.type of a type it cannot describe yet, which a processor uses"
+    );
+}
+
+#[test]
+#[ignore = "downloads symbol-processing-api 2.3.12 and a JDK"]
+fn getter_return_types_are_what_ksp2_reports() {
+    log_is_what_ksp2_reports(
+        "Accessors",
+        "accessors.AccessorsProvider",
+        &[fixtures().join("accessors/Accessors.kt")],
+        "ksp-outputs-accessors",
+        "accessors.expected",
+    );
+}
+
+/// A getter that writes its own return type (`get(): Long`) is refused: KSP2 serves that written
+/// reference, which the round does not describe yet.
+#[test]
+#[ignore = "downloads symbol-processing-api 2.3.12 and a JDK"]
+fn the_return_type_a_getter_writes_is_refused() {
+    let (runtime, env) = runtime();
+    let processor = processor_in(
+        &runtime,
+        "Accessors",
+        "accessors.AccessorsProvider",
+        "ksp-processor-accessors-refusals",
+    );
+    let out = scratch("ksp-outputs-accessors-refused");
+    let outputs = KspOutputs {
+        kotlin: out.join("kotlin"),
+        java: out.join("java"),
+        classes: out.join("classes"),
+        resources: out.join("resources"),
+    };
+    let error = run(
+        &runtime,
+        &env,
+        &processor,
+        &[fixtures().join("accessors-refused/TypedGetter.kt")],
+        &[],
+        &outputs,
+    )
+    .err()
+    .expect("the host refuses a getter's written return type");
+    assert_eq!(
+        error.to_string(),
+        "krusty's KSP host does not implement KSPropertyGetter.returnType yet, which a processor uses"
+    );
+}
+
+#[test]
+#[ignore = "downloads symbol-processing-api 2.3.12 and a JDK"]
+fn effective_java_modifiers_are_what_ksp2_reports() {
+    log_is_what_ksp2_reports(
+        "JavaModifiers",
+        "javamodifiers.JavaModifiersProvider",
+        &[fixtures().join("java-modifiers/JavaModifiers.kt")],
+        "ksp-outputs-java-modifiers",
+        "java-modifiers.expected",
+    );
+}
+
+#[test]
+#[ignore = "downloads symbol-processing-api 2.3.12 and a JDK"]
+fn overridees_are_what_ksp2_reports() {
+    log_is_what_ksp2_reports(
+        "Overridees",
+        "overridees.OverrideesProvider",
+        &[
+            fixtures().join("overridees/Overrides.kt"),
+            fixtures().join("overridees/Overridees.kt"),
+        ],
+        "ksp-outputs-overridees",
+        "overridees.expected",
+    );
+}
+
+#[test]
+#[ignore = "downloads symbol-processing-api 2.3.12 and a JDK"]
+fn overridees_of_listed_members_are_what_ksp2_reports() {
+    log_is_what_ksp2_reports(
+        "AllOverridees",
+        "alloverridees.AllOverrideesProvider",
+        &[fixtures().join("all-overridees/AllOverridees.kt")],
+        "ksp-outputs-all-overridees",
+        "all-overridees.expected",
+    );
+}
+
+#[test]
+#[ignore = "downloads symbol-processing-api 2.3.12 and a JDK"]
+fn an_overridee_the_round_cannot_describe_is_refused() {
+    let (runtime, env) = runtime();
+    let processor = processor_in(
+        &runtime,
+        "Overridees",
+        "overridees.OverrideesProvider",
+        "ksp-processor-overridees-refusals",
+    );
+    for fixture in ["JavaLibraryMember.kt", "GenericLibraryMember.kt"] {
+        let out = scratch(&format!("ksp-outputs-overridees-refused-{fixture}"));
+        let outputs = KspOutputs {
+            kotlin: out.join("kotlin"),
+            java: out.join("java"),
+            classes: out.join("classes"),
+            resources: out.join("resources"),
+        };
+        let error = run(
+            &runtime,
+            &env,
+            &processor,
+            &[fixtures().join("overridees-refused").join(fixture)],
+            &[],
+            &outputs,
+        )
+        .err()
+        .unwrap_or_else(|| panic!("the host refuses the overridee in {fixture}"));
+        assert_eq!(
+            error.to_string(),
+            "krusty's KSP host does not implement KSFunctionDeclaration.findOverridee yet, which \
+             a processor uses",
+            "{fixture}"
+        );
+    }
+}
+
 #[test]
 #[ignore = "downloads symbol-processing-api 2.3.12 and a JDK"]
 fn class_literal_arguments_are_what_ksp2_reports() {
@@ -603,4 +800,116 @@ fn class_literal_arguments_are_what_ksp2_reports() {
         "ksp-outputs-class-literals",
         "class-literals.expected",
     );
+}
+
+#[test]
+#[ignore = "downloads symbol-processing-api 2.3.12 and a JDK"]
+fn java_annotation_array_elements_default_to_empty_arrays() {
+    log_with_dependencies_is_what_ksp2_reports(
+        "Annotations",
+        "annotations.AnnotationsProvider",
+        &[fixtures().join("java-array-defaults/Use.kt")],
+        &[
+            fixtures().join("java-array-defaults/dependency/ArrayElements.java"),
+            fixtures().join("java-array-defaults/dependency/Valued.java"),
+        ],
+        "ksp-outputs-java-array-defaults",
+        "java-array-defaults.expected",
+    );
+}
+
+#[test]
+#[ignore = "downloads symbol-processing-api 2.3.12 and a JDK"]
+fn all_functions_and_properties_of_source_classifiers_are_what_ksp2_lists() {
+    let (runtime, env) = runtime();
+    let processor = processor(&runtime, "AllMembers", "allmembers.AllMembersProvider");
+    let out = scratch("ksp-outputs-all-members");
+    let outputs = KspOutputs {
+        kotlin: out.join("kotlin"),
+        java: out.join("java"),
+        classes: out.join("classes"),
+        resources: out.join("resources"),
+    };
+    let sources = [fixtures().join("all-members/AllMembers.kt")];
+    let run = run(&runtime, &env, &processor, &sources, &[], &outputs)
+        .unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(run.generated, Vec::<String>::new());
+    let expected: Vec<String> = std::fs::read_to_string(fixtures().join("all-members.expected"))
+        .unwrap()
+        .lines()
+        .filter(|line| !line.starts_with('#'))
+        .map(str::to_string)
+        .collect();
+    assert_eq!(run.log, expected);
+}
+
+#[test]
+#[ignore = "downloads symbol-processing-api 2.3.12 and a JDK"]
+fn all_members_sharing_a_name_are_listed_together_as_ksp2_lists_them() {
+    log_is_what_ksp2_reports(
+        "AllMembers",
+        "allmembers.AllMembersProvider",
+        &[fixtures().join("all-members-grouping/Grouping.kt")],
+        "ksp-outputs-all-members-grouping",
+        "all-members-grouping.expected",
+    );
+}
+
+#[test]
+#[ignore = "downloads symbol-processing-api 2.3.12 and a JDK"]
+fn members_meeting_in_an_intersection_are_listed_as_ksp2_lists_them() {
+    log_is_what_ksp2_reports(
+        "AllMembers",
+        "allmembers.AllMembersProvider",
+        &[fixtures().join("intersections/Intersections.kt")],
+        "ksp-outputs-intersections",
+        "intersections.expected",
+    );
+}
+
+#[test]
+#[ignore = "downloads symbol-processing-api 2.3.12 and a JDK"]
+fn intersection_members_are_what_ksp2_makes() {
+    log_is_what_ksp2_reports(
+        "Intersections",
+        "intersections.IntersectionsProvider",
+        &[fixtures().join("intersections/Intersections.kt")],
+        "ksp-outputs-intersection-members",
+        "intersection-members.expected",
+    );
+}
+
+#[test]
+#[ignore = "downloads symbol-processing-api 2.3.12 and a JDK"]
+fn all_functions_whose_order_krusty_cannot_say_are_refused() {
+    let (runtime, env) = runtime();
+    let processor = processor_in(
+        &runtime,
+        "AllMembers",
+        "allmembers.AllMembersProvider",
+        "ksp-processor-all-members-refusals",
+    );
+    for case in [
+        "CovariantIntersection",
+        "Substitution",
+        "EnumClass",
+        "LibrarySupertype",
+    ] {
+        let out = scratch(&format!("ksp-outputs-all-members-{case}"));
+        let outputs = KspOutputs {
+            kotlin: out.join("kotlin"),
+            java: out.join("java"),
+            classes: out.join("classes"),
+            resources: out.join("resources"),
+        };
+        let sources = [fixtures().join(format!("all-members-refused/{case}.kt"))];
+        let error = run(&runtime, &env, &processor, &sources, &[], &outputs)
+            .err()
+            .unwrap_or_else(|| panic!("{case}: the host lists members it cannot order"));
+        assert_eq!(
+            error.to_string(),
+            "krusty's KSP host does not implement KSClassDeclaration.getAllFunctions of a classifier whose members it cannot order yet, which a processor uses",
+            "{case}"
+        );
+    }
 }

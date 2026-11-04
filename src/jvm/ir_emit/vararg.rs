@@ -6,10 +6,24 @@ use crate::jvm::array_representation::array_store_op;
 
 /// An array value to create: its type, and the reification argument kotlinc marks its creation
 /// with when a reified body creates it of its own type parameter (`ReifiedMarkers::arrays`).
+/// `source` is the vararg expression the array realizes, whose source line owns the array's own
+/// instructions; a generated array has none.
 #[derive(Clone, Copy)]
 pub(super) struct NewArray<'a> {
     pub(super) ty: &'a Ty,
     pub(super) reified_marker: Option<&'a str>,
+    pub(super) source: Option<ExprId>,
+}
+
+/// Return to the vararg's own line before an instruction of the array itself.
+///
+/// kotlinc lowers a vararg to `tmp = arrayOfNulls(n); tmp[0] = e0; …; tmp`, every generated
+/// statement at the vararg's offsets. Its line therefore comes back before each element store's
+/// `[array, index]` prefix and before the final array load, while each element marks its own line.
+fn mark_array_line(emitter: &mut Emitter<'_>, array: NewArray<'_>, code: &mut CodeBuilder) {
+    if let Some(source) = array.source {
+        emitter.mark_expression_start(source, code);
+    }
 }
 
 /// `anewarray` of `element_type`'s class over the length on the stack, preceded by kotlinc's
@@ -53,8 +67,21 @@ pub(super) fn emit(
             .set_emit_error("vararg spread flags do not match the element list".to_string());
         return;
     }
+    let ir = emitter.ir;
+    let mut flat = Vec::with_capacity(elements.len());
+    flatten_spread_literals(ir, elements, spreads, None, &mut flat);
+    let elements = flat.iter().map(|element| element.value).collect::<Vec<_>>();
+    let spreads = flat
+        .iter()
+        .map(|element| element.spread)
+        .collect::<Vec<_>>();
+    let components = flat
+        .iter()
+        .map(|element| element.component)
+        .collect::<Vec<_>>();
+    let (elements, spreads) = (elements.as_slice(), spreads.as_slice());
     if !spreads.iter().any(|&spread| spread) {
-        emit_packed_array(emitter, array, elements, code);
+        emit_packed_array(emitter, array, elements, &components, code);
         return;
     }
 
@@ -64,7 +91,7 @@ pub(super) fn emit(
     if elements.len() == 1
         && spreads[0]
         && matches!(
-            emitter.ir.expr(elements[0]),
+            ir.expr(elements[0]),
             IrExpr::Vararg { .. } | IrExpr::NewArray { .. }
         )
     {
@@ -88,6 +115,7 @@ pub(super) fn emit(
     } else if element_type.is_jvm_scalar() {
         emit_primitive_spread(
             emitter,
+            array,
             element_type,
             elements,
             spreads,
@@ -99,8 +127,11 @@ pub(super) fn emit(
             emitter,
             array,
             element_type,
-            elements,
-            spreads,
+            Elements {
+                values: elements,
+                spreads,
+                components: &components,
+            },
             temps.as_deref(),
             code,
         );
@@ -108,6 +139,60 @@ pub(super) fn emit(
     if let Some(temps) = temps {
         emitter.release_operand_spills(&temps);
     }
+}
+
+/// One element of a vararg array after spread literals are flattened into it.
+struct FlatElement {
+    value: u32,
+    spread: bool,
+    /// The element type of the spread literal the value was written in, when it was. The value is
+    /// adapted to that type, as the literal's own array would have stored it: an `Int` from
+    /// `*arrayOf<Int>(1)` is boxed to `Integer` before it joins an `Object[]`.
+    component: Option<Ty>,
+}
+
+/// The elements of a reference vararg array, with the type each one is adapted to.
+struct Elements<'a> {
+    values: &'a [u32],
+    spreads: &'a [bool],
+    components: &'a [Option<Ty>],
+}
+
+/// kotlinc's `VarargLowering` does not copy an array literal spread into a vararg
+/// (`g(*arrayOf(a, b), c)`): the literal's elements join the enclosing array in place, under the
+/// enclosing vararg's line. An empty literal keeps its own array, which is all an empty
+/// `arrayOf()` and an `emptyArray()` have in common at this point.
+fn flatten_spread_literals(
+    ir: &IrFile,
+    elements: &[u32],
+    spreads: &[bool],
+    component: Option<Ty>,
+    flat: &mut Vec<FlatElement>,
+) {
+    for (&element, &spread) in elements.iter().zip(spreads) {
+        match ir.expr(element) {
+            IrExpr::Vararg {
+                array_type,
+                elements: literal,
+                spreads: literal_spreads,
+            } if spread && !literal.is_empty() && literal.len() == literal_spreads.len() => {
+                let literal_component = Some(array_jvm_element(array_type));
+                flatten_spread_literals(ir, literal, literal_spreads, literal_component, flat);
+            }
+            _ => flat.push(FlatElement {
+                value: element,
+                spread,
+                component,
+            }),
+        }
+    }
+}
+
+/// The scalar a reference array boxes element `index` to: the type of the literal it was
+/// flattened from, or the array's own element type.
+fn element_box_adapter(components: &[Option<Ty>], index: usize, element_type: Ty) -> Option<Ty> {
+    let component = components.get(index).copied().flatten();
+    reference_array_scalar_adapter(component.unwrap_or(element_type))
 }
 
 /// `Arrays.copyOf(array, array.length)` for one existing reference array. The erased overload
@@ -175,6 +260,7 @@ pub(super) fn emit_consumed_reference_copy(
 
 fn emit_primitive_spread(
     emitter: &mut Emitter<'_>,
+    array: NewArray<'_>,
     element_type: Ty,
     elements: &[u32],
     spreads: &[bool],
@@ -200,6 +286,7 @@ fn emit_primitive_spread(
     store(builder_ty, builder_slot, code);
     let builder_lease = emitter.lease_frame_temporary(held, builder_ty);
     for (index, &element) in elements.iter().enumerate() {
+        mark_array_line(emitter, array, code);
         load(builder_ty, builder_slot, code);
         if let Some(temps) = temps {
             let (slot, ty, _) = temps[index];
@@ -207,6 +294,7 @@ fn emit_primitive_spread(
         } else {
             emitter.emit_value(element, code);
         }
+        mark_array_line(emitter, array, code);
         if spreads[index] {
             let add_spread = emitter
                 .cw
@@ -217,6 +305,7 @@ fn emit_primitive_spread(
             code.invokevirtual(add, slot_words(element_type) as i32, 0);
         }
     }
+    mark_array_line(emitter, array, code);
     load(builder_ty, builder_slot, code);
     let to_array = emitter
         .cw
@@ -284,11 +373,15 @@ fn emit_reference_spread(
     emitter: &mut Emitter<'_>,
     array: NewArray<'_>,
     element_type: Ty,
-    elements: &[u32],
-    spreads: &[bool],
+    elements: Elements<'_>,
     temps: Option<&[(u16, Ty, super::backend_temporaries::TemporaryLease)]>,
     code: &mut CodeBuilder,
 ) {
+    let Elements {
+        values: elements,
+        spreads,
+        components,
+    } = elements;
     let builder = "kotlin/jvm/internal/SpreadBuilder";
     let class = emitter.cw.class_ref(builder);
     code.new_obj(class);
@@ -296,14 +389,20 @@ fn emit_reference_spread(
     code.push_int(elements.len() as i32, emitter.cw);
     let init = emitter.cw.methodref(builder, "<init>", "(I)V");
     code.invokespecial(init, 1, 0);
-    let box_element = reference_array_scalar_adapter(element_type);
+    // kotlinc parks the builder in a local and reloads it for every `add` / `addSpread`, then
+    // sizes the result array from it: `toArray(new T[builder.size()])`.
+    let builder_ty = Ty::obj(builder);
+    let held = emitter.frame.enter_temp(TempRole::VarargArray, builder_ty);
+    let builder_slot = held.slot();
+    store(builder_ty, builder_slot, code);
+    let builder_lease = emitter.lease_frame_temporary(held, builder_ty);
     for (index, &element) in elements.iter().enumerate() {
-        code.dup();
+        mark_array_line(emitter, array, code);
+        load(builder_ty, builder_slot, code);
         if let Some(temps) = temps {
             let (slot, ty, _) = temps[index];
             load(ty, slot, code);
         } else {
-            // Preserve the established byte sequence when no child introduces control flow.
             emitter.emit_value(element, code);
         }
         let produced = temps.map_or_else(|| emitter.value_ty(element), |temps| temps[index].1);
@@ -312,14 +411,20 @@ fn emit_reference_spread(
                 .cw
                 .methodref(builder, "addSpread", "(Ljava/lang/Object;)V")
         } else {
+            let box_element = element_box_adapter(components, index, element_type);
             box_reference_scalar(emitter, box_element, produced, code);
             emitter
                 .cw
                 .methodref(builder, "add", "(Ljava/lang/Object;)V")
         };
+        mark_array_line(emitter, array, code);
         code.invokevirtual(method, 1, 0);
     }
-    code.push_int(0, emitter.cw);
+    mark_array_line(emitter, array, code);
+    load(builder_ty, builder_slot, code);
+    load(builder_ty, builder_slot, code);
+    let size = emitter.cw.methodref(builder, "size", "()I");
+    code.invokevirtual(size, 0, 1);
     emit_reference_new_array(emitter, element_type, array.reified_marker, code);
     let to_array = emitter.cw.methodref(
         builder,
@@ -331,6 +436,7 @@ fn emit_reference_spread(
         .cw
         .class_ref(&type_descriptor(ir_ty_to_jvm(array.ty)));
     code.checkcast(array_class);
+    emitter.release_temporary(builder_lease);
 }
 
 /// Build a packed array through the next local slot, matching kotlinc's evaluation and frame shape.
@@ -338,6 +444,7 @@ pub(super) fn emit_packed_array(
     emitter: &mut Emitter<'_>,
     array: NewArray<'_>,
     elements: &[u32],
+    components: &[Option<Ty>],
     code: &mut CodeBuilder,
 ) {
     let array_type = array.ty;
@@ -351,7 +458,7 @@ pub(super) fn emit_packed_array(
         .iter()
         .any(|&element| emitter.spills_operand_prefix(element))
     {
-        emit_packed_array_through_temps(emitter, array, elements, code);
+        emit_packed_array_through_temps(emitter, array, elements, components, code);
         return;
     }
     code.push_int(elements.len() as i32, emitter.cw);
@@ -368,16 +475,17 @@ pub(super) fn emit_packed_array(
     }
 
     let array_type = ir_ty_to_jvm(array_type);
-    let array = emitter.frame.enter_temp(TempRole::VarargArray, array_type);
-    let slot = array.slot();
+    let temporary = emitter.frame.enter_temp(TempRole::VarargArray, array_type);
+    let slot = temporary.slot();
     store(array_type, slot, code);
-    let array_lease = emitter.lease_frame_temporary(array, array_type);
+    let array_lease = emitter.lease_frame_temporary(temporary, array_type);
 
     let (store_op, width) = array_store_op(element_type, reference_array);
-    let box_element = reference_array
-        .then(|| reference_array_scalar_adapter(element_type))
-        .flatten();
     for (index, &element) in elements.iter().enumerate() {
+        let box_element = reference_array
+            .then(|| element_box_adapter(components, index, element_type))
+            .flatten();
+        mark_array_line(emitter, array, code);
         load(array_type, slot, code);
         code.push_int(index as i32, emitter.cw);
         emitter.emit_value(element, code);
@@ -387,6 +495,7 @@ pub(super) fn emit_packed_array(
         code.array_store(store_op, width);
     }
 
+    mark_array_line(emitter, array, code);
     load(array_type, slot, code);
     emitter.release_temporary(array_lease);
 }
@@ -397,6 +506,7 @@ fn emit_packed_array_through_temps(
     emitter: &mut Emitter<'_>,
     array: NewArray<'_>,
     elements: &[u32],
+    components: &[Option<Ty>],
     code: &mut CodeBuilder,
 ) {
     let array_type = array.ty;
@@ -404,6 +514,7 @@ fn emit_packed_array_through_temps(
     let reference_array = array_type.is_reference_array();
     let temps = emitter.spill_to_temps(elements, code);
 
+    mark_array_line(emitter, array, code);
     code.push_int(elements.len() as i32, emitter.cw);
     if element_type.is_jvm_scalar() && !reference_array {
         code.newarray(prim_newarray_atype(element_type));
@@ -412,18 +523,19 @@ fn emit_packed_array_through_temps(
     }
 
     let jvm_array_type = ir_ty_to_jvm(array_type);
-    let array = emitter
+    let temporary = emitter
         .frame
         .enter_temp(TempRole::VarargArray, jvm_array_type);
-    let slot = array.slot();
+    let slot = temporary.slot();
     store(jvm_array_type, slot, code);
-    let array_lease = emitter.lease_frame_temporary(array, jvm_array_type);
+    let array_lease = emitter.lease_frame_temporary(temporary, jvm_array_type);
 
     let (store_op, width) = array_store_op(element_type, reference_array);
-    let box_element = reference_array
-        .then(|| reference_array_scalar_adapter(element_type))
-        .flatten();
     for (index, &(temp_slot, temp_ty, _)) in temps.iter().enumerate() {
+        let box_element = reference_array
+            .then(|| element_box_adapter(components, index, element_type))
+            .flatten();
+        mark_array_line(emitter, array, code);
         load(jvm_array_type, slot, code);
         code.push_int(index as i32, emitter.cw);
         load(temp_ty, temp_slot, code);
@@ -432,6 +544,7 @@ fn emit_packed_array_through_temps(
     }
 
     // Newest first: the array was entered above the element temporaries.
+    mark_array_line(emitter, array, code);
     load(jvm_array_type, slot, code);
     emitter.release_temporary(array_lease);
     emitter.release_operand_spills(&temps);

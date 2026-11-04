@@ -1,17 +1,12 @@
 //! Stable lookup of every declared bound of a type parameter, which `Ty::TyParam` cannot carry.
 //!
-//! A type-parameter type carries one upper bound. Which one depends on where the type was built:
-//! a declaration's own signature lists a classifier bound first, while the same parameter
-//! referenced from another parameter's bound keeps the written order. Assignability therefore
+//! A type-parameter type carries one upper bound, its first written one. Assignability therefore
 //! needs all declared bounds by the declaration-scoped semantic identity, including during Pass 1
-//! before resolved headers exist.
+//! before resolved headers exist. Which bound a target erases the parameter to is the backend's
+//! choice, made from the declaration's complete bounds.
 
 use crate::types::TyKind;
-use crate::{
-    fx_hash::HashMap,
-    libraries::GenericSig,
-    types::{ty_with_transitive_param_bounds, Ty},
-};
+use crate::{fx_hash::HashMap, types::Ty};
 
 use super::{ClassSig, SymbolTable, TParams};
 
@@ -43,43 +38,6 @@ impl LexicalBoundsIndex {
     pub(super) fn all(&self, identity: &str) -> Option<Vec<Ty>> {
         self.by_parameter.get(identity).cloned()
     }
-}
-
-/// Put each concrete class bound first for JVM erasure, then update every carried reference to a
-/// reordered formal. Replacement bounds are hydrated transitively because one formal's new class
-/// bound can itself contain another reordered formal. The shared type operation owns cycle safety.
-pub(super) fn order_primary_class_bounds(
-    signature: &mut GenericSig,
-    mut bound_is_interface: impl FnMut(Ty) -> bool,
-) {
-    let mut primaries = HashMap::default();
-    for (formal, bounds) in signature.formals.iter().zip(&mut signature.formal_bounds) {
-        let Some(primary) = bounds.iter().position(|bound| {
-            bound.non_null().kotlin_class_internal().is_some() && !bound_is_interface(*bound)
-        }) else {
-            continue;
-        };
-        if primary == 0 {
-            continue;
-        }
-        let primary = bounds.remove(primary);
-        bounds.insert(0, primary);
-        primaries.insert(formal.clone(), primary);
-    }
-    if primaries.is_empty() {
-        return;
-    }
-    let recarry = |ty: Ty| ty_with_transitive_param_bounds(ty, &primaries);
-    for bounds in &mut signature.formal_bounds {
-        for bound in bounds {
-            *bound = recarry(*bound);
-        }
-    }
-    for parameter in &mut signature.params {
-        *parameter = recarry(*parameter);
-    }
-    signature.receiver = signature.receiver.map(recarry);
-    signature.ret = recarry(signature.ret);
 }
 
 #[derive(Default)]

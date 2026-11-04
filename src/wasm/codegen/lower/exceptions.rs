@@ -3,11 +3,44 @@
 use crate::backend::BackendCompilerIntrinsic as CompilerIntrinsic;
 use crate::fir::ExternalCallableId;
 use crate::ir::IrCatch;
-use crate::types::{type_name, TypeName};
+use crate::types::TypeName;
 
 use super::*;
 
 impl Body<'_> {
+    /// A reference assertion keeps its precise heap carrier and evaluates its input once. Its
+    /// failed edge throws the authenticated Kotlin NPE through the ordinary exception tag.
+    pub(super) fn assert_nonnull_reference(
+        &mut self,
+        operand: u32,
+        reference: ValType,
+    ) -> Result<(), Unsupported> {
+        let structure = self.runtime.exceptions.ensure_class(
+            self.module,
+            self.classifiers,
+            crate::libraries::RuntimeExceptionKind::NullPointer.classifier(),
+        )?;
+        let value = self.local(reference);
+        self.expression(operand)?;
+        self.code
+            .local_set(value)
+            .local_get(value)
+            .ref_is_null()
+            .if_(BlockType::Empty);
+        self.runtime.exceptions.construct_class(
+            &mut self.code,
+            structure,
+            None,
+            self.runtime.string,
+        );
+        self.code
+            .throw(self.runtime.exceptions.tag)
+            .end()
+            .local_get(value)
+            .ref_as_non_null();
+        Ok(())
+    }
+
     pub(super) fn new_object(
         &mut self,
         internal: TypeName,
@@ -21,7 +54,7 @@ impl Body<'_> {
         }
         let operation = external
             .and_then(|target| self.callables.callable(target))
-            .and_then(|fact| fact.member_realization.compiler_intrinsic());
+            .and_then(|fact| fact.compiler_operation());
         let Some(CompilerIntrinsic::ThrowableConstructor { message }) = operation else {
             return self.construction(internal, args, params);
         };
@@ -45,7 +78,7 @@ impl Body<'_> {
 
     pub(super) fn is_throwable_message(&self, target: ExternalCallableId) -> bool {
         self.callables.callable(target).is_some_and(|fact| {
-            fact.compiler_intrinsic == Some(CompilerIntrinsic::ThrowableMessage)
+            fact.compiler_operation() == Some(CompilerIntrinsic::ThrowableMessage)
         })
     }
 
@@ -98,7 +131,14 @@ impl Body<'_> {
         let [catch] = catches else {
             return Err("a `try` without exactly one Throwable catch".into());
         };
-        if catch.ty != Ty::obj_name(type_name("kotlin/Throwable")) {
+        let catch_layout = catch
+            .ty
+            .obj_internal()
+            .and_then(|identity| self.classifiers.classifier(identity))
+            .and_then(|fact| fact.runtime_exception);
+        if catch.ty.is_nullable()
+            || !matches!(catch_layout, Some(layout) if layout.kind == crate::libraries::RuntimeExceptionKind::Throwable)
+        {
             return Err(format!("a catch of `{}`", describe(catch.ty)));
         }
         let result_block = carrier(result)?.map_or(BlockType::Empty, BlockType::Value);

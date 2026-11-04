@@ -80,6 +80,9 @@ impl BodyLowering<'_> {
             .is_none()
             .then(|| super::string_concatenation::flattened_concatenation(self.body, expression_id))
             .flatten();
+        let builtin_call = (folded.is_none() && concatenation.is_none())
+            .then(|| super::builtin_calls::builtin_call(self.body, expression))
+            .flatten();
         let lowered = match &expression.kind {
             _ if concatenation.is_some() => {
                 let parts = concatenation.expect("guarded by the arm");
@@ -154,7 +157,11 @@ impl BodyLowering<'_> {
                 let slot = self
                     .implicit_receiver_slot(*current, *depth)
                     .ok_or(FirLoweringFailure::MissingImplicitReceiver { origin })?;
-                self.ir.add_expr(IrExpr::GetValue(slot))
+                let read = self.ir.add_expr(IrExpr::GetValue(slot));
+                self.ir
+                    .binding_read_stability
+                    .insert(read, crate::ir::IrBindingStability::Stable);
+                read
             }
             FirExprKind::EnclosingReceiver { path } => self.enclosing_receiver(path, origin)?,
             FirExprKind::CapturedImplicitReceiver {
@@ -166,7 +173,11 @@ impl BodyLowering<'_> {
                 let slot = self
                     .implicit_receiver_capture_slot(*enclosing_depth, *current, *depth, path)
                     .ok_or(FirLoweringFailure::MissingImplicitReceiver { origin })?;
-                self.ir.add_expr(IrExpr::GetValue(slot))
+                let read = self.ir.add_expr(IrExpr::GetValue(slot));
+                self.ir
+                    .binding_read_stability
+                    .insert(read, crate::ir::IrBindingStability::Stable);
+                read
             }
             FirExprKind::SingletonValue { classifier } => self.checked_singleton(*classifier),
             FirExprKind::EnumEntry {
@@ -190,6 +201,7 @@ impl BodyLowering<'_> {
                     if let Some(stability) = self.binding_stability.get(value).copied() {
                         self.ir.binding_read_stability.insert(read, stability);
                     }
+                    self.record_crossinline_read(read, self.crossinline_parameter_slot(*value));
                     read
                 }
             }
@@ -222,6 +234,7 @@ impl BodyLowering<'_> {
                 context_arguments,
                 substitutions,
             } => {
+                let source_line = self.body.expression_debug_lines(expression_id).source;
                 let lowered = self.checked_property_read(
                     target,
                     *dispatch_receiver,
@@ -237,15 +250,7 @@ impl BodyLowering<'_> {
                         .map(|signature| signature.result.get()),
                     crate::fir::FirPropertyTarget::External { result, .. } => Some(result.get()),
                 };
-                if declared.is_some_and(|declared| declared != expression.ty.get()) {
-                    self.ir.add_expr(IrExpr::TypeOp {
-                        op: IrTypeOp::ImplicitCoercion,
-                        arg: lowered,
-                        type_operand: expression.ty.get(),
-                    })
-                } else {
-                    lowered
-                }
+                self.declaration_result(lowered, declared, expression.ty.get(), source_line)
             }
             FirExprKind::PropertyWrite {
                 target,
@@ -326,8 +331,8 @@ impl BodyLowering<'_> {
                 })
             }
             FirExprKind::Call(call) => {
-                let lowered = self
-                    .checked_call(call, self.body.expression_debug_lines(expression_id).source)?;
+                let source_line = self.body.expression_debug_lines(expression_id).source;
+                let lowered = self.checked_call(call, source_line)?;
                 let declared_result = match call.target {
                     crate::fir::FirCallTarget::Module(target) => self
                         .index
@@ -345,7 +350,7 @@ impl BodyLowering<'_> {
                         ..
                     } => Some(physical_result.get()),
                 };
-                self.declaration_result(lowered, declared_result, expression.ty.get())
+                self.declaration_result(lowered, declared_result, expression.ty.get(), source_line)
             }
             FirExprKind::ConstructorCall(call) => self.checked_constructor_call(call)?,
             FirExprKind::AnonymousObject(object) => self.anonymous_object(object)?,
@@ -969,6 +974,8 @@ impl BodyLowering<'_> {
                 });
                 if *suspend {
                     self.ir.suspend_calls.insert(invoke, result.get());
+                } else {
+                    super::inlining::splice_immediate_lambda(self, invoke, origin)?;
                 }
                 invoke
             }
@@ -1064,6 +1071,8 @@ impl BodyLowering<'_> {
                 self.safe_call_expression(expression_id, receiver, *selector, expression.ty.get())?
             }
             FirExprKind::Elvis { lhs, rhs } => {
+                // Set only while this elvis is the next link of an enclosing chain.
+                let chain_start = self.elvis_chain_start.take();
                 let lhs_value = self.expression(*lhs)?;
                 let temporary = self.allocate_temporary();
                 let variable = self.ir.add_expr(IrExpr::Variable {
@@ -1077,6 +1086,13 @@ impl BodyLowering<'_> {
                     init: Some(lhs_value),
                     named: false,
                 });
+                // fir2ir declares the temporary where the elvis starts: for a later link of a
+                // chain, where the chain starts.
+                let start = chain_start
+                    .unwrap_or_else(|| self.body.expression_debug_lines(expression_id).start);
+                if start != 0 {
+                    self.ir.elvis_temporaries.insert(variable, start);
+                }
                 let condition_lhs = self.ir.add_expr(IrExpr::GetValue(temporary));
                 let null = self.ir.add_expr(IrExpr::Const(IrConst::Null));
                 let condition = self.ir.add_expr(IrExpr::PrimitiveBinOp {
@@ -1084,7 +1100,22 @@ impl BodyLowering<'_> {
                     lhs: condition_lhs,
                     rhs: null,
                 });
-                let rhs = self.expression(*rhs)?;
+                let next_link = match self.body.expr(*rhs).map(|rhs| &rhs.kind) {
+                    Some(FirExprKind::Elvis { lhs: next, .. }) => Some(*next),
+                    _ => None,
+                };
+                let chained = next_link.is_some();
+                if chained && start != 0 {
+                    self.elvis_chain_start = Some(start);
+                }
+                let rhs = self.expression(*rhs);
+                self.elvis_chain_start = None;
+                let rhs = rhs?;
+                if chained {
+                    // `a ?: b ?: c` is one chain that begins with `a`, as kotlinc folds it: the
+                    // later elvis does not state a start line of its own.
+                    self.ir.kept_start_lines.remove(&rhs);
+                }
                 let rhs = self.coerce_result(rhs, expression.ty.get());
                 let lhs = self.ir.add_expr(IrExpr::GetValue(temporary));
                 let lhs = self.coerce_result(lhs, expression.ty.get());
@@ -1092,7 +1123,14 @@ impl BodyLowering<'_> {
                     branches: vec![(Some(condition), rhs), (None, lhs)],
                 });
                 self.ir.logical_types.insert(result, expression.ty.get());
-                let line = self.body.expression_debug_lines(expression_id).source;
+                // The fold's right-side condition marks the elvis's line. Where the right side is
+                // the chain's next link, kotlinc's chain marks that link's operand line there
+                // instead, and the last link marks the line the chain started on.
+                let line = match (next_link, chain_start) {
+                    (Some(next), _) => self.body.expression_debug_lines(next).start,
+                    (None, Some(chain_start)) => chain_start,
+                    (None, None) => self.body.expression_debug_lines(expression_id).source,
+                };
                 self.ir.whens.elvises.insert(result, line);
                 // An elvis over a safe call is one more guard of that call's chain: its left
                 // value's null check joins the chain's, and every `null` reaches the right side.
@@ -1104,10 +1142,14 @@ impl BodyLowering<'_> {
                     self.ir.null_guards.insert(result);
                     self.ir.elvis_safe_call_guards.insert(result);
                 }
-                self.ir.add_expr(IrExpr::Block {
+                let elvis = self.ir.add_expr(IrExpr::Block {
                     stmts: vec![variable],
                     value: Some(result),
-                })
+                });
+                // kotlinc states the elvis's own line where it begins and again where its value is
+                // stored, and keeps it when the left value or the store marks another line there.
+                self.ir.kept_start_lines.insert(elvis);
+                elvis
             }
             FirExprKind::Throw(value) => {
                 let operand = self.expression(*value)?;
@@ -1416,13 +1458,14 @@ impl BodyLowering<'_> {
                 arguments,
                 parameter_types,
             } => {
+                let source_line = self.body.expression_debug_lines(expression_id).source;
                 let (call, declared) = self.checked_local_call(
                     target.clone(),
                     *extension_receiver,
                     arguments,
                     parameter_types,
                 )?;
-                self.declaration_result(call, Some(declared), expression.ty.get())
+                self.declaration_result(call, Some(declared), expression.ty.get(), source_line)
             }
             FirExprKind::Lambda {
                 callable,
@@ -1465,23 +1508,30 @@ impl BodyLowering<'_> {
         if !matches!(expression.kind, FirExprKind::Lambda { .. }) {
             self.record_callable_reference_provenance(expression_id, first_generated);
         }
-        let debug = self.body.expression_debug_lines(expression_id);
+        let mut debug = self.body.expression_debug_lines(expression_id);
+        // kotlinc replaces an array-factory call (`intArrayOf(a, b)`) by its vararg, whose offsets
+        // start at the first element, so the call's own line never opens. An empty factory call
+        // keeps its own position.
+        if let FirExprKind::ArrayLiteral { elements, .. } = &expression.kind {
+            let first = elements
+                .first()
+                .map(|first| self.body.expression_debug_lines(first.value).source);
+            if let Some(line) = first.filter(|&line| line != 0) {
+                debug.source = line;
+            }
+        }
         if debug.positionless {
             self.ir.mark_positionless(lowered);
         }
         if debug.source != 0 {
             self.ir.expr_source_lines.insert(lowered, debug.source);
+            // The builtin call this node realizes, when lowering made a node of its own for it.
+            if let Some(call) = builtin_call.filter(|_| lowered as usize >= first_generated) {
+                self.ir.builtin_calls.insert(lowered, call);
+            }
             // A call whose operands were stored first keeps the call's line on the call itself, which
             // kotlinc marks once those operands are evaluated.
             if let Some(&call) = self.operand_bound_calls.get(&lowered) {
-                self.ir
-                    .expr_source_lines
-                    .entry(call)
-                    .or_insert(debug.source);
-            }
-            // So does a call one of whose operands is inlined from a compiled body: the inlined
-            // code ran under the callee's lines.
-            if let Some(call) = self.ir.call_after_compiled_inline_operand(lowered) {
                 self.ir
                     .expr_source_lines
                     .entry(call)
@@ -1605,9 +1655,26 @@ impl BodyLowering<'_> {
     /// Preserve the checked semantic conversion from a declaration's result to its call-site
     /// substitution. Whether that conversion crosses a physical ABI boundary is target-owned; the
     /// JVM records its answer after generic erasure.
-    fn declaration_result(&mut self, call: ExprId, declared: Option<Ty>, result: Ty) -> ExprId {
+    fn declaration_result(
+        &mut self,
+        call: ExprId,
+        declared: Option<Ty>,
+        result: Ty,
+        source_line: u32,
+    ) -> ExprId {
         if declared.is_none_or(|declared| declared == result) {
             return call;
+        }
+        // The conversion remains the same checked source operation. Keep its position on the
+        // original producer and on the selected call inside an operand-evaluation block.
+        if source_line != 0 {
+            self.ir.expr_source_lines.entry(call).or_insert(source_line);
+            if let Some(&selected) = self.operand_bound_calls.get(&call) {
+                self.ir
+                    .expr_source_lines
+                    .entry(selected)
+                    .or_insert(source_line);
+            }
         }
         let coercion = self.ir.add_expr(IrExpr::TypeOp {
             op: IrTypeOp::ImplicitCoercion,
@@ -2065,6 +2132,18 @@ impl BodyLowering<'_> {
         // explicit conversion so nullable primitive receivers are unboxed before their selected
         // operation; a raw nullable-slot read would put a wrapper into a primitive local.
         let selector_read = self.ir.add_expr(IrExpr::GetValue(temporary));
+        // fir2ir reads the temporary as the selector's receiver at the receiver's own position,
+        // and tests it for `null` at the safe call's (its `?.` selector's).
+        let safe_call_line = self.body.expression_debug_lines(safe_call).source;
+        let receiver_line = self.body.expression_debug_lines(receiver.value).start;
+        if receiver_line != 0 {
+            self.ir.safe_call_reads.insert(
+                selector_read,
+                crate::ir::IrSafeCallRead::Receiver {
+                    start_line: receiver_line,
+                },
+            );
+        }
         let selector_read = self.ir.add_expr(IrExpr::TypeOp {
             op: IrTypeOp::ImplicitCoercion,
             arg: selector_read,
@@ -2076,11 +2155,20 @@ impl BodyLowering<'_> {
         self.constants.bind_temporary(receiver.value);
         let null = self.ir.add_expr(IrExpr::Const(IrConst::Null));
         let condition_read = self.ir.add_expr(IrExpr::GetValue(temporary));
+        let null_check = crate::ir::IrSafeCallRead::NullCheck {
+            line: safe_call_line,
+        };
+        if safe_call_line != 0 {
+            self.ir.safe_call_reads.insert(condition_read, null_check);
+        }
         let condition = self.ir.add_expr(IrExpr::PrimitiveBinOp {
             op: IrBinOp::Eq,
             lhs: condition_read,
             rhs: null,
         });
+        if safe_call_line != 0 {
+            self.ir.safe_call_reads.insert(condition, null_check);
+        }
         let selector = self.expression(selector)?;
         let selector = self.coerce_result(selector, result_type);
         let null_result = if result_type == Ty::Unit {
@@ -2103,10 +2191,12 @@ impl BodyLowering<'_> {
         self.ir.whens.exhaustive.insert(guarded, result_type);
         self.ir.logical_types.insert(guarded, result_type);
         self.ir.null_guards.insert(guarded);
-        Ok(self.ir.add_expr(IrExpr::Block {
+        let block = self.ir.add_expr(IrExpr::Block {
             stmts: vec![variable],
             value: Some(guarded),
-        }))
+        });
+        self.ir.safe_calls.insert(block);
+        Ok(block)
     }
 
     fn storage_class(
@@ -2139,12 +2229,25 @@ impl BodyLowering<'_> {
             .dispatch_receiver_slot()
             .map(|slot| self.ir.add_expr(IrExpr::GetValue(slot)))
             .ok_or(FirLoweringFailure::MissingLocalClass(owner))?;
+        self.capture_field_read(receiver, class, field)
+    }
+
+    /// Read capture `field` (its identity) of `class` from `receiver`, keeping the capture's
+    /// `crossinline` provenance on the read.
+    fn capture_field_read(
+        &mut self,
+        receiver: ExprId,
+        class: crate::ir::ClassId,
+        field: u32,
+    ) -> Result<ExprId, FirLoweringFailure> {
         let index = self.capture_field_index(class, field)?;
-        Ok(self.ir.add_expr(IrExpr::GetField {
+        let read = self.ir.add_expr(IrExpr::GetField {
             receiver,
             class,
             index,
-        }))
+        });
+        self.record_crossinline_read(read, self.class_field_crossinline_parameter(class, field));
+        Ok(read)
     }
 
     /// The field-table position of capture `field` (its identity) of `class`. A local class stores
@@ -2168,6 +2271,30 @@ impl BodyLowering<'_> {
             }
             _ => Ok(field),
         }
+    }
+
+    /// The `crossinline` parameter capture `field` (its identity) of local class `owner` holds, as
+    /// recorded when the class's captures were prepared.
+    pub(super) fn class_capture_crossinline_parameter(
+        &self,
+        owner: crate::fir::DeclarationId,
+        field: u32,
+    ) -> Result<Option<u32>, FirLoweringFailure> {
+        Ok(self.class_field_crossinline_parameter(self.storage_class(owner)?, field))
+    }
+
+    fn class_field_crossinline_parameter(
+        &self,
+        class: crate::ir::ClassId,
+        field: u32,
+    ) -> Option<u32> {
+        let declaration = &self.ir.classes[class as usize];
+        declaration
+            .ctor_args
+            .get(field as usize)
+            .filter(|_| field < declaration.constructor_prefix_count)
+            .and_then(|argument| argument.capture.as_ref())
+            .and_then(|capture| capture.crossinline_parameter)
     }
 
     pub(super) fn constructor_capture_parameter(
@@ -2202,7 +2329,10 @@ impl BodyLowering<'_> {
                 if !valid_owner || field >= self.class_constructor_capture_count {
                     return Err(FirLoweringFailure::InvalidConstructorCapture { owner, field });
                 }
-                return Ok(self.ir.add_expr(IrExpr::GetValue(field + 1)));
+                let read = self.ir.add_expr(IrExpr::GetValue(field + 1));
+                let parameter = self.class_capture_crossinline_parameter(owner, field)?;
+                self.record_crossinline_read(read, parameter);
+                return Ok(read);
             }
         };
         let capture = self
@@ -2213,7 +2343,9 @@ impl BodyLowering<'_> {
                 enclosing_depth,
                 source,
             })?;
-        Ok(self.ir.add_expr(IrExpr::GetValue(capture.slot)))
+        let read = self.ir.add_expr(IrExpr::GetValue(capture.slot));
+        self.record_crossinline_read(read, capture.crossinline_parameter);
+        Ok(read)
     }
 
     fn constructor_context_parameter(
@@ -2276,12 +2408,7 @@ impl BodyLowering<'_> {
                 ),
             });
         }
-        let index = self.capture_field_index(class, field)?;
-        Ok(self.ir.add_expr(IrExpr::GetField {
-            receiver,
-            class,
-            index,
-        }))
+        self.capture_field_read(receiver, class, field)
     }
 
     pub(super) fn enclosing_class_storage_read(
@@ -2326,12 +2453,7 @@ impl BodyLowering<'_> {
             return Err(FirLoweringFailure::MissingLocalClass(owner));
         }
         let class = self.storage_class(owner)?;
-        let index = self.capture_field_index(class, field)?;
-        Ok(self.ir.add_expr(IrExpr::GetField {
-            receiver,
-            class,
-            index,
-        }))
+        self.capture_field_read(receiver, class, field)
     }
 
     /// Realize the checker-published semantic enclosing-instance path in the current common class

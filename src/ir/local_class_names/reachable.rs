@@ -27,7 +27,8 @@ impl IrFile {
         owned_expressions: &HashSet<ExprId>,
         detached_impls: &mut HashSet<FunId>,
     ) -> Vec<DetachedLambdaImplementation> {
-        if names.is_empty() {
+        let names = &IdentityRemap::classifiers(names);
+        if names.is_identity() {
             return Vec::new();
         }
         let class_ids = self
@@ -224,7 +225,7 @@ impl IrFile {
             remap_owned_function(self, function, names);
         }
 
-        let placeholders = names.values().copied().collect::<HashSet<_>>();
+        let placeholders = names.classifiers.values().copied().collect::<HashSet<_>>();
         let copies = self
             .classes
             .iter()
@@ -338,7 +339,7 @@ fn detach_lambda_impl(ir: &mut IrFile, source: FunId) -> FunId {
     target
 }
 
-fn remap_owned_function(ir: &mut IrFile, function: FunId, names: &HashMap<TypeName, TypeName>) {
+fn remap_owned_function(ir: &mut IrFile, function: FunId, names: &IdentityRemap<'_>) {
     {
         let shape = &mut ir.functions[function as usize];
         tys(&mut shape.params, names);
@@ -423,7 +424,7 @@ fn remap_owned_function(ir: &mut IrFile, function: FunId, names: &HashMap<TypeNa
 fn remap_class_value<K>(
     map: &mut HashMap<(ClassId, K), Ty>,
     class: ClassId,
-    names: &HashMap<TypeName, TypeName>,
+    names: &IdentityRemap<'_>,
 ) where
     K: Eq + std::hash::Hash + Copy,
 {
@@ -439,7 +440,7 @@ fn remap_class_value<K>(
     }
 }
 
-fn remap_secondary_capture(ir: &mut IrFile, class: ClassId, names: &HashMap<TypeName, TypeName>) {
+fn remap_secondary_capture(ir: &mut IrFile, class: ClassId, names: &IdentityRemap<'_>) {
     let keys = ir
         .shared_secondary_super_capture_parameters
         .keys()

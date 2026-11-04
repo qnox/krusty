@@ -42,15 +42,19 @@ impl Emitter<'_> {
         }
         self.link_safe_call_chain(block, code);
         let copied_caller = self.copied_function_caller(block, code);
-        let enclosing_statement_line = self.statement_line;
         let saved = self.open_slot_scope();
         let terminal_target = self.terminal_statement_target.take();
         let marked_initializer = self.renders_initializer_boundary(block);
         self.mark_initializer_line(block, false, code);
-        // The optimized safe call still owns an ordinary lexical block. Enter its depth before
-        // asking for the fast path so nested selector emission, local ranges, and frames observe
-        // the same lifecycle as `emit_open_block`.
-        self.block_depth += 1;
+        let entry = InlineBodyEntry {
+            normalize_at_lambda_frame: delays_stack_normalization,
+            stack_height: inline_stack_height,
+            within_inline_lambda,
+            opening: self.external_inline_body_opening(block, &stmts),
+            copied_function: copied_caller.is_some().then_some(block),
+            discarded_frame_result: value
+                .and_then(|value| self.discarded_copied_frame_tail(block, &stmts, value)),
+        };
         let EmittedBlock {
             discard_after_close,
             retains_postfix_temporary,
@@ -59,31 +63,7 @@ impl Emitter<'_> {
             emit_after_frame_close,
             discard_after_frame,
             close_discarded_provider_frame,
-        } = if self.try_emit_duplicated_safe_call(block, &stmts, value, true, code) {
-            self.terminal_statement_target = None;
-            self.statement_line = enclosing_statement_line;
-            EmittedBlock {
-                discard_after_close: None,
-                retains_postfix_temporary: false,
-                reserved_inline_stack: None,
-                close_lambda_before_locals: false,
-                emit_after_frame_close: None,
-                discard_after_frame: None,
-                close_discarded_provider_frame: None,
-            }
-        } else {
-            self.block_depth -= 1;
-            let entry = InlineBodyEntry {
-                normalize_at_lambda_frame: delays_stack_normalization,
-                stack_height: inline_stack_height,
-                within_inline_lambda,
-                opening: self.external_inline_body_opening(block, &stmts),
-                copied_function: copied_caller.is_some().then_some(block),
-                discarded_frame_result: value
-                    .and_then(|value| self.discarded_copied_frame_tail(block, &stmts, value)),
-            };
-            self.emit_open_block(block, stmts, value, terminal_target, entry, true, code)
-        };
+        } = self.emit_open_block(block, stmts, value, terminal_target, entry, true, code);
         self.mark_initializer_line(block, true, code);
         let mut anchored = false;
         if !self.ir.callable_scopes.contains(&block) {
@@ -189,9 +169,7 @@ impl Emitter<'_> {
         let mut deferred_invocation_result = None;
         let mut copied_frame_result = None;
         let optimized_postfix = self.emit_postfix_iinc(block, false, code);
-        if !optimized_postfix
-            && !self.try_emit_duplicated_safe_call(block, stmts, value, false, code)
-        {
+        if !optimized_postfix {
             let mut normalize_at_lambda_frame = delays_stack_normalization;
             let opening = self.external_inline_body_opening(block, stmts);
             let mut bound_operands = 0;
@@ -1214,6 +1192,11 @@ impl Emitter<'_> {
             // FixStack replaces the opening marker with the saved caller stack. Keep that
             // generated store inside the lambda frame's mapped line interval.
             self.mark_statement_line(statement, code);
+            // A statement that states its own line before its operands (a safe call, an
+            // intrinsic call) keeps that entry where an operand marks another line.
+            if self.keeps_start_line(statement) {
+                self.mark_kept_start_line(statement, code);
+            }
             if normalize_at_lambda_frame
                 && matches!(
                     self.ir.debug_local_provenance(statement),
@@ -1432,6 +1415,9 @@ impl Emitter<'_> {
         let Some(&line) = self.ir.expr_lines.get(&statement) else {
             return;
         };
+        // kotlinc's `visitStatementContainer` marks no line for a statement apart from its
+        // expression, so this eager entry is the statement value's own until that value marks it.
+        code.mark_value_boundary(statement);
         // A dispatch owns the line entry at the physical call, so this writes no second entry
         // and the statement keeps its source line. Otherwise the marked line is the mapped
         // output line of an inline copy: a later instruction that returns to this statement
@@ -1457,18 +1443,48 @@ impl Emitter<'_> {
         }
         let end = code.bytes.len().min(u16::MAX as usize) as u16;
         let depth = self.block_depth;
+        let mut closed = Vec::new();
         let mut i = 0;
         while i < self.open_locals.len() {
             if self.open_locals[i].depth >= depth {
-                let local = self.open_locals.remove(i);
-                let length = local
-                    .explicit_end
-                    .unwrap_or(end)
-                    .saturating_sub(local.start);
-                local.record(Some(length), code);
+                closed.push(self.open_locals.remove(i));
             } else {
                 i += 1;
             }
+        }
+        self.record_open_locals(
+            closed,
+            |local| {
+                Some(
+                    local
+                        .explicit_end
+                        .unwrap_or(end)
+                        .saturating_sub(local.start),
+                )
+            },
+            code,
+        );
+    }
+
+    /// Record closed locals, `length` giving each one's range, then number the inline frames
+    /// their markers close, innermost first.
+    pub(super) fn record_open_locals(
+        &mut self,
+        locals: Vec<OpenLocal>,
+        length: impl Fn(&OpenLocal) -> Option<u16>,
+        code: &mut CodeBuilder,
+    ) {
+        let mut frames = Vec::new();
+        for local in locals {
+            if local.opens_inline_frame {
+                frames.extend(local.inline_frame);
+            }
+            let length = length(&local);
+            local.record(length, code);
+        }
+        frames.sort_unstable();
+        for frame in frames.into_iter().rev() {
+            self.close_inline_scope_frame(frame, code);
         }
     }
 

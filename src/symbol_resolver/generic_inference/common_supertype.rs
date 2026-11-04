@@ -60,7 +60,7 @@ impl<'a> CommonSupertypeSolver<'a> {
         let nullable = bounds.iter().any(|bound| bound.is_nullable());
         let preserve_nullability = |result: Ty| {
             if nullable && result != Ty::Error {
-                Ty::nullable(result.non_null())
+                Ty::nullable(result)
             } else {
                 result
             }
@@ -81,6 +81,17 @@ impl<'a> CommonSupertypeSolver<'a> {
             return Some(preserve_nullability(Ty::Nothing));
         };
         if rest.iter().all(|bound| *bound == first) {
+            // One classifier joined with its own `(Mutable)` interval keeps the interval: the lower
+            // faces agree and the read-only upper face bounds both.
+            let flexible = Ty::mutability_flexible(first);
+            let first = if bounds
+                .iter()
+                .any(|bound| bound.non_null_keeping_mutability() == flexible)
+            {
+                flexible
+            } else {
+                first
+            };
             return Some(preserve_nullability(first));
         }
         if let Some((_, _, _, result)) =
@@ -311,6 +322,7 @@ fn type_size(ty: Ty) -> usize {
         }
         TyKind::Nullable(inner)
         | TyKind::PlatformNullable(inner)
+        | TyKind::MutabilityFlexible(inner)
         | TyKind::InProjection(inner)
         | TyKind::OutProjection(inner)
         | TyKind::StarProjection(inner)

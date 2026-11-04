@@ -199,6 +199,8 @@ fn bind_concrete_parameter(
     outer_formals: &[String],
     binds: &mut GSigBinds,
 ) -> bool {
+    // `T?` matched against `S?` says only `T = S & Any`: `S` itself may admit null.
+    let through_nullable = shape.is_nullable();
     let shape = shape.non_null();
     let actual = actual.non_null();
     match shape.kind() {
@@ -211,7 +213,12 @@ fn bind_concrete_parameter(
             binds,
         ),
         TyKind::TyParam(name, _) if nested.formals.iter().any(|formal| formal == name) => {
-            let constraint = actual.projection_inner().unwrap_or(actual).non_null();
+            let constraint = actual.projection_inner().unwrap_or(actual);
+            let constraint = if through_nullable {
+                constraint.contributed_through_nullable_formal()
+            } else {
+                constraint.non_null()
+            };
             if !is_concrete_constraint(constraint, &nested.formals, outer_formals) {
                 return true;
             }

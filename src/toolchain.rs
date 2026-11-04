@@ -365,6 +365,27 @@ pub fn ensure_maven_artifact(
     version: &str,
     extension: &str,
 ) -> Option<PathBuf> {
+    ensure_repository_artifact(MAVEN_CENTRAL, group, artifact, version, extension)
+}
+
+const MAVEN_CENTRAL: &str = "https://repo1.maven.org/maven2";
+
+/// Google's Maven repository, the only one that publishes the AndroidX artifacts (the Compose
+/// runtime among them).
+const GOOGLE_MAVEN: &str = "https://dl.google.com/android/maven2";
+
+/// A jar from Google's Maven repository, cached like [`ensure_maven`].
+pub fn ensure_google_maven(group: &str, artifact: &str, version: &str) -> Option<PathBuf> {
+    ensure_repository_artifact(GOOGLE_MAVEN, group, artifact, version, "jar")
+}
+
+fn ensure_repository_artifact(
+    repository: &str,
+    group: &str,
+    artifact: &str,
+    version: &str,
+    extension: &str,
+) -> Option<PathBuf> {
     if extension.is_empty()
         || !extension
             .bytes()
@@ -387,7 +408,7 @@ pub fn ensure_maven_artifact(
         return Some(file);
     }
     let url = format!(
-        "https://repo1.maven.org/maven2/{}/{artifact}/{version}/{artifact}-{version}.{extension}",
+        "{repository}/{}/{artifact}/{version}/{artifact}-{version}.{extension}",
         group.replace('.', "/"),
     );
     let download = maven_download_path(&file);
@@ -450,15 +471,17 @@ pub fn jvm_classpath_jars_for(src: &str) -> Vec<PathBuf> {
 /// The set of `-classpath` jars a box test needs, formed from its directives — mirroring kotlinc's
 /// `JvmEnvironmentConfigurator`: stdlib + kotlin-test + annotations are always present (kotlinc only
 /// drops stdlib under `-no-stdlib`); `WITH_REFLECT` adds kotlin-reflect; `STDLIB_JDK8` adds
-/// kotlin-stdlib-jdk8; `WITH_COROUTINES` adds kotlinx-coroutines-core. Missing jars are fetched from
-/// Maven Central. Memoized per directive-signature — locating jars walks the (huge) gradle/m2 caches,
+/// kotlin-stdlib-jdk8; `WITH_COROUTINES` adds kotlinx-coroutines-core; `WITH_COMPOSE` adds the Compose
+/// runtime. Missing jars are fetched from Maven Central (Google's Maven repository for Compose).
+/// Memoized per directive-signature — locating jars walks the (huge) gradle/m2 caches,
 /// so this collapses thousands of filesystem walks into at most a handful.
 pub fn classpath_jars_for(src: &str) -> Vec<PathBuf> {
     let sig: u8 = (directive(src, "WITH_STDLIB") as u8)
         | (directive(src, "WITH_RUNTIME") as u8) << 1
         | (directive(src, "WITH_REFLECT") as u8) << 2
         | (directive(src, "STDLIB_JDK8") as u8) << 3
-        | (directive(src, "WITH_COROUTINES") as u8) << 4;
+        | (directive(src, "WITH_COROUTINES") as u8) << 4
+        | (directive(src, "WITH_COMPOSE") as u8) << 5;
     static CACHE: std::sync::OnceLock<std::sync::Mutex<crate::fx_hash::HashMap<u8, Vec<PathBuf>>>> =
         std::sync::OnceLock::new();
     let cache = CACHE.get_or_init(|| std::sync::Mutex::new(crate::fx_hash::HashMap::default()));
@@ -502,6 +525,9 @@ fn classpath_jars_uncached(src: &str) -> Vec<PathBuf> {
         {
             jars.push(j);
         }
+    }
+    if extra.compose {
+        jars.extend(compose_runtime_jars().into_iter().flatten());
     }
     if extra.coroutines {
         // Coroutines aren't in the dist; fetch the runtime jar from Maven.
@@ -554,6 +580,29 @@ pub fn serialization_json_jar() -> Option<PathBuf> {
             SERIALIZATION_VERSION,
         )
     })
+}
+
+/// The pinned Compose runtime version `// WITH_COMPOSE` cases compile against. The compiler plugin
+/// ships with the reference distribution; this runtime declares every API the plugin calls.
+pub const COMPOSE_RUNTIME_VERSION: &str = "1.12.1";
+
+/// The Compose runtime jars, the runtime's own dependencies included: what a JVM (desktop)
+/// project that applies the Compose compiler plugin compiles and runs against.
+pub fn compose_runtime_jars() -> Option<Vec<PathBuf>> {
+    Some(vec![
+        ensure_google_maven(
+            "androidx.compose.runtime",
+            "runtime-desktop",
+            COMPOSE_RUNTIME_VERSION,
+        )?,
+        ensure_google_maven(
+            "androidx.compose.runtime",
+            "runtime-annotation-jvm",
+            COMPOSE_RUNTIME_VERSION,
+        )?,
+        ensure_google_maven("androidx.collection", "collection-jvm", "1.5.0")?,
+        coroutines_jar()?,
+    ])
 }
 
 /// Locate the coroutines runtime jar used by classpath suspend tests.

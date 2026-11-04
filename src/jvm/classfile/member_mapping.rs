@@ -121,6 +121,16 @@ impl ClassWriter {
         std::mem::replace(&mut self.members.copying, copying)
     }
 
+    /// Record the class constants `created` names, which no instruction of the class's own code
+    /// interned, as not named by that code.
+    pub(super) fn record_unmapped_classes(&mut self, created: &[String]) {
+        for name in created {
+            if let Some(index) = self.cp.class_index(name) {
+                self.members.copied_classes.insert(index);
+            }
+        }
+    }
+
     /// The `NameAndType` entries only copied member references use: their descriptors were never
     /// mapped for this class.
     pub(super) fn copied_only_name_and_types(&self) -> HashSet<u16> {

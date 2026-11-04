@@ -215,7 +215,8 @@ fn specialize_member_type_with_unbound(
                 if bound.upper_bound_admits_null() {
                     binding
                 } else {
-                    binding.non_null()
+                    // `S & Any` takes the argument's own `& Any` (`T` becomes `T & Any`).
+                    binding.non_null().definitely_non_null()
                 }
             };
             match (position, binding.kind()) {
@@ -297,6 +298,16 @@ fn specialize_member_type_with_unbound(
             } else {
                 Ty::platform_nullable(specialized)
             }
+        }
+        TyKind::MutabilityFlexible(inner) => {
+            Ty::mutability_flexible(specialize_member_type_with_unbound(
+                source,
+                inner,
+                bindings,
+                position,
+                unbound,
+                input_projection,
+            ))
         }
         TyKind::InProjection(inner) => Ty::in_projection(specialize_member_type_with_unbound(
             source,
@@ -539,6 +550,7 @@ fn contains_flexible_variable(ty: Ty) -> bool {
         TyKind::DefinitelyNotNull(inner)
         | TyKind::Nullable(inner)
         | TyKind::PlatformNullable(inner)
+        | TyKind::MutabilityFlexible(inner)
         | TyKind::InProjection(inner)
         | TyKind::OutProjection(inner)
         | TyKind::StarProjection(inner) => contains_flexible_variable(inner),

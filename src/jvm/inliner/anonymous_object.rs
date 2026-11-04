@@ -11,8 +11,7 @@
 //! An object whose constructor is passed one of the call's inline lambdas (a `crossinline` one)
 //! inlines it: the copy keeps the lambda's captured values instead of the lambda, and each of its
 //! methods that called the lambda runs the lambda's body in its place (see `lambda_inlining`).
-//! Objects whose bodies create anonymous objects of their own are a later stage (see "JVM unified
-//! inliner" in `docs/IMPLEMENTATION_PLAN.md`).
+//! Objects whose bodies create anonymous objects of their own are a later stage.
 
 mod constructor;
 use constructor::DeclaredCapture;
@@ -393,13 +392,6 @@ pub(crate) fn regenerate(
         };
         remap_declaration(&mut method, &mut remapper)?;
         if let Some(code) = &method.code {
-            // Only a `$$forInline` copy's machine takes the suspension points a suspend lambda
-            // brings: kotlinc writes one for every suspend method that invokes such a lambda.
-            if continuation.is_none() && lambda_inlining::reads_suspend_lambda(code, &lambdas) {
-                return Err(RegenerationError::Unsupported(
-                    "a suspend lambda in a method without a $$forInline copy",
-                ));
-            }
             // kotlinc's `MethodInliner` transforms every method of a copy: one that reads an inlined
             // lambda, or names an object the copy regenerates in turn (a reified lambda nested in
             // it), has its objects regenerated as the copy's next ones.
@@ -429,6 +421,7 @@ pub(crate) fn regenerate(
                 let code = lambda_inlining::inline_into(
                     &code,
                     new,
+                    continuation.is_some(),
                     &lambdas,
                     &mut lines,
                     regeneration.caller_lines,

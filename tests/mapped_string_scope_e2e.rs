@@ -77,7 +77,7 @@ fn java_only_members_are_not_in_the_kotlin_string_scope() {
     // is what preserves `chars`/`codePoints`), so such a method still reaches `String` one rung up —
     // and whether it does is JDK-DEPENDENT. `getChars` is the trap: `String`-only through JDK 24, but a
     // `CharSequence` default method as of JDK 25, so probing it passes on a JDK 21 developer machine
-    // and fails on a JDK 25 CI runner. See the residual-leak note in docs/SPEC.md.
+    // and fails on a JDK 25 CI runner.
     let stdlib = common::stdlib_jar();
     let jdk = common::jdk_modules();
     for (member, source) in [

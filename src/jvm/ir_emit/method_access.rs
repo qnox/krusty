@@ -3,7 +3,7 @@
 use crate::ir::IrFile;
 use crate::jvm::classfile::{
     ACC_ABSTRACT, ACC_BRIDGE, ACC_FINAL, ACC_PRIVATE, ACC_PROTECTED, ACC_PUBLIC, ACC_STATIC,
-    ACC_SYNTHETIC, ACC_VARARGS,
+    ACC_STRICT, ACC_SYNCHRONIZED, ACC_SYNTHETIC, ACC_VARARGS,
 };
 
 use super::{IrExpr, LambdaMode, LambdaModes};
@@ -101,7 +101,31 @@ pub(super) fn declared_method_access(
     } else {
         0
     };
-    access | synthetic | bridge | varargs_access(ir, fid)
+    access
+        | synthetic
+        | bridge
+        | varargs_access(ir, fid)
+        | annotated_method_modifiers(ir.function_annotations.get(&fid))
+}
+
+/// The method modifiers kotlinc's `calculateMethodFlags` derives from the function's annotations:
+/// `@Synchronized` makes the method `ACC_SYNCHRONIZED` and `@Strictfp` `ACC_STRICT`. Both are
+/// SOURCE annotations, recorded on the declaration (a function or a property accessor) as
+/// resolved identities.
+pub(super) fn annotated_method_modifiers(
+    annotations: Option<&crate::ir::DeclarationAnnotations>,
+) -> u16 {
+    let Some(annotations) = annotations else {
+        return 0;
+    };
+    let mut modifiers = 0;
+    if annotations.declares(crate::types::type_name("kotlin/jvm/Synchronized")) {
+        modifiers |= ACC_SYNCHRONIZED;
+    }
+    if annotations.declares(crate::types::type_name("kotlin/jvm/Strictfp")) {
+        modifiers |= ACC_STRICT;
+    }
+    modifiers
 }
 
 /// kotlinc's `isReifiable`: the function declares a `reified` type parameter. Its erased body only
@@ -212,7 +236,16 @@ pub(super) fn primary_constructor_access(
     is_continuation: bool,
     value_param_ctor: bool,
 ) -> u16 {
-    let access = if class.is_anonymous_object && anonymous_object_in_inline_function(ir, class) {
+    let access = if class.is_anonymous_object
+        && super::enclosure::in_inline_function_scope(ir, class)
+    {
+        ACC_PUBLIC
+    } else if is_continuation
+        && ir.class_id_by_name(class.fq_name_id()).is_some_and(|id| {
+            crate::jvm::suspend_inline_functions::constructed_by_method_copy(ir, id)
+        })
+    {
+        // A method's `$$forInline` copy constructs it, from wherever it is inlined.
         ACC_PUBLIC
     } else if is_continuation || class.is_anonymous_object {
         // A continuation class's ctor is package-private (constructed only by its own file);
@@ -223,6 +256,11 @@ pub(super) fn primary_constructor_access(
         0
     } else if class.is_value {
         ACC_PRIVATE | ACC_SYNTHETIC
+    } else if class.is_singleton()
+        && ir.ctor_visibilities.get(&class.fq_name_id()) == Some(&crate::types::Visibility::Public)
+    {
+        // A generated singleton whose producer declares a public constructor.
+        ACC_PUBLIC
     } else if class.is_singleton() || value_param_ctor || class.is_sealed {
         ACC_PRIVATE
     } else {
@@ -236,14 +274,4 @@ pub(super) fn primary_constructor_access(
         }
     };
     access | primary_constructor_varargs(class)
-}
-
-/// An anonymous object declared directly in an `inline` function. Inlining copies its `new` into
-/// each call site, which may live in another package, so the constructor has to be public. The
-/// class itself stays in the function's package.
-fn anonymous_object_in_inline_function(ir: &IrFile, class: &crate::ir::IrClass) -> bool {
-    let Some(crate::ir::IrEnclosure::Function(function)) = class.enclosure.as_ref() else {
-        return false;
-    };
-    ir.inline_fns.contains(function)
 }

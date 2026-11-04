@@ -68,6 +68,15 @@ pub(super) fn rename(ir: &mut IrFile, under: &Under) {
         };
         names.push((marker, format!("{getter}$annotations")));
     }
+    for property in &ir.package_properties {
+        let Some(marker) = ir.jvm_package_property_annotation_marker(property.property) else {
+            continue;
+        };
+        let getter =
+            crate::jvm::property_annotations::realized_package_getter_name(ir, property.property)
+                .unwrap_or_else(|| crate::names::property_getter_name(&property.name));
+        names.push((marker, format!("{getter}$annotations")));
+    }
     for (marker, name) in names {
         ir.functions[marker as usize].name = name;
     }

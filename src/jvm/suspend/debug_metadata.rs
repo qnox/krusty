@@ -95,6 +95,7 @@ fn is_inline_lambda_call(ir: &IrFile, expression: ExprId) -> bool {
         return false;
     };
     let selected_inline = ir.inline_call_sites.contains(&expression)
+        || ir.compiled_inline_call(expression).is_some()
         || matches!(&**callee, Callee::Static { inline, .. } if *inline != InlineKind::None);
     selected_inline && args.iter().any(|&argument| contains_lambda(ir, argument))
 }

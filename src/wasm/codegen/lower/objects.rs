@@ -965,6 +965,18 @@ impl Body<'_> {
             TyKind::Obj(name, _) if name == crate::types::wk::any() => {
                 self.code.ref_test(nullable, HeapType::Eq);
             }
+            TyKind::Obj(name, _)
+                if self
+                    .classifiers
+                    .classifier(name)
+                    .is_some_and(|fact| fact.runtime_exception.is_some()) =>
+            {
+                let structure =
+                    self.runtime
+                        .exceptions
+                        .ensure_class(self.module, self.classifiers, name)?;
+                self.code.ref_test(nullable, HeapType::Concrete(structure));
+            }
             _ => match (self.interface_of_type(tested), self.class_of_type(tested)) {
                 (Some(interface), _) => self.interface_test(interface, nullable),
                 (None, Some(class)) => self.instance_test(class, nullable)?,

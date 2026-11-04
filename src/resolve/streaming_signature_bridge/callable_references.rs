@@ -170,7 +170,7 @@ impl ProductionSignatureSemantics<'_> {
         let Some(alias) = alias else {
             return crate::fir::ResolvedTy::new(constructed).map_err(|_| Self::failure());
         };
-        self.record_alias_constructor_result(
+        let result = self.record_alias_constructor_result(
             origin,
             self.apply_source_alias_constructor_result(
                 scope,
@@ -179,7 +179,17 @@ impl ProductionSignatureSemantics<'_> {
                 argument,
                 expected.map(crate::fir::ResolvedTy::get),
             ),
-        )
+        )?;
+        if alias.explicit_arguments.is_empty() {
+            self.selected_calls.record_inferred_abbreviation(
+                origin,
+                super::selected_call_facts::InferredAbbreviation {
+                    formals: alias.formals.into_boxed_slice(),
+                    expansion: alias.expansion,
+                },
+            );
+        }
+        Ok(result)
     }
 
     /// The type a constructor call through `alias` produces, with the abbreviation it carries:

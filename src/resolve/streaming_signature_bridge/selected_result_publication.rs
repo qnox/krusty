@@ -246,6 +246,31 @@ impl crate::fir::SelectedResultPublicationSemantics for ProductionSignatureSeman
         self.selected_calls.abbreviation(origin)
     }
 
+    fn published_call_result_abbreviation(
+        &self,
+        origin: crate::fir::OriginId,
+        published: crate::fir::ResolvedTy,
+    ) -> Option<crate::fir::ResolvedTypeAbbreviation> {
+        let abbreviation = self.selected_calls.abbreviation(origin)?;
+        let Some(inferred) = self.selected_calls.inferred_abbreviation(origin) else {
+            return Some(abbreviation);
+        };
+        let mut bindings = crate::symbol_resolver::GSigBinds::default();
+        crate::symbol_resolver::unify_ty(inferred.expansion, published.get(), &mut bindings);
+        // A formal the published expansion leaves unbound keeps the argument ordinary selection
+        // inferred for it.
+        let arguments = inferred
+            .formals
+            .iter()
+            .zip(abbreviation.arguments.iter())
+            .map(|(formal, ordinary)| bindings.get(formal).copied().unwrap_or(*ordinary))
+            .collect();
+        Some(crate::fir::ResolvedTypeAbbreviation {
+            arguments,
+            ..abbreviation
+        })
+    }
+
     fn call_result_publication(
         &self,
         _scope: crate::fir::SignatureScope,

@@ -99,6 +99,7 @@ pub(super) fn collect_type_parameters(
         }
         TyKind::Nullable(inner)
         | TyKind::PlatformNullable(inner)
+        | TyKind::MutabilityFlexible(inner)
         | TyKind::InProjection(inner)
         | TyKind::OutProjection(inner) => collect_type_parameters(inner, parameters),
         // A star's upper bound is a computed capture fact, not a source occurrence that can
