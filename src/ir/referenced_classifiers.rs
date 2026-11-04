@@ -54,6 +54,11 @@ pub(crate) fn referenced_classifier_names(ir: &IrFile) -> Vec<TypeName> {
         }
         for argument in &class.ctor_args {
             collect_classifier_names(argument.ty, &mut out);
+            if let super::IrCtorParameterProvenance::InterfaceDelegate { interface, .. } =
+                argument.provenance
+            {
+                collect_classifier_names(interface, &mut out);
+            }
         }
         for constructor in &class.secondary_ctors {
             constructor
