@@ -23,7 +23,7 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
 
 jobs:
-  # Asks the runner controller where this run's jobs should run (.github/actions/route). In shadow
+  # Asks the runner controller where this run's jobs should run (infragnite/route-runner). In shadow
   # mode the answer is only logged and recorded beside where each job really ran; every job keeps
   # its own runs-on. No job waits for this one. Fork PRs get no OIDC token and do not ask.
   route:
@@ -42,9 +42,7 @@ jobs:
       - name: select supported Kotlin versions
         id: versions
         run: echo "matrix=$(just matrix-json)" >> "$GITHUB_OUTPUT"
-      - name: test the route request builder
-        run: python3 -m unittest scripts/tests/test_route_request.py
-      - uses: ./.github/actions/route
+      - uses: infragnite/route-runner@2c24bcc9fe2f764ea321e285faeffda8e50f89ea # v1
         with:
           workflow: .github/workflows/ci.yml
           asking: route
