@@ -10,11 +10,29 @@ fn official_bound_extension_reference_wrappers_bind_the_declared_receiver() {
     };
     let work = ProducerDirectory::new();
     let source = work.0.join("BoundReferences.kt");
-    std::fs::write(
-        &source,
-        include_str!("../../../../tests/fixtures/klib_closure_frames/BoundExtensionReferences.kt"),
-    )
-    .unwrap();
+    let modules = crate::conformance::split_modules(include_str!(
+        "../../../../tests/box_regressions/multimodule/boundExtensionReferences.kt"
+    ))
+    .expect("the complete bound-reference module graph");
+    let [library_module, consumer_module] = modules.as_slice() else {
+        panic!("the bound-reference graph must retain both modules");
+    };
+    assert_eq!(library_module.name, "lib");
+    assert!(library_module.deps.is_empty());
+    assert_eq!(consumer_module.name, "main");
+    assert_eq!(consumer_module.deps, ["lib"]);
+    assert!(modules.iter().all(|module| module.friends.is_empty()
+        && module.depends_on.is_empty()
+        && module.java_files.is_empty()));
+    let [(library_file, library_source)] = library_module.files.as_slice() else {
+        panic!("the complete library source must be retained");
+    };
+    let [(consumer_file, _)] = consumer_module.files.as_slice() else {
+        panic!("the complete consumer source must be retained");
+    };
+    assert_eq!(library_file, "Library");
+    assert_eq!(consumer_file, "Consumer");
+    std::fs::write(&source, library_source).unwrap();
     let library = work.0.join("bound-references");
     let output = std::process::Command::new(root.join("bin/kotlinc-native"))
         .args(["-p", "library", "-nopack", "-o"])
