@@ -54,7 +54,7 @@ pub(crate) fn realize(ir: &mut IrFile, callables: &mut CheckedBackendCallables) 
 /// target fills a construction's, a `super(…)` delegation's or an enum constant's omitted
 /// arguments by evaluating these in the constructor's frame, so a call one of them makes is a call
 /// site of this file like any in a body.
-fn constructor_defaults(ir: &IrFile) -> Vec<ExprId> {
+pub(super) fn constructor_defaults(ir: &IrFile) -> Vec<ExprId> {
     ir.classes
         .iter()
         .flat_map(|class| {

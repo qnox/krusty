@@ -209,24 +209,6 @@ impl<'a> FileLowering<'a> {
                         Some((internal, secondary, omitted))
                     }),
             )
-            // An enum CONSTANT leaving an argument out is the same omission written a third way:
-            // `RED` where the enum's constructor declares `(val rgb: Int = 0)` is not an
-            // expression and not a supertype call, so neither collector above sees it. A constant
-            // with a BODY is left out: its instance is a synthesized subclass whose own
-            // constructor takes the entry's arguments, and the defaults are recorded against the
-            // enum rather than against it.
-            .chain(self.ir.classes.iter().flat_map(|class| {
-                class.enum_entries.iter().filter_map(move |entry| {
-                    if entry.default_parameters.is_empty() || entry.subclass.is_some() {
-                        return None;
-                    }
-                    let mut omitted = entry.default_parameters.clone();
-                    omitted.sort_unstable();
-                    let secondary = (!entry.constructor.primary())
-                        .then_some(entry.constructor.ordinal as usize - 1);
-                    Some((class.fq_name_id(), secondary, omitted))
-                })
-            }))
             .collect();
         for (internal, secondary, omitted) in shapes {
             // A construction naming a class this file does not declare, or a constructor whose
@@ -398,6 +380,9 @@ impl BodyLowering<'_, '_, '_> {
         selected: Option<&[Ty]>,
         omitted: &[u32],
     ) -> Result<Option<Value>, Unsupported> {
+        // An enum constant's `kotlin.Enum` storage, taken before the arguments are lowered: an
+        // argument's own construction is not the constant.
+        let enum_base = self.enum_base.take();
         let name = internal.render();
         let class = self.file.class_of(internal, "construction of")?;
         // Which constructor the selection names — the primary's, or a secondary's, whose defaults
@@ -457,6 +442,7 @@ impl BodyLowering<'_, '_, '_> {
         let descriptor = self.file.classes[class as usize].descriptor;
         let size = self.file.model.layout(class).instance_size;
         let object = self.allocate(descriptor, size)?;
+        self.store_enum_base(enum_base, object)?;
         arguments.insert(0, object);
         let func_ref = self.func_ref(id);
         self.emit_call(func_ref, &arguments)?;

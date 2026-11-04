@@ -598,6 +598,9 @@ fn remap_expression(expression: &mut IrExpr, names: &IdentityRemap<'_>) {
         | IrExpr::EnumValues { classifier }
         | IrExpr::EnumValueOf { classifier, .. }
         | IrExpr::EnumEntries { classifier }
+        | IrExpr::EnumConstant { classifier, .. }
+        | IrExpr::EnumEntriesList { classifier, .. }
+        | IrExpr::NoSuchEnumConstant { classifier, .. }
         | IrExpr::EnumSwitchKey { classifier, .. } => name(classifier, names),
         IrExpr::EnumSwitchOrdinal {
             classifier,

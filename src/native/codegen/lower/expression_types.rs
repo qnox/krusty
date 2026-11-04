@@ -181,6 +181,8 @@ impl BodyLowering<'_, '_, '_> {
             | IrExpr::EnumValueOf { .. }
             | IrExpr::EnumValues { .. }
             | IrExpr::EnumEntries { .. }
+            | IrExpr::EnumConstant { .. }
+            | IrExpr::EnumEntriesList { .. }
             | IrExpr::NewArray { .. }
             | IrExpr::Vararg { .. }
             | IrExpr::CallableReference(_) => ir.named_type(id)?,

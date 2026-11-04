@@ -104,13 +104,14 @@ impl IrFile {
             IrExpr::New { internal, .. } => Ty::obj_name(*internal),
             IrExpr::SingletonValue { classifier }
             | IrExpr::EnumEntry { classifier, .. }
-            | IrExpr::EnumValueOf { classifier, .. } => Ty::obj_name(*classifier),
+            | IrExpr::EnumValueOf { classifier, .. }
+            | IrExpr::EnumConstant { classifier, .. } => Ty::obj_name(*classifier),
             // An enclosing-instance edge names the outer classifier it reaches.
             IrExpr::EnclosingInstance { outer, .. } => Ty::obj_name(*outer),
             IrExpr::EnumValues { classifier } => {
                 Ty::obj_args("kotlin/Array", &[Ty::obj_name(*classifier)])
             }
-            IrExpr::EnumEntries { classifier } => {
+            IrExpr::EnumEntries { classifier } | IrExpr::EnumEntriesList { classifier, .. } => {
                 Ty::obj_args("kotlin/enums/EnumEntries", &[Ty::obj_name(*classifier)])
             }
             IrExpr::EnumSwitchOrdinal { .. } | IrExpr::EnumSwitchKey { .. } => Ty::Int,

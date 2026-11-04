@@ -619,6 +619,28 @@ pub enum IrExpr {
     EnumEntries {
         classifier: TypeName,
     },
+    /// One constant of `classifier` being built by [`crate::backend::enums`]: `construction`, a
+    /// `New` of the enum or of the constant's body subclass, with `kotlin.Enum`'s `name` and
+    /// `ordinal` storage holding these values before any constructor runs. A target owns that
+    /// storage; the shared lowering owns when and in which order constants are built.
+    EnumConstant {
+        classifier: TypeName,
+        name: Box<str>,
+        ordinal: u32,
+        construction: ExprId,
+    },
+    /// The one `EnumEntries` list of `classifier` over `values`, a fresh array of its constants in
+    /// declaration order. Built once by the enum's initializer ([`crate::backend::enums`]).
+    EnumEntriesList {
+        classifier: TypeName,
+        values: ExprId,
+    },
+    /// `classifier.valueOf(name)` found no constant of that name: Kotlin throws
+    /// `IllegalArgumentException`. Value type `Nothing`.
+    NoSuchEnumConstant {
+        classifier: TypeName,
+        name: ExprId,
+    },
     /// JVM `MappedEnumWhenLowering`: the switch key of `subject`'s entry, read from the emitting
     /// class's `$WhenMappings` table for `classifier` at `subject`'s runtime ordinal. Value type:
     /// `Int`. `registrations` are the table entries this subject `when` (and every subject `when`
@@ -1834,6 +1856,11 @@ pub struct IrFile {
     /// Each declaration's default-argument entry, by the declaration's `FunId`, once a target's
     /// shared default-argument lowering has realized it as an ordinary function of this file.
     pub(crate) default_entries: crate::fx_hash::HashMap<FunId, FunId>,
+    /// Each enum class's initializer, which builds its constants and then its companion, once a
+    /// target's shared enum lowering ([`crate::backend::enums`]) has realized it as an ordinary
+    /// function of this file. A target whose companion getter runs first calls it before building
+    /// the companion, so touching the companion builds the constants first.
+    pub(crate) enum_initializers: crate::fx_hash::HashMap<ClassId, FunId>,
     /// `FunId` → source parameter names and, when present, default-value expressions.
     pub fn_params: crate::fx_hash::HashMap<u32, FnParamInfo>,
     /// Per declared method/function, whether each SOURCE parameter was declared nullable (`a: String?`).

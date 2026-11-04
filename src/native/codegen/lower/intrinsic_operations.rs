@@ -187,14 +187,12 @@ impl BodyLowering<'_, '_, '_> {
                 self.runtime_call("kt_array_content_to_string", &[any()], any(), &[array])
             }
             IrIntrinsic::Assert { mode } => self.checked_assertion(mode, args),
-            // Inline specialization has already replaced a reified parameter by the call site's
-            // enum; one still standing here names no enum this generator can build.
-            IrIntrinsic::EnumEntries { classifier } => match classifier.non_null().obj_internal() {
-                Some(classifier) => self.enum_entries(classifier),
-                None => Err(declined!(
-                    "`enumEntries` of `{classifier:?}`, which is not an enum"
-                )),
-            },
+            // The shared enum lowering realized `enumEntries<E>()` for every enum this file
+            // declares. One still standing here names an enum another file declares, or a reified
+            // parameter inline specialization did not replace.
+            IrIntrinsic::EnumEntries { classifier } => Err(declined!(
+                "`enumEntries` of `{classifier:?}`, which this file does not declare"
+            )),
             other => Err(declined!("the `{other:?}` intrinsic")),
         }
     }
