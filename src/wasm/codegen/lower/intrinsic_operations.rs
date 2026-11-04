@@ -50,6 +50,15 @@ impl Body<'_> {
                 self.code.array_get_u(self.runtime.chars);
                 Ok(())
             }
+            // `Any?.toString()` is the string a template makes of its operand.
+            IrIntrinsic::NullableAnyToString => {
+                let value = match (receiver, args) {
+                    (None, [value]) => *value,
+                    (Some(value), []) => value,
+                    _ => return Err("a malformed `toString` call".to_string()),
+                };
+                self.string_of(value)
+            }
             other => Err(format!("a call to the intrinsic {other:?}")),
         }
     }

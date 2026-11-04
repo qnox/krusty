@@ -28,6 +28,7 @@ mod intrinsic_operations;
 mod objects;
 mod scalar_instructions;
 mod shared_cells;
+mod string_conversion;
 
 #[cfg(test)]
 use tests::lower_alone;
@@ -1252,6 +1253,8 @@ impl<'a> Body<'a> {
                 receiver,
                 args,
             } => self.method_call(class, index, receiver, &args)?,
+            // `Unit` has no carrier: its one value is the absence of one.
+            IrExpr::SingletonValue { .. } if self.carrier_of(id)?.is_none() => {}
             IrExpr::SingletonValue { classifier } => self.singleton(classifier)?,
             IrExpr::PropertyRead {
                 receiver: Some(receiver),
@@ -1406,32 +1409,6 @@ impl<'a> Body<'a> {
             IrConst::UInt(value) => self.code.i32_const(*value as i32),
             IrConst::ULong(value) => self.code.i64_const(*value as i64),
         };
-        Ok(())
-    }
-
-    /// Push `id` converted to a non-null `String`, as a string template does.
-    fn string_of(&mut self, id: u32) -> Result<(), Unsupported> {
-        let ty = self.type_of(id)?;
-        self.expression(id)?;
-        let function = match ty {
-            Some(Ty::String | Ty::Null) => self.runtime.string_or_null,
-            Some(ty) if ty == Ty::nullable(Ty::String) => self.runtime.string_or_null,
-            Some(Ty::Int | Ty::Short | Ty::Byte) => self.runtime.string_of_i32,
-            Some(Ty::Long) => self.runtime.string_of_i64,
-            Some(Ty::Char) => self.runtime.string_of_char,
-            Some(Ty::Boolean) => self.runtime.string_of_boolean,
-            Some(ty) if self.class_of_type(ty).is_some() => {
-                return self.object_to_string(ty);
-            }
-            Some(other) => {
-                return Err(format!(
-                    "a string template part of type `{}`",
-                    describe(other)
-                ));
-            }
-            None => return Ok(()),
-        };
-        self.code.call(function);
         Ok(())
     }
 
