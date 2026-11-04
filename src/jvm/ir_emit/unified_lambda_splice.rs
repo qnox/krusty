@@ -6,9 +6,10 @@
 //! The call reaches this splice after its literal positions are selected and its route is decided.
 //! [`unified_splice_plan`] then decides, before any capture is bound or any code is emitted:
 //!
-//! - each selected literal's checked facts (its function type sized to its arity, its body's
-//!   result, a method parameter per argument). A missing or mis-sized fact is invalid IR, and the
-//!   call fails with an emission error; nothing is reconstructed from the physical lambda method;
+//! - each selected literal's checked facts (its function type sized to its arity, a suspend
+//!   type's continuation included; its body's result; a method parameter per argument). A missing
+//!   or mis-sized fact is invalid IR, and the call fails with an emission error; nothing is
+//!   reconstructed from the physical lambda method;
 //! - the host body's frame plan around those literals. A host whose frame cannot be planned (one
 //!   whose invokes move the lambda through another local, or a coroutine state machine compiled
 //!   for direct calls) is a shape this splice does not support. That is decided here, before
@@ -22,6 +23,9 @@ use super::inline_call_outcome::InlineCallOutcome;
 use super::*;
 use crate::jvm::inline::SplicedFrame;
 use crate::types::TyKind;
+
+mod placed_lambda_parameters;
+pub(super) use placed_lambda_parameters::placed_lambda_parameters;
 
 /// The checked facts the placement of one selected literal reads.
 #[derive(Debug, PartialEq)]
@@ -79,8 +83,8 @@ fn literal_facts(ir: &IrFile, lambda: ExprId) -> Result<LiteralFacts, &'static s
         return Err("a placed lambda is not a literal inline lambda");
     };
     let arity = *arity as usize;
-    // `arity` is the source-level arity. It cannot recover the capture boundary after the suspend
-    // pass appends a physical `Continuation` parameter; the capture list is that exact boundary.
+    // `arity` counts the arguments `invoke` passes, a suspend lambda's continuation included. It
+    // cannot recover the capture boundary; the capture list is that exact boundary.
     let physical = jvm_function_params(ir, *impl_fn);
     let Some(arguments) = physical.get(captures.len()..captures.len() + arity) else {
         return Err("a placed lambda's method lacks a parameter for each argument");
@@ -90,9 +94,10 @@ fn literal_facts(ir: &IrFile, lambda: ExprId) -> Result<LiteralFacts, &'static s
         .map(|ty| ty.non_null())
         .map(Ty::kind)
     {
-        Some(TyKind::Fun(signature)) if signature.params.len() == arity => signature.params.clone(),
-        _ => return Err("a placed lambda has no checked function type with each argument's type"),
-    };
+        Some(TyKind::Fun(signature)) => placed_lambda_parameters(signature, arity),
+        _ => None,
+    }
+    .ok_or("a placed lambda has no checked function type with each argument's type")?;
     // The body is built in a scratch frame whose argument slots are not installed yet, so its
     // value's type is the checked one, never read back from slots or from the method.
     let Some(result) = ir.logical_type(*inline_body) else {
@@ -121,11 +126,9 @@ fn callable_reference_facts(ir: &IrFile, lambda: ExprId) -> Result<LiteralFacts,
     let TyKind::Fun(signature) = function_type.non_null().kind() else {
         return Err("a placed callable reference has no function type");
     };
-    if signature.params.len() != arity {
-        return Err(
-            "a placed callable reference has no checked function type with each argument's type",
-        );
-    }
+    let semantic = placed_lambda_parameters(signature, arity).ok_or(
+        "a placed callable reference has no checked function type with each argument's type",
+    )?;
     let physical = jvm_function_params(ir, adapter);
     let Some(arguments) = physical.get(captures.len()..captures.len() + arity) else {
         return Err("a placed callable reference's method lacks a parameter for each argument");
@@ -137,7 +140,7 @@ fn callable_reference_facts(ir: &IrFile, lambda: ExprId) -> Result<LiteralFacts,
         inline_body: returned,
         captures: captures.len(),
         physical: arguments.to_vec(),
-        semantic: signature.params.clone(),
+        semantic,
         result,
     })
 }
@@ -578,6 +581,11 @@ mod tests {
     /// A literal lambda capturing caller value 0 and taking one argument, whose method takes
     /// `method_params`.
     fn literal(ir: &mut IrFile, method_params: Vec<Ty>) -> (ExprId, ExprId) {
+        literal_of_arity(ir, method_params, 1)
+    }
+
+    /// A literal lambda capturing caller value 0 whose `invoke` passes `arity` arguments.
+    fn literal_of_arity(ir: &mut IrFile, method_params: Vec<Ty>, arity: u8) -> (ExprId, ExprId) {
         let impl_fn = ir.add_fun(IrFunction {
             name: "placed$lambda".to_string(),
             params: method_params,
@@ -591,7 +599,7 @@ mod tests {
         let body = ir.add_expr(IrExpr::GetValue(1));
         let lambda = ir.add_expr(IrExpr::Lambda {
             impl_fn,
-            arity: 1,
+            arity,
             captures: vec![capture],
             sam: None,
             inline_body: Some(body),
@@ -659,6 +667,46 @@ mod tests {
                         physical: vec![Ty::Int],
                         semantic: vec![Ty::UInt],
                         result: Ty::UInt,
+                    },
+                    slot_base: 4,
+                    sites: 2,
+                }],
+                top_local: 7,
+            }))
+        );
+    }
+
+    #[test]
+    fn a_suspend_literal_takes_the_continuation_after_its_function_type_parameters() {
+        let mut ir = IrFile::default();
+        let receiver = ir.add_expr(IrExpr::GetValue(2));
+        let continuation = Ty::obj("kotlin/coroutines/Continuation");
+        // A suspend lambda's arity counts the continuation its implementation takes last.
+        let (lambda, body) = literal_of_arity(&mut ir, vec![Ty::Long, Ty::Int, continuation], 2);
+        let IrExpr::Lambda { impl_fn, .. } = ir.expr(lambda) else {
+            unreachable!()
+        };
+        let impl_fn = *impl_fn;
+        ir.set_logical_type(lambda, Ty::fun_suspend(vec![Ty::Int], Ty::Int));
+        ir.set_logical_type(body, Ty::Int);
+        assert_eq!(
+            unified_splice_plan(
+                &ir,
+                &[receiver, lambda],
+                &[1],
+                Some(&frame(vec![4], vec![2]))
+            ),
+            Ok(UnifiedSplice::Planned(UnifiedSplicePlan {
+                literals: vec![PlacedLiteral {
+                    operand: 1,
+                    facts: LiteralFacts {
+                        lambda,
+                        impl_fn,
+                        inline_body: body,
+                        captures: 1,
+                        physical: vec![Ty::Int, continuation],
+                        semantic: vec![Ty::Int, continuation],
+                        result: Ty::Int,
                     },
                     slot_base: 4,
                     sites: 2,

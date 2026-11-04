@@ -548,6 +548,21 @@ fn callee(callee: &mut Callee, names: &IdentityRemap<'_>) {
     }
 }
 
+/// The exact classifier remap, applied to a SAM conversion's checked target.
+fn sam_target(sam: &mut crate::ir::IrSamTarget, names: &IdentityRemap<'_>) {
+    name(&mut sam.classifier, names);
+    tys(&mut sam.parameters, names);
+    sam.result = ty(sam.result, names);
+    tys(&mut sam.declared_parameters, names);
+    sam.declared_result = ty(sam.declared_result, names);
+    tys(&mut sam.overridden_results, names);
+    for parameter in &mut sam.type_parameters {
+        for (bound, _) in &mut parameter.bounds {
+            *bound = ty(*bound, names);
+        }
+    }
+}
+
 fn remap_expression(expression: &mut IrExpr, names: &IdentityRemap<'_>) {
     match expression {
         IrExpr::Checked(operation) => checked_operation(operation, names),
@@ -674,14 +689,7 @@ fn remap_expression(expression: &mut IrExpr, names: &IdentityRemap<'_>) {
             tys(params, names);
             *ret = ty(*ret, names);
         }
-        IrExpr::Lambda { sam: Some(sam), .. } => {
-            name(&mut sam.classifier, names);
-            tys(&mut sam.parameters, names);
-            sam.result = ty(sam.result, names);
-            tys(&mut sam.declared_parameters, names);
-            sam.declared_result = ty(sam.declared_result, names);
-            tys(&mut sam.overridden_results, names);
-        }
+        IrExpr::Lambda { sam: Some(sam), .. } => sam_target(sam, names),
         IrExpr::Try {
             catches, result, ..
         } => {
@@ -983,6 +991,11 @@ fn remap_class(class: &mut super::IrClass, names: &IdentityRemap<'_>) {
     for argument in &mut class.ctor_args {
         argument.ty = ty(argument.ty, names);
         argument.declared_ty = argument.declared_ty.map(|value| ty(value, names));
+        if let super::IrCtorParameterProvenance::InterfaceDelegate { interface, .. } =
+            &mut argument.provenance
+        {
+            *interface = ty(*interface, names);
+        }
         if let Some(receiver) = argument
             .capture
             .as_mut()
@@ -1104,6 +1117,9 @@ fn remap_class(class: &mut super::IrClass, names: &IdentityRemap<'_>) {
             .iter_mut()
             .for_each(|(_, holder)| name(holder, names));
         lambda.function_type = ty(lambda.function_type, names);
+        if let Some(sam) = &mut lambda.sam {
+            sam_target(sam, names);
+        }
         tys(&mut lambda.bridge.param_tys, names);
         lambda.bridge.ret_ty = ty(lambda.bridge.ret_ty, names);
         lambda
@@ -1953,6 +1969,7 @@ mod tests {
                 nullable: false,
                 kotlin_interface: true,
                 parameter_identities: Vec::new(),
+                type_parameters: Vec::new(),
             })),
             inline_body: None,
         };
