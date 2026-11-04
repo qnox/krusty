@@ -12,7 +12,8 @@ use crate::fx_hash::HashMap;
 use std::collections::VecDeque;
 
 use super::body_lowering::{
-    BodyLowering, CallLinker, LinkedAccessor, LinkedCallee, LinkedConstructor, LoweredFunction,
+    BodyLowering, CallLinker, LinkedAccessor, LinkedCallableReference, LinkedCallee,
+    LinkedConstructor, LoweredFunction,
 };
 use super::callee_facts::{KlibCalleeFact, KlibCalleeFacts};
 use super::decline::{KlibBodyDecline, KlibBodyDeclineReason};
@@ -613,6 +614,26 @@ impl CallLinker for Linker<'_, '_> {
         sup: Ty,
     ) -> bool {
         self.sources.callees.is_subtype(parameters, sub, sup)
+            || super::callable_references::function_supertype(sub, sup)
+    }
+
+    fn link_reference(
+        &mut self,
+        ir: &mut IrFile,
+        callee: &KlibPublicIdSignature,
+    ) -> Result<LinkedCallableReference, KlibBodyDeclineReason> {
+        let identity = self.callee_identity(callee)?;
+        let (declaration, kind) = self.sources.callees.reference_declaration(&identity)?;
+        let call = self.link(ir, callee)?;
+        Ok(LinkedCallableReference {
+            declaration,
+            kind,
+            call,
+        })
+    }
+
+    fn same_type(&self, left: Ty, right: Ty) -> bool {
+        self.sources.callees.same_type(left, right)
     }
 
     fn link_constructor(
@@ -680,7 +701,12 @@ impl CallLinker for Linker<'_, '_> {
             .constructor_bound(parameters, argument, bound)
     }
 
-    fn singleton(&self, _classifier: TypeName) -> Result<(), KlibBodyDeclineReason> {
+    fn singleton(&self, classifier: TypeName) -> Result<(), KlibBodyDeclineReason> {
+        // The target realizes the value of an object whose representation it owns, as it does for
+        // a source reference of that object. Any other object would need its class materialized.
+        if self.sources.callees.target_represents(classifier) {
+            return Ok(());
+        }
         Err(KlibBodyDeclineReason::UnsupportedOperation(
             "an object value",
         ))
@@ -842,6 +868,7 @@ impl CallLinker for Linker<'_, '_> {
                 context_count: 0,
                 singleton_dispatch: None,
                 type_parameters: Vec::new(),
+                type_parameter_bounds: Some(Vec::new()),
                 class_type_parameters: self.class_type_parameters(selected)?,
             });
         }
@@ -880,11 +907,12 @@ impl CallLinker for Linker<'_, '_> {
                 Some(self.sources.bodies),
             )
             .map_err(callee_declined)?;
-            // A member of a generic class the target represents is read at its class's type
-            // arguments, which the call binds from its dispatch receiver.
+            // A member of a generic class realized outside this unit, by the target or by its
+            // provider, is read at its class's type arguments, which the call binds from its
+            // dispatch receiver.
             let class = match selected {
                 Some(selected)
-                    if emitted.is_target_member()
+                    if matches!(purpose, HeaderPurpose::External)
                         && selected
                             .class_contract()
                             .is_some_and(|class| !class.parameters.formals.is_empty()) =>
@@ -941,6 +969,9 @@ impl CallLinker for Linker<'_, '_> {
                 type_parameters: selected
                     .and_then(|selected| selected.generic_signature())
                     .map_or_else(Vec::new, |signature| signature.formals.clone()),
+                type_parameter_bounds: selected
+                    .and_then(|selected| selected.generic_signature())
+                    .map(|signature| signature.formal_bounds.clone()),
                 class_type_parameters,
             });
         }
@@ -977,6 +1008,9 @@ impl CallLinker for Linker<'_, '_> {
             type_parameters: selected
                 .and_then(|selected| selected.generic_signature())
                 .map_or_else(Vec::new, |signature| signature.formals.clone()),
+            type_parameter_bounds: selected
+                .and_then(|selected| selected.generic_signature())
+                .map(|signature| signature.formal_bounds.clone()),
             class_type_parameters: Vec::new(),
         })
     }

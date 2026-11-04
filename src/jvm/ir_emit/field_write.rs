@@ -156,7 +156,7 @@ impl Emitter<'_> {
                 code,
             );
         }
-        if self.ir.expr_source_lines.contains_key(&value)
+        if self.ir.source_line(value).is_some()
             || super::debug_lines::enters_nested_copied_lambda_frame(self.ir, statement, value)
         {
             if let Some(&statement_line) = self.ir.expr_lines.get(&statement) {

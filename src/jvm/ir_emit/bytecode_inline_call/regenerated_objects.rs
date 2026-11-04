@@ -15,6 +15,7 @@ use crate::jvm::inliner::{
     copy_sam_wrapper, regenerate, AnonymousObjects, CallSite, CallSiteSource, ClassNameGenerators,
     InlineError, ObjectLambda, RegeneratedObject, Regeneration, RegenerationError,
 };
+use crate::jvm::ir_emit::signature_formatter::Wildcards;
 use crate::jvm::ir_emit::JvmSignatureFormatter;
 use crate::jvm::reified_arguments::ReifiedArguments;
 use crate::jvm::source_map::SourceMap;
@@ -322,16 +323,17 @@ impl<'a> Emitter<'a> {
             source_file: self.cw.source_file_name(),
             call_line: self
                 .ir
-                .expr_source_lines
-                .get(&call_expression)
-                .and_then(|&line| u16::try_from(line.checked_sub(1)?).ok()),
+                .source_line(call_expression)
+                .and_then(|line| u16::try_from(line.checked_sub(1)?).ok()),
         }
     }
 }
 
 impl CallObjects<'_> {
     /// Each of the callee's type parameters with its argument at this call, as the signature
-    /// kotlinc's `TypeParameterMappings` writes for it (`mapTypeParameter`).
+    /// kotlinc's `TypeParameterMappings` writes for it (`mapTypeParameter`, in its
+    /// `GENERIC_ARGUMENT` mode: `List<String>` signs `List<+String>`, the declaration-site wildcard
+    /// a parameter position would drop over a final class kept).
     fn type_arguments(&self, site: &RegenerationSite<'_>) -> Option<Vec<(String, String)>> {
         let formatter = JvmSignatureFormatter::with_symbols(self.ir, site.symbols, self.run);
         let Some(arguments) = self
@@ -343,7 +345,7 @@ impl CallObjects<'_> {
         };
         arguments
             .iter()
-            .map(|(name, ty)| Some((name.clone(), formatter.ty(ty)?)))
+            .map(|(name, ty)| Some((name.clone(), formatter.ty_at(ty, Wildcards::Generic)?)))
             .collect()
     }
 }

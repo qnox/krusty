@@ -413,6 +413,12 @@ mod tests {
         ir.annotation_constructions.insert(
             construction,
             crate::ir::IrAnnotationConstruction {
+                arguments: crate::libraries::AnnotationArgumentProvenance::from_selected(
+                    1,
+                    &[0],
+                    &[],
+                )
+                .unwrap(),
                 interface,
                 members: vec![("value".into(), Ty::String)],
                 defaults: vec![None],
@@ -439,7 +445,7 @@ mod tests {
         }));
         assert_eq!(construction_interface(&ir, construction), Some(interface));
         let parameter = ir.add_expr(IrExpr::GetValue(0));
-        ir.logical_types.insert(parameter, Ty::obj_name(interface));
+        ir.set_logical_type(parameter, Ty::obj_name(interface));
         assert_eq!(construction_interface(&ir, parameter), None);
     }
 }
