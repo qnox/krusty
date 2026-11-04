@@ -308,6 +308,14 @@ mod tests {
                 args: vec![holder],
             })
         };
+        ir.set_logical_type(
+            call,
+            if uncaptured_lambda {
+                Ty::fun(vec![Ty::Int], Ty::Int)
+            } else {
+                Ty::Int
+            },
+        );
         let body = ir.add_expr(IrExpr::Block {
             stmts: vec![variable, call],
             value: None,
