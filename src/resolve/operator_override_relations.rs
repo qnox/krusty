@@ -9,7 +9,7 @@
 use super::SymbolTable;
 use crate::fir::{
     DeclarationFlags, DeclarationId, DeclarationKind, ResolvedFunctionOverrideTarget,
-    ResolvedModuleIndex, ResolvedOperatorEqualsOverride, ResolvedOperatorEqualsTarget,
+    ResolvedModuleIndex, ResolvedOperatorEqualsOverride,
 };
 use crate::libraries::{FnKind, FunctionInfo};
 use crate::module_symbols::ModuleSymbols;
@@ -147,22 +147,15 @@ fn inputs_match(
 fn target(
     index: &ResolvedModuleIndex,
     function: &FunctionInfo,
-) -> Option<ResolvedOperatorEqualsTarget> {
+) -> Option<ResolvedFunctionOverrideTarget> {
     if let Some(declaration) = function.stable_declaration {
         let callable = index.callable_for_declaration(declaration)?;
-        return Some(ResolvedOperatorEqualsTarget::Callable(
-            ResolvedFunctionOverrideTarget::Module(callable.id),
-        ));
-    }
-    if let Some(external) = function.callable.external_identity {
-        return Some(ResolvedOperatorEqualsTarget::Callable(
-            ResolvedFunctionOverrideTarget::External(external),
-        ));
+        return Some(ResolvedFunctionOverrideTarget::Module(callable.id));
     }
     function
         .callable
-        .compiler_core_declaration
-        .map(ResolvedOperatorEqualsTarget::CompilerCore)
+        .external_identity
+        .map(ResolvedFunctionOverrideTarget::External)
 }
 
 fn select_declared(

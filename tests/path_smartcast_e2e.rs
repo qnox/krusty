@@ -654,3 +654,12 @@ fun box(): String {\n\
 }\n";
     assert_ok(SRC);
 }
+
+#[test]
+fn a_type_test_on_a_property_path_keeps_the_declared_type() {
+    // The same program runs in every box lane from `box_regressions`; here it runs against kotlinc.
+    common::expect_box_same_as_kotlinc(
+        include_str!("box_regressions/propertySmartCastKeepsDeclaredTypeTopLevel.kt"),
+        "PropertySmartCastKeepsDeclaredType",
+    );
+}

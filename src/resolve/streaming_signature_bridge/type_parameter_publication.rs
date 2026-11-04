@@ -491,7 +491,10 @@ pub(super) fn publish_source_declarations(
             );
             super::publication_continuation::retain_or_report(
                 diagnostics,
-                &semantics.diagnostics.borrow()[solver_diagnostics..],
+                super::diagnostics::RetainedFindings {
+                    recorded: &semantics.diagnostics.borrow()[solver_diagnostics..],
+                    published: &super::diagnostics::published_in(index),
+                },
                 stub.id,
                 None,
                 deferred_candidates,
@@ -522,7 +525,10 @@ pub(super) fn publish_source_declarations(
             );
             super::publication_continuation::retain_or_report(
                 diagnostics,
-                &semantics.diagnostics.borrow()[solver_diagnostics..],
+                super::diagnostics::RetainedFindings {
+                    recorded: &semantics.diagnostics.borrow()[solver_diagnostics..],
+                    published: &super::diagnostics::published_in(index),
+                },
                 stub.id,
                 None,
                 deferred_candidates,
@@ -552,7 +558,10 @@ pub(super) fn publish_source_declarations(
             Err(diagnostic) => {
                 super::publication_continuation::retain_or_report(
                     diagnostics,
-                    &semantics.diagnostics.borrow()[solver_diagnostics..],
+                    super::diagnostics::RetainedFindings {
+                        recorded: &semantics.diagnostics.borrow()[solver_diagnostics..],
+                        published: &super::diagnostics::published_in(index),
+                    },
                     stub.id,
                     Some(diagnostic),
                     deferred_candidates,
@@ -576,7 +585,10 @@ pub(super) fn publish_source_declarations(
         {
             super::publication_continuation::retain_or_report(
                 diagnostics,
-                &semantics.diagnostics.borrow()[solver_diagnostics..],
+                super::diagnostics::RetainedFindings {
+                    recorded: &semantics.diagnostics.borrow()[solver_diagnostics..],
+                    published: &super::diagnostics::published_in(index),
+                },
                 stub.id,
                 None,
                 deferred_candidates,

@@ -293,3 +293,23 @@ fn without_the_feature_the_unit_candidate_is_chosen() {
     let source = GENERIC_RESULT_OR_UNIT.replace("SELECTED", "UUUU");
     assert_compiles_like_kotlinc("GenericResultOrUnitOff", &source, &[], &[]);
 }
+
+const INFERRED_RESULT: &str = "fun interface IntSam { fun run(): Int }\n\
+    class C {\n\
+    \x20   fun m(b: IntSam) = \"I\"\n\
+    \x20   fun m(b: () -> String) = \"S\"\n\
+    }\n\
+    fun inferred(c: C) = c.m { 1 } + c.m { \"\" }\n\
+    fun box(): String = if (inferred(C()) == \"IS\") \"OK\" else inferred(C())\n";
+
+/// A declaration whose result type is inferred is solved from its body's call, and that call's
+/// lambda discriminates the candidates there as well.
+#[test]
+fn an_inferred_result_type_selects_by_the_lambda_like_kotlinc() {
+    assert_compiles_like_kotlinc(
+        "InferredResult",
+        &format!("{EAGER}{INFERRED_RESULT}"),
+        &[],
+        &[],
+    );
+}
