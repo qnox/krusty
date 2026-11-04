@@ -29,7 +29,7 @@ pub(super) fn supported(ir: &IrFile, id: ClassId) -> bool {
         return false;
     };
     // Preserve the established inner-instance path. Adding a Capture role or payload requires
-    // the complete storage proof below even when the class is also an inner class.
+    // the complete prefix proof below even when the class is also an inner class.
     if class.is_inner_class
         && prefix.iter().all(|argument| {
             argument.provenance != IrCtorParameterProvenance::Capture
@@ -63,7 +63,7 @@ pub(super) fn supported(ir: &IrFile, id: ClassId) -> bool {
                     )
                     && argument.capture_identity
                         == ir.class_capture_identities.get(&(id, parameter)).copied()
-                    && stored_parameter(ir, id, parameter, argument)
+                    && capture_parameter(ir, id, parameter, argument)
             }
             IrCtorParameterProvenance::EnclosingInstance if class.is_inner_class => {
                 argument.capture.is_none()
@@ -74,6 +74,22 @@ pub(super) fn supported(ir: &IrFile, id: ClassId) -> bool {
             _ => false,
         }
     })
+}
+
+fn capture_parameter(ir: &IrFile, id: ClassId, parameter: u32, argument: &IrCtorArg) -> bool {
+    match (argument.is_field, argument.field_index) {
+        (true, Some(_)) => stored_parameter(ir, id, parameter, argument),
+        // A constructor-only capture is already an ordinary constructor parameter. It has no
+        // physical field and cannot participate in either stored or forwarded prefix transport.
+        (false, None) => {
+            argument.anonymous_super_forward.is_none()
+                && !ir.classes[id as usize]
+                    .pre_super_param_fields
+                    .iter()
+                    .any(|(source, _)| *source == parameter)
+        }
+        _ => false,
+    }
 }
 
 fn stored_parameter(ir: &IrFile, id: ClassId, parameter: u32, argument: &IrCtorArg) -> bool {
