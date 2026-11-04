@@ -2467,6 +2467,13 @@ regressions/kt5056.kt
 regressions/kt51927.kt
 regressions/kt6434.kt
 regressions/kt68727.kt
+regressions/multimodule/inferredResultThroughAliasArguments.kt
+regressions/multimodule/inferredResultThroughAliasCall.kt
+regressions/multimodule/inferredResultThroughAliasRead.kt
+regressions/multimodule/inferredResultThroughContextAliasArguments.kt
+regressions/multimodule/inferredResultThroughExplicitAliasArguments.kt
+regressions/multimodule/inferredResultThroughMergedAliasArguments.kt
+regressions/multimodule/inferredResultThroughNullableAlias.kt
 regressions/multimodule/inlineAssertFailsWithBlock.kt
 regressions/multimodule/inlineAssertFailsWithCompletedBlock.kt
 regressions/multimodule/inlineNarrowElementInRange.kt

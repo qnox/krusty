@@ -5179,6 +5179,13 @@ regressions/kt789.kt
 regressions/kt998.kt
 regressions/lambdaWithTypeParameters.kt
 regressions/lambdaWrongReturnType.kt
+regressions/multimodule/inferredResultThroughAliasArguments.kt
+regressions/multimodule/inferredResultThroughAliasCall.kt
+regressions/multimodule/inferredResultThroughAliasRead.kt
+regressions/multimodule/inferredResultThroughContextAliasArguments.kt
+regressions/multimodule/inferredResultThroughExplicitAliasArguments.kt
+regressions/multimodule/inferredResultThroughMergedAliasArguments.kt
+regressions/multimodule/inferredResultThroughNullableAlias.kt
 regressions/multimodule/inlineAssertFailsWithBlock.kt
 regressions/multimodule/inlineAssertFailsWithCompletedBlock.kt
 regressions/multimodule/inlineBuiltString.kt
