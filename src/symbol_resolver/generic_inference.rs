@@ -636,62 +636,6 @@ pub(crate) fn unify_ty_from_symbols(
     unify_ty_impl(Some(source), sig, actual, binds);
 }
 
-/// Record declaration-owned type variables that are instantiated by the identical symbolic type
-/// at a call site. Ordinary unification deliberately ignores `T` against `T`: during postponed
-/// inference that pair is not a useful constraint and must not block a later concrete `T = String`.
-/// It is nevertheless evidence that a selected recursive/self call has a complete identity
-/// substitution. Keep that distinction explicit and publish these bindings only after all useful
-/// receiver, argument, and expected-result constraints have been solved.
-pub(crate) fn collect_generic_identity_bindings(
-    declared: Ty,
-    actual: Ty,
-    formals: &[crate::types::TyParamName],
-    bindings: &mut GSigBinds,
-) {
-    match (declared.kind(), actual.kind()) {
-        (TyKind::TyParam(declared, _), TyKind::TyParam(found, _))
-        | (TyKind::Var(declared, _), TyKind::Var(found, _))
-            if declared == found && formals.contains(&declared) =>
-        {
-            bindings.entry(declared).or_insert(actual);
-        }
-        (TyKind::InProjection(declared), TyKind::InProjection(actual))
-        | (TyKind::OutProjection(declared), TyKind::OutProjection(actual))
-        | (TyKind::Nullable(declared), TyKind::Nullable(actual))
-        | (TyKind::PlatformNullable(declared), TyKind::PlatformNullable(actual))
-        | (TyKind::MutabilityFlexible(declared), TyKind::MutabilityFlexible(actual)) => {
-            collect_generic_identity_bindings(declared, actual, formals, bindings);
-        }
-        (
-            TyKind::Nullable(declared)
-            | TyKind::PlatformNullable(declared)
-            | TyKind::MutabilityFlexible(declared),
-            _,
-        ) if !null_only(actual) => {
-            collect_generic_identity_bindings(declared, actual.non_null(), formals, bindings);
-        }
-        (TyKind::Obj(declared_name, declared_args), TyKind::Obj(actual_name, actual_args))
-            if declared_name == actual_name =>
-        {
-            for (&declared, &actual) in declared_args.iter().zip(actual_args) {
-                collect_generic_identity_bindings(declared, actual, formals, bindings);
-            }
-        }
-        (TyKind::Fun(declared), TyKind::Fun(actual))
-            if declared.params.len() == actual.params.len()
-                && declared.context_count == actual.context_count
-                && declared.has_receiver == actual.has_receiver
-                && declared.suspend == actual.suspend =>
-        {
-            for (&declared, &actual) in declared.params.iter().zip(&actual.params) {
-                collect_generic_identity_bindings(declared, actual, formals, bindings);
-            }
-            collect_generic_identity_bindings(declared.ret, actual.ret, formals, bindings);
-        }
-        _ => {}
-    }
-}
-
 pub(crate) fn inference_actual(actual: Ty) -> Ty {
     if actual == Ty::Null {
         Ty::nullable(Ty::Nothing)

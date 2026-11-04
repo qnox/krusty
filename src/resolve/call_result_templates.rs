@@ -114,13 +114,21 @@ impl Checker<'_> {
             .is_some_and(|lexical| lexical.iter().any(|identity| identity == formal))
     }
 
-    /// `signature` as the template of the one call `call`: formals lexically in scope there are
-    /// renamed to that call's fresh variables, exactly as its constraints were solved.
+    /// The call expression that owns the inference variables solved at `call`.
+    pub(super) fn call_site(&self, call: ExprId) -> crate::types::CallSiteIdentity {
+        crate::types::CallSiteIdentity {
+            compilation: self.compilation_id,
+            file: self.file_index,
+            call: call.0,
+        }
+    }
+
+    /// `signature` as the template of the one call `call`: every formal is that call's variable,
+    /// exactly as its constraints were solved.
     fn call_site_signature(&self, call: ExprId, signature: GenericSig) -> GenericSig {
-        crate::symbol_resolver::CallSiteVariables::instantiate(&signature, |formal| {
-            self.lexically_fixed_at_call(call, formal)
-        })
-        .map_or(signature, |instance| instance.signature().clone())
+        crate::symbol_resolver::CallSiteVariables::instantiate(&signature, self.call_site(call))
+            .signature()
+            .clone()
     }
 
     /// The semantic generic signature retained by one checker-selected call. Declaration origin and

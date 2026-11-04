@@ -56,8 +56,13 @@ impl Checker<'_> {
             signature.has_receiver,
             signature.suspend,
         );
-        let operand_view =
-            self.sam_source_nominal(scope, *argument, self.expr_types[argument.0 as usize]);
+        // The operand was checked under this call's variables; the constructor's selection
+        // publishes over the interface's own formals.
+        let site = self.call_site(call);
+        let operand_view = crate::types::ty_declared_at_call(
+            self.sam_source_nominal(scope, *argument, self.expr_types[argument.0 as usize]),
+            site,
+        );
         let postpone_lambda_body = expected.is_none()
             && self.postponed_argument_depth != 0
             && matches!(self.file.expr(*argument), Expr::Lambda { .. })
@@ -83,6 +88,7 @@ impl Checker<'_> {
                     )
                 })
         };
+        let actual = crate::types::ty_declared_at_call(actual, site);
         let selected = if fixed_target.is_some() {
             select_fixed_sam_constructor(&self.fed_source(), signature, target, actual)
         } else {

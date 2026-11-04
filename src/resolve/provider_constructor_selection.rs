@@ -310,9 +310,8 @@ impl Checker<'_> {
                         Some((source, parameter, actual, whole_array))
                     })
                     .collect::<Vec<_>>();
-                // Inside the constructed class (or an inner class that sees its formals), the
-                // class's own `T` is a fixed type, while this call infers a fresh `T`.
-                let lexical = scope.lexical_tparam_identities();
+                // The call infers its own `T`, distinct from the class's `T` when that is in
+                // scope as a fixed type (inside the class or an inner class).
                 let source = self.fed_source();
                 let inference_actuals = actuals
                     .iter()
@@ -339,7 +338,7 @@ impl Checker<'_> {
                     .collect::<Vec<_>>();
                 let constraints = crate::symbol_resolver::CallSiteVariables::solve(
                     signature,
-                    |formal| lexical.iter().any(|identity| identity == formal),
+                    self.call_site(call),
                     |signature| {
                         crate::symbol_resolver::infer_generic_call_constraints_with_argument_ordinals(
                             &source,
