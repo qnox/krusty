@@ -3,7 +3,7 @@
 //! captures after them, its `$i$a$` marker as its first local, and its body ending in a return of
 //! its own type. The inliner places that node at each `invoke` of the lambda.
 
-use super::super::inline_lambda_parameters::placed_lambda_parameters;
+use super::super::unified_lambda_splice::placed_lambda_parameters;
 use super::lambda_route::SpliceReason;
 use super::*;
 use crate::jvm::classreader::{ExcEntry, MethodLocal};

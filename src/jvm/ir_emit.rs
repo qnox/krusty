@@ -109,7 +109,6 @@ mod inline_call_outcome;
 use inline_call_outcome::InlineCallOutcome;
 mod inline_frame_marker;
 mod inline_lambda_aliases;
-mod inline_lambda_parameters;
 mod inline_return_frames;
 mod inline_scope_frames;
 mod instance_field_names;

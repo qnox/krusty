@@ -13,7 +13,10 @@ use crate::types::{FnSig, Ty};
 /// The semantic type of each of the `arity` arguments a placed lambda of function type
 /// `signature` is invoked with: the function type's parameters, then the continuation when it is
 /// `suspend`. `None` when the function type does not account for exactly `arity` arguments.
-pub(super) fn placed_lambda_parameters(signature: &FnSig, arity: usize) -> Option<Vec<Ty>> {
+pub(in crate::jvm::ir_emit) fn placed_lambda_parameters(
+    signature: &FnSig,
+    arity: usize,
+) -> Option<Vec<Ty>> {
     let mut parameters = signature.params.clone();
     if signature.suspend {
         parameters.push(Ty::obj("kotlin/coroutines/Continuation"));

@@ -20,10 +20,12 @@
 //! literal is an emission error, never another lowering.
 
 use super::inline_call_outcome::InlineCallOutcome;
-use super::inline_lambda_parameters::placed_lambda_parameters;
 use super::*;
 use crate::jvm::inline::SplicedFrame;
 use crate::types::TyKind;
+
+mod placed_lambda_parameters;
+pub(super) use placed_lambda_parameters::placed_lambda_parameters;
 
 /// The checked facts the placement of one selected literal reads.
 #[derive(Debug, PartialEq)]
