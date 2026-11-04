@@ -16,6 +16,7 @@ mod control_forms;
 mod demo_package;
 mod elvis_blocks;
 mod inline_templates;
+mod parameter_defaults;
 mod primitive_calls;
 mod range_membership_producers;
 mod returnable_blocks;
@@ -427,6 +428,21 @@ fn render_node(ir: &IrFile, expression: ExprId) -> String {
                 .collect::<Vec<_>>()
                 .join(", ");
             format!("call {}({args})", ir.fn_source_names[function])
+        }
+        IrExpr::Call {
+            callee: call_callee,
+            dispatch_receiver: None,
+            args,
+        } if let Callee::LocalWithDefaults { function, defaults } = &**call_callee => {
+            let args = args
+                .iter()
+                .map(|argument| render(ir, *argument))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "call {}({args}; defaults {defaults:?})",
+                ir.fn_source_names[function]
+            )
         }
         IrExpr::InvokeFunction { func, args, .. } => {
             let operands = std::iter::once(func)

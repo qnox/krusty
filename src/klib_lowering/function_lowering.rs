@@ -632,6 +632,7 @@ fn header(
     };
     let mut params = Vec::with_capacity(serialized.len());
     let mut identities = Vec::with_capacity(serialized.len());
+    let mut defaults = Vec::with_capacity(serialized.len());
     let mut varargs = vararg_parameters::VarargParameters::default();
     for (index, (role, parameter)) in serialized.iter().enumerate() {
         let packed = semantic_type(arena, types, parameter.ty)?;
@@ -644,11 +645,7 @@ fn header(
                 semantic_type(arena, types, element)?,
             )?;
         }
-        if parameter.default_value.is_some() {
-            return Err(KlibBodyDeclineReason::UnsupportedDeclaration(
-                "a parameter default",
-            ));
-        }
+        defaults.push(parameter.default_value);
         params.push(packed);
         identities.push(serialized_identity(*role, parameter));
     }
@@ -707,7 +704,7 @@ fn header(
         receiver_slot: None,
         singleton_extension_unread_receiver,
         values,
-        defaults: vec![None; serialized.len()],
+        defaults,
         type_parameters,
         erasures: HashMap::default(),
         erased_result: None,

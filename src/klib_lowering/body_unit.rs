@@ -494,15 +494,32 @@ impl DependencyBodyUnit {
                 &mut self.ir,
                 &mut linker,
             );
+            let decline = |reason| match reason {
+                KlibBodyDeclineReason::CalleeDeclined(decline) => *decline,
+                reason => KlibBodyDecline::new(body.identity.declaration.clone(), reason),
+            };
             let lowered = match &body.initialization {
                 Some((class, plan)) => lowering.initialize_class(*class, plan),
                 None => lowering.body(body.statements),
             }
-            .map_err(|reason| match reason {
-                KlibBodyDeclineReason::CalleeDeclined(decline) => *decline,
-                reason => KlibBodyDecline::new(body.identity.declaration, reason),
-            })?;
+            .map_err(decline)?;
             self.ir.functions[body.function as usize].body = Some(lowered);
+            let defaults = BodyLowering::parameter_defaults(
+                body.arena,
+                function,
+                &body.header,
+                &self.builtins,
+                &mut self.ir,
+                &mut linker,
+            )
+            .map_err(decline)?;
+            if let Some(defaults) = defaults {
+                self.ir
+                    .fn_params
+                    .get_mut(&body.function)
+                    .expect("a declared function publishes its parameters")
+                    .defaults = Some(defaults);
+            }
         }
         Ok(root)
     }

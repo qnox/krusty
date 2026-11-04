@@ -1507,19 +1507,20 @@ fn stdlib_calls_reach_header_declared_callees() {
     // Selected generic roots now pass their own declared headers and can reach unselected
     // generic callees. These exact deeper-decline counts are measured on every manifest release;
     // they are not expected-failure allowances for executable conformance tests. Elvis and safe-call
-    // blocks, then generic calls and `when` subject blocks, now reach further declared callees;
-    // the same complete inputs were measured on every release.
+    // blocks, then generic calls and `when` subject blocks, then declarations with parameter
+    // defaults, now reach further declared callees; the same complete inputs were measured on
+    // every release.
     let expected =
         if crate::kotlin_version::target() >= crate::kotlin_version::KotlinVersion::V2_4_20 {
             vec![
                 ("it calls `kotlin.ArithmeticException.<init>`)", 2),
                 ("it calls `kotlin.NumberFormatException.<init>`)", 4),
                 ("it calls `kotlin.UInt.<init>`)", 4),
-                ("it converts a value implicitly)", 1),
-                ("it declares a parameter default)", 35),
-                ("it declares type parameters)", 182),
+                ("it converts a value implicitly)", 4),
+                ("it declares type parameters)", 205),
                 ("it uses a block of a compiler-introduced form)", 1),
-                ("it uses a call of a member function)", 60),
+                ("it uses a call of a file-private declaration)", 6),
+                ("it uses a call of a member function)", 74),
                 (
                     "it uses a call of a member no library serializes, such as a fake override)",
                     10,
@@ -1527,18 +1528,18 @@ fn stdlib_calls_reach_header_declared_callees() {
                 ("it uses a call through a property accessor signature)", 35),
                 ("it uses a constant of another type than its value's)", 6),
                 ("it uses a loop whose body is not a block)", 2),
-                ("its library serializes none)", 74),
+                ("its library serializes none)", 98),
             ]
         } else {
             vec![
                 ("it calls `kotlin.ArithmeticException.<init>`)", 2),
                 ("it calls `kotlin.NumberFormatException.<init>`)", 4),
                 ("it calls `kotlin.UInt.<init>`)", 4),
-                ("it converts a value implicitly)", 1),
-                ("it declares a parameter default)", 28),
-                ("it declares type parameters)", 164),
+                ("it converts a value implicitly)", 4),
+                ("it declares type parameters)", 187),
                 ("it uses a block of a compiler-introduced form)", 1),
-                ("it uses a call of a member function)", 60),
+                ("it uses a call of a file-private declaration)", 4),
+                ("it uses a call of a member function)", 71),
                 (
                     "it uses a call of a member no library serializes, such as a fake override)",
                     10,
@@ -1546,7 +1547,7 @@ fn stdlib_calls_reach_header_declared_callees() {
                 ("it uses a call through a property accessor signature)", 35),
                 ("it uses a constant of another type than its value's)", 6),
                 ("it uses a loop whose body is not a block)", 2),
-                ("its library serializes none)", 74),
+                ("its library serializes none)", 98),
             ]
         };
     assert_eq!(
@@ -1580,8 +1581,7 @@ fn stdlib_bodies_decline_inside_header_declared_callees() {
                 Some(string),
                 &[chars],
             ),
-            "the KLIB body of `kotlin.text.removePrefix` (it reaches the KLIB body of \
-             `kotlin.text.startsWith` (it declares a parameter default))",
+            "the KLIB body of `kotlin.text.removePrefix` (it converts a value implicitly)",
         ),
         (
             super::frozen_function(

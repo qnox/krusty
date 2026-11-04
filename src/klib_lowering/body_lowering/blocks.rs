@@ -7,10 +7,12 @@
 //! statement of another type to `Unit`. This module rebuilds the source shape from the statement
 //! forms, so a block lowers to the block checked FIR lowering produces for its source.
 
-use super::{mismatch, unsupported, BodyLowering, Lowered};
-use crate::ir::{ExprId, IrExpr};
+use super::{mismatch, unsupported, BodyLowering, CallLinker, Lowered, LoweredFunction};
+use crate::ir::{ExprId, IrExpr, IrFile};
+use crate::klib_lowering::function_lowering::FunctionHeader;
+use crate::klib_lowering::ir_builtins::IrBuiltinOperators;
 use crate::metadata::klib_ir::tree::{
-    KlibIrBranch, KlibIrExprId, KlibIrExprKind, KlibIrStatement, KlibIrTypeOperator,
+    KlibIrArena, KlibIrBranch, KlibIrExprId, KlibIrExprKind, KlibIrStatement, KlibIrTypeOperator,
 };
 use crate::metadata::klib_ir::KlibIrConstant;
 use crate::types::Ty;
@@ -43,14 +45,32 @@ impl BodyLowering<'_> {
         Ok(body)
     }
 
-    /// A parameter's default, lowered as checked FIR lowers the source default: a value of the
-    /// parameter's declared type, which may read the parameters before it.
-    pub(in super::super) fn default_value(
-        mut self,
-        default: KlibIrExprId,
-        declared: Ty,
-    ) -> Lowered<ExprId> {
-        self.declared_operand(default, declared)
+    /// Each parameter's default, lowered as checked FIR lowers a source default: a value of the
+    /// parameter's declared type, which may read the parameters before it. `None` when the
+    /// function declares none, as checked FIR lowering publishes no defaults for it.
+    pub(in super::super) fn parameter_defaults(
+        arena: &KlibIrArena,
+        function: LoweredFunction<'_>,
+        header: &FunctionHeader,
+        builtins: &IrBuiltinOperators,
+        ir: &mut IrFile,
+        linker: &mut dyn CallLinker,
+    ) -> Lowered<Option<Vec<Option<ExprId>>>> {
+        if header.defaults().iter().all(Option::is_none) {
+            return Ok(None);
+        }
+        let mut defaults = Vec::with_capacity(header.params().len());
+        for (default, &declared) in header.defaults().iter().zip(header.params()) {
+            defaults.push(match *default {
+                // Each default is its own expression of the declaration's frame.
+                Some(default) => Some(
+                    BodyLowering::new(arena, function, header, builtins, ir, linker)
+                        .declared_operand(default, declared)?,
+                ),
+                None => None,
+            });
+        }
+        Ok(Some(defaults))
     }
 
     /// Whether `statement` is a loop whose condition is the constant `true` and whose lowered
