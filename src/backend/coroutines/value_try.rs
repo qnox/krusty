@@ -288,7 +288,7 @@ pub(crate) fn desugar_value_try(
         // Local/static targets and a captured-cell holder read have no receiver effect to reorder.
         match ir.exprs[s as usize].clone() {
             IrExpr::SetValue { var, value } => {
-                if let Some(ty) = ir.logical_types.get(&value).copied() {
+                if let Some(ty) = ir.logical_type(value) {
                     if let Some((decl, new_try, get)) =
                         bind_value_try_to_fresh_local(ir, representation, value, &ty, suspend_set)
                     {
