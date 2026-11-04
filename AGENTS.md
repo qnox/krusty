@@ -360,10 +360,7 @@ change, not a quiet reset inside yours.
   Genuinely platform-specific parts carry a `PLATFORM-SPECIFIC` explanation or move to their
   owning E2E leaf. This rule does not require an unrelated backend fix in a frontend change.
 - Do not add failure/applicability allowances, skips or platform exclusions without explicit
-  approval for the exact case; preserve existing whole controls. The one standing approval: a
-  portable fixture a change adds to `tests/box_regressions/` may list the lanes that cannot run it
-  yet in their box expected-failure lists, in that same change (`scripts/check-outcome-lists.sh`
-  accepts exactly those entries). An existing case never gains an expected failure. Audit fixture moves and
+  approval for the exact case; preserve existing whole controls. Audit fixture moves and
   matrix selection with `git diff <base>...HEAD -- tests .github/workflows/ci.yml`, and run
   `scripts/check-outcome-lists.sh <base> HEAD`.
 - Use `./run-tests.sh`; do not use release builds for ordinary validation.
