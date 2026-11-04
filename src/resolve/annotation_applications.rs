@@ -101,6 +101,15 @@ pub(super) enum PropertyAnnotationOwner {
     Classifier { owner_is_interface: bool },
 }
 
+/// One application bound in its scope, before any host check.
+enum FoldedApplication {
+    /// The application bound but cannot be applied (an optional expectation outside common
+    /// sources, or a class with no element declaration); its diagnostic is already reported.
+    Rejected(TypeName),
+    /// The bound identity and, when every argument folded, the application's values.
+    Arguments(TypeName, Option<crate::types::AppliedAnnotation>),
+}
+
 #[derive(Clone, Copy)]
 enum AnnotationApplicationHost {
     Unspecified,
@@ -229,7 +238,10 @@ impl Checker<'_> {
             scope,
             &property.annotations,
             &property.annotation_args,
-            include,
+            &|annotation| {
+                include(annotation)
+                    && super::lexical_policies::property_declaration_site(annotation)
+            },
         );
         // The parser hoists a `companion { ... }` property as a classifier-associated extension,
         // but an initialized/lateinit/explicit-field declaration still owns static storage on the
@@ -388,14 +400,33 @@ impl Checker<'_> {
         )
     }
 
-    /// Check an annotation application against the declaration host that owns it.
-    fn check_annotation_application_for_host(
+    /// The identity and folded values of an application written for a use-site of a property
+    /// (`@get:`), for the lexical policies it opens over that site. The property's own host check
+    /// validates and publishes the application; this one only binds and folds it.
+    pub(super) fn use_site_application_values(
         &mut self,
         scope: &CheckerScope<'_>,
         annotation: &AnnotationRef,
         arguments: &[ExprId],
-        host: AnnotationApplicationHost,
-    ) -> Option<TypeName> {
+    ) -> Option<(TypeName, Vec<(String, crate::types::AnnotationValue)>)> {
+        match self.fold_annotation_application_in_scope(scope, annotation, arguments)? {
+            FoldedApplication::Rejected(_) => None,
+            FoldedApplication::Arguments(internal, applied) => Some((
+                internal,
+                applied.map(|applied| applied.values).unwrap_or_default(),
+            )),
+        }
+    }
+
+    /// Bind one application in `scope` and fold its arguments, without validating it against a
+    /// declaration host or publishing it. The host check and the lexical policies an application
+    /// opens both start from this.
+    fn fold_annotation_application_in_scope(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        annotation: &AnnotationRef,
+        arguments: &[ExprId],
+    ) -> Option<FoldedApplication> {
         if arguments
             .iter()
             .any(|argument| self.file.expr_span(*argument).is_none())
@@ -452,16 +483,14 @@ impl Checker<'_> {
                  module sources."
                     .to_string(),
             );
-            let _ = self.validate_property_annotation_contract(annotation, internal, host);
-            return Some(internal);
+            return Some(FoldedApplication::Rejected(internal));
         }
         let Some(shape) = self.applied_annotation_shape(owner) else {
             self.diags.error(
                 annotation.span,
                 "resolved annotation has no semantic element declaration".to_string(),
             );
-            let _ = self.validate_property_annotation_contract(annotation, internal, host);
-            return Some(internal);
+            return Some(FoldedApplication::Rejected(internal));
         };
         let applied =
             if self.check_annotation_arguments(scope, annotation.span, &shape, arguments, None) {
@@ -485,6 +514,25 @@ impl Checker<'_> {
                 }
             } else {
                 None
+            };
+        Some(FoldedApplication::Arguments(internal, applied))
+    }
+
+    /// Check an annotation application against the declaration host that owns it.
+    fn check_annotation_application_for_host(
+        &mut self,
+        scope: &CheckerScope<'_>,
+        annotation: &AnnotationRef,
+        arguments: &[ExprId],
+        host: AnnotationApplicationHost,
+    ) -> Option<TypeName> {
+        let (internal, applied) =
+            match self.fold_annotation_application_in_scope(scope, annotation, arguments)? {
+                FoldedApplication::Rejected(internal) => {
+                    let _ = self.validate_property_annotation_contract(annotation, internal, host);
+                    return Some(internal);
+                }
+                FoldedApplication::Arguments(internal, applied) => (internal, applied),
             };
         // Argument failures precede host-contract failures, while a property contract precedes
         // the target diagnostic for the same annotation (kotlinc's diagnostic ledger order).

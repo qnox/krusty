@@ -39,6 +39,7 @@ mod null_check_narrowing;
 use constructor_references::ReferenceReceiver;
 mod access_control;
 mod accessor_annotations;
+mod accessor_bodies;
 mod actualization_names;
 mod alias_constructor_application;
 mod alias_projection;
@@ -45061,7 +45062,7 @@ impl<'a> Checker<'a> {
                     } else {
                         property_scope
                     };
-                    let property_suppression_depth = self.push_declaration_policies(
+                    let property_suppression_depth = self.push_property_declaration_policies(
                         property_scope,
                         &property.annotations,
                         &property.annotation_args,
@@ -45811,46 +45812,24 @@ impl<'a> Checker<'a> {
                         let field_ty =
                             (bp.receiver.is_none() && bp.context_params.is_empty()).then_some(ty);
                         if let Some(getter) = &bp.getter {
-                            let getter_field = field_ty
-                                .filter(|_| backing_field_binding::getter_declares_field(bp));
-                            self.with_ret_field(ty, getter_field, &accessor_scope, |checker| {
-                                match getter {
-                                    FunBody::Expr(body) => {
-                                        checker.check_expression_getter(
-                                            &accessor_scope,
-                                            *body,
-                                            ty,
-                                            bp.ty.is_some(),
-                                            None,
-                                        );
-                                    }
-                                    FunBody::Block(body) => {
-                                        checker.check_executable_body(&accessor_scope, *body);
-                                    }
-                                    FunBody::None => {}
-                                }
-                            });
+                            let result = accessor_bodies::GetterResult {
+                                ty,
+                                field: field_ty
+                                    .filter(|_| backing_field_binding::getter_declares_field(bp)),
+                                declared: bp.ty.is_some(),
+                                declaration: None,
+                            };
+                            self.check_getter_body(&accessor_scope, bp, getter, result);
                         }
                         if let Some(setter) = &bp.setter {
                             if let Some(body) = &setter.body {
-                                self.with_ret_field(
-                                    Ty::Unit,
-                                    field_ty,
+                                self.check_setter_body(
                                     &accessor_scope,
-                                    |checker| {
-                                        let setter_scope = accessor_scope
-                                            .child(ScopeKind::Function { receiver: None });
-                                        let parameter = crate::ast::setter_param_or_value(
-                                            setter.param.as_ref(),
-                                        );
-                                        checker.declare(&setter_scope, &parameter, ty, true);
-                                        match body {
-                                            FunBody::Expr(body) | FunBody::Block(body) => {
-                                                checker.check_executable_body(&setter_scope, *body);
-                                            }
-                                            FunBody::None => {}
-                                        }
-                                    },
+                                    bp,
+                                    setter,
+                                    body,
+                                    ty,
+                                    field_ty,
                                 );
                             }
                         }
@@ -46627,8 +46606,11 @@ impl<'a> Checker<'a> {
                         self.check_bodyless_property_bounds(scope, bp, declaration);
                         continue;
                     }
-                    let property_suppression_depth =
-                        self.push_declaration_policies(scope, &bp.annotations, &bp.annotation_args);
+                    let property_suppression_depth = self.push_property_declaration_policies(
+                        scope,
+                        &bp.annotations,
+                        &bp.annotation_args,
+                    );
                     let check_ordinary_property_body = self
                         .selected_body_declarations
                         .as_ref()
@@ -47227,32 +47209,14 @@ impl<'a> Checker<'a> {
                             .as_ref()
                             .filter(|body| self.should_check_selected_fun_body(body))
                         {
-                            let getter_field = field_ty
-                                .filter(|_| backing_field_binding::getter_declares_field(bp));
-                            self.with_ret_field(prop_ty, getter_field, scope, |c| match getter {
-                                FunBody::Expr(g) => {
-                                    c.check_expression_getter(
-                                        scope,
-                                        *g,
-                                        prop_ty,
-                                        bp.declared_ty().is_some(),
-                                        stable_property,
-                                    );
-                                    if bp.declared_ty().is_none() {
-                                        if let Some(declaration) = stable_property {
-                                            c.record_inferred_property_publication(
-                                                declaration,
-                                                *g,
-                                                prop_ty,
-                                            );
-                                        }
-                                    }
-                                }
-                                FunBody::Block(g) => {
-                                    c.check_executable_body(scope, *g);
-                                }
-                                FunBody::None => {}
-                            });
+                            let result = accessor_bodies::GetterResult {
+                                ty: prop_ty,
+                                field: field_ty
+                                    .filter(|_| backing_field_binding::getter_declares_field(bp)),
+                                declared: bp.declared_ty().is_some(),
+                                declaration: stable_property,
+                            };
+                            self.check_getter_body(scope, bp, getter, result);
                         }
                         if let Some(setter) = &bp.setter {
                             if let Some(body) = setter
@@ -47260,20 +47224,7 @@ impl<'a> Checker<'a> {
                                 .as_ref()
                                 .filter(|body| self.should_check_selected_fun_body(body))
                             {
-                                self.with_ret_field(Ty::Unit, field_ty, scope, |c| {
-                                    let setter_scope =
-                                        scope.child(ScopeKind::Function { receiver: None });
-                                    let scope = &setter_scope;
-                                    let pname =
-                                        crate::ast::setter_param_or_value(setter.param.as_ref());
-                                    c.declare(scope, &pname, prop_ty, true);
-                                    match body {
-                                        FunBody::Expr(g) | FunBody::Block(g) => {
-                                            c.check_executable_body(scope, *g);
-                                        }
-                                        FunBody::None => {}
-                                    }
-                                });
+                                self.check_setter_body(scope, bp, setter, body, prop_ty, field_ty);
                             }
                         }
                     }
