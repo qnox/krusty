@@ -73,7 +73,9 @@ jobs:
   # krusty-plugin-host is outside the default members and the coverage packages, so its own
   # compiler-independent tests run here. Compiler-dependent plugin integrations run in `ci`.
   plugin-host:
-    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted", "rust-4c-8gb"]') }}
+    # GitHub-hosted: these tests ran out of memory on the 8 GB self-hosted runners, and GitHub's
+    # Linux runners (16 GB) had free slots.
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
