@@ -450,8 +450,6 @@ pub(super) fn is_compatible(
     }
     let mut result_bindings = crate::symbol_resolver::GSigBinds::default();
     crate::symbol_resolver::unify_inferred_ty(expected.ret, ret, &mut result_bindings);
-    let expected_ret =
-        crate::symbol_resolver::ty_subst_keep_unbound(expected.ret, &result_bindings);
     expected
         .params
         .iter()
@@ -464,7 +462,74 @@ pub(super) fn is_compatible(
                 _ => is_assignable(expected, *actual),
             }
         })
-        && ((allow_unit_coercion && expected.ret == Ty::Unit) || is_assignable(ret, expected_ret))
+        && result_is_compatible(ret, expected, allow_unit_coercion, is_assignable)
+}
+
+/// Whether a declaration's `ret` fits an expected callable shape's result. An open result variable
+/// is bound by that same result first, so only its other occurrences can contradict it.
+pub(super) fn result_is_compatible(
+    ret: Ty,
+    expected: &'static crate::types::FnSig,
+    allow_unit_coercion: bool,
+    mut is_assignable: impl FnMut(Ty, Ty) -> bool,
+) -> bool {
+    let mut result_bindings = crate::symbol_resolver::GSigBinds::default();
+    crate::symbol_resolver::unify_inferred_ty(expected.ret, ret, &mut result_bindings);
+    let expected_ret =
+        crate::symbol_resolver::ty_subst_keep_unbound(expected.ret, &result_bindings);
+    (allow_unit_coercion && expected.ret == Ty::Unit) || is_assignable(ret, expected_ret)
+}
+
+/// Whether each input occurrence of an outer variable that the result binds agrees with that
+/// binding. One candidate is one constraint system: `Int -> String` cannot satisfy `(T) -> T`, since
+/// the result requires `String <: T` and the input `T <: Int`. Inputs whose variables the result
+/// leaves open were already admitted against their bounds.
+pub(super) fn inputs_agree_with_result(
+    ret: Ty,
+    expected: &'static crate::types::FnSig,
+    target_params: &[Ty],
+    plan: &[AdaptedRefArgument],
+    mut is_assignable: impl FnMut(Ty, Ty) -> bool,
+) -> bool {
+    let mut result_bindings = crate::symbol_resolver::GSigBinds::default();
+    crate::symbol_resolver::unify_inferred_ty(expected.ret, ret, &mut result_bindings);
+    if result_bindings.is_empty() {
+        return true;
+    }
+    let mut fits = |input: Ty, declared: Ty| {
+        let bound = crate::symbol_resolver::ty_subst_keep_unbound(input, &result_bindings);
+        bound == input
+            || matches!(bound.non_null().kind(), TyKind::TyParam(..))
+            || is_assignable(bound, declared)
+    };
+    plan.iter().enumerate().all(|(target, argument)| {
+        let Some(&declared) = target_params.get(target) else {
+            return true;
+        };
+        match argument {
+            AdaptedRefArgument::Value(value) => expected
+                .params
+                .get(*value)
+                .is_none_or(|&input| fits(input, declared)),
+            AdaptedRefArgument::Vararg {
+                values,
+                whole_array,
+            } => {
+                let declared = if *whole_array {
+                    declared
+                } else {
+                    declared.array_read_elem().unwrap_or(declared)
+                };
+                values.iter().all(|value| {
+                    expected
+                        .params
+                        .get(*value)
+                        .is_none_or(|&input| fits(input, declared))
+                })
+            }
+            AdaptedRefArgument::Default => true,
+        }
+    })
 }
 
 /// Replace provisional type-variable slots in an expected callable shape with the concrete slots
