@@ -1154,7 +1154,7 @@ impl BodyLowering<'_> {
         let initial = self.ir.add_expr(IrExpr::Const(IrConst::Null));
         let declaration = self.ir.add_expr(IrExpr::Variable {
             index: result_slot,
-            ty: Ty::obj("java/lang/Object"),
+            ty: Ty::nullable(Ty::obj("kotlin/Any")),
             init: Some(initial),
             named: false,
         });
