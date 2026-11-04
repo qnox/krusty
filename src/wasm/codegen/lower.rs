@@ -242,6 +242,7 @@ pub(super) fn lower_file(
             ir.declared_value_slot_types(root),
             function.ret,
         );
+        body.scope = crate::ir::IrEnclosure::Function(id as FunId);
         match body.function_body(root, function.ret) {
             Ok(()) => {
                 let Body { code, locals, .. } = body;
@@ -257,8 +258,7 @@ pub(super) fn lower_file(
             Err(_reason)
                 if ir.signatures.get(&(id as FunId)).is_some_and(|signature| {
                     signature
-                        .type_params
-                        .iter()
+                        .declared_type_parameters()
                         .any(|parameter| parameter.reified)
                 }) =>
             {
@@ -591,6 +591,10 @@ struct Body<'a> {
     /// How many structured instructions enclose the current position.
     depth: u32,
     loops: Vec<Loop>,
+    /// The executable scope whose code this body emits: the function, the class's constructor or
+    /// singleton, or the file's static initializer. Only the template ownership of a reified
+    /// type operation reads it.
+    scope: crate::ir::IrEnclosure,
 }
 
 impl<'a> Body<'a> {
@@ -641,6 +645,7 @@ impl<'a> Body<'a> {
             result,
             depth: 0,
             loops: Vec::new(),
+            scope: crate::ir::IrEnclosure::File,
         }
     }
 
@@ -1140,7 +1145,7 @@ impl<'a> Body<'a> {
                 op: op @ (IrTypeOp::InstanceOf | IrTypeOp::NotInstanceOf | IrTypeOp::SafeCast),
                 arg,
                 type_operand,
-            } => self.type_test(op, arg, type_operand)?,
+            } => self.type_test(id, op, arg, type_operand)?,
             IrExpr::TypeOp {
                 op: op @ (IrTypeOp::ImplicitCoercion | IrTypeOp::Cast),
                 arg,
