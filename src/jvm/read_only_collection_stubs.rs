@@ -47,8 +47,9 @@ const FACE_ORDER: [CollectionKind; 8] = [
 
 /// The faces whose stubs are realized. The JDK members of the mutable collections (`removeIf`) and
 /// the `toArray` lowering are not yet realized for any face.
-const REALIZED_FACES: [CollectionKind; 4] = [
+const REALIZED_FACES: [CollectionKind; 5] = [
     CollectionKind::Collection,
+    CollectionKind::Set,
     CollectionKind::List,
     CollectionKind::Iterator,
     CollectionKind::ListIterator,

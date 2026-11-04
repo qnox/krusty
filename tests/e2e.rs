@@ -2955,3 +2955,6 @@ mod immediate_lambda_invocation_e2e;
 
 #[path = "facade_local_classifier_metadata_e2e.rs"]
 mod facade_local_classifier_metadata_e2e;
+
+#[path = "plugin_host_compiler_e2e/mod.rs"]
+mod plugin_host_compiler_e2e;
