@@ -5,6 +5,7 @@
 //! it. Name-based runtime tables remain explicit migration debt inside `native::intrinsics`.
 
 mod c_calls;
+mod default_entries;
 mod dependency_exports;
 
 use super::*;
@@ -303,42 +304,33 @@ impl BodyLowering<'_, '_, '_> {
         args: &[u32],
     ) -> Result<Option<Value>, Unsupported> {
         match callee {
-            Callee::LocalWithDefaults { function, defaults }
-            | Callee::ClassStaticWithDefaults {
-                function, defaults, ..
-            } => self.defaulted_call(*function, defaults, dispatch_receiver, args, site),
-            // A top-level function in another file: that file exports the entry that fills the
-            // omitted arguments, because only it holds their defaults.
-            Callee::ModuleWithDefaults {
+            // Another file's default-argument entry fills the omitted arguments, because only
+            // that file holds their defaults.
+            Callee::ModuleDefaultEntry {
                 target,
-                default_provider: crate::fir::ResolvedFunctionOverrideTarget::Module(provider),
+                provider,
                 params,
                 ret,
-                defaults,
-                dispatch_receiver_ty: None,
-                ..
             } if dispatch_receiver.is_none() => {
-                self.module_defaulted_call(*provider, *target, params, *ret, defaults, args)
-            }
-            Callee::ModuleWithDefaults { defaults, .. } => {
-                match self.file.inherited_default_provider(callee) {
-                    Some(provider) => {
-                        self.defaulted_call(provider, defaults, dispatch_receiver, args, site)
-                    }
-                    None => Err(declined!("a {} call", callee_kind(callee))),
-                }
+                self.module_default_entry_call(*provider, *target, params, *ret, args)
             }
             // A static method owned by a class is, to this generator, a function with a symbol —
             // the owner is a JVM placement fact, and there is no flat facade here for it to be
             // placed differently from. A local function declared inside a member is the shape that
             // arrives this way.
             Callee::Local(function) | Callee::ClassStatic { function, .. } => {
-                if dispatch_receiver.is_some() {
-                    return Err("a static call with a receiver".into());
-                }
+                let mut arguments = match dispatch_receiver {
+                    None => Vec::new(),
+                    Some(receiver) => {
+                        match self.value_class_member_receiver(*function, receiver)? {
+                            Some(value) => vec![value],
+                            None => return Ok(None),
+                        }
+                    }
+                };
                 let params =
                     super::super::super::captures::carried_parameters(self.file.ir, *function);
-                let arguments = self.arguments(args, &params)?;
+                arguments.extend(self.arguments(args, &params)?);
                 if self.terminated {
                     return Ok(None);
                 }

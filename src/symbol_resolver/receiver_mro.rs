@@ -3,7 +3,8 @@
 
 use super::{
     classifier_callable_signature, declared_function_type, direct_supertypes,
-    ty_subst_keep_unbound, unify_ty_from_symbols, GSigBinds, SourceOracle,
+    ty_subst_keep_unbound, unify_receiver_from_symbols, unify_ty_from_symbols, GSigBinds,
+    SourceOracle,
 };
 use crate::symbol_source::SymbolSource;
 use crate::types::{Ty, TyKind};
@@ -39,7 +40,7 @@ fn receiver_type_args_match(
     let oracle = SourceOracle(src);
     if decl_recv.mentions_ty_param() {
         let mut bindings = GSigBinds::default();
-        unify_ty_from_symbols(src, decl_recv, recv, &mut bindings);
+        unify_receiver_from_symbols(src, decl_recv, recv, &mut bindings);
         contravariant_formals_read_nothing(decl_recv, recv, &mut bindings);
         let specialized = ty_subst_keep_unbound(decl_recv, &bindings);
         // A callee-owned receiver variable may bind to a still-symbolic variable owned by the
@@ -113,7 +114,7 @@ fn contravariant_formals_read_nothing(decl_recv: Ty, recv: Ty, bindings: &mut GS
             continue;
         }
         if let TyKind::TyParam(name, _) = inner.non_null().kind() {
-            bindings.insert(name.to_string(), Ty::Nothing);
+            bindings.insert(name, Ty::Nothing);
         }
     }
 }
@@ -152,8 +153,9 @@ fn bind_receiver_type_variables(
     }
     let mut bindings = GSigBinds::default();
     unify_ty_from_symbols(src, recv, decl_recv, &mut bindings);
-    bindings
-        .retain(|variable, value| type_variables.contains(variable) && !value.mentions_ty_param());
+    bindings.retain(|variable, value| {
+        type_variables.iter().any(|formal| formal == variable) && !value.mentions_ty_param()
+    });
     ty_subst_keep_unbound(recv, &bindings)
 }
 

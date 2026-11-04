@@ -51,7 +51,10 @@ impl CallConstraints<'_> {
             crate::symbol_resolver::unify_ty(signature.ret, expected, &mut seeded);
         }
         for (formal, ty) in seeded {
-            if signature.formals.contains(&formal) && !ty.mentions_pending() && ty != Ty::Error {
+            if signature.formals.iter().any(|declared| *declared == formal)
+                && !ty.mentions_pending()
+                && ty != Ty::Error
+            {
                 bindings.entry(formal).or_insert(ty);
             }
         }

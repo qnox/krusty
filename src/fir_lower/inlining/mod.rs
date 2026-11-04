@@ -815,8 +815,8 @@ impl BodyLowering<'_> {
                     substituted_inline_lambdas.insert(copy);
                     self.ir.unmark_inline_copy(copy);
                     self.ir.binding_read_stability.remove(&copy);
-                    if let Some(ty) = self.ir.logical_types.get(&lambda).copied() {
-                        self.ir.logical_types.insert(copy, ty);
+                    if let Some(ty) = self.ir.logical_type(lambda) {
+                        self.ir.set_logical_type(copy, ty);
                     }
                     continue;
                 }
@@ -935,6 +935,31 @@ impl BodyLowering<'_> {
             preflight_temporary =
                 lambda_splice_contract::preflight(self.ir, invocation, preflight_temporary)?;
         }
+        // The escaping lambdas are regenerated before the anonymous objects are copied: the object
+        // copies' classifier walk then renames inside each call-site lambda it reaches, which this
+        // expansion alone owns. Walked first, the objects would detach the lambdas' shared
+        // declaration implementations onto clones the plan never specializes, and the call-site
+        // lambda would keep the reified marker. The plan commits without declining; a malformed
+        // anonymous object below is a lowering failure, not a decline that leaves the call executable.
+        let inlined_escaping_implementations = match (module_callee, frame.source()) {
+            (Some(module_callee), Some((source_owner, callee_source))) => escaping_lambda::apply(
+                self.ir,
+                escaping_lambda_plan,
+                &bindings,
+                &reified_bindings,
+                caller_declaration,
+                self.expansion_enclosure,
+                self.in_default_argument,
+                &caller_source_name,
+                function,
+                source_owner,
+                callee_source,
+                module_callee,
+                &callee,
+            ),
+            // The plan is empty: a dependency template declares no lambda.
+            _ => Default::default(),
+        };
         // An anonymous object's methods are not children of the inlined template. Cloning only the
         // `new` reuses the declaration class, whose reified parameter is erased. This is the final
         // fallible specialization: both lambda transformations above have already been preflighted,
@@ -1009,25 +1034,6 @@ impl BodyLowering<'_> {
                 self.ir.inline_only_fns.remove(&function);
             }
         }
-        let inlined_escaping_implementations = match (module_callee, frame.source()) {
-            (Some(module_callee), Some((source_owner, callee_source))) => escaping_lambda::apply(
-                self.ir,
-                escaping_lambda_plan,
-                &bindings,
-                &reified_bindings,
-                caller_declaration,
-                self.expansion_enclosure,
-                self.in_default_argument,
-                &caller_source_name,
-                function,
-                source_owner,
-                callee_source,
-                module_callee,
-                &callee,
-            ),
-            // The plan is empty: a dependency template declares no lambda.
-            _ => Default::default(),
-        };
         // Consuming a source lambda implementation is the only irreversible part of escaping
         // inline-lambda specialization. Commit it only after every transformation that can decline
         // this expansion has succeeded; otherwise the original call still needs that body.
@@ -1185,7 +1191,7 @@ impl BodyLowering<'_> {
             arg,
             type_operand: specialized,
         });
-        self.ir.logical_types.insert(expression, specialized);
+        self.ir.set_logical_type(expression, specialized);
         expression
     }
 
@@ -1217,7 +1223,7 @@ impl BodyLowering<'_> {
                 staged.push(value);
                 continue;
             }
-            let ty = self.ir.logical_types.get(&value).copied()?;
+            let ty = self.ir.logical_type(value)?;
             let slot = self.allocate_temporary();
             let declaration = self.ir.add_expr(IrExpr::Variable {
                 index: slot,
@@ -1232,7 +1238,7 @@ impl BodyLowering<'_> {
                     .insert(declaration);
             }
             let read = self.ir.add_expr(IrExpr::GetValue(slot));
-            self.ir.logical_types.insert(read, ty);
+            self.ir.set_logical_type(read, ty);
             staged.push(read);
         }
         if bound == 1 {
@@ -1402,7 +1408,7 @@ impl BodyLowering<'_> {
         {
             let continuation = self.ir.add_expr(IrExpr::CurrentContinuation);
             let ty = Ty::obj("kotlin/coroutines/Continuation");
-            self.ir.logical_types.insert(continuation, ty);
+            self.ir.set_logical_type(continuation, ty);
             let slot = self.allocate_temporary();
             let declaration = self.ir.add_expr(IrExpr::Variable {
                 index: slot,
@@ -1722,10 +1728,14 @@ pub(super) fn specialize_recorded_facts(
     bindings: &HashMap<String, Ty>,
     runtime: &HashMap<String, Ty>,
 ) {
+    if let Some(ty) = ir.logical_type_mut(expression) {
+        specialize_ty(ty, bindings);
+    }
+    if let Some(ty) = ir.physical_type_mut(expression) {
+        specialize_ty(ty, bindings);
+    }
     for ty in [
-        ir.logical_types.get_mut(&expression),
         ir.whens.exhaustive.get_mut(&expression),
-        ir.physical_types.get_mut(&expression),
         ir.ext_call_source_receiver.get_mut(&expression),
         ir.call_declared_ret.get_mut(&expression),
         ir.suspend_calls.get_mut(&expression),

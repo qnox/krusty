@@ -66,13 +66,14 @@ fn merge_active_constraints(
     constraints: crate::symbol_resolver::AssignabilityConstraints,
     active: &crate::fx_hash::HashSet<&str>,
 ) {
-    let inferred =
-        constraints
-            .lower
-            .into_iter()
-            .chain(constraints.upper.into_iter().flat_map(|(formal, bounds)| {
-                bounds.into_iter().map(move |bound| (formal.clone(), bound))
-            }));
+    let inferred = constraints
+        .lower
+        .into_iter()
+        .chain(constraints.upper.into_iter().flat_map(|(formal, bounds)| {
+            bounds
+                .into_iter()
+                .map(move |bound| (crate::types::TyParamName::from(&formal), bound))
+        }));
     for (formal, actual) in inferred {
         if active.contains(formal.as_str()) {
             bindings
@@ -235,7 +236,12 @@ impl ProductionSignatureSemantics<'_> {
         let (parameters, slots) = if let Some((kinds, slots)) =
             Self::probe_call_arguments(callables.functions(), arguments, trailing_lambda)
         {
-            let projected = self.project_postponed_callables(scope, receiver, callables, &kinds);
+            let projected = self.project_postponed_callables(
+                scope,
+                receiver,
+                callables,
+                crate::symbol_resolver::FamilyArguments::Shared(&kinds),
+            );
             let parameters = match resolver.select_receiver_function_with_params(
                 receiver,
                 spelling,
@@ -353,7 +359,12 @@ impl ProductionSignatureSemantics<'_> {
                         overloads: vec![candidate.clone()],
                     });
                 let projected =
-                    self.project_postponed_callables(scope, receiver, callables, &kinds);
+                    self.project_postponed_callables(
+                        scope,
+                        receiver,
+                        callables,
+                        crate::symbol_resolver::FamilyArguments::Shared(&kinds),
+                    );
                 let parameters = match resolver.select_receiver_function_with_params(
                     receiver,
                     spelling,
@@ -416,8 +427,15 @@ impl ProductionSignatureSemantics<'_> {
         scope: crate::fir::SignatureScope,
         receiver: Ty,
         callables: crate::libraries::Callables,
-        arguments: &[crate::symbol_resolver::CallArgKind],
+        arguments: crate::symbol_resolver::FamilyArguments<'_>,
     ) -> PostponedCallableFamily {
+        // Each declaration is projected against its own arguments, in its parameter order.
+        let (source_arguments, calls) = match arguments {
+            crate::symbol_resolver::FamilyArguments::Shared(arguments) => (arguments, None),
+            crate::symbol_resolver::FamilyArguments::PerCandidate { calls, source } => {
+                (source, Some(calls))
+            }
+        };
         let constraint_frame = self.active_scoped_constraint_frame(scope.owner);
         let mut active = crate::fx_hash::HashSet::default();
         if let Some(inputs) = constraint_frame.and_then(|(owner, index)| {
@@ -434,7 +452,7 @@ impl ProductionSignatureSemantics<'_> {
         if active.is_empty() {
             return PostponedCallableFamily {
                 callables,
-                arguments: arguments.to_vec(),
+                arguments: source_arguments.to_vec(),
                 bindings: Vec::new(),
             };
         }
@@ -454,8 +472,8 @@ impl ProductionSignatureSemantics<'_> {
             &module as &dyn crate::symbol_source::SymbolSource,
             &*self.table.libraries as &dyn crate::symbol_source::SymbolSource,
         ]);
-        let arguments = arguments.to_vec();
-        for candidate in &mut functions.overloads {
+        for (index, candidate) in functions.overloads.iter_mut().enumerate() {
+            let arguments = calls.map_or(source_arguments, |calls| calls[index].args.as_slice());
             let Some(mut signature) = candidate.generic_sig.clone() else {
                 // A non-generic extension's receiver still constrains the active variables that
                 // the actual receiver mentions (`Buildee<UserKlass>.f()` on `Buildee<FT>`).
@@ -482,7 +500,7 @@ impl ProductionSignatureSemantics<'_> {
             let value_parameter_start = candidate.context_count.min(signature.params.len());
             for (parameter, argument) in signature.params[value_parameter_start..]
                 .iter()
-                .zip(&arguments)
+                .zip(arguments)
             {
                 if !argument.is_expected_type_callable() || argument.result_is_input_constrained() {
                     continue;
@@ -491,7 +509,7 @@ impl ProductionSignatureSemantics<'_> {
                 collect_type_parameters(*parameter, &mut contextual);
                 for formal in contextual {
                     if let Some(value) = known.get(formal).copied() {
-                        bindings.insert(formal.to_string(), value);
+                        bindings.insert(crate::types::TyParamName::new(formal), value);
                     }
                 }
             }
@@ -507,7 +525,7 @@ impl ProductionSignatureSemantics<'_> {
             for (parameter, argument) in signature.params[value_parameter_start..]
                 .iter()
                 .copied()
-                .zip(&arguments)
+                .zip(arguments)
             {
                 if argument.is_omitted_default()
                     || (argument.is_lambda_literal() && !argument.contributes_type_to_inference())
@@ -543,7 +561,7 @@ impl ProductionSignatureSemantics<'_> {
             let committed = bindings
                 .iter()
                 .filter(|(formal, _)| active.contains(formal.as_str()))
-                .map(|(formal, ty)| (formal.clone(), *ty))
+                .map(|(formal, ty)| (*formal, *ty))
                 .collect();
 
             signature.receiver = signature
@@ -566,7 +584,7 @@ impl ProductionSignatureSemantics<'_> {
         }
         PostponedCallableFamily {
             callables: crate::libraries::Callables::from_parts(functions, properties),
-            arguments,
+            arguments: source_arguments.to_vec(),
             bindings: recorded,
         }
     }

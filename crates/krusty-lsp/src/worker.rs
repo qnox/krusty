@@ -334,7 +334,7 @@ struct WireDiagnostic {
     hi: u32,
     severity: u8,
     #[serde(default)]
-    warning_name: Option<String>,
+    name: Option<String>,
     kind: u8,
     message: String,
 }
@@ -372,9 +372,7 @@ impl From<DocumentAnalysis> for AnalysisResponse {
                         Severity::Error => 1,
                         Severity::Warning => 2,
                     },
-                    warning_name: diagnostic
-                        .warning_name
-                        .map(|name| name.as_str().to_string()),
+                    name: diagnostic.name.map(|name| name.as_str().to_string()),
                     kind: match diagnostic.kind {
                         DiagnosticKind::Compiler => 0,
                         DiagnosticKind::IncompatibleEquality => 1,
@@ -411,10 +409,10 @@ impl AnalysisResponse {
                     span: Span::new(diagnostic.lo, diagnostic.hi),
                     editor_span: None,
                     identity: None,
-                    warning_name: diagnostic
-                        .warning_name
+                    name: diagnostic
+                        .name
                         .as_deref()
-                        .and_then(krusty::diag::CompilerWarningName::parse),
+                        .and_then(krusty::diag::DiagnosticName::parse),
                     severity: if diagnostic.severity == 2 {
                         Severity::Warning
                     } else {
@@ -1561,21 +1559,21 @@ mod tests {
     use crate::analysis::MAX_SOURCE_SET_NAVIGATION_ENTRIES;
 
     #[test]
-    fn compiler_warning_name_survives_the_worker_wire_boundary() {
-        let diagnostic = |warning_name: krusty::diag::CompilerWarningName, msg: &str| Diagnostic {
+    fn kotlinc_diagnostic_name_survives_the_worker_wire_boundary() {
+        let diagnostic = |name: krusty::diag::DiagnosticName, msg: &str| Diagnostic {
             span: Span::new(1, 2),
             editor_span: None,
             severity: Severity::Warning,
-            warning_name: Some(warning_name),
+            name: Some(name),
             kind: DiagnosticKind::Compiler,
             msg: msg.to_string(),
             identity: None,
             file: 0,
         };
         let analysis = DocumentAnalysis::with_diagnostics(vec![
-            diagnostic(krusty::diag::CompilerWarningName::Deprecation, "deprecated"),
+            diagnostic(krusty::diag::names::DEPRECATION, "deprecated"),
             diagnostic(
-                krusty::diag::CompilerWarningName::ValueClassCannotBeRecursiveViaTypeParameters,
+                krusty::diag::names::VALUE_CLASS_CANNOT_BE_RECURSIVE_VIA_TYPE_PARAMETERS_WARNING,
                 "recursive",
             ),
         ]);
@@ -1586,12 +1584,12 @@ mod tests {
             decoded
                 .diagnostics
                 .iter()
-                .map(|diagnostic| diagnostic.warning_name)
+                .map(|diagnostic| diagnostic.name)
                 .collect::<Vec<_>>(),
             [
-                Some(krusty::diag::CompilerWarningName::Deprecation),
+                Some(krusty::diag::names::DEPRECATION),
                 Some(
-                    krusty::diag::CompilerWarningName::ValueClassCannotBeRecursiveViaTypeParameters,
+                    krusty::diag::names::VALUE_CLASS_CANNOT_BE_RECURSIVE_VIA_TYPE_PARAMETERS_WARNING,
                 ),
             ]
         );

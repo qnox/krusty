@@ -164,8 +164,8 @@ impl BodyLowering<'_> {
         let result = self.ir.add_expr(IrExpr::When {
             branches: vec![(Some(matches), matched), (None, mismatch)],
         });
-        self.ir.logical_types.insert(matched, Ty::Boolean);
-        self.ir.logical_types.insert(result, Ty::Boolean);
+        self.ir.set_logical_type(matched, Ty::Boolean);
+        self.ir.set_logical_type(result, Ty::Boolean);
         Ok(self.ir.add_expr(IrExpr::Block {
             stmts: declarations,
             value: Some(result),
@@ -182,7 +182,7 @@ impl BodyLowering<'_> {
     ) -> Result<ExprId, FirLoweringFailure> {
         let start = self.ir.add_expr(IrExpr::Const(IrConst::Int(0)));
         let end = self.indices_size(indices)?;
-        self.ir.logical_types.insert(end, Ty::Int);
+        self.ir.set_logical_type(end, Ty::Int);
         let value = self.expression(value)?;
         Ok(self.ir.add_expr(IrExpr::Checked(Box::new(
             IrCheckedOperation::RangeContains {
@@ -282,8 +282,8 @@ impl BodyLowering<'_> {
         // These reads are synthesized from temporaries declared above, rather than lowered from
         // source FIR expressions. Preserve the selected range-comparison type on each operand so
         // targets choose only its representation.
-        self.ir.logical_types.insert(lhs, ty);
-        self.ir.logical_types.insert(rhs, ty);
+        self.ir.set_logical_type(lhs, ty);
+        self.ir.set_logical_type(rhs, ty);
         self.ir.add_expr(IrExpr::PrimitiveBinOp {
             op: operation,
             lhs,

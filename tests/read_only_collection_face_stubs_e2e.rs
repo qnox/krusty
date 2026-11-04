@@ -9,9 +9,9 @@
 //! final special bridge testing `instanceof String`, and an inherited `Base<T>.remove(T)` under
 //! `Base<String>` implements it with the erased descriptor itself, so it needs nothing.
 //!
-//! The JDK default `removeIf` and the `toArray` pair are later realizations, and so is the
-//! signature of a declared `containsAll` override; these comparisons leave those members out by
-//! their exact spelling and compare every other member byte for byte.
+//! The JDK default `removeIf` is a later realization; these comparisons leave it out by its exact
+//! spelling and compare every other member, the `toArray` pair and the declared `containsAll`
+//! override included, byte for byte.
 
 use super::common;
 
@@ -95,15 +95,9 @@ const ABSTRACT_BAG: &str = "abstract class Bag : Collection<String>\n";
 
 /// The members a later realization writes, as `javap -p` spells them in either compiler's class.
 const LATER_REALIZATIONS: &[&str] = &[
-    "public boolean containsAll(java.util.Collection<?>);",
-    "public boolean containsAll(java.util.Collection<java.lang.String>);",
-    "public boolean containsAll(java.util.Collection<java.lang.Integer>);",
-    "public boolean containsAll(java.util.Collection<? extends T>);",
     "public boolean removeIf(java.util.function.Predicate<? super java.lang.String>);",
     "public boolean removeIf(java.util.function.Predicate<? super java.lang.Integer>);",
     "public boolean removeIf(java.util.function.Predicate<? super T>);",
-    "public <T> T[] toArray(T[]);",
-    "public java.lang.Object[] toArray();",
 ];
 
 /// The fake-override bridges an abstract class's unimplemented `contains` and `size` get, a later

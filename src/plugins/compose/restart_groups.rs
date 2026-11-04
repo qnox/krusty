@@ -544,22 +544,15 @@ fn changed_argument(ir: &mut IrFile, caller: Slots, arguments: &[ArgumentState])
                     order => {
                         let distance = slot.abs_diff(parent) * BITS_PER_SLOT;
                         let distance = ir.add_expr(IrExpr::Const(IrConst::Int(distance as i32)));
-                        ir.add_expr(IrExpr::PrimitiveBinOp {
-                            op: if order.is_gt() {
-                                IrBinOp::Shl
-                            } else {
-                                IrBinOp::Shr
-                            },
-                            lhs: bits,
-                            rhs: distance,
-                        })
+                        let shift = if order.is_gt() {
+                            IrBinOp::Shl
+                        } else {
+                            IrBinOp::Shr
+                        };
+                        ir.add_arithmetic(shift, bits, distance, Ty::Int)
                     }
                 };
-                forwarded.push(ir.add_expr(IrExpr::PrimitiveBinOp {
-                    op: IrBinOp::BitAnd,
-                    lhs: mask,
-                    rhs: shifted,
-                }));
+                forwarded.push(ir.add_arithmetic(IrBinOp::BitAnd, mask, shifted, Ty::Int));
             }
         }
     }
@@ -576,21 +569,13 @@ fn changed_argument(ir: &mut IrFile, caller: Slots, arguments: &[ArgumentState])
 }
 
 fn or(ir: &mut IrFile, lhs: ExprId, rhs: ExprId) -> ExprId {
-    ir.add_expr(IrExpr::PrimitiveBinOp {
-        op: IrBinOp::BitOr,
-        lhs,
-        rhs,
-    })
+    ir.add_arithmetic(IrBinOp::BitOr, lhs, rhs, Ty::Int)
 }
 
 fn and_constant(ir: &mut IrFile, value: u32, bits: i32) -> ExprId {
     let lhs = ir.add_expr(IrExpr::GetValue(value));
     let rhs = ir.add_expr(IrExpr::Const(IrConst::Int(bits)));
-    ir.add_expr(IrExpr::PrimitiveBinOp {
-        op: IrBinOp::BitAnd,
-        lhs,
-        rhs,
-    })
+    ir.add_arithmetic(IrBinOp::BitAnd, lhs, rhs, Ty::Int)
 }
 
 fn int_comparison(ir: &mut IrFile, op: IrBinOp, lhs: ExprId, rhs: i32) -> ExprId {
@@ -855,7 +840,7 @@ fn update_scope(ir: &mut IrFile, runtime: &ComposeRuntime, facts: &RestartableFu
         branches: vec![(Some(condition), null_result), (None, update)],
     });
     ir.whens.exhaustive.insert(guarded, Ty::Unit);
-    ir.logical_types.insert(guarded, Ty::Unit);
+    ir.set_logical_type(guarded, Ty::Unit);
     ir.null_guards.insert(guarded);
     let block = ir.add_expr(IrExpr::Block {
         stmts: vec![variable],

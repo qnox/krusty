@@ -445,7 +445,7 @@ impl<'a> Checker<'a> {
                     .select_receiver_function_with_params_tracking(
                         receiver,
                         name,
-                        &arg_kinds,
+                        crate::symbol_resolver::FamilyArguments::Shared(&arg_kinds),
                         &[],
                         &members,
                         None,
@@ -541,7 +541,7 @@ impl<'a> Checker<'a> {
         } = match resolver.select_receiver_function_with_applied_receiver_tracking(
             receiver,
             name,
-            &arg_kinds,
+            crate::symbol_resolver::FamilyArguments::Shared(&arg_kinds),
             &[],
             &callables,
             expected_result,
@@ -633,7 +633,7 @@ impl<'a> Checker<'a> {
                     arguments: signature
                         .formals
                         .iter()
-                        .map(|formal| bindings.get(formal).copied())
+                        .map(|formal| bindings.get(formal.as_str()).copied())
                         .collect(),
                     signature: signature.clone(),
                     call_sig: selected.call_sig.clone(),
@@ -945,7 +945,9 @@ impl<'a> Checker<'a> {
                 .select_receiver_function_with_params_tracking(
                     comparable,
                     "compareTo",
-                    &[crate::symbol_resolver::CallArgKind::Typed(element)],
+                    crate::symbol_resolver::FamilyArguments::Shared(&[
+                        crate::symbol_resolver::CallArgKind::Typed(element),
+                    ]),
                     &[],
                     &callables,
                     None,
