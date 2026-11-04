@@ -809,6 +809,7 @@ mod tests {
                 bounds: vec![(Ty::obj("kotlin/Any"), false)],
                 variance: Default::default(),
                 reified: true,
+                captured_from_enclosing: false,
             }],
             params: vec![parameter],
             ret: Some(parameter),
@@ -899,6 +900,7 @@ mod tests {
                 bounds: vec![(parameter, false)],
                 variance: Default::default(),
                 reified: false,
+                captured_from_enclosing: false,
             }],
         );
         ir.record_lambda_type_parameters(source, vec![signature(parameter).type_params[0].clone()]);
