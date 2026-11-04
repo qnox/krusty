@@ -5267,7 +5267,6 @@ sealed/multipleFiles_enabled.kt
 secondaryConstructors/accessToCompanion.kt
 secondaryConstructors/basicNoPrimaryOneSink.kt
 secondaryConstructors/basicPrimary.kt
-secondaryConstructors/callFromLocalSubClass.kt
 secondaryConstructors/clashingDefaultConstructors.kt
 secondaryConstructors/dataClasses.kt
 secondaryConstructors/defaultArgs.kt
