@@ -1,4 +1,5 @@
-// TARGET_BACKEND: JVM_IR
+// Every inline function's `$default` stub runs the function's body. The JVM-only `@JvmStatic` and
+// `@JvmInline` forms run in inlineJvmStaticDefaultStub.kt.
 var seen = 0
 inline fun f(x: Int = 1): Int = x + 1
 private inline fun hidden(x: Int = 1): Int = x + 3
@@ -39,19 +40,14 @@ class Picker {
 }
 object O {
     inline fun h(x: Int = 1): Int = x + 5
-    @JvmStatic inline fun hs(x: Int = 1): Int = x + 6
 }
 class K {
     companion object {
         inline fun c(x: Int = 1): Int = x + 7
-        @JvmStatic inline fun cs(x: Int = 1): Int = x + 8
     }
 }
 open class Op {
     inline fun og(x: Int = 1): Int = x + 9
-}
-@JvmInline value class V(val v: Int) {
-    inline fun plus(x: Int = 1): Int = v + x
 }
 inline fun caught(result: String = try { error("x") } catch (e: IllegalStateException) { "Y" }): String =
     result
@@ -63,9 +59,9 @@ class D {
 fun box(): String {
     u()
     val sum = f() + useHidden() + "ab".ext() + C().g() + D().useHidden() + with(C()) { "a".mext() } +
-        O.h() + O.hs() + K.c() + K.cs() + Op().og() + V(1).plus()
+        O.h() + K.c() + Op().og()
     if (seen != 1 || isA<String>() || two() != "aab") return "FAIL: shapes"
     if (guarded() != "a" || log != "af" || loop() != 3 || caught() != "Y") return "FAIL: statements"
     if (Picker().pick(E.A) != "OK") return "FAIL: pick"
-    return if (sum == 2 + 4 + 3 + 3 + 3 + 2 + 6 + 7 + 8 + 9 + 10 + 2) "OK" else "FAIL: $sum"
+    return if (sum == 2 + 4 + 3 + 3 + 3 + 2 + 6 + 8 + 10) "OK" else "FAIL: $sum"
 }
