@@ -87,18 +87,7 @@ fun box(): String = pick(E.A, "OK")
 
 /// An enum `when` that only a public inline member's `$default` wrapper evaluates: the default is
 /// code of that inline function's scope, so its class's mappings carry the public-ABI flag.
-const MEMBER_DEFAULT: &str = r#"
-enum class E { A, B }
-
-class Picker {
-    inline fun pick(e: E, s: String = when (e) {
-        E.A -> "OK"
-        E.B -> "FAIL"
-    }): String = s
-}
-
-fun box(): String = Picker().pick(E.A, "OK")
-"#;
+const MEMBER_DEFAULT: &str = include_str!("box_regressions/inlineMemberDefaultWhenMapping.kt");
 
 const CROSS_DECLARATION: &str = r#"
 enum class Size { S, M, L }
