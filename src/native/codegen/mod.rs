@@ -216,6 +216,7 @@ impl Backend for CraneliftBackend {
             }
         };
         crate::backend::counted_loops::realize(&mut file.ir, COUNTED_LOOPS);
+        crate::backend::default_arguments::realize(&mut file.ir, &mut file.callables);
         // A local or anonymous classifier arrives with an opaque identity; this target names it
         // from its provenance as Kotlin/Native does. There is no facade class here, so a
         // classifier local to a top-level function starts in the package: `box$MyLocalObject`,
@@ -315,8 +316,9 @@ impl Backend for CraneliftBackend {
             state.next_dependency_symbol += 1;
             // A later module calling this declaration with arguments left out reaches the
             // declaring file's default entry through an export of its own.
-            let default_entry = lower::exports_default_entry(&file.ir, callable)
-                .then(|| format!("{symbol}__defaults"));
+            let default_entry =
+                crate::backend::default_arguments::published_entry(&file.ir, callable)
+                    .map(|_| format!("{symbol}__defaults"));
             let reference_declaration = match file.kind {
                 crate::backend::CheckedIrUnitKind::Source => {
                     match ReferenceDeclaration::source_export(&file.ir, file.module_name, callable)

@@ -29003,7 +29003,7 @@ fun use() {
     }
 
     #[test]
-    fn subclass_constructor_prefers_package_type_to_nested_type_from_superclass() {
+    fn subclass_constructor_prefers_nested_type_from_superclass_to_package_type() {
         let mut diagnostics = DiagSink::new();
         let source = "class Category\n\
              open class Parent { enum class Category { FIRST } }\n\
@@ -29020,7 +29020,7 @@ fun use() {
                 .get(&type_name("Child"))
                 .expect("subclass signature")
                 .ctor_params,
-            [Ty::obj("Category")]
+            [Ty::obj("Parent$Category")]
         );
     }
 
@@ -31051,7 +31051,7 @@ fn make_checker_with_index<'a, S: CheckerSymbolEnvironment>(
         this_narrow: None,
         this_labels: Vec::new(),
         lexical_class_context: Vec::new(),
-        classifier_header_owner: None,
+        classifier_header: None,
         exact_anonymous_class_roots: crate::fx_hash::HashSet::default(),
         extension_receiver_labels: Vec::new(),
         local_function_receivers: crate::fx_hash::HashSet::default(),
@@ -33519,10 +33519,8 @@ struct Checker<'a> {
     /// Source class owners of a hoisted anonymous-object declaration, nearest first. They contribute
     /// lexical classifier scope but are not implicit runtime receivers (captures remain a separate ABI).
     lexical_class_context: Vec<TypeName>,
-    /// Classifier whose declaration header is currently being checked. Its own declaration and
-    /// enclosing classifier namespaces precede package/import lookup, while nested classifiers
-    /// inherited by this owner form a later fallback rung. It never becomes an implicit receiver.
-    classifier_header_owner: Option<TypeName>,
+    /// Classifier header currently being checked and its part. It never becomes an implicit receiver.
+    classifier_header: Option<classifier_binding::ClassifierHeader>,
     /// Anonymous classifiers in the current structural ownership chain. Their generated `$` names are
     /// exact roots, never evidence of lexical parents; those come only from `lexical_class_context`.
     exact_anonymous_class_roots: crate::fx_hash::HashSet<TypeName>,
@@ -42559,7 +42557,7 @@ impl<'a> Checker<'a> {
 
     fn access_context_class_names(&self) -> Vec<TypeName> {
         let mut classes = self.lexical_source_class_names();
-        if let Some(owner) = self.classifier_header_owner {
+        if let Some(owner) = self.classifier_header.map(|header| header.owner) {
             classes.retain(|candidate| *candidate != owner);
             classes.insert(0, owner);
         }
@@ -45035,11 +45033,9 @@ impl<'a> Checker<'a> {
                 None
             };
             // Primary-constructor parameters, class context parameters, and class bounds are
-            // classifier-header declarations. Resolve them before the class dispatch-receiver rung
-            // exists. Nested declarations are still lexical classifier bindings in primary
-            // parameter types, while inherited nested classifiers remain a fallback after
-            // lexical/file scope. Enclosing classifiers plus own/captured type parameters are
-            // visible here. Pass 1 publishes these signatures from this same boundary.
+            // classifier-header declarations, resolved before the class dispatch-receiver rung
+            // exists. See `ClassifierHeaderPart` for which classifiers each part sees. Pass 1
+            // publishes these signatures from this same boundary.
             let classifier_header_scope = scope.child(ScopeKind::Block);
             if let Some((names, captured)) = &captured_type_parameters {
                 classifier_header_scope.declare_tparams(names, captured, |name| {
@@ -45047,8 +45043,7 @@ impl<'a> Checker<'a> {
                 });
             }
             classifier_header_scope.declare_tparams(&cl.type_params, &class_tparams, |_| false);
-            let previous_header_owner =
-                std::mem::replace(&mut self.classifier_header_owner, current_owner);
+            let previous_header = self.enter_classifier_header(current_owner);
             let stable_primary_constructor = body_local_class
                 .then(|| {
                     stable_local_classifier.zip(self.resolved_index).and_then(
@@ -45275,6 +45270,7 @@ impl<'a> Checker<'a> {
                     )
                 })
                 .collect::<Vec<_>>();
+            self.enter_classifier_type_parameter_bounds();
             if finalized_local_classifier_header {
                 if let Some(declaration) = stable_local_classifier {
                     if !self.record_finalized_type_parameter_bounds(
@@ -45291,7 +45287,7 @@ impl<'a> Checker<'a> {
                     self.check_type_parameter_bound(&classifier_header_scope, bound);
                 }
             }
-            self.classifier_header_owner = previous_header_owner;
+            self.classifier_header = previous_header;
             // Executable declarations inside the classifier—including constructor defaults,
             // enum-entry arguments, companion initializers, and nested anonymous declarations—do
             // have its lexical classifier rung even when they have no dispatch receiver. Introduce
@@ -51020,91 +51016,6 @@ impl<'a> Checker<'a> {
         self.contextual_integer_literal_type(expected, |expected| {
             unsigned_literal_ty(value, expected)
         })
-    }
-
-    /// Whether a selected call can infer its result from `expected` after expression-owned result
-    /// transformations have been preserved. The declaration supplies the generic result shape, but
-    /// a safe call adds nullability outside that shape and contextual inference cannot erase it.
-    fn call_result_can_bind_expected(&self, expression: ExprId, expected: Ty) -> bool {
-        // `Any`/`Any?` cannot bind anything: every result is already a subtype, so the
-        // expectation carries no constraint for a result variable. A literal declared
-        // `Map<String, Any?>` hands `Any?` to every nested value and used to re-enter each level
-        // once more for it (see `selected_argument_type` for the equal-type case).
-        if expected
-            .non_null()
-            .obj_internal()
-            .is_some_and(|owner| owner == crate::types::wk::any())
-        {
-            return false;
-        }
-        if let Expr::Elvis { lhs, rhs } = self.file.expr(expression) {
-            // An Elvis carries the selected generic-result decision of either branch. Treating only
-            // a syntactic CALL as contextual made `null ?: emptyList()` opaque to an enclosing
-            // `Collection<Int>` parameter even though the RHS had already selected `emptyList<T>`.
-            return self.call_result_can_bind_expected(*lhs, Ty::nullable(expected))
-                || self.call_result_can_bind_expected(*rhs, expected);
-        }
-        if let Expr::SafeCall { receiver, .. } = self.file.expr(expression) {
-            let receiver = self.expr_types[receiver.0 as usize];
-            if receiver.is_reference() && !expected.admits_null() {
-                return false;
-            }
-        }
-        if self
-            .file
-            .call_type_args
-            .get(&expression.0)
-            .is_some_and(|arguments| !arguments.is_empty())
-        {
-            return false;
-        }
-        if matches!(
-            self.expr_lowers.get(&expression),
-            Some(ExprLowering::CompilerSynthetic(
-                crate::synthetics::SyntheticKind::EmptyReference
-                    | crate::synthetics::SyntheticKind::ReferenceVararg
-            ))
-        ) {
-            let expected = expected.non_null();
-            let actual = self.expr_types[expression.0 as usize].non_null();
-            return expected.is_reference_array()
-                && expected.array_elem().is_some()
-                && actual.is_reference_array();
-        }
-        if matches!(self.file.expr(expression), Expr::Call { .. }) {
-            let expected_owner = expected.kotlin_class_internal();
-            let actual_owner = self.expr_types[expression.0 as usize].kotlin_class_internal();
-            if expected_owner.is_some()
-                && expected_owner == actual_owner
-                && expected_owner
-                    .and_then(|owner| self.resolver().classifier(owner))
-                    .is_some_and(|class| !class.type_params.is_empty())
-            {
-                return true;
-            }
-        }
-        let resolved = self.resolved_calls.get(&expression);
-        let generic = self.expected_type_callable_signature(expression);
-        crate::trace_compiler!(
-            "expected_call",
-            "argument expression={expression:?} expected={expected:?} selected={} generic_ret={:?}",
-            resolved.is_some(),
-            generic.as_ref().map(|signature| signature.ret),
-        );
-        let Some(generic) = generic else {
-            return false;
-        };
-        let source = self.fed_source();
-        let admits = |signature: &GenericSig| {
-            crate::symbol_resolver::infer_generic_return_bindings_from_symbols(
-                &source,
-                signature,
-                expected,
-                |actual, bound| self.receiver_is_assignable(actual, bound),
-            )
-            .is_some()
-        };
-        admits(&generic)
     }
 
     /// Whether a selected generic producer still needs an enclosing expectation to complete a
