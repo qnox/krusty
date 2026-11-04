@@ -60,6 +60,35 @@ impl LexicalTypeParameters {
     }
 }
 
+/// The parser's view of the inventory: classifier and callable bodies push their own parameters,
+/// and static classifier boundaries cut the enclosing scope and restore it afterwards.
+impl super::Parser<'_> {
+    pub(super) fn push_lexical_type_params(
+        &mut self,
+        params: &[String],
+        bounds: &[(String, crate::ast::TypeRef)],
+    ) -> usize {
+        self.lexical_type_parameters.push(params, bounds)
+    }
+
+    pub(super) fn pop_lexical_type_params(&mut self, old_len: usize) {
+        self.lexical_type_parameters.pop(old_len);
+    }
+
+    pub(super) fn current_lexical_type_params(&self) -> Vec<String> {
+        self.lexical_type_parameters.names()
+    }
+
+    pub(super) fn cut_lexical_type_parameter_scope(&mut self) -> LexicalTypeParameters {
+        std::mem::take(&mut self.lexical_type_parameters)
+    }
+
+    pub(super) fn restore_lexical_type_parameter_scope(&mut self, scope: LexicalTypeParameters) {
+        debug_assert!(self.lexical_type_parameters.names().is_empty());
+        self.lexical_type_parameters = scope;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::ast::Decl;

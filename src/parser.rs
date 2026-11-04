@@ -830,31 +830,6 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn push_lexical_type_params(
-        &mut self,
-        params: &[String],
-        bounds: &[(String, TypeRef)],
-    ) -> usize {
-        self.lexical_type_parameters.push(params, bounds)
-    }
-
-    fn pop_lexical_type_params(&mut self, old_len: usize) {
-        self.lexical_type_parameters.pop(old_len);
-    }
-
-    fn current_lexical_type_params(&self) -> Vec<String> {
-        self.lexical_type_parameters.names()
-    }
-
-    fn cut_lexical_type_parameter_scope(&mut self) -> LexicalTypeParameters {
-        std::mem::take(&mut self.lexical_type_parameters)
-    }
-
-    fn restore_lexical_type_parameter_scope(&mut self, scope: LexicalTypeParameters) {
-        debug_assert!(self.lexical_type_parameters.names().is_empty());
-        self.lexical_type_parameters = scope;
-    }
-
     // ---- cursor helpers ----
     fn kind(&self) -> TokenKind {
         self.t[self.i].kind
