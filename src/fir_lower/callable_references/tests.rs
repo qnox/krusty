@@ -1417,6 +1417,12 @@ fn external_annotation_construction_reaches_common_ir_without_provider_lookup() 
                 parameters: Box::new([resolved(Ty::String)]),
                 declared_parameters: Box::new([resolved(Ty::String)]),
                 annotation: Some(Box::new(FirAnnotationConstruction {
+                    arguments: crate::libraries::AnnotationArgumentProvenance::from_selected(
+                        1,
+                        &[0],
+                        &[],
+                    )
+                    .unwrap(),
                     members: Box::new([("name".into(), resolved(Ty::String))]),
                     defaults: Box::new([None]),
                 })),

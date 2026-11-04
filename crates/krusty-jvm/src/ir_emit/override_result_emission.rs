@@ -9,7 +9,7 @@
 
 use super::inline_call::parse_descriptor_params;
 use super::scalar_coercion::{box_prim_free, unbox_prim_from};
-use super::signature_formatter::JvmSignatureFormatter;
+use super::signature_formatter::{JvmSignatureFormatter, MethodSignatureParts};
 use super::{
     discard, ir_method_desc, ir_ty_to_jvm, jvm_declared_ty, jvm_is_erased_top, method_descriptor,
     method_signature, type_descriptor, CodeBuilder, Emitter,
@@ -183,14 +183,31 @@ pub(super) fn declared_method_signature(
     function: u32,
 ) -> Option<String> {
     let declaration = &ir.functions[function as usize];
-    let signature = method_signature(formatter, ir, function, declaration)?;
-    if !override_results.boxes(function) {
-        return Some(signature);
+    // The unboxed shape decides whether a signature is needed at all; boxing a primitive result
+    // never adds generic structure.
+    method_signature(formatter, ir, function, declaration)?;
+    declared_method_signature_parts(formatter, ir, override_results, function)
+        .map(|parts| parts.render())
+}
+
+/// [`declared_method_signature`]'s shape in its grammar's parts, before any comparison with a
+/// descriptor: the result element is the wrapper where `override_results` boxes it.
+pub(super) fn declared_method_signature_parts(
+    formatter: &JvmSignatureFormatter<'_>,
+    ir: &IrFile,
+    override_results: &OverrideResults,
+    function: u32,
+) -> Option<MethodSignatureParts> {
+    let declaration = &ir.functions[function as usize];
+    let mut parts =
+        super::method_signatures::method_signature_parts(formatter, ir, function, declaration)?;
+    if override_results.boxes(function) {
+        assert_eq!(
+            parts.result,
+            type_descriptor(jvm_declared_ty(&declaration.ret)),
+            "a boxed override result is signed as its primitive"
+        );
+        parts.result = type_descriptor(jvm_declared_ty(&Ty::nullable(declaration.ret)));
     }
-    let primitive = type_descriptor(jvm_declared_ty(&declaration.ret));
-    let parameters = signature
-        .strip_suffix(primitive.as_str())
-        .expect("a boxed override result is signed as its primitive");
-    let wrapper = type_descriptor(jvm_declared_ty(&Ty::nullable(declaration.ret)));
-    Some(format!("{parameters}{wrapper}"))
+    Some(parts)
 }

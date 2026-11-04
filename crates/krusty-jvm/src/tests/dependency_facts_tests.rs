@@ -719,8 +719,11 @@ fn an_identity_its_provider_cannot_answer_is_an_internal_error() {
         dispatch_receiver: None,
         args: Vec::new(),
     });
+    // A provider that publishes no dependency declarations assigned no identity.
+    struct NoDependencies;
+    impl krusty::symbol_source::SymbolSource for NoDependencies {}
     assert_eq!(
-        CheckedBackendCallables::freeze(&ir, &krusty::libraries::EmptySymbolSource).map(|_| ()),
+        CheckedBackendCallables::freeze(&ir, &NoDependencies).map(|_| ()),
         Err(DependencyFactError::UnknownCallable(target))
     );
 }

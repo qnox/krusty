@@ -413,6 +413,12 @@ mod tests {
         ir.annotation_constructions.insert(
             construction,
             krusty::ir::IrAnnotationConstruction {
+                arguments: krusty::libraries::AnnotationArgumentProvenance::from_selected(
+                    1,
+                    &[0],
+                    &[],
+                )
+                .unwrap(),
                 interface,
                 members: vec![("value".into(), Ty::String)],
                 defaults: vec![None],
