@@ -71,6 +71,10 @@ pub struct IrLambdaClass {
     /// forces (it extends `Object`). The source form is kept here because realization moves the
     /// implementation out of the lambda-origin table.
     pub kotlin_lambda: Option<IrLambdaOrigin>,
+    /// The functional interface the class implements in place of `FunctionN`, for a SAM-converted
+    /// lambda: `invoke` is then that interface's method, under the method's name, and the bridge
+    /// adapts the method's declared shape rather than `FunctionN.invoke`.
+    pub sam: Option<Box<IrSamTarget>>,
 }
 
 /// One captured value a lambda class stores in a field.

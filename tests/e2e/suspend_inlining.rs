@@ -10,3 +10,5 @@ mod build840_nn1_suspend_inline_withlock_e2e;
 mod crossinline_suspend_object_e2e;
 #[path = "../suspend_lambda_regeneration_e2e.rs"]
 mod suspend_lambda_regeneration_e2e;
+#[path = "../suspend_value_invokes_e2e.rs"]
+mod suspend_value_invokes_e2e;

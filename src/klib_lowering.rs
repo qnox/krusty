@@ -18,6 +18,7 @@ mod callable_references;
 mod callee_facts;
 mod class_headers;
 mod class_initialization;
+mod class_storage;
 mod closure_forms;
 mod constructor_calls;
 mod decline;
