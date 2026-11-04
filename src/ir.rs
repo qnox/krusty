@@ -623,10 +623,13 @@ pub enum IrExpr {
     /// class's `$WhenMappings` table for `classifier` at `subject`'s runtime ordinal. Value type:
     /// `Int`. `registrations` are the table entries this subject `when` (and every subject `when`
     /// nested in it) claims, in kotlinc's visiting order; see [`EnumSwitchRegistration`].
+    /// `source_order` is the source `when`'s start offset ([`IrFile::start_offset`]), which
+    /// places these claims among the other claims of the class the backend emits it in.
     EnumSwitchOrdinal {
         classifier: TypeName,
         subject: ExprId,
         registrations: Box<[EnumSwitchRegistration]>,
+        source_order: Option<u32>,
     },
     /// The `$WhenMappings` key of one enum entry in the emitting class's table. Value type: `Int`.
     EnumSwitchKey {

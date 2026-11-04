@@ -8,8 +8,8 @@
 //! backend's bytecode temporaries pass, never to this module.
 
 use crate::fir::{
-    FirExprId, FirWhenBranch, FirWhenCondition, FirWhenSubjectNumericEquality, LocalValueId,
-    ResolvedTy,
+    FirExprId, FirExpressionDebugLines, FirWhenBranch, FirWhenCondition,
+    FirWhenSubjectNumericEquality, LocalValueId, ResolvedTy,
 };
 use crate::ir::{Callee, ExprId, IrBinOp, IrExpr, IrIntrinsic, IrTypeOp};
 use crate::types::Ty;
@@ -24,8 +24,9 @@ impl BodyLowering<'_> {
         branches: &[FirWhenBranch],
         result_ty: Ty,
         deeply_exhaustive: bool,
-        line: u32,
+        lines: FirExpressionDebugLines,
     ) -> Result<ExprId, FirLoweringFailure> {
+        let line = lines.source;
         let mut prefix = Vec::new();
         let subject_expression = subject;
         let subject = match (subject, subject_variable) {
@@ -154,6 +155,9 @@ impl BodyLowering<'_> {
         // subject, so it has no `when` line of its own.
         if line != 0 && !branches.is_empty() {
             self.ir.whens.source_lines.insert(when, line);
+        }
+        if !lines.positionless {
+            self.ir.set_start_offset(when, lines.start_offset);
         }
         let has_else = branches.iter().any(|branch| branch.conditions.is_empty());
         // Every `when` with an `else`, and one the checker proved exhaustive without it (whatever

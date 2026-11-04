@@ -14,6 +14,10 @@ pub struct IrNodePosition {
     pub source_line: Option<u32>,
     /// The line the expression's source text ends on.
     pub end_line: Option<u32>,
+    /// Where the expression's source text starts in its file, kotlinc's `startOffset`: compared
+    /// only with another expression of the same file, for a decision kotlinc makes by visiting a
+    /// file's declarations in source order.
+    pub start_offset: Option<u32>,
 }
 
 /// The positions of every expression node, by [`ExprId`].
@@ -44,6 +48,7 @@ impl InheritedFacts for IrNodePositions {
         let IrNodePosition {
             source_line,
             end_line,
+            start_offset,
         } = self.get(source);
         let copy = self.get_mut(target);
         if source_line.is_some() {
@@ -51,6 +56,9 @@ impl InheritedFacts for IrNodePositions {
         }
         if end_line.is_some() {
             copy.end_line = end_line;
+        }
+        if start_offset.is_some() {
+            copy.start_offset = start_offset;
         }
     }
 }
@@ -78,6 +86,15 @@ impl IrFile {
 
     pub fn set_source_line(&mut self, expression: ExprId, line: u32) {
         self.positions.get_mut(expression).source_line = Some(line);
+    }
+
+    /// Where `expression`'s source text starts in its file.
+    pub fn start_offset(&self, expression: ExprId) -> Option<u32> {
+        self.positions.get(expression).start_offset
+    }
+
+    pub fn set_start_offset(&mut self, expression: ExprId, offset: u32) {
+        self.positions.get_mut(expression).start_offset = Some(offset);
     }
 
     pub fn set_end_line(&mut self, expression: ExprId, line: u32) {
