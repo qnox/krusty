@@ -62,9 +62,9 @@ fn hoist_when_cond_suspensions(
     let ty = expected_ty
         .or_else(|| match ir.exprs[expression as usize] {
             IrExpr::TypeOp { type_operand, .. } => Some(type_operand),
-            _ => ir.logical_types.get(&expression).copied(),
+            _ => ir.logical_type(expression),
         })
-        .or_else(|| ir.logical_types.get(&when_expr).copied())?;
+        .or_else(|| ir.logical_type(when_expr))?;
     let (declaration, conditional, value) =
         bind_value_when_to_fresh_local(ir, typing.representation, expression, &ty, suspend_set)?;
     value_types.insert(
@@ -204,8 +204,8 @@ fn hoist_spliced_walk(
             }
             // The rewritten body computes the same value, so it carries the checked result type
             // the backend places the literal by.
-            if let Some(&result) = ir.logical_types.get(&inner) {
-                ir.logical_types.insert(rewritten, result);
+            if let Some(result) = ir.logical_type(inner) {
+                ir.set_logical_type(rewritten, result);
             }
         }
         for capture in captures {
@@ -335,7 +335,7 @@ fn spliced_value_try_type(ir: &IrFile, value: ExprId) -> Option<Ty> {
             arg, type_operand, ..
         } if matches!(ir.exprs[*arg as usize], IrExpr::Try { .. }) => Some(*type_operand),
         IrExpr::Try { result, .. } => Some(*result),
-        _ => ir.logical_types.get(&value).copied(),
+        _ => ir.logical_type(value),
     }
 }
 
@@ -823,7 +823,7 @@ fn hoist_expr(
         }
         let semantic_ty = match ir.exprs[e as usize] {
             IrExpr::TypeOp { type_operand, .. } => Some(type_operand),
-            _ => ir.logical_types.get(&e).copied(),
+            _ => ir.logical_type(e),
         };
         if let Some(ty) = semantic_ty {
             if let Some((declaration, conditional, value)) =
@@ -1382,10 +1382,8 @@ fn recorded_operand_type(
     match ir.exprs[expression as usize] {
         IrExpr::GetValue(index) => value_types.get(&index).copied(),
         _ => ir
-            .physical_types
-            .get(&expression)
-            .or_else(|| ir.logical_types.get(&expression))
-            .copied(),
+            .physical_type(expression)
+            .or_else(|| ir.logical_type(expression)),
     }
 }
 
@@ -1431,7 +1429,7 @@ fn hoist_operands_in_order(
                         "suspend",
                         "hoist_operands_in_order BAIL: operand {i} untypeable: {:?} logical={:?}",
                         ir.exprs[x as usize],
-                        ir.logical_types.get(&x)
+                        ir.logical_type(x)
                     );
                     return None;
                 };
@@ -1516,9 +1514,8 @@ mod tests {
     fn a_snapshot_uses_the_recorded_physical_type_before_the_logical_type() {
         let mut ir = IrFile::default();
         let expression = ir.add_expr(IrExpr::UnitInstance);
-        ir.logical_types.insert(expression, Ty::Int);
-        ir.physical_types
-            .insert(expression, Ty::obj("java/lang/Integer"));
+        ir.set_logical_type(expression, Ty::Int);
+        ir.set_physical_type(expression, Ty::obj("java/lang/Integer"));
 
         assert_eq!(
             recorded_operand_type(&ir, expression, &HashMap::default()),
@@ -1539,7 +1536,7 @@ mod tests {
             arg: suspension,
             declaration: crate::ir::EnumValueOfDeclaration::Member,
         });
-        ir.logical_types.insert(shared, Ty::obj("example/Level"));
+        ir.set_logical_type(shared, Ty::obj("example/Level"));
         let concat = ir.add_expr(IrExpr::StringConcat(vec![shared, shared]));
         let returned = ir.add_expr(IrExpr::Return(Some(concat)));
         let body = ir.add_expr(IrExpr::Block {
@@ -1601,12 +1598,12 @@ mod tests {
                 arg: suspension,
                 declaration: crate::ir::EnumValueOfDeclaration::Member,
             });
-            ir.logical_types.insert(level, Ty::obj("example/Level"));
+            ir.set_logical_type(level, Ty::obj("example/Level"));
             level
         };
         let operands = vec![level(), level()];
         let body = ir.add_expr(IrExpr::StringConcat(operands));
-        ir.logical_types.insert(body, Ty::String);
+        ir.set_logical_type(body, Ty::String);
         let lambda = ir.add_expr(IrExpr::Lambda {
             impl_fn,
             arity: 0,
@@ -1628,7 +1625,7 @@ mod tests {
             rewritten, body,
             "the suspension is hoisted out of the operand"
         );
-        assert_eq!(ir.logical_types.get(&rewritten), Some(&Ty::String));
+        assert_eq!(ir.logical_type(rewritten), Some(Ty::String));
     }
 
     #[test]

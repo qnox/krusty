@@ -57,7 +57,7 @@ pub(super) fn unbox_wrap(ir: &mut IrFile, id: ExprId, x: TypeName, under: &Under
     super::type_operation_roles::record_unbox_type_operation_edge(ir, id, cast);
     // `id` now denotes the `unbox-impl` result (here and in `unbox_wrap_nullable`), so its physical
     // fact changes with the node rather than still claim the erased reference or the box.
-    ir.physical_types.insert(id, u);
+    ir.set_physical_type(id, u);
 }
 
 /// Replace an erased-reference expression with an explicit cast to its known boxed value class.
@@ -126,5 +126,5 @@ pub(super) fn unbox_wrap_nullable(
         stmts: vec![var],
         value: Some(when),
     };
-    ir.physical_types.insert(id, Ty::nullable(u));
+    ir.set_physical_type(id, Ty::nullable(u));
 }
