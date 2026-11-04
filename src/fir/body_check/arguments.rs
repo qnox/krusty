@@ -91,8 +91,7 @@ impl BodyFirChecker<'_> {
             | FirExprKind::CapturedValueWrite { .. }
             | FirExprKind::ValueWrite { .. }
             | FirExprKind::PropertyWrite { .. }
-            | FirExprKind::BackingFieldWrite { .. }
-            | FirExprKind::IndexedWrite { .. } => true,
+            | FirExprKind::BackingFieldWrite { .. } => true,
             FirExprKind::Block {
                 result: Some(result),
                 ..
