@@ -389,7 +389,11 @@ fn class_type_param_bound_ignores_nested_classifiers_of_the_class_and_its_supert
         ("BscopeSuper", BOUND_SKIPS_SUPERTYPE_NESTED, "Child"),
         ("BscopeOwn", BOUND_SKIPS_OWN_NESTED, "Own"),
     ] {
-        assert_eq!(common::expect_box_run_with_stdlib(src, stem), "OK", "{stem}");
+        assert_eq!(
+            common::expect_box_run_with_stdlib(src, stem),
+            "OK",
+            "{stem}"
+        );
         let Some((kotlinc, krusty)) = javap_both(stem, src, class) else {
             eprintln!("skip ({stem}: reference toolchain unavailable)");
             return;
