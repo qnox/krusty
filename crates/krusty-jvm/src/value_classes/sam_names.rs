@@ -11,13 +11,22 @@ pub(super) fn rename(ir: &mut IrFile, value_classes: &Under) {
     // fact. Two methods of one fun interface can share a name and arity while their value-class
     // hashes differ, so the physical name must not be recovered from a `(classifier, name, arity)`
     // map.
-    for expression in &mut ir.exprs {
-        let IrExpr::Lambda {
-            sam: Some(target), ..
-        } = expression
-        else {
-            continue;
-        };
+    // A lambda class realized for a conversion implements the same declared method through its
+    // bridge.
+    let values = ir
+        .exprs
+        .iter_mut()
+        .filter_map(|expression| match expression {
+            IrExpr::Lambda {
+                sam: Some(target), ..
+            } => Some(&mut **target),
+            _ => None,
+        });
+    let classes = ir
+        .classes
+        .iter_mut()
+        .filter_map(|class| class.lambda.as_mut()?.sam.as_deref_mut());
+    for target in values.chain(classes) {
         target.method = super::vc_mangle_once(
             &target.method,
             &target.declared_parameters,

@@ -2,7 +2,8 @@
 //!
 //! A stub is `public`, throws `UnsupportedOperationException` with kotlinc's fixed message, and
 //! carries no line numbers: kotlinc builds it without a source offset. Its bridge to the mutable
-//! declaration's erased descriptor is `ACC_PUBLIC|ACC_BRIDGE|ACC_SYNTHETIC` with the same body.
+//! declaration's erased descriptor is `ACC_PUBLIC|ACC_BRIDGE|ACC_SYNTHETIC` with the same body,
+//! except that a type-safe stub's bridge (`Object remove(Object)`) calls the stub.
 //! A member the class already implements gets no stub, only that bridge, which forwards to the
 //! implementation like any bridge and maps to the class declaration's line. A builtin with a
 //! different JVM name (`removeAt`) is realized under that name, and its erased bridge directly
@@ -156,20 +157,43 @@ fn emit_stub_bridge(class: &IrClass, cw: &mut ClassWriter, stub: &ReadOnlyStub) 
             descriptor: &descriptor,
             signature: None,
         };
-        match stub.barrier {
-            // kotlinc's special bridge of a type-safe declaration is final, not synthetic, and
-            // tests each checked argument before the call.
-            Some(barrier) => emit_forwarding::<{ 0x0001 | 0x0010 | 0x0040 }>(
+        let Some(barrier) = stub.barrier else {
+            emit_forwarding::<{ 0x0001 | 0x0040 | 0x1000 }>(
+                class, cw, &target, &method, *result, None,
+            );
+            return;
+        };
+        // kotlinc's special bridge of a type-safe declaration is final, not synthetic, and tests
+        // each checked argument before the call. When the implementation's reference result is
+        // narrower than the erased one, it is two methods: a final synthetic copy at the erased
+        // descriptor, then the final bridge at the implementation's result
+        // (`Object remove(Object)`, then `Integer remove(Object)`).
+        let checked = Some((barrier, stub.override_parameters.as_slice()));
+        let narrower =
+            target.result != *result && target.result.is_reference() && result.is_reference();
+        if !narrower {
+            emit_forwarding::<{ 0x0001 | 0x0010 | 0x0040 }>(
+                class, cw, &target, &method, *result, checked,
+            );
+            return;
+        }
+        emit_forwarding::<{ 0x0001 | 0x0010 | 0x0040 | 0x1000 }>(
+            class, cw, &target, &method, *result, checked,
+        );
+        let narrowed = method_descriptor(parameters, target.result);
+        if !cw.has_method(&stub.physical_name, &narrowed) {
+            let special = ThrowingMethod {
+                descriptor: &narrowed,
+                ..method
+            };
+            emit_forwarding::<{ 0x0001 | 0x0010 | 0x0040 }>(
                 class,
                 cw,
                 &target,
-                &method,
-                *result,
-                Some((barrier, &stub.override_parameters)),
-            ),
-            None => emit_forwarding::<{ 0x0001 | 0x0040 | 0x1000 }>(
-                class, cw, &target, &method, *result, None,
-            ),
+                &special,
+                target.result,
+                checked,
+            );
         }
         return;
     }
@@ -188,6 +212,17 @@ fn emit_stub_bridge(class: &IrClass, cw: &mut ClassWriter, stub: &ReadOnlyStub) 
         descriptor: &descriptor,
         signature: None,
     };
+    if stub.type_safe {
+        // A type-safe stub already takes the erased parameters: its bridge calls it.
+        let stub_parameters = jvm_tys(&stub.parameters);
+        let target = Target {
+            name: &stub.physical_name,
+            parameters: &stub_parameters,
+            result: stub.physical_result(),
+        };
+        emit_forwarding::<{ 0x0001 | 0x0040 | 0x1000 }>(class, cw, &target, &method, *result, None);
+        return;
+    }
     emit_throwing::<{ 0x0001 | 0x0040 | 0x1000 }>(class, cw, &method);
 }
 

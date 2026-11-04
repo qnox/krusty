@@ -101,6 +101,7 @@ mod tests {
                 nullable: false,
                 kotlin_interface: false,
                 parameter_identities: Vec::new(),
+                type_parameters: Vec::new(),
             })),
             inline_body: None,
         });

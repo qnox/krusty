@@ -20,6 +20,7 @@ mod read_only_stubs;
 struct BridgeMethodHeader<'a> {
     bridge: &'a krusty::ir::Bridge,
     packs_arguments: bool,
+    erased_copy: bool,
     entry: Option<&'a EntryHeader>,
     signature: Option<&'a str>,
     owner_is_interface: bool,
@@ -35,6 +36,7 @@ fn finish_bridge(
     let BridgeMethodHeader {
         bridge,
         packs_arguments,
+        erased_copy,
         entry,
         signature,
         owner_is_interface,
@@ -45,7 +47,7 @@ fn finish_bridge(
         code.link();
         cw.add_method_sig(entry.access, name, desc, code, entry.signature.as_deref());
         cw.set_method_parameters(name, desc, &entry.reflected);
-    } else if packs_arguments {
+    } else if packs_arguments || erased_copy {
         finish_code::<{ 0x0001 | 0x0010 | 0x0040 | 0x1000 }>(cw, name, desc, code, locals);
     } else if owner_is_interface && (bridge.special || bridge.collection_barrier.is_some()) {
         // A special collection bridge is a concrete JVM default even when its Kotlin member is
@@ -233,7 +235,7 @@ pub(super) fn emit_bridges(
         ) {
             continue;
         }
-        emit_bridge(&class, cw, bridge_index, b, None);
+        emit_planned_bridge(&class, cw, bridge_index, b);
     }
     stub_bridges.emit_rest(c, cw);
     let inherited = &env.collection_members.inherited_bridges;
@@ -268,6 +270,94 @@ impl<'a> ClassBridges<'a> {
     }
 }
 
+/// How one planned bridge is realized.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BridgeRealization {
+    /// As planned.
+    Planned,
+    /// The erased-descriptor copy of a type-safe special bridge whose own result is narrower
+    /// (`Object get(Object)` beside `Integer get(Object)`): the same body, final and synthetic,
+    /// with no generic signature.
+    ErasedCopy,
+}
+
+/// Emit one planned bridge in kotlinc's form. A special bridge whose implementation result
+/// erases to a narrower JVM reference than the overridden declaration's is two methods: the special
+/// bridge at the implementation's result (`final HashSet<String> keySet()`, `final Integer
+/// get(Object)`) and a bridge at the erased descriptor. For a type-safe function the erased one
+/// is a final synthetic copy of the special body and comes first; for a renamed property getter
+/// it is an ordinary bridge to the special one, after it.
+fn emit_planned_bridge(
+    class: &ClassBridges<'_>,
+    cw: &mut ClassWriter,
+    bridge_index: usize,
+    b: &krusty::ir::Bridge,
+) {
+    // A value-class result keeps its single adapted bridge.
+    let adapted = class
+        .adaptations
+        .get(
+            class.class.fq_name_id(),
+            u32::try_from(bridge_index).expect("bridge ordinals fit u32"),
+        )
+        .is_some();
+    let narrower_result = b.special
+        && !adapted
+        && !class.class.is_interface
+        && ir_ty_to_jvm(&b.concrete_ret).is_reference()
+        && ir_ty_to_jvm(&b.erased_ret).is_reference()
+        && ir_ty_to_jvm(&b.concrete_ret) != ir_ty_to_jvm(&b.erased_ret)
+        && b.target_ret.is_none();
+    let special = krusty::ir::Bridge {
+        erased_ret: b.concrete_ret,
+        ..b.clone()
+    };
+    if narrower_result && b.kind == krusty::ir::BridgeKind::Function && b.barrier_plan.is_some() {
+        emit_bridge(
+            class,
+            cw,
+            bridge_index,
+            b,
+            None,
+            BridgeRealization::ErasedCopy,
+        );
+        emit_bridge(
+            class,
+            cw,
+            bridge_index,
+            &special,
+            None,
+            BridgeRealization::Planned,
+        );
+    } else if narrower_result && b.kind == krusty::ir::BridgeKind::PropertyGetter {
+        emit_bridge(
+            class,
+            cw,
+            bridge_index,
+            &special,
+            None,
+            BridgeRealization::Planned,
+        );
+        let erased = krusty::ir::Bridge {
+            special: false,
+            target_name: Some(b.name.clone()),
+            target_ret: Some(b.concrete_ret),
+            concrete_ret: b.erased_ret,
+            ..b.clone()
+        };
+        emit_bridge(
+            class,
+            cw,
+            bridge_index,
+            &erased,
+            None,
+            BridgeRealization::Planned,
+        );
+    } else {
+        emit_bridge(class, cw, bridge_index, b, None, BridgeRealization::Planned);
+    }
+}
+
 /// Emit one bridge: see [`emit_bridges`].
 fn emit_bridge(
     class: &ClassBridges<'_>,
@@ -275,6 +365,7 @@ fn emit_bridge(
     bridge_index: usize,
     b: &krusty::ir::Bridge,
     entry: Option<&EntryHeader>,
+    realization: BridgeRealization,
 ) {
     let ClassBridges {
         ir,
@@ -314,7 +405,11 @@ fn emit_bridge(
         |(function, _)| jvm_declared_ty(&override_results.physical_result(ir, function)),
     );
     let erased_desc = method_descriptor(&ep, er);
-    let signature = (b.special && b.collection_barrier.is_some())
+    // A special bridge carries its result's generic signature: a type-safe member's, or a renamed
+    // property getter's (`keySet()Ljava/util/Set<Ljava/lang/String;>;`).
+    let signature = (realization == BridgeRealization::Planned
+        && b.special
+        && (b.collection_barrier.is_some() || b.kind == krusty::ir::BridgeKind::PropertyGetter))
         .then(|| {
             let formatter = JvmSignatureFormatter::with_symbols(ir, signature_symbols, run);
             if b.concrete_ret.mentions_ty_param()
@@ -509,6 +604,7 @@ fn emit_bridge(
             BridgeMethodHeader {
                 bridge: b,
                 packs_arguments,
+                erased_copy: realization == BridgeRealization::ErasedCopy,
                 entry,
                 signature: signature.as_deref(),
                 owner_is_interface: c.is_interface,
@@ -535,6 +631,7 @@ fn emit_bridge(
             BridgeMethodHeader {
                 bridge: b,
                 packs_arguments,
+                erased_copy: realization == BridgeRealization::ErasedCopy,
                 entry,
                 signature: signature.as_deref(),
                 owner_is_interface: c.is_interface,
@@ -639,6 +736,7 @@ fn emit_bridge(
         BridgeMethodHeader {
             bridge: b,
             packs_arguments,
+            erased_copy: realization == BridgeRealization::ErasedCopy,
             entry,
             signature: signature.as_deref(),
             owner_is_interface: c.is_interface,
@@ -826,7 +924,14 @@ pub(super) fn emit_value_class_interface_entries(
             env.java_parameters,
         );
         let class = ClassBridges::new(ir, c, env);
-        emit_bridge(&class, cw, bridge_index, b, Some(&header));
+        emit_bridge(
+            &class,
+            cw,
+            bridge_index,
+            b,
+            Some(&header),
+            BridgeRealization::Planned,
+        );
         cw.set_method_nullability(&b.name, &descriptor, header.result, &header.parameters);
     }
 }

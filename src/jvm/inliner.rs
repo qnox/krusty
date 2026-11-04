@@ -40,6 +40,7 @@ mod preparation;
 mod reified;
 mod reified_type_checks;
 mod returns;
+mod suspend_invoke_markers;
 mod try_blocks;
 
 #[cfg(test)]

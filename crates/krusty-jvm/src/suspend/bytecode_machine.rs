@@ -26,6 +26,7 @@ use super::cps::{
     frame_suspensions, placed_lambda_suspensions, spliced_inline_suspensions,
     spliced_suspension_lambda_impls, TransformedMachine, TransformedSuspension,
 };
+use super::cps_returns::return_tail_calls;
 use super::emission_facts::{ContinuationMetadata, MachineOutputs};
 use super::spill_layout::{suspension_points_in_order, SpillLayout};
 use super::{
@@ -107,6 +108,15 @@ pub(super) fn route(
         ) {
             return Routed::Failed;
         }
+    }
+    if let Some(&close) = ir.fn_close_lines.get(&fid) {
+        let own_result = route.context.orig_rets[fid as usize];
+        let tail_calls: Vec<ExprId> = suspensions
+            .iter()
+            .filter(|suspension| unit_return || suspension.result == own_result)
+            .map(|suspension| suspension.call)
+            .collect();
+        return_tail_calls(ir, body, &tail_calls, unit_return, close);
     }
     if !box_returns(ir, body) {
         return Routed::Failed;

@@ -289,7 +289,10 @@ impl Emitter<'_> {
                         } else {
                             self.emit_value(value, code);
                         }
-                    } else if let Some(result) = self.copied_frame_result(block, value) {
+                    } else if let Some(result) = self
+                        .copied_frame_result(block, value)
+                        .or_else(|| self.spliced_lambda_result_conversion(stmts, value))
+                    {
                         copied_frame_result = Some(
                             self.emit_copied_frame_result_before_adaptation(result, value, code),
                         );
@@ -425,6 +428,41 @@ impl Emitter<'_> {
             }
             _ => None,
         }
+    }
+
+    /// A spliced lambda's result converted to the type its inline function expects of it. kotlinc
+    /// inlines the lambda body as a method of its own: the body, and its locals, end at the
+    /// lambda's own result, and the conversion to the invocation's type (boxing `parse(it)` for
+    /// `let`'s `R`) follows those locals, before the inline function's line returns.
+    fn spliced_lambda_result_conversion(
+        &self,
+        stmts: &[u32],
+        value: u32,
+    ) -> Option<CopiedFrameResult> {
+        if !self.opens_spliced_lambda_frame(stmts) {
+            return None;
+        }
+        let IrExpr::TypeOp {
+            op: krusty::ir::IrTypeOp::ImplicitCoercion,
+            arg,
+            type_operand,
+        } = *self.ir.expr(value)
+        else {
+            return None;
+        };
+        // An enclosing copied frame whose tail reaches this conversion already owns its
+        // adaptation.
+        if self.inline_coercions.is_deferred(value) {
+            return None;
+        }
+        self.transformed_result(value)
+            .is_none()
+            .then_some(CopiedFrameResult::Coercion {
+                expression: value,
+                arg,
+                type_operand,
+                physical_arg: None,
+            })
     }
 
     /// Follow only transparent trailing-value blocks inside one explicitly recorded copied result
@@ -1790,7 +1828,9 @@ enum CopiedFrameResult {
         caller_line: u32,
     },
     /// A same-module copied body physically produces its declaration-erased result inside the
-    /// frame; the caller narrows or unboxes it only after the frame's debug locals end.
+    /// frame; the caller narrows or unboxes it only after the frame's debug locals end. A spliced
+    /// lambda's result converts to its invocation's type after the lambda's locals end the same
+    /// way.
     Coercion {
         expression: u32,
         arg: u32,

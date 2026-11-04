@@ -1372,7 +1372,7 @@ impl Backend for JvmBackend {
             &facade,
             &delegate_closures,
             current_source,
-            self.lambda_modes.lambdas,
+            self.lambda_modes,
         ) {
             Ok(methods) => methods,
             Err(()) => {

@@ -31,6 +31,7 @@ impl Emitter<'_> {
         node: &IrExpr,
         code: &mut CodeBuilder,
     ) {
+        self.mark_suspend_call_line(expression, code);
         if self.emit_discarded_safe_call(expression, node, code) {
             return;
         }

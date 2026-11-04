@@ -304,6 +304,7 @@ fn annotation_implementation(
     enclosure: IrEnclosure,
 ) -> IrClass {
     IrClass {
+        declaration_context: None,
         declaration_name: None,
         fq_name,
         is_source_declared: false,

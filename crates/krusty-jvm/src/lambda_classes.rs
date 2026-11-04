@@ -12,11 +12,16 @@
 //! is a singleton read from its `INSTANCE` field.
 //!
 //! High-arity lambdas also take this path because `FunctionN.invoke(Object[])` needs the packed
-//! bridge the realized class writes. The adaptation conflicts taken so far: a value class whose
-//! declared underlying type is neither nullable
-//! nor primitive, as a parameter or the result (the factory cannot box such a value, and it knows
-//! nothing of the mangled name its specialized method takes); and, before language level 2.4, a
-//! `Nothing`/`Nothing?` parameter or inferred result, which maps to `Void` and has no adaptee at all.
+//! bridge the realized class writes. The adaptation conflicts are kotlinc's, computed once per slot
+//! for both kinds of lambda: a `Nothing`/`Nothing?` slot (or, before language level 2.4, inferred
+//! result), which maps to `Void` and has no adaptee at all; a value class whose declared underlying
+//! type is neither nullable nor primitive (the factory cannot box it); a value class the interface
+//! slot itself declares (the factory knows nothing of the mangled method it implies); and slots
+//! whose constraints from the overridden declarations disagree.
+//!
+//! A SAM-converted lambda follows the same rule against its interface method: the class then
+//! implements that interface, declares the interface's own type parameters, holds the body under
+//! the method's instantiated (value-class mangled) name, and bridges the declared slot to it.
 //! A lambda written inside an `inline` function is a class whatever its signature (see
 //! `inline_scope`); a caller that inlines the function constructs that declaring class.
 //! A default argument of an `inline` function is a class even when the factory could adapt it:
@@ -28,6 +33,7 @@
 //! it fieldless: the expansion created that closure value rather than reading a declaration
 //! singleton.
 
+mod factory_adaptation;
 mod inline_scope;
 
 /// The declaration implementation at the root of a chain of call-site specializations.
@@ -70,6 +76,8 @@ struct ClassRole {
     scope: Option<inline_scope::InlineScope>,
     /// The source form of a `-Xlambdas=class` Kotlin lambda.
     kotlin_lambda: Option<krusty::ir::IrLambdaOrigin>,
+    /// The functional interface a SAM-converted lambda implements in place of `FunctionN`.
+    sam: Option<Box<krusty::ir::IrSamTarget>>,
 }
 
 #[derive(Clone, Copy)]
@@ -239,9 +247,14 @@ pub(super) struct Site {
 
 /// The one expression that builds `fid`'s lambda value, when the lambda can compile to a class of
 /// its own: a plain Kotlin function value the source's naming walk named, not one an inline call's
-/// splice consumes.
+/// splice consumes, nor a SAM conversion.
 pub(super) fn site(ir: &IrFile, fid: FunId) -> Option<Site> {
-    site_in_roots(ir, fid, true, None, None)
+    site_in_roots(ir, fid, true, None, None).filter(|site| {
+        matches!(
+            ir.exprs[site.node as usize],
+            IrExpr::Lambda { sam: None, .. }
+        )
+    })
 }
 
 /// `inline_declaration` is the node an inline function's body declares `fid` with, when the
@@ -275,13 +288,7 @@ fn site_in_roots(
         );
         return None;
     };
-    let lambda = &ir.exprs[node as usize];
-    let IrExpr::Lambda {
-        captures,
-        sam: None,
-        ..
-    } = lambda
-    else {
+    let IrExpr::Lambda { captures, .. } = &ir.exprs[node as usize] else {
         return None;
     };
     // A specialized copy shares the source lambda's naming provenance. Using that name here would
@@ -570,11 +577,11 @@ pub(super) fn realize(
     facade: &str,
     delegates: &super::local_delegate_closures::Requirements,
     current_source: krusty::ir::IrModuleSource,
-    lambdas_mode: crate::ir_emit::LambdaMode,
+    modes: crate::ir_emit::LambdaModes,
 ) -> Result<LambdaMethods, ()> {
     // Under `indy` a lambda is a class only where the runtime factory cannot build it; under
     // `class` every Kotlin function lambda is one, extending `kotlin.jvm.internal.Lambda`.
-    let class_lambdas = lambdas_mode == crate::ir_emit::LambdaMode::Class;
+    let class_lambdas = modes.lambdas == crate::ir_emit::LambdaMode::Class;
     let adapt_factory = !class_lambdas;
     let methods = LambdaMethods::collect(ir);
     let mut kotlin_lambda_sites = Vec::new();
@@ -582,9 +589,13 @@ pub(super) fn realize(
         .exprs
         .iter()
         .filter_map(|expression| match expression {
-            IrExpr::Lambda {
-                impl_fn, sam: None, ..
-            } => Some(*impl_fn),
+            IrExpr::Lambda { impl_fn, sam, .. }
+                if sam
+                    .as_deref()
+                    .is_none_or(|target| factory_adaptation::sam_candidate(target, modes)) =>
+            {
+                Some(*impl_fn)
+            }
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -621,6 +632,57 @@ pub(super) fn realize(
         let every_emitted_root =
             ir.lambda_origins.contains_key(&fid) || runtime_reified || inline_anonymous;
         let values = reachable.reachable(ir, fid, every_emitted_root);
+        let sam = values
+            .first()
+            .and_then(|&node| match &ir.exprs[node as usize] {
+                IrExpr::Lambda { sam, .. } => sam.clone(),
+                _ => None,
+            });
+        if let Some(target) = sam {
+            // A SAM conversion is a class exactly where `LambdaMetafactory` cannot adapt the
+            // lambda to the interface method. Lambdas an inline function or a delegate owns keep
+            // their own realization.
+            if delegate_source.is_some()
+                || inline_default.is_some()
+                || inline_scoped
+                || runtime_reified
+                || inline_anonymous
+                || !ir.lambda_origins.contains_key(&fid)
+                || !factory_adaptation::sam_conflict(ir, classifiers, &target)
+            {
+                continue;
+            }
+            reachable.invalidate();
+            let signature = krusty::types::FnSig {
+                params: target.parameters.clone(),
+                ret: target.result,
+                context_count: target.context_count as usize,
+                has_receiver: target.has_receiver,
+                suspend: false,
+            };
+            match class_shape(ir, fid, every_emitted_root, None, false, None) {
+                Ok((site, body, captures)) => realize_class(
+                    ir,
+                    fid,
+                    body,
+                    &site,
+                    &signature,
+                    &captures,
+                    ClassRole {
+                        sam: Some(target),
+                        ..ClassRole::default()
+                    },
+                ),
+                Err(shape) => {
+                    krusty::trace_compiler!(
+                        "value_classes",
+                        "SAM lambda fid={fid} needs a class but is left unrealized: {shape}"
+                    );
+                    ir.jvm_unrealized_lambda_classes.insert(fid);
+                }
+            }
+            continue;
+        }
         let Some(function_type) = values.first().and_then(|node| ir.logical_type(*node)) else {
             continue;
         };
@@ -637,12 +699,12 @@ pub(super) fn realize(
                 && (!adapt_factory
                     || (!runtime_reified
                         && !inline_anonymous
-                        && !signature
-                            .params
-                            .iter()
-                            .chain([&signature.ret])
-                            .any(|&ty| factory_conflict(ir, classifiers, ty))
-                        && !nothing_conflict(ir, fid, signature))))
+                        && !factory_adaptation::function_conflict(
+                            ir,
+                            classifiers,
+                            fid,
+                            signature,
+                        ))))
         {
             continue;
         }
@@ -775,6 +837,7 @@ pub(super) fn realize(
                         default: inline_default,
                         scope: inline_scope,
                         kotlin_lambda,
+                        sam: None,
                     },
                 );
             }
@@ -868,78 +931,6 @@ fn class_shape(
     Ok((site, body, captures))
 }
 
-/// Whether `ty`, a parameter or the result of a lambda's function type, is one `LambdaMetafactory`
-/// cannot adapt: a value class whose declared underlying type is neither nullable nor a primitive
-/// (kotlinc's `computeParameterTypeAdaptationConstraint`). A type-parameter underlying is
-/// nullable exactly when its bound is.
-fn factory_conflict(
-    ir: &IrFile,
-    classifiers: &dyn krusty::types::ClassifierFactSource,
-    ty: Ty,
-) -> bool {
-    let Some(classifier) = ty.non_null().obj_internal() else {
-        return false;
-    };
-    if let Some(class) = ir
-        .classes
-        .iter()
-        .find(|class| class.is_value && class.fq_name == classifier)
-    {
-        let field = class
-            .fields
-            .first()
-            .expect("a value class has its underlying field before lambda-class realization");
-        let nullable = match &field.type_param {
-            Some(name) => {
-                field.ty.is_nullable()
-                    || class
-                        .type_param_bounds
-                        .iter()
-                        .find(|(candidate, _)| candidate == name)
-                        .is_none_or(|(_, bound)| bound.is_nullable())
-            }
-            None => field.ty.is_nullable() || is_primitive(field.ty),
-        };
-        return !nullable;
-    }
-    let recorded = ir.external_value_class_name(classifier).copied();
-    let published = classifiers.classifier_value_underlying(classifier);
-    if let (Some(recorded), Some(published)) = (recorded, published) {
-        assert_eq!(
-            recorded.canonical_semantic(),
-            published.canonical_semantic(),
-            "checked providers disagreed about one value-class declaration"
-        );
-    }
-    recorded
-        .or(published)
-        .is_some_and(|underlying| !admits_null(underlying) && !is_primitive(underlying))
-}
-
-/// Whether the lambda's implementation has a `Nothing`/`Nothing?` type the pre-2.4 factory cannot adapt
-/// (kotlinc's `computeParameterTypeAdaptationConstraint`: `adapteeType.isNothing() ||
-/// adapteeType.isNullableNothing()` → CONFLICT). A parameter type comes from the selected function
-/// type, but the specialized invoke's RESULT is the body's own inferred type: `{ null }` selected
-/// as `(Any?) -> Any?` still returns `Nothing?`, which maps to `Void` and has no adaptee.
-///
-/// Only a source lambda lowered through `checked_lambda` has an inferred-result entry. A lambda
-/// stored in a dependency inline body already has a class-file representation and is regenerated
-/// by the bytecode inliner; it does not pass through this source-lambda classification again.
-/// Callable references have no inferred result in kotlinc either, so their absence here matches
-/// the reference.
-fn nothing_conflict(ir: &IrFile, fid: FunId, signature: &krusty::types::FnSig) -> bool {
-    fn is_nothing(ty: Ty) -> bool {
-        matches!(ty.non_null(), Ty::Nothing | Ty::Null)
-    }
-    let Some(inferred_result) = ir.lambda_inferred_results.get(&fid).copied() else {
-        // Current language levels select the caller-facing result as the implementation signature.
-        // The frontend records that decision by omitting the pre-2.4 inferred-result fact, so this
-        // backend does not need a parallel language-version option.
-        return false;
-    };
-    signature.params.iter().copied().any(is_nothing) || is_nothing(inferred_result)
-}
-
 /// The result type used by the lambda implementation method. Before language level 2.4 checked
 /// FIR records the body's inferred result; current language levels deliberately omit that fact and
 /// use the selected function signature's result instead.
@@ -969,15 +960,6 @@ fn raw_supertype(ir: &IrFile, fid: FunId, signature: &krusty::types::FnSig) -> b
         .copied()
         .any(|ty| is_nothing(ty) && ty.admits_null())
         || is_nothing(implementation_result(ir, fid, signature))
-}
-
-/// Whether a value class's declared underlying type admits `null`: a nullable type, or a type
-/// parameter whose bound does (`Result<T>(val a: T)` over `T : Any?`).
-fn admits_null(underlying: Ty) -> bool {
-    match underlying.kind() {
-        TyKind::TyParam(_, bound) => admits_null(bound),
-        _ => underlying.admits_null(),
-    }
 }
 
 /// Kotlin's primitive types: a non-null built-in scalar, never an unsigned.
@@ -1059,6 +1041,7 @@ fn realize_class(
         .is_some_and(|specialization| specialization.consumed_inline_capture);
     let inline_default = role.default;
     let kotlin_lambda = role.kotlin_lambda.is_some();
+    let sam = role.sam.clone();
     super::shared_captures::realize_lambda_capture_parameters(ir, fid, captures.len());
     let class = declare_class(ir, fid, site, signature, captures, role);
     adopt_lifted_declarations(ir, fid, class);
@@ -1088,9 +1071,10 @@ fn realize_class(
         };
     }
     // The specialized `invoke` returns the lambda's own result: nothing for `Unit`, and a primitive
-    // boxed, since it overrides the generic `R`. A value class stays its carrier, which the
-    // bridge boxes. kotlinc types it by the body's INFERRED result, which a `Nothing`/`Nothing?`
-    // body pins to `Void` even when the selected function type's return is wider.
+    // boxed where it overrides a reference result (`FunctionN`'s generic `R`, or an interface
+    // method's). A value class stays its carrier, which the bridge boxes. kotlinc types it by the
+    // body's INFERRED result, which a `Nothing`/`Nothing?` body pins to `Void` even when the
+    // selected function type's return is wider.
     let result = match implementation_result(ir, fid, signature) {
         inferred if matches!(inferred.non_null(), Ty::Nothing | Ty::Null) => {
             if inferred.admits_null() {
@@ -1100,6 +1084,17 @@ fn realize_class(
             }
         }
         _ => match signature.ret {
+            ret if sam.as_deref().is_some_and(|target| {
+                std::iter::once(target.declared_result)
+                    .chain(target.overridden_results.iter().copied())
+                    .any(|overridden| {
+                        crate::override_results::scalar_over_reference(ret, overridden)
+                    })
+            }) =>
+            {
+                Ty::nullable(ret)
+            }
+            _ if sam.is_some() => signature.ret,
             // A numbered FunctionN class has a typed override whose generic result is boxed. Past
             // the numbered interfaces, the specialized method is not that interface slot: it
             // keeps the body's scalar result and the separately emitted packed-array bridge owns
@@ -1141,7 +1136,10 @@ fn realize_class(
             ir.exprs[expression as usize] = IrExpr::Return(Some(boxed));
         }
     }
-    become_invoke(ir, fid, class, captures.len(), result);
+    let method = sam
+        .as_deref()
+        .map_or_else(|| "invoke".to_string(), |target| target.method.clone());
+    become_invoke(ir, fid, class, captures.len(), result, method);
     if (inline_default.is_some() || kotlin_lambda) && site.function_type.mentions_ty_param() {
         // The class captures the enclosing declaration's type parameters; its specialized
         // `invoke` does not redeclare them, but its method Signature still names those exact
@@ -1250,6 +1248,7 @@ fn declare_class(
         default: inline_default,
         scope: inline_scope,
         kotlin_lambda,
+        sam,
     } = role;
     let mut class = krusty::ir::IrClass::synthetic(site.class);
     class.superclass = krusty::types::type_name(if kotlin_lambda.is_some() {
@@ -1265,11 +1264,14 @@ fn declare_class(
         .or(inline_scope.and_then(|scope| scope.parent_lambda))
         .map(krusty::ir::IrEnclosure::Function)
         .or_else(|| ir.callable_reference_enclosures.get(&site.node).copied());
-    class
-        .interfaces
-        .push(&krusty::jvm::names::function_interface_internal_name(
-            signature.params.len(),
-        ));
+    match &sam {
+        Some(target) => class.interfaces.push_name(target.classifier),
+        None => class
+            .interfaces
+            .push(&krusty::jvm::names::function_interface_internal_name(
+                signature.params.len(),
+            )),
+    }
     for capture in captures {
         // The field keeps the capture's source spelling; the emitter spells its JVM name from
         // `IrLambdaClass::captures`.
@@ -1370,6 +1372,7 @@ fn declare_class(
         lifting_scope: super::lifted_names::lifting_scope(ir, fid),
         bridge: krusty::ir::IrInvokeBridge::logical(signature.params.clone(), signature.ret),
         kotlin_lambda,
+        sam,
     });
     ir.add_class(class)
 }
@@ -1428,7 +1431,14 @@ fn unlift(ir: &mut IrFile, fid: FunId) {
 
 /// Make the lifted lambda function the class's `invoke` over the lambda's own parameters, taking
 /// no lifted name and checking each non-null reference parameter.
-fn become_invoke(ir: &mut IrFile, fid: FunId, class: ClassId, captured: usize, result: Ty) {
+fn become_invoke(
+    ir: &mut IrFile,
+    fid: FunId,
+    class: ClassId,
+    captured: usize,
+    result: Ty,
+    method: String,
+) {
     let internal = ir.classes[class as usize].fq_name;
     if let Some(parameters) = ir.fn_params.get_mut(&fid) {
         parameters.identities.drain(..captured);
@@ -1448,7 +1458,7 @@ fn become_invoke(ir: &mut IrFile, fid: FunId, class: ClassId, captured: usize, r
                 .then_some(krusty::ir::IrParameterCheck::NonNull)
         })
         .collect();
-    function.name = "invoke".to_string();
+    function.name = method;
     function.ret = result;
     function.is_static = false;
     function.dispatch_receiver = Some(internal);
@@ -1541,6 +1551,7 @@ mod method_domain_tests {
             lifting_scope: None,
             bridge: krusty::ir::IrInvokeBridge::logical(vec![], Ty::Unit),
             kotlin_lambda: None,
+            sam: None,
         });
         closure.methods = vec![3, 4];
         ir.classes.push(closure);

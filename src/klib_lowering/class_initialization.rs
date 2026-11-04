@@ -10,7 +10,7 @@ use super::klib_types::semantic_type;
 use crate::fx_hash::HashSet;
 use crate::klib_libraries::{KlibCalleeOrigin, KlibDeclarationBodies};
 use crate::libraries::{
-    KlibBodyCallable, KlibDeclarationSignature, KlibDependencyCallable, TypeKind,
+    KlibBodyCallable, KlibClassStorage, KlibDeclarationSignature, KlibDependencyCallable, TypeKind,
 };
 use crate::metadata::klib_ir::tree::{
     KlibIrArguments, KlibIrBody, KlibIrExprId, KlibIrExprKind, KlibIrField, KlibIrMember,
@@ -18,14 +18,7 @@ use crate::metadata::klib_ir::tree::{
 };
 use crate::metadata::klib_ir::{KlibIrSignature, KlibIrSymbolKind};
 use crate::metadata::semantic::KotlinModality;
-use crate::types::{Ty, Visibility};
-
-pub(super) struct StorageField<'a> {
-    pub(super) declaration: &'a KlibIrField,
-    pub(super) ty: Ty,
-    pub(super) final_: bool,
-    pub(super) private: bool,
-}
+use crate::types::Ty;
 
 pub(super) enum InitializationStep<'a> {
     Field { index: u32, value: KlibIrExprId },
@@ -34,7 +27,8 @@ pub(super) enum InitializationStep<'a> {
 
 pub(super) struct ClassInitialization<'a, 'b> {
     pub(super) header: ClassMemberHeader<'a, 'b>,
-    pub(super) fields: Vec<StorageField<'b>>,
+    pub(super) field_declarations: Vec<&'b KlibIrField>,
+    pub(super) storage: KlibClassStorage,
     pub(super) steps: Vec<InitializationStep<'b>>,
 }
 
@@ -85,9 +79,12 @@ pub(super) fn plan<'a, 'b>(
             parameter.default_value.is_some() || parameter.vararg_element_type.is_some()
         })
         || header.class.supertypes.len() != 1
-        || semantic_type(header.arena, &header.types, header.class.supertypes[0])?
-            != Ty::obj_name(crate::types::wk::any())
     {
+        return Ok(None);
+    }
+    let declared_superclass =
+        semantic_type(header.arena, &header.types, header.class.supertypes[0])?;
+    if declared_superclass != Ty::obj_name(crate::types::wk::any()) {
         return Ok(None);
     }
     let Some(KlibIrBody::Block(statements)) = &header.function.body else {
@@ -164,54 +161,40 @@ pub(super) fn plan<'a, 'b>(
         ));
     }
     let mut fields = Vec::new();
+    let mut field_declarations = Vec::new();
     let mut steps = Vec::new();
     let mut identities = HashSet::default();
     for member in &header.class.members {
-        let field = match member {
-            KlibIrMember::Field(field) => Some(field),
-            KlibIrMember::Property(property) => property.backing_field.as_ref(),
-            KlibIrMember::AnonymousInitializer { base, statements } => {
-                if base.flags != 0 {
-                    return Err(KlibBodyDeclineReason::UnsupportedOperation(
-                        "a static or flagged class initializer",
-                    ));
-                }
-                steps.push(InitializationStep::Block(statements));
-                None
+        if let KlibIrMember::AnonymousInitializer { base, statements } = member {
+            if base.flags != 0 {
+                return Err(KlibBodyDeclineReason::UnsupportedOperation(
+                    "a static or flagged class initializer",
+                ));
             }
-            _ => None,
-        };
-        let Some(field) = field else { continue };
-        let flags =
-            field
-                .instance_storage_flags()
-                .ok_or(KlibBodyDeclineReason::UnsupportedOperation(
-                    "an external, static or unknown field storage flag",
-                ))?;
-        if !matches!(
-            field.base.symbol.kind,
-            KlibIrSymbolKind::Field | KlibIrSymbolKind::StandaloneField
-        ) || !identities.insert(&field.base.symbol)
-        {
-            return Err(mismatch(
-                "a class field has an invalid or repeated storage identity",
-            ));
+            steps.push(InitializationStep::Block(statements));
         }
-        let ty = semantic_type(header.arena, &header.types, field.ty)?;
+        let field = super::class_storage::member_field(member);
+        let Some(field) = field else { continue };
         let index = u32::try_from(fields.len()).expect("a field list fits u32");
-        fields.push(StorageField {
-            declaration: field,
-            ty,
-            final_: flags.is_final,
-            private: flags.visibility == Visibility::Private,
-        });
+        fields.push(super::class_storage::declared_field(
+            &header,
+            field,
+            &mut identities,
+        )?);
+        field_declarations.push(field);
         if let Some(value) = field.initializer {
             steps.push(InitializationStep::Field { index, value });
         }
     }
+    let storage = KlibClassStorage {
+        declaration: header.contract.clone(),
+        superclass: declared_superclass,
+        fields,
+    };
     Ok(Some(ClassInitialization {
         header,
-        fields,
+        field_declarations,
+        storage,
         steps,
     }))
 }

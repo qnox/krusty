@@ -353,6 +353,17 @@ change, not a quiet reset inside yours.
 - A portable Native regression must establish its expected result through the JVM/kotlinc oracle
   before asserting the Native result. Use `expect_box_ok_with_stdlib` (or the result-returning
   equivalent when the exact value matters) before `expect_native_box`.
+- **Keep one shared portable regression inventory.** Store each whole portable Kotlin program
+  once in `tests/box_regressions/`; select it through the canonical backend/version matrix.
+  E2E artifact or strict backend guards reuse that source with `include_str!` and preserve all
+  original inputs and assertions. A missing backend capability is not a platform-specific
+  language or setup exception; report the gap without cropping or removing shared coverage.
+  Genuinely platform-specific parts carry a `PLATFORM-SPECIFIC` explanation or move to their
+  owning E2E leaf. This rule does not require an unrelated backend fix in a frontend change.
+- Do not add failure/applicability allowances, skips or platform exclusions without explicit
+  approval for the exact case; preserve existing whole controls. Audit fixture moves and
+  matrix selection with `git diff <base>...HEAD -- tests .github/workflows/ci.yml`, and run
+  `scripts/check-outcome-lists.sh <base> HEAD`.
 - Use `./run-tests.sh`; do not use release builds for ordinary validation.
 - `gate` is a Cargo profile: `--profile gate`. Never `--target-dir target/gate` or
   `CARGO_TARGET_DIR=target/gate`; that builds the dev profile into `target/gate/debug`, which

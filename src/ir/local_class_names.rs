@@ -35,6 +35,16 @@ pub enum IrLocalClassOwner {
     External(TypeName),
 }
 
+/// A source classifier's original declaration context, retained when an inline copy changes its
+/// current executable enclosure. Targets decide how these source roles affect representation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IrClassDeclarationContext {
+    TopLevel,
+    Member,
+    Executable,
+    ClassInitializer { owner: TypeName },
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IrLocalClassNameProvenance {
     /// Source file whose facade roots the name when there is no lexical owner. An inline payload
@@ -533,6 +543,21 @@ fn callee(callee: &mut Callee, names: &IdentityRemap<'_>) {
     }
 }
 
+/// The exact classifier remap, applied to a SAM conversion's checked target.
+fn sam_target(sam: &mut crate::ir::IrSamTarget, names: &IdentityRemap<'_>) {
+    name(&mut sam.classifier, names);
+    tys(&mut sam.parameters, names);
+    sam.result = ty(sam.result, names);
+    tys(&mut sam.declared_parameters, names);
+    sam.declared_result = ty(sam.declared_result, names);
+    tys(&mut sam.overridden_results, names);
+    for parameter in &mut sam.type_parameters {
+        for (bound, _) in &mut parameter.bounds {
+            *bound = ty(*bound, names);
+        }
+    }
+}
+
 fn remap_expression(expression: &mut IrExpr, names: &IdentityRemap<'_>) {
     match expression {
         IrExpr::Checked(operation) => checked_operation(operation, names),
@@ -659,14 +684,7 @@ fn remap_expression(expression: &mut IrExpr, names: &IdentityRemap<'_>) {
             tys(params, names);
             *ret = ty(*ret, names);
         }
-        IrExpr::Lambda { sam: Some(sam), .. } => {
-            name(&mut sam.classifier, names);
-            tys(&mut sam.parameters, names);
-            sam.result = ty(sam.result, names);
-            tys(&mut sam.declared_parameters, names);
-            sam.declared_result = ty(sam.declared_result, names);
-            tys(&mut sam.overridden_results, names);
-        }
+        IrExpr::Lambda { sam: Some(sam), .. } => sam_target(sam, names),
         IrExpr::Try {
             catches, result, ..
         } => {
@@ -930,6 +948,11 @@ fn declaration_argument_boundaries(
 
 fn remap_class(class: &mut super::IrClass, names: &IdentityRemap<'_>) {
     name(&mut class.fq_name, names);
+    if let Some(IrClassDeclarationContext::ClassInitializer { owner }) =
+        &mut class.declaration_context
+    {
+        name(owner, names);
+    }
     for (_, bound) in &mut class.type_param_bounds {
         *bound = ty(*bound, names);
     }
@@ -1084,6 +1107,9 @@ fn remap_class(class: &mut super::IrClass, names: &IdentityRemap<'_>) {
             .iter_mut()
             .for_each(|(_, holder)| name(holder, names));
         lambda.function_type = ty(lambda.function_type, names);
+        if let Some(sam) = &mut lambda.sam {
+            sam_target(sam, names);
+        }
         tys(&mut lambda.bridge.param_tys, names);
         lambda.bridge.ret_ty = ty(lambda.bridge.ret_ty, names);
         lambda
@@ -1836,6 +1862,44 @@ mod tests {
     }
 
     #[test]
+    fn class_copy_retains_original_context_when_its_current_enclosure_changes() {
+        let mut ir = crate::ir::IrFile::default();
+        let source_owner = crate::types::type_name("sample/SourceOwner");
+        let target_owner = crate::types::type_name("sample/TargetOwner");
+        let owner = ir.add_class(crate::ir::IrClass::synthetic(source_owner));
+        let mut original = crate::ir::IrClass::synthetic(source_owner.nested_child("Original"));
+        original.declaration_context = Some(IrClassDeclarationContext::ClassInitializer {
+            owner: source_owner,
+        });
+        original.enclosure = Some(crate::ir::IrEnclosure::ClassInitializer(owner));
+        let mut copy = original.clone();
+        copy.enclosure = Some(crate::ir::IrEnclosure::File);
+        copy.fq_name = source_owner.nested_child("Copy");
+        let original = ir.add_class(original);
+        let copy = ir.add_class(copy);
+
+        ir.remap_classifier_identities(&HashMap::from_iter([(source_owner, target_owner)]));
+
+        for class in [original, copy] {
+            assert_eq!(
+                ir.classes[class as usize].declaration_context,
+                Some(IrClassDeclarationContext::ClassInitializer {
+                    owner: target_owner
+                })
+            );
+        }
+        assert_eq!(
+            ir.classes[original as usize].enclosure,
+            Some(crate::ir::IrEnclosure::ClassInitializer(owner))
+        );
+        assert_eq!(
+            ir.classes[copy as usize].enclosure,
+            Some(crate::ir::IrEnclosure::File)
+        );
+        assert_eq!(ir.classes[owner as usize].fq_name, target_owner);
+    }
+
+    #[test]
     fn remaps_every_type_carrier_inside_expressions() {
         let source = crate::types::type_name("sample/Source");
         let target = crate::types::type_name("sample/Target");
@@ -1895,6 +1959,7 @@ mod tests {
                 nullable: false,
                 kotlin_interface: true,
                 parameter_identities: Vec::new(),
+                type_parameters: Vec::new(),
             })),
             inline_body: None,
         };
