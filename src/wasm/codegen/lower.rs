@@ -1211,6 +1211,7 @@ impl<'a> Body<'a> {
                 ..
             } => {
                 self.new_object(
+                    id,
                     internal,
                     &args,
                     ctor_params.as_deref(),
